@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bq ls *)",
+      "Bash(bq show *)",
+      "Bash(gcloud logging read *)",
+      "Bash(gcloud projects get-iam-policy *)",
+      "Bash(gsutil ls *)",
+      "Bash(gsutil cat *)",
+      "Bash(gcloud storage ls *)",
+      "Bash(gcloud auth list*)",
+      "Bash(gcloud services list*)",
+      "Bash(jupyter kernelspec list*)",
+      "mcp__plugin_data-agent-kit-starter-pack_notebook__get_cell_outputs",
+      "mcp__plugin_data-agent-kit-starter-pack_notebook__read_cell",
+      "mcp__plugin_data-agent-kit-starter-pack_notebook__list_cells"
+    ]
+  }
+}
