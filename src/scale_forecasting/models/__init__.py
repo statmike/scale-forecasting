@@ -12,10 +12,11 @@ grows by one line per model as Phase 2.5 lands each file.
 from __future__ import annotations
 
 from ..errors import ModelError
-from .base_model import _REGISTRY, BaseModel
 
 # --- model registration imports (side-effect: each calls register()) -----------
-# One line per model file; added as BUILD 2.5 lands each. (none yet)
+# One line per model file; added as BUILD 2.5 lands each.
+from . import theta  # noqa: E402,F401
+from .base_model import _REGISTRY, BaseModel
 
 
 def get_model(name: str) -> type[BaseModel]:

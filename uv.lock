@@ -2131,6 +2131,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "statsmodels" },
 ]
 
@@ -2178,6 +2179,7 @@ requires-dist = [
     { name = "pyspark", marker = "extra == 'spark'", specifier = ">=3.5" },
     { name = "ray", extras = ["default"], marker = "extra == 'ray'", specifier = ">=2.30" },
     { name = "scikit-learn", specifier = ">=1.5" },
+    { name = "scipy", specifier = ">=1.11" },
     { name = "statsmodels", specifier = ">=0.14" },
     { name = "xgboost", marker = "extra == 'models'", specifier = ">=2.0" },
 ]
