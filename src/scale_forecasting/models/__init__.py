@@ -15,7 +15,7 @@ from ..errors import ModelError
 
 # --- model registration imports (side-effect: each calls register()) -----------
 # One line per model file; added as BUILD 2.5 lands each.
-from . import theta  # noqa: E402,F401
+from . import holtwinters, theta  # noqa: E402,F401
 from .base_model import _REGISTRY, BaseModel
 
 
