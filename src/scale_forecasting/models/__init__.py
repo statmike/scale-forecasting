@@ -18,6 +18,7 @@ from ..errors import ModelError
 from . import (  # noqa: E402,F401
     holtwinters,
     lightgbm_model,
+    neuralprophet_model,
     prophet_model,
     sarimax,
     stl_bagging,
