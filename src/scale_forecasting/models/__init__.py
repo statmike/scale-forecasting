@@ -19,6 +19,7 @@ from . import (  # noqa: E402,F401
     holtwinters,
     lightgbm_model,
     sarimax,
+    stl_bagging,
     theta,
     ucm,
     xgboost_model,
