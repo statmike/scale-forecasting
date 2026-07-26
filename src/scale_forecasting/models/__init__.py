@@ -15,7 +15,14 @@ from ..errors import ModelError
 
 # --- model registration imports (side-effect: each calls register()) -----------
 # One line per model file; added as BUILD 2.5 lands each.
-from . import holtwinters, sarimax, theta, ucm, xgboost_model  # noqa: E402,F401
+from . import (  # noqa: E402,F401
+    holtwinters,
+    lightgbm_model,
+    sarimax,
+    theta,
+    ucm,
+    xgboost_model,
+)
 from .base_model import _REGISTRY, BaseModel
 
 
