@@ -11,12 +11,27 @@ import pytest
 
 from scale_forecasting.errors import ModelError
 from scale_forecasting.models.base_model import (
+    _REGISTRY,
     DEFAULT_QUANTILES,
     PREDICTION_COLUMNS,
     BaseModel,
     ModelContext,
     register,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_registry() -> Any:
+    """Keep test-only models (``_dummy`` etc.) out of the shared factory registry.
+
+    These tests register throwaway classes to exercise ``register``; without cleanup they
+    leak into the global ``_REGISTRY`` and break tests that assert the exact model set
+    (e.g. test_factory). Snapshot before, restore after.
+    """
+    snapshot = dict(_REGISTRY)
+    yield
+    _REGISTRY.clear()
+    _REGISTRY.update(snapshot)
 
 
 def _ctx(**over: Any) -> ModelContext:
@@ -68,8 +83,6 @@ def test_default_search_space_is_empty() -> None:
 
 
 def test_register_adds_class_and_returns_it() -> None:
-    from scale_forecasting.models.base_model import _REGISTRY
-
     returned = register(_Dummy)
     assert returned is _Dummy
     assert _REGISTRY["_dummy"] is _Dummy
@@ -89,6 +102,8 @@ def test_register_rejects_missing_name() -> None:
 
 
 def test_register_rejects_duplicate_name() -> None:
+    register(_Dummy)  # ensure the name is taken (registry is restored after each test)
+
     class _Clash(_Dummy):
         pass
 

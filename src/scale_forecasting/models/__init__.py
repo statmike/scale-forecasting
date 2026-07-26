@@ -16,6 +16,7 @@ from ..errors import ModelError
 # --- model registration imports (side-effect: each calls register()) -----------
 # One line per model file; added as BUILD 2.5 lands each.
 from . import (  # noqa: E402,F401
+    bigquery_native,
     holtwinters,
     lightgbm_model,
     neuralprophet_model,
