@@ -1,10 +1,169 @@
-"""Feature engineering — holidays, transforms, exog, lags — pure (CONTRACTS §6, DESIGN §4).
+"""Feature engineering for the Python models — pure (CONTRACTS §6, DESIGN §4).
 
-Owned by BUILD step 2.3. Public surface: ``build_features``, ``holiday_frame``.
+Everything here is declarative-from-config and runs *inside* the execution node, so no
+data crosses the network. Two entry points:
+
+- ``build_features(series, cfg) -> (y, X)`` — turn one raw series frame into the fit
+  inputs: ``y`` (target Series indexed by ds, transform applied) and ``X`` (exog + holiday
+  + Fourier + lag columns aligned to ``y``, or None when no feature is configured).
+- ``holiday_frame(cfg) -> DataFrame`` — the one canonical holiday calendar (``ds``,
+  ``holiday`` columns) computed from ``features.holidays``, fed to *both* Python models and
+  the BQML custom-holiday input so "holiday" is identical everywhere (DESIGN §4).
+
+Transforms are **stateless** (``none``/``log1p``) so a model can invert with only
+``ctx.transform`` (a name) inside ``predict``; ``boxcox`` needs a fitted λ that the
+``(y, X)`` seam can't carry, so it is rejected here rather than silently mis-inverted.
+
+Public surface: ``build_features``, ``holiday_frame``, ``apply_transform``,
+``invert_transform``.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-def build_features(series: object, cfg: object) -> object:  # pragma: no cover - stub
-    raise NotImplementedError("features.build_features — BUILD step 2.3")
+import numpy as np
+import pandas as pd
+
+from .errors import ConfigError
+
+if TYPE_CHECKING:
+    from .config import RunConfig
+
+# Fourier terms use a yearly period keyed by frequency (approx periods per year).
+_PERIODS_PER_YEAR: dict[str, float] = {"D": 365.25, "W": 52.18, "M": 12.0, "MS": 12.0, "H": 8766.0}
+
+
+# --- transforms (stateless) ----------------------------------------------------
+
+
+def apply_transform(y: pd.Series, transform: str) -> pd.Series:
+    """Apply the configured target transform to ``y`` (forward direction)."""
+    if transform == "none":
+        return y
+    if transform == "log1p":
+        if (y < -1).any():
+            raise ConfigError("log1p transform requires y >= -1 (got values < -1)")
+        return pd.Series(np.log1p(y.to_numpy()), index=y.index, name=y.name)
+    if transform == "boxcox":
+        raise ConfigError(
+            "boxcox transform is not yet supported (stateful λ); use 'none' or 'log1p'"
+        )
+    raise ConfigError(f"unknown transform '{transform}'")
+
+
+def invert_transform(values: np.ndarray, transform: str) -> np.ndarray:
+    """Invert a transform on forecasts/bounds so the frame is in original units (§2.1)."""
+    arr = np.asarray(values, dtype=float)
+    if transform == "none":
+        return arr
+    if transform == "log1p":
+        return np.expm1(arr)
+    if transform == "boxcox":
+        raise ConfigError(
+            "boxcox transform is not yet supported (stateful λ); use 'none' or 'log1p'"
+        )
+    raise ConfigError(f"unknown transform '{transform}'")
+
+
+# --- holidays ------------------------------------------------------------------
+
+
+def holiday_frame(cfg: RunConfig) -> pd.DataFrame:
+    """Canonical holiday calendar for the run (DESIGN §4).
+
+    ``features.holidays`` lists ISO country codes (e.g. ``["US"]``). Returns a frame with
+    ``ds`` (datetime64[ns]) and ``holiday`` (name) columns, empty when none configured.
+    A generous fixed year window keeps the calendar deterministic; callers filter by ds.
+    """
+    codes = cfg.features.holidays
+    if not codes:
+        return pd.DataFrame({"ds": pd.to_datetime([]), "holiday": pd.array([], dtype="string")})
+
+    import holidays as holidays_pkg
+
+    years = range(2015, 2036)  # generous, deterministic window
+    records: list[tuple[pd.Timestamp, str]] = []
+    for code in codes:
+        try:
+            cal = holidays_pkg.country_holidays(code, years=years)
+        except NotImplementedError as e:
+            raise ConfigError(f"unknown holiday country code '{code}'") from e
+        for day, name in cal.items():
+            records.append((pd.Timestamp(day), str(name)))
+
+    records.sort(key=lambda r: r[0])
+    ds = pd.DatetimeIndex([r[0] for r in records]).as_unit("ns")
+    names = pd.array([r[1] for r in records], dtype="string")
+    return pd.DataFrame({"ds": ds, "holiday": names})
+
+
+# --- feature assembly ----------------------------------------------------------
+
+
+def build_features(series: pd.DataFrame, cfg: RunConfig) -> tuple[pd.Series, pd.DataFrame | None]:
+    """Build ``(y, X)`` fit inputs for one series (DESIGN §4).
+
+    ``series`` is one ts_id's rows with the configured date/target (and optional exog)
+    columns. ``y`` is returned indexed by ds, sorted, with the transform applied. ``X``
+    carries any configured exog, an ``is_holiday`` flag, Fourier terms, and lag columns —
+    aligned to ``y`` — or None when nothing is configured.
+    """
+    d, f = cfg.data, cfg.features
+    if d.date_col not in series or d.target_col not in series:
+        raise ConfigError(
+            f"series missing required columns '{d.date_col}'/'{d.target_col}'; "
+            f"has {list(series.columns)}"
+        )
+
+    frame = series.copy()
+    frame[d.date_col] = pd.to_datetime(frame[d.date_col]).astype("datetime64[ns]")
+    frame = frame.sort_values(d.date_col).set_index(d.date_col)
+    frame.index.name = "ds"
+
+    y = frame[d.target_col].astype(float)
+    y = apply_transform(y, f.transform)
+    y.name = "y"
+
+    cols: dict[str, np.ndarray] = {}
+
+    # Exogenous regressors passed straight through (must exist in the series).
+    for name in f.exog:
+        if name not in frame:
+            raise ConfigError(f"exog column '{name}' not found in series")
+        cols[name] = frame[name].astype(float).to_numpy()
+
+    # Holiday flag from the canonical calendar (parity with BQML).
+    if f.holidays:
+        hol = holiday_frame(cfg)
+        holiday_days = set(hol["ds"].to_numpy())
+        cols["is_holiday"] = np.isin(frame.index.to_numpy(), list(holiday_days)).astype(float)
+
+    # Fourier seasonality terms (yearly), for ML models.
+    if f.fourier:
+        cols.update(_fourier_terms(pd.DatetimeIndex(frame.index), d.freq, order=3))
+
+    # Lag features from the (transformed) target.
+    for lag in f.lags:
+        if lag <= 0:
+            raise ConfigError(f"lags must be positive, got {lag}")
+        cols[f"lag_{lag}"] = y.shift(lag).to_numpy()
+
+    if not cols:
+        return y, None
+    X = pd.DataFrame(cols, index=frame.index)
+    return y, X
+
+
+def _fourier_terms(index: pd.DatetimeIndex, freq: str, order: int) -> dict[str, np.ndarray]:
+    """Sine/cosine Fourier features for a yearly seasonal period (pure)."""
+    period = _PERIODS_PER_YEAR.get(freq, 365.25)
+    # Position within the seasonal cycle, from the day count since epoch.
+    nanos = index.to_numpy(dtype="datetime64[ns]").astype("int64")
+    t = nanos.astype(float) / (24 * 3600 * 1e9)
+    out: dict[str, np.ndarray] = {}
+    for k in range(1, order + 1):
+        ang = 2.0 * np.pi * k * t / period
+        out[f"fourier_sin_{k}"] = np.sin(ang)
+        out[f"fourier_cos_{k}"] = np.cos(ang)
+    return out
