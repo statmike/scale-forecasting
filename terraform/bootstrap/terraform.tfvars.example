@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored (never commit ids).
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#   # edit the values, then:
+#   terraform init && terraform apply
+
+project_id      = "statmike-scale-forecasting"
+billing_account = "XXXXXX-XXXXXX-XXXXXX" # from: gcloud billing accounts list
+org_id          = "798987785246"         # statmike.altostrat.com; or set folder_id instead
+region          = "us-central1"
+
+# create_project    = true                # false if your org pre-creates projects
+# state_bucket_name = "my-unique-tfstate" # override if "<project_id>-tfstate" is taken

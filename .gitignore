@@ -34,6 +34,10 @@ application_default_credentials.json
 *.tfstate.*
 .terraform/
 .terraform.lock.hcl
+# Never commit real ids (billing/org) or generated plans
+terraform.tfvars
+*.auto.tfvars
+*.tfplan
 
 # Notebooks
 .ipynb_checkpoints/

@@ -50,3 +50,24 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     (hourly). `SUPPORTED_FREQS` is now `(D, W, MS, ME, h)`. This was latent: nothing ran a
     monthly/hourly panel end-to-end before, so `date_range(freq="M")` would have raised only
     in production. `seasonality.py` is the SSOT for the spellings.
+
+- **Arc B B0.1–B0.2 (Terraform authored, not yet applied).** Two-stage state:
+  `terraform/bootstrap` (local state → creates project + GCS state bucket) and
+  `terraform/main` (GCS backend → everything else). Small one-capability modules mirroring
+  the Python side: `apis`, `iam` (sf-runner/sf-compute, no keys, least-privilege),
+  `storage` (warehouse/artifacts/code buckets), `bigquery` (dataset + BigLake connection +
+  warehouse grant), `budget` (50/90/100% alerts), `composer` (Composer 3, gated). Greenfield
+  default + BYO toggles (`create_project`, `enable_apis`, `create_service_accounts`,
+  `create_composer`). Gate: `terraform validate` green on both stages + `fmt` clean.
+  - **DEVIATION from BUILD B0.2** ("registry tables via Terraform"): the five tables' DDL is
+    single-sourced in `registry/ddl.py` (snapshot-tested) and created by
+    `registry.bq.ensure_tables()` at run time. Terraform owns the *containers* (dataset,
+    connection, bucket grants), the app owns the *tables* — one source of truth for the DDL,
+    no HCL/Python drift. Table creation moves to Arc B step B1 (registry round-trip).
+  - **Composer is a first-class on/off toggle** (`create_composer`, default false): the only
+    at-rest cost, and many deployments run the pipeline ad-hoc (notebook/local) with no
+    scheduler. Module header documents start (`=true` + apply) → run (DAG orchestrates
+    fan-out) → stop (`=false` + apply destroys just the env; data/registry untouched).
+  - **Not yet applied** — awaiting billing account id + human review of `terraform plan`
+    before any spend. Composer image pinned `composer-3-airflow-2.10.5-build.0` (verify/bump
+    to a currently-offered Composer 3 build at apply time).
