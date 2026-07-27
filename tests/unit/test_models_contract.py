@@ -50,7 +50,7 @@ def _golden_series(n: int = 400, with_exog: bool = False) -> tuple[pd.Series, pd
     y = pd.Series(trend + weekly + noise, index=idx, name="y")
     X = None
     if with_exog:
-        X = pd.DataFrame({"exog_1": np.cos(np.arange(n) * 2 * np.pi / 30)}, index=idx)
+        X = pd.DataFrame({"price_index": np.cos(np.arange(n) * 2 * np.pi / 30)}, index=idx)
     return y, X
 
 

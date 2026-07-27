@@ -87,12 +87,12 @@ OPTIONS (
 );
 
 CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.source_series` (
-  ts_id      STRING NOT NULL,
-  ds         DATE NOT NULL,
-  y          FLOAT64,
-  archetype  STRING,
-  exog_1     FLOAT64,
-  is_holiday BOOL
+  ts_id       STRING NOT NULL,
+  ds          DATE NOT NULL,
+  y           FLOAT64,
+  archetype   STRING,
+  price_index FLOAT64,
+  is_holiday  BOOL
 )
 PARTITION BY ds
 CLUSTER BY ts_id

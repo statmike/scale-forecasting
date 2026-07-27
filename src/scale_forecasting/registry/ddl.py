@@ -82,14 +82,17 @@ CREATE TABLE IF NOT EXISTS `{d}.backtest_oof` (
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",
+    # Columns carry business names; the config maps each to a role (date→date_col,
+    # price_index→features.exog). `price_index` is the example driver the generator emits
+    # and the xreg models regress on; swap it for real drivers in your own source table.
     "source_series": """\
 CREATE TABLE IF NOT EXISTS `{d}.source_series` (
-  ts_id      STRING NOT NULL,
-  ds         DATE NOT NULL,
-  y          FLOAT64,
-  archetype  STRING,
-  exog_1     FLOAT64,
-  is_holiday BOOL
+  ts_id       STRING NOT NULL,
+  ds          DATE NOT NULL,
+  y           FLOAT64,
+  archetype   STRING,
+  price_index FLOAT64,
+  is_holiday  BOOL
 )
 PARTITION BY ds
 CLUSTER BY ts_id""",

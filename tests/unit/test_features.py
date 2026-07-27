@@ -37,7 +37,7 @@ def _series(n: int = 10, with_exog: bool = False) -> pd.DataFrame:
     ds = pd.date_range("2026-01-01", periods=n, freq="D")
     frame = {"ds": ds, "y": np.arange(1.0, n + 1.0)}
     if with_exog:
-        frame["exog_1"] = np.arange(100.0, 100.0 + n)
+        frame["price_index"] = np.arange(100.0, 100.0 + n)
     return pd.DataFrame(frame)
 
 
@@ -125,10 +125,10 @@ def test_build_features_applies_transform_to_y() -> None:
 
 
 def test_build_features_exog_passthrough() -> None:
-    y, X = build_features(_series(6, with_exog=True), _cfg(features={"exog": ["exog_1"]}))
+    y, X = build_features(_series(6, with_exog=True), _cfg(features={"exog": ["price_index"]}))
     assert X is not None
-    assert "exog_1" in X.columns
-    assert np.allclose(X["exog_1"].to_numpy(), np.arange(100.0, 106.0))
+    assert "price_index" in X.columns
+    assert np.allclose(X["price_index"].to_numpy(), np.arange(100.0, 106.0))
 
 
 def test_build_features_missing_exog_raises() -> None:
@@ -164,7 +164,7 @@ def test_build_features_fourier_terms() -> None:
 
 
 def test_build_features_X_aligned_to_y() -> None:
-    cfg = _cfg(features={"exog": ["exog_1"], "lags": [1]})
+    cfg = _cfg(features={"exog": ["price_index"], "lags": [1]})
     y, X = build_features(_series(7, with_exog=True), cfg)
     assert X is not None
     assert X.index.equals(y.index)
