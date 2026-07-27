@@ -18,9 +18,9 @@ from scale_forecasting.seasonality import (
 def test_seasonal_period_known_freqs() -> None:
     assert seasonal_period("D") == 7
     assert seasonal_period("W") == 52
-    assert seasonal_period("M") == 12
+    assert seasonal_period("ME") == 12
     assert seasonal_period("MS") == 12
-    assert seasonal_period("H") == 24
+    assert seasonal_period("h") == 24
 
 
 def test_seasonal_period_unknown_falls_back_to_weekly() -> None:
@@ -31,8 +31,8 @@ def test_seasonal_period_unknown_falls_back_to_weekly() -> None:
 
 def test_periods_per_year_known_freqs() -> None:
     assert periods_per_year("D") == 365.25
-    assert periods_per_year("M") == 12.0
-    assert periods_per_year("H") == 8766.0
+    assert periods_per_year("ME") == 12.0
+    assert periods_per_year("h") == 8766.0
 
 
 def test_periods_per_year_unknown_falls_back_to_daily() -> None:

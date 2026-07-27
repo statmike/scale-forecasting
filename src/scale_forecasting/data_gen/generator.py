@@ -1,10 +1,12 @@
 """Pure example-data generator — no I/O (CONTRACTS §6, DESIGN §13.1).
 
 Deterministic panel math: each series is a sum of readable components —
-``trend + weekly & yearly seasonality + holiday bumps + AR(1) noise`` — then shaped by an
-**archetype** (smooth-seasonal, intermittent, trending, promo-spiky, noisy) that applies
-intermittency, level shifts, and promo spikes. Every series draws its parameters from an rng
-**seeded by its own index**, so:
+``trend + short-cycle & yearly seasonality + holiday bumps + AR(1) noise`` — then shaped by
+an **archetype** (smooth-seasonal, intermittent, trending, promo-spiky, noisy) that applies
+intermittency, level shifts, and promo spikes. Seasonality is measured in *steps* (via the
+shared :mod:`seasonality` maps), so the panel is coherent at any ``freq`` — daily, weekly,
+monthly, hourly — and daily output is byte-for-byte the same as day-count math. Every series
+draws its parameters from an rng **seeded by its own index**, so:
 
 * series ``i`` is byte-for-byte identical no matter which partition produced it — hence
   ``generate_panel(n)`` equals the union of any partitioning of ``range(n)`` (the property
@@ -27,6 +29,8 @@ import numpy as np
 import pandas as pd
 from scipy.signal import lfilter
 
+from ..seasonality import periods_per_year, seasonal_period
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
@@ -38,7 +42,7 @@ class GenConfig:
     """What to generate. Pure parameters — no source/sink here (that's ``seed_spark.py``)."""
 
     n_series: int = 100_000
-    history_days: int = 1460  # ~4 years of daily history
+    history: int = 1460  # number of periods of history (at freq); ~4 years daily
     freq: str = "D"
     start: str = "2021-01-01"
     holidays: tuple[str, ...] = ("US",)
@@ -112,10 +116,16 @@ ARCHETYPES: tuple[Archetype, ...] = (
 
 
 def _time_axis(cfg: GenConfig) -> tuple[pd.DatetimeIndex, np.ndarray]:
-    """The shared date index and its day-offsets from the start (for seasonality)."""
-    index = pd.date_range(cfg.start, periods=cfg.history_days, freq=cfg.freq).as_unit("ns")
-    day = (index - index[0]).days.to_numpy().astype(float)
-    return index, day
+    """The shared date index and its integer step positions (0, 1, 2, … at ``freq``).
+
+    Seasonality is built off *step position*, not calendar days, so a cycle spans the
+    right number of steps at any frequency (a "yearly" cycle is 52 weekly steps or 12
+    monthly steps, not 365 days). For daily data step == day-offset, so daily panels are
+    byte-for-byte unchanged.
+    """
+    index = pd.date_range(cfg.start, periods=cfg.history, freq=cfg.freq).as_unit("ns")
+    pos = np.arange(len(index), dtype=float)
+    return index, pos
 
 
 def _holiday_mask(index: pd.DatetimeIndex, codes: Sequence[str]) -> np.ndarray:
@@ -153,31 +163,43 @@ def _one_series(
     i: int,
     cfg: GenConfig,
     seed: int,
-    day: np.ndarray,
+    pos: np.ndarray,
     holiday_mask: np.ndarray,
 ) -> dict[str, np.ndarray | str]:
-    """Generate the components of a single series ``i`` as plain arrays."""
+    """Generate the components of a single series ``i`` as plain arrays.
+
+    ``pos`` is the integer step position (0, 1, 2, …) at the run frequency. All cycles are
+    measured in steps via the shared seasonality maps, so a series is coherent at any freq:
+    the "weekly" amplitude drives the dominant sub-annual cycle (7 steps daily, 24 hourly)
+    and the "yearly" amplitude drives the annual cycle (365.25 steps daily, 52 weekly, 12
+    monthly). For daily data these are 7 and 365.25 — byte-for-byte the original.
+    """
     arch = ARCHETYPES[i % len(ARCHETYPES)]
     rng = _series_seed(seed, i)
-    t = day / max(day[-1], 1.0)  # normalized time in [0, 1]
+    short_period = float(seasonal_period(cfg.freq))
+    year_period = periods_per_year(cfg.freq)
+    n = pos.size
+    t = pos / max(pos[-1], 1.0)  # normalized time in [0, 1]
 
     base = _uniform(rng, arch.base)
     trend = base * _uniform(rng, arch.trend_frac) * t
-    weekly = base * _uniform(rng, arch.weekly_amp) * np.sin(2 * np.pi * day / 7.0)
-    yearly = base * _uniform(rng, arch.yearly_amp) * np.sin(2 * np.pi * day / 365.25)
+    weekly = base * _uniform(rng, arch.weekly_amp) * np.sin(2 * np.pi * pos / short_period)
+    yearly = base * _uniform(rng, arch.yearly_amp) * np.sin(2 * np.pi * pos / year_period)
     holiday = base * _uniform(rng, arch.holiday_frac) * holiday_mask
 
     # AR(1) colored noise via a one-pole filter on white innovations.
     rho = _uniform(rng, arch.ar1_rho)
     sigma = base * _uniform(rng, arch.noise_frac)
-    innovations = rng.normal(0.0, sigma, size=day.size)
+    innovations = rng.normal(0.0, sigma, size=n)
     noise = lfilter([1.0], [1.0, -rho], innovations)
 
-    # Optional exogenous driver: a smooth index the target partially follows (xreg paths).
+    # Optional exogenous driver: a smooth ~quarterly index the target partially follows
+    # (xreg paths). Quarter = year_period / 4, so it scales with frequency.
     exog: np.ndarray | None = None
-    exog_effect = np.zeros(day.size)
+    exog_effect = np.zeros(n)
     if cfg.with_exog:
-        exog = 100.0 + 20.0 * np.sin(2 * np.pi * day / 90.0 + _uniform(rng, (0.0, 6.28)))
+        driver_period = year_period / 4.0
+        exog = 100.0 + 20.0 * np.sin(2 * np.pi * pos / driver_period + _uniform(rng, (0.0, 6.28)))
         exog_effect = base * _uniform(rng, (0.05, 0.2)) * (exog - 100.0) / 20.0
 
     y = base + trend + weekly + yearly + holiday + noise + exog_effect
@@ -185,17 +207,17 @@ def _one_series(
     # --- archetype shaping ---
     # One abrupt level shift (a changepoint) partway through the history.
     if rng.random() < arch.level_shift_prob:
-        cut = int(rng.uniform(0.3, 0.7) * day.size)
+        cut = int(rng.uniform(0.3, 0.7) * n)
         y[cut:] += base * _uniform(rng, (-0.5, 0.5))
 
-    # Promo spikes: a few days multiplied up (outliers/promos).
+    # Promo spikes: a few steps multiplied up (outliers/promos).
     if arch.spike_rate > 0:
-        spike_days = rng.random(day.size) < arch.spike_rate
+        spike_days = rng.random(n) < arch.spike_rate
         y[spike_days] *= _uniform(rng, arch.spike_mult)
 
     # Intermittency: zero-inflate slow movers so preprocessing/robust models matter.
     if arch.zero_inflation > 0:
-        y[rng.random(day.size) < arch.zero_inflation] = 0.0
+        y[rng.random(n) < arch.zero_inflation] = 0.0
 
     y = np.clip(y, 0.0, None).round(3)
 
@@ -218,13 +240,13 @@ def generate_partition(
     ``price_index`` when ``cfg.with_exog``), sorted by ``ts_id`` then ``ds``. Pure and
     deterministic: identical output for identical ``(id, cfg, seed)``.
     """
-    index, day = _time_axis(cfg)
+    index, pos = _time_axis(cfg)
     holiday_mask = _holiday_mask(index, cfg.holidays)
     ds = index.to_numpy()
 
     frames: list[pd.DataFrame] = []
     for i in id_range:
-        comp = _one_series(i, cfg, seed, day, holiday_mask)
+        comp = _one_series(i, cfg, seed, pos, holiday_mask)
         cols: dict[str, object] = {
             "ts_id": f"s_{i:06d}",
             "archetype": comp["archetype"],

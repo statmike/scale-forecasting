@@ -38,3 +38,15 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
   - **Remaining stubs for Arc B:** `main.run`, `router.split_by_runtime`, all four
     `engines/*`, `data_gen/seed_spark`, the four `registry/bq` writers, and `bigquery_native`
     fit/predict (raise `NotImplementedError(_ARC_B)`).
+
+- **Pre-deploy hardening (post A-END).** Added a shared `seasonality.py` (one freq→period
+  source for the 5 seasonal models + Fourier features) and `validation.py` (pre-flight
+  input-contract validator: fail-fast, names the first offending series/column/value; we
+  *validate*, never *prepare* — no resampling/tz). Reconciled the exog seam on the business
+  name `price_index` (source table carries business names; `features.exog` list *is* the
+  role assignment; no synthetic `exog_1` column). Generator is now freq-general (seasonality
+  measured in steps; daily output byte-for-byte unchanged).
+  - **pandas 3 dropped the `M` and `H` freq aliases** → use `ME` (month-end) and `h`
+    (hourly). `SUPPORTED_FREQS` is now `(D, W, MS, ME, h)`. This was latent: nothing ran a
+    monthly/hourly panel end-to-end before, so `date_range(freq="M")` would have raised only
+    in production. `seasonality.py` is the SSOT for the spellings.
