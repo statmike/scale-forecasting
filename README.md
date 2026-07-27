@@ -7,8 +7,9 @@ methods, and capture every run's lineage in BigQuery — from a local notebook o
 Airflow, with the *same* code. Deploy the whole thing into a fresh project with one
 `terraform apply`, complete with 100k example series to run against immediately.
 
-> ⚠️ **Status: under construction.** This README is a skeleton; a 5-minute quickstart,
-> architecture diagram, and cost/quota notes land in the final polish phase.
+> ⚠️ **Status: under construction.** The local dev loop (below) is fully working; the
+> cloud deploy (Terraform, Spark/Ray/BigQuery engines) and an architecture diagram land
+> in the final polish phase.
 
 ---
 
@@ -57,12 +58,25 @@ Read `src/scale_forecasting/config.py` (the run contract) and
 
 ## Quickstart
 
-_Coming in the polish phase._ In brief:
+No GCP needed — run a real model on sample data in under a minute.
 
 ```bash
-uv sync
-python -c "import scale_forecasting; print(scale_forecasting.__version__)"
+uv sync                                            # install into a local venv
+uv run python -m scale_forecasting.playground --list           # see every model
+uv run python -m scale_forecasting.playground --model theta --backtest
 ```
+
+That runs the **same** `worker.run_cell` the cluster runs, on a small generated
+panel, and prints the forecast horizon plus the backtest metric panel. For an
+interactive version — pick a model, plot the forecast and its interval — open
+[`notebooks/model_playground.ipynb`](./notebooks/model_playground.ipynb).
+
+**Add your own model** in one file: copy [`docs/model_template.py`](./docs/model_template.py)
+into `src/scale_forecasting/models/`, add one import line, and it shows up in the
+list above automatically. Full walkthrough: [`docs/adding_a_model.md`](./docs/adding_a_model.md).
+
+> The one-`terraform apply` cloud deploy (Spark/Ray/BigQuery at scale) lands in the
+> final polish phase; the quickstart above is the whole local dev loop today.
 
 ## License
 
