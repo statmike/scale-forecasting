@@ -18,6 +18,16 @@ class ConfigError(ScaleForecastError):
     """The run config is missing, malformed, or internally inconsistent."""
 
 
+class DataError(ScaleForecastError):
+    """The input series data violates the contract the config declares.
+
+    Raised by the pre-flight validator (``validation.py``) *before* any compute fans
+    out, so a shape problem in the source (missing column, gap in a series, wrong
+    freq) surfaces as one clear message naming the offender instead of thousands of
+    failed cells.
+    """
+
+
 class ModelError(ScaleForecastError):
     """A model failed to fit or predict.
 
