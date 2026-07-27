@@ -9,6 +9,12 @@ warehouse bucket.
 Rendering is a pure string operation (no BigQuery client), so it is snapshot-tested
 offline; ``registry/bq.ensure_tables`` (Arc B) executes what this renders.
 
+JSON-typed fields (``raw_config``, ``best_params``, ``quantiles``) are stored as
+**STRING**, not the native ``JSON`` type: BigQuery-managed Iceberg tables reject the
+JSON column type (verified against a live table, B0.3). The row assemblers in ``bq.py``
+already emit JSON *strings* (``json.dumps`` / ``_as_json``), so STRING matches what the
+writers produce; query them back with ``PARSE_JSON(col)`` when you need structured access.
+
 Public surface: ``TABLE_NAMES``, ``render_create_tables``.
 """
 
@@ -30,7 +36,7 @@ CREATE TABLE IF NOT EXISTS `{d}.run_registry` (
   backtest_on       BOOL,
   decision_metric   STRING,
   ensemble_strategies ARRAY<STRING>,
-  raw_config        JSON NOT NULL,
+  raw_config        STRING NOT NULL,
   status            STRING,
   n_series          INT64,
   n_models          INT64,
@@ -50,7 +56,7 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   wape FLOAT64, mase FLOAT64, rmsse FLOAT64, bias FLOAT64,
   coverage FLOAT64, pinball FLOAT64,
   fit_seconds    FLOAT64,
-  best_params    JSON,
+  best_params    STRING,
   model_artifact STRING,
   created_at     TIMESTAMP NOT NULL
 )
@@ -66,7 +72,7 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_predictions` (
   yhat          FLOAT64,
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
-  quantiles     JSON
+  quantiles     STRING
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",

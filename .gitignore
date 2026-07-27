@@ -39,6 +39,9 @@ terraform.tfvars
 *.auto.tfvars
 *.tfplan
 
+# Throwaway spikes — live-infra experiments, never product surface
+spikes/
+
 # Notebooks
 .ipynb_checkpoints/
 

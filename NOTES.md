@@ -106,3 +106,29 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     dataset + connection + connection grant + budget. Composer gated off (0 composer resources).
     `terraform output` gives dataset/connection/warehouse_uri/buckets/SA emails for the run
     config. Near-zero cost at rest. Next: B0.3 seed write-path spike.
+
+- **Arc B B0.3 write-path spike (LIVE infra) — findings that reshape the writers.** Ran a
+  throwaway spike (`spikes/`, gitignored) that reused the REAL pure code (generate_panel,
+  render_create_tables, assemble_prediction_rows) to test both write routes against the live
+  managed-Iceberg tables. Managed Iceberg (GA 2026) has real constraints the writers must honor:
+  1. **No native JSON column type.** DDL had `raw_config`/`best_params`/`quantiles` as `JSON`;
+     Iceberg rejects it. FIXED in `ddl.py` → `STRING` (the assemblers already emit JSON strings
+     via `json.dumps`/`_as_json`, so STRING matches the data; read back with `PARSE_JSON`).
+     Snapshot regenerated; test_ddl green.
+  2. **No `WRITE_TRUNCATE` on load.** Iceberg load jobs reject truncate; documented pattern is
+     `DELETE FROM t WHERE TRUE` then `WRITE_APPEND`. → seed job (B0.4) uses delete-then-append.
+  3. **No legacy streaming (`tabledata.insertAll`) on partitioned BigLake managed tables.** BQ
+     error explicitly says "use the Write API." So `insert_rows_json` is OUT for the registry
+     writers.
+  - **Route decisions (verified working):**
+    - **Route 2 — example/seed data → `source_series`:** LOAD JOB (delete-then-append). PASS.
+    - **Route 1 — per-series/per-forecast results → registry tables:** the Storage Write API is
+      the supported streaming path (legacy streaming blocked). A **query-based `INSERT`** also
+      works and is the simplest robust path for small/medium batches (PASS in spike). B1 will use
+      the Storage Write API for the high-fanout worker writes (millions of rows) and can fall back
+      to query-INSERT where simpler.
+    - **Idempotency:** `forecast_predictions` has NO `model_hash` column (that's in
+      `forecast_metadata`); predictions key on `(run_id, ts_id, model_type)`. DELETE-by-key +
+      INSERT, run 2x, produced no duplicates. PASS. (Note: `cell_dedup_key` returns
+      `{run_id, model_hash}` — correct for metadata/oof tables, NOT predictions. B1 needs
+      per-table dedup keys.)

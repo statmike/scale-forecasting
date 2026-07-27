@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.run_registry` (
   backtest_on       BOOL,
   decision_metric   STRING,
   ensemble_strategies ARRAY<STRING>,
-  raw_config        JSON NOT NULL,
+  raw_config        STRING NOT NULL,
   status            STRING,
   n_series          INT64,
   n_models          INT64,
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   wape FLOAT64, mase FLOAT64, rmsse FLOAT64, bias FLOAT64,
   coverage FLOAT64, pinball FLOAT64,
   fit_seconds    FLOAT64,
-  best_params    JSON,
+  best_params    STRING,
   model_artifact STRING,
   created_at     TIMESTAMP NOT NULL
 )
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_predictions` (
   yhat          FLOAT64,
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
-  quantiles     JSON
+  quantiles     STRING
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id
