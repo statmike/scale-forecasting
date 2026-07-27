@@ -23,7 +23,7 @@ SEED = 20260726
 
 
 def _cfg(**over: object) -> GenConfig:
-    base: dict[str, object] = {"n_series": 20, "history": 120, "holidays": ("US",)}
+    base: dict[str, object] = {"history": 120, "holidays": ("US",)}
     base.update(over)
     return GenConfig(**base)  # type: ignore[arg-type]
 
@@ -47,7 +47,7 @@ def test_different_seed_changes_data() -> None:
 
 
 def test_shape_and_columns() -> None:
-    cfg = _cfg(n_series=5, history=100)
+    cfg = _cfg(history=100)
     df = generate_panel(5, cfg, SEED)
     assert list(df.columns) == ["ts_id", "archetype", "ds", "y"]
     assert len(df) == 5 * 100
@@ -79,7 +79,7 @@ def test_exog_column_emitted_when_requested() -> None:
 
 @pytest.mark.parametrize("freq", ["D", "W", "MS", "ME", "h"])
 def test_generates_on_any_supported_freq(freq: str) -> None:
-    cfg = _cfg(n_series=3, history=60, freq=freq)
+    cfg = _cfg(history=60, freq=freq)
     df = generate_panel(3, cfg, SEED)
     assert len(df) == 3 * 60
     # Each series lands on a regular grid at the requested freq.
@@ -92,7 +92,7 @@ def test_daily_output_unchanged_by_position_based_seasonality() -> None:
     # Regression guard: for daily data, step position == day offset, so switching the
     # seasonality math to position-based must not perturb a single value. This digest was
     # captured from the pre-refactor generator; it must not move.
-    cfg = _cfg(n_series=4, history=90, freq="D")
+    cfg = _cfg(history=90, freq="D")
     df = generate_panel(4, cfg, SEED)
     assert df["y"].notna().all()
     assert float(df["y"].sum()) == pytest.approx(41909.749, abs=1e-3)
@@ -104,7 +104,7 @@ def test_generated_panel_passes_the_validator() -> None:
     from scale_forecasting.validation import validate_panel
 
     for freq in ("D", "W", "MS"):
-        panel = generate_panel(3, _cfg(n_series=3, history=80, freq=freq), SEED)
+        panel = generate_panel(3, _cfg(history=80, freq=freq), SEED)
         cfg = RunConfig(
             run_name="t",
             data={"source_table": "t", "freq": freq, "horizon": 4},
@@ -119,7 +119,7 @@ def test_generated_panel_passes_the_validator() -> None:
 
 
 def test_partition_union_equals_full_panel() -> None:
-    cfg = _cfg(n_series=12, history=90)
+    cfg = _cfg(history=90)
     full = generate_panel(12, cfg, SEED)
 
     # Arbitrary, uneven partitioning of range(12).
@@ -130,7 +130,7 @@ def test_partition_union_equals_full_panel() -> None:
 
 
 def test_series_limit_is_a_prefix() -> None:
-    cfg = _cfg(n_series=10, history=90)
+    cfg = _cfg(history=90)
     full = generate_panel(10, cfg, SEED)
     subset = generate_panel(4, cfg, SEED)  # data.series_limit=4 → first 4 series
 
@@ -139,7 +139,7 @@ def test_series_limit_is_a_prefix() -> None:
 
 
 def test_single_series_stable_across_partitions() -> None:
-    cfg = _cfg(n_series=50, history=60)
+    cfg = _cfg(history=60)
     # Series 7 must be identical whether generated alone or inside a wider range.
     alone = generate_partition([7], cfg, SEED)
     wide = generate_partition(range(5, 10), cfg, SEED)

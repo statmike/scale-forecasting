@@ -57,7 +57,7 @@ def sample_data(
     scale. Columns: ``ts_id, archetype, ds, y`` (+ ``price_index`` when ``with_exog``).
     Defaults to 3 series × 2 years daily — enough to show trend + seasonality + intervals.
     """
-    cfg = GenConfig(n_series=n_series, history=history, freq=freq, with_exog=with_exog)
+    cfg = GenConfig(history=history, freq=freq, with_exog=with_exog)
     return generate_panel(n_series, cfg, seed)
 
 

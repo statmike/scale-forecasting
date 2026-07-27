@@ -39,9 +39,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class GenConfig:
-    """What to generate. Pure parameters — no source/sink here (that's ``seed_spark.py``)."""
+    """How to *shape* each series — not how many. The count is the caller's ``id_range`` /
+    ``n`` (a partition of series ids), which keeps the partition-union invariant orthogonal
+    to the per-series knobs. Pure parameters — no source/sink here (that's ``seed_spark.py``).
+    """
 
-    n_series: int = 100_000
     history: int = 1460  # number of periods of history (at freq); ~4 years daily
     freq: str = "D"
     start: str = "2021-01-01"

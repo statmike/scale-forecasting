@@ -22,7 +22,7 @@ python -m scale_forecasting.playground --list           # my_model now appears
 python -m scale_forecasting.playground --model my_model --backtest
 ```
 
-or open `notebooks/model_playground.ipynb`, pick your model from the dropdown, and run.
+or open `notebooks/model_playground.ipynb`, set `MODEL = "my_model"`, and run the cells.
 
 ## The contract every model owes
 
