@@ -20,13 +20,11 @@ from statsmodels.tsa.forecasting.theta import ThetaModel
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..seasonality import seasonal_period
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
 if TYPE_CHECKING:
     import optuna
-
-# Seasonal period per frequency; Theta needs a period for its seasonal decomposition.
-_PERIOD: dict[str, int] = {"D": 7, "W": 52, "M": 12, "MS": 12, "H": 24}
 
 
 class ThetaModelWrapper(BaseModel):
@@ -41,7 +39,7 @@ class ThetaModelWrapper(BaseModel):
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         if len(y) < 2:
             raise ModelError("theta requires at least 2 observations")
-        period = _PERIOD.get(self.ctx.freq, 7)
+        period = seasonal_period(self.ctx.freq)
         deseasonalize = len(y) >= 2 * period
         self._last_date = y.index[-1]
         self._fitted = ThetaModel(

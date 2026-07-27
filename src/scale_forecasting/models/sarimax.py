@@ -15,14 +15,11 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..seasonality import seasonal_period
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
 if TYPE_CHECKING:
     import optuna
-
-# Seasonal period per frequency (the SARIMA "m"). Kept modest so a 100k-series batch stays
-# tractable; HPO can widen the (p,d,q) orders later.
-_PERIOD: dict[str, int] = {"D": 7, "W": 52, "M": 12, "MS": 12, "H": 24}
 
 
 class Sarimax(BaseModel):
@@ -37,7 +34,7 @@ class Sarimax(BaseModel):
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         if len(y) < 3:
             raise ModelError("sarimax requires at least 3 observations")
-        period = _PERIOD.get(self.ctx.freq, 7)
+        period = seasonal_period(self.ctx.freq)
         order = tuple(self.params.get("order", (1, 1, 1)))
         seasonal = len(y) >= 2 * period
         default_seasonal = (0, 1, 1, period) if seasonal else (0, 0, 0, 0)

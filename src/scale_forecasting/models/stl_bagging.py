@@ -16,9 +16,9 @@ from statsmodels.tsa.seasonal import STL
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..seasonality import seasonal_period
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
-_PERIOD: dict[str, int] = {"D": 7, "W": 52, "M": 12, "MS": 12, "H": 24}
 _N_BAG = 40  # bootstrap replicates for the predictive distribution
 
 
@@ -32,7 +32,7 @@ class StlBagging(BaseModel):
     supports_native_intervals = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
-        period = _PERIOD.get(self.ctx.freq, 7)
+        period = seasonal_period(self.ctx.freq)
         if len(y) < 2 * period:
             raise ModelError(f"stl_bagging requires at least {2 * period} observations")
         self._period = period

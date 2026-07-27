@@ -26,12 +26,10 @@ import numpy as np
 import pandas as pd
 
 from .errors import ConfigError
+from .seasonality import periods_per_year
 
 if TYPE_CHECKING:
     from .config import RunConfig
-
-# Fourier terms use a yearly period keyed by frequency (approx periods per year).
-_PERIODS_PER_YEAR: dict[str, float] = {"D": 365.25, "W": 52.18, "M": 12.0, "MS": 12.0, "H": 8766.0}
 
 
 # --- transforms (stateless) ----------------------------------------------------
@@ -157,7 +155,7 @@ def build_features(series: pd.DataFrame, cfg: RunConfig) -> tuple[pd.Series, pd.
 
 def _fourier_terms(index: pd.DatetimeIndex, freq: str, order: int) -> dict[str, np.ndarray]:
     """Sine/cosine Fourier features for a yearly seasonal period (pure)."""
-    period = _PERIODS_PER_YEAR.get(freq, 365.25)
+    period = periods_per_year(freq)
     # Position within the seasonal cycle, from the day count since epoch.
     nanos = index.to_numpy(dtype="datetime64[ns]").astype("int64")
     t = nanos.astype(float) / (24 * 3600 * 1e9)

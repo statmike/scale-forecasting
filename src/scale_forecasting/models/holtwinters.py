@@ -12,10 +12,8 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..seasonality import seasonal_period
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
-
-# Seasonal period per frequency; seasonality is only enabled with enough history.
-_PERIOD: dict[str, int] = {"D": 7, "W": 52, "M": 12, "MS": 12, "H": 24}
 
 
 class HoltWinters(BaseModel):
@@ -30,7 +28,7 @@ class HoltWinters(BaseModel):
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         if len(y) < 2:
             raise ModelError("holtwinters requires at least 2 observations")
-        period = _PERIOD.get(self.ctx.freq, 7)
+        period = seasonal_period(self.ctx.freq)
         seasonal = "add" if len(y) >= 2 * period else None
         self._last_date = y.index[-1]
         self._fitted = ExponentialSmoothing(
