@@ -9,7 +9,7 @@ installed. Recursive multi-step forecasting + design matrix come from the shared
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,9 @@ from ..errors import ModelError
 from ..features import invert_transform
 from . import _lag_forecaster as lf
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
+
+if TYPE_CHECKING:
+    import optuna
 
 
 class XgboostModel(BaseModel):
@@ -66,7 +69,7 @@ class XgboostModel(BaseModel):
         return self._assemble_frame(ds, qmap)
 
     @classmethod
-    def search_space(cls, trial: Any) -> dict[str, Any]:
+    def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
         return {
             "n_estimators": trial.suggest_int("n_estimators", 100, 600),
             "max_depth": trial.suggest_int("max_depth", 3, 10),

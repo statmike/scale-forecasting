@@ -6,7 +6,7 @@ and emits native prediction intervals (Gaussian, from the forecast standard erro
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -17,9 +17,12 @@ from ..errors import ModelError
 from ..features import invert_transform
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
-# Default (p,d,q) and seasonal (P,D,Q,m) orders per frequency. Kept modest so a 100k-series
-# batch stays tractable; HPO can widen these later.
-_SEASONAL_M: dict[str, int] = {"D": 7, "W": 52, "M": 12, "MS": 12, "H": 24}
+if TYPE_CHECKING:
+    import optuna
+
+# Seasonal period per frequency (the SARIMA "m"). Kept modest so a 100k-series batch stays
+# tractable; HPO can widen the (p,d,q) orders later.
+_PERIOD: dict[str, int] = {"D": 7, "W": 52, "M": 12, "MS": 12, "H": 24}
 
 
 class Sarimax(BaseModel):
@@ -34,10 +37,10 @@ class Sarimax(BaseModel):
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         if len(y) < 3:
             raise ModelError("sarimax requires at least 3 observations")
-        m = _SEASONAL_M.get(self.ctx.freq, 7)
+        period = _PERIOD.get(self.ctx.freq, 7)
         order = tuple(self.params.get("order", (1, 1, 1)))
-        seasonal = len(y) >= 2 * m
-        default_seasonal = (0, 1, 1, m) if seasonal else (0, 0, 0, 0)
+        seasonal = len(y) >= 2 * period
+        default_seasonal = (0, 1, 1, period) if seasonal else (0, 0, 0, 0)
         seasonal_order = tuple(self.params.get("seasonal_order", default_seasonal))
         self._last_date = y.index[-1]
         self._fitted = SARIMAX(
@@ -64,7 +67,7 @@ class Sarimax(BaseModel):
         return self._assemble_frame(ds, qmap)
 
     @classmethod
-    def search_space(cls, trial: Any) -> dict[str, Any]:
+    def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
         return {
             "order": (
                 trial.suggest_int("p", 0, 3),

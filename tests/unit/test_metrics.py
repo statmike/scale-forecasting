@@ -8,10 +8,12 @@ coverage in [0,1], pinball ≥ 0.
 from __future__ import annotations
 
 import math
+from typing import get_args
 
 import numpy as np
 import pytest
 
+from scale_forecasting.config import DecisionMetric
 from scale_forecasting.metrics import METRIC_NAMES, compute_metrics
 
 # A tiny fixed window with easy-to-verify arithmetic.
@@ -33,6 +35,12 @@ def test_panel_has_every_metric() -> None:
     m = compute_metrics(_YT, _YH)
     assert set(m) == set(METRIC_NAMES)
     assert all(isinstance(v, float) for v in m.values())
+
+
+def test_metric_names_match_config_decision_metric() -> None:
+    # The panel metrics.py produces must be exactly the DecisionMetric vocabulary in the
+    # config — same order, one source of truth (metrics ↔ config ↔ DDL, CONTRACTS §2.3).
+    assert METRIC_NAMES == get_args(DecisionMetric)
 
 
 # --- point-error metrics vs hand-computed --------------------------------------
