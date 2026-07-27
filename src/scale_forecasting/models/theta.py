@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-from statsmodels.tsa.forecasting.theta import ThetaModel
+from statsmodels.tsa.forecasting.theta import ThetaModel as _StatsmodelsTheta
 
 from ..errors import ModelError
 from ..features import invert_transform
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     import optuna
 
 
-class ThetaModelWrapper(BaseModel):
+class ThetaModel(BaseModel):
     """Theta forecaster (statsmodels)."""
 
     name = "theta"
@@ -42,7 +42,7 @@ class ThetaModelWrapper(BaseModel):
         period = seasonal_period(self.ctx.freq)
         deseasonalize = len(y) >= 2 * period
         self._last_date = y.index[-1]
-        self._fitted = ThetaModel(
+        self._fitted = _StatsmodelsTheta(
             y.astype(float), period=period, deseasonalize=deseasonalize
         ).fit()
 
@@ -71,4 +71,4 @@ class ThetaModelWrapper(BaseModel):
         return {"deseasonalize": trial.suggest_categorical("deseasonalize", [True, False])}
 
 
-register(ThetaModelWrapper)
+register(ThetaModel)

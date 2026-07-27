@@ -19,6 +19,19 @@ import pandas as pd
 LAGS: tuple[int, ...] = (1, 2, 3, 7, 14, 28)
 
 
+def _true_exog(exog: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Drop any ``lag_*`` columns from an exog frame.
+
+    Tree models own their lags via the recursion below, so config-driven ``features.lags``
+    (which arrive as ``lag_*`` columns in ``exog``) must not leak in — otherwise a config
+    lag that overlaps :data:`LAGS` would silently overwrite the recursively-computed value.
+    """
+    if exog is None:
+        return None
+    keep = [c for c in exog.columns if not c.startswith("lag_")]
+    return exog[keep] if keep else None
+
+
 def _calendar(index: pd.DatetimeIndex) -> dict[str, np.ndarray]:
     """Deterministic calendar features from a datetime index."""
     return {
@@ -40,6 +53,7 @@ def build_design(
     idx = pd.DatetimeIndex(y.index)
     cols: dict[str, np.ndarray] = {f"lag_{lag}": y.shift(lag).to_numpy() for lag in LAGS}
     cols.update(_calendar(idx))
+    exog = _true_exog(exog)  # tree models own their lags; ignore any lag_* from config
     if exog is not None:
         for c in exog.columns:
             cols[c] = exog[c].to_numpy(dtype=float)
@@ -62,6 +76,7 @@ def recursive_predict(
     exog), predicts, and appends the prediction to the history for the next step.
     """
     series = history.copy()
+    future_exog = _true_exog(future_exog)  # match build_design: recursion owns the lags
     preds: list[float] = []
     for i, ts in enumerate(future_index):
         row: dict[str, float] = {f"lag_{lag}": float(series.iloc[-lag]) for lag in LAGS}

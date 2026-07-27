@@ -137,6 +137,10 @@ def run_cell(series: pd.DataFrame, model_name: str, cfg: RunConfig) -> CellResul
         y, X = build_features(series, cfg)
         model = model_cls({}, ctx)
         model.fit(y, X)
+        # Offline has no *true* future exog (that arrives with a real run, Arc B). As a
+        # stand-in we hand exog-aware models the first `horizon` rows of the design matrix
+        # so shapes line up; values are historical, so exog-driven forecasts are indicative
+        # only. Tree models ignore any lag_* columns here (see _lag_forecaster).
         future_exog = X.iloc[: cfg.data.horizon] if X is not None else None
         predictions = model.predict(cfg.data.horizon, future_exog)
 

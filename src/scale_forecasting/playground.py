@@ -27,7 +27,7 @@ from .models import get_model, list_models
 from .validation import validate_panel
 from .worker import CellResult, run_cell
 
-# A small, fast default: enough history for yearly seasonality, cheap to fit interactively.
+# Fixed seed so the sample panel is reproducible run-to-run (determinism, not size).
 _SAMPLE_SEED = 20260726
 
 

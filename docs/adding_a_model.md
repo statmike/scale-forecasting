@@ -72,6 +72,12 @@ bounds (`lower ≤ yhat ≤ upper`). The base class does the assembly for you:
   xgboost, …), import it *inside* `fit` and raise `ModelError("… install the 'models'
   extra")` on `ImportError`. That way the model still *registers* without the dep, and the
   contract test skips it cleanly instead of breaking the suite. See `xgboost_model.py`.
+- **Avoid shadowing the library you wrap.** When your model's name collides with the package
+  it imports, keep them distinct: either suffix the *file* `_model.py` (`prophet_model.py`
+  imports `prophet`) or alias the import (`theta.py` does
+  `from statsmodels...theta import ThetaModel as _StatsmodelsTheta`). Models with no such
+  collision use the bare name (`sarimax.py`). The registered `name` string is unaffected
+  either way.
 
 ## What you get for free
 

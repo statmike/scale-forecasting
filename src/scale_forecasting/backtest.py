@@ -92,21 +92,23 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
 
 def backtest_cell(
     series: pd.DataFrame,
-    model: Callable[[], BaseModel],
+    model_factory: Callable[[], BaseModel],
     cfg: RunConfig,
 ) -> tuple[pd.DataFrame, list[dict[str, float]]]:
     """Run CV for one series and model factory (CONTRACTS §2.2).
 
     Args:
         series: one ts_id's raw rows (date/target/exog columns).
-        model: a **factory** returning a freshly-constructed model, called once per fold so
-            no fitted state leaks across folds.
+        model_factory: returns a freshly-constructed model, called once per fold so no
+            fitted state leaks across folds.
         cfg: the run config (drives features and fold geometry).
 
     Returns:
         ``(oof, fold_metrics)`` where ``oof`` is the canonical OOF frame (§2.2: ``ds``,
         ``fold_id``, ``y_true``, ``yhat``) concatenated across folds, and ``fold_metrics``
-        is the per-fold metric panel (list, in fold order).
+        is the per-fold metric panel (list, in fold order). The registry later augments this
+        frame with ``ts_id``/``model_type`` and renames ``ds``→``forecast_date`` before the
+        ensembler consumes it (see ``ensembler._pivot_oof``) — this cell emits the bare form.
     """
     y, X = build_features(series, cfg)
     n = len(y)
@@ -121,7 +123,7 @@ def backtest_cell(
         y_val = y.iloc[fold.val_start : fold.val_end]
         X_val = X.iloc[fold.val_start : fold.val_end] if X is not None else None
 
-        est = model()
+        est = model_factory()
         est.fit(y_train, X_train)
         pred = est.predict(fold.val_size, X_val)
 
