@@ -27,9 +27,11 @@ locals {
     "composer.googleapis.com",             # Composer 3 (Airflow) — created only if create_composer
     "artifactregistry.googleapis.com",     # container images for engines / Ray
     "cloudbuild.googleapis.com",           # build those images
+    "serviceusage.googleapis.com",         # enable/disable APIs; also the quota target for the budget
     "iam.googleapis.com",                  # service accounts + role grants
     "cloudresourcemanager.googleapis.com", # project-level IAM bindings
-    "cloudbilling.googleapis.com",         # budget + alerts
+    "cloudbilling.googleapis.com",         # link project ↔ billing account
+    "billingbudgets.googleapis.com",       # the budget + threshold alerts (distinct API)
   ]
 }
 

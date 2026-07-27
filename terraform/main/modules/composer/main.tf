@@ -36,7 +36,7 @@ variable "region" {
 }
 
 variable "service_account" {
-  description = "Runner SA the environment (and its workers) run as — sf-runner."
+  description = "Runner SA the environment (and its workers) run as — scale-forecasting-runner."
   type        = string
 }
 

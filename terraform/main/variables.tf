@@ -25,7 +25,7 @@ variable "enable_apis" {
 }
 
 variable "create_service_accounts" {
-  description = "Create sf-runner / sf-compute SAs. false to bring your own (set *_email vars)."
+  description = "Create the runner / compute SAs. false to bring your own (set *_email vars)."
   type        = bool
   default     = true
 }
@@ -51,13 +51,13 @@ variable "dataset_id" {
 }
 
 variable "runner_sa_email" {
-  description = "Existing sf-runner SA email; used only when create_service_accounts = false."
+  description = "Existing runner SA email; used only when create_service_accounts = false."
   type        = string
   default     = null
 }
 
 variable "compute_sa_email" {
-  description = "Existing sf-compute SA email; used only when create_service_accounts = false."
+  description = "Existing compute SA email; used only when create_service_accounts = false."
   type        = string
   default     = null
 }

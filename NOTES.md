@@ -54,7 +54,7 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
 - **Arc B B0.1–B0.2 (Terraform authored, not yet applied).** Two-stage state:
   `terraform/bootstrap` (local state → creates project + GCS state bucket) and
   `terraform/main` (GCS backend → everything else). Small one-capability modules mirroring
-  the Python side: `apis`, `iam` (sf-runner/sf-compute, no keys, least-privilege),
+  the Python side: `apis`, `iam` (scale-forecasting-runner/-compute, no keys, least-privilege),
   `storage` (warehouse/artifacts/code buckets), `bigquery` (dataset + BigLake connection +
   warehouse grant), `budget` (50/90/100% alerts), `composer` (Composer 3, gated). Greenfield
   default + BYO toggles (`create_project`, `enable_apis`, `create_service_accounts`,
@@ -71,3 +71,38 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
   - **Not yet applied** — awaiting billing account id + human review of `terraform plan`
     before any spend. Composer image pinned `composer-3-airflow-2.10.5-build.0` (verify/bump
     to a currently-offered Composer 3 build at apply time).
+
+- **Arc B B0 apply — bootstrap live, main reviewed (naming polish before main apply).**
+  Bootstrap applied cleanly (project `statmike-scale-forecasting` + state bucket). First apply
+  attempt failed on `billing.resourceAssociations.create`; resolved by granting the dev
+  identity `roles/billing.user` at the **org** level (798987785246) — the billing account was
+  not directly editable, org-scoped grant cascaded. Two review decisions on the main stage,
+  made before applying it:
+  - **Service accounts renamed** `sf-runner`/`sf-compute` → `scale-forecasting-runner`/
+    `scale-forecasting-compute`. Full names read self-evidently in the IAM console; both fit
+    the 30-char `account_id` limit (24/25). No applied resources to migrate (main not applied
+    yet).
+  - **Kept three GCS buckets** (warehouse/artifacts/code) rather than one with folder
+    prefixes — reasoning captured in `modules/storage/main.tf` header. Decisive points: GCS
+    applies IAM/versioning/lifecycle/force_destroy at the *bucket* level (folders are just name
+    prefixes); the BigLake connection SA needs objectAdmin scoped to *warehouse only*; and
+    code (derivable, GitHub-backed, wants force_destroy) vs artifacts (G3 lineage, must never
+    be force_destroyed) have opposite retention postures. Cost is identical (GCS bills per byte,
+    not per bucket). Also rejected merging artifacts+code for the same retention-posture reason.
+  - **Two apply-time fixes** (both real GCP eventual-consistency / ADC-quota gaps, not design
+    errors — the config was valid, the cloud needed coaxing):
+    1. **Budget needed a quota project.** `billingbudgets.googleapis.com` refuses ADC requests
+       with no quota project set. Fix: a dedicated `google.billing_quota` provider alias
+       (`billing_project` + `user_project_override`) used ONLY by the budget module — NOT the
+       default provider, because that override also routes the Service Usage (API-enable) calls,
+       which can't be billed to a project where Service Usage isn't enabled yet (bootstrap
+       deadlock). Added `serviceusage` + `billingbudgets` to the apis module. No global ADC
+       mutation (DESIGN §13.0 honored).
+    2. **BigLake connection service-agent race.** The connection's `bqcx-…@gcp-sa-bigquery-condel`
+       agent is provisioned async; the warehouse-bucket grant referenced it before it existed
+       ("service account ... does not exist"). Fix: a `time_sleep` (20s) between connection and
+       grant — standard idiom.
+  - **APPLIED & verified** (2026-07-27): project + 12 APIs + 2 SAs + 10 grants + 3 buckets +
+    dataset + connection + connection grant + budget. Composer gated off (0 composer resources).
+    `terraform output` gives dataset/connection/warehouse_uri/buckets/SA emails for the run
+    config. Near-zero cost at rest. Next: B0.3 seed write-path spike.

@@ -1,8 +1,13 @@
 # iam — the two service accounts and their least-privilege roles (DESIGN §12).
 #
 # No keys, ever. These SAs are used via ADC + impersonation:
-#   sf-runner  — orchestration: read/write BQ, GCS, submit Dataproc/Ray jobs. Composer runs as it.
-#   sf-compute — attached to Dataproc/Ray workers: BQ data + GCS artifact read/write only.
+#   scale-forecasting-runner  — orchestration: read/write BQ, GCS, submit Dataproc/Ray jobs.
+#                               Composer runs as it.
+#   scale-forecasting-compute — attached to Dataproc/Ray workers: BQ data + GCS artifacts only.
+#
+# Names are spelled out in full (not abbreviated) so they read self-evidently in the IAM
+# console — a reader sees the product they belong to without a decoder. The account_id limit
+# is 30 chars; both fit (24 and 25).
 #
 # `create` = false lets you bring your own SAs (pass their emails in); then this module only
 # resolves the emails through to outputs and grants nothing (your admin owns the grants).
@@ -18,13 +23,13 @@ variable "create" {
 }
 
 variable "runner_email" {
-  description = "Existing sf-runner email when create = false."
+  description = "Existing runner SA email when create = false."
   type        = string
   default     = null
 }
 
 variable "compute_email" {
-  description = "Existing sf-compute email when create = false."
+  description = "Existing compute SA email when create = false."
   type        = string
   default     = null
 }
@@ -34,14 +39,14 @@ variable "compute_email" {
 resource "google_service_account" "runner" {
   count        = var.create ? 1 : 0
   project      = var.project_id
-  account_id   = "sf-runner"
+  account_id   = "scale-forecasting-runner"
   display_name = "scale-forecasting orchestration (BQ/GCS/Dataproc/Ray submit)"
 }
 
 resource "google_service_account" "compute" {
   count        = var.create ? 1 : 0
   project      = var.project_id
-  account_id   = "sf-compute"
+  account_id   = "scale-forecasting-compute"
   display_name = "scale-forecasting workers (BQ data + GCS artifacts)"
 }
 
@@ -80,7 +85,7 @@ resource "google_project_iam_member" "grant" {
   member  = "serviceAccount:${each.value.member}"
 }
 
-# Let sf-runner impersonate sf-compute (needed to attach it to worker jobs) — no keys.
+# Let the runner impersonate the compute SA (needed to attach it to worker jobs) — no keys.
 resource "google_service_account_iam_member" "runner_impersonates_compute" {
   count              = var.create ? 1 : 0
   service_account_id = google_service_account.compute[0].name
@@ -89,11 +94,11 @@ resource "google_service_account_iam_member" "runner_impersonates_compute" {
 }
 
 output "runner_email" {
-  description = "sf-runner service account email."
+  description = "scale-forecasting-runner service account email."
   value       = local.runner_email
 }
 
 output "compute_email" {
-  description = "sf-compute service account email."
+  description = "scale-forecasting-compute service account email."
   value       = local.compute_email
 }

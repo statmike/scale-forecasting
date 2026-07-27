@@ -44,11 +44,22 @@ resource "google_bigquery_connection" "iceberg" {
   cloud_resource {}
 }
 
+# A cloud-resource connection's service agent is provisioned asynchronously — the agent id is
+# returned immediately, but it can take a few seconds to become referenceable in IAM. Without
+# this pause the grant below can fail with "service account ... does not exist". A short sleep
+# is the standard idiom for this eventual-consistency gap.
+resource "time_sleep" "wait_for_connection_agent" {
+  depends_on      = [google_bigquery_connection.iceberg]
+  create_duration = "20s"
+}
+
 # The connection's service agent must be able to read/write the warehouse bucket objects.
 resource "google_storage_bucket_iam_member" "conn_warehouse" {
   bucket = var.warehouse_bucket
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_bigquery_connection.iceberg.cloud_resource[0].service_account_id}"
+
+  depends_on = [time_sleep.wait_for_connection_agent]
 }
 
 output "dataset_id" {

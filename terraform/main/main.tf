@@ -42,6 +42,10 @@ module "budget" {
   billing_account = var.billing_account
   amount_usd      = var.budget_amount_usd
 
+  providers = {
+    google.billing_quota = google.billing_quota
+  }
+
   depends_on = [module.apis]
 }
 
