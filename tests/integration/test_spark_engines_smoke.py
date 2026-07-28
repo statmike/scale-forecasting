@@ -83,31 +83,40 @@ def _capturing_runner(cfg: RunConfig, settings_broadcast: Any, sink_dir: str) ->
     return _run
 
 
-def test_explode_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+def _run_engine_locally(
+    engine_module: Any,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Drive one engine's ``run(cfg)`` on local Spark; return (written cell rows, closed header).
+
+    Both engines share this harness — they differ only in fan-out shape (explode cross-joins to a
+    cell per (series, model); naive keeps a series whole and loops models), which is exactly what
+    the caller asserts on. The connector read, the executor-side write, and the header writes are
+    swapped as described in the module docstring.
+    """
+    import json
+
     from pyspark.sql import SparkSession
 
-    from scale_forecasting.engines import spark_explode, spark_io
+    from scale_forecasting.engines import spark_io
     from scale_forecasting.registry import bq
 
     n_series, models = 4, ["theta", "holtwinters"]
     panel = _panel(n_series)
     sink = str(tmp_path)
 
-    # 1. Swap the BigQuery connector read for a local DataFrame built from the panel.
     def _fake_read(spark: SparkSession, cfg: RunConfig, settings: Settings) -> Any:
         pdf = panel.copy()
         pdf["ds"] = pdf["ds"].dt.date  # source_series.ds is DATE
         return spark.createDataFrame(pdf)
 
     monkeypatch.setattr(spark_io, "read_source_series", _fake_read)
-
-    # 2. Swap the grouped-UDF factory so the executor-side write goes to the temp-dir sink (see
-    #    module docstring: the driver-side monkeypatch can't reach the separate worker process).
     monkeypatch.setattr(
         spark_io, "make_group_runner", lambda cfg, bc: _capturing_runner(cfg, bc, sink)
     )
 
-    # 3. Header writes are driver-side, so an in-memory capture is enough for the status assertion.
     header: dict[str, Any] = {}
     monkeypatch.setattr(bq, "ensure_tables", lambda cfg, *, settings=None: None)
     monkeypatch.setattr(
@@ -119,28 +128,51 @@ def test_explode_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     monkeypatch.setattr(Settings, "resolve", staticmethod(_settings))
 
     cfg = RunConfig(
-        run_name="local spark explode",
+        run_name=f"local spark {method}",
         data={"source_table": "source_series", "horizon": 7, "series_limit": n_series},
-        spark_method="explode",
+        spark_method=method,
         models=models,
     )
-
-    spark_explode.run(cfg)
-
-    # Read back what the workers wrote: one row per (series, model) cell — the explode cross-join,
-    # run through applyInPandas and returned across the process boundary.
-    import json
+    engine_module.run(cfg)
 
     written = []
     for path in sorted(tmp_path.glob("bucket-*.jsonl")):
         for line in path.read_text().splitlines():
             written.append(json.loads(line))
+    return written, header
+
+
+def test_explode_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    from scale_forecasting.engines import spark_explode
+
+    written, header = _run_engine_locally(spark_explode, "explode", monkeypatch, tmp_path)
+
+    # One row per (series, model) cell — the explode cross-join, through applyInPandas and back
+    # across the process boundary.
+    n_series, models = 4, {"theta", "holtwinters"}
     assert len(written) == n_series * len(models)
     cells = {(r["ts_id"], r["model_type"]) for r in written}
     assert len(cells) == n_series * len(models)
-    assert {m for _, m in cells} == set(models)
+    assert {m for _, m in cells} == models
 
-    # Driver closed the header from the collected status frame.
+    assert header["status"] in {"COMPLETED", "PARTIAL"}
+    assert header["n_series"] == n_series
+    assert header["runtime_seconds"] > 0
+
+
+def test_naive_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    from scale_forecasting.engines import spark_naive
+
+    written, header = _run_engine_locally(spark_naive, "naive", monkeypatch, tmp_path)
+
+    # naive has no cross-join, yet the sequential per-series model loop still produces the same
+    # (series, model) cells — one task ran all models for its series (the straggler shape).
+    n_series, models = 4, {"theta", "holtwinters"}
+    assert len(written) == n_series * len(models)
+    cells = {(r["ts_id"], r["model_type"]) for r in written}
+    assert len(cells) == n_series * len(models)
+    assert {m for _, m in cells} == models
+
     assert header["status"] in {"COMPLETED", "PARTIAL"}
     assert header["n_series"] == n_series
     assert header["runtime_seconds"] > 0

@@ -139,6 +139,15 @@ def test_split_single_family_is_one_group() -> None:
     assert split_models_by_family(cfg) == {"statistical": ["theta", "holtwinters"]}
 
 
+def test_multi_on_cluster_engine_is_guarded() -> None:
+    # multi is submit-side only; the on-cluster engine must refuse loudly, not run un-split.
+    from scale_forecasting.engines import spark_multi
+    from scale_forecasting.errors import EngineError
+
+    with pytest.raises(EngineError, match="submit_multi"):
+        spark_multi.run(_cfg(spark_method="multi"))
+
+
 # --- BatchInfra resolution -----------------------------------------------------
 
 
