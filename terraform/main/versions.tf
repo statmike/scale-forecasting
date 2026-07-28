@@ -27,5 +27,11 @@ terraform {
       source  = "hashicorp/time"
       version = "~> 0.12"
     }
+    # Zips src/ at apply time so the seed batch loads current code via python_file_uris — the
+    # package is NOT baked into the runtime image (modules/seed).
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 }

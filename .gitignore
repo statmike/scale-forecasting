@@ -33,6 +33,7 @@ application_default_credentials.json
 *.tfstate
 *.tfstate.*
 .terraform/
+.terraform-tmp/
 .terraform.lock.hcl
 # Never commit real ids (billing/org) or generated plans
 terraform.tfvars

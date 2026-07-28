@@ -9,8 +9,9 @@ Split into two halves along the pure/I-O seam (CONTRACTS §0):
 - **I/O** (implemented in Arc B step B1, GCP-verified by the ``@gcp`` round-trip test):
   ``ensure_tables``, ``write_header``, ``update_header``, ``write_cells`` — execute DDL,
   INSERT/UPDATE the single-row header, and stream the three cell tables via the Storage
-  Write API. Idempotency is **run-scoped**: ``write_cells`` clears a run's rows then
-  re-appends (B0.3: the streaming buffer can't be DELETE-d per-cell after an append).
+  Write API. Idempotency is **append-only + dedupe-on-read**: ``write_cells`` only appends
+  (never DELETEs — a DELETE against rows still in the ~90-min streaming buffer is rejected),
+  and serving views dedupe with ``DISTINCT``/``GROUP BY`` on ``run_id`` (+ cell keys).
 
 The infra identity (project / dataset / connection / warehouse) is not on ``RunConfig`` —
 it is resolved from the environment via :class:`~scale_forecasting.settings.Settings`, so the

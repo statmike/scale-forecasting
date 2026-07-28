@@ -238,3 +238,38 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     rows scale exactly (5,200 smoke → 5,200,000 at 100k), price_index all-NULL (no `--with-exog`),
     schema matches the DDL (ts_id/ds REQUIRED, DATE/BOOL/FLOAT), per-archetype means consistent
     smoke↔100k (parity across scale = generator determinism holds under Spark fan-out).
+
+- **Arc B B0.4-hardening — runtime code delivery, one deps-only container, TF sync, VPC BYO.**
+  Five architectural cleanups after operating B0.4, all verified with a live 100-series smoke
+  (`sf-seed-smoke2-100-749aa78b`, SUCCEEDED, apply stayed in state):
+  - **Code ships at RUNTIME, not in the image.** The container previously `pip install .`-baked the
+    package, so a code edit forced an image rebuild+repush (it bit us mid-B0.4). Now Terraform
+    `archive_file` zips `src/` every apply → uploads `seed/scale_forecasting-<md5>.zip` → the batch
+    loads it via `pyspark_batch.python_file_uris` (on `sys.path`, so `seed_entry.py`'s
+    `import scale_forecasting` resolves from the zip). The 8-char md5 is folded into `batch_id`
+    (`sf-seed-<label>-<n>-<hash>`), so changed code ⇒ new immutable batch (batches never update in
+    place). Needed the `hashicorp/archive ~> 2.4` provider in `versions.tf`.
+  - **One deps-only container (core + [models] + [ray], NOT [spark], NOT the package).** Dockerfile
+    now `COPY docker/requirements.txt` + `pip install -r`, no package. `requirements.txt` is
+    GENERATED+committed via `uv export --frozen --no-emit-project --no-dev --no-hashes --extra
+    models --extra ray` (satisfies CLAUDE.md §5 "locked requirements.txt for clusters"). pyspark
+    excluded on purpose — installing it shadows the Serverless-mounted Spark. Image is now
+    slow-moving: rebuild only on a dep change, never on a code edit.
+  - **TF sync fix:** `timeouts { create = "60m" }` on `google_dataproc_batch` (provider default is
+    10m; that's what left the 100k batch out of state). Recovery pattern documented in the seed
+    module header: batch state in GCP is source of truth; `terraform import
+    module.seed.google_dataproc_batch.seed[0] projects/<p>/locations/<r>/batches/<id>` if an apply
+    ever errors post-submit. The smoke2 apply completed in state — no import needed.
+  - **Network greenfield/brownfield toggle:** `modules/network` gained `create` (default **true**,
+    greenfield) + `subnetwork_uri` (BYO, default null), mirroring iam/composer. `create = false`
+    builds nothing and passes an existing subnet through to the `subnetwork_uri` output. Wired
+    `create_network` + `subnetwork_uri` through root `main.tf`/`variables.tf` + README BYO table.
+    It was the last module without the BYO toggle.
+  - **Clarity:** fixed the stale `registry/bq.py` module docstring (idempotency is **append-only +
+    dedupe-on-read**, never clear-then-append) and the `seed_spark.py` infra-identity docstring
+    (`--sf-*` args exported to env by `main()`, not Spark env props). Confirmed the BQ Write-API
+    code is centralized in `registry/bq.py` (`_append_via_write_api`/`_proto_for`/`_encode_rows`),
+    reused by every registry writer.
+  - **NOTE — smoke replaced the 100k dataset** (replace-on-reseed DELETE-then-append). Restored to
+    the 100k deliverable with `seed_run_label=full seed_num_series=100000 seed_write_method=indirect`
+    after the smoke verified the runtime-code path.

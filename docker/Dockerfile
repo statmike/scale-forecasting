@@ -1,8 +1,14 @@
 # Custom container for Dataproc Serverless Spark (Arc B) — the shared runtime image.
 #
-# This one image is the dependency-delivery mechanism for every Spark path: the seed job (B0.4)
-# and, later, the `explode`/`multi` forecast engines (B2). It carries the `scale_forecasting`
-# package + its CORE deps, so the identical code runs local == Managed Spark == (eventually) Ray.
+# This one image is the DEPENDENCY-delivery mechanism for every compute path: the seed job (B0.4),
+# the `explode`/`multi` forecast engines (B2), and Ray on Vertex (B4). It carries the full locked
+# dependency set (core + [models] + [ray]) from docker/requirements.txt — but NOT the
+# `scale_forecasting` package itself.
+#
+# CODE ships at RUNTIME, not in the image: the Dataproc batch passes src/ as a zip via
+# python_file_uris (Terraform rebuilds+uploads it every apply — see modules/seed). So the image is
+# slow-moving (rebuild only when deps change), and a code edit never requires an image rebuild —
+# no stale code can hide in the container.
 #
 # Dataproc Serverless custom-container rules (https://cloud.google.com/dataproc-serverless/docs/
 # guides/custom-containers) baked in below:
@@ -15,9 +21,10 @@
 #   * Build for **linux/amd64** and push to Artifact Registry (see docker/cloudbuild.yaml).
 #
 # The spark-bigquery connector is BUILT-IN on Serverless (do not add it here); this image just
-# needs to be able to import `pyspark` at runtime — which the mounted runtime provides — and our
-# pure code. `pyspark` is therefore intentionally NOT pip-installed (it's an optional extra used
-# only for local UDF testing); installing it here would shadow the runtime's version.
+# needs to be able to import `pyspark` at runtime — which the mounted runtime provides — and the
+# code that ships via python_file_uris. `pyspark` is therefore intentionally NOT in
+# requirements.txt (the export omits the [spark] extra); installing it here would shadow the
+# runtime's version.
 
 FROM debian:12-slim
 
@@ -45,15 +52,14 @@ RUN python3.11 -m venv ${VENV}
 ENV PATH="${VENV}/bin:${PATH}"
 ENV PYSPARK_PYTHON=${VENV}/bin/python
 
-# Install the package + its CORE deps only (numpy/pandas/scipy/holidays/google-cloud-*, protobuf).
-# The [spark]/[ray]/[models] extras are deliberately excluded: pyspark is runtime-mounted, and the
-# heavy model extras are added when B2/B4 need them (keeps the base image lean). Copy pyproject +
-# sources, then editable-install so the layer caches on dependency changes, not every source edit.
+# Install the LOCKED dependency set only (core + [models] + [ray]; NOT [spark], NOT the package).
+# See docker/requirements.txt for the export command + why pyspark and the package are excluded.
+# Copy only requirements.txt so this layer caches on dependency changes — never on a source edit
+# (the package isn't here; it ships at runtime via python_file_uris).
 WORKDIR /opt/scale-forecasting
-COPY pyproject.toml README.md ./
-COPY src ./src
+COPY docker/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir -r requirements.txt
 
 # --- the mandatory spark user (UID/GID 1099) -----------------------------------------------------
 RUN groupadd --gid 1099 spark \

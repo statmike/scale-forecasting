@@ -50,6 +50,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 |----------|---------|----------------|
 | `enable_apis` | `true` | an admin already enabled the APIs |
 | `create_service_accounts` | `true` | you bring your own SAs (`runner_sa_email`, `compute_sa_email`) |
+| `create_network` | `true` | your org already has a network — pass an existing subnet (`subnetwork_uri`) with Private Google Access + internal-ingress |
 | `create_composer` | `false` | (already off) turn **on** for scheduled DAG runs |
 | `run_seed` | `false` | (already off) turn **on** to submit the seed batch (real spend) |
 | `create_project` (bootstrap) | `true` | your org pre-creates projects |

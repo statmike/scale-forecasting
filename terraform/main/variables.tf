@@ -30,6 +30,22 @@ variable "create_service_accounts" {
   default     = true
 }
 
+variable "create_network" {
+  description = <<-EOT
+    Create the VPC + subnet + firewall for serverless compute. Default TRUE (greenfield). Set
+    FALSE if your org already manages a network, and pass an existing subnet via subnetwork_uri
+    (it must have Private Google Access + an internal-ingress firewall rule).
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "subnetwork_uri" {
+  description = "Existing subnet self-link for serverless batches; used only when create_network = false."
+  type        = string
+  default     = null
+}
+
 variable "create_composer" {
   description = <<-EOT
     Create the Composer 3 (Airflow) environment. Default FALSE — Composer is the only

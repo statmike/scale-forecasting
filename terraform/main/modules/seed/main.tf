@@ -5,6 +5,20 @@
 # It is GATED (run_seed) and BLOCKING: google_dataproc_batch waits for the batch to reach a
 # terminal state on apply, so `terraform apply` == submit + wait for SUCCEEDED/FAILED.
 #
+# CODE DELIVERY: the batch loads the scale_forecasting package at RUNTIME via python_file_uris, not
+# from the container image. Terraform zips src/ (archive_file) every apply and uploads it; the zip's
+# md5 is folded into batch_id, so any code change yields a new (immutable) batch that runs the new
+# code. The runtime image carries only locked deps (docker/requirements.txt) — no package, no stale
+# code. The thin launcher (seed_entry.py) is the gs:// main file; the zip supplies what it imports.
+#
+# SYNC / RECOVERY: google_dataproc_batch blocks until terminal, but its client-side wait has a
+# timeout (we set it to 60m below; the provider default is only 10m and it bit us on the 100k run —
+# the batch SUCCEEDED at ~11m wall but the apply errored and left the resource OUT of state). If an
+# apply ever errors AFTER the batch was submitted, the batch state in GCP is the source of truth:
+# `gcloud dataproc batches describe <id>` to check, then `terraform import
+# module.seed.google_dataproc_batch.seed[0] projects/<proj>/locations/<region>/batches/<id>` to
+# reconcile state. (Benign perpetual diffs on budget + terraform_labels are cosmetic — see NOTES.)
+#
 # ─── LIFECYCLE: smoke → review → full (real cloud spend; BUILD gate) ───────────────────────
 #
 #   SMOKE  (cents, minutes — verifies schema/dtypes/count/determinism AND surfaces real cost):
@@ -110,9 +124,16 @@ variable "subnetwork_uri" {
 }
 
 locals {
-  # Batch ids: lowercase alnum + hyphens, 4-63 chars, unique per (label, count) so smoke and full
-  # are distinct immutable batches.
-  batch_id = "sf-seed-${var.run_label}-${var.num_series}"
+  # Repo src/ (contains only the scale_forecasting/ package, so it sits at the zip root and is
+  # importable once the zip is on sys.path via python_file_uris).
+  src_dir  = "${path.module}/../../../../src"
+  zip_path = "${path.module}/.terraform-tmp/scale_forecasting.zip"
+
+  # Batch ids: lowercase alnum + hyphens, 4-63 chars. Unique per (label, count) AND per code
+  # version — the 8-char code hash means a source change yields a NEW immutable batch that runs the
+  # new code (batches are never updated in place). "sf-seed-full-100000-1a2b3c4d" = 28 chars < 63.
+  code_hash = var.create ? substr(data.archive_file.package[0].output_md5, 0, 8) : ""
+  batch_id  = "sf-seed-${var.run_label}-${var.num_series}-${local.code_hash}"
 
   # The infra identity is passed as JOB ARGS, not Spark env properties. Dataproc Serverless
   # allowlists Spark property prefixes and rejects driver-env (spark.kubernetes.driverEnv.* →
@@ -128,7 +149,26 @@ locals {
   ]
 }
 
-# The launcher must be a gs:// file for main_python_file_uri; the package itself is in the image.
+# Zip the scale_forecasting package from src/ at apply time. output_md5 changes iff the source
+# changes, driving both the uploaded object name and the batch_id (so new code => new batch).
+data "archive_file" "package" {
+  count       = var.create ? 1 : 0
+  type        = "zip"
+  source_dir  = local.src_dir
+  output_path = local.zip_path
+}
+
+# The package zip the batch loads at runtime via python_file_uris (NOT baked into the image). The
+# md5 in the name makes each code version a distinct object (no in-place overwrite races).
+resource "google_storage_bucket_object" "package" {
+  count  = var.create ? 1 : 0
+  bucket = var.code_bucket
+  name   = "seed/scale_forecasting-${local.code_hash}.zip"
+  source = data.archive_file.package[0].output_path
+}
+
+# The launcher must be a gs:// file for main_python_file_uri; it just imports main() from the
+# package supplied by python_file_uris (the zip above), so the batch runs current code.
 resource "google_storage_bucket_object" "launcher" {
   count  = var.create ? 1 : 0
   bucket = var.code_bucket
@@ -157,11 +197,21 @@ resource "google_dataproc_batch" "seed" {
 
   pyspark_batch {
     main_python_file_uri = "gs://${var.code_bucket}/${google_storage_bucket_object.launcher[0].name}"
+    # The package zip: put on sys.path so seed_entry.py's `import scale_forecasting` resolves to
+    # this apply's code, not anything in the image.
+    python_file_uris = ["gs://${var.code_bucket}/${google_storage_bucket_object.package[0].name}"]
     args = concat([
       "--n-series", tostring(var.num_series),
       "--master-seed", tostring(var.master_seed),
       "--write-method", var.write_method,
     ], local.infra_args)
+  }
+
+  # The provider's default create-wait is 10m; a large batch (100k took ~11m wall) blows past it and
+  # errors the apply even though the batch succeeds — leaving the resource out of state. 60m covers
+  # the 100k seed and future B2 runs with headroom.
+  timeouts {
+    create = "60m"
   }
 }
 

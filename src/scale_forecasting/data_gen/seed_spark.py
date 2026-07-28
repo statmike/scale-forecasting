@@ -23,7 +23,9 @@ mode (managed Iceberg rejects truncate); replace-on-reseed is a driver-side ``DE
 TRUE`` before the write (the B0.3-proven delete-then-append shape).
 
 **Infra identity** is resolved from the ``SF_*`` environment via :class:`~scale_forecasting.
-settings.Settings` (G1), which the Dataproc batch sets on the driver + executors.
+settings.Settings` (G1). Dataproc Serverless rejects driver-env Spark properties, so the batch
+passes the identity as ``--sf-*`` job args, which :func:`main` exports into ``os.environ`` on the
+driver before resolution — keeping env-based ``Settings`` the single G1 seam.
 
 Public surface: ``main(argv)``. ``pyspark`` and GCP clients import lazily inside the functions
 that need them, so this module imports cleanly offline (parity with the engines) and

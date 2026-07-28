@@ -72,10 +72,13 @@ module "container" {
 
 # Minimal VPC + subnet for serverless compute (Dataproc Serverless now, Ray later). Fresh projects
 # have no default network, and serverless batches need a subnet with Private Google Access.
+# Greenfield (create_network = true) builds it; brownfield passes an existing subnetwork_uri.
 module "network" {
-  source     = "./modules/network"
-  project_id = var.project_id
-  region     = var.region
+  source         = "./modules/network"
+  project_id     = var.project_id
+  region         = var.region
+  create         = var.create_network
+  subnetwork_uri = var.subnetwork_uri
 
   depends_on = [module.apis]
 }
