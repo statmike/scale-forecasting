@@ -79,11 +79,11 @@ def test_build_batch_wires_launcher_package_and_args() -> None:
         settings=_settings(),
         engine="explode",
         package_uri="gs://code-bkt/runs/pkg-1234.zip",
-        launcher_uri="gs://code-bkt/runs/spark_entry.py",
+        launcher_uri="gs://code-bkt/runs/spark_main.py",
         config_uri="gs://code-bkt/runs/run-abc.json",
     )
     ps = batch.pyspark_batch
-    assert ps.main_python_file_uri == "gs://code-bkt/runs/spark_entry.py"
+    assert ps.main_python_file_uri == "gs://code-bkt/runs/spark_main.py"
     assert list(ps.python_file_uris) == ["gs://code-bkt/runs/pkg-1234.zip"]
     # engine + config-uri lead; the --sf-* infra args follow (the Dataproc delivery path).
     assert ps.args[:4] == ["--engine", "explode", "--config-uri", "gs://code-bkt/runs/run-abc.json"]
@@ -199,7 +199,7 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     staged: dict[str, Any] = {}
 
     def _fake_stage_code(infra: BatchInfra) -> tuple[str, str]:
-        return ("gs://code-bkt/runs/pkg.zip", "gs://code-bkt/runs/spark_entry.py")
+        return ("gs://code-bkt/runs/pkg.zip", "gs://code-bkt/runs/spark_main.py")
 
     def _fake_stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
         staged["series_limit"] = cfg.data.series_limit
@@ -233,3 +233,39 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     assert staged["parent"] == "projects/proj-x/locations/us-central1"
     assert batch_id.startswith("sf-explode-")
     assert staged["batch_id"] == batch_id
+
+
+def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A FAILED batch must raise (not exit 0) — else the header stays RUNNING, failure silent."""
+    from scale_forecasting import submit
+    from scale_forecasting.errors import EngineError
+
+    class _State:
+        name = "FAILED"
+
+    class _FakeResult:
+        state = _State()
+        state_message = "ImportError: attempted relative import with no known parent package"
+
+    class _FakeOp:
+        def result(self) -> Any:
+            return _FakeResult()
+
+    class _FakeClient:
+        def create_batch(self, *, parent: str, batch: Any, batch_id: str) -> _FakeOp:
+            return _FakeOp()
+
+    monkeypatch.setattr(
+        submit, "_stage_code", lambda infra: ("gs://c/p.zip", "gs://c/spark_main.py")
+    )
+    monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
+    monkeypatch.setattr(submit, "_batch_client", lambda region: _FakeClient())
+
+    with pytest.raises(EngineError, match="FAILED"):
+        submit.submit_batch(
+            _cfg(models=["theta"]),
+            engine="explode",
+            settings=_settings(),
+            infra=_infra(),
+            wait=True,
+        )

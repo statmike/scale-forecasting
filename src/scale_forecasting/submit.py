@@ -10,8 +10,8 @@ What :func:`submit_batch` does:
 
 1. **Package the code at runtime** — zip ``src/`` and upload it to the code bucket, so the batch
    loads current code via ``python_file_uris`` rather than anything baked into the container image
-   (the B0.4 code-delivery decision). Upload the thin ``spark_entry`` launcher as the ``gs://`` main
-   file.
+   (the B0.4 code-delivery decision). Upload the standalone ``spark_main`` shim as the ``gs://``
+   main file (Dataproc runs it as ``__main__``; it absolute-imports the in-package dispatch logic).
 2. **Stage the run config** — write the validated config to ``gs://<code>/runs/<run_id>.json`` and
    pass it as ``--config-uri``. The JSON is the lossless reproducibility record (G3).
 3. **Deliver infra identity as args** — the ``--sf-*`` flags (Dataproc rejects driver-env), built
@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ._infra_args import infra_args_from
-from .errors import ConfigError, get_logger
+from .errors import ConfigError, EngineError, get_logger
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -142,9 +142,9 @@ def build_batch(
 ) -> object:
     """Assemble the ``dataproc_v1.Batch`` for one forecast run (pure — builds the message only).
 
-    Mirrors the Terraform seed batch: runtime container + package zip on ``python_file_uris``,
-    ``spark_entry`` as the ``gs://`` main file, ``--engine``/``--config-uri`` + the ``--sf-*`` infra
-    args. ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (the naive-demo throttle).
+    Mirrors the Terraform seed batch: runtime container + package zip on ``python_file_uris``, the
+    ``spark_main`` shim as the ``gs://`` main file, ``--engine``/``--config-uri`` + the ``--sf-*``
+    infra args. ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (naive throttle).
     """
     from google.cloud import dataproc_v1 as dataproc
 
@@ -177,10 +177,13 @@ def build_batch(
 
 
 def _stage_code(infra: BatchInfra) -> tuple[str, str]:
-    """Zip ``src/`` + upload it and the ``spark_entry`` launcher to the code bucket.
+    """Zip ``src/`` + upload it and the standalone launcher shim to the code bucket.
 
     Returns ``(package_uri, launcher_uri)``. The zip name carries an md5 so a code change is a new
-    object (no in-place overwrite races), matching the seed module's runtime-delivery contract.
+    object (no in-place overwrite races), matching the seed module's runtime-delivery contract. The
+    launcher is ``src/spark_main.py`` — a top-level shim (absolute import), *not* the in-package
+    ``spark_entry`` module: Dataproc runs the main file as ``__main__`` with no package context, so
+    a file with relative imports would ``ImportError``. The zip supplies the package it imports.
     """
     import hashlib
     import io
@@ -202,8 +205,8 @@ def _stage_code(infra: BatchInfra) -> tuple[str, str]:
     pkg_name = f"runs/scale_forecasting-{code_hash}.zip"
     bucket.blob(pkg_name).upload_from_string(data, content_type="application/zip")
 
-    launcher_name = "runs/spark_entry.py"
-    launcher_local = _SRC_DIR / "scale_forecasting" / "spark_entry.py"
+    launcher_name = "runs/spark_main.py"
+    launcher_local = _SRC_DIR / "spark_main.py"
     bucket.blob(launcher_name).upload_from_filename(str(launcher_local))
 
     return (
@@ -286,7 +289,15 @@ def submit_batch(
     operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
     if wait:
         result = operation.result()  # blocks until terminal
-        _log.info("batch %s finished: state=%s", batch_id, getattr(result, "state", "?"))
+        state = getattr(result, "state", None)
+        state_name = getattr(state, "name", str(state))
+        _log.info("batch %s finished: state=%s", batch_id, state_name)
+        # A non-SUCCEEDED terminal state must fail loudly — the caller/CLI otherwise exits 0 on a
+        # failed batch (the header stays RUNNING and the failure is silent). SUCCEEDED is the one
+        # green state; CANCELLED/FAILED and anything else raise with the batch's own status message.
+        if state_name != "SUCCEEDED":
+            detail = getattr(result, "state_message", "") or "(no state_message)"
+            raise EngineError(f"batch {batch_id} terminal state {state_name}: {detail}")
     return batch_id
 
 

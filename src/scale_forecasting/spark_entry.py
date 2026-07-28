@@ -1,10 +1,12 @@
-"""Dataproc Serverless PySpark entrypoint for the forecast engines (BUILD B2).
+"""Engine dispatch for the Dataproc Serverless forecast batches (BUILD B2).
 
-Dataproc's ``main_python_file_uri`` must be a single ``gs://`` file; the ``scale_forecasting``
-package is supplied at RUNTIME via ``python_file_uris`` (a zip of ``src/``), never baked into the
-container image — the same code-delivery pattern the seed job uses (see ``modules/seed``). This is
-the thin ``gs://`` shim the *forecast* batches point at: it loads the run config, restores the
-infra identity, and dispatches to the requested engine.
+Dataproc's ``main_python_file_uri`` must be a single ``gs://`` file that it runs as ``__main__``
+(no package context — relative imports would ``ImportError``), so the batch's *main file* is the
+standalone :mod:`spark_main` shim (``src/spark_main.py``), which absolute-imports :func:`main` here.
+This module is the in-package dispatch logic it calls — imported as a submodule from the
+``python_file_uris`` zip (a zip of ``src/``, supplied at RUNTIME, never baked into the container
+image — the same code-delivery pattern the seed job uses, see ``modules/seed``). It loads the run
+config, restores the infra identity, and dispatches to the requested engine.
 
 Flow on the driver:
 
