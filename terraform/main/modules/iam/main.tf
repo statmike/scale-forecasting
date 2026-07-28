@@ -76,10 +76,11 @@ locals {
   compute_roles = {
     "bq.dataEditor"    = "roles/bigquery.dataEditor" # read source_series, write results
     "bq.jobUser"       = "roles/bigquery.jobUser"
-    "connection"       = local.connection_role           # get/use/delegate the BigLake connection
-    "storage.objAdmin" = "roles/storage.objectAdmin"     # read/write model artifacts
-    "dataproc.worker"  = "roles/dataproc.worker"         # batch RUNTIME SA: logs/metrics/staging
-    "artifactreg.read" = "roles/artifactregistry.reader" # pull the custom Spark runtime image
+    "bq.readSession"   = "roles/bigquery.readSessionUser" # Storage Read API: spark-bigquery connector reads source_series
+    "connection"       = local.connection_role            # get/use/delegate the BigLake connection
+    "storage.objAdmin" = "roles/storage.objectAdmin"      # read/write model artifacts
+    "dataproc.worker"  = "roles/dataproc.worker"          # batch RUNTIME SA: logs/metrics/staging
+    "artifactreg.read" = "roles/artifactregistry.reader"  # pull the custom Spark runtime image
   }
 
   # Flatten (email, role) pairs into one map — static keys, apply-time role values.
