@@ -93,12 +93,17 @@ module = [
     "prophet.*",
     "neuralprophet.*",
     "sklearn.*",
-    # pyspark is runtime-mounted on Dataproc Serverless (an optional [spark] extra, not in the
-    # dev env); the seed job imports it lazily inside main(). Treat as untyped rather than pull
-    # the heavy dep just for stubs.
-    "pyspark.*",
 ]
 ignore_missing_imports = true
+
+# pyspark is runtime-mounted on Dataproc Serverless (the optional [spark] extra); engines/seed
+# import it lazily inside run()/main(). We treat its surface as untyped — `follow_imports = "skip"`
+# (not just ignore_missing_imports) so the result is identical whether or not the extra happens to
+# be installed in the current venv, keeping the mypy gate reproducible across dev/CI/cluster.
+[[tool.mypy.overrides]]
+module = ["pyspark.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 # google.protobuf ships no py.typed marker in our resolved version; we touch it only to
 # build the dynamic Storage Write API descriptor in registry/bq.py. Treat as untyped rather

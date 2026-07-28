@@ -1,0 +1,15 @@
+{
+  "run_name": "multi_demo",
+  "python_runtime": "spark",
+  "spark_method": "multi",
+  "data": {
+    "source_table": "source_series",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "holtwinters", "xgboost", "lightgbm"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  }
+}

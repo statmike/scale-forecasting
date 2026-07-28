@@ -48,6 +48,11 @@ output "runtime_image_repo" {
   value       = module.container.image_repo_path
 }
 
+output "subnetwork_uri" {
+  description = "Subnet the serverless batches run in (needed by the submit helper for forecast runs)."
+  value       = module.network.subnetwork_uri
+}
+
 output "seed_batch_id" {
   description = "Submitted seed batch id (null unless run_seed = true)."
   value       = module.seed.batch_id
