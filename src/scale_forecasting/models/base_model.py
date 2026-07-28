@@ -103,6 +103,21 @@ class BaseModel(ABC):
         """Resolved params actually used (post-HPO). Logged to ``forecast_metadata.best_params``."""
         return dict(self.params)
 
+    def serialize(self) -> bytes | None:
+        """Serialize the fitted model for artifact persistence (CONTRACTS §3.4).
+
+        Returns the bytes to store as the cell's ``model_artifact`` — the registry writer
+        uploads them under ``<warehouse>/artifacts/<run_id>/`` and stamps the GCS ObjectRef
+        onto the ``forecast_metadata`` row (lineage, G3). Default: pickle the instance.
+        Override to use a model-native format (e.g. ``Booster.save_model``) or return
+        ``None`` to opt out for models cheap enough to refit. Called only when the run sets
+        ``persist_models``; a ``None`` return (or a raised error, which the worker catches)
+        simply means no artifact for that cell — persistence never sinks a forecast.
+        """
+        import pickle
+
+        return pickle.dumps(self)
+
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
         """HPO search space (optional; used only when ``hpo.enabled``). Default: no search."""

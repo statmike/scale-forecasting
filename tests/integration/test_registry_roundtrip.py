@@ -70,7 +70,7 @@ def _oof(base: float) -> pd.DataFrame:
 
 
 def _ok_cell(
-    run_id: str, ts_id: str, cfg: RunConfig, base: float, artifact_local_path: str | None = None
+    run_id: str, ts_id: str, cfg: RunConfig, base: float, artifact_bytes: bytes | None = None
 ) -> CellResult:
     return CellResult(
         run_id=run_id,
@@ -85,7 +85,7 @@ def _ok_cell(
         metrics={"wape": 0.1, "mae": base},
         best_params={"alpha": 0.5},
         fit_seconds=1.0,
-        artifact_local_path=artifact_local_path,
+        artifact_bytes=artifact_bytes,
     )
 
 
@@ -152,7 +152,7 @@ def _distinct_count(client: Any, table: str, table_ref: str, run_id: str) -> int
     return int(next(iter(rows)).c)
 
 
-def test_registry_roundtrip(settings: Settings, tmp_path: Any) -> None:
+def test_registry_roundtrip(settings: Settings) -> None:
     from google.cloud import bigquery
 
     client = bigquery.Client(project=settings.project_id)
@@ -191,11 +191,9 @@ def test_registry_roundtrip(settings: Settings, tmp_path: Any) -> None:
     assert header.n_models == 1
 
     # write_cells: 2 ok cells + 1 error cell (empty predictions/oof). One ok cell carries a
-    # model artifact, to exercise upload → GCS → model_artifact link.
-    artifact = tmp_path / "model.pkl"
-    artifact.write_bytes(b"fake-fitted-model-bytes")
+    # model artifact (in-memory bytes), to exercise upload → GCS → model_artifact link.
     results = [
-        _ok_cell(run_id, "series-0", cfg, base=10.0, artifact_local_path=str(artifact)),
+        _ok_cell(run_id, "series-0", cfg, base=10.0, artifact_bytes=b"fake-fitted-model-bytes"),
         _ok_cell(run_id, "series-1", cfg, base=20.0),
         _error_cell(run_id, "series-2", cfg),
     ]
@@ -218,7 +216,8 @@ def test_registry_roundtrip(settings: Settings, tmp_path: Any) -> None:
         )
     ).model_artifact
     assert artifact_uri and artifact_uri.startswith("gs://")
-    assert artifact_uri.endswith(f"/artifacts/{run_id}/model.pkl")
+    expected_hash = make_model_hash(run_id, "series-0", "theta", cfg)
+    assert artifact_uri.endswith(f"/artifacts/{run_id}/{expected_hash}.pkl")
     from google.cloud import storage
 
     without_scheme = artifact_uri[len("gs://") :]

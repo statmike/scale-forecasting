@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from .backtest import backtest_cell
+from .errors import get_logger
 from .features import build_features, holiday_frame
 from .metrics import METRIC_NAMES
 from .models import get_model
@@ -28,6 +29,8 @@ from .registry.ids import make_model_hash, make_run_id
 
 if TYPE_CHECKING:
     from .config import RunConfig
+
+_log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -51,7 +54,11 @@ class CellResult:
     metrics: dict[str, float]  # §2.3 (full-fit metrics)
     best_params: dict[str, Any] = field(default_factory=dict)
     fit_seconds: float = 0.0
-    artifact_local_path: str | None = None
+    # Serialized fitted model (from BaseModel.serialize), or None when persistence is off / the
+    # model opts out. Carried as bytes rather than a temp-file path so it crosses the executor
+    # boundary as plain data with no local-fs lifecycle; the registry writer uploads it to GCS and
+    # stamps the ObjectRef onto forecast_metadata.model_artifact (CONTRACTS §3.4, G3).
+    artifact_bytes: bytes | None = None
 
 
 def _compute_engine(model_cls: type[BaseModel], cfg: RunConfig) -> str:
@@ -144,6 +151,16 @@ def run_cell(series: pd.DataFrame, model_name: str, cfg: RunConfig) -> CellResul
         future_exog = X.iloc[: cfg.data.horizon] if X is not None else None
         predictions = model.predict(cfg.data.horizon, future_exog)
 
+        # Persist the fitted model as an artifact only when the run opts in (G3 lineage). A
+        # serialize failure must not sink an otherwise-good forecast, so it degrades to no
+        # artifact (CONTRACTS §3.3) rather than turning the cell into an error.
+        artifact_bytes: bytes | None = None
+        if cfg.compute.persist_models:
+            try:
+                artifact_bytes = model.serialize()
+            except Exception as e:  # noqa: BLE001 - persistence is best-effort, never fatal
+                _log.warning("serialize failed for %s/%s: %r", ts_id, model_name, e)
+
         return CellResult(
             run_id=run_id,
             ts_id=ts_id,
@@ -157,6 +174,7 @@ def run_cell(series: pd.DataFrame, model_name: str, cfg: RunConfig) -> CellResul
             metrics=metrics,
             best_params=model.get_params(),
             fit_seconds=time.perf_counter() - started,
+            artifact_bytes=artifact_bytes,
         )
     except Exception as e:  # any failure → error cell, batch survives (CONTRACTS §3.3)
         return _error(repr(e), engine)

@@ -101,6 +101,42 @@ def test_backtest_on_populates_oof_and_metrics() -> None:
     assert not math.isnan(res.metrics["wape"])
 
 
+# --- artifact persistence (persist_models gate) --------------------------------
+
+
+def test_persist_off_by_default_yields_no_artifact() -> None:
+    # Default config: persistence off, so no bytes to upload (model_artifact stays null).
+    res = run_cell(_series(), "theta", _cfg())
+    assert res.artifact_bytes is None
+
+
+def test_persist_on_serializes_the_fitted_model() -> None:
+    import pickle
+
+    cfg = _cfg(compute={"persist_models": True})
+    res = run_cell(_series(), "theta", cfg)
+    assert res.status == "ok"
+    assert isinstance(res.artifact_bytes, bytes) and res.artifact_bytes
+    # Round-trips back to a fitted model of the right type (default pickle serialize).
+    from scale_forecasting.models import get_model
+
+    restored = pickle.loads(res.artifact_bytes)
+    assert isinstance(restored, get_model("theta"))
+
+
+def test_persist_failure_degrades_to_no_artifact(monkeypatch: Any) -> None:
+    # A serialize() that raises must not sink the forecast — cell stays ok, artifact is None.
+    from scale_forecasting.models.base_model import BaseModel
+
+    def _boom(self: BaseModel) -> bytes | None:
+        raise RuntimeError("cannot pickle")
+
+    monkeypatch.setattr(BaseModel, "serialize", _boom)
+    res = run_cell(_series(), "theta", _cfg(compute={"persist_models": True}))
+    assert res.status == "ok"
+    assert res.artifact_bytes is None
+
+
 # --- native model routing ------------------------------------------------------
 
 

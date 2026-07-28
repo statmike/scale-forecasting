@@ -518,8 +518,9 @@ def write_cells(
     config, so a re-run of the same config writes byte-identical rows; serving views dedupe on
     ``run_id`` (+ cell keys). Steps:
 
-    1. Assemble rows via the pure assemblers; upload each cell's artifact (if any) and stamp
-       the returned URI onto its ``forecast_metadata`` row.
+    1. Assemble rows via the pure assemblers; upload each cell's serialized model bytes (if any,
+       when the run set ``persist_models``) and stamp the returned URI onto its
+       ``forecast_metadata`` row.
     2. **Append** each table's rows via the Storage Write API default stream.
 
     ``write_cells`` may be called once per run (driver-side collect) or many times per run (per
@@ -550,9 +551,12 @@ def write_cells(
         pred_rows.extend(assemble_prediction_rows(result))
         oof_rows.extend(assemble_oof_rows(result))
         model_artifact: str | None = None
-        if result.artifact_local_path is not None:
-            model_artifact = artifacts.upload_artifact(
-                result.artifact_local_path, result.run_id, resolved.warehouse_uri
+        if result.artifact_bytes is not None:
+            model_artifact = artifacts.upload_artifact_bytes(
+                result.artifact_bytes,
+                f"{result.model_hash}.pkl",
+                result.run_id,
+                resolved.warehouse_uri,
             )
         meta_rows.append(assemble_metadata_row(result, created_at, model_artifact=model_artifact))
 

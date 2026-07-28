@@ -11,5 +11,8 @@
   "features": {
     "holidays": ["US"],
     "transform": "log1p"
+  },
+  "compute": {
+    "persist_models": true
   }
 }

@@ -131,6 +131,10 @@ class ComputeConfig(BaseModel):
     max_parallelism: int = Field(default=1000, gt=0)
     machine_family: str = "auto"
     spark_deps: Literal["packed_venv", "container"] = "packed_venv"
+    # Persist each fitted model as a GCS artifact (ObjectRef in forecast_metadata.model_artifact,
+    # G3 lineage). Off by default: at 100k×N cells the object count + write cost is material, so a
+    # run opts in explicitly (demos do; the hero scale run need not). See BaseModel.serialize.
+    persist_models: bool = False
     use_gpu: bool = False
     gpu_type: str = "T4"
     # "auto" = profile-driven calibration (DESIGN §11.1), or a fixed fraction in (0, 1].
