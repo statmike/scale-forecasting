@@ -155,8 +155,12 @@ class RunConfig(BaseModel):
     run_name: str
     data: DataConfig
     python_runtime: Literal["spark", "ray"] = "spark"
-    # explode | multi — meaningful only when python_runtime == "spark".
-    spark_method: Literal["explode", "multi"] | None = None
+    # explode | multi | naive — meaningful only when python_runtime == "spark".
+    #   explode : cross-join series × model, key = (ts_id, model_type); independent cells (hero).
+    #   multi   : one serverless batch per model family (submitted by the CLI submit helper).
+    #   naive   : group by ts_id only, sequential model loop — the straggler anti-pattern, for
+    #             demonstrating why explode's per-cell fan-out matters (DESIGN §2.1). Small scales.
+    spark_method: Literal["explode", "multi", "naive"] | None = None
     models: list[str] = Field(min_length=1)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)

@@ -15,9 +15,9 @@ import datetime as dt
 import pandas as pd
 import pytest
 
+from scale_forecasting._infra_args import INFRA_ARG_ENV
 from scale_forecasting.data_gen.generator import GenConfig, generate_partition
 from scale_forecasting.data_gen.seed_spark import (
-    _INFRA_ARG_ENV,
     _SOURCE_COLUMNS,
     _parse_args,
     _to_source_rows,
@@ -104,7 +104,7 @@ def test_parse_args_exports_infra_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # The batch delivers SF_* as --sf-* args; parsing them must populate os.environ so the
     # existing env-based Settings.resolve() seam works unchanged (driver-env is rejected by
     # Dataproc Serverless, so args are the only reliable path).
-    for _, env_name in _INFRA_ARG_ENV:
+    for _, env_name in INFRA_ARG_ENV:
         monkeypatch.delenv(env_name, raising=False)
     _parse_args(
         [

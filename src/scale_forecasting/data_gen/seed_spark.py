@@ -38,6 +38,7 @@ import argparse
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .._infra_args import add_infra_args, export_infra_env
 from ..errors import get_logger
 
 if TYPE_CHECKING:
@@ -67,33 +68,6 @@ class SeedArgs:
     num_partitions: int  # Spark parallelism for generation
 
 
-# The (--flag → SF_* env var) mapping for the infra-identity args. One place so the parser, the
-# exporter, and the Terraform module stay in agreement.
-_INFRA_ARG_ENV: tuple[tuple[str, str], ...] = (
-    ("sf_project_id", "SF_PROJECT_ID"),
-    ("sf_connection", "SF_CONNECTION"),
-    ("sf_warehouse_uri", "SF_WAREHOUSE_URI"),
-    ("sf_dataset_id", "SF_DATASET_ID"),
-    ("sf_region", "SF_REGION"),
-)
-
-
-def _export_infra_env(ns: argparse.Namespace) -> None:
-    """Copy any provided ``--sf-*`` args into ``os.environ`` before ``Settings.resolve()``.
-
-    Dataproc Serverless rejects driver-env Spark properties, so the batch delivers the infra
-    identity as args; exporting them here (only when set) keeps env-based resolution the single G1
-    seam without forking a "resolve from args" path. Local runs pass no ``--sf-*`` and use the
-    ambient environment untouched.
-    """
-    import os
-
-    for attr, env_name in _INFRA_ARG_ENV:
-        value = getattr(ns, attr, None)
-        if value:
-            os.environ[env_name] = value
-
-
 def _parse_args(argv: list[str] | None) -> SeedArgs:
     """Parse the CLI knobs the Terraform ``seed`` module passes to the batch."""
     p = argparse.ArgumentParser(prog="seed_spark", description="Seed the source_series table.")
@@ -110,16 +84,12 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
     p.add_argument("--num-partitions", type=int, default=0)
     # Infra identity delivered as args (not env): Dataproc Serverless allowlists Spark property
     # prefixes and rejects driver-env, so the batch passes SF_* here and main() exports them to
-    # os.environ before Settings.resolve() — keeping env-based resolution the single G1 seam. When
-    # unset (local runs), the ambient SF_* environment is used as-is.
-    p.add_argument("--sf-project-id", type=str, default=None)
-    p.add_argument("--sf-connection", type=str, default=None)
-    p.add_argument("--sf-warehouse-uri", type=str, default=None)
-    p.add_argument("--sf-dataset-id", type=str, default=None)
-    p.add_argument("--sf-region", type=str, default=None)
+    # os.environ before Settings.resolve() — keeping env-based resolution the single G1 seam. The
+    # --sf-* flags + the exporter live in _infra_args so every entrypoint shares one mapping.
+    add_infra_args(p)
     ns = p.parse_args(argv)
 
-    _export_infra_env(ns)
+    export_infra_env(ns)
     holidays = tuple(c.strip() for c in ns.holidays.split(",") if c.strip())
     num_partitions = ns.num_partitions or _default_partitions(ns.n_series)
     return SeedArgs(

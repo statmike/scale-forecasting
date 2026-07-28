@@ -118,6 +118,12 @@ def test_ray_leaves_spark_method_none() -> None:
     assert cfg.spark_method is None
 
 
+def test_naive_spark_method_accepted() -> None:
+    # naive is a first-class Spark method (the straggler-demo anti-pattern, DESIGN §2.1).
+    cfg = RunConfig(**_minimal_dict(python_runtime="spark", spark_method="naive"))
+    assert cfg.spark_method == "naive"
+
+
 def test_singular_strategy_shorthand_becomes_list() -> None:
     # Use a calculated strategy so the shorthand is what's under test, not the
     # learned-without-backtest drop rule.
