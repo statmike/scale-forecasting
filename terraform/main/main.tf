@@ -59,3 +59,47 @@ module "composer" {
 
   depends_on = [module.apis]
 }
+
+# The Artifact Registry repo for the shared Spark/Ray runtime image. The image is built into it
+# by Cloud Build (docker/cloudbuild.yaml); this owns only the container.
+module "container" {
+  source     = "./modules/container"
+  project_id = var.project_id
+  region     = var.region
+
+  depends_on = [module.apis]
+}
+
+# Minimal VPC + subnet for serverless compute (Dataproc Serverless now, Ray later). Fresh projects
+# have no default network, and serverless batches need a subnet with Private Google Access.
+module "network" {
+  source     = "./modules/network"
+  project_id = var.project_id
+  region     = var.region
+
+  depends_on = [module.apis]
+}
+
+# Gated: submits the Dataproc Serverless seed batch only when run_seed = true (see modules/seed
+# for the smoke → review → full lifecycle). Depends on everything the batch touches at runtime.
+module "seed" {
+  source     = "./modules/seed"
+  create     = var.run_seed
+  project_id = var.project_id
+  region     = var.region
+
+  num_series   = var.seed_num_series
+  master_seed  = var.seed_master_seed
+  write_method = var.seed_write_method
+  run_label    = var.seed_run_label
+
+  code_bucket             = module.storage.code_bucket
+  container_image         = "${module.container.image_repo_path}:${var.seed_image_tag}"
+  compute_service_account = module.iam.compute_email
+  connection              = module.bigquery.connection_id
+  warehouse_uri           = module.storage.warehouse_uri
+  dataset_id              = var.dataset_id
+  subnetwork_uri          = module.network.subnetwork_uri
+
+  depends_on = [module.apis, module.iam, module.storage, module.bigquery, module.container, module.network]
+}

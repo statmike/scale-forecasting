@@ -51,12 +51,17 @@ in `terraform.tfvars` and pass existing resources by variable:
 | `enable_apis` | `true` | an admin already enabled the APIs |
 | `create_service_accounts` | `true` | you bring your own SAs (`runner_sa_email`, `compute_sa_email`) |
 | `create_composer` | `false` | (already off) turn **on** for scheduled DAG runs |
+| `run_seed` | `false` | (already off) turn **on** to submit the seed batch (real spend) |
 | `create_project` (bootstrap) | `true` | your org pre-creates projects |
 
 ## Modules (one capability each)
 
-`apis` · `iam` · `storage` · `bigquery` · `budget` · `composer` — mirroring the Python side's
-one-file-one-capability rule. Read each module's header comment for what and why.
+`apis` · `iam` · `storage` · `bigquery` · `budget` · `composer` · `container` · `network` ·
+`seed` — mirroring the Python side's one-file-one-capability rule. Read each module's header
+comment for what and why. `container` owns the Artifact Registry repo for the shared Spark/Ray
+runtime image (built by `docker/cloudbuild.yaml`); `network` provides the VPC + subnet (Private
+Google Access) that serverless compute requires; `seed` submits the gated Dataproc Serverless
+batch that materializes the example dataset (BUILD B0.4).
 
 **Table schemas live in Python, not here.** The five registry/data tables are defined once in
 `src/scale_forecasting/registry/ddl.py` and created by `registry.bq.ensure_tables()` at run

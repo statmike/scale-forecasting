@@ -189,3 +189,52 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
   - **NOTE (pre-existing, not B1):** `ruff format --check` flags ~12–13 files I never touched (a
     newer ruff resolves via `ruff>=0.5`). Left untouched; worth a separate `ruff format` sweep +
     pinning ruff.
+
+- **Arc B B0.4 — 100k example dataset seeded via Dataproc Serverless Spark (both write paths
+  proven).** The shipped 100,000-series dataset is live in managed-Iceberg `source_series`
+  (146,000,000 rows = 100k × 1,460 daily obs, 2021-01-01→2024-12-30, 5 archetypes × 20k each).
+  This step also doubled as the platform's first **Spark scale smoke** — the first Spark→
+  managed-Iceberg write ever (B0.3 only proved the Python-client registry routes). Built:
+  real `data_gen/seed_spark.py` (pure `_to_source_rows` transform, offline-tested; lazy pyspark),
+  a shared Spark runtime **container** (`docker/` + `modules/container` AR repo), a minimal
+  **VPC** (`modules/network`), and the gated **`seed`** batch module.
+  - **Dep delivery = custom container.** Debian-slim base, NO Spark/Java/PySpark (runtime-mounted),
+    `procps`/`tini`/`libjemalloc2`, spark user UID/GID **1099**, `pip install .` (core deps only —
+    pyspark is an excluded extra). Built by `docker/cloudbuild.yaml` (amd64) → AR. Rebuild the
+    image whenever `seed_spark.py` / deps change — the code is baked in at `pip install`.
+  - **Infra identity is delivered as CLI args, not Spark env properties.** Dataproc Serverless
+    allowlists Spark property prefixes and REJECTS driver-env (`spark.driverEnv.*` isn't a real
+    property; `spark.kubernetes.driverEnv.*` → 400 "unsupported properties"). Executors accept
+    `spark.executorEnv.*` but only the DRIVER needs SF_* (Settings.resolve + ensure_tables + the
+    write all run driver-side). FIX: the `seed` module passes `--sf-project-id/-connection/
+    -warehouse-uri/-dataset-id/-region`; `seed_spark.main()` exports them to `os.environ` before
+    `Settings.resolve()`, keeping env-based resolution the single G1 seam. Local runs pass no
+    `--sf-*` and use the ambient env untouched.
+  - **Fresh-project gaps this org exposed:** (a) Cloud Build SA (the Compute Engine default SA,
+    `<num>-compute@`) had NO roles → `modules/container` grants it `cloudbuild.builds.builder` +
+    `artifactregistry.writer`. (b) No default VPC → `modules/network` (VPC + subnet, Private
+    Google Access + internal-ingress firewall) is required for any serverless batch. (c) The
+    compute SA's `bigquery.connectionUser` (get+use) is NOT enough to CREATE managed-Iceberg
+    tables through the connection — that needs `bigquery.connections.delegate`, which among
+    predefined roles ships only in `connectionAdmin` (over-broad: +setIamPolicy/+delete). FIX:
+    a custom role **`sfConnectionDelegate`** (get/use/delegate only), granted to both SAs in
+    place of `connectionUser` — same least-privilege reasoning as the B0.3 `legacyBucketReader`
+    choice.
+  - **Write paths — both proven.** Smoke (100 series) used `direct` (Storage Write API, no temp
+    bucket); 100k used `indirect` (Spark→Parquet→GCS→BQ load). `indirect` is the right choice for
+    a full RE-seed: `direct`'s ~90-min Write-API buffer blocks the driver-side `DELETE WHERE TRUE`
+    (replace-on-reseed), whereas `indirect` has no buffer, so the DELETE clears cleanly. Both write
+    APPEND (managed Iceberg rejects truncate).
+  - **Cost/runtime (real):** smoke ≈ **$0.02**, ~2.5 min compute; **100k ≈ $0.11–0.15, 8m34s**
+    (6.34M milliDcuSeconds ≈ 1.76 DCU-hr). Far under the pre-run $5–20 estimate — Spark fan-out +
+    Serverless autoscaling makes the full seed effectively free.
+  - **`google_dataproc_batch` client-wait gotcha:** the provider blocks until terminal but its
+    client-side wait timed out at 10 min while the 100k batch was still finishing (succeeded at
+    8m34s of compute, but provisioning pushed total past the client deadline). The apply errored
+    even though the batch SUCCEEDED, leaving the batch OUT of state → `terraform import` reconciled
+    it. Watch for this on any long batch; the batch state in GCP is the source of truth, not the
+    apply exit code.
+  - **Verified:** 146M rows, 100k distinct ts_id, 5 archetypes × 20k, 1,460 distinct days, holiday
+    rows scale exactly (5,200 smoke → 5,200,000 at 100k), price_index all-NULL (no `--with-exog`),
+    schema matches the DDL (ts_id/ds REQUIRED, DATE/BOOL/FLOAT), per-archetype means consistent
+    smoke↔100k (parity across scale = generator determinism holds under Spark fan-out).

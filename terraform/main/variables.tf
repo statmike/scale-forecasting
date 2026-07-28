@@ -62,6 +62,51 @@ variable "compute_sa_email" {
   default     = null
 }
 
+# --- seed job (BUILD B0.4) -----------------------------------------------------
+# The Dataproc Serverless batch that materializes the example dataset. Gated off by default;
+# run_seed = true is real cloud spend. See modules/seed for the smoke → review → full lifecycle.
+
+variable "run_seed" {
+  description = <<-EOT
+    Submit the Dataproc Serverless seed batch (real cloud spend). Default FALSE. Turn on for the
+    smoke (seed_num_series = 100) first, review cost/runtime, then the full run
+    (seed_num_series = 100000). google_dataproc_batch blocks until the batch is terminal, so
+    `terraform apply` submits and waits.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "seed_num_series" {
+  description = "Series to generate: 100 for the smoke, 100000 for the shipped example dataset."
+  type        = number
+  default     = 100000
+}
+
+variable "seed_master_seed" {
+  description = "Master RNG seed — identical shipped data on every deploy (DESIGN §13.1)."
+  type        = number
+  default     = 20260726
+}
+
+variable "seed_write_method" {
+  description = "spark-bigquery write path: direct (Storage Write API) or indirect (GCS→BQ load)."
+  type        = string
+  default     = "direct"
+}
+
+variable "seed_run_label" {
+  description = "Short label distinguishing seed batches (e.g. \"smoke\", \"full\"); part of batch_id."
+  type        = string
+  default     = "full"
+}
+
+variable "seed_image_tag" {
+  description = "Tag of the runtime image the seed batch runs (built by docker/cloudbuild.yaml)."
+  type        = string
+  default     = "latest"
+}
+
 # --- budget --------------------------------------------------------------------
 
 variable "billing_account" {

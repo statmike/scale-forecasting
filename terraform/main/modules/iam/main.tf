@@ -55,26 +55,55 @@ locals {
   compute_email = var.create ? google_service_account.compute[0].email : var.compute_email
 
   # Least-privilege role sets. Kept as locals so the grants below stay a single readable loop.
-  runner_roles = [
-    "roles/bigquery.dataEditor",     # write registry rows + create tables in the dataset
-    "roles/bigquery.jobUser",        # run queries / load jobs
-    "roles/bigquery.connectionUser", # use the BigLake connection for Iceberg
-    "roles/storage.objectAdmin",     # warehouse + artifacts + code buckets
-    "roles/dataproc.editor",         # submit Dataproc Serverless batches
-    "roles/aiplatform.user",         # submit Ray on Vertex jobs
-  ]
-  compute_roles = [
-    "roles/bigquery.dataEditor", # read source_series, write results
-    "roles/bigquery.jobUser",
-    "roles/bigquery.connectionUser",
-    "roles/storage.objectAdmin", # read/write model artifacts
-  ]
+  # The connection role is our custom sfConnectionDelegate (below), not connectionUser: creating
+  # managed-Iceberg tables through the BigLake connection needs bigquery.connections.delegate, and
+  # among predefined roles that permission ships ONLY in connectionAdmin — which also carries
+  # setIamPolicy + delete on the connection. Same reasoning as the warehouse-bucket grants (we
+  # chose legacyBucketReader over storage.admin): take the exact permissions, not the broad role.
+  connection_role = var.create ? google_project_iam_custom_role.connection_delegate[0].id : null
 
-  # Flatten (email, role) pairs into one map so a single resource block does all grants.
+  # (key, role) pairs. The key is a STATIC label so it can be a for_each map key even though the
+  # connection role's value is only known after apply (Terraform requires known keys, apply-time
+  # values). Keys read as the role's short name; `connection` is the custom sfConnectionDelegate.
+  runner_roles = {
+    "bq.dataEditor"    = "roles/bigquery.dataEditor" # write registry rows + create tables
+    "bq.jobUser"       = "roles/bigquery.jobUser"    # run queries / load jobs
+    "connection"       = local.connection_role       # get/use/delegate the BigLake connection
+    "storage.objAdmin" = "roles/storage.objectAdmin" # warehouse + artifacts + code buckets
+    "dataproc.editor"  = "roles/dataproc.editor"     # submit Dataproc Serverless batches
+    "aiplatform.user"  = "roles/aiplatform.user"     # submit Ray on Vertex jobs
+  }
+  compute_roles = {
+    "bq.dataEditor"    = "roles/bigquery.dataEditor" # read source_series, write results
+    "bq.jobUser"       = "roles/bigquery.jobUser"
+    "connection"       = local.connection_role           # get/use/delegate the BigLake connection
+    "storage.objAdmin" = "roles/storage.objectAdmin"     # read/write model artifacts
+    "dataproc.worker"  = "roles/dataproc.worker"         # batch RUNTIME SA: logs/metrics/staging
+    "artifactreg.read" = "roles/artifactregistry.reader" # pull the custom Spark runtime image
+  }
+
+  # Flatten (email, role) pairs into one map — static keys, apply-time role values.
   grants = var.create ? merge(
-    { for r in local.runner_roles : "runner:${r}" => { member = local.runner_email, role = r } },
-    { for r in local.compute_roles : "compute:${r}" => { member = local.compute_email, role = r } },
+    { for k, r in local.runner_roles : "runner:${k}" => { member = local.runner_email, role = r } },
+    { for k, r in local.compute_roles : "compute:${k}" => { member = local.compute_email, role = r } },
   ) : {}
+}
+
+# Custom role: exactly the connection permissions the Iceberg path needs — get + use + delegate.
+# `delegate` is what lets the SA create/write managed-Iceberg tables *through* the connection's
+# service agent; predefined connectionUser omits it and connectionAdmin over-grants (setIamPolicy,
+# delete). Least-privilege, matching this module's philosophy.
+resource "google_project_iam_custom_role" "connection_delegate" {
+  count       = var.create ? 1 : 0
+  project     = var.project_id
+  role_id     = "sfConnectionDelegate"
+  title       = "scale-forecasting BigLake connection delegate"
+  description = "Get, use, and delegate the BigLake connection for managed-Iceberg tables."
+  permissions = [
+    "bigquery.connections.get",
+    "bigquery.connections.use",
+    "bigquery.connections.delegate",
+  ]
 }
 
 resource "google_project_iam_member" "grant" {

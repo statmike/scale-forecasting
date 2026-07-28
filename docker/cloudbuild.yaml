@@ -1,0 +1,37 @@
+# Cloud Build config — build the shared Spark runtime image and push it to Artifact Registry.
+#
+# Build on demand from the repo root:
+#
+#   gcloud builds submit --config docker/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=scale-forecasting,_IMAGE=spark-runtime,_TAG=latest \
+#     --project <PROJECT_ID>
+#
+# The Artifact Registry repo (`_REPO`) is created by terraform/main/modules/container. Dataproc
+# Serverless requires a **linux/amd64** image; Cloud Build's default workers are amd64, so a plain
+# `docker build` produces the right architecture (no buildx/QEMU needed).
+#
+# A git-push-triggered rebuild (Cloud Build trigger) is deferred until the GitHub repo connection
+# exists (§A-PUSH); until then this is the explicit, cost-reviewed build step.
+
+substitutions:
+  _REGION: us-central1
+  _REPO: scale-forecasting
+  _IMAGE: spark-runtime
+  _TAG: latest
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file
+      - docker/Dockerfile
+      - --tag
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}"
+      - .
+
+options:
+  logging: CLOUD_LOGGING_ONLY

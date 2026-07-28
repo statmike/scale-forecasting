@@ -149,6 +149,23 @@ def _holiday_mask(index: pd.DatetimeIndex, codes: Sequence[str]) -> np.ndarray:
     return np.isin(index.normalize().to_numpy(), holiday_days)
 
 
+def is_holiday_flags(ds: Sequence[object] | pd.Series, holidays: Sequence[str]) -> np.ndarray:
+    """Boolean holiday flags for a sequence of dates — the public view of the panel's calendar.
+
+    The generator applies holidays as a numeric *bump* on ``y`` (it emits no holiday column),
+    but the ``source_series`` table carries an ``is_holiday`` column the models read. This
+    derives that flag from the **same** ``holidays`` calendar the bump uses, so the shipped
+    ``is_holiday`` agrees with the effect baked into ``y`` (parity, DESIGN §4). Pure — used by
+    the Spark seed transform (:mod:`data_gen.seed_spark`).
+
+    ``ds`` is any date-like sequence (a column of ``generate_partition`` output, a list of
+    ``date``/``Timestamp``); ``holidays`` is the country codes (e.g. ``("US",)``). Returns a
+    ``bool`` array aligned to ``ds``.
+    """
+    index = pd.DatetimeIndex(pd.to_datetime(list(ds))).as_unit("ns")
+    return _holiday_mask(index, holidays)
+
+
 # --- one series ----------------------------------------------------------------
 
 

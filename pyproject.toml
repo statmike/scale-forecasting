@@ -93,6 +93,10 @@ module = [
     "prophet.*",
     "neuralprophet.*",
     "sklearn.*",
+    # pyspark is runtime-mounted on Dataproc Serverless (an optional [spark] extra, not in the
+    # dev env); the seed job imports it lazily inside main(). Treat as untyped rather than pull
+    # the heavy dep just for stubs.
+    "pyspark.*",
 ]
 ignore_missing_imports = true
 

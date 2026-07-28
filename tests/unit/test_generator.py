@@ -17,6 +17,7 @@ from scale_forecasting.data_gen.generator import (
     GenConfig,
     generate_panel,
     generate_partition,
+    is_holiday_flags,
 )
 
 SEED = 20260726
@@ -113,6 +114,34 @@ def test_generated_panel_passes_the_validator() -> None:
         rep = validate_panel(panel, cfg)
         assert rep.n_series == 3
         assert rep.freq == freq
+
+
+# --- is_holiday_flags (the source_series is_holiday column) ---------------------
+
+
+def test_is_holiday_flags_marks_new_years_day() -> None:
+    # 2021-01-01 (US New Year's Day) is a holiday; 2021-01-04 is an ordinary Monday.
+    ds = pd.to_datetime(["2021-01-01", "2021-01-02", "2021-01-04"])
+    flags = is_holiday_flags(ds, ("US",))
+    assert flags.dtype == np.bool_
+    assert flags.tolist() == [True, False, False]
+
+
+def test_is_holiday_flags_aligns_with_generated_panel() -> None:
+    # The flag derived over a series' dates must match the panel's own calendar (parity):
+    # exactly the US holidays inside the history window are marked.
+    cfg = _cfg(history=400, freq="D")
+    df = generate_partition([0], cfg, SEED)
+    flags = is_holiday_flags(df["ds"], cfg.holidays)
+    assert len(flags) == len(df)
+    # A daily year+ window always contains at least the fixed-date US holidays.
+    assert flags.sum() > 0
+
+
+def test_is_holiday_flags_empty_codes_all_false() -> None:
+    ds = pd.to_datetime(["2021-07-04", "2021-12-25"])
+    flags = is_holiday_flags(ds, ())
+    assert flags.tolist() == [False, False]
 
 
 # --- the partition-union invariant (what the Spark seed job relies on) ----------

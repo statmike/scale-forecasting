@@ -42,3 +42,18 @@ output "airflow_uri" {
   description = "Airflow UI (null unless create_composer = true)."
   value       = module.composer.airflow_uri
 }
+
+output "runtime_image_repo" {
+  description = "Base path for the shared Spark/Ray runtime image (append :tag). Build target for Cloud Build."
+  value       = module.container.image_repo_path
+}
+
+output "seed_batch_id" {
+  description = "Submitted seed batch id (null unless run_seed = true)."
+  value       = module.seed.batch_id
+}
+
+output "seed_batch_state" {
+  description = "Terminal state of the seed batch (null unless run_seed = true)."
+  value       = module.seed.batch_state
+}
