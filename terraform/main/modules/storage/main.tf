@@ -8,8 +8,9 @@
 # lifecycle, and force_destroy at the BUCKET level — "folders" are just name prefixes, not
 # real boundaries — so separate buckets are what let each of these get the policy it needs:
 #
-#   * warehouse is the decisive one: the BigLake connection SA is granted objectAdmin scoped
-#     to THIS bucket only (see modules/bigquery). Fold everything into one bucket and that
+#   * warehouse is the decisive one: the BigLake connection SA is granted objectUser +
+#     legacyBucketReader scoped to THIS bucket only (see modules/bigquery). Fold everything
+#     into one bucket and that
 #     least-privilege grant would also expose the code and model artifacts. Prefix-scoped IAM
 #     (IAM Conditions on resource-name prefixes) exists but is brittle and not universally
 #     honored — a real separate bucket is the clean boundary.

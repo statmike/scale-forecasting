@@ -23,6 +23,10 @@ dependencies = [
     "google-cloud-bigquery>=3.25",
     "google-cloud-bigquery-storage>=2.25",
     "google-cloud-storage>=2.17",
+    # Storage Write API rows are protobuf: registry/bq.py builds a dynamic descriptor per
+    # cell table and serializes rows against it (a transitive dep of the google libs above,
+    # pinned explicit because we import google.protobuf directly).
+    "protobuf>=4.25",
 ]
 
 [project.optional-dependencies]
@@ -90,6 +94,13 @@ module = [
     "neuralprophet.*",
     "sklearn.*",
 ]
+ignore_missing_imports = true
+
+# google.protobuf ships no py.typed marker in our resolved version; we touch it only to
+# build the dynamic Storage Write API descriptor in registry/bq.py. Treat as untyped rather
+# than pin types-protobuf (which must track the runtime protobuf version).
+[[tool.mypy.overrides]]
+module = ["google.protobuf.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

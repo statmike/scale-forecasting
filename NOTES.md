@@ -132,3 +132,60 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
       INSERT, run 2x, produced no duplicates. PASS. (Note: `cell_dedup_key` returns
       `{run_id, model_hash}` — correct for metadata/oof tables, NOT predictions. B1 needs
       per-table dedup keys.)
+
+- **Arc B B0.3 — Storage Write API proven end-to-end (the chosen route-1 path).** Extended the
+  spike with a real Storage Write API append (dynamic proto descriptor matching the table +
+  default stream) — the reference the B1 writers lift. Two more findings, both baked into infra
+  or the B1 design:
+  1. **Connection SA needs `storage.buckets.get`, not just object access.** The Write API
+     streaming path checks bucket-metadata permission on the warehouse bucket; load jobs and
+     query-INSERT don't (they only touch objects), which is why those passed while streaming
+     404'd… actually 403'd: "connection … does not have permissions storage.buckets.get". No
+     single predefined role has both object ops AND buckets.get except `storage.admin` (too
+     broad). FIX (applied to live infra): TWO scoped grants on the warehouse bucket for the
+     connection SA — `roles/storage.objectUser` (object read/write/delete) +
+     `roles/storage.legacyBucketReader` (the one bucket-metadata read). `modules/bigquery`
+     now renders both (`conn_warehouse_objects` + `conn_warehouse_bucket`). NOTE: `objectUser`
+     does NOT include `buckets.get` — I assumed it did and had to add the second grant.
+  2. **The default write stream buffers rows; DELETE/UPDATE can't touch the buffer.** BigQuery
+     rejects `DELETE … WHERE` over rows still in the Write API streaming buffer ("would affect
+     rows in the streaming buffer, which is not supported"). So the DELETE-by-key idempotency
+     pattern CANNOT be combined with a same-key Write API append while the buffer is hot. B1's
+     idempotency must therefore lean on **run_id being unique per run** (each cell writes
+     exactly once — no per-cell delete), and a *whole-run* retry either uses a fresh run_id or
+     deletes the run partition only after the buffer flushes. Query-INSERT (step 3b/4) is
+     unaffected (no buffer) and remains the simple path for small/medium batches + the header
+     row.
+  - **All 7 spike checks green (exit 0):** ddl×2, route2 load, legacy-stream-blocked (expected),
+    query-INSERT, Storage Write API, idempotency. Spike is done; writers get built on this.
+    B1 route split: **Storage Write API** for high-fanout cell writes (predictions/metadata/oof);
+    **query-INSERT** for the run_registry header + updates. Then delete `spikes/`.
+
+- **Arc B B1 — registry writers built; live gate overturned the idempotency design.** Implemented
+  the four writers in `registry/bq.py` (`ensure_tables`, `write_header`, `update_header`,
+  `write_cells`) + `artifacts.upload_artifact`, plus a new infra seam `settings.py` (`SF_*` env
+  vars → `Settings`, so the identical code runs local↔Composer, G1). Cell tables encode rows to a
+  dynamic protobuf descriptor per table (`_proto_for`) and append via the Write API default stream
+  using the direct `append_rows(requests=…)` iterator (NOT the `AppendRowsStream` wrapper, which
+  masks the gRPC error). New permanent `@gcp` test `tests/integration/test_registry_roundtrip.py`
+  replaces the spike; `conftest.py` skips `@gcp` unless `SF_PROJECT_ID` is set.
+  - **FINDING (reshaped the design): the locked "run-level clear + append" idempotency is not
+    viable — a DELETE that *matches* rows in the Write API streaming buffer is rejected for the
+    whole buffer window (~90 min), even when the DELETE is the first write for that run_id (it hits
+    a *prior* run's still-buffered rows for the same deterministic run_id). A DELETE matching
+    *nothing* succeeds — so clear-then-append fails exactly when it's needed. This was foreshadowed
+    by B0.3 but the plan's DELETE step contradicted it; the live gate caught it before commit.**
+  - **NEW design (user-approved): append-only + dedupe-on-read.** `write_cells` never DELETEs. Because
+    `run_id` is a pure function of config (`make_run_id`), a re-run writes byte-identical rows, so
+    "duplicates" are exact copies; serving views dedupe with `GROUP BY`/`DISTINCT` on `run_id` +
+    cell keys (predictions: ts_id,model_type,forecast_date; oof: +fold_id; metadata: ts_id,model_type).
+    No write-time delete, scales to high fanout, and `write_cells` composes whether called once
+    (driver collect) or per-partition (Spark/Ray). `cell_dedup_key` docstring updated accordingly.
+  - **Live gate green** against `statmike-scale-forecasting`: ensure_tables idempotent, all 3 cell
+    tables land via Write API, re-run keeps the dedupe-on-read count stable while raw rows grow,
+    artifact upload→readable GCS object→`model_artifact` link, error cell→PARTIAL header. Spike deleted.
+  - **Dep:** added `protobuf>=4.25` (explicit — we import `google.protobuf` directly) + a mypy
+    override for `google.protobuf.*` (no py.typed).
+  - **NOTE (pre-existing, not B1):** `ruff format --check` flags ~12–13 files I never touched (a
+    newer ruff resolves via `ruff>=0.5`). Left untouched; worth a separate `ruff format` sweep +
+    pinning ruff.

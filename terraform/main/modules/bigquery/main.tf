@@ -53,10 +53,27 @@ resource "time_sleep" "wait_for_connection_agent" {
   create_duration = "20s"
 }
 
-# The connection's service agent must be able to read/write the warehouse bucket objects.
-resource "google_storage_bucket_iam_member" "conn_warehouse" {
+# The connection's service agent needs TWO grants on the warehouse bucket, because the
+# Storage Write API streaming path (the route the workers use to write per-series results)
+# checks BOTH object access AND `storage.buckets.get` on the bucket — and no single predefined
+# role covers both without over-granting (only storage.admin does, which also adds bucket
+# delete + setIamPolicy). Verified empirically in the B0.3 spike: with object access alone,
+# append_rows failed 403 "connection does not have permissions storage.buckets.get".
+#   1. objectUser        — read/write/delete the Iceberg data files (storage.objects.*).
+#   2. legacyBucketReader — the single bucket-metadata read (storage.buckets.get) the Write
+#                           API requires; the least-privilege role that carries it.
+# Load jobs and query-INSERT never hit this check, which is why they passed on objects alone.
+resource "google_storage_bucket_iam_member" "conn_warehouse_objects" {
   bucket = var.warehouse_bucket
-  role   = "roles/storage.objectAdmin"
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_bigquery_connection.iceberg.cloud_resource[0].service_account_id}"
+
+  depends_on = [time_sleep.wait_for_connection_agent]
+}
+
+resource "google_storage_bucket_iam_member" "conn_warehouse_bucket" {
+  bucket = var.warehouse_bucket
+  role   = "roles/storage.legacyBucketReader"
   member = "serviceAccount:${google_bigquery_connection.iceberg.cloud_resource[0].service_account_id}"
 
   depends_on = [time_sleep.wait_for_connection_agent]

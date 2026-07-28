@@ -42,5 +42,26 @@ def artifact_gcs_uri(local_path: str, run_id: str, warehouse_uri: str) -> str:
 
 def upload_artifact(
     local_path: str, run_id: str, warehouse_uri: str
-) -> str:  # pragma: no cover - Arc B (B1)
-    raise NotImplementedError("registry.artifacts.upload_artifact — BUILD step B1")
+) -> str:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Upload one local artifact to its deterministic GCS destination; return the URI.
+
+    Destination is :func:`artifact_gcs_uri` (pure), so re-running a cell overwrites the
+    same object in place — idempotent, matching the run-scoped registry writes. Raises
+    :class:`RegistryError` if the local file is missing or the upload fails.
+    """
+    from google.cloud import storage
+
+    from ..errors import RegistryError
+
+    uri = artifact_gcs_uri(local_path, run_id, warehouse_uri)
+    # gs://<bucket>/<blob path> -> (bucket, blob)
+    without_scheme = uri[len("gs://") :]
+    bucket_name, _, blob_path = without_scheme.partition("/")
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        blob.upload_from_filename(local_path)
+    except Exception as exc:  # noqa: BLE001 - re-raised as a package error with context
+        raise RegistryError(f"artifact upload failed for {local_path!r} -> {uri}: {exc}") from exc
+    return uri

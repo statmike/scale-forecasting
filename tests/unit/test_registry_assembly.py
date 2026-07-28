@@ -138,8 +138,17 @@ def test_metadata_row_carries_artifact_link() -> None:
 def test_metadata_metric_columns_match_ddl() -> None:
     # The assembled metric keys must be exactly the metric columns in the DDL (§4).
     ddl_metrics = {
-        "mae", "rmse", "mse", "mape", "smape", "wape", "mase", "rmsse",
-        "bias", "coverage", "pinball",
+        "mae",
+        "rmse",
+        "mse",
+        "mape",
+        "smape",
+        "wape",
+        "mase",
+        "rmsse",
+        "bias",
+        "coverage",
+        "pinball",
     }
     assert set(bq.METRIC_COLUMNS) == ddl_metrics
 
@@ -160,9 +169,11 @@ def test_empty_best_params_serialized_to_none() -> None:
 # --- idempotency key -----------------------------------------------------------
 
 
-def test_dedup_key_is_run_and_model_hash() -> None:
+def test_dedup_key_is_run_scoped() -> None:
+    # Idempotency is enforced at the run grain (run-level clear + append), so the key is
+    # run_id alone — not model_hash (B0.3: can't DELETE the streaming buffer per-cell).
     key = bq.cell_dedup_key(_result())
-    assert key == {"run_id": "my-run-abc123def456", "model_hash": "f" * 64}
+    assert key == {"run_id": "my-run-abc123def456"}
 
 
 # --- header row ----------------------------------------------------------------
@@ -203,4 +214,6 @@ def test_artifact_uri_is_run_scoped_and_deterministic() -> None:
     uri = artifacts.artifact_gcs_uri("/tmp/model.pkl", "my-run-abc123", "gs://bucket/warehouse/")
     assert uri == "gs://bucket/warehouse/artifacts/my-run-abc123/model.pkl"
     # deterministic
-    assert uri == artifacts.artifact_gcs_uri("/tmp/model.pkl", "my-run-abc123", "gs://bucket/warehouse")
+    assert uri == artifacts.artifact_gcs_uri(
+        "/tmp/model.pkl", "my-run-abc123", "gs://bucket/warehouse"
+    )
