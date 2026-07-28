@@ -37,8 +37,17 @@ _UPPER_Q = 0.9
 
 # Panel order — kept identical to config.DecisionMetric / the DDL (single source of truth).
 METRIC_NAMES: tuple[str, ...] = (
-    "mae", "rmse", "mse", "mape", "smape", "wape",
-    "mase", "rmsse", "bias", "coverage", "pinball",
+    "mae",
+    "rmse",
+    "mse",
+    "mape",
+    "smape",
+    "wape",
+    "mase",
+    "rmsse",
+    "bias",
+    "coverage",
+    "pinball",
 )
 
 

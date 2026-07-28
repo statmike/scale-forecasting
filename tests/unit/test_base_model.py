@@ -53,7 +53,9 @@ class _Dummy(BaseModel):
         self._set_residuals(y.to_numpy() - self._level)
 
     def predict(
-        self, horizon: int, X: pd.DataFrame | None = None,
+        self,
+        horizon: int,
+        X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
         ds = pd.date_range("2026-01-01", periods=horizon, freq="D")

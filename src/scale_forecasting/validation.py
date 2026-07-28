@@ -86,9 +86,7 @@ def validate_panel(
 
     # 2. Frequency understood end-to-end. ---------------------------------------
     if not is_supported(d.freq):
-        raise DataError(
-            f"unsupported freq '{d.freq}'; supported: {', '.join(SUPPORTED_FREQS)}"
-        )
+        raise DataError(f"unsupported freq '{d.freq}'; supported: {', '.join(SUPPORTED_FREQS)}")
 
     # 3. Declared columns present. ----------------------------------------------
     required = [d.ts_id_col, d.date_col, d.target_col, *cfg.features.exog]
@@ -116,8 +114,7 @@ def validate_panel(
         _check_series_spacing(str(ts_id), dates, d.freq)
         if len(dates) < need:
             raise DataError(
-                f"series '{ts_id}' has only {len(dates)} observations, needs >= {need} "
-                f"({reason})"
+                f"series '{ts_id}' has only {len(dates)} observations, needs >= {need} ({reason})"
             )
         shortest = len(dates) if shortest is None else min(shortest, len(dates))
 
@@ -187,8 +184,7 @@ def _check_series_spacing(ts_id: str, dates: pd.DatetimeIndex, freq: str) -> Non
     missing = expected[~expected.isin(dates)]
     if len(missing) > 0:
         raise DataError(
-            f"series '{ts_id}': gap at {missing[0].date()} — missing from the "
-            f"freq='{freq}' grid"
+            f"series '{ts_id}': gap at {missing[0].date()} — missing from the freq='{freq}' grid"
         )
 
     # Membership matches but the index still differs (shouldn't happen post dup-check).

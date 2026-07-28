@@ -50,7 +50,9 @@ class _LastValue(BaseModel):
         self._last = float(y.iloc[-1])
 
     def predict(
-        self, horizon: int, X: pd.DataFrame | None = None,
+        self,
+        horizon: int,
+        X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
         ds = pd.date_range("2026-01-01", periods=horizon, freq="D")

@@ -63,7 +63,11 @@ def test_run_model_theta_ok() -> None:
     assert len(run.result.predictions) == 14
     # Canonical frame columns present.
     assert list(run.result.predictions.columns) == [
-        "ds", "yhat", "yhat_lower", "yhat_upper", "quantiles",
+        "ds",
+        "yhat",
+        "yhat_lower",
+        "yhat_upper",
+        "quantiles",
     ]
 
 

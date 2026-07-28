@@ -124,9 +124,7 @@ def run_model(
     if data is None:
         data = sample_data(n_series=3, freq=freq, with_exog=with_exog)
 
-    cfg = build_config(
-        model, freq=freq, horizon=horizon, backtest=backtest, with_exog=with_exog
-    )
+    cfg = build_config(model, freq=freq, horizon=horizon, backtest=backtest, with_exog=with_exog)
     validate_panel(data, cfg)
 
     ts_col = cfg.data.ts_id_col
@@ -159,7 +157,9 @@ def summarize(run: PlaygroundRun) -> str:
         lines.append(f"horizon    : {first.date()} → {last.date()}")
     if run.backtest:
         panel = ", ".join(
-            f"{k}={v:.3f}" for k, v in r.metrics.items() if v == v  # skip NaN
+            f"{k}={v:.3f}"
+            for k, v in r.metrics.items()
+            if v == v  # skip NaN
         )
         lines.append(f"metrics    : {panel or '(none)'}")
     else:

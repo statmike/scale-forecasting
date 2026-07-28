@@ -84,8 +84,13 @@ def test_backtest_off_has_no_oof_and_nan_metrics() -> None:
 
 def test_backtest_on_populates_oof_and_metrics() -> None:
     cfg = _cfg(
-        backtest={"enabled": True, "n_folds": 2, "horizon": HORIZON, "step": HORIZON,
-                  "min_train": 30},
+        backtest={
+            "enabled": True,
+            "n_folds": 2,
+            "horizon": HORIZON,
+            "step": HORIZON,
+            "min_train": 30,
+        },
     )
     res = run_cell(_series(), "theta", cfg)
     assert res.status == "ok"

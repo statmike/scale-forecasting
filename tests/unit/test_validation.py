@@ -92,7 +92,9 @@ def test_missing_target_column_lists_columns() -> None:
 
 def test_missing_declared_exog_raises() -> None:
     cfg = RunConfig(
-        run_name="t", data={"source_table": "t"}, models=["sarimax"],
+        run_name="t",
+        data={"source_table": "t"},
+        models=["sarimax"],
         features={"exog": ["price_index"]},
     )
     with pytest.raises(DataError, match="missing column 'price_index'"):

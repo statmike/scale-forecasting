@@ -133,9 +133,9 @@ class BaseModel(ABC):
 
     def _future_index(self, last_date: pd.Timestamp, horizon: int) -> pd.DatetimeIndex:
         """The ``horizon`` future dates after ``last_date`` at the context frequency."""
-        return pd.date_range(
-            start=last_date, periods=horizon + 1, freq=self.ctx.freq
-        )[1:].as_unit("ns")
+        return pd.date_range(start=last_date, periods=horizon + 1, freq=self.ctx.freq)[1:].as_unit(
+            "ns"
+        )
 
     def _assemble_frame(
         self,
