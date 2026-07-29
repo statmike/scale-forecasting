@@ -1,0 +1,13 @@
+{
+  "run_name": "bq_native_demo",
+  "data": {
+    "source_table": "source_series",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["arima_plus", "arima_plus_xreg", "timesfm"],
+  "features": {
+    "holidays": ["US"],
+    "exog": ["price_index"]
+  }
+}
