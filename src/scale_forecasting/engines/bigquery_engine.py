@@ -38,6 +38,7 @@ Public surface: ``run(cfg, models)``; builders ``build_create_model_sql``,
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..features import holiday_frame
@@ -46,6 +47,22 @@ from ..registry.ids import make_run_id
 if TYPE_CHECKING:
     from ..config import RunConfig
     from ..settings import Settings
+
+
+@dataclass(frozen=True)
+class BqOutcome:
+    """The BigQuery engine's run summary — what :func:`main.run` folds into the shared header.
+
+    ``status`` is COMPLETED (the engine raises on any SQL failure rather than returning FAILED, so a
+    returned outcome is always COMPLETED today; the field is explicit for symmetry with the Spark
+    roll-up and future partial-success handling). ``n_series`` is the distinct series count observed
+    in the held-out eval; ``models`` is the executed native subset (feeds ``bq_models``).
+    """
+
+    status: str
+    n_series: int
+    models: list[str]
+
 
 # --- constants -----------------------------------------------------------------
 
@@ -396,7 +413,13 @@ def render_setup_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}"
 # --- engine --------------------------------------------------------------------
 
 
-def run(cfg: RunConfig, models: list[str]) -> None:  # pragma: no cover - GCP I/O, @gcp smoke
+def run(
+    cfg: RunConfig,
+    models: list[str],
+    *,
+    manage_header: bool = True,
+    settings: Settings | None = None,
+) -> BqOutcome:  # pragma: no cover - GCP I/O, @gcp smoke
     """Execute the BigQuery-native subset end-to-end, mirroring :func:`spark_naive.run`.
 
     Header lifecycle (CONTRACTS §8.2): resolve :class:`Settings`, derive the config-pinned
@@ -406,6 +429,12 @@ def run(cfg: RunConfig, models: list[str]) -> None:  # pragma: no cover - GCP I/
     forecast INSERT), read the held-out eval + history back, compute the metric panel through
     :func:`metrics.compute_metrics`, and append ``backtest_oof`` + ``forecast_metadata`` rows via
     the registry's Storage Write API row-dict path.
+
+    ``manage_header=False`` is **contributor mode** (Arc B): :func:`main.run` owns the single shared
+    header, so the engine skips ``ensure_tables`` / ``write_header`` / ``update_header`` and only
+    runs SQL + writes the cell tables. It returns a :class:`BqOutcome` (status + ``n_series``) so
+    the orchestrator can fold it into the combined header finalize. ``settings`` may be passed to
+    reuse the orchestrator's already-resolved infra; ``None`` resolves it here (standalone default).
 
     Idempotent: ``run_id`` is a pure function of the config and every write is append-only /
     dedupe-on-read, so a re-run of the same config lands byte-identical rows (§3.4).
@@ -422,11 +451,13 @@ def run(cfg: RunConfig, models: list[str]) -> None:  # pragma: no cover - GCP I/
     from ..settings import Settings
 
     log = get_logger(__name__)
-    settings = Settings.resolve()
+    settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
     dataset = settings.dataset_ref
     client = bigquery.Client(project=settings.project_id)
-    log.info("bigquery run start: run_id=%s models=%s", run_id, models)
+    log.info(
+        "bigquery run start: run_id=%s models=%s manage_header=%s", run_id, models, manage_header
+    )
 
     def _query(sql: str) -> Any:
         job_config = bigquery.QueryJobConfig(
@@ -434,8 +465,9 @@ def run(cfg: RunConfig, models: list[str]) -> None:  # pragma: no cover - GCP I/
         )
         return client.query(sql, job_config=job_config).result()
 
-    bq.ensure_tables(cfg, settings=settings)
-    bq.write_header(cfg, run_id, settings=settings)
+    if manage_header:
+        bq.ensure_tables(cfg, settings=settings)
+        bq.write_header(cfg, run_id, settings=settings)
 
     started = time.perf_counter()
     created_at = datetime.now(UTC)
@@ -494,24 +526,28 @@ def run(cfg: RunConfig, models: list[str]) -> None:  # pragma: no cover - GCP I/
         _append_rows(settings, "forecast_metadata", bq._META_SPEC, meta_rows)
     except Exception as exc:  # noqa: BLE001 - header must record the failure before re-raising
         status = "FAILED"
+        # Owner mode records the failure on its own header before re-raising; contributor mode
+        # leaves the shared header to main.run's finalize (which sees the raised RegistryError).
+        if manage_header:
+            bq.update_header(
+                run_id,
+                settings=settings,
+                status=status,
+                runtime_seconds=time.perf_counter() - started,
+            )
+        raise RegistryError(f"bigquery run failed for {run_id}: {exc}") from exc
+
+    runtime_seconds = time.perf_counter() - started
+    if manage_header:
         bq.update_header(
             run_id,
             settings=settings,
             status=status,
-            runtime_seconds=time.perf_counter() - started,
+            runtime_seconds=runtime_seconds,
+            n_series=n_series,
+            n_models=len(models),
+            bq_models=list(models),
         )
-        raise RegistryError(f"bigquery run failed for {run_id}: {exc}") from exc
-
-    runtime_seconds = time.perf_counter() - started
-    bq.update_header(
-        run_id,
-        settings=settings,
-        status=status,
-        runtime_seconds=runtime_seconds,
-        n_series=n_series,
-        n_models=len(models),
-        bq_models=list(models),
-    )
     log.info(
         "bigquery run done: run_id=%s status=%s models=%d series=%d runtime=%.1fs",
         run_id,
@@ -520,6 +556,7 @@ def run(cfg: RunConfig, models: list[str]) -> None:  # pragma: no cover - GCP I/
         n_series,
         runtime_seconds,
     )
+    return BqOutcome(status=status, n_series=n_series, models=list(models))
 
 
 def _append_rows(  # pragma: no cover - GCP I/O, @gcp smoke

@@ -75,7 +75,7 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
     return [id_col, _MODEL_COL]
 
 
-def default_bucket_count(cfg: RunConfig) -> int:
+def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int:
     """Bucket count that keeps each ``applyInPandas`` frame bounded as scale grows.
 
     Buckets are *shuffle partitions*, not executor concurrency (that's
@@ -88,30 +88,40 @@ def default_bucket_count(cfg: RunConfig) -> int:
 
     With ``series_limit`` set the cell count is known offline (series × models for explode, series
     for naive); an unbounded run falls back to ``max_parallelism`` buckets (best guess without a
-    known cell count).
+    known cell count). ``models`` is the executed subset (Arc B); ``None`` means ``cfg.models`` — so
+    a standalone run and a subset run size buckets to the work they actually fan out.
     """
+    executed = models if models is not None else cfg.models
     target = cfg.compute.bucket_target_cells
     limit = cfg.data.series_limit
     if limit is None:
         return max(1, min(cfg.compute.max_parallelism, _MAX_BUCKETS))
-    cells = limit if cfg.spark_method == "naive" else limit * len(cfg.models)
+    cells = limit if cfg.spark_method == "naive" else limit * len(executed)
     return max(1, min(math.ceil(cells / target), _MAX_BUCKETS))
 
 
 # --- pure: the grouped-UDF body ------------------------------------------------
 
 
-def run_group(pdf: pd.DataFrame, cfg: RunConfig) -> tuple[list[CellResult], pd.DataFrame]:
+def run_group(
+    pdf: pd.DataFrame, cfg: RunConfig, models: list[str] | None = None
+) -> tuple[list[CellResult], pd.DataFrame]:
     """Run every cell in one group's pandas frame; pure — no Spark, no BigQuery.
 
     The frame is one bucket's rows. If it carries the internal model column (explode/multi: the
     series were cross-joined with the model list), each ``(ts_id, model_type)`` sub-frame is one
-    cell. Otherwise (naive) every model in ``cfg.models`` is run for each ``ts_id`` in a sequential
-    loop. Helper columns are dropped so each sub-frame is a clean series frame for
+    cell. Otherwise (naive) every model in the executed list is run for each ``ts_id`` in a
+    sequential loop. Helper columns are dropped so each sub-frame is a clean series frame for
     :func:`~scale_forecasting.worker.run_cell` (which derives the run_id from ``cfg`` itself, so no
     id needs threading here). Returns the :class:`CellResult` list (for the writer) and the compact
     :data:`STATUS_COLUMNS` frame (for the driver's header roll-up). Never raises per cell —
     ``run_cell`` maps a failure to a ``status="error"`` result (CONTRACTS §3.3).
+
+    ``models`` is the executed subset (Arc B): under :func:`main.run` a mixed config routes only its
+    Python-runtime models here while the BigQuery-native models run elsewhere, so the naive loop
+    must iterate the subset, not the full ``cfg.models`` (which would feed a native model into
+    ``run_cell`` → ``NotImplementedError``). ``None`` means ``cfg.models`` (standalone). The explode
+    path takes its models from the cross-join column, so the subset only affects the naive loop.
     """
     import pandas as pd
 
@@ -119,6 +129,7 @@ def run_group(pdf: pd.DataFrame, cfg: RunConfig) -> tuple[list[CellResult], pd.D
 
     id_col = cfg.data.ts_id_col
     helper_cols = [c for c in (_MODEL_COL, _BUCKET_COL) if c in pdf.columns]
+    executed = models if models is not None else cfg.models
 
     results: list[CellResult] = []
     if _MODEL_COL in pdf.columns:
@@ -130,7 +141,7 @@ def run_group(pdf: pd.DataFrame, cfg: RunConfig) -> tuple[list[CellResult], pd.D
         # naive: one task per series, all models sequentially — the deliberate anti-pattern.
         for _ts_id, sub in pdf.groupby(id_col, sort=False):
             series = sub.drop(columns=helper_cols)
-            for model_name in cfg.models:
+            for model_name in executed:
                 results.append(run_cell(series, model_name, cfg))
 
     status = pd.DataFrame(
@@ -229,16 +240,23 @@ def _limit_series(df: DataFrame, cfg: RunConfig) -> DataFrame:
     return df.join(keep, on=id_col, how="leftsemi")
 
 
-def cross_join_models(df: DataFrame, cfg: RunConfig, spark: SparkSession) -> DataFrame:
+def cross_join_models(
+    df: DataFrame, cfg: RunConfig, spark: SparkSession, models: list[str] | None = None
+) -> DataFrame:
     """Cross-join the series with the (small) model list → one row-set per ``(series, model)``.
 
     The model list is broadcast (a handful of rows), so this is a map-side replication of each
     series, not a shuffle join. The resulting :data:`_MODEL_COL` is the cell's model and part of
     the explode bucket key.
+
+    ``models`` is the executed subset (Arc B): a mixed config under :func:`main.run` cross-joins
+    only its Python-runtime models — cross-joining a BigQuery-native model would create Spark cells
+    whose ``run_cell`` raises ``NotImplementedError``. ``None`` means ``cfg.models`` (standalone).
     """
     from pyspark.sql import functions as F
 
-    models_df = spark.createDataFrame([(m,) for m in cfg.models], [_MODEL_COL])
+    executed = models if models is not None else cfg.models
+    models_df = spark.createDataFrame([(m,) for m in executed], [_MODEL_COL])
     return df.crossJoin(F.broadcast(models_df))
 
 
@@ -274,19 +292,24 @@ def status_schema() -> Any:
     )
 
 
-def make_group_runner(cfg: RunConfig, settings_broadcast: Any) -> Any:
+def make_group_runner(
+    cfg: RunConfig, settings_broadcast: Any, models: list[str] | None = None
+) -> Any:
     """Build the ``applyInPandas`` function: run one bucket's cells, write them, return status.
 
     Closes over the picklable ``cfg`` and a Spark broadcast of :class:`Settings`. On each bucket it
     calls the pure :func:`run_group`, appends the results with the B1 writer
     (:func:`~scale_forecasting.registry.bq.write_cells`, executor-side, once per bucket), and
     returns only the compact status frame — so no forecast payload ever crosses back to the driver.
+
+    ``models`` is the executed subset (Arc B), forwarded to :func:`run_group` so the naive loop runs
+    only the Python-runtime models under a mixed :func:`main.run` config. ``None`` → ``cfg.models``.
     """
 
     def _run(pdf: pd.DataFrame) -> pd.DataFrame:
         from ..registry import bq
 
-        results, status = run_group(pdf, cfg)
+        results, status = run_group(pdf, cfg, models)
         if results:
             bq.write_cells(results, settings=settings_broadcast.value)
         return status

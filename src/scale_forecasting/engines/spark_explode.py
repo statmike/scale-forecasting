@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 
-def run(cfg: RunConfig) -> None:
+def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool = True) -> None:
     """Execute an explode run end-to-end: header → fan cells across Spark → close header.
 
     Driver-side lifecycle (CONTRACTS §3.4, §8.2):
@@ -44,6 +44,16 @@ def run(cfg: RunConfig) -> None:
     3. Aggregate the statuses and ``update_header`` (COMPLETED/PARTIAL/FAILED, wall-clock
        ``runtime_seconds``, ``n_series``).
 
+    ``models`` is the executed subset (Arc B): ``None`` (the default, standalone) runs every model
+    in ``cfg.models``; :func:`main.run` passes only the Python-runtime models of a mixed config so
+    the BigQuery-native ones don't become Spark cells. run_id is always derived from the *full*
+    ``cfg`` so both runtimes share it (:func:`make_run_id`).
+
+    ``manage_header=False`` puts the engine in **contributor mode** (Arc B): :func:`main.run` owns
+    the single shared header, so the engine skips ``ensure_tables`` / ``write_header`` /
+    ``update_header`` and only fans cells + writes results. The default ``True`` preserves the
+    self-contained standalone lifecycle every existing caller (CLI, ``@spark`` smoke) relies on.
+
     Idempotent by construction: the config-derived ``run_id`` + append-only/dedupe-on-read writes
     mean a re-run of the same config lands byte-identical rows (§3.4).
     """
@@ -57,18 +67,22 @@ def run(cfg: RunConfig) -> None:
 
     settings = Settings.resolve()
     run_id = make_run_id(cfg)
-    n_buckets = spark_io.default_bucket_count(cfg)
+    executed = models if models is not None else cfg.models
+    n_buckets = spark_io.default_bucket_count(cfg, executed)
     _log.info(
-        "explode run start: run_id=%s series_limit=%s models=%d buckets=%d",
+        "explode run start: run_id=%s series_limit=%s models=%d buckets=%d manage_header=%s",
         run_id,
         cfg.data.series_limit,
-        len(cfg.models),
+        len(executed),
         n_buckets,
+        manage_header,
     )
 
     # 1. Header first, so a run is visible in the registry even if the Spark job dies mid-flight.
-    bq.ensure_tables(cfg, settings=settings)
-    bq.write_header(cfg, run_id, settings=settings)
+    #    In contributor mode (Arc B) main.run already wrote the shared header — skip both.
+    if manage_header:
+        bq.ensure_tables(cfg, settings=settings)
+        bq.write_header(cfg, run_id, settings=settings)
 
     spark = SparkSession.builder.appName(f"scale-forecasting-explode-{run_id}").getOrCreate()
     started = time.perf_counter()
@@ -77,10 +91,10 @@ def run(cfg: RunConfig) -> None:
         #    every executor's write_cells resolves the same infra without a second env path (G1).
         settings_bc = spark.sparkContext.broadcast(settings)
         cells = spark_io.read_source_series(spark, cfg, settings)
-        cells = spark_io.cross_join_models(cells, cfg, spark)
+        cells = spark_io.cross_join_models(cells, cfg, spark, executed)
         cells = spark_io.add_bucket(cells, cfg, n_buckets)
 
-        runner = spark_io.make_group_runner(cfg, settings_bc)
+        runner = spark_io.make_group_runner(cfg, settings_bc, executed)
         status_sdf = cells.groupBy(spark_io._BUCKET_COL).applyInPandas(
             runner, schema=spark_io.status_schema()
         )
@@ -88,16 +102,17 @@ def run(cfg: RunConfig) -> None:
     finally:
         spark.stop()
 
-    # 3. Close the header from the collected statuses.
+    # 3. Close the header from the collected statuses (owner mode only; main.run finalizes else).
     outcome = spark_io.aggregate_status(status_pdf)
     runtime_seconds = time.perf_counter() - started
-    bq.update_header(
-        run_id,
-        settings=settings,
-        status=outcome.status,
-        runtime_seconds=runtime_seconds,
-        n_series=outcome.n_series,
-    )
+    if manage_header:
+        bq.update_header(
+            run_id,
+            settings=settings,
+            status=outcome.status,
+            runtime_seconds=runtime_seconds,
+            n_series=outcome.n_series,
+        )
     _log.info(
         "explode run done: run_id=%s status=%s cells=%d ok=%d error=%d runtime=%.1fs",
         run_id,

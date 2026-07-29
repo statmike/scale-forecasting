@@ -108,6 +108,39 @@ def test_build_batch_without_max_executors_sets_no_cap() -> None:
     assert "spark.dynamicAllocation.maxExecutors" not in dict(batch.runtime_config.properties)
 
 
+def test_build_batch_defaults_omit_arc_b_flags() -> None:
+    # Standalone submit (no models subset, header-owning) must build the exact arg list it always
+    # did — no --models / --manage-header — so existing batches and callers are byte-stable.
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        engine="explode",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+    )
+    args = list(batch.pyspark_batch.args)
+    assert "--models" not in args
+    assert "--manage-header" not in args
+
+
+def test_build_batch_appends_arc_b_flags_when_non_default() -> None:
+    # main.run's contributor launch: restrict the executed subset + hand header ownership to main.
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        engine="explode",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        models=["theta", "holtwinters"],
+        manage_header=False,
+    )
+    args = list(batch.pyspark_batch.args)
+    assert args[args.index("--models") + 1] == "theta,holtwinters"
+    assert args[args.index("--manage-header") + 1] == "false"
+
+
 def test_build_batch_max_executors_caps_dynamic_allocation() -> None:
     # The naive-demo throttle: capping executors is what makes the straggler visible.
     batch = build_batch(

@@ -16,7 +16,13 @@ Flow on the driver:
    before anything resolves ``Settings`` (Dataproc rejects driver-env, so args are the delivery
    path — see :mod:`._infra_args`).
 2. ``load_config`` the JSON into a validated, frozen :class:`~scale_forecasting.config.RunConfig`.
-3. Call the engine's ``run(cfg)``.
+3. Call the engine's ``run(cfg, models=..., manage_header=...)``.
+
+``--models`` / ``--manage-header`` carry the Arc B contract on-cluster (see :func:`main.run`):
+``--models m1,m2`` restricts the executed subset (the staged config's ``run_id`` is unchanged, so
+both runtimes share it) and ``--manage-header false`` puts the engine in contributor mode (``main``
+owns the single shared header). Both are optional — absent, the engine runs its standalone lifecycle
+over ``cfg.models``, so an ordinary ``submit`` batch dispatches exactly as before.
 
 Public surface: ``main(argv)``. ``pyspark`` and the engines import lazily so this file imports
 cleanly offline (parity with the seed entry / the engines).
@@ -54,10 +60,33 @@ def _load_uri(uri: str) -> str:
     return Path(uri).read_text()
 
 
+def _parse_models(raw: str | None) -> list[str] | None:
+    """Parse the optional ``--models m1,m2`` CSV into a subset list (``None`` → run ``cfg.models``).
+
+    Empty/whitespace-only tokens are dropped so a trailing comma is harmless; an all-empty value
+    collapses to ``None`` (standalone) rather than an empty subset (which would run nothing).
+    """
+    if raw is None:
+        return None
+    names = [tok.strip() for tok in raw.split(",") if tok.strip()]
+    return names or None
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="spark_entry", description="Run a Spark forecast engine.")
     p.add_argument("--engine", required=True, choices=sorted(_ENGINES))
     p.add_argument("--config-uri", required=True, help="gs:// (or local) path to run config JSON")
+    p.add_argument(
+        "--models",
+        default=None,
+        help="optional comma-separated executed subset (Arc B); absent runs all cfg.models",
+    )
+    p.add_argument(
+        "--manage-header",
+        default="true",
+        choices=("true", "false"),
+        help="false = contributor mode; main.run owns the shared header (Arc B)",
+    )
     add_infra_args(p)
     ns = p.parse_args(argv)
     export_infra_env(ns)
@@ -74,7 +103,15 @@ def main(argv: list[str] | None = None) -> None:
     from .config import load_config
 
     ns = _parse_args(argv)
-    _log.info("spark_entry: engine=%s config_uri=%s", ns.engine, ns.config_uri)
+    models = _parse_models(ns.models)
+    manage_header = ns.manage_header == "true"
+    _log.info(
+        "spark_entry: engine=%s config_uri=%s models=%s manage_header=%s",
+        ns.engine,
+        ns.config_uri,
+        models,
+        manage_header,
+    )
 
     # load_config takes a path; materialize a gs:// config to a temp file (local path unchanged).
     raw = _load_uri(ns.config_uri)
@@ -86,7 +123,7 @@ def main(argv: list[str] | None = None) -> None:
         cfg = load_config(cfg_path)
 
     module = importlib.import_module(f".engines.{_ENGINES[ns.engine]}", package=__package__)
-    module.run(cfg)
+    module.run(cfg, models=models, manage_header=manage_header)
 
 
 if __name__ == "__main__":  # pragma: no cover - cluster entrypoint

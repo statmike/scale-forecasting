@@ -223,16 +223,28 @@ def build_batch(
     launcher_uri: str,
     config_uri: str,
     max_executors: int | None = None,
+    models: list[str] | None = None,
+    manage_header: bool = True,
 ) -> object:
     """Assemble the ``dataproc_v1.Batch`` for one forecast run (pure — builds the message only).
 
     Mirrors the Terraform seed batch: runtime container + package zip on ``python_file_uris``, the
     ``spark_main`` shim as the ``gs://`` main file, ``--engine``/``--config-uri`` + the ``--sf-*``
     infra args. ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (naive throttle).
+
+    ``models`` / ``manage_header`` carry the Arc B contract on-cluster: ``--models m1,m2`` restricts
+    the executed subset (run_id still derives from the full staged config) and ``--manage-header
+    false`` puts the on-cluster engine in contributor mode (``main.run`` owns the shared header).
+    Both are appended to ``args`` **only when non-default**, so a standalone submit builds the exact
+    same arg list as before (existing batches / snapshot tests unchanged).
     """
     from google.cloud import dataproc_v1 as dataproc
 
     args = ["--engine", engine, "--config-uri", config_uri, *infra_args_from(settings)]
+    if models is not None:
+        args += ["--models", ",".join(models)]
+    if not manage_header:
+        args += ["--manage-header", "false"]
     properties = {}
     if max_executors is not None:
         properties["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
@@ -332,6 +344,8 @@ def submit_batch(
     settings: Settings | None = None,
     infra: BatchInfra | None = None,
     max_executors: int | None = None,
+    models: list[str] | None = None,
+    manage_header: bool = True,
     wait: bool = True,
 ) -> str:
     """Stage code + config and submit one Dataproc Serverless forecast batch; return its batch id.
@@ -343,6 +357,12 @@ def submit_batch(
     its own queryable run). With ``wait`` the call blocks until the batch is terminal (parity with
     the Terraform seed apply) and then stamps Dataproc job telemetry onto the header
     (:func:`_stamp_job_telemetry`, best-effort); otherwise it returns once submitted (no telemetry).
+
+    ``models`` / ``manage_header`` carry the Arc B contract to the cluster. The **full** ``cfg`` is
+    always staged (so its ``run_id`` matches :func:`main.run`'s), while ``models`` restricts the
+    executed subset on-cluster and ``manage_header=False`` runs the engine in contributor mode
+    (``main.run`` owns the shared header). Both default to standalone behavior, so every existing
+    caller stages and submits exactly as before.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -366,6 +386,8 @@ def submit_batch(
         launcher_uri=launcher_uri,
         config_uri=config_uri,
         max_executors=max_executors,
+        models=models,
+        manage_header=manage_header,
     )
 
     client = _batch_client(settings.region)

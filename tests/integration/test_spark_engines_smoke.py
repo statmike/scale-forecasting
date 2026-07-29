@@ -114,7 +114,9 @@ def _run_engine_locally(
 
     monkeypatch.setattr(spark_io, "read_source_series", _fake_read)
     monkeypatch.setattr(
-        spark_io, "make_group_runner", lambda cfg, bc: _capturing_runner(cfg, bc, sink)
+        spark_io,
+        "make_group_runner",
+        lambda cfg, bc, models=None: _capturing_runner(cfg, bc, sink),
     )
 
     header: dict[str, Any] = {}
