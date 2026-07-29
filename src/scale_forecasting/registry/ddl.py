@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS `{d}.run_registry` (
   status            STRING,
   n_series          INT64,
   n_models          INT64,
-  runtime_seconds   FLOAT64
+  runtime_seconds   FLOAT64,
+  job_telemetry     STRING
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id""",

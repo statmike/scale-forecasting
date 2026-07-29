@@ -33,7 +33,7 @@ import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ._infra_args import infra_args_from
 from .errors import ConfigError, EngineError, get_logger
@@ -119,6 +119,90 @@ class BatchInfra:
 
 
 # --- pure: batch spec assembly (no network) ------------------------------------
+
+
+def _rfc3339_seconds(a: object, b: object) -> float | None:
+    """Whole seconds between two Dataproc timestamp fields (``b - a``), or None.
+
+    Dataproc stamps ``create_time``/``state_time`` as ``google.protobuf.Timestamp``; both expose
+    ``.timestamp()`` (via the proto's datetime helper). Returns None if either is missing so a
+    partial batch object degrades cleanly rather than raising.
+    """
+    ts_a = getattr(a, "timestamp", None)
+    ts_b = getattr(b, "timestamp", None)
+    if not callable(ts_a) or not callable(ts_b):
+        return None
+    try:
+        return round(ts_b() - ts_a(), 1)
+    except Exception:  # noqa: BLE001 - telemetry is best-effort, never fatal
+        return None
+
+
+def extract_job_telemetry(batch: object) -> dict[str, Any]:
+    """Flatten a Dataproc ``Batch`` into the JSON-able telemetry dict stamped on the run header.
+
+    Pure (no network): reads only fields already on the ``batch`` object that ``get_batch`` returns.
+    Answers the operability questions the registry couldn't before — *how big was the cluster, did
+    it autoscale, how much did it cost, and where did the wall-clock go* (provision + startup +
+    closeout vs. our own ``runtime_seconds``):
+
+    - ``total_wall_s`` — ``state_time − create_time``: the full provision→terminal wall-clock. The
+      gap between this and the engine's ``runtime_seconds`` is Dataproc overhead (autoscaling
+      warm-up + teardown), which amortizes as scale grows — the efficiency half of the scale story.
+    - ``dcu_milli_seconds`` / ``shuffle_storage_gb_seconds`` — approximate usage (billing proxy +
+      shuffle pressure).
+    - ``driver_cores`` / ``executor_cores`` / ``executor_instances`` / ``max_executors`` — the
+      resolved cluster sizing and the autoscaling cap (our naive throttle shows up here).
+    - ``runtime_version`` / ``container_image`` — what actually ran (reproducibility).
+    - ``service_account`` / ``subnetwork_uri`` — the identity + network the batch had access to.
+
+    Every field is individually optional: a missing sub-message yields None for its keys, never a
+    raise, so this is safe to call on any batch object the API returns.
+    """
+    tel: dict[str, Any] = {}
+
+    tel["total_wall_s"] = _rfc3339_seconds(
+        getattr(batch, "create_time", None), getattr(batch, "state_time", None)
+    )
+
+    runtime_info = getattr(batch, "runtime_info", None)
+    usage = getattr(runtime_info, "approximate_usage", None) if runtime_info else None
+    tel["dcu_milli_seconds"] = (
+        int(getattr(usage, "milli_dcu_seconds", 0)) or None if usage else None
+    )
+    tel["shuffle_storage_gb_seconds"] = (
+        int(getattr(usage, "shuffle_storage_gb_seconds", 0)) or None if usage else None
+    )
+
+    runtime_config = getattr(batch, "runtime_config", None)
+    props = dict(getattr(runtime_config, "properties", {}) or {}) if runtime_config else {}
+
+    def _prop_int(key: str) -> int | None:
+        raw = props.get(key)
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    tel["driver_cores"] = _prop_int("spark.driver.cores")
+    tel["executor_cores"] = _prop_int("spark.executor.cores")
+    tel["executor_instances"] = _prop_int("spark.executor.instances")
+    tel["max_executors"] = _prop_int("spark.dynamicAllocation.maxExecutors")
+    tel["runtime_version"] = (
+        getattr(runtime_config, "version", None) or None if runtime_config else None
+    )
+    tel["container_image"] = (
+        getattr(runtime_config, "container_image", None) or None if runtime_config else None
+    )
+
+    env = getattr(batch, "environment_config", None)
+    exec_cfg = getattr(env, "execution_config", None) if env else None
+    tel["service_account"] = (
+        getattr(exec_cfg, "service_account", None) or None if exec_cfg else None
+    )
+    tel["subnetwork_uri"] = getattr(exec_cfg, "subnetwork_uri", None) or None if exec_cfg else None
+
+    return tel
 
 
 def _batch_id(run_id: str, engine: str) -> str:
@@ -257,7 +341,8 @@ def submit_batch(
     ``data.series_limit`` at submit time — the scale knob for the 10 → 100 → 1k → 100k story;
     because it changes the config it yields a distinct ``run_id``/header per scale (each scale is
     its own queryable run). With ``wait`` the call blocks until the batch is terminal (parity with
-    the Terraform seed apply); otherwise it returns once submitted.
+    the Terraform seed apply) and then stamps Dataproc job telemetry onto the header
+    (:func:`_stamp_job_telemetry`, best-effort); otherwise it returns once submitted (no telemetry).
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -292,6 +377,11 @@ def submit_batch(
         state = getattr(result, "state", None)
         state_name = getattr(state, "name", str(state))
         _log.info("batch %s finished: state=%s", batch_id, state_name)
+        # Stamp Dataproc-level telemetry (cluster sizing, wall/overhead split, DCU usage) onto the
+        # header — before the raise below, so even a FAILED batch (whose on-cluster update_header
+        # never ran) still gets its sizing recorded. Best-effort: any failure here is logged and
+        # swallowed, never sinking the run (the forecasts + registry rows already landed).
+        _stamp_job_telemetry(client, parent, batch_id, run_id, settings)
         # A non-SUCCEEDED terminal state must fail loudly — the caller/CLI otherwise exits 0 on a
         # failed batch (the header stays RUNNING and the failure is silent). SUCCEEDED is the one
         # green state; CANCELLED/FAILED and anything else raise with the batch's own status message.
@@ -299,6 +389,31 @@ def submit_batch(
             detail = getattr(result, "state_message", "") or "(no state_message)"
             raise EngineError(f"batch {batch_id} terminal state {state_name}: {detail}")
     return batch_id
+
+
+def _stamp_job_telemetry(
+    client: Any, parent: str, batch_id: str, run_id: str, settings: Settings
+) -> None:
+    """Read the finished batch's telemetry and write it to the run header (best-effort).
+
+    A fresh ``get_batch`` (the LRO result can carry incomplete ``approximate_usage``) → the pure
+    :func:`extract_job_telemetry` → ``update_header(job_telemetry=<json>)``. Wrapped so any failure
+    (API error, missing field, header not yet written) is logged and swallowed: telemetry is a
+    nice-to-have overlay on an already-complete run, never a reason to fail it (CONTRACTS §3.3).
+    """
+    import json
+
+    from .registry import bq
+
+    try:
+        fetched = client.get_batch(name=f"{parent}/batches/{batch_id}")
+        telemetry = extract_job_telemetry(fetched)
+        bq.update_header(
+            run_id, settings=settings, job_telemetry=json.dumps(telemetry, sort_keys=True)
+        )
+        _log.info("batch %s telemetry stamped: %s", batch_id, telemetry)
+    except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
+        _log.warning("batch %s telemetry capture failed (non-fatal): %r", batch_id, exc)
 
 
 def submit_multi(

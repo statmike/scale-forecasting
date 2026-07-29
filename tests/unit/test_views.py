@@ -1,0 +1,64 @@
+"""Tests for the analyst-view renderer (CONTRACTS §4, DESIGN §8.2).
+
+Offline snapshot test: rendering is a pure string op, so we pin the exact SQL. If the view
+definitions change intentionally, regenerate the snapshot with SF_UPDATE_SNAPSHOTS=1.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from scale_forecasting.registry.views import VIEW_NAMES, render_create_views
+
+SNAPSHOT = Path(__file__).parent / "snapshots" / "views.sql"
+
+
+def _render_all() -> str:
+    stmts = render_create_views("proj.scale_forecasting")
+    return "\n\n".join(stmts[name] for name in VIEW_NAMES)
+
+
+def test_both_views_rendered() -> None:
+    stmts = render_create_views("proj.scale_forecasting")
+    assert set(stmts) == set(VIEW_NAMES)
+    assert set(VIEW_NAMES) == {"v_run_summary", "v_model_leaderboard"}
+
+
+def test_every_statement_is_replace_and_terminated() -> None:
+    for stmt in render_create_views("d").values():
+        assert "CREATE OR REPLACE VIEW" in stmt
+        assert stmt.rstrip().endswith(";")
+
+
+def test_dataset_ref_substituted_in_name_and_sources() -> None:
+    stmt = render_create_views("myproj.myds")["v_run_summary"]
+    # both the view name and the table it reads carry the dataset ref
+    assert "`myproj.myds.v_run_summary`" in stmt
+    assert "`myproj.myds.run_registry`" in stmt
+
+
+def test_run_summary_unpacks_telemetry_and_derives_overhead() -> None:
+    stmt = render_create_views("d")["v_run_summary"]
+    # telemetry is read out of the JSON STRING, and overhead is total_wall − our runtime
+    assert "JSON_VALUE(job_telemetry, '$.total_wall_s')" in stmt
+    assert "overhead_seconds" in stmt
+    assert "overhead_fraction" in stmt
+
+
+def test_leaderboard_is_per_run_model_full_fit_only() -> None:
+    stmt = render_create_views("d")["v_model_leaderboard"]
+    assert "GROUP BY run_id, model_type" in stmt
+    # full-fit summary rows only (fold_id IS NULL), so per-fold rows don't inflate counts
+    assert "fold_id IS NULL" in stmt
+    # a model that failed every cell surfaces as a high no-artifact rate
+    assert "no_artifact_rate" in stmt
+
+
+def test_views_snapshot() -> None:
+    rendered = _render_all()
+    if os.environ.get("SF_UPDATE_SNAPSHOTS") == "1":
+        SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        SNAPSHOT.write_text(rendered)
+    assert SNAPSHOT.exists(), "snapshot missing; run with SF_UPDATE_SNAPSHOTS=1 to create"
+    assert rendered == SNAPSHOT.read_text()

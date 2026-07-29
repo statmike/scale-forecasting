@@ -217,9 +217,16 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
             staged["engine_arg"] = list(batch.pyspark_batch.args)
             return _FakeOp()
 
+        def get_batch(self, *, name: str) -> Any:  # telemetry fetch after terminal state
+            staged["get_batch_name"] = name
+            return type("B", (), {})()
+
     monkeypatch.setattr(submit, "_stage_code", _fake_stage_code)
     monkeypatch.setattr(submit, "_stage_config", _fake_stage_config)
     monkeypatch.setattr(submit, "_batch_client", lambda region: _FakeClient())
+    # Telemetry stamping calls the live update_header; stub it so this stays offline. (It's
+    # best-effort and would be swallowed anyway, but stubbing keeps the test off BigQuery.)
+    monkeypatch.setattr(submit, "_stamp_job_telemetry", lambda *a, **k: None)
 
     batch_id = submit.submit_batch(
         _cfg(models=["theta"]),
@@ -260,6 +267,9 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
     monkeypatch.setattr(submit, "_batch_client", lambda region: _FakeClient())
+    # Telemetry is stamped even on a FAILED batch (so its sizing is recorded), before the raise —
+    # stub it out so this stays offline and the raise is what the test observes.
+    monkeypatch.setattr(submit, "_stamp_job_telemetry", lambda *a, **k: None)
 
     with pytest.raises(EngineError, match="FAILED"):
         submit.submit_batch(
@@ -269,3 +279,111 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
             infra=_infra(),
             wait=True,
         )
+
+
+# --- extract_job_telemetry: flatten the Dataproc Batch into the header overlay ---
+#
+# Fakes mirror the google.cloud.dataproc_v1.Batch shape (nested attrs / a properties dict / proto
+# Timestamps with .timestamp()); values are the real ones observed on the n=10 serverless smoke.
+
+
+class _FakeTs:
+    def __init__(self, epoch: float) -> None:
+        self._epoch = epoch
+
+    def timestamp(self) -> float:
+        return self._epoch
+
+
+class _FakeUsage:
+    milli_dcu_seconds = 39723675
+    shuffle_storage_gb_seconds = 3997200
+
+
+class _FakeRuntimeInfo:
+    approximate_usage = _FakeUsage()
+
+
+class _FakeRuntimeConfig:
+    version = "2.2.82"
+    container_image = "us-central1-docker.pkg.dev/p/repo/spark-runtime:latest"
+    properties = {
+        "spark.driver.cores": "4",
+        "spark.executor.cores": "4",
+        "spark.executor.instances": "2",
+        "spark.dynamicAllocation.maxExecutors": "2",
+    }
+
+
+class _FakeExecConfig:
+    service_account = "compute@p.iam.gserviceaccount.com"
+    subnetwork_uri = "projects/p/regions/us-central1/subnetworks/sf"
+
+
+class _FakeEnvConfig:
+    execution_config = _FakeExecConfig()
+
+
+class _FakeBatch:
+    # create→state span of 562s (the n=10 provision→terminal wall-clock).
+    create_time = _FakeTs(1_000_000.0)
+    state_time = _FakeTs(1_000_562.0)
+    runtime_info = _FakeRuntimeInfo()
+    runtime_config = _FakeRuntimeConfig()
+    environment_config = _FakeEnvConfig()
+
+
+def test_extract_job_telemetry_full_batch() -> None:
+    from scale_forecasting.submit import extract_job_telemetry
+
+    tel = extract_job_telemetry(_FakeBatch())
+    assert tel["total_wall_s"] == 562.0
+    assert tel["dcu_milli_seconds"] == 39723675
+    assert tel["shuffle_storage_gb_seconds"] == 3997200
+    assert tel["driver_cores"] == 4
+    assert tel["executor_cores"] == 4
+    assert tel["executor_instances"] == 2
+    assert tel["max_executors"] == 2
+    assert tel["runtime_version"] == "2.2.82"
+    assert tel["container_image"].endswith("spark-runtime:latest")
+    assert tel["service_account"] == "compute@p.iam.gserviceaccount.com"
+    assert tel["subnetwork_uri"].endswith("/subnetworks/sf")
+
+
+def test_extract_job_telemetry_is_json_serializable() -> None:
+    import json
+
+    from scale_forecasting.submit import extract_job_telemetry
+
+    # The header stores it as a JSON STRING (Iceberg rejects native JSON) — it must round-trip.
+    tel = extract_job_telemetry(_FakeBatch())
+    assert json.loads(json.dumps(tel, sort_keys=True))["total_wall_s"] == 562.0
+
+
+def test_extract_job_telemetry_degrades_on_empty_batch() -> None:
+    # A batch object missing every sub-message must yield all-None keys, never raise (best-effort).
+    from scale_forecasting.submit import extract_job_telemetry
+
+    tel = extract_job_telemetry(type("Empty", (), {})())
+    assert tel["total_wall_s"] is None
+    assert tel["dcu_milli_seconds"] is None
+    assert tel["executor_instances"] is None
+    assert tel["runtime_version"] is None
+    assert tel["service_account"] is None
+
+
+def test_extract_job_telemetry_no_executor_cap_when_unset() -> None:
+    # No dynamicAllocation.maxExecutors property (unthrottled explode) → max_executors is None.
+    from scale_forecasting.submit import extract_job_telemetry
+
+    class _RC:
+        version = "2.2"
+        container_image = "img:tag"
+        properties = {"spark.executor.instances": "8"}
+
+    class _B:
+        runtime_config = _RC()
+
+    tel = extract_job_telemetry(_B())
+    assert tel["executor_instances"] == 8
+    assert tel["max_executors"] is None

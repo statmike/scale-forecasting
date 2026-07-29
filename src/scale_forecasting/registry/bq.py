@@ -20,8 +20,8 @@ writer accepts an optional ``settings=`` for tests/callers that already hold one
 resolves from ``SF_*`` env vars. GCP client libraries are imported lazily inside the writers so
 the pure layer (and its offline tests) never need them installed.
 
-Public surface: ``ensure_tables``, ``write_header``, ``update_header``, ``write_cells``,
-plus the pure assemblers used by the writers and the tests.
+Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_header``,
+``write_cells``, plus the pure assemblers used by the writers and the tests.
 """
 
 from __future__ import annotations
@@ -154,6 +154,11 @@ def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> di
         "n_series": cfg.data.series_limit,
         "n_models": len(cfg.models),
         "runtime_seconds": None,
+        # Dataproc-level job telemetry (executor sizing, wall/startup split, DCU usage): a JSON
+        # STRING filled in after the batch finishes by the submitter (extract_job_telemetry →
+        # update_header). NULL here at RUNNING and for any run whose telemetry couldn't be read
+        # (best-effort — never blocks a run). See run_registry DDL / DESIGN §8.2.
+        "job_telemetry": None,
     }
 
 
@@ -412,6 +417,34 @@ def ensure_tables(
         except Exception as exc:  # noqa: BLE001 - re-raised with table context
             raise RegistryError(f"ensure_tables failed creating {name}: {exc}") from exc
 
+    # Curated analyst views sit on top of the tables — create them in the same setup pass so the
+    # reviewable read surface (v_run_summary / v_model_leaderboard) exists after any run.
+    ensure_views(settings=resolved)
+
+
+def ensure_views(
+    *, settings: Settings | None = None
+) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Create/replace the analyst views over the registry (idempotent, §4).
+
+    Renders the ``CREATE OR REPLACE VIEW`` statements (:func:`registry.views.render_create_views`)
+    for the resolved dataset and executes each. Called by :func:`ensure_tables`; safe to call on its
+    own to refresh view definitions after a change. Raises :class:`RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+    from .views import render_create_views
+
+    resolved = _resolve_settings(settings)
+    views = render_create_views(resolved.dataset_ref)
+    client = bigquery.Client(project=resolved.project_id)
+    for name, statement in views.items():
+        try:
+            client.query(statement).result()
+        except Exception as exc:  # noqa: BLE001 - re-raised with view context
+            raise RegistryError(f"ensure_views failed creating {name}: {exc}") from exc
+
 
 # run_registry columns that may be set by write_header / update_header, with their BQ types.
 _HEADER_PARAM_TYPES: dict[str, str] = {
@@ -430,6 +463,7 @@ _HEADER_PARAM_TYPES: dict[str, str] = {
     "n_series": "INT64",
     "n_models": "INT64",
     "runtime_seconds": "FLOAT64",
+    "job_telemetry": "STRING",
 }
 
 

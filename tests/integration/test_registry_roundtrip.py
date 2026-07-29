@@ -17,6 +17,7 @@ be DELETE-d while buffered, so the test never reuses a run_id across invocations
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -233,19 +234,25 @@ def test_registry_roundtrip(settings: Settings) -> None:
     assert _distinct_count(client, "backtest_oof", oof, run_id) == 6
     assert _distinct_count(client, "forecast_metadata", meta, run_id) == 3
 
-    # update_header closes the run: an error cell present → PARTIAL.
+    # update_header closes the run: an error cell present → PARTIAL. job_telemetry is the JSON
+    # overlay the submitter stamps post-batch (here a stand-in) — proves the new column round-trips.
     status = "PARTIAL" if any(r.status == "error" for r in results) else "COMPLETED"
+    telemetry_json = json.dumps(
+        {"total_wall_s": 20.0, "executor_instances": 2, "dcu_milli_seconds": 123456},
+        sort_keys=True,
+    )
     bq.update_header(
         run_id,
         settings=settings,
         status=status,
         runtime_seconds=12.5,
         n_series=len(results),
+        job_telemetry=telemetry_json,
     )
     closed = next(
         iter(
             client.query(
-                f"SELECT status, runtime_seconds, n_series FROM "
+                f"SELECT status, runtime_seconds, n_series, job_telemetry FROM "
                 f"`{settings.table_ref('run_registry')}` WHERE run_id=@run_id",
                 job_config=_run_id_params(run_id),
             ).result()
@@ -254,3 +261,5 @@ def test_registry_roundtrip(settings: Settings) -> None:
     assert closed.status == "PARTIAL"
     assert closed.runtime_seconds == 12.5
     assert closed.n_series == 3
+    # The telemetry column stores JSON as STRING (Iceberg rejects native JSON); parse to compare.
+    assert json.loads(closed.job_telemetry)["executor_instances"] == 2
