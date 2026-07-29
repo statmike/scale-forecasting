@@ -129,6 +129,12 @@ class ComputeConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     max_parallelism: int = Field(default=1000, gt=0)
+    # Target cells per Spark bucket (applyInPandas frame). Buckets = ceil(cells / this), so each
+    # task materializes ~this many series-histories — the knob that keeps per-task memory bounded as
+    # scale grows. This is a *shuffle-partition* count, distinct from executor concurrency (capped
+    # separately by spark.dynamicAllocation.maxExecutors). Small keeps frames tiny; large amortizes
+    # write_cells over fatter batches. See engines/spark_io.default_bucket_count.
+    bucket_target_cells: int = Field(default=8, gt=0)
     machine_family: str = "auto"
     spark_deps: Literal["packed_venv", "container"] = "packed_venv"
     # Persist each fitted model as a GCS artifact (ObjectRef in forecast_metadata.model_artifact,

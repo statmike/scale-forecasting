@@ -67,33 +67,51 @@ def test_bucket_key_honors_custom_ts_id_col() -> None:
 # --- default_bucket_count ------------------------------------------------------
 
 
-def test_bucket_count_is_per_cell_for_explode() -> None:
+def test_bucket_count_targets_cells_per_bucket_for_explode() -> None:
     cfg = _cfg(
         spark_method="explode",
         models=["theta", "holtwinters", "sarimax"],
         data={"source_table": "t", "series_limit": 100},
+        compute={"bucket_target_cells": 8},
     )
-    # explode: one bucket per (series × model) cell.
-    assert default_bucket_count(cfg) == 300
+    # explode: 100 series × 3 models = 300 cells → ceil(300 / 8) = 38 buckets (~8 cells each).
+    assert default_bucket_count(cfg) == 38
 
 
-def test_bucket_count_is_per_series_for_naive() -> None:
+def test_bucket_count_targets_cells_per_bucket_for_naive() -> None:
     cfg = _cfg(
         spark_method="naive",
         models=["theta", "holtwinters"],
         data={"source_table": "t", "series_limit": 100},
+        compute={"bucket_target_cells": 8},
     )
-    # naive: one bucket per series (models run sequentially inside the task).
-    assert default_bucket_count(cfg) == 100
+    # naive: cell count = series (models run sequentially in the task) → ceil(100 / 8) = 13.
+    assert default_bucket_count(cfg) == 13
 
 
-def test_bucket_count_clamped_to_max_parallelism() -> None:
+def test_bucket_count_scales_with_work_not_max_parallelism() -> None:
+    # The 100k OOM regression guard: buckets are decoupled from max_parallelism (a concurrency
+    # knob), so a huge run makes many small buckets instead of few giant frames. 100k × 4 = 400k
+    # cells → ceil(400k / 8) = 50k buckets, regardless of a small max_parallelism.
     cfg = _cfg(
         spark_method="explode",
-        data={"source_table": "t", "series_limit": 10_000},
-        compute={"max_parallelism": 50},
+        models=["theta", "holtwinters", "sarimax", "xgboost"],
+        data={"source_table": "t", "series_limit": 100_000},
+        compute={"max_parallelism": 50, "bucket_target_cells": 8},
     )
-    assert default_bucket_count(cfg) == 50
+    assert default_bucket_count(cfg) == 50_000
+
+
+def test_bucket_count_respects_max_buckets_ceiling() -> None:
+    # Pathological config: tiny target on a huge run would shatter into too many partitions; the
+    # _MAX_BUCKETS safety ceiling caps it.
+    cfg = _cfg(
+        spark_method="explode",
+        models=["theta", "holtwinters", "sarimax", "xgboost"],
+        data={"source_table": "t", "series_limit": 1_000_000},
+        compute={"bucket_target_cells": 1},
+    )
+    assert default_bucket_count(cfg) == spark_io._MAX_BUCKETS
 
 
 def test_bucket_count_defaults_to_cap_when_unlimited() -> None:

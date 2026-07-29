@@ -32,6 +32,7 @@ frozen dataclass), preserving the G1 seam without a second env-based delivery pa
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,11 @@ if TYPE_CHECKING:
 # so they can't collide with a real source column, and dropped before a frame reaches ``run_cell``.
 _MODEL_COL = "_sf_model"
 _BUCKET_COL = "_sf_bucket"
+
+# Safety ceiling on bucket count: even a huge run shouldn't shatter into an unbounded number of
+# tiny shuffle partitions (scheduler overhead, tiny writes). At the 100k×N hero scale with the
+# default target this is not reached; it only guards a pathological config.
+_MAX_BUCKETS = 100_000
 
 # The compact per-cell status frame the UDF returns to the driver (no forecast payload).
 STATUS_COLUMNS: tuple[str, ...] = ("ts_id", "model_type", "status", "fit_seconds")
@@ -70,18 +76,26 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
 
 
 def default_bucket_count(cfg: RunConfig) -> int:
-    """A sensible bucket count: roughly one bucket per cell, capped at ``max_parallelism``.
+    """Bucket count that keeps each ``applyInPandas`` frame bounded as scale grows.
+
+    Buckets are *shuffle partitions*, not executor concurrency (that's
+    ``spark.dynamicAllocation.maxExecutors``): each bucket is materialized as one pandas frame in
+    one task, so its size — not the cluster width — is what OOMs an executor. We therefore size
+    buckets to hold ~``compute.bucket_target_cells`` cells each: ``buckets = ceil(cells / target)``.
+    That holds ~``target`` series-histories per frame at *every* scale (1k and 100k alike), instead
+    of the old ``min(cells, max_parallelism)`` which silently fattened frames past the executor
+    memory budget once ``cells`` outgrew the cap (the 100k OOM). Clamped to ``[1, _MAX_BUCKETS]``.
 
     With ``series_limit`` set the cell count is known offline (series × models for explode, series
-    for naive); unbounded runs fall back to ``max_parallelism``. Clamped to ``[1, max_parallelism]``
-    so a tiny run doesn't make thousands of empty buckets and a huge run doesn't exceed the cap.
+    for naive); an unbounded run falls back to ``max_parallelism`` buckets (best guess without a
+    known cell count).
     """
-    cap = cfg.compute.max_parallelism
+    target = cfg.compute.bucket_target_cells
     limit = cfg.data.series_limit
     if limit is None:
-        return max(1, cap)
-    base = limit if cfg.spark_method == "naive" else limit * len(cfg.models)
-    return max(1, min(cap, base))
+        return max(1, min(cfg.compute.max_parallelism, _MAX_BUCKETS))
+    cells = limit if cfg.spark_method == "naive" else limit * len(cfg.models)
+    return max(1, min(math.ceil(cells / target), _MAX_BUCKETS))
 
 
 # --- pure: the grouped-UDF body ------------------------------------------------
