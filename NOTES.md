@@ -351,3 +351,51 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     it has no `CREATE MODEL` OPTIONS map — `run()` still stamps `best_params` for every model. TimesFM
     is serverless (`AI.FORECAST`, no training, no `model =>` arg). The smoke seeds its **own**
     exog-carrying scratch table so `arima_plus_xreg` has a non-NULL regressor to train on.
+
+- **Arc B — `main.run`: Spark ∥ BigQuery in parallel, ONE run_id / ONE header.** The last
+  orchestration stub. `python -m scale_forecasting.main --config <mixed.json>` runs the Python
+  compute runtime (Spark on Dataproc) **and** the BigQuery-native models **at the same time, in the
+  same run**, so they land side-by-side on `v_model_leaderboard` — the "wall-clock ≈ max(python, bq),
+  not sum" thesis, made queryable. Architecture + why:
+  - **The core asymmetry that drove the seam.** `make_run_id(cfg)` is a pure digest over the *whole*
+    config incl. `cfg.models`, so two engines can only share a run_id if both see the full cfg. The
+    B3 BQ engine already decoupled run_id (full cfg) from executed models (explicit `models` arg); the
+    Spark engines did **not** — `cross_join_models` / the naive loop read `cfg.models` directly. Handing
+    a mixed cfg to Spark unchanged would cross-join the BQ-native models into Spark cells →
+    `worker.run_cell` → `NotImplementedError` (natives execute as SQL, not Python). So a **models
+    subset** param was threaded through the Spark path (`spark_io` → `spark_explode`/`spark_naive` →
+    `submit` → `spark_entry`), mirroring the BQ engine: run_id from the full cfg, executed set = the
+    explicit subset.
+  - **`main` is the sole header owner; engines run in contributor mode.** An opt-in
+    `manage_header=False` on every engine skips `ensure_tables`/`write_header`/`update_header` and
+    writes only cells. `main.run` writes the single header RUNNING up front, runs both engines as
+    contributors (each with only its subset), joins, and finalizes the one header with a combined
+    status. Defaults (`models=None`, `manage_header=True`) preserve standalone behavior byte-for-byte —
+    every existing engine CLI + `@gcp` smoke is unchanged.
+  - **Parallelism via one worker thread, no header race.** `main` launches the remote Spark batch in a
+    `ThreadPoolExecutor` future (`submit_batch(wait=True)` — its telemetry stamp runs in-thread) while
+    the in-process BigQuery engine runs on the main thread; the BQ work (minutes, in-process) overlaps
+    the Spark provisioning floor. Combined status: COMPLETED iff both engines green, else FAILED —
+    finalized **before** the error re-raises, so the run stays queryable and the CLI exits non-zero.
+    The only in-window header UPDATE is `submit`'s best-effort telemetry stamp, which completes inside
+    the joined future before `main`'s finalize — so nothing else ever touches the header.
+  - **Metric parity needs backtest ON for the Spark path.** The BQ natives always score a held-out
+    fold; the Python/Spark path only emits a metric panel from OOF when `backtest.enabled=true`. So the
+    mixed demo config enables a small backtest (`n_folds=2`) — otherwise the Spark model would land
+    forecasts but NULL `mean_wape` and the two runtimes wouldn't be comparable, which is the whole
+    point of the single-run leaderboard.
+  - **Coarsening (documented).** A remote contributor batch can't return its run-level PARTIAL (some
+    cells errored) to the orchestrator, so a SUCCEEDED batch reports COMPLETED; per-model failure stays
+    visible on `v_model_leaderboard` (a failed model → NULL metric AVGs).
+  - **Rejected shapes, with a pointer.** `python_runtime="ray"` → clean `ConfigError` (unbuilt stub);
+    `spark_method="multi"` → `ConfigError` pointing at `python -m scale_forecasting.submit --engine
+    multi` (multi is inherently multi-run — each family child gets its own run_id, can't share one
+    header). Both guarded only when there *are* Python models, so an all-BQ config plans regardless.
+    `--dry-run` resolves run_id + `estimate_fanout` offline, touching no GCP.
+  - **Verified live (project `…-scale-forecasting`, never the default project).** A mixed config (one
+    Spark model + the three natives, `series_limit=10`, backtest on) through `main.run` launched a real
+    Dataproc Serverless batch **and** the in-BigQuery engine under one run_id: exactly **one**
+    `run_registry` header, COMPLETED, `n_models=4`, `bq_models` = the three natives; all four models on
+    `v_model_leaderboard` under the same run_id, cleanly split `compute_engine='spark'` (the Spark
+    model) vs `'bigquery'` (the natives), each with a non-NULL metric panel. The single-run,
+    two-engine, directly-comparable leaderboard is the demo spine.

@@ -1,0 +1,21 @@
+{
+  "run_name": "mixed_demo",
+  "python_runtime": "spark",
+  "spark_method": "explode",
+  "data": {
+    "source_table": "source_series",
+    "horizon": 28,
+    "series_limit": 10
+  },
+  "models": ["theta", "arima_plus", "arima_plus_xreg", "timesfm"],
+  "features": {
+    "holidays": ["US"],
+    "exog": ["price_index"]
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  }
+}
