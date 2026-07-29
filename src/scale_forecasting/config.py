@@ -147,10 +147,40 @@ class ComputeConfig(BaseModel):
     gpu_fraction: Literal["auto"] | float = "auto"
     budget_usd: float = Field(default=50.0, ge=0.0)
 
+    # --- Ray on Vertex (B4) ----------------------------------------------------
+    # The Ray runtime sizes a *fixed* (non-autoscaling) cluster to the run's fan-out and packs
+    # GPU-benefiting models (NeuralProphet) onto fractional T4 slots while stats/ML run on CPU
+    # (DESIGN §11.1, D17). These knobs feed engines/ray_io.plan_cluster + calibrate_gpu_fraction;
+    # they are inert unless python_runtime == "ray".
+    #
+    # Reuse opt-in: target an existing cluster by name (skip create + skip teardown). None (default)
+    # = ephemeral per-run cluster (create → submit → delete-in-finally).
+    ray_cluster_name: str | None = None
+    # Machine types for the two fixed worker pools. GPU workers must be N1 for T4 attachment.
+    ray_head_machine_type: str = "n1-standard-4"
+    ray_cpu_machine_type: str = "n1-standard-8"
+    ray_gpu_machine_type: str = "n1-standard-8"
+    # GPUs per GPU worker node. T4 permits 1, 2, or 4 per node (not 3) — validated below.
+    accelerator_count: int = Field(default=1, gt=0)
+    # Fixed-pool sizing: how many cells one worker slot should chew through before we add another
+    # node (amortizes per-node warm-up), plus a hard ceiling so a huge fan-out can't request an
+    # unbounded cluster. n_gpu_nodes/n_cpu_nodes are derived, then clamped to [1, ray_max_nodes].
+    ray_target_cells_per_slot: int = Field(default=8, gt=0)
+    ray_max_nodes: int = Field(default=16, gt=0)
+    # Auto-fraction calibration (gpu_fraction == "auto"): how many series to profile and the
+    # headroom multiplier applied to measured peak GPU memory before dividing by device memory.
+    gpu_calibration_samples: int = Field(default=3, gt=0)
+    gpu_safety_margin: float = Field(default=1.3, gt=1.0)
+
     @model_validator(mode="after")
     def _check_gpu_fraction(self) -> ComputeConfig:
         if isinstance(self.gpu_fraction, float) and not (0.0 < self.gpu_fraction <= 1.0):
             raise ValueError("gpu_fraction must be 'auto' or a float in (0, 1]")
+        # T4 attaches in counts of 1, 2, or 4 per node (3 is not a valid GPU count on Vertex/GCE).
+        if self.gpu_type == "T4" and self.accelerator_count not in (1, 2, 4):
+            raise ValueError(
+                f"accelerator_count for T4 must be 1, 2, or 4 (got {self.accelerator_count})"
+            )
         return self
 
 

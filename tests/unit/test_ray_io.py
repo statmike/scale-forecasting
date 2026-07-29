@@ -1,0 +1,280 @@
+"""Offline tests for the Ray-engine core (BUILD B4, ``scale_forecasting.engines.ray_io``).
+
+No Ray, no Vertex, no GPU, no BigQuery: the pure sizing/routing/chunking logic is exercised against
+real ``RunConfig`` objects. The live cluster + fractional-GPU path is the ``@gpu`` smoke in
+``tests/integration/test_ray_gpu_smoke.py``; the on-cluster driver is ``test_ray_engine.py``.
+
+The two load-bearing properties for the user's "size to the run's scale, and show resizing" brief:
+:func:`plan_cluster` is a deterministic function of the config, and a larger ``series_limit`` yields
+a strictly larger fixed cluster (and vice-versa).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pandas as pd
+import pytest
+
+from scale_forecasting.config import RunConfig
+from scale_forecasting.engines import ray_io
+from scale_forecasting.engines.spark_io import _MODEL_COL
+from scale_forecasting.registry.ids import make_run_id
+
+# theta/holtwinters = CPU (statistical); xgboost = CPU (ml); neuralprophet = GPU (deep_learning).
+_CPU = "theta"
+_GPU = "neuralprophet"
+
+
+def _cfg(**over: Any) -> RunConfig:
+    base: dict[str, Any] = {
+        "run_name": "ray io test",
+        "python_runtime": "ray",
+        "data": {"source_table": "source_series", "horizon": 7, "series_limit": 10},
+        "models": [_CPU, _GPU],
+    }
+    base.update(over)
+    return RunConfig(**base)
+
+
+def _compute(**over: Any) -> dict[str, Any]:
+    """A compute block with GPU on by default (so the GPU pool is sized)."""
+    base: dict[str, Any] = {"use_gpu": True}
+    base.update(over)
+    return base
+
+
+# --- split_gpu_cpu_models ------------------------------------------------------
+
+
+def test_split_routes_neuralprophet_to_gpu_rest_to_cpu() -> None:
+    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=[_CPU, _GPU, "xgboost", "holtwinters"]))
+    assert gpu == [_GPU]
+    assert cpu == [_CPU, "xgboost", "holtwinters"]
+
+
+def test_split_honors_executed_subset() -> None:
+    # Arc B: main.run hands only the Python-runtime subset; split must respect it, not cfg.models.
+    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(), models=[_CPU])
+    assert gpu == []
+    assert cpu == [_CPU]
+
+
+def test_split_preserves_order() -> None:
+    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=["holtwinters", _CPU]))
+    assert cpu == ["holtwinters", _CPU]  # input order, not sorted
+
+
+# --- calibrate_gpu_fraction ----------------------------------------------------
+
+
+def test_calibrate_fixed_fraction_passthrough() -> None:
+    cfg = _cfg(compute=_compute(gpu_fraction=0.25))
+    assert ray_io.calibrate_gpu_fraction(cfg) == 0.25
+
+
+def test_calibrate_auto_solves_from_injected_peak() -> None:
+    # A 4 GiB peak on a 16 GiB T4 with the default 1.3 margin → 4*1.3/16 = 0.325.
+    cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.3))
+    frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[4 * 1024**3])
+    assert frac == pytest.approx(0.325)
+
+
+def test_calibrate_auto_takes_worst_case_peak() -> None:
+    cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.5))
+    frac = ray_io.calibrate_gpu_fraction(
+        cfg, measured_peaks_bytes=[1 * 1024**3, 8 * 1024**3, 2 * 1024**3]
+    )
+    assert frac == pytest.approx(0.75)  # 8 GiB (the max) × 1.5 / 16 GiB
+
+
+def test_calibrate_auto_clamps_high_to_one() -> None:
+    # A peak larger than the device (+ margin) can't exceed a whole GPU.
+    cfg = _cfg(compute=_compute(gpu_fraction="auto"))
+    assert ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[20 * 1024**3]) == 1.0
+
+
+def test_calibrate_auto_clamps_low_to_floor() -> None:
+    cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.01))
+    frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[1024])  # ~nothing
+    assert frac == ray_io._MIN_FRACTION
+
+
+def test_calibrate_auto_no_measurements_falls_back_to_nominal() -> None:
+    cfg = _cfg(compute=_compute(gpu_fraction="auto"))
+    assert (
+        ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[]) == ray_io._NOMINAL_AUTO_FRACTION
+    )
+
+
+def test_gpu_slots_per_device() -> None:
+    assert ray_io.gpu_slots_per_device(0.25) == 4
+    assert ray_io.gpu_slots_per_device(0.5) == 2
+    assert ray_io.gpu_slots_per_device(1.0) == 1
+    assert ray_io.gpu_slots_per_device(0.75) == 1  # floor(1.33) == 1
+
+
+# --- plan_cluster: determinism + sizing ----------------------------------------
+
+
+def test_plan_is_deterministic() -> None:
+    cfg = _cfg(compute=_compute())
+    rid = make_run_id(cfg)
+    a = ray_io.plan_cluster(cfg, run_id=rid)
+    b = ray_io.plan_cluster(cfg, run_id=rid)
+    assert a == b
+
+
+def test_plan_no_autoscaling_fields() -> None:
+    # D17: the plan describes fixed node counts only — there is no min/max replica field to leak.
+    plan = ray_io.plan_cluster(_cfg(compute=_compute()), run_id="rid")
+    assert not any("replica" in f or "autoscal" in f for f in vars(plan))
+    assert isinstance(plan.gpu_node_count, int)
+    assert isinstance(plan.cpu_node_count, int)
+
+
+def test_plan_names_ephemeral_cluster_from_run_id() -> None:
+    plan = ray_io.plan_cluster(_cfg(compute=_compute()), run_id="run-abc")
+    assert plan.cluster_name == "sf-ray-run-abc"
+    assert plan.reuse is False
+
+
+def test_plan_reuse_targets_named_cluster_and_skips_lifecycle() -> None:
+    plan = ray_io.plan_cluster(
+        _cfg(compute=_compute(ray_cluster_name="my-standing-cluster")), run_id="run-abc"
+    )
+    assert plan.cluster_name == "my-standing-cluster"
+    assert plan.reuse is True
+
+
+def test_plan_gpu_off_sizes_no_gpu_pool() -> None:
+    # use_gpu=False → NeuralProphet still routes to the GPU list, but no GPU nodes are provisioned
+    # (the model would fall back to CPU inside the task). The CPU pool still runs the stat model.
+    plan = ray_io.plan_cluster(_cfg(compute=_compute(use_gpu=False)), run_id="rid")
+    assert plan.gpu_node_count == 0
+    assert plan.cpu_node_count >= 1
+
+
+def test_plan_all_cpu_models_size_no_gpu_pool() -> None:
+    plan = ray_io.plan_cluster(_cfg(models=[_CPU, "holtwinters"], compute=_compute()), run_id="rid")
+    assert plan.gpu_node_count == 0
+    assert plan.n_gpu_cells == 0
+
+
+def test_plan_accelerator_type_mapped_to_vertex_enum() -> None:
+    plan = ray_io.plan_cluster(_cfg(compute=_compute()), run_id="rid")
+    assert plan.accelerator_type == "NVIDIA_TESLA_T4"
+
+
+def test_plan_larger_scale_yields_larger_cluster() -> None:
+    # The core "resize for the scale of the run" property: 10× the series ⇒ strictly more nodes.
+    small = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 10}, compute=_compute()), run_id="r"
+    )
+    large = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 1000}, compute=_compute()), run_id="r"
+    )
+    assert large.total_worker_nodes > small.total_worker_nodes
+    assert large.cpu_node_count > small.cpu_node_count
+
+
+def test_plan_node_count_clamped_to_max() -> None:
+    plan = ray_io.plan_cluster(
+        _cfg(
+            data={"source_table": "s", "series_limit": 1_000_000},
+            compute=_compute(ray_max_nodes=4),
+        ),
+        run_id="r",
+    )
+    assert plan.cpu_node_count <= 4
+    assert plan.gpu_node_count <= 4
+
+
+def test_plan_smaller_scale_yields_single_node_each() -> None:
+    plan = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 1}, compute=_compute()), run_id="r"
+    )
+    assert plan.cpu_node_count == 1
+    assert plan.gpu_node_count == 1
+
+
+def test_plan_unbounded_series_sizes_from_max_parallelism() -> None:
+    # No series_limit → sizing uses max_parallelism as the cell basis (best guess), still fixed.
+    plan = ray_io.plan_cluster(
+        _cfg(
+            data={"source_table": "s"},  # no series_limit
+            compute=_compute(max_parallelism=100),
+        ),
+        run_id="r",
+    )
+    assert plan.cpu_node_count >= 1
+
+
+def test_plan_finer_gpu_fraction_packs_more_and_needs_fewer_nodes() -> None:
+    # A smaller fraction packs more NP tasks per T4, so the same cells need no more GPU nodes.
+    coarse = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 64}, compute=_compute(gpu_fraction=0.5)),
+        run_id="r",
+    )
+    fine = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 64}, compute=_compute(gpu_fraction=0.25)),
+        run_id="r",
+    )
+    assert fine.gpu_node_count <= coarse.gpu_node_count
+
+
+# --- chunk_cells ---------------------------------------------------------------
+
+
+def _source(n_series: int, rows_each: int = 3) -> pd.DataFrame:
+    frames = []
+    for i in range(n_series):
+        frames.append(
+            pd.DataFrame(
+                {
+                    "ts_id": [f"s{i}"] * rows_each,
+                    "ds": pd.date_range("2024-01-01", periods=rows_each),
+                    "y": range(rows_each),
+                }
+            )
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_chunk_cells_tags_model_and_covers_every_cell() -> None:
+    src = _source(4)
+    chunks = ray_io.chunk_cells(src, _cfg(), [_CPU, _GPU], n_chunks=3)
+    assert all(_MODEL_COL in c.columns for c in chunks)
+    # 4 series × 2 models = 8 cells, each a distinct (ts_id, model) across all chunks.
+    seen = set()
+    for c in chunks:
+        for (ts_id, model), _sub in c.groupby(["ts_id", _MODEL_COL]):
+            seen.add((ts_id, model))
+    assert len(seen) == 8
+
+
+def test_chunk_cells_keeps_a_cells_history_together() -> None:
+    src = _source(3, rows_each=5)
+    chunks = ray_io.chunk_cells(src, _cfg(), [_CPU], n_chunks=5)
+    # Every (ts_id, model) cell appears in exactly one chunk, with its full 5-row history.
+    locations: dict[tuple[str, str], int] = {}
+    for idx, c in enumerate(chunks):
+        for key, sub in c.groupby(["ts_id", _MODEL_COL]):
+            assert len(sub) == 5
+            locations.setdefault(key, idx)  # type: ignore[arg-type]
+            assert locations[key] == idx  # never split across chunks
+    assert len(locations) == 3
+
+
+def test_chunk_cells_is_deterministic() -> None:
+    src = _source(6)
+    a = ray_io.chunk_cells(src, _cfg(), [_CPU, _GPU], n_chunks=4)
+    b = ray_io.chunk_cells(src, _cfg(), [_CPU, _GPU], n_chunks=4)
+    assert len(a) == len(b)
+    for ca, cb in zip(a, b, strict=True):
+        pd.testing.assert_frame_equal(ca, cb)
+
+
+def test_chunk_cells_empty_source_or_models_yields_nothing() -> None:
+    assert ray_io.chunk_cells(pd.DataFrame(), _cfg(), [_CPU], n_chunks=2) == []
+    assert ray_io.chunk_cells(_source(2), _cfg(), [], n_chunks=2) == []
