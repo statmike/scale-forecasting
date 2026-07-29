@@ -399,3 +399,62 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     `v_model_leaderboard` under the same run_id, cleanly split `compute_engine='spark'` (the Spark
     model) vs `'bigquery'` (the natives), each with a non-NULL metric panel. The single-run,
     two-engine, directly-comparable leaderboard is the demo spine.
+
+- **B4 — Ray on Vertex AI: a deterministic fixed-size T4 cluster, fractional-GPU NeuralProphet.**
+  The third Python runtime, and the design's home for GPU-accelerated models (Spark can't share a
+  GPU fractionally). `python_runtime="ray"` now runs the Python-runtime models on a **fixed-size**
+  Vertex Ray cluster in parallel with the BigQuery-native engine under one run_id — exactly the Arc B
+  contract, a different compute backend. Architecture + decisions:
+  - **Deterministic sizing, not autoscaling (supersedes the original design).** The framing that
+    drove B4: *don't autoscale — size the cluster to the run's fan-out, and show resizing it for
+    larger/smaller scales.* A fixed-size pool is the honest model for a fixed-scale batch job, so a
+    pure `ray_io.plan_cluster(cfg) -> RayClusterPlan` sizes two fixed pools from `estimate_fanout`
+    (GPU-worker pool for the deep-learning models, CPU-worker pool for stats/ML), each a fixed
+    `node_count` with **no** `autoscaling_spec`. "Resize for scale" is just a different `series_limit`
+    → a different fixed plan (n=6 → 1+1 nodes; n=600 → clamped to `ray_max_nodes`); the whole sizing
+    decision is logged + stamped to the run. Proven offline by the `plan_cluster` sizing tests.
+  - **Heterogeneous fractional-GPU routing — the reason Ray exists here.** `ray_engine.run` (the
+    on-cluster driver) splits the executed models into GPU models (NeuralProphet, `family ==
+    "deep_learning"`) and CPU models, dispatching each chunk of cells as a `@ray.remote(num_gpus=frac)`
+    or `@ray.remote(num_cpus=1)` task — both calling the **exact** B2 `run_group` + `bq.write_cells`
+    executor-side (a "chunk" is Ray's "bucket"; `spark_io`/`worker`/`registry` untouched). NP cells
+    pack onto a T4 at a calibrated fraction while stats cells run on CPU, all landing
+    `compute_engine="ray"` (falls out free — `run_cell` already stamps `cfg.python_runtime`).
+  - **Auto-fraction GPU calibration.** `gpu_fraction: "auto"` (default) → sample a few series, fit NP
+    measuring peak GPU memory, solve `fraction ≈ (peak × safety_margin) / device_mem`, clamp; a fixed
+    float short-circuits it. Unit-tested with injected memory numbers (no GPU needed for the offline
+    gate); the chosen fraction is stamped to the run for reproducibility.
+  - **Ephemeral-default / reuse-opt-in lifecycle, teardown-in-`finally`.** `ray_submit.submit_ray`
+    (sibling of `submit.py`) owns the cluster: **ephemeral** (default) creates the planned cluster →
+    submits the driver as a Ray Job → polls to terminal + stamps telemetry → `delete_ray_cluster`
+    in a `finally` (teardown survives a failing job — no orphaned T4s billing forever); **reuse**
+    (`compute.ray_cluster_name` or `--cluster-name`) targets a standing cluster and skips both
+    create and delete. Both paths unit-tested with `vertex_ray` monkeypatched.
+  - **No on-cluster shim (unlike Spark).** A Vertex Ray Job's entrypoint is a *shell command*
+    (`python -m scale_forecasting.ray_entry …`) that runs **with** package context, and the current
+    `src/` ships via the job's `runtime_env` working dir — so, unlike Dataproc's bare
+    `main_python_file_uri` (which needs the `spark_main` shim), `ray_entry` *is* the entrypoint. Same
+    G1 "same code local↔cluster" seam, delivered at runtime, never baked into the image.
+  - **Telemetry parity, no schema change.** A Ray analog of Spark's `job_telemetry` (cluster name,
+    node counts, machine/accelerator types, `sizing_gpu_fraction`, ray/python versions, wall-clock,
+    job id) is stamped into the existing `run_registry.job_telemetry` STRING column via
+    `update_header` — `v_run_summary`/`v_model_leaderboard` need nothing new.
+  - **`main.run` dispatch.** `_plan` now accepts `python_runtime="ray"`; a one-point
+    `_launch_python_runtime` picks Ray vs Spark on the worker thread (both contributor-mode, one
+    shared header), so Ray ∥ BigQuery works identically to Spark ∥ BigQuery. The `multi` guard stays
+    but is unreachable for ray — the config layer forbids `ray` + any `spark_method` outright.
+  - **Dep note.** `vertex_ray` imports `immutabledict` at module load, but `google-cloud-aiplatform`
+    only declares it under its own `[ray]` extra, which would pin `ray[default]<=2.47.1` and conflict
+    with ours — so the `[ray]` extra pulls `immutabledict` directly.
+  - **Test-harness note.** The `@ray` engine tests spin up a real local Ray session (`local_mode` is
+    gone in Ray 2.x); under `uv run`, Ray's worker subprocesses can't re-resolve the venv and fail to
+    `import ray` (60s registration timeouts). Run them via `.venv/bin/python -m pytest` directly —
+    then they pass in seconds. The offline gate otherwise stays green (ruff, mypy, unit suite).
+  - **Live @gpu smoke authored, run pending T4 quota.** `configs/ray_gpu_demo.json` +
+    `tests/integration/test_ray_gpu_smoke.py` (`@gpu`, collect-but-skip unless `SF_ENABLE_GPU`) run a
+    mixed config (NeuralProphet + a stat model + the three natives, `series_limit=6`, backtest on)
+    through `main.run` against a fixed-size T4 cluster, asserting: one COMPLETED header,
+    `python_runtime='ray'`; NP + the stat model `compute_engine='ray'` with non-NULL metrics beside
+    the natives on one leaderboard; the calibrated fraction + fixed plan in `job_telemetry`; and the
+    ephemeral cluster **gone afterward** (`list_ray_clusters`). Needs `NVIDIA_T4_GPUS` quota in-region
+    (a console/gcloud request, not Terraform) before the one authorized live run.

@@ -1,0 +1,26 @@
+{
+  "run_name": "ray_gpu_demo",
+  "python_runtime": "ray",
+  "data": {
+    "source_table": "source_series",
+    "horizon": 28,
+    "series_limit": 6
+  },
+  "models": ["neuralprophet", "theta", "arima_plus", "arima_plus_xreg", "timesfm"],
+  "features": {
+    "holidays": ["US"],
+    "exog": ["price_index"]
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  },
+  "compute": {
+    "use_gpu": true,
+    "gpu_type": "T4",
+    "gpu_fraction": "auto",
+    "accelerator_count": 1
+  }
+}
