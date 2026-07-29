@@ -925,6 +925,15 @@ wheels = [
 ]
 
 [[package]]
+name = "immutabledict"
+version = "4.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/e6/718471048fea0366c3e3d1df3acfd914ca66d571cdffcf6d37bbcd725708/immutabledict-4.3.1.tar.gz", hash = "sha256:f844a669106cfdc73f47b1a9da003782fb17dc955a54c80972e0d93d1c63c514", size = 7806, upload-time = "2026-02-15T10:32:34.668Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/ce/f9018bf69ae91b273b6391a095e7c93fa5e1617f25b6ba81ad4b20c9df10/immutabledict-4.3.1-py3-none-any.whl", hash = "sha256:c9facdc0ff30fdb8e35bd16532026cac472a549e182c94fa201b51b25e4bf7bf", size = 5000, upload-time = "2026-02-15T10:32:33.672Z" },
+]
+
+[[package]]
 name = "importlib-resources"
 version = "7.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2161,6 +2170,7 @@ models = [
 ]
 ray = [
     { name = "google-cloud-aiplatform" },
+    { name = "immutabledict" },
     { name = "ray", extra = ["default"] },
 ]
 spark = [
@@ -2186,6 +2196,7 @@ requires-dist = [
     { name = "google-cloud-dataproc", marker = "extra == 'spark'", specifier = ">=5.9" },
     { name = "google-cloud-storage", specifier = ">=2.17" },
     { name = "holidays", specifier = ">=0.50" },
+    { name = "immutabledict", marker = "extra == 'ray'", specifier = ">=4.0" },
     { name = "lightgbm", marker = "extra == 'models'", specifier = ">=4.3" },
     { name = "neuralprophet", marker = "extra == 'models'", specifier = ">=0.9" },
     { name = "numpy", specifier = ">=1.26" },

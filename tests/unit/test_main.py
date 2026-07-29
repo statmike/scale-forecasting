@@ -17,11 +17,19 @@ from scale_forecasting import main
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.registry.ids import make_run_id
+from scale_forecasting.settings import Settings
 
 # Model names by runtime: theta is a Python/Spark model; arima_plus / arima_plus_xreg / timesfm are
 # the BigQuery-native models (runtime == "bigquery").
 _SPARK = "theta"
 _NATIVE = ["arima_plus", "arima_plus_xreg", "timesfm"]
+
+# A resolved Settings for the dispatch tests (never used to touch GCP — the submit fns are faked).
+_SETTINGS = Settings(
+    project_id="proj-x",
+    connection="proj-x.us-central1.conn",
+    warehouse_uri="gs://bkt/warehouse",
+)
 
 
 def _cfg(**over: Any) -> RunConfig:
@@ -64,12 +72,14 @@ def test_plan_all_python_has_no_bq_models() -> None:
     assert plan.bq_models == []
 
 
-# --- _plan: the out-of-scope shapes it must reject -----------------------------
+# --- _plan: ray is accepted; the out-of-scope multi shape is rejected ----------
 
 
-def test_plan_rejects_ray_when_python_models_present() -> None:
-    with pytest.raises(ConfigError, match="ray"):
-        main._plan(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"))
+def test_plan_accepts_ray_when_python_models_present() -> None:
+    # B4: the Ray engine is built, so main.run now dispatches ray — _plan must NOT reject it.
+    plan = main._plan(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"))
+    assert plan.python_models == [_SPARK]
+    assert plan.bq_models == _NATIVE
 
 
 def test_plan_rejects_multi_when_python_models_present() -> None:
@@ -77,8 +87,16 @@ def test_plan_rejects_multi_when_python_models_present() -> None:
         main._plan(_cfg(models=[_SPARK, *_NATIVE], spark_method="multi"))
 
 
+def test_ray_runtime_cannot_carry_spark_method() -> None:
+    # multi is a Spark-only method, so main._plan's multi guard is gated on python_runtime="spark".
+    # It never has to fire for a ray config because the config layer forbids ray + any spark_method
+    # outright — so a ray config that names one fails to construct, well before _plan sees it.
+    with pytest.raises(ValueError, match="spark_method is only valid"):
+        _cfg(models=[_SPARK], python_runtime="ray", spark_method="multi")
+
+
 def test_plan_allows_ray_config_when_only_bigquery_models() -> None:
-    # An all-native config never uses the Python runtime, so ray/multi don't apply — it must plan.
+    # An all-native config never uses the Python runtime, so runtime choice doesn't apply.
     plan = main._plan(_cfg(models=_NATIVE, python_runtime="ray"))
     assert plan.python_models == []
     assert plan.bq_models == _NATIVE
@@ -106,10 +124,59 @@ def test_dry_run_returns_run_id_and_estimates_fanout(monkeypatch: pytest.MonkeyP
     assert called["cfg"] is cfg
 
 
-def test_dry_run_still_rejects_ray() -> None:
-    # The plan (and its rejections) runs before the dry_run short-circuit, so bad shapes fail fast.
-    with pytest.raises(ConfigError, match="ray"):
-        main.run(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"), dry_run=True)
+def test_dry_run_still_rejects_multi() -> None:
+    # The plan (and its rejection) runs before the dry_run short-circuit, so bad shapes fail fast.
+    with pytest.raises(ConfigError, match="submit --engine multi"):
+        main.run(_cfg(models=[_SPARK, *_NATIVE], spark_method="multi"), dry_run=True)
+
+
+def test_dry_run_allows_ray() -> None:
+    # Ray is a supported runtime now; a ray config plans + dry-runs like any other.
+    run_id = main.run(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"), dry_run=True)
+    assert run_id == make_run_id(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"))
+
+
+# --- _launch_python_runtime: dispatch by python_runtime ------------------------
+
+
+def test_launch_python_runtime_dispatches_spark(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.submit as submit_mod
+
+    seen: dict[str, Any] = {}
+
+    def _fake_submit_batch(cfg: RunConfig, **kw: Any) -> str:
+        seen.update(kw)
+        seen["cfg"] = cfg
+        return "batch-1"
+
+    monkeypatch.setattr(submit_mod, "submit_batch", _fake_submit_batch)
+
+    cfg = _cfg(models=[_SPARK], python_runtime="spark")
+    plan = main._plan(cfg)
+    main._launch_python_runtime(cfg, plan, _SETTINGS)
+    assert seen["engine"] == "explode"
+    assert seen["models"] == [_SPARK]
+    assert seen["manage_header"] is False
+
+
+def test_launch_python_runtime_dispatches_ray(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.ray_submit as ray_submit_mod
+
+    seen: dict[str, Any] = {}
+
+    def _fake_submit_ray(cfg: RunConfig, **kw: Any) -> str:
+        seen.update(kw)
+        seen["cfg"] = cfg
+        return "job-1"
+
+    monkeypatch.setattr(ray_submit_mod, "submit_ray", _fake_submit_ray)
+
+    cfg = _cfg(models=[_SPARK], python_runtime="ray")
+    plan = main._plan(cfg)
+    main._launch_python_runtime(cfg, plan, _SETTINGS)
+    assert "engine" not in seen  # ray takes no spark engine arg
+    assert seen["models"] == [_SPARK]
+    assert seen["manage_header"] is False
 
 
 # --- CLI: dispatches dry_run ---------------------------------------------------

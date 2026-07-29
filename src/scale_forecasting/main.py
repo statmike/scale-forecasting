@@ -31,9 +31,15 @@ stays queryable and the CLI exits non-zero), and returns the shared ``run_id``.
 cells errored) to the orchestrator, so a SUCCEEDED batch is reported COMPLETED; per-model failure
 stays visible on ``v_model_leaderboard`` (a failed model → NULL metric AVGs).
 
-Out of scope here (rejected with a clear pointer): ``python_runtime="ray"`` (unbuilt B4 stub) and
-``spark_method="multi"`` (inherently multi-run — each family child gets its own run_id, so it can't
-share one header; use ``python -m scale_forecasting.submit --engine multi``).
+Both Python runtimes are supported and dispatched by ``cfg.python_runtime``: ``"spark"`` launches a
+Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`), ``"ray"`` a fixed-size
+Vertex Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`) — either way on the worker
+thread, in contributor mode, in parallel with the in-process BigQuery engine under one run_id.
+
+Out of scope here (rejected with a clear pointer): ``spark_method="multi"`` (inherently multi-run —
+each family child gets its own run_id, so it can't share one header; use ``python -m
+scale_forecasting.submit --engine multi``). ``multi`` is a Spark-only method, so the guard only
+applies when ``python_runtime="spark"``.
 
 Public surface: ``run(cfg, *, dry_run=False) -> run_id`` and
 ``python -m scale_forecasting.main --config ... [--dry-run]``.
@@ -50,6 +56,7 @@ from .router import split_by_runtime
 
 if TYPE_CHECKING:
     from .config import RunConfig
+    from .settings import Settings
 
 _log = get_logger(__name__)
 
@@ -72,32 +79,27 @@ def _plan(cfg: RunConfig) -> _RunPlan:
     """Resolve the run_id + per-runtime model split, rejecting shapes this orchestrator can't run.
 
     Pure and offline: computes ``make_run_id(cfg)`` and :func:`router.split_by_runtime`, then guards
-    the two out-of-scope shapes — but only when they would actually bite, i.e. when there *are*
-    Python-runtime models to run:
+    the one out-of-scope shape — but only when it would actually bite, i.e. when there *are*
+    Python-runtime models to run on the Spark runtime:
 
-    * ``python_runtime="ray"`` → :class:`ConfigError` (the Ray engine is an unbuilt B4 stub).
-    * ``spark_method="multi"`` → :class:`ConfigError` pointing at ``submit --engine multi`` (multi
-      fans out one batch *per family*, each with its own run_id, so it can't share a single header).
+    * ``python_runtime="spark"`` + ``spark_method="multi"`` → :class:`ConfigError` pointing at
+      ``submit --engine multi`` (multi fans out one batch *per family*, each with its own run_id, so
+      it can't share a single header). ``multi`` is Spark-only, so the Ray runtime never trips it.
 
-    An all-BigQuery config is unaffected by either (the Python runtime is never used), so it plans
-    and runs regardless of ``python_runtime`` / ``spark_method``.
+    Both ``python_runtime="spark"`` and ``python_runtime="ray"`` are supported (dispatched in
+    :func:`run`). An all-BigQuery config is unaffected by the guard (the Python runtime is never
+    used), so it plans and runs regardless of ``python_runtime`` / ``spark_method``.
     """
     run_id = make_run_id(cfg)
     python_models, bq_models = split_by_runtime(cfg)
 
-    if python_models:
-        if cfg.python_runtime == "ray":
-            raise ConfigError(
-                "main.run does not support python_runtime='ray' yet (the Ray engine is an unbuilt "
-                "B4 stub); use python_runtime='spark' or a BigQuery-native-only config."
-            )
-        if cfg.spark_method == "multi":
-            raise ConfigError(
-                "main.run cannot run spark_method='multi' under one run_id: multi fans out one "
-                "batch per model family, each with its own run_id and header. Run it standalone "
-                "with `python -m scale_forecasting.submit --engine multi`, or choose "
-                "spark_method='explode'/'naive' to orchestrate it in parallel with BigQuery here."
-            )
+    if python_models and cfg.python_runtime == "spark" and cfg.spark_method == "multi":
+        raise ConfigError(
+            "main.run cannot run spark_method='multi' under one run_id: multi fans out one "
+            "batch per model family, each with its own run_id and header. Run it standalone "
+            "with `python -m scale_forecasting.submit --engine multi`, or choose "
+            "spark_method='explode'/'naive' to orchestrate it in parallel with BigQuery here."
+        )
 
     return _RunPlan(
         run_id=run_id,
@@ -107,10 +109,44 @@ def _plan(cfg: RunConfig) -> _RunPlan:
     )
 
 
+def _launch_python_runtime(cfg: RunConfig, plan: _RunPlan, settings: Settings) -> None:
+    """Run the Python-runtime models on the runtime ``cfg.python_runtime`` picks (contributor mode).
+
+    The one dispatch point between the two Python runtimes, called on :func:`run`'s worker thread:
+    ``"ray"`` → a fixed-size Vertex Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`);
+    otherwise → a Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`) as the
+    ``plan.spark_method`` engine. Both run ``plan.python_models`` with ``manage_header=False`` (this
+    orchestrator owns the single shared header) and block until terminal, so the caller joins one
+    future regardless of runtime. Kept a plain module function (not a lambda) so the worker thread's
+    traceback names it and the import stays lazy (Ray/Spark extras load only for the chosen path).
+    """
+    if cfg.python_runtime == "ray":
+        from .ray_submit import submit_ray
+
+        submit_ray(
+            cfg,
+            models=plan.python_models,
+            manage_header=False,
+            settings=settings,
+            wait=True,
+        )
+    else:
+        from .submit import submit_batch
+
+        submit_batch(
+            cfg,
+            engine=plan.spark_method or "explode",
+            models=plan.python_models,
+            manage_header=False,
+            settings=settings,
+            wait=True,
+        )
+
+
 def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
     """Execute one run: Spark + BigQuery-native in parallel under one run_id; return that run_id.
 
-    Resolves the plan (:func:`_plan`, which rejects ray/multi), then:
+    Resolves the plan (:func:`_plan`, which rejects Spark ``multi``), then:
 
     * ``dry_run=True`` → log the run_id + :func:`~scale_forecasting.config.estimate_fanout` and
       return, touching no GCP. The offline "what would this schedule" path (DESIGN §11).
@@ -131,7 +167,6 @@ def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
     from .engines import bigquery_engine
     from .registry import bq
     from .settings import Settings
-    from .submit import submit_batch
 
     plan = _plan(cfg)
     run_id = plan.run_id
@@ -166,20 +201,15 @@ def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
     spark_error: BaseException | None = None
     bq_error: BaseException | None = None
 
-    # Launch the remote Spark batch on a worker thread (it blocks until terminal + stamps telemetry
-    # in-thread), and run the in-process BigQuery engine on the main thread so the two overlap.
+    # Launch the remote Python-runtime job on a worker thread (it blocks until terminal + stamps
+    # telemetry in-thread), and run the in-process BigQuery engine on the main thread so the two
+    # overlap. The runtime — Spark batch or fixed-size Vertex Ray cluster — is chosen by
+    # cfg.python_runtime; both take the same contributor-mode contract (models subset + shared
+    # header owned here), so Ray ∥ BigQuery works under one run_id exactly like Spark ∥ BigQuery.
     with ThreadPoolExecutor(max_workers=1) as pool:
-        spark_future = None
+        python_future = None
         if plan.python_models:
-            spark_future = pool.submit(
-                submit_batch,
-                cfg,
-                engine=plan.spark_method or "explode",
-                models=plan.python_models,
-                manage_header=False,
-                settings=settings,
-                wait=True,
-            )
+            python_future = pool.submit(_launch_python_runtime, cfg, plan, settings)
         if plan.bq_models:
             try:
                 bq_outcome = bigquery_engine.run(
@@ -187,9 +217,9 @@ def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
                 )
             except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
                 bq_error = exc
-        if spark_future is not None:
+        if python_future is not None:
             try:
-                spark_future.result()
+                python_future.result()
             except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
                 spark_error = exc
 

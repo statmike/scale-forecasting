@@ -43,6 +43,9 @@ spark = [
 ray = [
     "ray[default]>=2.30",
     "google-cloud-aiplatform>=1.60",
+    # vertex_ray imports immutabledict at module load; aiplatform only declares it under its own
+    # [ray] extra, which would pin ray[default]<=2.47.1 and conflict with ours — so pull it directly.
+    "immutabledict>=4.0",
 ]
 # Boosted-tree and deep-learning models (optional — heavier installs).
 models = [
