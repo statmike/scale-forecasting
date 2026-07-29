@@ -458,3 +458,24 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     the natives on one leaderboard; the calibrated fraction + fixed plan in `job_telemetry`; and the
     ephemeral cluster **gone afterward** (`list_ray_clusters`). Needs `NVIDIA_T4_GPUS` quota in-region
     (a console/gcloud request, not Terraform) before the one authorized live run.
+  - **Pre-flight fixes (found preparing the live T4 run — all offline-verified before any spend):**
+    - **pandas capped `<3`.** NeuralProphet 0.9.0 (its latest release) calls the `Series.view` API
+      that pandas 3.0 removed, so it can't `fit` under 3.x — proven by a local NP fit, not guessed.
+      `pyproject.toml` now pins `pandas>=2.2,<3` (+ `pandas-stubs<3`); re-locked to pandas 2.3.3 and
+      regenerated `docker/requirements.txt`. Our own code has no pandas-3-only idioms, so the cap is
+      clean product-wide. The full offline suite now runs **with** NeuralProphet (no `-k` skip) —
+      **460 passed**. Two knock-ons: NP `fit` now calls `set_random_seed(ctx.seed)` (torch was
+      unseeded → the determinism contract test failed once NP actually ran); a `.where(cond, None)`
+      call in `data_gen/seed_spark.py` gained one `type: ignore[call-overload]` (pandas-stubs<3 lacks
+      the overload, valid at runtime). `lightning_logs/` (a Lightning artifact NP writes to CWD on
+      fit) is now git-ignored.
+    - **Ray version skew.** `runtime_env["pip"]` no longer points at the raw `requirements.txt` (which
+      pins `ray==2.56.1`); it ships a parsed package **list minus Ray** (`build_runtime_env` /
+      `_requirements_packages`). Vertex Ray's cluster image provides Ray (latest supported = 2.47),
+      and pip-installing a newer Ray over the running head/workers breaks the job. Everything else
+      (torch, neuralprophet, …) still installs on the prebuilt image at job start.
+    - **Public endpoint (no VPC peering).** `RayInfra.network` is now optional: unset → the cluster
+      gets a **public endpoint** (`create_ray_cluster(network=None)`, Vertex's own default), so a
+      deployment with no private-services-access connection can still run. A VPC (with PSA in place)
+      still yields a private endpoint. This is a real capability add, not a workaround — the offline
+      deployment here has no PSA peering, and requiring it would have blocked the runtime entirely.

@@ -12,7 +12,10 @@ authors = [{ name = "scale-forecasting contributors" }]
 # data scientist can `uv sync` and read/run the core without pulling Spark or Ray.
 dependencies = [
     "pydantic>=2.7",
-    "pandas>=2.2",
+    # pandas is capped <3 because neuralprophet (the [models] deep-learning model) still calls the
+    # Series.view API that pandas 3.0 removed, so it can't fit under 3.x. Our own code uses no
+    # pandas-3-only idioms, so 2.2.x is a clean floor↔ceiling for the whole product.
+    "pandas>=2.2,<3",
     "numpy>=1.26",
     "pyarrow>=16.0",
     "statsmodels>=0.14",
@@ -61,7 +64,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
-    "pandas-stubs>=2.2",
+    "pandas-stubs>=2.2,<3",
 ]
 
 [build-system]

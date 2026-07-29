@@ -77,6 +77,8 @@ cuda-toolkit==13.0.3.0 ; sys_platform == 'linux'
     # via torch
 cycler==0.12.1
     # via matplotlib
+db-dtypes==1.7.1
+    # via scale-forecasting
 distlib==0.4.3
     # via virtualenv
 distro==1.9.0
@@ -184,6 +186,8 @@ idna==3.18
     #   httpx
     #   requests
     #   yarl
+immutabledict==4.3.1
+    # via scale-forecasting
 importlib-resources==7.1.0
     # via prophet
 jinja2==3.1.6
@@ -240,6 +244,7 @@ numpy==1.26.4
     #   captum
     #   cmdstanpy
     #   contourpy
+    #   db-dtypes
     #   lightgbm
     #   matplotlib
     #   neuralprophet
@@ -322,6 +327,7 @@ optuna==4.9.0
 packaging==26.2
     # via
     #   captum
+    #   db-dtypes
     #   google-cloud-aiplatform
     #   google-cloud-bigquery
     #   lightning-utilities
@@ -333,9 +339,10 @@ packaging==26.2
     #   statsmodels
     #   tensorboard
     #   torchmetrics
-pandas==3.0.5
+pandas==2.3.3
     # via
     #   cmdstanpy
+    #   db-dtypes
     #   neuralprophet
     #   prophet
     #   scale-forecasting
@@ -385,7 +392,9 @@ protobuf==6.33.6
 py-spy==0.4.2
     # via ray
 pyarrow==25.0.0
-    # via scale-forecasting
+    # via
+    #   db-dtypes
+    #   scale-forecasting
 pyasn1==0.6.4
     # via pyasn1-modules
 pyasn1-modules==0.4.2
@@ -412,6 +421,8 @@ python-discovery==1.5.0
     # via virtualenv
 pytorch-lightning==2.6.5
     # via neuralprophet
+pytz==2026.3.post1
+    # via pandas
 pyyaml==6.0.3
     # via
     #   optuna
@@ -516,7 +527,7 @@ typing-extensions==4.16.0
     #   typing-inspection
 typing-inspection==0.4.2
     # via pydantic
-tzdata==2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
+tzdata==2026.3
     # via pandas
 urllib3==2.7.0
     # via requests

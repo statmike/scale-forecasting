@@ -46,6 +46,9 @@ spikes/
 # Notebooks
 .ipynb_checkpoints/
 
+# NeuralProphet / PyTorch-Lightning training artifacts (written to CWD on fit)
+lightning_logs/
+
 # OS / editor
 .DS_Store
 .idea/

@@ -10,6 +10,7 @@ bearing lifecycle properties: **ephemeral creates then deletes (even when the jo
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -89,12 +90,20 @@ def test_build_runtime_env_ships_src_and_requirements() -> None:
     import os
 
     env = ray_submit.build_runtime_env()
-    # working_dir is the package root (so `python -m scale_forecasting.ray_entry` resolves), pip the
-    # locked cluster deps — both must be real local paths that exist for the upload to succeed.
+    # working_dir is the package root (so `python -m scale_forecasting.ray_entry` resolves) — a real
+    # local dir that exists for the upload to succeed.
     assert env["working_dir"].endswith("/src")
     assert os.path.isdir(env["working_dir"])
-    assert env["pip"].endswith("docker/requirements.txt")
-    assert os.path.isfile(env["pip"])
+    # pip is the locked deps as a package LIST (pinned "name==version" specs), not a file path, so
+    # we can drop cluster-provided packages from it.
+    pip = env["pip"]
+    assert isinstance(pip, list) and pip
+    assert all("==" in spec for spec in pip)
+    # neuralprophet (a real [models] dep) is shipped; Ray is NOT (the cluster image provides it, and
+    # a pip pin could clash with the version Vertex booted).
+    names = {re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower() for spec in pip}
+    assert "neuralprophet" in names
+    assert "ray" not in names
 
 
 # --- RayInfra resolution -------------------------------------------------------
@@ -112,10 +121,23 @@ def test_ray_infra_resolve_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert infra.ray_version == ray_submit._DEFAULT_RAY_VERSION
 
 
+def test_ray_infra_resolve_without_network_is_public_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # SF_RAY_NETWORK is optional: unset → network is None → public endpoint (no VPC peering needed).
+    monkeypatch.delenv("SF_RAY_NETWORK", raising=False)
+    monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
+    monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
+    infra = ray_submit.RayInfra.resolve()
+    assert infra.network is None
+    assert infra.compute_sa == "sa@x.iam"
+
+
 def test_ray_infra_resolve_missing_var_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("SF_RAY_NETWORK", "SF_COMPUTE_SA", "SF_CODE_BUCKET"):
         monkeypatch.delenv(var, raising=False)
-    with pytest.raises(ConfigError, match="SF_RAY_NETWORK"):
+    # network is optional now, so the first *required* var that's missing is SF_COMPUTE_SA.
+    with pytest.raises(ConfigError, match="SF_COMPUTE_SA"):
         ray_submit.RayInfra.resolve()
 
 
@@ -128,13 +150,20 @@ def test_ray_infra_from_terraform_outputs_with_and_without_image() -> None:
     }
     no_image = ray_submit.RayInfra.from_terraform_outputs(outputs)
     assert no_image.container_image is None
+    assert no_image.network == "projects/p/global/networks/scale-forecasting"
     with_image = ray_submit.RayInfra.from_terraform_outputs(outputs, image_tag="v1")
     assert with_image.container_image == "us-docker.pkg.dev/p/repo/runtime:v1"
 
 
+def test_ray_infra_from_terraform_outputs_without_network_is_public() -> None:
+    # network_id is optional (a deployment without private-services access omits it) → public.
+    infra = ray_submit.RayInfra.from_terraform_outputs({"compute_sa": "s", "code_bucket": "b"})
+    assert infra.network is None
+
+
 def test_ray_infra_from_terraform_outputs_missing_key_raises() -> None:
-    with pytest.raises(ConfigError, match="network_id"):
-        ray_submit.RayInfra.from_terraform_outputs({"compute_sa": "s", "code_bucket": "b"})
+    with pytest.raises(ConfigError, match="code_bucket"):
+        ray_submit.RayInfra.from_terraform_outputs({"compute_sa": "s"})
 
 
 # --- extract_ray_telemetry: the header overlay ---------------------------------

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -63,7 +64,7 @@ _REQUIREMENTS = _REPO_ROOT / "docker" / "requirements.txt"
 
 # Ray-cluster infra env vars (beyond the SF_* identity Settings resolves). Kept together so the
 # docstring, resolve(), and any tooling agree. code_bucket + compute_sa are shared with the Spark
-# batch; network is the VPC the Vertex Ray cluster peers into; container_image is optional.
+# batch; network (optional) is a VPC for a private endpoint; container_image is optional.
 _ENV_NETWORK = "SF_RAY_NETWORK"
 _ENV_COMPUTE_SA = "SF_COMPUTE_SA"
 _ENV_CODE_BUCKET = "SF_CODE_BUCKET"
@@ -86,24 +87,30 @@ class RayInfra:
     """Vertex-Ray infra identity — what launching a cluster needs beyond :class:`Settings`.
 
     Resolved from ``SF_*`` env (parity with ``Settings`` / ``BatchInfra``) or ``terraform output``.
-    ``network`` is the VPC the cluster peers into; ``compute_sa`` the runtime SA it runs as;
-    ``code_bucket`` where the run config JSON is staged. ``container_image`` is an optional custom
-    node image (the shared runtime that bundles ``[ray]`` + ``[models]``); when unset, Vertex's
-    prebuilt Ray image is used and ``runtime_env`` installs ``requirements.txt`` on top.
+    ``network`` is an **optional** VPC: set it (with a private-services connection in place) for a
+    private endpoint; leave it unset and the cluster gets a public endpoint — no VPC peering / PSA
+    required, which is the simplest way to run when the deployment has no private-services access.
+    ``compute_sa`` is the runtime SA the cluster runs as; ``code_bucket`` where the run config JSON
+    is staged. ``container_image`` is an optional custom node image (the shared runtime that bundles
+    ``[ray]`` + ``[models]``); when unset, Vertex's prebuilt Ray image is used and ``runtime_env``
+    installs ``requirements.txt`` on top.
     """
 
-    network: str
     compute_sa: str
     code_bucket: str
+    network: str | None = None
     container_image: str | None = None
     ray_version: str = _DEFAULT_RAY_VERSION
     python_version: str = _DEFAULT_PYTHON_VERSION
 
     @classmethod
     def resolve(cls) -> RayInfra:
-        """Build from the ``SF_*`` Ray-infra environment; raise naming the first missing var."""
+        """Build from the ``SF_*`` Ray-infra environment; raise naming the first missing var.
+
+        ``SF_COMPUTE_SA`` and ``SF_CODE_BUCKET`` are required; ``SF_RAY_NETWORK`` is optional
+        (unset → public endpoint, no VPC peering needed).
+        """
         required = {
-            "network": _ENV_NETWORK,
             "compute_sa": _ENV_COMPUTE_SA,
             "code_bucket": _ENV_CODE_BUCKET,
         }
@@ -117,9 +124,9 @@ class RayInfra:
                 )
             values[field_name] = raw
         return cls(
-            network=values["network"],
             compute_sa=values["compute_sa"],
             code_bucket=values["code_bucket"],
+            network=os.environ.get(_ENV_NETWORK) or None,
             container_image=os.environ.get(_ENV_CONTAINER_IMAGE) or None,
             ray_version=os.environ.get(_ENV_RAY_VERSION) or _DEFAULT_RAY_VERSION,
         )
@@ -130,19 +137,19 @@ class RayInfra:
     ) -> RayInfra:
         """Build from a ``terraform output -json`` value map (local dev/tests).
 
-        Reads the keys the ``terraform/main`` stage emits — ``network_id``, ``compute_sa``,
-        ``code_bucket``, and (when ``image_tag`` is given) ``runtime_image_repo`` for a custom node
-        image. Omitting ``image_tag`` leaves ``container_image`` unset (Vertex prebuilt image +
-        ``requirements.txt``).
+        Reads the keys the ``terraform/main`` stage emits — ``compute_sa``, ``code_bucket``, an
+        optional ``network_id`` (absent → public endpoint), and (when ``image_tag`` is given)
+        ``runtime_image_repo`` for a custom node image. Omitting ``image_tag`` leaves
+        ``container_image`` unset (Vertex prebuilt image + ``requirements.txt``).
         """
         try:
             image = (
                 f"{outputs['runtime_image_repo']}:{image_tag}" if image_tag is not None else None
             )
             return cls(
-                network=outputs["network_id"],
                 compute_sa=outputs["compute_sa"],
                 code_bucket=outputs["code_bucket"],
+                network=outputs.get("network_id") or None,
                 container_image=image,
             )
         except KeyError as exc:
@@ -177,18 +184,47 @@ def build_entrypoint(
     return " ".join(parts)
 
 
+# Packages the cluster already provides — never reinstall these via runtime_env or a pip-installed
+# version would fight the one baked into the Vertex Ray image (the cluster's Ray is pinned at create
+# via ``ray_version``, and requirements.txt may pin a newer Ray than Vertex supports, so swapping it
+# out from under the running head/workers breaks the job). Matched on the PEP-508 project name.
+_CLUSTER_PROVIDED = frozenset({"ray"})
+
+
+def _requirements_packages() -> list[str]:
+    """Parse ``docker/requirements.txt`` into a package-spec list, dropping cluster-provided deps.
+
+    The uv-exported file is ``name==version [; marker]`` lines interleaved with ``# via`` comment
+    blocks; we keep only the requirement lines and skip anything whose project name is in
+    :data:`_CLUSTER_PROVIDED` (see its note — Ray must come from the image, not pip).
+    """
+    packages: list[str] = []
+    for raw in _REQUIREMENTS.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Project name = everything before the first version/extra/marker delimiter.
+        name = re.split(r"[<>=!~;\[ ]", line, maxsplit=1)[0].lower()
+        if name in _CLUSTER_PROVIDED:
+            continue
+        packages.append(line)
+    return packages
+
+
 def build_runtime_env() -> dict[str, Any]:
     """The Ray ``runtime_env`` shipping current ``src/`` + on-cluster deps (pure; local paths).
 
     Delivers code at RUNTIME the way the Spark path uploads a ``src/`` zip: ``working_dir`` is the
     package root (so ``python -m scale_forecasting.ray_entry`` imports the code that was just
-    submitted, not anything baked into the image — the G1 "same code" seam), and ``pip`` points at
-    the repo ``requirements.txt`` so a Vertex prebuilt image gains our deps. With a custom node
-    image that already bundles them the pip step is a fast no-op, so it is always kept for safety.
+    submitted, not anything baked into the image — the G1 "same code" seam), and ``pip`` is the
+    requirements package **list minus Ray** (:func:`_requirements_packages`): a Vertex prebuilt
+    image gains our deps, while Ray itself stays the image's version rather than being swapped by a
+    conflicting pip pin. With a custom node image that already bundles them the pip step is a fast
+    no-op, so it is always kept for safety.
     """
     return {
         "working_dir": str(_SRC_DIR),
-        "pip": str(_REQUIREMENTS),
+        "pip": _requirements_packages(),
     }
 
 
@@ -301,7 +337,9 @@ def _create_cluster(
 
     Head node is a single small CPU box (no accelerator); workers are the planned GPU/CPU pools
     (:func:`_worker_resources`). No ``autoscaling_spec`` anywhere — a fixed pool is the honest model
-    for a fixed-scale batch (D17). Labels tag the run for cost attribution.
+    for a fixed-scale batch (D17). ``infra.network`` is passed through: a VPC (with a
+    private-services connection) gives a private endpoint, and ``None`` gives a public endpoint —
+    Vertex's own default — so a deployment without VPC peering can still run. Labels tag the run.
     """
     from google.cloud.aiplatform import vertex_ray
 
@@ -311,12 +349,13 @@ def _create_cluster(
         custom_image=infra.container_image,
     )
     _log.info(
-        "creating fixed-size Ray cluster %s: cpu_nodes=%d gpu_nodes=%d accel=%s x%d",
+        "creating fixed-size Ray cluster %s: cpu_nodes=%d gpu_nodes=%d accel=%s x%d endpoint=%s",
         name,
         plan.cpu_node_count,
         plan.gpu_node_count,
         plan.accelerator_type,
         plan.accelerator_count,
+        "private" if infra.network else "public",
     )
     return vertex_ray.create_ray_cluster(
         head_node_type=head,

@@ -37,12 +37,15 @@ class NeuralProphetModel(BaseModel):
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:
-            from neuralprophet import NeuralProphet, set_log_level
+            from neuralprophet import NeuralProphet, set_log_level, set_random_seed
         except ImportError as e:  # pragma: no cover - exercised only without the extra
             raise ModelError("neuralprophet not installed; install the 'models' extra") from e
         if len(y) < 2:
             raise ModelError("neuralprophet requires at least 2 observations")
         set_log_level("ERROR")
+        # Seed torch so a fit is reproducible under a fixed seed, like every other stochastic model
+        # (xgboost/lightgbm wire ctx.seed too) — the model contract requires determinism.
+        set_random_seed(self.ctx.seed)
 
         self._last_date = y.index[-1]
         self._train = pd.DataFrame(

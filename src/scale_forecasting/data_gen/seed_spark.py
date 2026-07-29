@@ -242,7 +242,12 @@ def main(argv: list[str] | None = None) -> None:
         frame = generate_partition(id_list, gen_cfg, master_seed)
         rows = _to_source_rows(frame, holidays)
         # pd.NA → None so Spark writes SQL NULL (e.g. price_index when with_exog=False).
-        records = rows.astype(object).where(rows.notna(), None).to_dict("records")
+        # (pandas-stubs<3 has no .where(cond, None) overload though it's valid at runtime.)
+        records = (
+            rows.astype(object)
+            .where(rows.notna(), None)  # type: ignore[call-overload]
+            .to_dict("records")
+        )
         return iter(records)
 
     spark = SparkSession.builder.appName("scale-forecasting-seed").getOrCreate()
