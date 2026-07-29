@@ -273,3 +273,42 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
   - **NOTE — smoke replaced the 100k dataset** (replace-on-reseed DELETE-then-append). Restored to
     the 100k deliverable with `seed_run_label=full seed_num_series=100000 seed_write_method=indirect`
     after the smoke verified the runtime-code path.
+
+- **Arc B B2 — Spark forecast engines (explode · naive · multi) on Dataproc Serverless.** The
+  compute track: a real run fans `run_cell` across a serverless cluster and lands full lineage in
+  the three-tier registry. Architecture decisions + why (CONTRACTS §3.4/§3.5, DESIGN §2.1, D8–D12):
+  - **Executor-side batched writes**, not driver-collect. `groupBy(bucket).applyInPandas` runs
+    `run_cell` per cell and calls the *exact* B1 `write_cells` once per bucket; `bucket =
+    abs(hash(ts_id)) % n_buckets` keeps a series' rows together. 100k×N cells can't be `collect()`-ed;
+    append-only + dedupe-on-read (from B1) makes per-partition writes safe. Settings reach executors
+    by `sc.broadcast` (frozen str dataclass); driver owns the header + aggregates a compact 4-col
+    status frame to `update_header`.
+  - **`multi` is submit-side, not on-cluster.** `google-cloud-dataproc` is `[spark]`-only (excluded
+    from the container), so `spark_multi.run` is a guarded stub; the submit helper loops families and
+    launches one child `explode` batch each. Code ships at runtime via `python_file_uris` (zip of
+    `src/`) + a `spark_entry.py` launcher; RunConfig staged to GCS as JSON, passed as `--config-uri`.
+  - **`naive` is a first-class engine** (`spark_naive.py`), registry-logged, `--max-executors 2`
+    throttle → the straggler anti-pattern is real and queryable next to `explode`, small scales only.
+  - **`job_telemetry` column + analyst views.** Submitter stamps the terminal Dataproc `Batch`
+    (wall-clock, DCU, shuffle, cores, instances, maxExecutors, version, image, SA, subnet) into
+    `run_registry.job_telemetry` (JSON-as-STRING), best-effort, even on FAILED. `v_run_summary`
+    (scaling knobs + telemetry + derived `overhead_seconds`/`overhead_fraction`) and
+    `v_model_leaderboard` (per model: `no_artifact_rate`, `median_fit_seconds`, mean wape/mae) are
+    the reviewable read surface, created by `ensure_tables`→`ensure_views`.
+  - **DEVIATION — live schema drift found + fixed two ways.** The `job_telemetry` view failed live:
+    `ensure_tables` is `CREATE IF NOT EXISTS`, so the already-deployed `run_registry` never gained the
+    column. Fix: (1) one-time `ALTER TABLE ADD COLUMN IF NOT EXISTS` on the live table; (2) permanent
+    **additive self-migration** — `ddl.render_migrations` derives `ALTER ... ADD COLUMN IF NOT EXISTS`
+    from the same DDL bodies the CREATE uses, run by `ensure_tables` after the CREATEs (NOT NULL cols
+    excluded). New nullable columns now deploy without CREATE/migration drift (D12).
+  - **DEVIATION — `libgomp1` missing from the image.** lightgbm hard-links OpenMP (xgboost bundles
+    its own); without it every lightgbm cell degraded to an error (resilient PARTIAL, not a crash —
+    CONTRACTS §3.3). Added `libgomp1` to the Dockerfile; after rebuild the same run went all-green
+    (`no_artifact_rate=0.0` for all four models). Confirms the degrade-don't-die contract works.
+  - **Verified live (project `…-scale-forecasting`, never the default project).** explode n=10/100
+    SUCCEEDED→COMPLETED; naive n=100 `--max-executors 2` slower than explode at equal scale (the
+    anti-pattern); multi → one child `explode` batch per family; explode **n=1000** COMPLETED,
+    exactly 1000 distinct series × 4 models = 4000 full-fit cells, telemetry auto-stamped
+    (`total_wall_s≈527`, `runtime_seconds≈321`, `overhead_fraction≈0.39`). The scaling thesis is now
+    queryable: DCU-hours are nearly flat n=10→1000 (~10→12 DCU-hr) — the serverless provisioning
+    floor dominates until work outgrows it, which is the whole point of `explode`. Next gate: 100k.
