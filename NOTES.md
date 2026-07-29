@@ -312,3 +312,12 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     (`total_wall_s≈527`, `runtime_seconds≈321`, `overhead_fraction≈0.39`). The scaling thesis is now
     queryable: DCU-hours are nearly flat n=10→1000 (~10→12 DCU-hr) — the serverless provisioning
     floor dominates until work outgrows it, which is the whole point of `explode`. Next gate: 100k.
+  - **FIX — 100k bucket-sizing OOM.** The first 100k attempt FAILED: executors OOM-killed (exit
+    137) → shuffle `FetchFailedException` → stage aborted, at the `applyInPandas`/`toPandas` shuffle.
+    Root cause: `default_bucket_count` clamped buckets to `compute.max_parallelism` (default 1000),
+    so 400k cells forced ~400 series-histories into each per-task pandas frame — fine at 1k (4/frame),
+    fatal at 100k. Buckets are *shuffle partitions*, not executor concurrency (that's
+    `spark.dynamicAllocation.maxExecutors`), so decoupled them: new `compute.bucket_target_cells`
+    (default 8) sizes buckets as `ceil(cells / target)`, bounding per-task memory at every scale.
+    The 100k hero run uses a dedicated config (`bucket_target_cells=200` → 2000 buckets to keep the
+    Storage-Write stream count sane; `persist_models=false` to avoid 400k artifact objects).
