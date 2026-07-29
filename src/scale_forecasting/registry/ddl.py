@@ -15,7 +15,13 @@ JSON column type (verified against a live table, B0.3). The row assemblers in ``
 already emit JSON *strings* (``json.dumps`` / ``_as_json``), so STRING matches what the
 writers produce; query them back with ``PARSE_JSON(col)`` when you need structured access.
 
-Public surface: ``TABLE_NAMES``, ``render_create_tables``.
+Schema evolution is additive: when a new NULLABLE column is added to a body below,
+``render_migrations`` derives an ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` for it from
+the *same* bodies, so a table created under an older schema can be brought up to date
+without the CREATE and the migration ever drifting apart (``ensure_tables`` runs both).
+
+Public surface: ``TABLE_NAMES``, ``render_create_tables``, ``additive_columns``,
+``render_migrations``.
 """
 
 from __future__ import annotations
@@ -106,6 +112,50 @@ CLUSTER BY ts_id""",
 }
 
 TABLE_NAMES: tuple[str, ...] = tuple(_TABLE_BODIES)
+
+
+def _column_block(body: str) -> str:
+    """Return the text between the CREATE's opening ``(`` and the closing ``)`` (the columns)."""
+    open_paren = body.index("(")
+    close_paren = body.index("\n)", open_paren)
+    return body[open_paren + 1 : close_paren]
+
+
+def additive_columns(table: str) -> list[tuple[str, str]]:
+    """Return the ``(name, type)`` of every NULLABLE column of ``table``, in declaration order.
+
+    These are exactly the columns that can be back-filled onto an already-created table with
+    ``ADD COLUMN IF NOT EXISTS`` (a ``NOT NULL`` column can't be added to a populated table, so
+    those are excluded). Parsed from the same ``_TABLE_BODIES`` the CREATE renders, so the two can
+    never drift. Commas separate columns (types like ``ARRAY<STRING>`` carry none), so a plain
+    split is unambiguous; a piece containing ``NOT NULL`` is skipped.
+    """
+    cols: list[tuple[str, str]] = []
+    for piece in _column_block(_TABLE_BODIES[table]).split(","):
+        tokens = piece.split()
+        if not tokens or "NOT NULL" in " ".join(tokens):
+            continue
+        name, col_type = tokens[0], " ".join(tokens[1:])
+        if col_type:  # skip stray fragments; a real column always has a type
+            cols.append((name, col_type))
+    return cols
+
+
+def render_migrations(dataset: str) -> dict[str, str]:
+    """Render ``{table_name: ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...}`` for additive columns.
+
+    One idempotent ``ALTER`` per table adds every nullable column if absent, so a table created
+    under an older schema is brought current without touching existing rows (they read NULL) and
+    without a hand-written migration. Tables with no nullable columns are omitted.
+    """
+    out: dict[str, str] = {}
+    for name in TABLE_NAMES:
+        cols = additive_columns(name)
+        if not cols:
+            continue
+        adds = ",\n  ".join(f"ADD COLUMN IF NOT EXISTS {c} {t}" for c, t in cols)
+        out[name] = f"ALTER TABLE `{dataset}.{name}`\n  {adds};"
+    return out
 
 
 def _iceberg_options(table_name: str, warehouse_uri: str) -> str:

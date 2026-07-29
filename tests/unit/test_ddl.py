@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from scale_forecasting.registry.ddl import TABLE_NAMES, render_create_tables
+from scale_forecasting.registry.ddl import (
+    TABLE_NAMES,
+    additive_columns,
+    render_create_tables,
+    render_migrations,
+)
 
 SNAPSHOT = Path(__file__).parent / "snapshots" / "ddl_iceberg.sql"
 
@@ -56,6 +61,40 @@ def test_iceberg_requires_connection_and_warehouse() -> None:
 def test_dataset_ref_is_substituted() -> None:
     stmt = render_create_tables("myproj.myds", **_KW)["forecast_predictions"]
     assert "`myproj.myds.forecast_predictions`" in stmt
+
+
+# --- additive schema evolution (migrations) ------------------------------------
+
+
+def test_additive_columns_excludes_not_null_keys() -> None:
+    cols = dict(additive_columns("run_registry"))
+    # NOT NULL columns can't be added to a populated table, so they're not migration candidates.
+    assert "run_id" not in cols
+    assert "created_at" not in cols
+    assert "raw_config" not in cols
+    # the nullable columns are, with their types intact.
+    assert cols["status"] == "STRING"
+    assert cols["n_series"] == "INT64"
+    assert cols["job_telemetry"] == "STRING"
+
+
+def test_additive_columns_parse_array_type() -> None:
+    # a comma-free composite type (ARRAY<STRING>) survives the comma-split of the column block.
+    cols = dict(additive_columns("run_registry"))
+    assert cols["bq_models"] == "ARRAY<STRING>"
+
+
+def test_render_migrations_adds_job_telemetry_idempotently() -> None:
+    stmt = render_migrations("proj.ds")["run_registry"]
+    assert stmt.startswith("ALTER TABLE `proj.ds.run_registry`")
+    assert "ADD COLUMN IF NOT EXISTS job_telemetry STRING" in stmt
+    assert stmt.rstrip().endswith(";")
+
+
+def test_render_migrations_covers_every_table_with_nullable_columns() -> None:
+    migrations = render_migrations("d")
+    # all five tables have at least one nullable column, so each gets a migration statement.
+    assert set(migrations) == set(TABLE_NAMES)
 
 
 def test_ddl_snapshot() -> None:

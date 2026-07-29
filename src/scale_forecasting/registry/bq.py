@@ -402,7 +402,7 @@ def ensure_tables(
     from google.cloud import bigquery
 
     from ..errors import RegistryError
-    from .ddl import render_create_tables
+    from .ddl import render_create_tables, render_migrations
 
     resolved = _resolve_settings(settings)
     ddl = render_create_tables(
@@ -416,6 +416,16 @@ def ensure_tables(
             client.query(statement).result()
         except Exception as exc:  # noqa: BLE001 - re-raised with table context
             raise RegistryError(f"ensure_tables failed creating {name}: {exc}") from exc
+
+    # Additive schema evolution: bring tables created under an older schema up to the current
+    # column set (ADD COLUMN IF NOT EXISTS). A fresh CREATE already has every column, so these
+    # ALTERs are no-ops on it; on a pre-existing table they back-fill new nullable columns.
+    migrations = render_migrations(resolved.dataset_ref)
+    for name, statement in migrations.items():
+        try:
+            client.query(statement).result()
+        except Exception as exc:  # noqa: BLE001 - re-raised with table context
+            raise RegistryError(f"ensure_tables failed migrating {name}: {exc}") from exc
 
     # Curated analyst views sit on top of the tables — create them in the same setup pass so the
     # reviewable read surface (v_run_summary / v_model_leaderboard) exists after any run.

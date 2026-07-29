@@ -31,10 +31,13 @@ FROM debian:12-slim
 # --- OS packages required/recommended by Dataproc Serverless -------------------------------------
 # procps: `ps` for Spark. tini: init/reaper. libjemalloc2: allocator. python3.11 is Debian 12's
 # system Python (matches requires-python >=3.11,<3.12); pip + venv to build an isolated user env.
+# libgomp1: OpenMP runtime that lightgbm hard-links against (xgboost bundles its own); without it
+# lightgbm import fails and every lightgbm cell degrades to an error at runtime.
 RUN apt-get update && apt-get install --no-install-recommends -y \
         procps \
         tini \
         libjemalloc2 \
+        libgomp1 \
         python3.11 \
         python3.11-venv \
         python3-pip \
