@@ -321,3 +321,33 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     (default 8) sizes buckets as `ceil(cells / target)`, bounding per-task memory at every scale.
     The 100k hero run uses a dedicated config (`bucket_target_cells=200` → 2000 buckets to keep the
     Storage-Write stream count sane; `persist_models=false` to avoid 400k artifact objects).
+
+- **B3 BigQuery-native runtime (`engines/bigquery_engine.py`).** Three native models —
+  `arima_plus`, `arima_plus_xreg`, `timesfm` — run as SQL *in* BigQuery and land in the **same**
+  three registry tables as the Spark models, so they're directly comparable/ensemble-able.
+  `run(cfg, models)` is a self-contained engine (own header lifecycle, `bq_models` array stamped);
+  `router.split_by_runtime` partitions the model list by `runtime`, and a thin
+  `python -m scale_forecasting.engines.bigquery_engine --config …` CLI runs a BQ-only run. Fanning
+  it in parallel with a Python engine under one shared run_id is Arc B (`main.py`), not B3.
+  - **Metric parity, not a shortcut.** Each native model does a held-out single fold
+    (`cutoff = MAX(ds) − horizon`; train `ds <= cutoff`, score the last `horizon` window `ds > cutoff`).
+    The engine reads the held-out `(y_true, yhat, lower, upper)` + history back and calls the **same**
+    `metrics.compute_metrics` the Python models use — so the 11-metric panel can't drift by runtime.
+    `forecast_predictions` + `backtest_oof` (`fold_id=0`) + `forecast_metadata` (`fold_id=NULL`) all
+    land with `compute_engine='bigquery'`. Multi-fold BQ backtest is deferred.
+  - **Holiday parity via a custom-holiday CTE.** `CREATE MODEL … AS (training_data AS (…),
+    custom_holiday AS (SELECT … FROM UNNEST([STRUCT(region, holiday_name, primary_date,
+    preholiday_days, postholiday_days), …])))` built from the *same* `features.holiday_frame(cfg)`
+    calendar the Python suite uses — not `holiday_region`. Holiday names are sanitized to valid
+    identifiers (BQML surfaces them as columns).
+  - **Showpiece contrast.** ARIMA_PLUS with `time_series_id_col` trains **every series in one SQL
+    statement** — the opposite of Spark's per-cell fan-out. "One query forecasts N series" next to
+    "a serverless cluster fans N×M cells," both landing in one registry.
+  - **Three bugs the offline snapshot couldn't catch, surfaced by the live `@gcp` smoke:**
+    (1) `client.query(...).to_dataframe()` needs **`db-dtypes`** to map DATE/NUMERIC → pandas (added
+    to core deps); (2) XREG `ML.FORECAST` argument order is `(MODEL, STRUCT(...), (future_query))` —
+    the STRUCT comes **before** the future-features query, else "Scalar subquery cannot have more than
+    one column"; (3) `bqml_options` must resolve for `timesfm` (returns the AI.FORECAST params) since
+    it has no `CREATE MODEL` OPTIONS map — `run()` still stamps `best_params` for every model. TimesFM
+    is serverless (`AI.FORECAST`, no training, no `model =>` arg). The smoke seeds its **own**
+    exog-carrying scratch table so `arima_plus_xreg` has a non-NULL regressor to train on.
