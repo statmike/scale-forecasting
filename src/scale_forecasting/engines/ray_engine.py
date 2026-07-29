@@ -1,11 +1,245 @@
-"""Ray on Vertex — async task graph, heterogeneous CPU/fractional-GPU routing (DESIGN §11).
+"""Ray on Vertex — the on-cluster driver: read → route GPU/CPU → fan chunks → close (DESIGN §11).
 
-Owned by BUILD step B4. Public surface: ``run(cfg) -> None``,
-``calibrate_gpu_fraction(cfg) -> float | dict``.
+The Ray analog of :func:`~scale_forecasting.engines.spark_explode.run`, and its structural twin:
+header → fan cells across the cluster → aggregate statuses → close header. Everything reusable —
+the per-cell work (:func:`~scale_forecasting.engines.spark_io.run_group`), the executor-side write
+(:func:`~scale_forecasting.registry.bq.write_cells`), and the run-level roll-up
+(:func:`~scale_forecasting.engines.spark_io.aggregate_status`) — is shared verbatim through
+:mod:`.ray_io`; this module owns only the Ray-specific driver shell.
+
+**What's different from Spark, and why Ray is in the design (DESIGN §11.2).** The models are split
+into a GPU pool (NeuralProphet — ``family == "deep_learning"``) and a CPU pool (everything else).
+GPU cells run in ``@ray.remote(num_gpus=<fraction>)`` tasks that *pack several onto one T4* — the
+fractional-GPU sharing Spark can't do — while CPU cells run in ``@ray.remote(num_cpus=1)`` tasks.
+Both pools run the exact same chunk runner. The fixed (non-autoscaling) cluster they land on is
+sized at submit time by :func:`.ray_io.plan_cluster` (D17); this driver just fans work across
+whatever the cluster is.
+
+Runs on the Ray cluster head via :mod:`~scale_forecasting.ray_entry` (the Jobs API entrypoint).
+
+Public surface: ``run(cfg, models=None, *, manage_header=True) -> None``.
 """
 
 from __future__ import annotations
 
+import math
+from typing import TYPE_CHECKING
 
-def run(cfg: object) -> None:  # pragma: no cover - stub, see BUILD B4
-    raise NotImplementedError("engines.ray_engine.run — BUILD step B4")
+from ..errors import get_logger
+from . import ray_io
+from .spark_io import STATUS_COLUMNS, _needed_columns, _resolve_source_table
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from ..config import RunConfig
+    from ..settings import Settings
+
+_log = get_logger(__name__)
+
+
+def _read_source_series(
+    cfg: RunConfig, settings: Settings
+) -> pd.DataFrame:  # pragma: no cover - GCP I/O, exercised by the @gpu smoke
+    """Read the source series into a driver-side pandas frame (Ray's analog of the Spark read).
+
+    Reads via ``google-cloud-bigquery`` (no Spark here), projected to only the columns a cell needs
+    (:func:`_needed_columns`) and deterministically subset to the first ``series_limit`` ts_ids
+    (ordered) so every scale runs the *same* series (DESIGN §13.1), exactly like
+    :func:`~scale_forecasting.engines.spark_io.read_source_series`. The whole panel lands on the
+    driver, then :func:`.ray_io.chunk_cells` shards it into task-sized frames — acceptable because
+    Ray is the GPU path for modest scales, not the 100k hero (that's Spark, §11.2).
+    """
+    from google.cloud import bigquery
+
+    table = _resolve_source_table(cfg, settings)
+    cols = ", ".join(_needed_columns(cfg))
+    sql = f"SELECT {cols} FROM `{table}`"
+    limit = cfg.data.series_limit
+    if limit is not None:
+        id_col = cfg.data.ts_id_col
+        sql += (
+            f" WHERE {id_col} IN "
+            f"(SELECT {id_col} FROM `{table}` GROUP BY {id_col} ORDER BY {id_col} LIMIT {limit})"
+        )
+    client = bigquery.Client(project=settings.project_id)
+    return client.query(sql).to_dataframe()
+
+
+def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:
+    """The first few per-series frames, for live GPU-memory calibration (auto fraction only).
+
+    :func:`.ray_io.calibrate_gpu_fraction` fits NeuralProphet on these to measure peak GPU memory;
+    ``gpu_calibration_samples`` caps how many so calibration is a few fits, not the whole panel.
+    """
+    id_col = cfg.data.ts_id_col
+    n = cfg.compute.gpu_calibration_samples
+    ids = list(dict.fromkeys(source[id_col].tolist()))[:n]
+    return [source[source[id_col] == tid] for tid in ids]
+
+
+def _chunk_count(n_cells: int, target_cells: int) -> int:
+    """Chunks (Ray tasks) for a pool: ``ceil(cells / target)`` (≥ 1), or 0 for an empty pool.
+
+    Mirrors Spark's bucket count (:func:`~scale_forecasting.engines.spark_io.default_bucket_count`):
+    each chunk carries ~``target_cells`` cells so per-task memory stays bounded and the scheduler
+    has many units to pack onto the fixed nodes. Clamped to :data:`.ray_io._MAX_CHUNKS` downstream
+    by :func:`.ray_io.chunk_cells`.
+    """
+    if n_cells <= 0:
+        return 0
+    return max(1, math.ceil(n_cells / target_cells))
+
+
+def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool = True) -> None:
+    """Execute a Ray run end-to-end: header → route + fan chunks across the cluster → close header.
+
+    Driver-side lifecycle, the structural twin of :func:`spark_explode.run`:
+
+    1. Resolve infra :class:`~scale_forecasting.settings.Settings` (G1), derive the ``run_id`` from
+       the *full* ``cfg`` (so a mixed run shares one id across runtimes), and — in owner mode —
+       ``ensure_tables`` + ``write_header`` (RUNNING).
+    2. Read the source panel to the driver, split the executed models into GPU/CPU pools
+       (:func:`.ray_io.split_gpu_cpu_models`), calibrate the per-task GPU fraction
+       (:func:`.ray_io.calibrate_gpu_fraction` — live NeuralProphet memory profiling when ``auto``),
+       chunk each pool's cells (:func:`.ray_io.chunk_cells`), and dispatch one Ray task per chunk —
+       GPU chunks as ``@ray.remote(num_gpus=fraction)`` (packed onto T4s), CPU chunks as
+       ``num_cpus=1``. Every task runs the shared chunk runner (:func:`.ray_io.make_chunk_runner`),
+       which calls the exact :func:`run_group` + :func:`~scale_forecasting.registry.bq.write_cells`
+       and returns only the compact status frame.
+    3. Concatenate the statuses, :func:`.ray_io.aggregate_status`, and — in owner mode —
+       ``update_header`` (COMPLETED/PARTIAL/FAILED, wall-clock, ``n_series``).
+
+    ``models`` is the executed subset (Arc B): ``None`` runs every model in ``cfg.models``;
+    :func:`main.run` passes only the Python-runtime models of a mixed config so the BigQuery-native
+    ones run in BigQuery, not as Ray tasks. ``manage_header=False`` is contributor mode — the engine
+    skips the header lifecycle because :func:`main.run` owns the single shared header (parity with
+    the Spark contributor mode). Idempotent by construction: the config-derived ``run_id`` + append/
+    dedupe-on-read writes mean a re-run of the same config lands byte-identical rows (§3.4).
+
+    Assumes Ray is reachable: connects with a plain ``ray.init()`` only if not already connected
+    (the :mod:`~scale_forecasting.ray_entry` Jobs entrypoint normally owns the session), and tears
+    down only a session it opened — so a caller-managed session (e.g. the local-mode test) is left
+    intact.
+    """
+    import time
+
+    import pandas as pd
+    import ray
+
+    from ..registry import bq
+    from ..registry.ids import make_run_id
+    from ..settings import Settings
+
+    settings = Settings.resolve()
+    run_id = make_run_id(cfg)
+    executed = models if models is not None else cfg.models
+    gpu_models, cpu_models = ray_io.split_gpu_cpu_models(cfg, executed)
+    _log.info(
+        "ray run start: run_id=%s series_limit=%s gpu_models=%s cpu_models=%s manage_header=%s",
+        run_id,
+        cfg.data.series_limit,
+        gpu_models,
+        cpu_models,
+        manage_header,
+    )
+
+    # 1. Header first, so a run is visible even if the cluster dies mid-flight. Contributor mode
+    #    (Arc B) skips it — main.run already wrote the shared header.
+    if manage_header:
+        bq.ensure_tables(cfg, settings=settings)
+        bq.write_header(cfg, run_id, settings=settings)
+
+    owns_ray = not ray.is_initialized()
+    if owns_ray:
+        ray.init()
+    started = time.perf_counter()
+    try:
+        source = _read_source_series(cfg, settings)
+        runner = ray_io.make_chunk_runner(cfg, settings, executed)
+
+        # The per-task GPU fraction: fixed float passthrough, or live NeuralProphet profiling when
+        # "auto". Sample series only when auto (profiling costs) and only when a GPU is present.
+        sample = (
+            _sample_series(source, cfg)
+            if (gpu_models and cfg.compute.use_gpu and cfg.compute.gpu_fraction == "auto")
+            else None
+        )
+        gpu_fraction = ray_io.calibrate_gpu_fraction(cfg, sample_series=sample)
+
+        # Chunk counts come from the true cell counts (series in the panel × models in the pool).
+        target = cfg.compute.bucket_target_cells
+        gpu_chunks = ray_io.chunk_cells(
+            source, cfg, gpu_models, _chunk_count(_pool_cells(source, cfg, gpu_models), target)
+        )
+        cpu_chunks = ray_io.chunk_cells(
+            source, cfg, cpu_models, _chunk_count(_pool_cells(source, cfg, cpu_models), target)
+        )
+
+        # One Ray task per chunk. The remote closes over the picklable runner (cloudpickle handles
+        # the cfg/settings closure — the G1 seam, no second env path). GPU tasks request a fraction
+        # of a T4 so several pack onto one device; when no GPU is provisioned, NeuralProphet cells
+        # fall back to CPU inside the task, so route them as CPU work too (see _task_options).
+        @ray.remote
+        def _task(chunk: pd.DataFrame) -> pd.DataFrame:
+            return runner(chunk)
+
+        cpu_opts = _task_options(cfg, gpu_fraction, gpu=False)
+        gpu_opts = _task_options(cfg, gpu_fraction, gpu=True)
+        futures = [_task.options(**cpu_opts).remote(c) for c in cpu_chunks]
+        futures += [_task.options(**gpu_opts).remote(c) for c in gpu_chunks]
+
+        status_frames = ray.get(futures) if futures else []
+        status_pdf = (
+            pd.concat(status_frames, ignore_index=True)
+            if status_frames
+            else pd.DataFrame(columns=list(STATUS_COLUMNS))
+        )
+    finally:
+        if owns_ray:
+            ray.shutdown()
+
+    # 3. Close the header from the collected statuses (owner mode only; main.run finalizes else).
+    outcome = ray_io.aggregate_status(status_pdf)
+    runtime_seconds = time.perf_counter() - started
+    if manage_header:
+        bq.update_header(
+            run_id,
+            settings=settings,
+            status=outcome.status,
+            runtime_seconds=runtime_seconds,
+            n_series=outcome.n_series,
+        )
+    _log.info(
+        "ray run done: run_id=%s status=%s cells=%d ok=%d error=%d gpu_fraction=%s runtime=%.1fs",
+        run_id,
+        outcome.status,
+        outcome.n_cells,
+        outcome.n_ok,
+        outcome.n_error,
+        gpu_fraction,
+        runtime_seconds,
+    )
+
+
+def _pool_cells(source: pd.DataFrame, cfg: RunConfig, pool_models: list[str]) -> int:
+    """Cells one pool must run: distinct series in the panel × models in the pool (pure)."""
+    if not pool_models or source.empty:
+        return 0
+    n_series = int(source[cfg.data.ts_id_col].nunique())
+    return n_series * len(pool_models)
+
+
+def _task_options(cfg: RunConfig, gpu_fraction: float, *, gpu: bool) -> dict[str, float]:
+    """The ``@ray.remote.options`` for one pool's tasks — the heterogeneous-routing decision (pure).
+
+    CPU-pool tasks (``gpu=False``) always request ``num_cpus=1``. GPU-pool tasks (``gpu=True``)
+    request ``num_gpus=gpu_fraction`` **only when a GPU is actually provisioned** (``use_gpu``), so
+    several NeuralProphet tasks pack onto one T4 (Ray sums fractions against the device's 1.0). When
+    ``use_gpu`` is off there is no device to schedule against, so a GPU-model chunk runs as a plain
+    ``num_cpus=1`` task and NeuralProphet falls back to CPU inside the cell — the run still
+    finishes, just slower. Kept pure (no Ray) so the routing is unit-testable without a GPU.
+    """
+    if gpu and cfg.compute.use_gpu:
+        return {"num_gpus": gpu_fraction}
+    return {"num_cpus": 1}
