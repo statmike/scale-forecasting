@@ -567,8 +567,8 @@ SELECT
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
 FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_20ff6e1cbf2d`,
-    (SELECT ts_id, ds, price_index FROM `proj.scale_forecasting.source_series` WHERE ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series` GROUP BY ts_id ORDER BY ts_id LIMIT 100)),
-    STRUCT(28 AS horizon, 0.8 AS confidence_level));
+    STRUCT(28 AS horizon, 0.8 AS confidence_level),
+    (SELECT ts_id, ds, price_index FROM `proj.scale_forecasting.source_series` WHERE ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series` GROUP BY ts_id ORDER BY ts_id LIMIT 100)));
 
 -- ===== next model =====
 

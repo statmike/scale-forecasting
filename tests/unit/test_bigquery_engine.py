@@ -118,11 +118,13 @@ def test_forecast_insert_xreg_supplies_future_features() -> None:
     sql = be.build_forecast_insert_sql(
         _cfg(["arima_plus_xreg"], exog=["price_index"]), "arima_plus_xreg", _DS
     )
-    # XREG ML.FORECAST takes the held-out window's real future features before the STRUCT.
+    # XREG ML.FORECAST takes the STRUCT first, then the held-out window's real future features.
     assert "ML.FORECAST(MODEL" in sql
     assert "SELECT ts_id, ds, price_index" in sql
     assert "ds > (SELECT DATE_SUB(MAX(ds)" in sql
     assert "STRUCT(28 AS horizon, 0.8 AS confidence_level)" in sql
+    # The STRUCT precedes the future-features subquery (BQML's required argument order).
+    assert sql.index("STRUCT(28 AS horizon") < sql.index("SELECT ts_id, ds, price_index")
 
 
 def test_forecast_insert_timesfm_uses_ai_forecast_no_model() -> None:
@@ -175,6 +177,16 @@ def test_bqml_options_maps_columns() -> None:
     assert opts["time_series_timestamp_col"] == "ds"
     assert opts["time_series_data_col"] == "y"
     assert opts["horizon"] == 28
+
+
+def test_bqml_options_timesfm_returns_ai_forecast_params() -> None:
+    # TimesFM has no CREATE MODEL, but run() still stamps best_params for every model — so
+    # bqml_options must resolve for it (not KeyError) and describe the AI.FORECAST call instead.
+    opts = be.bqml_options(_cfg(["timesfm"]), "timesfm")
+    assert "TimesFM" in opts["model_type"]
+    assert opts["id_cols"] == ["ts_id"]
+    assert opts["horizon"] == 28
+    assert opts["confidence_level"] == 0.8
 
 
 # --- snapshot ------------------------------------------------------------------

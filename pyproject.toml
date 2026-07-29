@@ -23,6 +23,9 @@ dependencies = [
     "google-cloud-bigquery>=3.25",
     "google-cloud-bigquery-storage>=2.25",
     "google-cloud-storage>=2.17",
+    # BigQuery→pandas conversion (client.query(...).to_dataframe()) maps DATE / NUMERIC columns
+    # through db-dtypes; the BigQuery-native engine reads its held-out eval back this way.
+    "db-dtypes>=1.2",
     # Storage Write API rows are protobuf: registry/bq.py builds a dynamic descriptor per
     # cell table and serializes rows against it (a transitive dep of the google libs above,
     # pinned explicit because we import google.protobuf directly).

@@ -465,6 +465,21 @@ wheels = [
 ]
 
 [[package]]
+name = "db-dtypes"
+version = "1.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/bc/b348b35245452af9a6c8a360ae3434f027b919349a786d1cb73ded0c234e/db_dtypes-1.7.1.tar.gz", hash = "sha256:75adf3bdf3174a6474ea4162d9a345ea0b3102ec4fd603e69ec26b6e8a99145a", size = 36036, upload-time = "2026-07-08T17:03:35.671Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/83/5a/5601050daf8f21d201e7ff68cda559aac56b5be18632876daf7a711809b5/db_dtypes-1.7.1-py3-none-any.whl", hash = "sha256:450b94cd010cfa6d4d13cca2593009eba4fbe15516084c332cde1a47bbce0625", size = 17768, upload-time = "2026-07-08T17:03:03.252Z" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2121,6 +2136,7 @@ name = "scale-forecasting"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "db-dtypes" },
     { name = "google-cloud-bigquery" },
     { name = "google-cloud-bigquery-storage" },
     { name = "google-cloud-storage" },
@@ -2163,6 +2179,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "db-dtypes", specifier = ">=1.2" },
     { name = "google-cloud-aiplatform", marker = "extra == 'ray'", specifier = ">=1.60" },
     { name = "google-cloud-bigquery", specifier = ">=3.25" },
     { name = "google-cloud-bigquery-storage", specifier = ">=2.25" },

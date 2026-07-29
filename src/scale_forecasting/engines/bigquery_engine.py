@@ -154,12 +154,24 @@ def _cutoff_expr(cfg: RunConfig, source: str) -> str:
 
 
 def bqml_options(cfg: RunConfig, model_name: str) -> dict[str, Any]:
-    """The resolved BQML ``OPTIONS`` for a CREATE MODEL, as an ordered dict.
+    """The resolved model parameters, as an ordered dict — one source of truth for two uses.
 
-    One source of truth for both the rendered ``OPTIONS(...)`` clause and the ``best_params`` JSON
-    stamped onto each ``forecast_metadata`` row — so the registry records exactly what trained.
+    For the ARIMA models this is the ``CREATE MODEL`` ``OPTIONS(...)`` body *and* the
+    ``best_params`` JSON on each ``forecast_metadata`` row — the registry records what trained.
+    TimesFM has no ``CREATE MODEL``; :func:`_render_options` never sees its dict, but ``run`` still
+    stamps ``best_params`` for every model, so we return the resolved ``AI.FORECAST`` arguments here
+    — keeping the metadata row's provenance non-NULL and meaningful across both native shapes.
     """
     freq, _ = _freq(cfg)
+    if model_name not in _MODEL_TYPE:  # timesfm — serverless AI.FORECAST, no OPTIONS clause
+        return {
+            "model_type": "TimesFM (AI.FORECAST)",
+            "id_cols": [cfg.data.ts_id_col],
+            "timestamp_col": cfg.data.date_col,
+            "data_col": cfg.data.target_col,
+            "horizon": cfg.data.horizon,
+            "confidence_level": _CONFIDENCE_LEVEL,
+        }
     opts: dict[str, Any] = {
         "model_type": _MODEL_TYPE[model_name],
         "time_series_id_col": cfg.data.ts_id_col,
@@ -247,9 +259,10 @@ def _forecast_source(cfg: RunConfig, model_name: str, dataset: str) -> str:
     """The ``ML.FORECAST`` / ``AI.FORECAST`` table expression producing the held-out forecast.
 
     ARIMA_PLUS: ``ML.FORECAST(MODEL m, STRUCT(...))``. ARIMA_PLUS_XREG: the same with the held-out
-    window's *real* future features supplied before the STRUCT. TimesFM: ``AI.FORECAST`` over the
-    ``ds <= cutoff`` history — no model object. All three yield ``forecast_timestamp`` /
-    ``forecast_value`` / ``prediction_interval_{lower,upper}_bound`` plus the id column.
+    window's *real* future features supplied as a query *after* the STRUCT (the position BQML
+    requires). TimesFM: ``AI.FORECAST`` over the ``ds <= cutoff`` history — no model object. All
+    three yield ``forecast_timestamp`` / ``forecast_value`` /
+    ``prediction_interval_{lower,upper}_bound`` plus the id column.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
@@ -282,7 +295,7 @@ def _forecast_source(cfg: RunConfig, model_name: str, dataset: str) -> str:
         if sfilter:
             where.append(sfilter)
         future = f"SELECT {exog_cols} FROM `{source}` WHERE {' AND '.join(where)}"
-        return f"ML.FORECAST(MODEL {ref},\n    ({future}),\n    {struct})"
+        return f"ML.FORECAST(MODEL {ref},\n    {struct},\n    ({future}))"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
 
 
