@@ -124,7 +124,16 @@ def _cfg(source_table: str) -> RunConfig:
         # would land NULL mean_wape and the two runtimes wouldn't be comparable, which is the whole
         # point of the single-run leaderboard. A small fold count keeps the T4 run cheap.
         backtest={"enabled": True, "n_folds": 2, "horizon": _HORIZON, "step": _HORIZON},
-        compute={"use_gpu": True, "gpu_type": "T4", "gpu_fraction": "auto", "accelerator_count": 1},
+        # ray_regions: try each US region that has T4 quota in turn — one region can transiently
+        # stock out ("Resources are insufficient in region"), so the launcher hops to the next.
+        # The data plane stays in settings.region; only the cluster moves.
+        compute={
+            "use_gpu": True,
+            "gpu_type": "T4",
+            "gpu_fraction": "auto",
+            "accelerator_count": 1,
+            "ray_regions": ["us-central1", "us-east1", "us-west1"],
+        },
     )
 
 

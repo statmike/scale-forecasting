@@ -81,6 +81,13 @@ _DEFAULT_PYTHON_VERSION = "3.11"
 _POLL_SECONDS = 15
 _TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "STOPPED"})
 
+# Dashboard warm-up race: a cluster reaches RUNNING *before* its Ray dashboard is reachable through
+# Vertex's public-endpoint proxy, so the first JobSubmissionClient handshake (GET /api/version) can
+# get a proxy gateway timeout / connection refusal. We retry the *connection only* with backoff up
+# to this budget before giving up — well within the ~few-minutes the dashboard takes to serve.
+_DASHBOARD_CONNECT_ATTEMPTS = 20
+_DASHBOARD_CONNECT_BACKOFF_SECONDS = 15
+
 
 @dataclass(frozen=True)
 class RayInfra:
@@ -330,6 +337,75 @@ def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]
     return workers
 
 
+def _init_vertex(
+    settings: Settings, region: str
+) -> None:  # pragma: no cover - thin SDK call, live smoke covers
+    """Pin the Vertex SDK to the configured project + region before a ``vertex_ray`` call.
+
+    ``vertex_ray.create_ray_cluster`` (and the get/delete helpers) take no explicit project or
+    location — they read them from the SDK's global config, which else falls back to the ambient
+    ``GOOGLE_CLOUD_PROJECT`` / gcloud default. That would silently provision the cluster in the
+    wrong project when the deployment's project differs from the environment's (Composer, local dev,
+    any multi-project setup). Binding it from :class:`Settings` here keeps the same code targeting
+    the configured project everywhere (G1) — never whatever project the shell happens to point at.
+
+    ``region`` is explicit (not ``settings.region``) because the *cluster* may hop across regions on
+    a capacity stockout while the *data plane* stays pinned to ``settings.region`` — so every
+    cluster-region-scoped call re-inits the SDK to the region actually being attempted.
+    """
+    from google.cloud import aiplatform
+
+    aiplatform.init(project=settings.project_id, location=region)
+
+
+# Substrings that mark a *regional capacity* failure (retry a different region) vs. a config/quota
+# error (retrying elsewhere won't help). Matched case-insensitively against the cluster's error
+# message. Kept as data so the classifier stays a pure, unit-testable function.
+_CAPACITY_ERROR_MARKERS = (
+    "resources are insufficient in region",
+    "try a different region",
+    "does not have enough resources",
+    "insufficient resources",
+    "resource exhausted",
+)
+
+
+def _is_capacity_error(message: str) -> bool:
+    """True if a cluster-create error message signals a *regional capacity* shortage (pure).
+
+    Capacity errors are worth retrying in another region; anything else (bad machine type, missing
+    quota, permission) is not — so the fallback loop only advances on these, else fails fast.
+    """
+    low = message.lower()
+    return any(marker in low for marker in _CAPACITY_ERROR_MARKERS)
+
+
+def _is_generic_cluster_error(message: str) -> bool:
+    """True for the SDK's opaque post-provision "Cluster ... returned an error." (pure).
+
+    The Vertex SDK raises exactly this after polling a create to ERROR state, with the real reason
+    only on the resource (not the exception). When the resource read also fails we can't see the
+    reason — but this string only appears *after* a cluster provisioned and then failed, which in
+    practice is a capacity stockout, so the fallback treats it as retryable rather than fatal.
+    """
+    low = message.lower()
+    return "returned an error" in low and "cluster" in low
+
+
+def _resolve_regions(cfg: RunConfig, settings: Settings) -> list[str]:
+    """Priority-ordered cluster regions to attempt (pure): configured list, else [settings.region].
+
+    ``settings.region`` (the data-plane region) is always appended as a final fallback if it isn't
+    already listed, so a config that lists only remote regions still ends up trying home.
+    """
+    regions = list(cfg.compute.ray_regions or [])
+    if not regions:
+        return [settings.region]
+    if settings.region not in regions:
+        regions.append(settings.region)
+    return regions
+
+
 def _create_cluster(
     plan: ray_io.RayClusterPlan, infra: RayInfra, name: str
 ) -> str:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
@@ -366,6 +442,108 @@ def _create_cluster(
         ray_version=infra.ray_version,
         python_version=infra.python_version,
         labels={"app": "scale-forecasting"},
+        # NOTE: no explicit location — the region is bound via _init_vertex before this call, which
+        # is what the region-fallback loop re-pins per attempt.
+    )
+
+
+def _region_from_resource_name(resource_name: str) -> str | None:
+    """Parse the region out of a ``.../locations/<region>/...`` resource path, or ``None``.
+
+    Persistent-resource reads are *regional* — the service client must target
+    ``<region>-aiplatform.googleapis.com``, so we recover the region from the resource name the
+    create returned rather than assuming the data-plane region (the cluster may have hopped).
+    """
+    match = re.search(r"/locations/([^/]+)/", resource_name)
+    return match.group(1) if match else None
+
+
+def _cluster_error_message(
+    resource_name: str,
+) -> str:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
+    """The failed cluster's ``error.message`` (where the *real* reason lives), or ``""`` if none.
+
+    A create that fails to reach RUNNING surfaces only a generic
+    ``RuntimeError("Cluster ... returned an error.")`` from the SDK — the actionable text
+    ("Resources are insufficient in region: …") is on the ``PersistentResource.error`` field, not
+    in the exception. So the fallback classifier reads it here rather than trusting ``str(exc)``.
+
+    The read must hit the resource's *regional* endpoint (``<region>-aiplatform.googleapis.com``) —
+    against the global default the ``get`` fails and the reason is lost, which silently defeats the
+    capacity classifier. Best-effort: any read failure returns ``""`` (the caller falls back to the
+    exception string).
+    """
+    try:
+        from google.cloud import aiplatform_v1
+
+        region = _region_from_resource_name(resource_name)
+        client_options = {"api_endpoint": f"{region}-aiplatform.googleapis.com"} if region else None
+        client = aiplatform_v1.PersistentResourceServiceClient(client_options=client_options)
+        pr = client.get_persistent_resource(name=resource_name)
+        return pr.error.message or ""
+    except Exception as exc:  # noqa: BLE001 - diagnostic read; never fatal
+        _log.debug("could not read cluster error for %s: %r", resource_name, exc)
+        return ""
+
+
+def _create_cluster_across_regions(
+    plan: ray_io.RayClusterPlan,
+    infra: RayInfra,
+    name: str,
+    settings: Settings,
+    regions: list[str],
+) -> tuple[str, str]:  # pragma: no cover - orchestrates live Vertex I/O; @gpu smoke exercises it
+    """Create the fixed-size cluster, walking ``regions`` in order until one has T4 capacity.
+
+    Returns ``(cluster_resource_name, region)`` for the region that succeeded. On a *regional
+    capacity* failure (:func:`_is_capacity_error`) the stocked-out attempt's (deterministic)
+    resource is torn down and the next region tried; any *other* error (bad machine type, missing
+    quota, permission) is re-raised at once because another region won't fix it. Exhausting every
+    region raises :class:`EngineError` naming the regions tried.
+
+    The capacity signal is read from the failed resource's ``error.message`` (via
+    :func:`_cluster_error_message`) *and* the raised exception string — the SDK's exception is a
+    generic "returned an error" while the "Resources are insufficient in region" text lives only on
+    the resource, so classifying on the exception alone would never detect a stockout.
+
+    Only the cluster hops — the data plane (config staging, registry writes) stays in
+    ``settings.region``. The SDK is re-pinned to each attempted region via :func:`_init_vertex`
+    just before the create, so ``vertex_ray`` provisions there.
+    """
+    last_exc: Exception | None = None
+    for region in regions:
+        _init_vertex(settings, region)
+        try:
+            _log.info("attempting Ray cluster %s in region %s", name, region)
+            resource_name = _create_cluster(plan, infra, name)
+            _log.info("Ray cluster %s created in region %s", name, region)
+            return resource_name, region
+        except Exception as exc:  # noqa: BLE001 - classify, then either advance or re-raise
+            # Read the resource's own error text *before* teardown — that's where the capacity
+            # reason lives; the exception string is only a generic "returned an error".
+            resource_path = _resource_name(settings, name, region)
+            detail = _cluster_error_message(resource_path)
+            message = f"{exc} | {detail}".strip(" |")
+            _delete_cluster(
+                resource_path
+            )  # a create that errors mid-provision still leaves a resource
+            # Hop when the reason reads as capacity, OR when we couldn't read the reason but the SDK
+            # raised its generic post-provision "returned an error" (which only fires after polling
+            # to ERROR state — in practice a stockout). A specific exception with no capacity signal
+            # is a real config/quota/permission fault: another region won't help, so re-raise.
+            capacity = _is_capacity_error(message)
+            generic_provision_error = not detail and _is_generic_cluster_error(str(exc))
+            if not (capacity or generic_provision_error):
+                raise
+            _log.warning(
+                "region %s lacks T4 capacity (%s); trying next region",
+                region,
+                detail or exc,
+            )
+            last_exc = exc
+    raise EngineError(
+        f"Ray cluster {name} could not be created in any of {regions} "
+        f"(no T4 capacity): last error {last_exc!r}"
     )
 
 
@@ -391,6 +569,65 @@ def _delete_cluster(
         _log.warning("Ray cluster teardown failed (non-fatal): %r", exc)
 
 
+def _is_dashboard_warmup_error(exc: Exception) -> bool:
+    """True if ``exc`` looks like the dashboard-not-yet-serving race (retryable), not a real fault.
+
+    The JobSubmissionClient version handshake fails during warm-up with a proxy gateway timeout
+    (HTTP 5xx — 502/503/504, and Cloudflare's 524) or a bare connection error, all transient. A
+    4xx / auth / version-mismatch is a genuine fault and must *not* be retried, so we match on the
+    known-transient shapes only.
+    """
+    low = str(exc).lower()
+    transient_markers = (
+        " 502",
+        " 503",
+        " 504",
+        " 524",
+        "gateway",
+        "timeout",
+        "timed out",
+        "connection",
+        "temporarily unavailable",
+        "max retries",
+    )
+    return any(marker in low for marker in transient_markers)
+
+
+def _connect_job_client(
+    dashboard_address: str,
+) -> Any:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
+    """Open a ``JobSubmissionClient`` to the dashboard, retrying past the warm-up race.
+
+    ``JobSubmissionClient.__init__`` does a GET ``/api/version`` handshake; right after the cluster
+    hits RUNNING that endpoint may not be reachable through Vertex's public-endpoint proxy yet, so
+    the first attempts can raise a proxy gateway timeout (524/504/…). We back off and retry the
+    *connection only* (never a partial submit) until it succeeds or the budget is spent, then let
+    the last error propagate.
+    """
+    import time
+
+    from ray.job_submission import JobSubmissionClient
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _DASHBOARD_CONNECT_ATTEMPTS + 1):
+        try:
+            return JobSubmissionClient(f"vertex_ray://{dashboard_address}")
+        except Exception as exc:  # noqa: BLE001 - classify, retry transients, re-raise real faults
+            if not _is_dashboard_warmup_error(exc):
+                raise
+            last_exc = exc
+            _log.info(
+                "Ray dashboard not ready yet (attempt %d/%d): %r; retrying in %ds",
+                attempt,
+                _DASHBOARD_CONNECT_ATTEMPTS,
+                exc,
+                _DASHBOARD_CONNECT_BACKOFF_SECONDS,
+            )
+            time.sleep(_DASHBOARD_CONNECT_BACKOFF_SECONDS)
+    assert last_exc is not None
+    raise last_exc
+
+
 def _submit_and_poll(
     cluster: object,
     entrypoint: str,
@@ -400,16 +637,14 @@ def _submit_and_poll(
 ) -> tuple[str, str]:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
     """Submit the on-cluster driver as a Ray Job and (when ``wait``) poll to a terminal state.
 
-    Connects the Jobs client to the cluster's dashboard (``vertex_ray://<dashboard_address>``),
-    submits ``entrypoint`` with ``runtime_env`` (current ``src/`` + requirements), and returns
-    ``(job_id, status)``. Without ``wait`` the status is the immediate post-submit state (the caller
-    skips telemetry + the terminal-state check).
+    Connects the Jobs client to the cluster's dashboard (``vertex_ray://<dashboard_address>``,
+    retrying past the dashboard warm-up race), submits ``entrypoint`` with ``runtime_env`` (current
+    ``src/`` + requirements), and returns ``(job_id, status)``. Without ``wait`` the status is the
+    immediate post-submit state (the caller skips telemetry + the terminal-state check).
     """
     import time
 
-    from ray.job_submission import JobSubmissionClient
-
-    client = JobSubmissionClient(f"vertex_ray://{cluster.dashboard_address}")  # type: ignore[attr-defined]
+    client = _connect_job_client(cluster.dashboard_address)  # type: ignore[attr-defined]
     job_id = client.submit_job(entrypoint=entrypoint, runtime_env=runtime_env)
     _log.info("submitted Ray job %s", job_id)
     if not wait:
@@ -496,23 +731,33 @@ def submit_ray(
     config_uri = _stage_config(cfg, run_id, infra)
     entrypoint = build_entrypoint(config_uri, settings, models=models, manage_header=manage_header)
     runtime_env = build_runtime_env()
+    regions = _resolve_regions(cfg, settings)
     _log.info(
-        "ray submit: run_id=%s cluster=%s reuse=%s cpu_nodes=%d gpu_nodes=%d",
+        "ray submit: run_id=%s cluster=%s reuse=%s cpu_nodes=%d gpu_nodes=%d regions=%s",
         run_id,
         name,
         reuse,
         plan.cpu_node_count,
         plan.gpu_node_count,
+        regions,
     )
 
     cluster_resource_name: str | None = None
-    created = False
+    # For an ephemeral run, the teardown target is the *deterministic* resource path. The create
+    # helper cleans up each stocked-out region as it advances; this final target covers the region
+    # that actually got a cluster (torn down after the job) or a create that reached ERROR after the
+    # loop settled on a region. Reuse leaves the standing cluster alone.
+    teardown_target: str | None = None
     try:
         if reuse:
+            # A standing cluster lives in the data-plane region; pin the SDK there and target it.
+            _init_vertex(settings, settings.region)
             cluster_resource_name = _resource_name(settings, name)
         else:
-            cluster_resource_name = _create_cluster(plan, infra, name)
-            created = True
+            cluster_resource_name, cluster_region = _create_cluster_across_regions(
+                plan, infra, name, settings, regions
+            )
+            teardown_target = _resource_name(settings, name, cluster_region)
 
         import time
 
@@ -535,15 +780,23 @@ def submit_ray(
                 raise EngineError(f"ray job {job_id} terminal state {status}")
         return job_id
     finally:
-        # Guaranteed teardown of an ephemeral cluster — even on a raised job — mirroring the §10
-        # all_done intent. A reused cluster is left standing (created is False).
-        if created and cluster_resource_name is not None:
-            _delete_cluster(cluster_resource_name)
+        # Guaranteed teardown of an ephemeral cluster — even on a raised job *or a create that
+        # errored mid-provision* — mirroring the §10 all_done intent. teardown_target is set (to the
+        # deterministic path) for every ephemeral run and None for reuse, so a reused cluster is
+        # left standing while a half-created ephemeral one is still cleaned up. _delete_cluster is
+        # best-effort, so a target that never actually materialized is a harmless no-op.
+        if teardown_target is not None:
+            _delete_cluster(teardown_target)
 
 
-def _resource_name(settings: Settings, name: str) -> str:
-    """The Vertex persistent-resource path for a cluster display name (reuse targeting; pure)."""
-    return f"projects/{settings.project_id}/locations/{settings.region}/persistentResources/{name}"
+def _resource_name(settings: Settings, name: str, region: str | None = None) -> str:
+    """The Vertex persistent-resource path for a cluster display name (reuse targeting; pure).
+
+    ``region`` defaults to ``settings.region`` (the reuse case — a standing cluster lives in the
+    data-plane region); the ephemeral fallback path passes the region actually being attempted.
+    """
+    loc = region or settings.region
+    return f"projects/{settings.project_id}/locations/{loc}/persistentResources/{name}"
 
 
 def main(argv: list[str] | None = None) -> None:

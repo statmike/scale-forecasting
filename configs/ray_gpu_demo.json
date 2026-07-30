@@ -21,6 +21,7 @@
     "use_gpu": true,
     "gpu_type": "T4",
     "gpu_fraction": "auto",
-    "accelerator_count": 1
+    "accelerator_count": 1,
+    "ray_regions": ["us-central1", "us-east1", "us-west1"]
   }
 }

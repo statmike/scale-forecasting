@@ -260,6 +260,7 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls["deleted"] += 1
         calls["order"].append("delete")
         calls["delete_name"] = resource_name
+        calls.setdefault("delete_names", []).append(resource_name)
 
     def _fake_submit(
         cluster: Any, entrypoint: str, runtime_env: dict, *, wait: bool
@@ -274,6 +275,16 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     def _fake_stamp(telemetry: dict, run_id: str, settings: Settings) -> None:
         calls["telemetry"] = telemetry
 
+    def _fake_init(settings: Settings, region: str) -> None:
+        calls["init_project"] = settings.project_id
+        calls.setdefault("init_regions", []).append(region)
+
+    def _fake_cluster_error(resource_name: str) -> str:
+        # Default: no resource-side error text (tests that need one override this).
+        return calls.get("cluster_error", "")
+
+    monkeypatch.setattr(ray_submit, "_init_vertex", _fake_init)
+    monkeypatch.setattr(ray_submit, "_cluster_error_message", _fake_cluster_error)
     monkeypatch.setattr(ray_submit, "_stage_config", _fake_stage)
     monkeypatch.setattr(ray_submit, "_create_cluster", _fake_create)
     monkeypatch.setattr(ray_submit, "_get_cluster", _fake_get)
@@ -294,6 +305,8 @@ def test_submit_ray_ephemeral_creates_submits_and_deletes(
     assert calls["deleted"] == 1  # ephemeral tears down
     assert calls["order"] == ["create", "get", "submit", "delete"]
     assert calls["telemetry"]["cluster_name"].startswith("sf-ray-")
+    # Vertex SDK is pinned to the configured project (never the ambient GOOGLE_CLOUD_PROJECT).
+    assert calls["init_project"] == "proj-x"
 
 
 def test_submit_ray_deletes_even_when_job_raises(
@@ -396,3 +409,196 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
     assert calls["wait"] is False
     assert calls["telemetry"] is None  # no telemetry without wait
     assert calls["deleted"] == 1  # still torn down
+
+
+# --- region fallback: capacity classifier + resolution + the multi-region create loop ----------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Resources are insufficient in region: us-central1. Please try a different region.",
+        "The zone does not have enough resources available",
+        "RESOURCE EXHAUSTED",
+    ],
+)
+def test_is_capacity_error_true_for_stockout_messages(message: str) -> None:
+    assert ray_submit._is_capacity_error(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "machine type's memory is too small",
+        "Permission denied on service account",
+        "Quota exceeded for aiplatform.googleapis.com",
+    ],
+)
+def test_is_capacity_error_false_for_non_capacity_messages(message: str) -> None:
+    # A config/quota/permission error must NOT trigger a region hop (retrying elsewhere won't help).
+    assert ray_submit._is_capacity_error(message) is False
+
+
+def test_is_generic_cluster_error_matches_sdk_opaque_error() -> None:
+    # The SDK's post-provision opaque error → retryable when the reason can't be read.
+    msg = "[Ray on Vertex AI]: Cluster projects/.../persistentResources/x returned an error."
+    assert ray_submit._is_generic_cluster_error(msg) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["Permission denied on service account", "some other RuntimeError", "returned successfully"],
+)
+def test_is_generic_cluster_error_false_otherwise(message: str) -> None:
+    assert ray_submit._is_generic_cluster_error(message) is False
+
+
+@pytest.mark.parametrize(
+    ("resource_name", "expected"),
+    [
+        ("projects/307701787156/locations/us-central1/persistentResources/x", "us-central1"),
+        ("projects/p/locations/us-east1/persistentResources/sf-ray", "us-east1"),
+        ("not-a-resource-name", None),
+    ],
+)
+def test_region_from_resource_name(resource_name: str, expected: str | None) -> None:
+    # The regional endpoint for the error read is derived from the resource path, not assumed.
+    assert ray_submit._region_from_resource_name(resource_name) == expected
+
+
+# --- dashboard warm-up classifier: retry the connection race, not real faults ------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "524 Server Error: status code 524 for url: https://x.../api/version",
+        "504 Gateway Timeout for url: https://.../api/version",
+        "503 Server Error: Service Temporarily Unavailable",
+        "Connection refused",
+        "HTTPConnectionPool: Max retries exceeded",
+        "Read timed out",
+    ],
+)
+def test_is_dashboard_warmup_error_true_for_transient(message: str) -> None:
+    # The dashboard isn't serving through the proxy yet — retrying the connection is right.
+    assert ray_submit._is_dashboard_warmup_error(Exception(message)) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "401 Client Error: Unauthorized",
+        "403 Client Error: Forbidden",
+        "Ray cluster version 2.9 is incompatible with client 2.47",
+    ],
+)
+def test_is_dashboard_warmup_error_false_for_real_faults(message: str) -> None:
+    # Auth / version-mismatch won't fix themselves by waiting — must propagate, not spin.
+    assert ray_submit._is_dashboard_warmup_error(Exception(message)) is False
+
+
+def test_resolve_regions_defaults_to_settings_region() -> None:
+    # No ray_regions configured → just the data-plane region.
+    assert ray_submit._resolve_regions(_cfg(), _settings()) == ["us-central1"]
+
+
+def test_resolve_regions_appends_home_region_last() -> None:
+    # A configured list that omits home still ends up trying home as the final fallback.
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    assert ray_submit._resolve_regions(cfg, _settings()) == ["us-east1", "us-west1", "us-central1"]
+
+
+def test_resolve_regions_keeps_order_when_home_already_listed() -> None:
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-central1", "us-east1"]})
+    assert ray_submit._resolve_regions(cfg, _settings()) == ["us-central1", "us-east1"]
+
+
+def test_submit_ray_falls_back_to_next_region_on_capacity_stockout(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # region 1 stocks out (capacity error) → its partial resource is torn down and region 2 is
+    # tried, which succeeds. The winning region's cluster is torn down after the job.
+    calls = _stubbed_lifecycle
+
+    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+        calls["created"] += 1
+        calls["order"].append("create")
+        if calls["created"] == 1:
+            raise RuntimeError("Resources are insufficient in region: us-east1.")
+        calls["create_name"] = name
+        return f"projects/proj-x/locations/us-west1/persistentResources/{name}"
+
+    monkeypatch.setattr(ray_submit, "_create_cluster", _stockout_then_ok)
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    job_id = ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+
+    assert job_id == "job-xyz"
+    assert calls["created"] == 2  # first region failed, second succeeded
+    assert calls["init_regions"][:2] == ["us-east1", "us-west1"]  # tried in order
+    # teardown count = 1 stocked-out region + 1 successful region after the job.
+    assert calls["deleted"] == 2
+    # the stocked-out region's resource path was among the deletes.
+    assert any("us-east1" in name for name in calls["delete_names"])
+
+
+def test_submit_ray_falls_back_when_capacity_reason_only_on_resource_error(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real Vertex behavior: create raises a GENERIC "returned an error" while the capacity
+    # reason lives only on the resource's error.message. The classifier must read the resource
+    # error (not just the exception string) and still hop — this is the bug the live smoke caught.
+    calls = _stubbed_lifecycle
+    calls["cluster_error"] = (
+        "Resources are insufficient in region: us-east1. Try a different region."
+    )
+
+    def _generic_then_ok(plan: Any, infra: Any, name: str) -> str:
+        calls["created"] += 1
+        calls["order"].append("create")
+        if calls["created"] == 1:
+            raise RuntimeError("[Ray on Vertex AI]: Cluster ... returned an error.")
+        # region 2 succeeds → clear the resource-error so it isn't misread on a later call.
+        calls["cluster_error"] = ""
+        return f"projects/proj-x/locations/us-west1/persistentResources/{name}"
+
+    monkeypatch.setattr(ray_submit, "_create_cluster", _generic_then_ok)
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    job_id = ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+
+    assert job_id == "job-xyz"
+    assert calls["created"] == 2  # hopped despite the generic exception text
+    assert calls["init_regions"][:2] == ["us-east1", "us-west1"]
+
+
+def test_submit_ray_fails_fast_on_non_capacity_error_without_trying_more_regions(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-capacity error (e.g. bad machine type) must NOT hop regions — fail on the first attempt.
+    calls = _stubbed_lifecycle
+
+    def _bad_config(plan: Any, infra: Any, name: str) -> str:
+        calls["created"] += 1
+        raise RuntimeError("machine type's memory is too small")
+
+    monkeypatch.setattr(ray_submit, "_create_cluster", _bad_config)
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    with pytest.raises(RuntimeError, match="memory is too small"):
+        ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+    assert calls["created"] == 1  # did not try the second region
+
+
+def test_submit_ray_raises_when_all_regions_stock_out(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stubbed_lifecycle
+
+    def _always_stockout(plan: Any, infra: Any, name: str) -> str:
+        calls["created"] += 1
+        raise RuntimeError("Resources are insufficient in region: x. try a different region")
+
+    monkeypatch.setattr(ray_submit, "_create_cluster", _always_stockout)
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    with pytest.raises(EngineError, match="could not be created in any"):
+        ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+    assert calls["created"] == 3  # us-east1, us-west1, then home us-central1

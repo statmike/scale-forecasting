@@ -156,8 +156,18 @@ class ComputeConfig(BaseModel):
     # Reuse opt-in: target an existing cluster by name (skip create + skip teardown). None (default)
     # = ephemeral per-run cluster (create → submit → delete-in-finally).
     ray_cluster_name: str | None = None
+    # Priority-ordered candidate regions for the ephemeral cluster. GPU capacity is regional and can
+    # stock out transiently (a create is accepted, then fails to reach RUNNING with "Resources are
+    # insufficient in region: <r>") even when quota is fine — so the launcher tries these in order,
+    # tearing down each stocked-out attempt first. None (default) = just the [settings.region] list.
+    # Only the *cluster* hops; the data plane (dataset/buckets/connection, hence config staging and
+    # registry writes) stays in settings.region, so a cross-region list means cross-region reads.
+    ray_regions: list[str] | None = None
     # Machine types for the two fixed worker pools. GPU workers must be N1 for T4 attachment.
-    ray_head_machine_type: str = "n1-standard-4"
+    # The head node has a Vertex Ray floor of >18GB RAM, so n1-standard-8 (30GB) is the smallest
+    # valid head — n1-standard-4 (15GB) is rejected at create time. It runs no cells (the driver
+    # only), so the smaller worker pools stay independently sized.
+    ray_head_machine_type: str = "n1-standard-8"
     ray_cpu_machine_type: str = "n1-standard-8"
     ray_gpu_machine_type: str = "n1-standard-8"
     # GPUs per GPU worker node. T4 permits 1, 2, or 4 per node (not 3) — validated below.
