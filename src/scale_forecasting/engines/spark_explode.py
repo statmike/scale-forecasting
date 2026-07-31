@@ -24,12 +24,22 @@ from ..errors import get_logger
 from . import spark_io
 
 if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
+
     from ..config import RunConfig
+    from ..settings import Settings
 
 _log = get_logger(__name__)
 
 
-def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool = True) -> None:
+def run(
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    manage_header: bool = True,
+    settings: Settings | None = None,
+    spark: SparkSession | None = None,
+) -> None:
     """Execute an explode run end-to-end: header → fan cells across Spark → close header.
 
     Driver-side lifecycle (CONTRACTS §3.4, §8.2):
@@ -54,6 +64,14 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     ``update_header`` and only fans cells + writes results. The default ``True`` preserves the
     self-contained standalone lifecycle every existing caller (CLI, ``@spark`` smoke) relies on.
 
+    ``spark`` is an **optional injected session** (a :class:`SparkSession`, incl. a Spark Connect
+    ``DataprocSparkSession``). When ``None`` — the Dataproc batch path (``spark_entry`` passes
+    none) — the engine self-creates a session via ``getOrCreate()`` and ``stop()``s it in
+    ``finally``, exactly as before. When a session is injected — the notebook/Connect path — the
+    engine uses it and does **not** stop it (the caller owns its lifecycle). The fan-out code is
+    identical either way, so Connect and batch share one engine (G1). ``settings`` similarly lets a
+    caller pass an already-resolved :class:`Settings`; ``None`` resolves it from the environment.
+
     Idempotent by construction: the config-derived ``run_id`` + append-only/dedupe-on-read writes
     mean a re-run of the same config lands byte-identical rows (§3.4).
     """
@@ -65,7 +83,7 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     from ..registry.ids import make_run_id
     from ..settings import Settings
 
-    settings = Settings.resolve()
+    settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
     executed = models if models is not None else cfg.models
     n_buckets = spark_io.default_bucket_count(cfg, executed)
@@ -84,23 +102,28 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
         bq.ensure_tables(cfg, settings=settings)
         bq.write_header(cfg, run_id, settings=settings)
 
-    spark = SparkSession.builder.appName(f"scale-forecasting-explode-{run_id}").getOrCreate()
+    # An injected session (notebook / Spark Connect) is caller-owned — use it, don't stop it. Only a
+    # self-created session (the Dataproc batch path) is stopped here.
+    owns_session = spark is None
+    if spark is None:
+        spark = SparkSession.builder.appName(f"scale-forecasting-explode-{run_id}").getOrCreate()
     started = time.perf_counter()
     try:
-        # 2. Fan cells across the cluster. Settings is broadcast (picklable frozen dataclass) so
-        #    every executor's write_cells resolves the same infra without a second env path (G1).
-        settings_bc = spark.sparkContext.broadcast(settings)
+        # 2. Fan cells across the cluster. The frozen Settings is captured directly in the group
+        #    runner's closure (no sparkContext.broadcast — Connect has no such API); applyInPandas
+        #    cloudpickles it to every executor so write_cells resolves the same infra (G1).
         cells = spark_io.read_source_series(spark, cfg, settings)
         cells = spark_io.cross_join_models(cells, cfg, spark, executed)
         cells = spark_io.add_bucket(cells, cfg, n_buckets)
 
-        runner = spark_io.make_group_runner(cfg, settings_bc, executed)
+        runner = spark_io.make_group_runner(cfg, settings, executed)
         status_sdf = cells.groupBy(spark_io._BUCKET_COL).applyInPandas(
             runner, schema=spark_io.status_schema()
         )
         status_pdf = status_sdf.toPandas()  # compact: 4 cols × n_cells, no forecast payload
     finally:
-        spark.stop()
+        if owns_session:
+            spark.stop()
 
     # 3. Close the header from the collected statuses (owner mode only; main.run finalizes else).
     outcome = spark_io.aggregate_status(status_pdf)

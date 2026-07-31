@@ -41,6 +41,10 @@ dependencies = [
 spark = [
     "pyspark>=3.5",
     "google-cloud-dataproc>=5.9",
+    # Client-side only — lets a notebook drive the engine over a Dataproc Spark Connect endpoint
+    # (an injected DataprocSparkSession). NEVER imported by the engine modules (they run on-cluster
+    # against a classic session), so the same engine code runs as a batch and over Connect (G1).
+    "dataproc-spark-connect>=0.7",
 ]
 # Python runtime B — Ray on Vertex AI.
 ray = [

@@ -27,12 +27,22 @@ from ..errors import get_logger
 from . import spark_io
 
 if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
+
     from ..config import RunConfig
+    from ..settings import Settings
 
 _log = get_logger(__name__)
 
 
-def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool = True) -> None:
+def run(
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    manage_header: bool = True,
+    settings: Settings | None = None,
+    spark: SparkSession | None = None,
+) -> None:
     """Execute a naive run end-to-end: header → fan *series* across Spark → close header.
 
     Same driver-side lifecycle as :func:`spark_explode.run` (CONTRACTS §3.4, §8.2): resolve
@@ -49,7 +59,9 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     ``models`` / ``manage_header`` mirror :func:`spark_explode.run`: ``models`` is the executed
     subset (``None`` → ``cfg.models``) so a mixed :func:`main.run` config runs only its
     Python-runtime models here, and ``manage_header=False`` is contributor mode (main owns the
-    shared header). Both default to standalone behavior.
+    shared header). Both default to standalone behavior. ``settings`` / ``spark`` also mirror
+    :func:`spark_explode.run`: an injected caller-owned session (notebook / Spark Connect) is used
+    but not stopped, while ``None`` self-creates + stops one (the Dataproc batch path).
 
     Idempotent by construction: the config-derived ``run_id`` + append-only/dedupe-on-read writes
     mean a re-run of the same config lands byte-identical rows (§3.4).
@@ -62,7 +74,7 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     from ..registry.ids import make_run_id
     from ..settings import Settings
 
-    settings = Settings.resolve()
+    settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
     executed = models if models is not None else cfg.models
     n_buckets = spark_io.default_bucket_count(cfg, executed)
@@ -81,23 +93,28 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
         bq.ensure_tables(cfg, settings=settings)
         bq.write_header(cfg, run_id, settings=settings)
 
-    spark = SparkSession.builder.appName(f"scale-forecasting-naive-{run_id}").getOrCreate()
+    # An injected session (notebook / Spark Connect) is caller-owned — use it, don't stop it. Only a
+    # self-created session (the Dataproc batch path) is stopped here.
+    owns_session = spark is None
+    if spark is None:
+        spark = SparkSession.builder.appName(f"scale-forecasting-naive-{run_id}").getOrCreate()
     started = time.perf_counter()
     try:
         # 2. Fan whole series across the cluster — NO cross-join, so each task runs all models for
-        #    its series sequentially. Settings is broadcast (picklable frozen dataclass) so every
-        #    executor's write_cells resolves the same infra without a second env path (G1).
-        settings_bc = spark.sparkContext.broadcast(settings)
+        #    its series sequentially. The frozen Settings is captured directly in the group runner's
+        #    closure (no sparkContext.broadcast — Connect has no such API); applyInPandas
+        #    cloudpickles it to every executor so write_cells resolves the same infra (G1).
         cells = spark_io.read_source_series(spark, cfg, settings)
         cells = spark_io.add_bucket(cells, cfg, n_buckets)
 
-        runner = spark_io.make_group_runner(cfg, settings_bc, executed)
+        runner = spark_io.make_group_runner(cfg, settings, executed)
         status_sdf = cells.groupBy(spark_io._BUCKET_COL).applyInPandas(
             runner, schema=spark_io.status_schema()
         )
         status_pdf = status_sdf.toPandas()  # compact: 4 cols × n_cells, no forecast payload
     finally:
-        spark.stop()
+        if owns_session:
+            spark.stop()
 
     # 3. Close the header from the collected statuses (owner mode only; main.run finalizes else).
     outcome = spark_io.aggregate_status(status_pdf)

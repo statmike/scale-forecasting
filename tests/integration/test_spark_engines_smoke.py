@@ -54,13 +54,14 @@ def _settings() -> Settings:
     )
 
 
-def _capturing_runner(cfg: RunConfig, settings_broadcast: Any, sink_dir: str) -> Any:
+def _capturing_runner(cfg: RunConfig, settings: Any, sink_dir: str) -> Any:
     """A :func:`make_group_runner` stand-in: run a bucket, write its results as JSONL to the sink.
 
     This is what gets cloudpickled to the Spark worker, so the write lands in the worker process.
     ``sink_dir`` is a filesystem path both driver and (local) workers can see; each bucket writes a
     uniquely-named file, so concurrent buckets never collide. Mirrors the real runner exactly except
-    the leaf write goes to a file instead of ``bq.write_cells``.
+    the leaf write goes to a file instead of ``bq.write_cells``. ``settings`` is the frozen
+    :class:`Settings` captured directly (the Connect-safe seam — no ``sparkContext.broadcast``).
     """
     from scale_forecasting.engines.spark_io import run_group
 
@@ -116,7 +117,7 @@ def _run_engine_locally(
     monkeypatch.setattr(
         spark_io,
         "make_group_runner",
-        lambda cfg, bc, models=None: _capturing_runner(cfg, bc, sink),
+        lambda cfg, settings, models=None: _capturing_runner(cfg, settings, sink),
     )
 
     header: dict[str, Any] = {}
@@ -160,6 +161,71 @@ def test_explode_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     assert header["status"] in {"COMPLETED", "PARTIAL"}
     assert header["n_series"] == n_series
     assert header["runtime_seconds"] > 0
+
+
+def test_injected_session_is_used_but_not_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """An injected (caller-owned) session runs the fan-out but is NOT stopped by the engine.
+
+    This is the Spark Connect / notebook seam: ``spark_explode.run(cfg, spark=session)`` uses the
+    passed session (``owns_session = spark is None`` is False) and leaves its lifecycle to the
+    caller. A self-created session would be ``stop()``-ed in ``finally``; here the session must stay
+    live after ``run`` returns, which we prove by running a trivial job on it afterward.
+    """
+    import json
+
+    from pyspark.sql import SparkSession
+
+    from scale_forecasting.engines import spark_explode, spark_io
+    from scale_forecasting.registry import bq
+
+    n_series, models = 3, ["theta", "holtwinters"]
+    panel = _panel(n_series)
+    sink = str(tmp_path)
+
+    def _fake_read(spark: SparkSession, cfg: RunConfig, settings: Settings) -> Any:
+        pdf = panel.copy()
+        pdf["ds"] = pdf["ds"].dt.date
+        return spark.createDataFrame(pdf)
+
+    monkeypatch.setattr(spark_io, "read_source_series", _fake_read)
+    monkeypatch.setattr(
+        spark_io,
+        "make_group_runner",
+        lambda cfg, settings, models=None: _capturing_runner(cfg, settings, sink),
+    )
+    header: dict[str, Any] = {}
+    monkeypatch.setattr(bq, "ensure_tables", lambda cfg, *, settings=None: None)
+    monkeypatch.setattr(
+        bq, "write_header", lambda cfg, run_id, *, settings=None: header.update(run_id=run_id)
+    )
+    monkeypatch.setattr(
+        bq, "update_header", lambda run_id, *, settings=None, **fields: header.update(fields)
+    )
+
+    session = SparkSession.builder.master("local[2]").appName("injected-smoke").getOrCreate()
+    try:
+        cfg = RunConfig(
+            run_name="injected spark explode",
+            data={"source_table": "source_series", "horizon": 7, "series_limit": n_series},
+            spark_method="explode",
+            models=models,
+        )
+        # Injected session + resolved settings — the notebook/Connect call shape.
+        spark_explode.run(cfg, settings=_settings(), spark=session)
+
+        # The engine must NOT have stopped the caller's session: a trivial job still runs.
+        assert session.range(5).count() == 5
+
+        written = []
+        for path in sorted(tmp_path.glob("bucket-*.jsonl")):
+            for line in path.read_text().splitlines():
+                written.append(json.loads(line))
+        assert len(written) == n_series * len(models)
+        assert header["status"] in {"COMPLETED", "PARTIAL"}
+    finally:
+        session.stop()
 
 
 def test_naive_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:

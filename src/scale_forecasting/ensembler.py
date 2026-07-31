@@ -232,7 +232,7 @@ def _mean_or_median_stmt(strategy: str, cfg: RunConfig, dataset: str) -> str:
         f"SELECT run_id, ts_id, 'ensemble_{strategy}' AS model_type,\n"
         "       'ensemble' AS compute_engine, forecast_date,\n"
         f"       {yhat} AS yhat, {lower} AS yhat_lower, {upper} AS yhat_upper,\n"
-        "       NULL AS quantiles\n"
+        "       CAST(NULL AS STRING) AS quantiles\n"
         "FROM base_pred\n"
         "GROUP BY run_id, ts_id, forecast_date;"
     )
@@ -258,7 +258,7 @@ def _inverse_error_stmt(cfg: RunConfig, dataset: str) -> str:
         "       SAFE_DIVIDE(SUM(p.yhat * w.w), SUM(w.w)) AS yhat,\n"
         "       SAFE_DIVIDE(SUM(p.yhat_lower * w.w), SUM(w.w)) AS yhat_lower,\n"
         "       SAFE_DIVIDE(SUM(p.yhat_upper * w.w), SUM(w.w)) AS yhat_upper,\n"
-        "       NULL AS quantiles\n"
+        "       CAST(NULL AS STRING) AS quantiles\n"
         "FROM base_pred p\n"
         "JOIN model_weight w USING (ts_id, model_type)\n"
         "WHERE w.w IS NOT NULL\n"

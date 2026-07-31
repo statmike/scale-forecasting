@@ -109,7 +109,9 @@ def _plan(cfg: RunConfig) -> _RunPlan:
     )
 
 
-def _launch_python_runtime(cfg: RunConfig, plan: _RunPlan, settings: Settings) -> None:
+def _launch_python_runtime(
+    cfg: RunConfig, plan: _RunPlan, settings: Settings, spark: object | None = None
+) -> None:
     """Run the Python-runtime models on the runtime ``cfg.python_runtime`` picks (contributor mode).
 
     The one dispatch point between the two Python runtimes, called on :func:`run`'s worker thread:
@@ -119,6 +121,13 @@ def _launch_python_runtime(cfg: RunConfig, plan: _RunPlan, settings: Settings) -
     orchestrator owns the single shared header) and block until terminal, so the caller joins one
     future regardless of runtime. Kept a plain module function (not a lambda) so the worker thread's
     traceback names it and the import stays lazy (Ray/Spark extras load only for the chosen path).
+
+    ``spark`` is an optional injected :class:`SparkSession`. When it is supplied **and**
+    ``python_runtime == "spark"``, the Spark engine runs **in-process against that session**
+    (``spark_explode``/``spark_naive`` with ``spark=…``) instead of submitting a remote Dataproc
+    batch — the notebook / Spark Connect path. This is the same engine code the batch runs (the
+    injectable-session seam), so no logic forks per environment (G1). ``spark`` is ignored for the
+    Ray runtime and for a remote batch (the default when no session is passed).
     """
     if cfg.python_runtime == "ray":
         from .ray_submit import submit_ray
@@ -129,6 +138,19 @@ def _launch_python_runtime(cfg: RunConfig, plan: _RunPlan, settings: Settings) -
             manage_header=False,
             settings=settings,
             wait=True,
+        )
+    elif spark is not None:
+        # In-process Spark over an injected (Connect or local) session — no remote batch submit.
+        # multi never reaches here (rejected by _plan under one run_id), so it's naive xor explode.
+        from .engines import spark_explode, spark_naive
+
+        engine = spark_naive if plan.spark_method == "naive" else spark_explode
+        engine.run(
+            cfg,
+            models=plan.python_models,
+            manage_header=False,
+            settings=settings,
+            spark=spark,
         )
     else:
         from .submit import submit_batch
@@ -143,7 +165,7 @@ def _launch_python_runtime(cfg: RunConfig, plan: _RunPlan, settings: Settings) -
         )
 
 
-def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
+def run(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None) -> str:
     """Execute one run: Spark + BigQuery-native in parallel under one run_id; return that run_id.
 
     Resolves the plan (:func:`_plan`, which rejects Spark ``multi``), then:
@@ -152,10 +174,20 @@ def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
       return, touching no GCP. The offline "what would this schedule" path (DESIGN §11).
     * otherwise → resolve :class:`Settings`, ``ensure_tables`` + ``write_header`` (RUNNING, the one
       shared header), launch the remote Spark batch on a worker thread and run the BigQuery engine
-      inline (both in contributor mode), join, and finalize the header with the combined status +
-      wall-clock ``runtime_seconds`` + ``bq_models`` (+ the BQ engine's observed ``n_series`` when
-      it ran). On any engine failure the header is finalized FAILED before the error re-raises, so
-      the run stays queryable and the CLI exits non-zero.
+      inline (both in contributor mode), join, then — when both engines succeeded and
+      ``cfg.ensemble.enabled`` — run the ensembles (:func:`ensemble_run.run_ensembles`, which reads
+      the just-written base predictions/OOF and scores each consensus onto the leaderboard), and
+      finalize the header with the combined status + wall-clock ``runtime_seconds`` + ``bq_models``
+      (+ the BQ engine's observed ``n_series`` when it ran). On any engine *or* ensemble failure the
+      header is finalized FAILED before the error re-raises, so the run stays queryable and the CLI
+      exits non-zero.
+
+    ``spark`` is an optional injected :class:`SparkSession` (incl. a Spark Connect
+    ``DataprocSparkSession``). When supplied and ``python_runtime == "spark"``, the Spark models run
+    **in-process against that session** instead of a remote Dataproc batch — the notebook / Connect
+    demo path — using the identical engine code (the injectable-session seam, G1). The default
+    (``None``) keeps the remote-batch behavior every CLI/Composer caller relies on. The BigQuery
+    engine still runs in parallel on the main thread under the one shared run_id.
 
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows (§3.4).
@@ -209,7 +241,7 @@ def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
     with ThreadPoolExecutor(max_workers=1) as pool:
         python_future = None
         if plan.python_models:
-            python_future = pool.submit(_launch_python_runtime, cfg, plan, settings)
+            python_future = pool.submit(_launch_python_runtime, cfg, plan, settings, spark)
         if plan.bq_models:
             try:
                 bq_outcome = bigquery_engine.run(
@@ -223,8 +255,21 @@ def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
             except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
                 spark_error = exc
 
+    # Ensembles run only once both engines have produced their base predictions under this run_id
+    # (they read forecast_predictions / backtest_oof), so this is sequenced strictly after the join
+    # and skipped when an engine failed. A failure here is captured like an engine error and flips
+    # the shared header FAILED — the ensembles are part of the run's success contract.
+    ensemble_error: BaseException | None = None
+    if spark_error is None and bq_error is None and cfg.ensemble.enabled:
+        from .ensemble_run import run_ensembles
+
+        try:
+            run_ensembles(cfg, run_id, settings=settings)
+        except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
+            ensemble_error = exc
+
     runtime_seconds = time.perf_counter() - started
-    ok = spark_error is None and bq_error is None
+    ok = spark_error is None and bq_error is None and ensemble_error is None
     status = "COMPLETED" if ok else "FAILED"
 
     fields: dict[str, object] = {
@@ -238,7 +283,7 @@ def run(cfg: RunConfig, *, dry_run: bool = False) -> str:
 
     if not ok:
         # Re-raise the first failure so the CLI exits non-zero; the header already records FAILED.
-        raise spark_error or bq_error  # type: ignore[misc]
+        raise spark_error or bq_error or ensemble_error  # type: ignore[misc]
     _log.info("run %s done: status=%s runtime=%.1fs", run_id, status, runtime_seconds)
     return run_id
 

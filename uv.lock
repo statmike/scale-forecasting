@@ -465,6 +465,23 @@ wheels = [
 ]
 
 [[package]]
+name = "dataproc-spark-connect"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core" },
+    { name = "google-cloud-dataproc" },
+    { name = "packaging" },
+    { name = "pyspark", extra = ["connect"] },
+    { name = "tqdm" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/16/8fb6f9e5b409a11b87d58ecbabda66a7f2af2c1f8609cb9a8c5923b8f1ab/dataproc_spark_connect-1.1.0.tar.gz", hash = "sha256:c4d7337a422e80fe6c5cab7ca4e642de5948c6f5dcbe2e6d6ae4aafd32aad55e", size = 28044, upload-time = "2026-04-07T02:02:58.527Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2b/1b/ee56df54bd3413d6a9328bbc184bce2583dffa4c9262f5b9655247eb83ee/dataproc_spark_connect-1.1.0-py2.py3-none-any.whl", hash = "sha256:0202ebb8e3816b5d3f27642e17464a2d64c320776baaef0e6acee88ef45be557", size = 33224, upload-time = "2026-04-07T02:02:57.215Z" },
+]
+
+[[package]]
 name = "db-dtypes"
 version = "1.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1915,12 +1932,22 @@ wheels = [
 
 [[package]]
 name = "pyspark"
-version = "4.2.0"
+version = "4.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "py4j" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c3/33/c987434f5d50aa802779a004ca0fd45ee4350caab50554ad7283d5a22b50/pyspark-4.2.0.tar.gz", hash = "sha256:5ad689d53570ee1674193fd4f9bda065f0db3be9363a27d2a3406cc457b70b61", size = 450129423, upload-time = "2026-07-14T22:16:46Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/c8/27b5316543a4d724efef4ecc1cfcb42a9afcb8af33cfdff989164b9a4487/pyspark-4.0.4.tar.gz", hash = "sha256:7e119366364d48e3cda1b1efd1ebc6cd672949500667c9cabbeef858daba700f", size = 434312230, upload-time = "2026-07-15T11:15:10.721Z" }
+
+[package.optional-dependencies]
+connect = [
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "grpcio-status" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
 
 [[package]]
 name = "pytest"
@@ -2184,6 +2211,7 @@ ray = [
     { name = "ray", extra = ["default"] },
 ]
 spark = [
+    { name = "dataproc-spark-connect" },
     { name = "google-cloud-dataproc" },
     { name = "pyspark" },
 ]
@@ -2199,6 +2227,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dataproc-spark-connect", marker = "extra == 'spark'", specifier = ">=0.7" },
     { name = "db-dtypes", specifier = ">=1.2" },
     { name = "google-cloud-aiplatform", marker = "extra == 'ray'", specifier = ">=1.60" },
     { name = "google-cloud-bigquery", specifier = ">=3.25" },

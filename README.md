@@ -75,6 +75,13 @@ interactive version — pick a model, plot the forecast and its interval — ope
 into `src/scale_forecasting/models/`, add one import line, and it shows up in the
 list above automatically. Full walkthrough: [`docs/adding_a_model.md`](./docs/adding_a_model.md).
 
+**Demo notebooks** (run + review against a live deployment) live in [`notebooks/`](./notebooks):
+[`01_spark_via_connect`](./notebooks/01_spark_via_connect.ipynb) drives the Spark UDF fan-out over a
+Dataproc **Spark Connect** endpoint; [`02_bigquery_native`](./notebooks/02_bigquery_native.ipynb)
+runs the BigQuery-native models; [`03_combo_and_ensemble`](./notebooks/03_combo_and_ensemble.ipynb)
+runs Spark ∥ BigQuery under one `run_id` with ensembles, then reviews base + ensemble models side by
+side on `v_model_leaderboard`.
+
 > The one-`terraform apply` cloud deploy (Spark/Ray/BigQuery at scale) lands in the
 > final polish phase; the quickstart above is the whole local dev loop today.
 

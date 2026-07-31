@@ -1,0 +1,24 @@
+{
+  "run_name": "ensemble_demo",
+  "python_runtime": "spark",
+  "spark_method": "explode",
+  "data": {
+    "source_table": "source_series",
+    "horizon": 28,
+    "series_limit": 10
+  },
+  "models": ["theta", "arima_plus", "timesfm"],
+  "features": {
+    "holidays": ["US"]
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": ["mean", "median", "inverse_error"]
+  }
+}

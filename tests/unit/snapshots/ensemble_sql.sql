@@ -14,7 +14,7 @@ WITH base_pred AS (
 SELECT run_id, ts_id, 'ensemble_mean' AS model_type,
        'ensemble' AS compute_engine, forecast_date,
        AVG(yhat) AS yhat, AVG(yhat_lower) AS yhat_lower, AVG(yhat_upper) AS yhat_upper,
-       NULL AS quantiles
+       CAST(NULL AS STRING) AS quantiles
 FROM base_pred
 GROUP BY run_id, ts_id, forecast_date;
 
@@ -34,7 +34,7 @@ WITH base_pred AS (
 SELECT run_id, ts_id, 'ensemble_median' AS model_type,
        'ensemble' AS compute_engine, forecast_date,
        APPROX_QUANTILES(yhat, 2)[OFFSET(1)] AS yhat, APPROX_QUANTILES(yhat_lower, 2)[OFFSET(1)] AS yhat_lower, APPROX_QUANTILES(yhat_upper, 2)[OFFSET(1)] AS yhat_upper,
-       NULL AS quantiles
+       CAST(NULL AS STRING) AS quantiles
 FROM base_pred
 GROUP BY run_id, ts_id, forecast_date;
 
@@ -63,7 +63,7 @@ SELECT p.run_id, p.ts_id, 'ensemble_inverse_error' AS model_type,
        SAFE_DIVIDE(SUM(p.yhat * w.w), SUM(w.w)) AS yhat,
        SAFE_DIVIDE(SUM(p.yhat_lower * w.w), SUM(w.w)) AS yhat_lower,
        SAFE_DIVIDE(SUM(p.yhat_upper * w.w), SUM(w.w)) AS yhat_upper,
-       NULL AS quantiles
+       CAST(NULL AS STRING) AS quantiles
 FROM base_pred p
 JOIN model_weight w USING (ts_id, model_type)
 WHERE w.w IS NOT NULL

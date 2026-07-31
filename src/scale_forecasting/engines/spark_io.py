@@ -26,8 +26,11 @@ method (:func:`bucket_key_cols`):
 and calls the B1-validated :func:`~scale_forecasting.registry.bq.write_cells` on each bucket's
 results (all three cell tables + artifact upload, unchanged). Append-only + dedupe-on-read
 (§3.4) makes per-partition appends safe. The UDF returns only the compact status frame; the driver
-owns the header. Infra identity reaches executors via a broadcast :class:`Settings` (picklable
-frozen dataclass), preserving the G1 seam without a second env-based delivery path.
+owns the header. Infra identity reaches executors by capturing the frozen :class:`Settings`
+dataclass (picklable, tiny, read-only) directly in the group-runner closure, which ``applyInPandas``
+cloudpickles to each executor — preserving the G1 seam without a second env-based delivery path, and
+without the ``sparkContext.broadcast`` call that a Spark Connect session does not expose (so the
+same engine runs both as a Dataproc batch and driven over a Connect endpoint).
 """
 
 from __future__ import annotations
@@ -292,13 +295,17 @@ def status_schema() -> Any:
     )
 
 
-def make_group_runner(
-    cfg: RunConfig, settings_broadcast: Any, models: list[str] | None = None
-) -> Any:
+def make_group_runner(cfg: RunConfig, settings: Settings, models: list[str] | None = None) -> Any:
     """Build the ``applyInPandas`` function: run one bucket's cells, write them, return status.
 
-    Closes over the picklable ``cfg`` and a Spark broadcast of :class:`Settings`. On each bucket it
-    calls the pure :func:`run_group`, appends the results with the B1 writer
+    Closes over the picklable ``cfg`` and the frozen :class:`Settings` dataclass **directly** — not
+    a Spark broadcast. ``applyInPandas`` cloudpickles the whole closure to each executor, so
+    capturing the small immutable ``Settings`` by value is equivalent to a broadcast here (the
+    object is tiny and read-only) while dropping the ``sparkContext.broadcast`` call that a **Spark
+    Connect** session does not expose (Connect has no RDD/``sparkContext`` API). This is what lets
+    the *same* engine run both as a classic Dataproc batch and driven over a Connect endpoint from a
+    notebook (G1: one code path, no per-environment fork). On each bucket it calls the pure
+    :func:`run_group`, appends the results with the B1 writer
     (:func:`~scale_forecasting.registry.bq.write_cells`, executor-side, once per bucket), and
     returns only the compact status frame — so no forecast payload ever crosses back to the driver.
 
@@ -311,7 +318,7 @@ def make_group_runner(
 
         results, status = run_group(pdf, cfg, models)
         if results:
-            bq.write_cells(results, settings=settings_broadcast.value)
+            bq.write_cells(results, settings=settings)
         return status
 
     return _run

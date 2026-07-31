@@ -479,3 +479,75 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
       deployment with no private-services-access connection can still run. A VPC (with PSA in place)
       still yields a private endpoint. This is a real capability add, not a workaround — the offline
       deployment here has no PSA peering, and requiring it would have blocked the runtime entirely.
+
+- **B5: ensembling wired end-to-end.** `ensembler.py` stays pure (renders calculated INSERT SQL +
+  `fit_learned` returns weights/artifacts); a new engine-agnostic `ensemble_run.run_ensembles(cfg,
+  run_id, *, settings)` executes it. It runs inside `main.run` **after** the engine join and
+  **before** the header finalize, gated on `cfg.ensemble.enabled`, and its failure is captured like
+  an engine error (flips the shared header FAILED, re-raises) — ensembles are part of the run's
+  success contract. Three steps: (1) run each calculated statement with `@run_id` bound
+  (`ensemble_{mean,median,inverse_error}` → `forecast_predictions`, `compute_engine='ensemble'`);
+  (2) learned apply in pandas — read base preds + `backtest_oof`, `fit_learned`, blend
+  `yhat = Σ w·yhat` (weights renormalized over whichever base models are present per
+  (ts_id, forecast_date)), append rows + upload artifacts; (3) **score into `forecast_metadata`**
+  (`fold_id=NULL`) by joining ensemble preds to `source_series` actuals and running
+  `compute_metrics`. That `fold_id IS NULL` write is the missing leaderboard link —
+  `v_model_leaderboard` then shows the ensembles automatically, **no view change**.
+  - **Disjoint forecast windows (the subtlety).** Spark/Python models forecast the *true future*
+    (`ds > MAX(ds)`, no actuals); native BQ models forecast the *held-out fold* (`ds > cutoff`, has
+    actuals). Base preds from the two engines land on disjoint dates, so scoring joins ensemble
+    preds to actuals — only held-out dates with ground truth contribute, and future-dated blended
+    rows drop out of the join naturally. The combo demo config uses **calculated** strategies only
+    for this reason; learned strategies are exercised by the offline unit tests.
+
+- **Spark Connect capability (injectable session).** The engines can now be driven from a notebook
+  over a **Dataproc Spark Connect** endpoint, not just as a remote Dataproc batch — the *same*
+  engine code both ways (G1). Two changes: (1) `spark_explode.run` / `spark_naive.run` take an
+  optional `spark=` session — `owns_session = spark is None`, so a self-created session is
+  `stop()`-ed in `finally` (the batch path, unchanged) while an injected caller-owned session is
+  used but **not** stopped; `main.run` gains a matching `spark=` that dispatches in-process to the
+  engine instead of `submit_batch` when set (and `python_runtime="spark"`). (2) `make_group_runner`
+  captures the frozen `Settings` **directly** in the closure (`applyInPandas` cloudpickles it) —
+  dropping `spark.sparkContext.broadcast(settings)`, which a Spark Connect session doesn't expose
+  (no RDD/`sparkContext` API). `applyInPandas` and the DataFrame API (incl. the `F.broadcast` hint
+  in the model cross-join) *are* Connect-supported, so nothing else moved.
+  - **Client-only dep.** `dataproc-spark-connect` is in the `[spark]` extra but **never imported by
+    engine modules** (they run on-cluster against a classic session) — only by the notebook/client,
+    preserving the G1 seam. Pin the Connect session to **runtime 3.0** (Connect requires ≥ 3.0); the
+    batch default is left untouched.
+  - **Reachability + Python parity + fallback.** Spark Connect needs outbound reach to the endpoint
+    *and* the driver kernel's Python **minor** must match the workers'. **Dataproc 3.0 workers run
+    Python 3.12**, and Connect refuses a driver↔worker minor skew, so the `applyInPandas` fan-out
+    fails with `PYTHON_VERSION_MISMATCH` from a 3.11 driver. The fixture/notebook do a scratch
+    `spark.range(5).count()` (JVM-only reachability) **and** a one-row `applyInPandas` (worker-side
+    Python parity) before real work, and fall back to `main.run(cfg)` (remote batch) on any failure —
+    identical engine, so the fallback is a proven path, not a second code path to trust. The
+    `@spark`+`@gcp` Connect smoke **skips** (not fails) when the endpoint is unreachable or the
+    driver Python doesn't match; the remote-batch path exercises the same engine on 3.12 workers with
+    no local driver.
+
+- **Demo notebooks.** Three notebooks in `notebooks/` run + review against a live deployment
+  (`Settings.resolve()` from `SF_*`, poll `v_model_leaderboard` / `v_run_summary` since Write-API
+  rows are async-visible): `01_spark_via_connect` (Spark UDF fan-out over Connect + remote-batch
+  fallback), `02_bigquery_native` (native models, no Spark thread), `03_combo_and_ensemble` (Spark ∥
+  BigQuery under one `run_id` with B5 firing after the join — one leaderboard shows base Spark + base
+  BigQuery + `ensemble_*` side by side, plus a mean-WAPE bar colored by compute engine). Notebooks
+  ship with **empty outputs** (no executed identifiers to leak).
+
+- **B5 + Connect: live verification (what actually ran on real GCP).**
+  - **`ensemble_*` type bug, found + fixed live.** The calculated ensemble SQL emitted `NULL AS
+    quantiles`, which BigQuery types as INT64 — but `forecast_predictions.quantiles` is STRING, so
+    the `INSERT … SELECT` failed with a 400 (`type INT64 … cannot be inserted into column quantiles,
+    which has type STRING`). Fixed to `CAST(NULL AS STRING) AS quantiles` in both the mean/median and
+    inverse-error builders (snapshot updated). After the fix the `@gcp` ensemble smoke passes: base
+    Spark + native + `ensemble_{mean,median,inverse_error}` all land on `v_model_leaderboard` with
+    non-NULL `mean_wape` under one `run_id`.
+  - **Orchestration smoke still green** after the injectable-session refactor — Spark ∥ BQ under one
+    run_id, COMPLETED header, both engines on the leaderboard (the default no-`spark=` path still
+    submits a remote Dataproc batch, unchanged).
+  - **Connect: endpoint reachable, driver-Python skew is the real limiter.** From this GCP
+    workstation the Connect endpoint provisions fine at runtime 3.0 (no egress block) — the smoke
+    reached the cluster and launched the `applyInPandas` fan-out, which then failed on
+    `PYTHON_VERSION_MISMATCH` (driver 3.11 vs Dataproc-3.0 workers 3.12). The fixture now probes
+    Python parity and skips cleanly with that message; a true live Connect pass needs a 3.12 driver
+    kernel. The remote-batch path already covers the identical engine on 3.12 workers.

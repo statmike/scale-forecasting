@@ -179,6 +179,98 @@ def test_launch_python_runtime_dispatches_ray(monkeypatch: pytest.MonkeyPatch) -
     assert seen["manage_header"] is False
 
 
+# --- run(): ensemble orchestration after the engine join -----------------------
+
+
+def _patch_run_seams(
+    monkeypatch: pytest.MonkeyPatch, *, bq_error: Exception | None = None
+) -> dict[str, Any]:
+    """Fake every GCP seam main.run touches so the ensemble gating is exercised offline.
+
+    Records what happened in the returned dict: header status finalized, whether the BigQuery engine
+    and the Spark launch ran. The Python-runtime launch is faked to a no-op success. ``bq_error``
+    makes the BigQuery engine raise, to prove ensembles are skipped when an engine fails.
+    """
+    import scale_forecasting.ensemble_run as ensemble_mod
+    from scale_forecasting.engines import bigquery_engine
+    from scale_forecasting.registry import bq
+
+    seen: dict[str, Any] = {"ensemble_called": False}
+
+    monkeypatch.setattr(Settings, "resolve", classmethod(lambda cls: _SETTINGS))
+    monkeypatch.setattr(bq, "ensure_tables", lambda *a, **k: None)
+    monkeypatch.setattr(bq, "write_header", lambda *a, **k: None)
+
+    def _fake_update(run_id: str, *, settings: Any = None, **fields: Any) -> None:
+        seen["status"] = fields.get("status")
+
+    monkeypatch.setattr(bq, "update_header", _fake_update)
+
+    def _fake_bq_run(cfg: RunConfig, models: list[str], **kw: Any) -> Any:
+        seen["bq_ran"] = True
+        if bq_error is not None:
+            raise bq_error
+        return bigquery_engine.BqOutcome(status="COMPLETED", n_series=3, models=models)
+
+    monkeypatch.setattr(bigquery_engine, "run", _fake_bq_run)
+    monkeypatch.setattr(
+        main, "_launch_python_runtime", lambda *a, **k: seen.__setitem__("spark_ran", True)
+    )
+
+    def _fake_ensembles(cfg: RunConfig, run_id: str, *, settings: Any) -> None:
+        seen["ensemble_called"] = True
+        seen["ensemble_run_id"] = run_id
+
+    monkeypatch.setattr(ensemble_mod, "run_ensembles", _fake_ensembles)
+    return seen
+
+
+def test_run_invokes_ensembles_when_enabled_and_engines_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _patch_run_seams(monkeypatch)
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    run_id = main.run(cfg)
+    assert seen["ensemble_called"] is True
+    assert seen["ensemble_run_id"] == run_id
+    assert seen["status"] == "COMPLETED"
+
+
+def test_run_skips_ensembles_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _patch_run_seams(monkeypatch)
+    main.run(_cfg())  # ensemble.enabled defaults False
+    assert seen["ensemble_called"] is False
+    assert seen["status"] == "COMPLETED"
+
+
+def test_run_skips_ensembles_when_engine_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A BigQuery engine failure must skip ensembles (they'd read incomplete predictions) and the
+    # header finalizes FAILED.
+    seen = _patch_run_seams(monkeypatch, bq_error=RuntimeError("bq boom"))
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    with pytest.raises(RuntimeError, match="bq boom"):
+        main.run(cfg)
+    assert seen["ensemble_called"] is False
+    assert seen["status"] == "FAILED"
+
+
+def test_run_ensemble_failure_finalizes_header_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.ensemble_run as ensemble_mod
+
+    seen = _patch_run_seams(monkeypatch)
+
+    def _boom(cfg: RunConfig, run_id: str, *, settings: Any) -> None:
+        seen["ensemble_called"] = True
+        raise RuntimeError("ensemble boom")
+
+    monkeypatch.setattr(ensemble_mod, "run_ensembles", _boom)
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    with pytest.raises(RuntimeError, match="ensemble boom"):
+        main.run(cfg)
+    assert seen["ensemble_called"] is True
+    assert seen["status"] == "FAILED"
+
+
 # --- CLI: dispatches dry_run ---------------------------------------------------
 
 
