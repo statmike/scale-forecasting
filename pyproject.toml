@@ -131,6 +131,7 @@ markers = [
     "gcp: requires a GCP project + ADC (integration; off by default)",
     "spark: needs a local or serverless Spark session",
     "ray: needs a local or remote Ray runtime",
+    "raylive: provisions a live (billed) Vertex Ray cluster — CPU-only, opt-in",
     "gpu: needs a real GPU (T4)",
     "slow: long-running (scale smokes)",
 ]

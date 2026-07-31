@@ -526,13 +526,15 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     driver Python doesn't match; the remote-batch path exercises the same engine on 3.12 workers with
     no local driver.
 
-- **Demo notebooks.** Three notebooks in `notebooks/` run + review against a live deployment
+- **Demo notebooks.** Four notebooks in `notebooks/` run + review against a live deployment
   (`Settings.resolve()` from `SF_*`, poll `v_model_leaderboard` / `v_run_summary` since Write-API
   rows are async-visible): `01_spark_via_connect` (Spark UDF fan-out over Connect + remote-batch
   fallback), `02_bigquery_native` (native models, no Spark thread), `03_combo_and_ensemble` (Spark ∥
   BigQuery under one `run_id` with B5 firing after the join — one leaderboard shows base Spark + base
-  BigQuery + `ensemble_*` side by side, plus a mean-WAPE bar colored by compute engine). Notebooks
-  ship with **empty outputs** (no executed identifiers to leak).
+  BigQuery + `ensemble_*` side by side, plus a mean-WAPE bar colored by compute engine),
+  `04_ray_on_vertex` (Python-runtime models on a fixed-size Ray-on-Vertex cluster ∥ natives in
+  BigQuery — CPU-only `ray_cpu_demo.json` by default, one config flag from the `ray_gpu_demo.json`
+  fractional-T4 path). Notebooks ship with **empty outputs** (no executed identifiers to leak).
 
 - **B5 + Connect: live verification (what actually ran on real GCP).**
   - **`ensemble_*` type bug, found + fixed live.** The calculated ensemble SQL emitted `NULL AS
@@ -551,3 +553,20 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     `PYTHON_VERSION_MISMATCH` (driver 3.11 vs Dataproc-3.0 workers 3.12). The fixture now probes
     Python parity and skips cleanly with that message; a true live Connect pass needs a 3.12 driver
     kernel. The remote-batch path already covers the identical engine on 3.12 workers.
+
+- **Ray on Vertex: the blocker is the job-submission hop, not the model path.** A **CPU-only** live
+  smoke (`test_ray_cpu_smoke`, gate `SF_ENABLE_RAY` + the `raylive` marker; config
+  `configs/ray_cpu_demo.json` — `use_gpu:false`, no `neuralprophet`, so `plan_cluster` sizes the GPU
+  pool to zero) deliberately removes GPU quota as a variable to isolate the lifecycle. Live result:
+  the fixed cluster **creates** (PROVISIONING → RUNNING), the BigQuery natives **run in parallel**
+  and score, and the cluster **tears down** cleanly in the `finally` (no orphaned nodes) — but
+  submitting the Ray Job fails at `JobSubmissionClient("vertex_ray://…")` construction with a
+  repeated **HTTP 524** on the dashboard's `/api/version` handshake (an upstream proxy→origin
+  timeout), which exhausts the connect-retry budget. The submitter classifies 524 as transient and
+  retries correctly — so this is a **network-reachability** limit to the dashboard proxy host
+  (`*.aiplatform-training.googleusercontent.com`), a *different* host than the Dataproc Connect
+  endpoint, not a code fault. The `plan_cluster` sizing itself is proven offline+free by the unit
+  tests. **Run the Ray job-submission step from inside GCP** (a Vertex AI Workbench / Colab
+  Enterprise kernel on the cluster's network), which is exactly what `notebooks/04_ray_on_vertex`
+  documents and does — create/natives/teardown work from anywhere; only the job-submission hop needs
+  in-network reachability.
