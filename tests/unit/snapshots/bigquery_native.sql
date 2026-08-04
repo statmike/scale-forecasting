@@ -1,4 +1,4 @@
-CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_8287cb5546e4`
+CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_d03978e98d28`
 OPTIONS(
   model_type = 'ARIMA_PLUS',
   time_series_id_col = 'ts_id',
@@ -280,11 +280,11 @@ SELECT
   @run_id, ts_id, 'arima_plus', 'bigquery',
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
-FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_8287cb5546e4`, STRUCT(28 AS horizon, 0.8 AS confidence_level));
+FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_d03978e98d28`, STRUCT(28 AS horizon, 0.8 AS confidence_level));
 
 -- ===== next model =====
 
-CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_8287cb5546e4`
+CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_d03978e98d28`
 OPTIONS(
   model_type = 'ARIMA_PLUS_XREG',
   time_series_id_col = 'ts_id',
@@ -566,7 +566,7 @@ SELECT
   @run_id, ts_id, 'arima_plus_xreg', 'bigquery',
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
-FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_8287cb5546e4`,
+FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_d03978e98d28`,
     STRUCT(28 AS horizon, 0.8 AS confidence_level),
     (SELECT ts_id, ds, price_index FROM `proj.scale_forecasting.source_series` WHERE ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series` GROUP BY ts_id ORDER BY ts_id LIMIT 100)));
 

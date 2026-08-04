@@ -563,10 +563,37 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
   submitting the Ray Job fails at `JobSubmissionClient("vertex_ray://…")` construction with a
   repeated **HTTP 524** on the dashboard's `/api/version` handshake (an upstream proxy→origin
   timeout), which exhausts the connect-retry budget. The submitter classifies 524 as transient and
-  retries correctly — so this is a **network-reachability** limit to the dashboard proxy host
-  (`*.aiplatform-training.googleusercontent.com`), a *different* host than the Dataproc Connect
-  endpoint, not a code fault. The `plan_cluster` sizing itself is proven offline+free by the unit
-  tests. **Run the Ray job-submission step from inside GCP** (a Vertex AI Workbench / Colab
-  Enterprise kernel on the cluster's network), which is exactly what `notebooks/04_ray_on_vertex`
-  documents and does — create/natives/teardown work from anywhere; only the job-submission hop needs
-  in-network reachability.
+  retries correctly — so the fault is isolated to Google's managed dashboard-proxy → head-node
+  dashboard-port hop (`*.aiplatform-training.googleusercontent.com`), a *different* host than the
+  Dataproc Connect endpoint, not a code fault. The `plan_cluster` sizing itself is proven offline+free
+  by the unit tests, and Cloud Logging shows the head node is **healthy** (`Ray runtime started`, jobs
+  run) — only the proxy hop to its dashboard port fails.
+
+  The 524 proved **independent of client location, endpoint type, and org policy**: it reproduced
+  identically from a local workstation, an on-VPC VM, and a Colab Enterprise runtime; on both public
+  (`network=None`) and VPC-peering (`network=<vpc>`) endpoints; and with `compute.vmExternalIpAccess`
+  set to both DENY and ALLOW. Every one of those still 524'd. The axis that finally mattered was the
+  **cluster's connectivity mode**.
+
+- **Ray on Vertex: SOLVED — two co-requisites, a PSC-I attachment AND a ≥16-vCPU head node.** The
+  managed dashboard-proxy → head-node hop needs **both**: (1) the cluster on a **PSC-I (Private
+  Service Connect Interface) network attachment** (`psc_interface_config`) — not public, not VPC
+  peering; and (2) a head node of **n1-standard-16 (60GB) or larger**. Either alone still 524s.
+  The head-size requirement was the confounder that made this take weeks: every failing cluster used
+  a small head (n1-standard-8, 30GB — which *boots*, reaches RUNNING, and runs Ray, but whose managed
+  dashboard proxy never comes up → `/api/version` 524s at a 30s timeout with 0 bytes), and the one
+  cluster that ever worked happened to be the only one with a 16-vCPU head — so "PSC-I is the fix"
+  looked complete until we reproduced it through our own SDK path. **Controlled proof** (identical
+  PSC-I attachment `scale-forecasting-ray`, Ray 2.47.1/py 3.11, same `create_ray_cluster` code, only
+  the head machine varied): n1-standard-8 → `/api/version` 524 (30s, 0 bytes); **n1-standard-16 →
+  HTTP 200 in 6.7s**. The live resource confirmed PSC-I was applied identically in both cases
+  (`psc_interface_config.network_attachment` set, `network` empty), so the delta was purely head
+  size. The fix is **cluster-side, not client-location**: the dashboard address stays the public
+  `*.aiplatform-training.googleusercontent.com` proxy host, but a PSC-I + big-head cluster serves it
+  to any authed client (local, on-VPC, Colab, headless Composer) — no in-network submitter needed.
+  In the product: `config.ray_head_machine_type` defaults to **n1-standard-16** (do not lower it),
+  and `ray_submit` selects connectivity in precedence order PSC-I (`network_attachment` /
+  `SF_RAY_NETWORK_ATTACHMENT` / TF `network_attachment_id`) → VPC peering (`network`) → public; the
+  attachment is provisioned in Terraform (`modules/network`, `ACCEPT_AUTOMATIC`) with the Vertex AI
+  service agent granted consume-only access (`modules/iam`). Ray-on-Vertex is now a supported compute
+  track alongside Dataproc Serverless and BigQuery-native.

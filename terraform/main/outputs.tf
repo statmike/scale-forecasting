@@ -53,6 +53,16 @@ output "subnetwork_uri" {
   value       = module.network.subnetwork_uri
 }
 
+output "network_id" {
+  description = "VPC (project-number form) for VPC-attached Ray clusters; feeds SF_RAY_NETWORK / RayInfra. null in BYO mode."
+  value       = module.network.network_id
+}
+
+output "network_attachment_id" {
+  description = "PSC-I network attachment self-link for Vertex Managed Ray (private path); select it on the cluster/runtime. null in BYO mode."
+  value       = module.network.network_attachment_id
+}
+
 output "seed_batch_id" {
   description = "Submitted seed batch id (null unless run_seed = true)."
   value       = module.seed.batch_id

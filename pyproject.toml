@@ -48,7 +48,11 @@ spark = [
 ]
 # Python runtime B — Ray on Vertex AI.
 ray = [
-    "ray[default]>=2.30",
+    # Vertex AI supports only a fixed set of Ray cluster-image versions, and the client-side Ray must
+    # MATCH the cluster's or the JobSubmissionClient handshake (GET /api/version) hangs → HTTP 524.
+    # On Python 3.11 the supported versions are 2.42 and 2.47; we run 2.47.1, so cap the client to that
+    # range (an unbounded >= floats to a newer, unsupported Ray — the original cause of the 524).
+    "ray[default]>=2.42,<2.48",
     "google-cloud-aiplatform>=1.60",
     # vertex_ray imports immutabledict at module load; aiplatform only declares it under its own
     # [ray] extra, which would pin ray[default]<=2.47.1 and conflict with ours — so pull it directly.

@@ -164,10 +164,14 @@ class ComputeConfig(BaseModel):
     # registry writes) stays in settings.region, so a cross-region list means cross-region reads.
     ray_regions: list[str] | None = None
     # Machine types for the two fixed worker pools. GPU workers must be N1 for T4 attachment.
-    # The head node has a Vertex Ray floor of >18GB RAM, so n1-standard-8 (30GB) is the smallest
-    # valid head — n1-standard-4 (15GB) is rejected at create time. It runs no cells (the driver
-    # only), so the smaller worker pools stay independently sized.
-    ray_head_machine_type: str = "n1-standard-8"
+    # The head node runs no cells (the driver only), so the worker pools stay independently sized —
+    # but it must be big enough to serve the Ray dashboard/proxy leg. Vertex has a hard >18GB RAM
+    # floor (n1-standard-4 = 15GB is rejected at create), but the *operational* floor is higher: a
+    # 30GB/8-vCPU head (n1-standard-8) boots and reaches RUNNING yet its managed dashboard proxy
+    # never comes up, so the JobSubmissionClient `/api/version` handshake 524s (30s timeout, 0
+    # bytes) — proven repeatedly. n1-standard-16 (60GB/16-vCPU) serves the handshake in <7s. So the
+    # head default is n1-standard-16; do not drop it below that or Ray job submission will hang.
+    ray_head_machine_type: str = "n1-standard-16"
     ray_cpu_machine_type: str = "n1-standard-8"
     ray_gpu_machine_type: str = "n1-standard-8"
     # GPUs per GPU worker node. T4 permits 1, 2, or 4 per node (not 3) — validated below.

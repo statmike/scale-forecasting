@@ -81,8 +81,9 @@ Dataproc **Spark Connect** endpoint; [`02_bigquery_native`](./notebooks/02_bigqu
 runs the BigQuery-native models; [`03_combo_and_ensemble`](./notebooks/03_combo_and_ensemble.ipynb)
 runs Spark ∥ BigQuery under one `run_id` with ensembles, then reviews base + ensemble models side by
 side on `v_model_leaderboard`; [`04_ray_on_vertex`](./notebooks/04_ray_on_vertex.ipynb) runs the
-Python-runtime models on a fixed-size Ray-on-Vertex cluster ∥ the BigQuery natives (run it from an
-in-GCP kernel — job submission goes through the cluster's dashboard).
+Python-runtime models on a fixed-size Ray-on-Vertex cluster ∥ the BigQuery natives (job submission
+works from any authenticated client — local or in-GCP — because the cluster is provisioned on a
+PSC-I network attachment with a dashboard-capable head node, wired by the Terraform network module).
 
 > The one-`terraform apply` cloud deploy (Spark/Ray/BigQuery at scale) lands in the
 > final polish phase; the quickstart above is the whole local dev loop today.

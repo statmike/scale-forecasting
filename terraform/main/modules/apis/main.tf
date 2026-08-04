@@ -18,12 +18,17 @@ locals {
   # The full set for Spark + Ray + BigQuery + Composer + lineage. Grouped by purpose in the
   # comments so a reader knows why each is here.
   services = [
-    "compute.googleapis.com",              # networking substrate for Dataproc/Vertex/Composer
-    "storage.googleapis.com",              # GCS: warehouse, artifacts, code buckets
-    "bigquery.googleapis.com",             # registry + native models + Iceberg tables
-    "bigqueryconnection.googleapis.com",   # BigLake / Cloud Resource connection for Iceberg
-    "dataproc.googleapis.com",             # Dataproc Serverless (Spark engines + seed job)
-    "aiplatform.googleapis.com",           # Vertex AI (Ray on Vertex)
+    "compute.googleapis.com",            # networking substrate for Dataproc/Vertex/Composer
+    "storage.googleapis.com",            # GCS: warehouse, artifacts, code buckets
+    "bigquery.googleapis.com",           # registry + native models + Iceberg tables
+    "bigqueryconnection.googleapis.com", # BigLake / Cloud Resource connection for Iceberg
+    "dataproc.googleapis.com",           # Dataproc Serverless (Spark engines + seed job)
+    "aiplatform.googleapis.com",         # Vertex AI (Ray on Vertex)
+    # The Ray interactive dashboard / job-submission handshake is served through the managed
+    # Inverting-Proxy fabric (*.aiplatform-training.googleusercontent.com), which is built on the
+    # same Notebooks/IAP-backed path as Colab Enterprise. Without these, the proxy's backend leg
+    # never answers and the JobSubmissionClient GET /api/version hangs → HTTP 524.
+    "servicenetworking.googleapis.com",    # Private Services Access peering for the Ray private endpoint
     "composer.googleapis.com",             # Composer 3 (Airflow) — created only if create_composer
     "artifactregistry.googleapis.com",     # container images for engines / Ray
     "cloudbuild.googleapis.com",           # build those images

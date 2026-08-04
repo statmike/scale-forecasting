@@ -66,14 +66,19 @@ _REQUIREMENTS = _REPO_ROOT / "docker" / "requirements.txt"
 # docstring, resolve(), and any tooling agree. code_bucket + compute_sa are shared with the Spark
 # batch; network (optional) is a VPC for a private endpoint; container_image is optional.
 _ENV_NETWORK = "SF_RAY_NETWORK"
+_ENV_NETWORK_ATTACHMENT = "SF_RAY_NETWORK_ATTACHMENT"
 _ENV_COMPUTE_SA = "SF_COMPUTE_SA"
 _ENV_CODE_BUCKET = "SF_CODE_BUCKET"
 _ENV_CONTAINER_IMAGE = "SF_CONTAINER_IMAGE"
 _ENV_RAY_VERSION = "SF_RAY_VERSION"
 
-# Vertex Ray's supported Ray version + our runtime Python. Overridable via SF_RAY_VERSION so a newer
-# cluster image can be selected without a code change (the client submits jobs over HTTP, which is
-# tolerant of a minor client/cluster Ray skew).
+# Vertex Ray's supported Ray version + our runtime Python. Vertex AI accepts only a fixed set of Ray
+# versions for the cluster image (2.9.3 / 2.33.0 / 2.42.0 / 2.47.1; on Python 3.11 only 2.42 or
+# 2.47), and the client-side Ray MUST match the cluster's: the JobSubmissionClient handshake (GET
+# /api/version) hangs on a version-skewed dashboard rather than erroring cleanly. So the [ray] extra
+# is capped to a supported range (see pyproject.toml) and this default matches. Overridable via
+# SF_RAY_VERSION to select a different *supported* image without a code change — but the client Ray
+# must still equal it.
 _DEFAULT_RAY_VERSION = "2.47"
 _DEFAULT_PYTHON_VERSION = "3.11"
 
@@ -94,9 +99,19 @@ class RayInfra:
     """Vertex-Ray infra identity — what launching a cluster needs beyond :class:`Settings`.
 
     Resolved from ``SF_*`` env (parity with ``Settings`` / ``BatchInfra``) or ``terraform output``.
-    ``network`` is an **optional** VPC: set it (with a private-services connection in place) for a
-    private endpoint; leave it unset and the cluster gets a public endpoint — no VPC peering / PSA
-    required, which is the simplest way to run when the deployment has no private-services access.
+
+    Connectivity is one of three modes, in precedence order — the first that is set wins:
+
+    * ``network_attachment`` (**PSC-I**, the supported private path): a network-attachment
+      resource name. Vertex's tenant attaches an interface into the VPC through it, and — critically
+      — this is the *only* mode under which the managed Ray dashboard / ``JobSubmissionClient``
+      handshake (``GET /api/version``) is reachable off-cluster on this org; both public and VPC
+      peering leave the proxy→head-node hop dead (a 30s hang → HTTP 524). Excludes ``network``.
+    * ``network`` (VPC peering): a VPC (with a private-services connection) for a peered private
+      endpoint. Kept for deployments that already run this way, but note the dashboard-handshake
+      caveat above — prefer ``network_attachment``.
+    * neither set: a public endpoint (Vertex's default; same handshake caveat).
+
     ``compute_sa`` is the runtime SA the cluster runs as; ``code_bucket`` where the run config JSON
     is staged. ``container_image`` is an optional custom node image (the shared runtime that bundles
     ``[ray]`` + ``[models]``); when unset, Vertex's prebuilt Ray image is used and ``runtime_env``
@@ -106,6 +121,7 @@ class RayInfra:
     compute_sa: str
     code_bucket: str
     network: str | None = None
+    network_attachment: str | None = None
     container_image: str | None = None
     ray_version: str = _DEFAULT_RAY_VERSION
     python_version: str = _DEFAULT_PYTHON_VERSION
@@ -114,8 +130,9 @@ class RayInfra:
     def resolve(cls) -> RayInfra:
         """Build from the ``SF_*`` Ray-infra environment; raise naming the first missing var.
 
-        ``SF_COMPUTE_SA`` and ``SF_CODE_BUCKET`` are required; ``SF_RAY_NETWORK`` is optional
-        (unset → public endpoint, no VPC peering needed).
+        ``SF_COMPUTE_SA`` and ``SF_CODE_BUCKET`` are required; ``SF_RAY_NETWORK_ATTACHMENT``
+        (PSC-I, preferred) and ``SF_RAY_NETWORK`` (VPC peering) are optional — set at most one; if
+        both are set the attachment wins. Neither set → public endpoint.
         """
         required = {
             "compute_sa": _ENV_COMPUTE_SA,
@@ -134,6 +151,7 @@ class RayInfra:
             compute_sa=values["compute_sa"],
             code_bucket=values["code_bucket"],
             network=os.environ.get(_ENV_NETWORK) or None,
+            network_attachment=os.environ.get(_ENV_NETWORK_ATTACHMENT) or None,
             container_image=os.environ.get(_ENV_CONTAINER_IMAGE) or None,
             ray_version=os.environ.get(_ENV_RAY_VERSION) or _DEFAULT_RAY_VERSION,
         )
@@ -145,9 +163,10 @@ class RayInfra:
         """Build from a ``terraform output -json`` value map (local dev/tests).
 
         Reads the keys the ``terraform/main`` stage emits — ``compute_sa``, ``code_bucket``, an
-        optional ``network_id`` (absent → public endpoint), and (when ``image_tag`` is given)
-        ``runtime_image_repo`` for a custom node image. Omitting ``image_tag`` leaves
-        ``container_image`` unset (Vertex prebuilt image + ``requirements.txt``).
+        optional ``network_attachment_id`` (PSC-I, preferred) and/or ``network_id`` (VPC peering);
+        both absent → public endpoint, and if both are present the attachment wins. When
+        ``image_tag`` is given, ``runtime_image_repo`` is read for a custom node image; omitting it
+        leaves ``container_image`` unset (Vertex prebuilt image + ``requirements.txt``).
         """
         try:
             image = (
@@ -157,6 +176,7 @@ class RayInfra:
                 compute_sa=outputs["compute_sa"],
                 code_bucket=outputs["code_bucket"],
                 network=outputs.get("network_id") or None,
+                network_attachment=outputs.get("network_attachment_id") or None,
                 container_image=image,
             )
         except KeyError as exc:
@@ -413,9 +433,13 @@ def _create_cluster(
 
     Head node is a single small CPU box (no accelerator); workers are the planned GPU/CPU pools
     (:func:`_worker_resources`). No ``autoscaling_spec`` anywhere — a fixed pool is the honest model
-    for a fixed-scale batch (D17). ``infra.network`` is passed through: a VPC (with a
-    private-services connection) gives a private endpoint, and ``None`` gives a public endpoint —
-    Vertex's own default — so a deployment without VPC peering can still run. Labels tag the run.
+    for a fixed-scale batch (D17). Labels tag the run.
+
+    Connectivity follows :class:`RayInfra`'s three modes (first set wins): a PSC-I network
+    attachment (``psc_interface_config`` — the supported private path, the only mode whose managed
+    dashboard/``JobSubmissionClient`` handshake is reachable off-cluster on this org), else VPC
+    peering (``network=``), else a public endpoint (both unset — Vertex's default). PSC-I and
+    ``network`` are mutually exclusive at the API, so we pass exactly one.
     """
     from google.cloud.aiplatform import vertex_ray
 
@@ -424,6 +448,21 @@ def _create_cluster(
         node_count=1,
         custom_image=infra.container_image,
     )
+
+    # PSC-I takes precedence over peering; only one of psc_interface_config / network may be set.
+    psc_config = None
+    network = infra.network
+    if infra.network_attachment:
+        from google.cloud.aiplatform.vertex_ray.util.resources import PscIConfig
+
+        psc_config = PscIConfig(network_attachment=infra.network_attachment)
+        network = None  # mutually exclusive — never pass both
+        endpoint = "psc-i"
+    elif infra.network:
+        endpoint = "peering"
+    else:
+        endpoint = "public"
+
     _log.info(
         "creating fixed-size Ray cluster %s: cpu_nodes=%d gpu_nodes=%d accel=%s x%d endpoint=%s",
         name,
@@ -431,13 +470,14 @@ def _create_cluster(
         plan.gpu_node_count,
         plan.accelerator_type,
         plan.accelerator_count,
-        "private" if infra.network else "public",
+        endpoint,
     )
     return vertex_ray.create_ray_cluster(
         head_node_type=head,
         worker_node_types=_worker_resources(plan, infra),
         cluster_name=name,
-        network=infra.network,
+        network=network,
+        psc_interface_config=psc_config,
         service_account=infra.compute_sa,
         ray_version=infra.ray_version,
         python_version=infra.python_version,
@@ -594,42 +634,56 @@ def _is_dashboard_warmup_error(exc: Exception) -> bool:
 
 
 def _connect_job_client(
-    dashboard_address: str,
+    cluster_resource_name: str,
 ) -> Any:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
-    """Open a ``JobSubmissionClient`` to the dashboard, retrying past the warm-up race.
+    """Open a ``JobSubmissionClient`` to the cluster, retrying past the warm-up race.
+
+    We address the cluster by its **resource name**
+    (``vertex_ray://projects/<num>/locations/<region>/persistentResources/<name>``): the
+    ``[ray]``-extra resolver discovers the dashboard endpoint and authenticates the connection
+    itself. Submission routes through a Google-managed dashboard proxy.
+
+    Importing ``vertex_ray`` here is **load-bearing, not cosmetic**: the plugin registers the
+    ``vertex_ray://`` address handler *and* injects the OAuth Bearer token into the dashboard
+    handshake — Google's docs state it is "required to obtain authentication automatically." Without
+    it in the process that builds the client, the ``GET /api/version`` request reaches the proxy
+    without valid auth and the proxy holds it open until it times out (HTTP 524) instead of
+    returning a clean 401. The SDK's project/location is already bound upstream (``_init_vertex`` on
+    both the create and reuse paths); the import is idempotent, so this is belt-and-suspenders.
 
     ``JobSubmissionClient.__init__`` does a GET ``/api/version`` handshake; right after the cluster
-    hits RUNNING that endpoint may not be reachable through Vertex's public-endpoint proxy yet, so
-    the first attempts can raise a proxy gateway timeout (524/504/…). We back off and retry the
-    *connection only* (never a partial submit) until it succeeds or the budget is spent, then let
-    the last error propagate.
+    hits RUNNING that endpoint may not be reachable yet, so the first attempts can raise a proxy
+    gateway timeout (524/504/…). We back off and retry the *connection only* (never a partial
+    submit) until it succeeds or the budget is spent, then let the last error propagate. See
+    NOTES.md for the current status of the dashboard-proxy handshake on Vertex Ray.
     """
     import time
 
+    from google.cloud.aiplatform import vertex_ray  # noqa: F401 - registers vertex_ray:// + auth
     from ray.job_submission import JobSubmissionClient
 
     last_exc: Exception | None = None
     for attempt in range(1, _DASHBOARD_CONNECT_ATTEMPTS + 1):
         try:
-            return JobSubmissionClient(f"vertex_ray://{dashboard_address}")
-        except Exception as exc:  # noqa: BLE001 - classify, retry transients, re-raise real faults
+            return JobSubmissionClient(f"vertex_ray://{cluster_resource_name}")
+        except Exception as exc:  # noqa: BLE001 - classify, retry transients, re-raise faults
             if not _is_dashboard_warmup_error(exc):
                 raise
             last_exc = exc
             _log.info(
-                "Ray dashboard not ready yet (attempt %d/%d): %r; retrying in %ds",
+                "Ray dashboard not ready yet (attempt %d/%d): %r",
                 attempt,
                 _DASHBOARD_CONNECT_ATTEMPTS,
                 exc,
-                _DASHBOARD_CONNECT_BACKOFF_SECONDS,
             )
-            time.sleep(_DASHBOARD_CONNECT_BACKOFF_SECONDS)
+        _log.info("retrying Ray dashboard connect in %ds", _DASHBOARD_CONNECT_BACKOFF_SECONDS)
+        time.sleep(_DASHBOARD_CONNECT_BACKOFF_SECONDS)
     assert last_exc is not None
     raise last_exc
 
 
 def _submit_and_poll(
-    cluster: object,
+    cluster_resource_name: str,
     entrypoint: str,
     runtime_env: dict[str, Any],
     *,
@@ -637,14 +691,14 @@ def _submit_and_poll(
 ) -> tuple[str, str]:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
     """Submit the on-cluster driver as a Ray Job and (when ``wait``) poll to a terminal state.
 
-    Connects the Jobs client to the cluster's dashboard (``vertex_ray://<dashboard_address>``,
+    Connects the Jobs client to the cluster by resource name (``vertex_ray://<resource_name>``,
     retrying past the dashboard warm-up race), submits ``entrypoint`` with ``runtime_env`` (current
     ``src/`` + requirements), and returns ``(job_id, status)``. Without ``wait`` the status is the
     immediate post-submit state (the caller skips telemetry + the terminal-state check).
     """
     import time
 
-    client = _connect_job_client(cluster.dashboard_address)  # type: ignore[attr-defined]
+    client = _connect_job_client(cluster_resource_name)
     job_id = client.submit_job(entrypoint=entrypoint, runtime_env=runtime_env)
     _log.info("submitted Ray job %s", job_id)
     if not wait:
@@ -763,7 +817,7 @@ def submit_ray(
 
         cluster = _get_cluster(cluster_resource_name)
         started = time.perf_counter()
-        job_id, status = _submit_and_poll(cluster, entrypoint, runtime_env, wait=wait)
+        job_id, status = _submit_and_poll(cluster_resource_name, entrypoint, runtime_env, wait=wait)
         wall_s = round(time.perf_counter() - started, 1) if wait else None
 
         if wait:

@@ -126,11 +126,27 @@ def test_ray_infra_resolve_without_network_is_public_endpoint(
 ) -> None:
     # SF_RAY_NETWORK is optional: unset → network is None → public endpoint (no VPC peering needed).
     monkeypatch.delenv("SF_RAY_NETWORK", raising=False)
+    monkeypatch.delenv("SF_RAY_NETWORK_ATTACHMENT", raising=False)
     monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
     monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
     infra = ray_submit.RayInfra.resolve()
     assert infra.network is None
+    assert infra.network_attachment is None
     assert infra.compute_sa == "sa@x.iam"
+
+
+def test_ray_infra_resolve_reads_network_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SF_RAY_NETWORK_ATTACHMENT (PSC-I) resolves onto network_attachment — the preferred path.
+    monkeypatch.delenv("SF_RAY_NETWORK", raising=False)
+    monkeypatch.setenv(
+        "SF_RAY_NETWORK_ATTACHMENT",
+        "projects/123/regions/us-central1/networkAttachments/scale-forecasting-ray",
+    )
+    monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
+    monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
+    infra = ray_submit.RayInfra.resolve()
+    assert infra.network_attachment.endswith("/networkAttachments/scale-forecasting-ray")
+    assert infra.network is None
 
 
 def test_ray_infra_resolve_missing_var_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,6 +175,20 @@ def test_ray_infra_from_terraform_outputs_without_network_is_public() -> None:
     # network_id is optional (a deployment without private-services access omits it) → public.
     infra = ray_submit.RayInfra.from_terraform_outputs({"compute_sa": "s", "code_bucket": "b"})
     assert infra.network is None
+    assert infra.network_attachment is None
+
+
+def test_ray_infra_from_terraform_outputs_reads_network_attachment() -> None:
+    # network_attachment_id (PSC-I) is the supported private path — carried through from TF outputs.
+    outputs = {
+        "compute_sa": "sa@x.iam",
+        "code_bucket": "code-bkt",
+        "network_attachment_id": (
+            "projects/123/regions/us-central1/networkAttachments/scale-forecasting-ray"
+        ),
+    }
+    infra = ray_submit.RayInfra.from_terraform_outputs(outputs)
+    assert infra.network_attachment.endswith("/networkAttachments/scale-forecasting-ray")
 
 
 def test_ray_infra_from_terraform_outputs_missing_key_raises() -> None:
@@ -263,10 +293,11 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls.setdefault("delete_names", []).append(resource_name)
 
     def _fake_submit(
-        cluster: Any, entrypoint: str, runtime_env: dict, *, wait: bool
+        cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
     ) -> tuple[str, str]:
         calls["submitted"] += 1
         calls["order"].append("submit")
+        calls["submit_resource_name"] = cluster_resource_name
         calls["entrypoint"] = entrypoint
         calls["runtime_env"] = runtime_env
         calls["wait"] = wait
@@ -317,7 +348,7 @@ def test_submit_ray_deletes_even_when_job_raises(
     calls = _stubbed_lifecycle
 
     def _failing_submit(
-        cluster: Any, entrypoint: str, runtime_env: dict, *, wait: bool
+        cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
     ) -> tuple[str, str]:
         calls["order"].append("submit")
         return "job-fail", "FAILED"
@@ -397,7 +428,7 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
     calls = _stubbed_lifecycle
 
     def _immediate_submit(
-        cluster: Any, entrypoint: str, runtime_env: dict, *, wait: bool
+        cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
     ) -> tuple[str, str]:
         calls["order"].append("submit")
         calls["wait"] = wait
@@ -496,6 +527,43 @@ def test_is_dashboard_warmup_error_true_for_transient(message: str) -> None:
 def test_is_dashboard_warmup_error_false_for_real_faults(message: str) -> None:
     # Auth / version-mismatch won't fix themselves by waiting — must propagate, not spin.
     assert ray_submit._is_dashboard_warmup_error(Exception(message)) is False
+
+
+def test_connect_job_client_uses_resource_name_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # We address the cluster by its resource name; the [ray] resolver discovers and authenticates
+    # the dashboard itself. (Dashboard reachability is an execution-context property, not something
+    # the addressing form controls — see NOTES.md for the handshake status.)
+    resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
+    seen: list[str] = []
+
+    class _FakeJobClient:
+        def __init__(self, address: str) -> None:
+            seen.append(address)
+
+    monkeypatch.setattr("ray.job_submission.JobSubmissionClient", _FakeJobClient, raising=False)
+    client = ray_submit._connect_job_client(resource_name)
+    assert isinstance(client, _FakeJobClient)
+    assert seen == [f"vertex_ray://{resource_name}"]
+
+
+def test_connect_job_client_reraises_non_transient_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A real fault (auth) must propagate at once — not spin the warm-up retry loop.
+    resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
+    seen: list[str] = []
+
+    class _FakeJobClient:
+        def __init__(self, address: str) -> None:
+            seen.append(address)
+            raise Exception("403 Client Error: Forbidden")
+
+    monkeypatch.setattr("ray.job_submission.JobSubmissionClient", _FakeJobClient, raising=False)
+    with pytest.raises(Exception, match="403"):
+        ray_submit._connect_job_client(resource_name)
+    assert seen == [f"vertex_ray://{resource_name}"]
 
 
 def test_resolve_regions_defaults_to_settings_region() -> None:
