@@ -29,7 +29,10 @@ can open any file, understand it in one read, and fork it to their needs.
 - **Backtesting** (expanding/sliding folds, full metric panel) and **ensembling**
   (calculated + learned) out of the box.
 - **BigQuery lineage** — every run's config, per-model metrics, forecasts, and artifact
-  links are captured in managed Iceberg tables.
+  links are captured in native BigQuery tables (config, telemetry, and quantiles as native
+  `JSON` columns).
+- **Pick your input storage** — the example series ship in **both** managed-Iceberg and
+  native BigQuery, so you can benchmark the identical data on either format by name.
 - **Config-driven** — one JSON file describes the whole run; the same file runs locally
   and under Composer.
 
@@ -46,12 +49,23 @@ registry, so the config *is* the experiment record.
   (optionally) backtests, and predicts one `(series, model)` cell. The *same* function
   runs locally, inside a Spark Pandas UDF, and inside a Ray task. Engines differ only in
   how they fan it out and collect results — that's what makes "same code everywhere" real.
+- **Ray vs Spark, for the PySpark crowd.** If you fan `(series, model)` work out today with
+  `applyInPandas` + pandas UDFs, Ray runs the **identical** `worker.run_cell` (G1) over the
+  **same** input table (Iceberg or native — read through the BigQuery Storage Read API), so
+  the storage format is transparent to engine code. You get Ray ∥ BigQuery under one `run_id`
+  with no Spark session to stand up or tune — and because the Ray ecosystem can also host
+  Spark workloads (via RayDP), a team can consolidate many frameworks on one cluster.
+  *(Today the Ray engine reads via the BQ Storage Read API; Ray-native Iceberg reads
+  (`ray.data`) and Spark-on-Ray (RayDP) are a documented future direction, not a current
+  claim.)*
 - **Scale without a bottleneck.** Workers return data, not RPCs; results are written to
   BigQuery in bulk (Storage Write API). Parallelism is bounded by compute, not a tracking
   server's QPS.
-- **Lineage.** Three managed-Iceberg tiers — `run_registry` (config) →
+- **Lineage.** Three native-BigQuery tiers — `run_registry` (config) →
   `forecast_metadata` (metrics + GCS artifact links) → `forecast_predictions` (values),
-  plus `backtest_oof` for learned ensembling.
+  plus `backtest_oof` for learned ensembling. These run-collection tables are always native
+  (native `JSON` columns, `WRITE_TRUNCATE` reseed); the *input* table ships in both
+  Iceberg and native so you can compare storage formats on the same run shape.
 
 Read `src/scale_forecasting/config.py` (the run contract) and
 `src/scale_forecasting/worker.py` (the unit of work) to see the whole shape.

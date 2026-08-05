@@ -117,6 +117,12 @@ variable "seed_run_label" {
   default     = "full"
 }
 
+variable "seed_variant" {
+  description = "Source storage format(s) to seed: iceberg, native, or both (one panel, D19)."
+  type        = string
+  default     = "both"
+}
+
 variable "seed_image_tag" {
   description = "Tag of the runtime image the seed batch runs (built by docker/cloudbuild.yaml)."
   type        = string

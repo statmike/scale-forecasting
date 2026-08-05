@@ -419,20 +419,18 @@ def _stamp_job_telemetry(
     """Read the finished batch's telemetry and write it to the run header (best-effort).
 
     A fresh ``get_batch`` (the LRO result can carry incomplete ``approximate_usage``) → the pure
-    :func:`extract_job_telemetry` → ``update_header(job_telemetry=<json>)``. Wrapped so any failure
-    (API error, missing field, header not yet written) is logged and swallowed: telemetry is a
+    :func:`extract_job_telemetry` → ``update_header(job_telemetry=<dict>)``. The header column is a
+    native ``JSON`` type whose query parameter serializes the value itself, so we pass the telemetry
+    **dict** (not a pre-serialized string, which would double-encode). Wrapped so any failure (API
+    error, missing field, header not yet written) is logged and swallowed: telemetry is a
     nice-to-have overlay on an already-complete run, never a reason to fail it (CONTRACTS §3.3).
     """
-    import json
-
     from .registry import bq
 
     try:
         fetched = client.get_batch(name=f"{parent}/batches/{batch_id}")
         telemetry = extract_job_telemetry(fetched)
-        bq.update_header(
-            run_id, settings=settings, job_telemetry=json.dumps(telemetry, sort_keys=True)
-        )
+        bq.update_header(run_id, settings=settings, job_telemetry=telemetry)
         _log.info("batch %s telemetry stamped: %s", batch_id, telemetry)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("batch %s telemetry capture failed (non-fatal): %r", batch_id, exc)

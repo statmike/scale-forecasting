@@ -35,7 +35,7 @@ _SETTINGS = Settings(
 def _cfg(**over: Any) -> RunConfig:
     base: dict[str, Any] = {
         "run_name": "main test",
-        "data": {"source_table": "source_series", "horizon": 7, "series_limit": 5},
+        "data": {"source_table": "source_series_native", "horizon": 7, "series_limit": 5},
         "models": [_SPARK, *_NATIVE],
         "features": {"exog": ["price_index"]},
     }
@@ -291,7 +291,7 @@ def test_cli_dispatches_dry_run(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) 
         json.dumps(
             {
                 "run_name": "cli main test",
-                "data": {"source_table": "source_series", "horizon": 7},
+                "data": {"source_table": "source_series_native", "horizon": 7},
                 "models": [_SPARK],
             }
         )

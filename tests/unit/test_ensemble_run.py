@@ -31,7 +31,7 @@ _SETTINGS = Settings(
 def _cfg(**over: Any) -> RunConfig:
     base: dict[str, Any] = {
         "run_name": "ens run test",
-        "data": {"source_table": "source_series", "horizon": 7},
+        "data": {"source_table": "source_series_native", "horizon": 7},
         "models": ["theta", "arima_plus"],
     }
     base.update(over)

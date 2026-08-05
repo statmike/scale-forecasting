@@ -17,7 +17,7 @@ from scale_forecasting.validation import ValidationReport, validate_panel
 
 
 def _cfg(**data_overrides: object) -> RunConfig:
-    data = {"source_table": "proj.ds.source_series", **data_overrides}
+    data = {"source_table": "proj.ds.source_series_native", **data_overrides}
     return RunConfig(run_name="t", data=data, models=["theta"])
 
 

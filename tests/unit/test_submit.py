@@ -31,7 +31,7 @@ pytest.importorskip("google.cloud.dataproc_v1")
 def _cfg(**over: Any) -> RunConfig:
     base: dict[str, Any] = {
         "run_name": "submit test",
-        "data": {"source_table": "source_series", "horizon": 28},
+        "data": {"source_table": "source_series_native", "horizon": 28},
         "models": ["theta", "holtwinters", "xgboost", "lightgbm"],
     }
     base.update(over)

@@ -1,4 +1,4 @@
-# seed — submit the Dataproc Serverless Spark batch that seeds source_series (BUILD B0.4).
+# seed — submit the Dataproc Serverless Spark batch that seeds the source_series_* tables (B0.4).
 #
 # This runs the platform's own core pattern (parallel Spark generation + high-throughput BigQuery
 # write) to materialize the shipped example dataset, and doubles as the first Spark scale smoke.
@@ -25,7 +25,7 @@
 #     run_seed = true, seed_num_series = 100, seed_run_label = "smoke", then `terraform apply`.
 #
 #   REVIEW:
-#     inspect the batch's real cost + runtime and query source_series before scaling up.
+#     inspect the batch's real cost + runtime and query the source_series_* tables before scaling up.
 #
 #   FULL   (the 100k dataset — the B0.4 deliverable):
 #     seed_num_series = 100000, seed_run_label = "full", then `terraform apply`. The batch_id
@@ -33,9 +33,13 @@
 #     the new one; batches are immutable and are not updated in place).
 # ───────────────────────────────────────────────────────────────────────────────────────────
 #
-# Idempotency note: the seed job DELETEs source_series before writing (replace-on-reseed). Right
-# after a `direct` (Storage Write API) run the rows buffer ~90 min and can't be DELETE-d; an
-# immediate re-seed should use seed_write_method = "indirect" or wait out the buffer.
+# Idempotency note: the seed job clears each source table before writing (replace-on-reseed). The
+# native variant is cleared with TRUNCATE (clears the streaming buffer too); the Iceberg variant
+# DELETEs, and right after a `direct` (Storage Write API) run those rows buffer ~90 min and can't be
+# DELETE-d — an immediate Iceberg re-seed should use seed_write_method = "indirect" or wait it out.
+#
+# VARIANT: the example input ships in both storage formats (source_series_iceberg + source_series_
+# native), seeded from one generated panel. seed_variant selects which to seed (default "both").
 
 variable "create" {
   description = "Submit the seed batch. false = no batch, no spend (default)."
@@ -79,6 +83,17 @@ variable "run_label" {
   description = "Short label distinguishing batches (e.g. \"smoke\", \"full\"); part of batch_id."
   type        = string
   default     = "full"
+}
+
+variable "variant" {
+  description = "Which source storage format(s) to seed: iceberg, native, or both (from one panel)."
+  type        = string
+  default     = "both"
+
+  validation {
+    condition     = contains(["iceberg", "native", "both"], var.variant)
+    error_message = "variant must be \"iceberg\", \"native\", or \"both\"."
+  }
 }
 
 # --- infra the batch runs against (from other modules' outputs) ---
@@ -204,6 +219,7 @@ resource "google_dataproc_batch" "seed" {
       "--n-series", tostring(var.num_series),
       "--master-seed", tostring(var.master_seed),
       "--write-method", var.write_method,
+      "--variant", var.variant,
     ], local.infra_args)
   }
 

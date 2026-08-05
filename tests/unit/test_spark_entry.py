@@ -20,7 +20,7 @@ from scale_forecasting.engines import spark_explode, spark_naive
 
 _CONFIG: dict[str, Any] = {
     "run_name": "spark entry test",
-    "data": {"source_table": "source_series", "horizon": 7},
+    "data": {"source_table": "source_series_native", "horizon": 7},
     "models": ["theta", "holtwinters"],
     "spark_method": "explode",
 }

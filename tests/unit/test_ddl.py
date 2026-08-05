@@ -1,4 +1,4 @@
-"""Tests for the registry DDL renderer (CONTRACTS §4, DESIGN §8).
+"""Tests for the registry DDL renderer (CONTRACTS §4, DESIGN §8, D19).
 
 Offline snapshot test: rendering is a pure string op, so we pin the exact SQL. If the
 DDL changes intentionally, regenerate the snapshot with SF_UPDATE_SNAPSHOTS=1.
@@ -12,39 +12,90 @@ from pathlib import Path
 import pytest
 
 from scale_forecasting.registry.ddl import (
+    SOURCE_TABLE_ICEBERG,
+    SOURCE_TABLE_NATIVE,
     TABLE_NAMES,
     additive_columns,
     render_create_tables,
+    render_deployment_ddl,
+    render_drop_tables,
     render_migrations,
 )
 
-SNAPSHOT = Path(__file__).parent / "snapshots" / "ddl_iceberg.sql"
+SNAPSHOT = Path(__file__).parent / "snapshots" / "ddl_deployment.sql"
+DROP_SNAPSHOT = Path(__file__).parent / "snapshots" / "ddl_drop.sql"
 
 _KW = {"connection": "proj.us-central1.sf-conn", "warehouse_uri": "gs://proj-wh/warehouse"}
 
+# The four run-collection tables are always native; the source table ships in both formats.
+_REGISTRY_TABLES = ("run_registry", "forecast_metadata", "forecast_predictions", "backtest_oof")
+
 
 def _render_all() -> str:
-    stmts = render_create_tables("proj.scale_forecasting", **_KW)
+    stmts = render_deployment_ddl("proj.scale_forecasting", **_KW)
     return "\n\n".join(stmts[name] for name in TABLE_NAMES)
 
 
-def test_all_five_tables_rendered() -> None:
-    stmts = render_create_tables("proj.scale_forecasting", **_KW)
+def test_all_six_tables_rendered() -> None:
+    stmts = render_deployment_ddl("proj.scale_forecasting", **_KW)
     assert set(stmts) == set(TABLE_NAMES)
-    assert len(TABLE_NAMES) == 5
+    assert len(TABLE_NAMES) == 6
+    # four registry + two source variants
+    assert set(TABLE_NAMES) == {*_REGISTRY_TABLES, SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE}
 
 
 def test_every_statement_is_idempotent_and_terminated() -> None:
-    for stmt in render_create_tables("d", **_KW).values():
+    for stmt in render_deployment_ddl("d", **_KW).values():
         assert "CREATE TABLE IF NOT EXISTS" in stmt
         assert stmt.rstrip().endswith(";")
 
 
-def test_iceberg_wrapping_present() -> None:
-    stmt = render_create_tables("d", **_KW)["run_registry"]
+def test_registry_tables_are_native_in_deployment() -> None:
+    # The run-collection tables are always native BigQuery (D19) — no Iceberg wrapping, so they
+    # can carry the native JSON column type and be reseeded with WRITE_TRUNCATE.
+    stmts = render_deployment_ddl("d", **_KW)
+    for name in _REGISTRY_TABLES:
+        assert "ICEBERG" not in stmts[name], name
+        assert "WITH CONNECTION" not in stmts[name], name
+
+
+def test_registry_json_columns_use_native_json_type() -> None:
+    stmts = render_deployment_ddl("d", **_KW)
+    assert "raw_config        JSON NOT NULL" in stmts["run_registry"]
+    assert "job_telemetry     JSON" in stmts["run_registry"]
+    assert "best_params    JSON" in stmts["forecast_metadata"]
+    assert "quantiles     JSON" in stmts["forecast_predictions"]
+
+
+def test_source_iceberg_variant_is_iceberg_wrapped() -> None:
+    stmt = render_deployment_ddl("d", **_KW)[SOURCE_TABLE_ICEBERG]
     assert "table_format = 'ICEBERG'" in stmt
     assert "WITH CONNECTION `proj.us-central1.sf-conn`" in stmt
-    assert "storage_uri = 'gs://proj-wh/warehouse/run_registry'" in stmt
+    assert f"storage_uri = 'gs://proj-wh/warehouse/{SOURCE_TABLE_ICEBERG}'" in stmt
+
+
+def test_source_native_variant_has_no_iceberg_clause() -> None:
+    stmt = render_deployment_ddl("d", **_KW)[SOURCE_TABLE_NATIVE]
+    assert "ICEBERG" not in stmt
+    assert "WITH CONNECTION" not in stmt
+
+
+def test_both_source_variants_share_the_same_columns() -> None:
+    # Same panel seeds both, so schemas match column-for-column (only the wrapping differs).
+    stmts = render_deployment_ddl("d", **_KW)
+
+    def _cols(stmt: str) -> str:
+        return stmt[stmt.index("(") : stmt.index("\n)")]
+
+    assert _cols(stmts[SOURCE_TABLE_ICEBERG]) == _cols(stmts[SOURCE_TABLE_NATIVE])
+
+
+def test_deployment_dataset_ref_is_substituted() -> None:
+    stmt = render_deployment_ddl("myproj.myds", **_KW)["forecast_predictions"]
+    assert "`myproj.myds.forecast_predictions`" in stmt
+
+
+# --- the low-level render_create_tables primitive (per-table iceberg flag) ------
 
 
 def test_native_fallback_has_no_iceberg_clause() -> None:
@@ -58,9 +109,23 @@ def test_iceberg_requires_connection_and_warehouse() -> None:
         render_create_tables("d", iceberg=True)
 
 
-def test_dataset_ref_is_substituted() -> None:
-    stmt = render_create_tables("myproj.myds", **_KW)["forecast_predictions"]
-    assert "`myproj.myds.forecast_predictions`" in stmt
+# --- drop tables (reset path) --------------------------------------------------
+
+
+def test_render_drop_tables_covers_all_six() -> None:
+    drops = render_drop_tables("proj.ds")
+    assert set(drops) == set(TABLE_NAMES)
+    for name, stmt in drops.items():
+        assert stmt == f"DROP TABLE IF EXISTS `proj.ds.{name}`;"
+
+
+def test_drop_snapshot() -> None:
+    rendered = "\n".join(render_drop_tables("proj.scale_forecasting")[n] for n in TABLE_NAMES)
+    if os.environ.get("SF_UPDATE_SNAPSHOTS") == "1":
+        DROP_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        DROP_SNAPSHOT.write_text(rendered)
+    assert DROP_SNAPSHOT.exists(), "snapshot missing; run with SF_UPDATE_SNAPSHOTS=1 to create"
+    assert rendered == DROP_SNAPSHOT.read_text()
 
 
 # --- additive schema evolution (migrations) ------------------------------------
@@ -71,11 +136,11 @@ def test_additive_columns_excludes_not_null_keys() -> None:
     # NOT NULL columns can't be added to a populated table, so they're not migration candidates.
     assert "run_id" not in cols
     assert "created_at" not in cols
-    assert "raw_config" not in cols
+    assert "raw_config" not in cols  # NOT NULL, and now JSON
     # the nullable columns are, with their types intact.
     assert cols["status"] == "STRING"
     assert cols["n_series"] == "INT64"
-    assert cols["job_telemetry"] == "STRING"
+    assert cols["job_telemetry"] == "JSON"
 
 
 def test_additive_columns_parse_array_type() -> None:
@@ -87,13 +152,13 @@ def test_additive_columns_parse_array_type() -> None:
 def test_render_migrations_adds_job_telemetry_idempotently() -> None:
     stmt = render_migrations("proj.ds")["run_registry"]
     assert stmt.startswith("ALTER TABLE `proj.ds.run_registry`")
-    assert "ADD COLUMN IF NOT EXISTS job_telemetry STRING" in stmt
+    assert "ADD COLUMN IF NOT EXISTS job_telemetry JSON" in stmt
     assert stmt.rstrip().endswith(";")
 
 
 def test_render_migrations_covers_every_table_with_nullable_columns() -> None:
     migrations = render_migrations("d")
-    # all five tables have at least one nullable column, so each gets a migration statement.
+    # all six tables have at least one nullable column, so each gets a migration statement.
     assert set(migrations) == set(TABLE_NAMES)
 
 

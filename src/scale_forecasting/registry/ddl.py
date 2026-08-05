@@ -1,27 +1,33 @@
-"""CREATE TABLE DDL for the registry + example data (CONTRACTS §4, DESIGN §8).
+"""CREATE TABLE DDL for the registry + example data (CONTRACTS §4, DESIGN §8, D19).
 
-The five tables are the source of truth for the whole system; the column definitions
-below are verbatim from CONTRACTS §4. Each is a **BigQuery-managed Apache Iceberg**
-table (open format on GCS): the columns/partition/cluster are wrapped with a
-``WITH CONNECTION ... OPTIONS(table_format='ICEBERG', ...)`` clause pointing at the
-warehouse bucket.
+Six tables are the source of truth for the whole system; the column definitions below are
+verbatim from CONTRACTS §4. Storage format is split by role (D19):
+
+- The four **run-collection** tables (``run_registry``, ``forecast_metadata``,
+  ``forecast_predictions``, ``backtest_oof``) are always **native BigQuery**. Native gives us
+  the real ``JSON`` column type (``raw_config`` / ``job_telemetry`` / ``quantiles`` /
+  ``best_params``) and ``WRITE_TRUNCATE`` reseed, and needs no BigLake connection.
+- The example input table ships in **both** formats — ``source_series_iceberg`` (a
+  BigQuery-managed Apache Iceberg table: columns/partition/cluster wrapped with
+  ``WITH CONNECTION ... OPTIONS(table_format='ICEBERG', ...)`` at the warehouse bucket) and
+  ``source_series_native`` (plain native) — so a deployment can benchmark the identical series
+  on either storage. The engines read both transparently through BigQuery's table interface.
 
 Rendering is a pure string operation (no BigQuery client), so it is snapshot-tested
-offline; ``registry/bq.ensure_tables`` (Arc B) executes what this renders.
+offline; ``registry/bq.ensure_tables`` (Arc B) executes what ``render_deployment_ddl`` renders.
 
-JSON-typed fields (``raw_config``, ``best_params``, ``quantiles``) are stored as
-**STRING**, not the native ``JSON`` type: BigQuery-managed Iceberg tables reject the
-JSON column type (verified against a live table, B0.3). The row assemblers in ``bq.py``
-already emit JSON *strings* (``json.dumps`` / ``_as_json``), so STRING matches what the
-writers produce; query them back with ``PARSE_JSON(col)`` when you need structured access.
+The ``JSON`` columns use the native ``JSON`` type (only the native registry carries them; the
+Iceberg source table has none). The row assemblers in ``bq.py`` serialize JSON text, which a
+``JSON`` column parses on ingest; read them back with ``.`` field access or ``JSON_VALUE``.
 
 Schema evolution is additive: when a new NULLABLE column is added to a body below,
 ``render_migrations`` derives an ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` for it from
 the *same* bodies, so a table created under an older schema can be brought up to date
 without the CREATE and the migration ever drifting apart (``ensure_tables`` runs both).
 
-Public surface: ``TABLE_NAMES``, ``render_create_tables``, ``additive_columns``,
-``render_migrations``.
+Public surface: ``TABLE_NAMES``, ``SOURCE_TABLE_ICEBERG``, ``SOURCE_TABLE_NATIVE``,
+``render_deployment_ddl``, ``render_create_tables``, ``render_drop_tables``,
+``additive_columns``, ``render_migrations``.
 """
 
 from __future__ import annotations
@@ -42,12 +48,12 @@ CREATE TABLE IF NOT EXISTS `{d}.run_registry` (
   backtest_on       BOOL,
   decision_metric   STRING,
   ensemble_strategies ARRAY<STRING>,
-  raw_config        STRING NOT NULL,
+  raw_config        JSON NOT NULL,
   status            STRING,
   n_series          INT64,
   n_models          INT64,
   runtime_seconds   FLOAT64,
-  job_telemetry     STRING
+  job_telemetry     JSON
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id""",
@@ -63,7 +69,7 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   wape FLOAT64, mase FLOAT64, rmsse FLOAT64, bias FLOAT64,
   coverage FLOAT64, pinball FLOAT64,
   fit_seconds    FLOAT64,
-  best_params    STRING,
+  best_params    JSON,
   model_artifact STRING,
   created_at     TIMESTAMP NOT NULL
 )
@@ -79,7 +85,7 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_predictions` (
   yhat          FLOAT64,
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
-  quantiles     STRING
+  quantiles     JSON
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",
@@ -95,11 +101,24 @@ CREATE TABLE IF NOT EXISTS `{d}.backtest_oof` (
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",
-    # Columns carry business names; the config maps each to a role (date→date_col,
-    # price_index→features.exog). `price_index` is the example driver the generator emits
-    # and the xreg models regress on; swap it for real drivers in your own source table.
-    "source_series": """\
-CREATE TABLE IF NOT EXISTS `{d}.source_series` (
+}
+
+# The four collection tables above are the run registry. They are ALWAYS native BigQuery
+# (D19): native supports the JSON column type (so raw_config/job_telemetry/quantiles/best_params
+# are real JSON, not STRING) and WRITE_TRUNCATE (so a reseed is a clean truncate, not a
+# streaming-buffer-bounded DELETE). No BigLake connection or warehouse bucket is needed for them.
+_REGISTRY_TABLES: tuple[str, ...] = tuple(_TABLE_BODIES)
+
+# The example input table, shipped in BOTH storage formats so a deployment can benchmark the
+# identical series as managed Iceberg vs native BigQuery (the engines read either transparently
+# through BigQuery's table interface). `{name}` is filled per variant; `{{d}}` survives .format()
+# as the `{d}` dataset placeholder every other body uses.
+#
+# Columns carry business names; the config maps each to a role (date→date_col,
+# price_index→features.exog). `price_index` is the example driver the generator emits and the
+# xreg models regress on; swap it for real drivers in your own source table.
+_SOURCE_BODY_TEMPLATE = """\
+CREATE TABLE IF NOT EXISTS `{{d}}.{name}` (
   ts_id       STRING NOT NULL,
   ds          DATE NOT NULL,
   y           FLOAT64,
@@ -108,8 +127,14 @@ CREATE TABLE IF NOT EXISTS `{d}.source_series` (
   is_holiday  BOOL
 )
 PARTITION BY ds
-CLUSTER BY ts_id""",
-}
+CLUSTER BY ts_id"""
+
+SOURCE_TABLE_ICEBERG = "source_series_iceberg"
+SOURCE_TABLE_NATIVE = "source_series_native"
+_SOURCE_TABLES: tuple[str, ...] = (SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE)
+
+for _src in _SOURCE_TABLES:
+    _TABLE_BODIES[_src] = _SOURCE_BODY_TEMPLATE.format(name=_src)
 
 TABLE_NAMES: tuple[str, ...] = tuple(_TABLE_BODIES)
 
@@ -194,11 +219,59 @@ def render_create_tables(
         raise ValueError("iceberg=True requires both 'connection' and 'warehouse_uri'")
 
     out: dict[str, str] = {}
-    for name, body in _TABLE_BODIES.items():
-        stmt = body.format(d=dataset)
-        if iceberg:
-            assert warehouse_uri is not None  # narrowed by the guard above
-            options = _iceberg_options(name, warehouse_uri)
-            stmt = f"{stmt}\nWITH CONNECTION `{connection}`\n{options}"
-        out[name] = stmt + ";"
+    for name in _TABLE_BODIES:
+        out[name] = _render_one(name, dataset, connection, warehouse_uri, iceberg=iceberg)
     return out
+
+
+def _render_one(
+    name: str,
+    dataset: str,
+    connection: str | None,
+    warehouse_uri: str | None,
+    *,
+    iceberg: bool,
+) -> str:
+    """Render a single ``CREATE TABLE`` statement, Iceberg-wrapped iff ``iceberg``."""
+    stmt = _TABLE_BODIES[name].format(d=dataset)
+    if iceberg:
+        assert warehouse_uri is not None  # callers pass both when iceberg=True
+        options = _iceberg_options(name, warehouse_uri)
+        stmt = f"{stmt}\nWITH CONNECTION `{connection}`\n{options}"
+    return stmt + ";"
+
+
+def render_deployment_ddl(
+    dataset: str,
+    *,
+    connection: str,
+    warehouse_uri: str,
+) -> dict[str, str]:
+    """Render the CREATE DDL for a real deployment: native registry + both source variants (D19).
+
+    The storage policy is fixed here so callers don't juggle a per-table flag:
+
+    - the four **registry** tables are always **native** BigQuery (native ``JSON`` columns +
+      ``WRITE_TRUNCATE`` reseed; no BigLake connection needed);
+    - ``source_series_iceberg`` is a managed-Iceberg table (needs ``connection`` +
+      ``warehouse_uri``);
+    - ``source_series_native`` is a plain native table.
+
+    ``connection``/``warehouse_uri`` are required because the Iceberg source variant is always
+    created. Every statement is idempotent (``CREATE TABLE IF NOT EXISTS``).
+    """
+    out: dict[str, str] = {}
+    for name in TABLE_NAMES:
+        iceberg = name == SOURCE_TABLE_ICEBERG
+        out[name] = _render_one(name, dataset, connection, warehouse_uri, iceberg=iceberg)
+    return out
+
+
+def render_drop_tables(dataset: str) -> dict[str, str]:
+    """Render ``{table_name: DROP TABLE IF EXISTS ...;}`` for all six tables (reset path).
+
+    Pure string op (snapshot-testable); the destructive execution lives in ``bq.drop_all``. Used
+    to tear a deployment down to bare metal before a clean ``ensure_tables`` recreates it in the
+    current native/dual-format shape (the Iceberg→native registry switch is not an ``ALTER``).
+    """
+    return {name: f"DROP TABLE IF EXISTS `{dataset}.{name}`;" for name in TABLE_NAMES}

@@ -95,6 +95,7 @@ module "seed" {
   master_seed  = var.seed_master_seed
   write_method = var.seed_write_method
   run_label    = var.seed_run_label
+  variant      = var.seed_variant
 
   code_bucket             = module.storage.code_bucket
   container_image         = "${module.container.image_repo_path}:${var.seed_image_tag}"

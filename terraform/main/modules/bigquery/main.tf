@@ -1,11 +1,18 @@
-# bigquery — the dataset and the BigLake connection that managed-Iceberg tables need.
+# bigquery — the dataset and the BigLake connection that the managed-Iceberg source variant needs.
 #
-# NOTE on the table schemas: the five tables' DDL is single-sourced in Python
+# NOTE on the table schemas: the six tables' DDL is single-sourced in Python
 # (src/scale_forecasting/registry/ddl.py, snapshot-tested) and created by
 # registry.bq.ensure_tables() at run time. We deliberately do NOT re-declare those schemas
 # in HCL — two copies of the DDL would drift. Terraform owns the *containers* (dataset,
 # connection, bucket grant); the app owns the *tables*. (Deviation from BUILD B0.2's literal
 # "registry tables via Terraform"; recorded in NOTES.md.)
+#
+# Storage split (D19): the four run-collection tables (run_registry, forecast_metadata,
+# forecast_predictions, backtest_oof) are always NATIVE BigQuery — they carry native JSON
+# columns and reseed with WRITE_TRUNCATE, needing no connection. The example input ships in
+# BOTH formats — source_series_iceberg (managed Iceberg, uses the connection below) and
+# source_series_native (plain native) — so a deployment can benchmark either storage. The
+# connection + bucket grant here exist for the Iceberg source variant.
 
 variable "project_id" {
   type = string
@@ -28,7 +35,7 @@ resource "google_bigquery_dataset" "ds" {
   project     = var.project_id
   dataset_id  = var.dataset_id
   location    = var.region
-  description = "scale-forecasting run registry + example data (managed Iceberg)."
+  description = "scale-forecasting run registry (native) + example data (Iceberg + native variants)."
 }
 
 # Cloud Resource connection: managed-Iceberg tables read/write their GCS files through this

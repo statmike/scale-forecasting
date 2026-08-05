@@ -22,7 +22,7 @@ def _minimal_dict(**over: Any) -> dict[str, Any]:
     """A minimal valid config; override any top-level key via kwargs."""
     base: dict[str, Any] = {
         "run_name": "t",
-        "data": {"source_table": "p.d.source_series"},
+        "data": {"source_table": "p.d.source_series_native"},
         "models": ["theta"],
     }
     base.update(over)
@@ -46,7 +46,7 @@ def test_full_config_round_trips_from_design_example() -> None:
         **_minimal_dict(
             run_name="example_daily_v1",
             data={
-                "source_table": "project.scale_forecasting.source_series",
+                "source_table": "project.scale_forecasting.source_series_native",
                 "freq": "D",
                 "horizon": 28,
                 "series_limit": 1000,

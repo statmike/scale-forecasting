@@ -597,3 +597,31 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
   attachment is provisioned in Terraform (`modules/network`, `ACCEPT_AUTOMATIC`) with the Vertex AI
   service agent granted consume-only access (`modules/iam`). Ray-on-Vertex is now a supported compute
   track alongside Dataproc Serverless and BigQuery-native.
+
+- **Storage split by role — native registry + dual-format source (reverses the all-Iceberg
+  decision).** With Ray unblocked we removed the two frictions Iceberg forced on the run-collection
+  tables. The four registry tables (`run_registry`, `forecast_metadata`, `forecast_predictions`,
+  `backtest_oof`) are now **always native BigQuery**: (1) native `JSON` columns — `raw_config`,
+  `job_telemetry`, `quantiles`, `best_params` are `JSON`, not `STRING`+`JSON_VALUE`/`PARSE_JSON`
+  (reversing the earlier "Iceberg rejects JSON → store as STRING" accommodation); (2) `WRITE_TRUNCATE`
+  reseed instead of driver-side `DELETE WHERE TRUE`; (3) no BigLake connection needed for the
+  registry. **JSON serialization gotcha:** header params (`raw_config`/`job_telemetry`) are now passed
+  to `ScalarQueryParameter(type="JSON")` as Python **dicts**, not `json.dumps` strings — the client's
+  `_json_to_json` converter runs `json.dumps` itself, so a pre-serialized string double-encodes. Cell
+  fields (`quantiles`/`best_params`) stay string-serialized in the Storage Write API proto (the Write
+  API models a JSON column as a string field parsed on ingest — no proto change). `JSON_VALUE` works
+  on native JSON, so `views.py` SQL is unchanged.
+  - **Source table now ships in both formats.** The example input is created as
+    `source_series_iceberg` (managed Iceberg) **and** `source_series_native` (native) from **one**
+    seed panel, so a deployment can benchmark identical series on either storage. The canonical
+    `source_series` name is retired; a run picks a variant via `cfg.data.source_table`. All three
+    engines read through BigQuery's table interface, so storage format is transparent to engine code —
+    zero engine logic changed. `seed_spark --variant {iceberg,native,both}` (default `both`) seeds
+    them; the native reseed uses `TRUNCATE TABLE`, the Iceberg one still `DELETE WHERE TRUE`.
+  - **Honesty note (unchanged):** append-only / dedupe-on-read / no-DELETE in `write_cells` is a
+    Storage Write API streaming-buffer (~90 min) constraint, **not** Iceberg-specific — going native
+    does *not* remove the immediate-rerun double-count, so timestamped `run_name`s stay necessary.
+  - **Fresh start + reset tooling.** The Iceberg→native registry switch is drop-and-recreate, not
+    `ALTER`, so we added `bq.drop_all` + a `python -m scale_forecasting.reset [--yes]` entrypoint
+    (dry-run without `--yes`; drops all six tables + the two views). The Iceberg source variant still
+    needs the connection + warehouse bucket, so those stay in Terraform + required on `Settings`.

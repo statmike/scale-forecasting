@@ -1,4 +1,4 @@
-CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_d03978e98d28`
+CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_4295fbb63b2c`
 OPTIONS(
   model_type = 'ARIMA_PLUS',
   time_series_id_col = 'ts_id',
@@ -10,8 +10,8 @@ OPTIONS(
 AS (
   training_data AS (
     SELECT ts_id, ds, y
-  FROM `proj.scale_forecasting.source_series`
-  WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series` GROUP BY ts_id ORDER BY ts_id LIMIT 100)
+  FROM `proj.scale_forecasting.source_series_native`
+  WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series_native`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)
   ),
   custom_holiday AS (
   SELECT * FROM UNNEST([
@@ -280,11 +280,11 @@ SELECT
   @run_id, ts_id, 'arima_plus', 'bigquery',
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
-FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_d03978e98d28`, STRUCT(28 AS horizon, 0.8 AS confidence_level));
+FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_4295fbb63b2c`, STRUCT(28 AS horizon, 0.8 AS confidence_level));
 
 -- ===== next model =====
 
-CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_d03978e98d28`
+CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_4295fbb63b2c`
 OPTIONS(
   model_type = 'ARIMA_PLUS_XREG',
   time_series_id_col = 'ts_id',
@@ -296,8 +296,8 @@ OPTIONS(
 AS (
   training_data AS (
     SELECT ts_id, ds, y, price_index
-  FROM `proj.scale_forecasting.source_series`
-  WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series` GROUP BY ts_id ORDER BY ts_id LIMIT 100)
+  FROM `proj.scale_forecasting.source_series_native`
+  WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series_native`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)
   ),
   custom_holiday AS (
   SELECT * FROM UNNEST([
@@ -566,9 +566,9 @@ SELECT
   @run_id, ts_id, 'arima_plus_xreg', 'bigquery',
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
-FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_d03978e98d28`,
+FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_xreg_bq_test_4295fbb63b2c`,
     STRUCT(28 AS horizon, 0.8 AS confidence_level),
-    (SELECT ts_id, ds, price_index FROM `proj.scale_forecasting.source_series` WHERE ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series` GROUP BY ts_id ORDER BY ts_id LIMIT 100)));
+    (SELECT ts_id, ds, price_index FROM `proj.scale_forecasting.source_series_native` WHERE ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series_native`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)));
 
 -- ===== next model =====
 
@@ -579,7 +579,7 @@ SELECT
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
 FROM AI.FORECAST(
-    (SELECT ts_id, ds, y FROM `proj.scale_forecasting.source_series` WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series` GROUP BY ts_id ORDER BY ts_id LIMIT 100)),
+    (SELECT ts_id, ds, y FROM `proj.scale_forecasting.source_series_native` WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series_native`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)),
     data_col => 'y',
     timestamp_col => 'ds',
     id_cols => ['ts_id'],

@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -633,6 +634,20 @@ def _is_dashboard_warmup_error(exc: Exception) -> bool:
     return any(marker in low for marker in transient_markers)
 
 
+def _is_auth_expiry_error(exc: Exception) -> bool:
+    """True if ``exc`` is an expired-credential ``401`` from the dashboard proxy (refresh & retry).
+
+    Distinct from :func:`_is_dashboard_warmup_error`, which treats a 401 as a *connect-time* fault
+    that won't fix itself by waiting (right — spinning the warm-up loop on bad auth is pointless).
+    During a *long poll*, however, a 401 means something different: the ``vertex_ray://`` Jobs
+    client caches an OAuth Bearer token minted at construction (~60-min TTL), so a run outliving the
+    token gets a 401 on the next ``get_job_status`` even though nothing is wrong — rebuilding the
+    client mints a fresh token and the poll resumes. Match the 401 shapes the proxy returns.
+    """
+    low = str(exc).lower()
+    return " 401" in low or "unauthorized" in low
+
+
 def _connect_job_client(
     cluster_resource_name: str,
 ) -> Any:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
@@ -657,8 +672,6 @@ def _connect_job_client(
     submit) until it succeeds or the budget is spent, then let the last error propagate. See
     NOTES.md for the current status of the dashboard-proxy handshake on Vertex Ray.
     """
-    import time
-
     from google.cloud.aiplatform import vertex_ray  # noqa: F401 - registers vertex_ray:// + auth
     from ray.job_submission import JobSubmissionClient
 
@@ -696,37 +709,48 @@ def _submit_and_poll(
     ``src/`` + requirements), and returns ``(job_id, status)``. Without ``wait`` the status is the
     immediate post-submit state (the caller skips telemetry + the terminal-state check).
     """
-    import time
-
     client = _connect_job_client(cluster_resource_name)
     job_id = client.submit_job(entrypoint=entrypoint, runtime_env=runtime_env)
     _log.info("submitted Ray job %s", job_id)
-    if not wait:
-        return job_id, str(client.get_job_status(job_id))
 
-    status = str(client.get_job_status(job_id))
+    def _status() -> str:
+        # The Jobs client's OAuth token has a ~60-min TTL; a run outliving it gets a 401 on the
+        # next status call. That's not a job failure — rebuild the client (fresh token) and retry
+        # once, so a long GPU run (NeuralProphet) polls to completion instead of aborting.
+        nonlocal client
+        try:
+            return str(client.get_job_status(job_id))
+        except Exception as exc:  # noqa: BLE001 - only a 401 is recoverable here; re-raise the rest
+            if not _is_auth_expiry_error(exc):
+                raise
+            _log.info("Ray job poll hit auth expiry (%r); refreshing client and retrying", exc)
+            client = _connect_job_client(cluster_resource_name)
+            return str(client.get_job_status(job_id))
+
+    if not wait:
+        return job_id, _status()
+
+    status = _status()
     while status not in _TERMINAL_STATES:
         time.sleep(_POLL_SECONDS)
-        status = str(client.get_job_status(job_id))
+        status = _status()
     _log.info("Ray job %s finished: status=%s", job_id, status)
     return job_id, status
 
 
 def _stamp_ray_telemetry(telemetry: dict[str, Any], run_id: str, settings: Settings) -> None:
-    """Write the Ray telemetry dict to the run header as a JSON string (best-effort).
+    """Write the Ray telemetry dict to the run header's native JSON column (best-effort).
 
-    The pure :func:`extract_ray_telemetry` output → ``update_header(job_telemetry=<json>)``. Wrapped
-    so any failure (API error, header not yet written) is logged and swallowed: telemetry is a
+    The pure :func:`extract_ray_telemetry` output → ``update_header(job_telemetry=<dict>)``. The
+    header column is a native ``JSON`` type whose query parameter serializes the value itself, so we
+    pass the telemetry **dict** (not a pre-serialized string, which would double-encode). Wrapped so
+    any failure (API error, header not yet written) is logged and swallowed: telemetry is a
     nice-to-have overlay on an already-complete run, never a reason to fail it (CONTRACTS §3.3).
     """
-    import json
-
     from .registry import bq
 
     try:
-        bq.update_header(
-            run_id, settings=settings, job_telemetry=json.dumps(telemetry, sort_keys=True)
-        )
+        bq.update_header(run_id, settings=settings, job_telemetry=telemetry)
         _log.info("Ray telemetry stamped for run %s: %s", run_id, telemetry)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("Ray telemetry capture failed (non-fatal): %r", exc)
@@ -812,8 +836,6 @@ def submit_ray(
                 plan, infra, name, settings, regions
             )
             teardown_target = _resource_name(settings, name, cluster_region)
-
-        import time
 
         cluster = _get_cluster(cluster_resource_name)
         started = time.perf_counter()

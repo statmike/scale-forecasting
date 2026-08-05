@@ -3,7 +3,7 @@
   "python_runtime": "spark",
   "spark_method": "explode",
   "data": {
-    "source_table": "source_series",
+    "source_table": "source_series_iceberg",
     "horizon": 28,
     "series_limit": 10
   },

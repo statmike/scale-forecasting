@@ -10,7 +10,7 @@ Two views, matched to the two questions a run prompts:
 
 - ``v_run_summary`` — *how did each run go, and how efficiently?* One row per run: the scaling
   knobs (``spark_method``, ``n_series``, ``n_models``), the engine's own ``runtime_seconds``, and
-  the Dataproc ``job_telemetry`` overlay unpacked from its JSON string — total wall-clock, the
+  the Dataproc ``job_telemetry`` overlay unpacked from its JSON column — total wall-clock, the
   provisioning overhead (``total_wall_s − runtime_seconds``) and its share, cluster sizing, and DCU
   usage. This is the scaling-and-efficiency story as one ``SELECT * ORDER BY spark_method,
   n_series`` — explode's flat curve vs. naive's straggler, with overhead that amortizes at scale.
@@ -20,10 +20,10 @@ Two views, matched to the two questions a run prompts:
   shows as ``error_rate = 1.0``), median fit time, and the mean decision metrics where a backtest
   populated them. The entry point for "is this model worth keeping" before ensembling.
 
-``JSON_VALUE`` reads scalars straight out of the STRING-stored telemetry (Iceberg rejects the
-native JSON column type, so we store JSON as STRING and extract on read — see ``ddl.py``). Views
-tolerate a NULL ``job_telemetry`` (runs before this column, or whose telemetry capture was
-skipped): the unpacked fields come back NULL, the row still renders.
+``JSON_VALUE`` reads scalars straight out of the native ``JSON`` ``job_telemetry`` column (the
+registry is native BigQuery, so the column is the real ``JSON`` type — ``JSON_VALUE`` works on it
+unchanged; see ``ddl.py``, D19). Views tolerate a NULL ``job_telemetry`` (runs before this column,
+or whose telemetry capture was skipped): the unpacked fields come back NULL, the row still renders.
 
 Public surface: ``VIEW_NAMES``, ``render_create_views``.
 """

@@ -11,7 +11,7 @@ from scale_forecasting.registry.ids import make_model_hash, make_run_id
 def _cfg(**over: Any) -> RunConfig:
     base: dict[str, Any] = {
         "run_name": "my run",
-        "data": {"source_table": "p.d.source_series"},
+        "data": {"source_table": "p.d.source_series_native"},
         "models": ["theta"],
     }
     base.update(over)

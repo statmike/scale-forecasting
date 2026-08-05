@@ -2,7 +2,7 @@
   "run_name": "ray_gpu_demo",
   "python_runtime": "ray",
   "data": {
-    "source_table": "source_series",
+    "source_table": "source_series_iceberg",
     "horizon": 28,
     "series_limit": 6
   },

@@ -23,7 +23,7 @@ _CREATED = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 def _cfg(**over: Any) -> RunConfig:
     base: dict[str, Any] = {
         "run_name": "my run",
-        "data": {"source_table": "p.d.source_series", "series_limit": 5},
+        "data": {"source_table": "p.d.source_series_native", "series_limit": 5},
         "models": ["theta", "sarimax"],
     }
     base.update(over)
@@ -190,10 +190,11 @@ def test_header_row_snapshots_config() -> None:
     assert row["n_series"] == 5
     assert row["backtest_on"] is False
     assert row["created_at"] is _CREATED
-    # raw_config is the verbatim validated config as a JSON string
-    assert isinstance(row["raw_config"], str)
-    assert '"run_name": "my run"' in row["raw_config"]
-    assert '"models": ["theta", "sarimax"]' in row["raw_config"]
+    # raw_config is the verbatim validated config as a dict (the native JSON column's query
+    # parameter serializes it; a pre-serialized string would double-encode — D19).
+    assert isinstance(row["raw_config"], dict)
+    assert row["raw_config"]["run_name"] == "my run"
+    assert row["raw_config"]["models"] == ["theta", "sarimax"]
 
 
 def test_header_ensemble_strategies_empty_when_disabled() -> None:

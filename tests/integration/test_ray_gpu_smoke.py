@@ -26,12 +26,14 @@ proven offline+free by the ``plan_cluster`` sizing tests in ``tests/unit/test_ra
 is the one authorized *live* run.
 
 Skipped unless **both** ``SF_ENABLE_GPU`` and ``SF_PROJECT_ID`` are set (see ``tests/conftest.py``):
-this provisions a real T4 cluster (cost + ~15-25 min) and needs T4 quota (``NVIDIA_T4_GPUS`` in the
-region) + ADC. Beyond the ``SF_*`` identity the writers resolve, set the Ray infra vars
-(``SF_RAY_NETWORK`` / ``SF_COMPUTE_SA`` / ``SF_CODE_BUCKET``; optionally ``SF_CONTAINER_IMAGE`` /
-``SF_RAY_VERSION``), then run::
+this provisions a real T4 cluster (cost + ~20-40 min, most of it T4 provisioning) and needs T4 quota
+(``NVIDIA_T4_GPUS`` in the region) + ADC. The forecast fan-out is kept intentionally small (see the
+``_SERIES_LIMIT`` / ``_N_FOLDS`` / ``_CALIBRATION_SAMPLES`` module constants) so the *compute* stays
+cheap and the run finishes comfortably within an hour. Beyond the ``SF_*`` identity the writers
+resolve, set the Ray infra vars (``SF_RAY_NETWORK`` / ``SF_COMPUTE_SA`` / ``SF_CODE_BUCKET``;
+optionally ``SF_CONTAINER_IMAGE`` / ``SF_RAY_VERSION``), then run::
 
-    SF_ENABLE_GPU=1 uv run pytest -m gpu tests/integration/test_ray_gpu_smoke.py
+    SF_ENABLE_GPU=1 uv run --active pytest -m gpu tests/integration/test_ray_gpu_smoke.py
 
 **Self-contained data.** Like the Arc B mixed smoke, the shipped seed's ``price_index`` is all-NULL,
 so ARIMA_PLUS_XREG can't train on it; this test seeds its own tiny exog-carrying scratch
@@ -59,8 +61,17 @@ _CPU_MODEL = "theta"
 _NATIVE_MODELS = ["arima_plus", "arima_plus_xreg", "timesfm"]
 _PYTHON_MODELS = [_GPU_MODEL, _CPU_MODEL]
 _ALL_MODELS = [*_PYTHON_MODELS, *_NATIVE_MODELS]
-_SERIES_LIMIT = 6
-_HORIZON = 28
+# Kept deliberately small so the whole live run finishes well under an hour. NeuralProphet is the
+# long pole (a fixed 50-epoch fit per cell, ×[folds + final], plus the GPU calibration fits), so the
+# levers that bound wall-clock are series count, fold count, horizon, and calibration samples — all
+# below. A first cut at series=6/folds=2/horizon=28 ran ~75 min and outlived the Jobs client's OAuth
+# token (a 401 mid-poll — now handled by the client-refresh in ray_submit._submit_and_poll, but the
+# cheaper shape is still the right smoke). This still proves every invariant: NP scores a real OOF
+# fold on a fractional T4 alongside the natives under one run_id.
+_SERIES_LIMIT = 3
+_HORIZON = 14
+_N_FOLDS = 1  # one OOF fold is enough for NP to land a non-NULL metric; more only adds GPU minutes
+_CALIBRATION_SAMPLES = 1  # profile one series for the auto GPU fraction (default 3 → 3 extra fits)
 _HISTORY = 730  # ~2 years daily → training window > 1 year, so ARIMA_PLUS holidays apply
 _SCRATCH_TABLE = "b4_ray_gpu_smoke_source"
 
@@ -122,8 +133,9 @@ def _cfg(source_table: str) -> RunConfig:
         # Backtest ON so the Ray path emits an OOF metric panel: without it the Python engine only
         # forecasts (no metrics) while the BQ natives always score a held-out fold — so NP
         # would land NULL mean_wape and the two runtimes wouldn't be comparable, which is the whole
-        # point of the single-run leaderboard. A small fold count keeps the T4 run cheap.
-        backtest={"enabled": True, "n_folds": 2, "horizon": _HORIZON, "step": _HORIZON},
+        # point of the single-run leaderboard. One fold is enough for NP to land a non-NULL metric
+        # while keeping the T4 run cheap.
+        backtest={"enabled": True, "n_folds": _N_FOLDS, "horizon": _HORIZON, "step": _HORIZON},
         # ray_regions: try each US region that has T4 quota in turn — one region can transiently
         # stock out ("Resources are insufficient in region"), so the launcher hops to the next.
         # The data plane stays in settings.region; only the cluster moves.
@@ -131,6 +143,7 @@ def _cfg(source_table: str) -> RunConfig:
             "use_gpu": True,
             "gpu_type": "T4",
             "gpu_fraction": "auto",
+            "gpu_calibration_samples": _CALIBRATION_SAMPLES,
             "accelerator_count": 1,
             "ray_regions": ["us-central1", "us-east1", "us-west1"],
         },
@@ -193,7 +206,11 @@ def test_ray_gpu_fixed_cluster_smoke(settings: Settings, scratch_source: str) ->
     assert set(header.bq_models.split(",")) == set(_NATIVE_MODELS)
 
     # job_telemetry records the fixed T4 sizing that actually ran (the sizing decision is audited).
-    tel = json.loads(header.job_telemetry)
+    # It's a native JSON column now, so the BigQuery client hands it back already deserialized (a
+    # dict); older STRING rows arrive as text — accept either so the assertion is storage-agnostic.
+    tel = header.job_telemetry
+    if isinstance(tel, str):
+        tel = json.loads(tel)
     assert tel["runtime"] == "ray"
     assert tel["accelerator_type"] == "NVIDIA_TESLA_T4"
     assert 0.0 < tel["sizing_gpu_fraction"] <= 1.0  # a calibrated fraction, packed onto the T4

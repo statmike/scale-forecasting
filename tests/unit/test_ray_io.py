@@ -30,7 +30,7 @@ def _cfg(**over: Any) -> RunConfig:
     base: dict[str, Any] = {
         "run_name": "ray io test",
         "python_runtime": "ray",
-        "data": {"source_table": "source_series", "horizon": 7, "series_limit": 10},
+        "data": {"source_table": "source_series_native", "horizon": 7, "series_limit": 10},
         "models": [_CPU, _GPU],
     }
     base.update(over)

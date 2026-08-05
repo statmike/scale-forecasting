@@ -31,7 +31,11 @@ def _cfg(
 ) -> RunConfig:
     over: dict[str, Any] = {
         "run_name": "bq test",
-        "data": {"source_table": "source_series", "series_limit": series_limit, "freq": freq},
+        "data": {
+            "source_table": "source_series_native",
+            "series_limit": series_limit,
+            "freq": freq,
+        },
         "models": models,
         "features": {"holidays": holidays or [], "exog": exog or []},
     }
@@ -145,7 +149,7 @@ def test_eval_query_joins_forecast_to_actuals_with_intervals() -> None:
     assert "AS y_true" in sql
     assert "AS yhat" in sql
     assert "AS yhat_lower" in sql and "AS yhat_upper" in sql
-    assert "JOIN `proj.scale_forecasting.source_series`" in sql
+    assert "JOIN `proj.scale_forecasting.source_series_native`" in sql
     assert "DATE(f.forecast_timestamp)" in sql
 
 

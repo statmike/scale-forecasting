@@ -47,6 +47,26 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 # jemalloc: Spark on Serverless expects it available for preload.
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
+# --- NVIDIA driver visibility (Ray-on-Vertex GPU pool) -------------------------------------------
+# On a T4 worker, Ray counts GPUs via NVML (pynvml.nvmlInit() → nvmlDeviceGetCount()), which loads
+# libnvidia-ml.so.1 from the HOST driver. Ray-on-Vertex runs on GKE, which injects the host driver
+# into the container at the GKE convention path /usr/local/nvidia (nvidia-smi in .../bin, the driver
+# libs incl. libnvidia-ml.so.1 + libcuda.so in .../lib64). Two things are needed for our bare-Debian
+# image to SEE that injected driver:
+#   1. NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES so the injection happens at all.
+#   2. /usr/local/nvidia/{bin,lib64} on PATH / LD_LIBRARY_PATH so nvidia-smi + NVML can be loaded —
+#      without this, NVML fails ("libnvidia-ml.so.1 not found"), Ray sees 0 GPUs, and every
+#      fractional-GPU task (NeuralProphet: {'CPU':1,'GPU':<frac>}) is unschedulable forever.
+# We do NOT install the CUDA toolkit here — torch ships its own CUDA-12.6 userspace wheels (see
+# docker/requirements.txt) and only needs the injected DRIVER at runtime. All of this is inert on
+# CPU-only nodes (Dataproc Serverless, Ray CPU pool): the env vars do nothing without a GPU, and the
+# /usr/local/nvidia path simply doesn't exist there (a missing dir on PATH/LD_LIBRARY_PATH is a
+# no-op). So this stays one shared image across every compute path (G1).
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV PATH="/usr/local/nvidia/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}"
+
 # --- user Python environment ---------------------------------------------------------------------
 # An isolated venv keeps our deps off the system Python. Serverless launches the driver/executors
 # with PYSPARK_PYTHON, so point it at this interpreter.
@@ -61,8 +81,14 @@ ENV PYSPARK_PYTHON=${VENV}/bin/python
 # (the package isn't here; it ships at runtime via python_file_uris).
 WORKDIR /opt/scale-forecasting
 COPY docker/requirements.txt ./requirements.txt
+# torch is pinned to the CUDA-12.6 local build (torch==2.13.0+cu126) for the Vertex T4 driver — that
+# local version only exists on the PyTorch index, so add it alongside PyPI. --extra-index-url (not
+# --index-url) keeps PyPI primary for every other package; the pin's exact +cu126 version is only
+# satisfiable from the PyTorch index, so there's no ambiguity about where torch comes from.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu126 \
+        -r requirements.txt
 
 # --- the mandatory spark user (UID/GID 1099) -----------------------------------------------------
 RUN groupadd --gid 1099 spark \

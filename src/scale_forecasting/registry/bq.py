@@ -134,9 +134,11 @@ def assemble_metadata_row(
 def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> dict[str, Any]:
     """Build the ``run_registry`` header row from a config (§4, §8.2).
 
-    ``raw_config`` is the validated config serialized verbatim — the config *is* the
-    record (G3). ``bq_models`` is left empty here and filled by the router once model
-    runtimes are known (Arc B); status starts RUNNING.
+    ``raw_config`` is the validated config as a **dict** — the config *is* the record (G3).
+    ``run_registry.raw_config`` is a native ``JSON`` column, and the client's JSON query
+    parameter serializes the value itself (``json.dumps``), so the row must carry the dict, not
+    a pre-serialized string (a string would be double-encoded). ``bq_models`` is left empty here
+    and filled by the router once model runtimes are known (Arc B); status starts RUNNING.
     """
     return {
         "run_id": run_id,
@@ -149,15 +151,16 @@ def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> di
         "backtest_on": cfg.backtest.enabled,
         "decision_metric": cfg.backtest.decision_metric,
         "ensemble_strategies": list(cfg.ensemble.strategies) if cfg.ensemble.enabled else [],
-        "raw_config": json.dumps(cfg.model_dump(mode="json"), sort_keys=True),
+        "raw_config": cfg.model_dump(mode="json"),
         "status": "RUNNING",
         "n_series": cfg.data.series_limit,
         "n_models": len(cfg.models),
         "runtime_seconds": None,
-        # Dataproc-level job telemetry (executor sizing, wall/startup split, DCU usage): a JSON
-        # STRING filled in after the batch finishes by the submitter (extract_job_telemetry →
-        # update_header). NULL here at RUNNING and for any run whose telemetry couldn't be read
-        # (best-effort — never blocks a run). See run_registry DDL / DESIGN §8.2.
+        # Dataproc-level job telemetry (executor sizing, wall/startup split, DCU usage): a native
+        # JSON column filled in after the batch finishes by the submitter (extract_job_telemetry →
+        # update_header) as a **dict** (the JSON query param serializes it). NULL here at RUNNING
+        # and for any run whose telemetry couldn't be read (best-effort — never blocks a run).
+        # See run_registry DDL / DESIGN §8.2.
         "job_telemetry": None,
     }
 
@@ -393,19 +396,21 @@ def _resolve_settings(settings: Settings | None) -> Settings:
 def ensure_tables(
     cfg: RunConfig | None = None, *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Create every registry + source table if absent (idempotent DDL, §4).
+    """Create every registry + source table if absent (idempotent DDL, §4, D19).
 
-    Renders the managed-Iceberg DDL for the resolved dataset and executes each statement.
-    ``cfg`` is accepted for signature symmetry with the other writers but is unused — the
-    schema is fixed, not config-driven. Raises :class:`RegistryError` on a DDL failure.
+    Renders the deployment DDL for the resolved dataset — native registry (native ``JSON``
+    columns) plus both source variants, ``source_series_iceberg`` (managed Iceberg) and
+    ``source_series_native`` (plain) — and executes each statement. ``cfg`` is accepted for
+    signature symmetry with the other writers but is unused — the schema is fixed, not
+    config-driven. Raises :class:`RegistryError` on a DDL failure.
     """
     from google.cloud import bigquery
 
     from ..errors import RegistryError
-    from .ddl import render_create_tables, render_migrations
+    from .ddl import render_deployment_ddl, render_migrations
 
     resolved = _resolve_settings(settings)
-    ddl = render_create_tables(
+    ddl = render_deployment_ddl(
         resolved.dataset_ref,
         connection=resolved.connection,
         warehouse_uri=resolved.warehouse_uri,
@@ -456,6 +461,42 @@ def ensure_views(
             raise RegistryError(f"ensure_views failed creating {name}: {exc}") from exc
 
 
+def drop_all(
+    *, settings: Settings | None = None
+) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Drop all six registry + source tables and the analyst views (the reset path, D19).
+
+    **Destructive.** Renders :func:`registry.ddl.render_drop_tables` and executes each
+    ``DROP TABLE IF EXISTS`` (plus ``DROP VIEW IF EXISTS`` for the two analyst views), so a
+    subsequent :func:`ensure_tables` recreates everything in the current native/dual-format
+    shape — the Iceberg→native registry switch is a drop-and-recreate, not an ``ALTER``. Callers
+    are responsible for confirming intent before invoking. Raises :class:`RegistryError` on
+    failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+    from .ddl import render_drop_tables
+    from .views import render_create_views
+
+    resolved = _resolve_settings(settings)
+    client = bigquery.Client(project=resolved.project_id)
+
+    # Views depend on the tables — drop them first so the table drops don't trip a dependency.
+    for name in render_create_views(resolved.dataset_ref):
+        statement = f"DROP VIEW IF EXISTS `{resolved.table_ref(name)}`;"
+        try:
+            client.query(statement).result()
+        except Exception as exc:  # noqa: BLE001 - re-raised with view context
+            raise RegistryError(f"drop_all failed dropping view {name}: {exc}") from exc
+
+    for name, statement in render_drop_tables(resolved.dataset_ref).items():
+        try:
+            client.query(statement).result()
+        except Exception as exc:  # noqa: BLE001 - re-raised with table context
+            raise RegistryError(f"drop_all failed dropping {name}: {exc}") from exc
+
+
 # run_registry columns that may be set by write_header / update_header, with their BQ types.
 _HEADER_PARAM_TYPES: dict[str, str] = {
     "run_id": "STRING",
@@ -468,12 +509,12 @@ _HEADER_PARAM_TYPES: dict[str, str] = {
     "backtest_on": "BOOL",
     "decision_metric": "STRING",
     "ensemble_strategies": "ARRAY<STRING>",
-    "raw_config": "STRING",
+    "raw_config": "JSON",
     "status": "STRING",
     "n_series": "INT64",
     "n_models": "INT64",
     "runtime_seconds": "FLOAT64",
-    "job_telemetry": "STRING",
+    "job_telemetry": "JSON",
 }
 
 

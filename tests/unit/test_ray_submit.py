@@ -30,7 +30,7 @@ def _cfg(**over: Any) -> RunConfig:
     base: dict[str, Any] = {
         "run_name": "ray submit test",
         "python_runtime": "ray",
-        "data": {"source_table": "source_series", "horizon": 7, "series_limit": 8},
+        "data": {"source_table": "source_series_native", "horizon": 7, "series_limit": 8},
         "models": [_CPU, _GPU],
         "compute": {"use_gpu": True},
     }
@@ -413,7 +413,7 @@ def test_submit_ray_n_series_override_resizes_and_changes_run_id(
     # n_series is the scale knob: it changes the staged config (hence run_id) AND the fixed plan.
     calls = _stubbed_lifecycle
     base_run_id = make_run_id(
-        _cfg(data={"source_table": "source_series", "horizon": 7, "series_limit": 8})
+        _cfg(data={"source_table": "source_series_native", "horizon": 7, "series_limit": 8})
     )
     ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), n_series=1000, wait=True)
     # the ephemeral cluster name embeds the (new-scale) run_id, distinct from the base scale's.
@@ -564,6 +564,103 @@ def test_connect_job_client_reraises_non_transient_immediately(
     with pytest.raises(Exception, match="403"):
         ray_submit._connect_job_client(resource_name)
     assert seen == [f"vertex_ray://{resource_name}"]
+
+
+# --- poll-loop auth expiry: refresh the client on a 401, don't abort a long run ----------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "401 Client Error: Unauthorized",
+        "Request failed with status code 401: <html>...Unauthorized...</html>",
+        "Unauthorized",
+    ],
+)
+def test_is_auth_expiry_error_true_for_401(message: str) -> None:
+    # A 401 during the poll loop = the client's OAuth token expired — refresh & retry, not fail.
+    assert ray_submit._is_auth_expiry_error(Exception(message)) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "403 Client Error: Forbidden",
+        "500 Internal Server Error",
+        "Ray job failed",
+    ],
+)
+def test_is_auth_expiry_error_false_for_non_401(message: str) -> None:
+    # Anything that isn't a 401 is not a recoverable token expiry — must propagate.
+    assert ray_submit._is_auth_expiry_error(Exception(message)) is False
+
+
+def test_submit_and_poll_refreshes_client_on_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 401 mid-poll rebuilds the Jobs client (fresh token) and polls to a terminal state.
+
+    Simulates a run outliving the ~60-min OAuth TTL: the first client returns RUNNING then raises a
+    401; the poll must reconnect (a *second* client) and finish on SUCCEEDED — not abort the run.
+    """
+    resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
+    connects: list[int] = []
+
+    class _FakeClient:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+            self.calls = 0
+
+        def submit_job(self, *, entrypoint: str, runtime_env: dict) -> str:
+            return "job-1"
+
+        def get_job_status(self, job_id: str) -> str:
+            self.calls += 1
+            # First client: RUNNING once, then the token expires → 401 on the next poll.
+            if self.idx == 0:
+                if self.calls == 1:
+                    return "RUNNING"
+                raise RuntimeError("Request failed with status code 401: Unauthorized")
+            # Second client (post-refresh) reports the job finished.
+            return "SUCCEEDED"
+
+    def _fake_connect(_name: str) -> _FakeClient:
+        idx = len(connects)
+        connects.append(idx)
+        return _FakeClient(idx)
+
+    monkeypatch.setattr(ray_submit, "_connect_job_client", _fake_connect)
+    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
+
+    job_id, status = ray_submit._submit_and_poll(
+        resource_name, "python -m x", {"working_dir": "/src"}, wait=True
+    )
+    assert (job_id, status) == ("job-1", "SUCCEEDED")
+    assert len(connects) == 2  # connected once to submit/poll, reconnected once after the 401
+
+
+def test_submit_and_poll_reraises_non_401_poll_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A non-401 poll error is a real fault — it must propagate, not trigger a client refresh.
+    resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
+    connects: list[int] = []
+
+    class _FakeClient:
+        def submit_job(self, *, entrypoint: str, runtime_env: dict) -> str:
+            return "job-1"
+
+        def get_job_status(self, job_id: str) -> str:
+            raise RuntimeError("500 Internal Server Error")
+
+    def _fake_connect(_name: str) -> _FakeClient:
+        connects.append(len(connects))
+        return _FakeClient()
+
+    monkeypatch.setattr(ray_submit, "_connect_job_client", _fake_connect)
+    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="500"):
+        ray_submit._submit_and_poll(
+            resource_name, "python -m x", {"working_dir": "/src"}, wait=True
+        )
+    assert len(connects) == 1  # no refresh on a non-401
 
 
 def test_resolve_regions_defaults_to_settings_region() -> None:

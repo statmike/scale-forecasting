@@ -42,6 +42,10 @@ class Settings:
     """
 
     project_id: str
+    # BigLake connection + warehouse root stay REQUIRED even though the run-collection tables are
+    # native (D19): the example input still ships a managed-Iceberg variant (source_series_iceberg)
+    # that reads/writes its GCS files through the connection. Source storage format is chosen per
+    # run via cfg.data.source_table (…_iceberg vs …_native) — not a Settings knob (config-driven).
     connection: str  # BigLake connection ref, "project.region.name"
     warehouse_uri: str  # GCS warehouse root, "gs://<bucket>/warehouse"
     dataset_id: str = _DEFAULT_DATASET

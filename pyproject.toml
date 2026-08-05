@@ -64,6 +64,13 @@ models = [
     "lightgbm>=4.3",
     "prophet>=1.1.5",
     "neuralprophet>=0.9",
+    # torch is transitive via neuralprophet, but we pin it explicitly to bind the CUDA build below.
+    # NeuralProphet is the only GPU model, and it runs on Ray-on-Vertex T4s whose host driver
+    # (535.x) caps at CUDA 12.2. The default PyPI torch wheel is a CUDA-13 build that refuses to
+    # init against that driver ("driver too old"), so on Linux we must take a CUDA-12.x build (see
+    # [tool.uv.sources] below). Same version, just the cu126 variant — 12.x minor-version
+    # compatibility lets a 12.6-built wheel run on the 535 driver.
+    "torch>=2.13,<2.14",
 ]
 
 [dependency-groups]
@@ -73,6 +80,23 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
     "pandas-stubs>=2.2,<3",
+]
+
+# --- torch CUDA build selection (Ray-on-Vertex T4 GPU path) --------------------------------------
+# torch defaults to a CUDA-13 wheel on PyPI, which won't initialize on the Vertex T4 host driver
+# (535.x → CUDA 12.2 max). Pull the CUDA-12.6 build FROM the PyTorch index, but only on Linux
+# x86_64 — the runtime image (docker/Dockerfile) and every cluster node. On macOS / other platforms
+# (local dev) there is no CUDA wheel, so we fall back to the default PyPI build (CPU/MPS), keeping
+# `uv sync` working everywhere. The [ray]/@gpu path is Linux-only by construction, so this is the
+# only place the GPU build is needed.
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 
 [build-system]
