@@ -6,7 +6,12 @@ in that bucket. This split resolves the chicken-and-egg problem (you can't keep 
 bucket that doesn't exist yet).
 
 > **Cost:** the infrastructure is effectively free at rest — empty buckets, an empty dataset,
-> service accounts, network plumbing. Two things cost money:
+> service accounts, network plumbing. Three things cost money:
+> - **The runtime-image build** (`build_image = true`, **on by default**) runs Cloud Build once on
+>   the first apply to build + push the shared Spark/Ray image (a few minutes, cents of Cloud Build
+>   time). It's content-addressed on `docker/` and rebuilds only when the Dockerfile or
+>   `requirements.txt` change — never on a source-code edit. Set `build_image = false` if you build
+>   the image yourself (CI / air-gapped registry).
 > - **The example-data seed** (`run_seed = true`, **on by default**) runs a one-time Dataproc
 >   Serverless batch on the first apply (~8.5 min, ~$0.15 measured at the 100k default) to materialize
 >   the shipped dataset. It's content-addressed, so it does **not** re-run on later applies unless you
@@ -18,7 +23,9 @@ bucket that doesn't exist yet).
 
 ## Prerequisites
 
-- `terraform >= 1.5`, `gcloud` authenticated: `gcloud auth application-default login`.
+- `terraform >= 1.5` and the `gcloud` CLI, authenticated: `gcloud auth application-default login`
+  (the main stage shells out to `gcloud builds submit` to build the runtime image unless
+  `build_image = false`).
 - A **billing account id** (`gcloud billing accounts list`) and your **org or folder id**.
 - Permission to create projects under that org/folder.
 
@@ -57,6 +64,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 | `create_service_accounts` | `true` | you bring your own SAs (`runner_sa_email`, `compute_sa_email`) |
 | `create_network` | `true` | your org already has a network — pass an existing subnet (`subnetwork_uri`) with Private Google Access + internal-ingress |
 | `create_composer` | `false` | (already off) turn **on** for scheduled DAG runs |
+| `build_image` | `true` | (already **on**) turn **off** when you build/push the runtime image yourself (CI / air-gapped) |
 | `run_seed` | `true` | (already **on**) turn **off** to skip the example dataset (bring your own source table) |
 | `create_project` (bootstrap) | `true` | your org pre-creates projects |
 
@@ -65,7 +73,8 @@ in `terraform.tfvars` and pass existing resources by variable:
 `apis` · `iam` · `storage` · `bigquery` · `budget` · `composer` · `container` · `network` ·
 `seed` — mirroring the Python side's one-file-one-capability rule. Read each module's header
 comment for what and why. `container` owns the Artifact Registry repo for the shared Spark/Ray
-runtime image (built by `docker/cloudbuild.yaml`); `network` provides the VPC + subnet (Private
+runtime image **and builds + pushes it on apply** (via `docker/cloudbuild.yaml`, `build_image`
+toggle), so one apply fills the repo the seed/engines pull from; `network` provides the VPC + subnet (Private
 Google Access) that serverless compute requires; `seed` submits the gated Dataproc Serverless
 batch that materializes the example dataset (BUILD B0.4).
 

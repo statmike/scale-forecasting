@@ -15,6 +15,7 @@ budget_amount_usd = 200
 # enable_apis             = true
 # create_service_accounts = true
 # create_composer         = false   # keep off until you want scheduled DAG runs (Phase 7)
+# build_image             = true    # build+push the runtime image on apply; false = you build it yourself
 # dataset_id              = "scale_forecasting"
 
 # --- example dataset (on by default) ---
@@ -22,3 +23,8 @@ budget_amount_usd = 200
 #                            # ~$0.15); set false to skip it, or seed_num_series = 100 to smoke first.
 # seed_num_series = 100000   # 100 for a quick/cheap smoke, 100000 for the full shipped dataset.
 # seed_variant    = "both"   # seed source_series_iceberg + source_series_native (one generated panel).
+
+# --- default-on smoke forecast (proves the platform forecasts on first apply) ---
+# run_smoke       = true     # tolerant/non-blocking: fast Python models on Dataproc ∥ arima_plus in
+#                            # BigQuery, one run_id. Needs run_seed (the data) — a forecast failure
+#                            # NEVER fails the apply; see the smoke_batch_id / smoke_describe_hint outputs.

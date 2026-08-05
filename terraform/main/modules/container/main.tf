@@ -7,7 +7,13 @@
 # *repository* (the container), mirroring how bigquery owns the dataset and the app owns the
 # tables — one source of truth for the image (the Dockerfile), no HCL/Docker drift.
 #
-# The image is built on demand today:
+# Terraform builds the image on apply (null_resource.build below) by running that same
+# docker/cloudbuild.yaml via `gcloud builds submit` — so one `terraform apply` creates the repo AND
+# fills it, and the seed batch (which pulls this image) has something to pull. The build is
+# content-addressed on docker/ (Dockerfile + requirements.txt), so it runs on the first apply and
+# rebuilds ONLY when those deps change — never on a source-code edit (code ships at runtime via
+# python_file_uris, not baked in). Set build_image = false to skip it (image pre-built in CI or an
+# air-gapped registry); the equivalent manual command is:
 #
 #   gcloud builds submit --config docker/cloudbuild.yaml \
 #     --substitutions=_REGION=<region>,_REPO=<repo>,_IMAGE=spark-runtime,_TAG=latest \
@@ -15,7 +21,7 @@
 #
 # A git-push-triggered rebuild (google_cloudbuild_trigger) is intentionally DEFERRED: it needs a
 # GitHub repo connection, which waits on the first push to the private repo (§A-PUSH). Wiring it
-# now would fail to plan (no connection to reference).
+# now would fail to plan (no connection to reference). The one-shot build here needs no trigger.
 
 variable "project_id" {
   type = string
@@ -37,6 +43,18 @@ variable "image_name" {
   default     = "spark-runtime"
 }
 
+variable "build_image" {
+  description = "Build + push the runtime image via Cloud Build on apply. false = pre-built image."
+  type        = bool
+  default     = true
+}
+
+variable "image_tag" {
+  description = "Tag to build/push (must match the tag the seed batch and engines consume)."
+  type        = string
+  default     = "latest"
+}
+
 resource "google_artifact_registry_repository" "images" {
   project       = var.project_id
   location      = var.region
@@ -54,6 +72,15 @@ data "google_project" "this" {
 }
 
 locals {
+  # Base image path (no tag). The build's _IMAGE/_TAG extend it and the seed batch consumes it.
+  image_repo_path = format(
+    "%s-docker.pkg.dev/%s/%s/%s",
+    var.region,
+    var.project_id,
+    google_artifact_registry_repository.images.repository_id,
+    var.image_name,
+  )
+
   cloudbuild_sa = "${data.google_project.this.number}-compute@developer.gserviceaccount.com"
   cloudbuild_roles = [
     "roles/cloudbuild.builds.builder", # run builds, read the source-staging bucket, write logs
@@ -69,20 +96,52 @@ resource "google_project_iam_member" "cloudbuild" {
   member  = "serviceAccount:${local.cloudbuild_sa}"
 }
 
+# Build + push the runtime image via Cloud Build, reusing docker/cloudbuild.yaml (one source of
+# truth for the build). triggers is content-addressed on the two files that define the image —
+# Dockerfile + requirements.txt — plus the destination path/tag, so the build runs on the FIRST
+# apply (no prior state) and re-runs ONLY when those change. Source code is NOT a trigger: it ships
+# at runtime via python_file_uris, so editing src/ must not rebuild the slow image (mirrors the seed
+# module's content-addressing). depends_on ensures the repo exists and the Cloud Build SA can push
+# before the build runs; downstream consumers (the seed batch) order after this via module.container.
+resource "null_resource" "build" {
+  count = var.build_image ? 1 : 0
+
+  triggers = {
+    dockerfile   = filemd5("${path.module}/../../../../docker/Dockerfile")
+    requirements = filemd5("${path.module}/../../../../docker/requirements.txt")
+    image        = "${local.image_repo_path}:${var.image_tag}"
+  }
+
+  provisioner "local-exec" {
+    working_dir = "${path.module}/../../../.." # repo root: build context "." + docker/cloudbuild.yaml
+    command = join(" ", [
+      "gcloud builds submit",
+      "--config docker/cloudbuild.yaml",
+      "--substitutions=_REGION=${var.region},_REPO=${var.repository_id},_IMAGE=${var.image_name},_TAG=${var.image_tag}",
+      "--project ${var.project_id}", # explicit — never the ambient ADC project (DESIGN §13.0)
+      ".",
+    ])
+  }
+
+  depends_on = [
+    google_artifact_registry_repository.images,
+    google_project_iam_member.cloudbuild,
+  ]
+}
+
 output "repository_id" {
   description = "Artifact Registry repository id."
   value       = google_artifact_registry_repository.images.repository_id
+}
+
+output "image_built" {
+  description = "Set once the build has run (or null when build_image = false); order downstream on this."
+  value       = var.build_image ? null_resource.build[0].id : null
 }
 
 # The full image path the Dataproc batch's runtime_config.container_image consumes and that the
 # `gcloud builds submit` _IMAGE/_TAG substitutions extend. Tag is appended by the consumer.
 output "image_repo_path" {
   description = "Base image path: <region>-docker.pkg.dev/<project>/<repo>/<image>."
-  value = format(
-    "%s-docker.pkg.dev/%s/%s/%s",
-    var.region,
-    var.project_id,
-    google_artifact_registry_repository.images.repository_id,
-    var.image_name,
-  )
+  value       = local.image_repo_path
 }

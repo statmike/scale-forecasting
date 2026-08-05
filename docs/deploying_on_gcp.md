@@ -56,15 +56,39 @@ the services are on); everything else depends on it.
 | `storage` | Three GCS buckets: `warehouse`, `artifacts`, `code` | Separate buckets, not one with prefixes — see [Storage](#storage-three-buckets-on-purpose) |
 | `bigquery` | The dataset + the BigLake (Cloud Resource) connection | Tables are **not** here — the app creates them. Connection exists for the Iceberg source variant |
 | `budget` | A monthly cost budget with 50/90/100% alert thresholds | A budget *alerts*, it does not *cap*. Safety net before any spend |
-| `container` | The Artifact Registry Docker repo for the shared Spark/Ray runtime image | Owns the *repo*; the image is built by Cloud Build from `docker/Dockerfile` |
+| `container` | The Artifact Registry Docker repo **and the Cloud Build run that fills it** | Owns the *repo* and builds + pushes the shared runtime image on apply (`build_image`, content-addressed on `docker/`) — see [The runtime image](#the-runtime-image) |
 | `network` | VPC + subnet + firewall + PSA peering + Cloud NAT + PSC-I attachment | Serverless compute needs a private-access subnet; Ray needs the private path — see [Networking](#networking-what-each-piece-is-for) |
 | `composer` | *(gated, off by default)* Composer 3 (Airflow) environment | The only real at-rest cost (~$300–400/mo). Start/stop with one variable |
 | `seed` | *(on by default)* The Dataproc Serverless batch that materializes the example dataset | Runs once on the first apply; `terraform apply` submits **and waits** for the batch. See [The example dataset](#the-example-dataset) |
 
-The **infrastructure** — everything except the seed batch and `composer` — is **effectively free at
-rest**: empty buckets, an empty dataset, service accounts, a connection, and network plumbing all
-cost nothing until compute runs. The one on-by-default cost is the **example-data seed** (below): a
-one-time batch on the first apply.
+The **infrastructure** — everything except the image build, the seed batch, and `composer` — is
+**effectively free at rest**: empty buckets, an empty dataset, service accounts, a connection, and
+network plumbing all cost nothing until compute runs. Two on-by-default costs run on the first apply:
+the **runtime-image build** and the **example-data seed** (both below), each a one-time step.
+
+### The runtime image
+
+`build_image` defaults to **true**, so the first `terraform apply` doesn't just create the empty
+Artifact Registry repo — it **fills it**. The `container` module runs `gcloud builds submit` against
+the repo's own [`docker/cloudbuild.yaml`](../docker/cloudbuild.yaml), building the shared Spark/Ray
+runtime image from [`docker/Dockerfile`](../docker/Dockerfile) and pushing it to the repo. This
+matters because *everything downstream pulls that image* — the seed batch below, and every forecast
+engine. Without it, a fresh deploy with `run_seed = true` would fail: the seed batch would try to
+pull an image that doesn't exist yet. One apply now does the whole chain: repo → image → seed.
+
+- **It's content-addressed on `docker/`.** The build is triggered by an md5 of the `Dockerfile` and
+  `requirements.txt` (the two files that define the image), so it runs on the **first** apply and
+  re-runs **only** when those change. A source-code edit does **not** rebuild it — application code
+  ships to jobs at runtime via `python_file_uris` (see the seed module), never baked into the image.
+- **Cost/mechanics.** A Cloud Build run is a few minutes and cents of build time. The image is
+  `linux/amd64` (Dataproc Serverless requires amd64; Cloud Build's default workers are amd64, so a
+  plain `docker build` produces the right architecture — no emulation).
+- **Requirements.** The machine running Terraform needs the `gcloud` CLI (Terraform shells out to it).
+  If `enable_apis = false`, an admin must have already enabled `cloudbuild.googleapis.com`.
+- **Escape hatch.** Set `build_image = false` if you build and push the image yourself (CI or an
+  air-gapped registry) — then push it to the tag the seed/engines consume (`seed_image_tag`, default
+  `latest`) before running any compute. The equivalent manual command is documented in the `container`
+  module header and `docker/cloudbuild.yaml`.
 
 ### The example dataset
 
@@ -122,6 +146,7 @@ toggles (all default to the greenfield/quickstart behavior).
 | `create_service_accounts` | `true` | You bring your own SAs | `runner_sa_email` + `compute_sa_email` (and your admin owns their grants) |
 | `create_network` | `true` | Your org already manages a VPC | `subnetwork_uri` — a subnet with **Private Google Access** + an **internal-ingress** firewall rule |
 | `create_composer` | `false` | You want scheduled DAG runs | Nothing — flip **on** (starts the ~$300–400/mo meter); flip off to stop it |
+| `build_image` | `true` | You build/push the runtime image yourself (CI / air-gapped) | Push your image to the `seed_image_tag` before running compute |
 | `run_seed` | `true` | You'll bring your own source table (skip the example data) | Flip **off**; then point runs at your own `source_series_*` table |
 | `create_project` *(bootstrap)* | `true` | Your org pre-creates projects | An existing `project_id` |
 
@@ -167,7 +192,8 @@ The `apis` module enables exactly these, grouped by what they're for:
 **Image supply chain**
 - **Artifact Registry** (`artifactregistry.googleapis.com`) — holds the one shared Spark/Ray runtime
   image, so the *same* code + deps run local == Dataproc == Ray.
-- **Cloud Build** (`cloudbuild.googleapis.com`) — builds that image from `docker/Dockerfile`.
+- **Cloud Build** (`cloudbuild.googleapis.com`) — builds that image from `docker/Dockerfile` on the
+  first apply (`build_image`, on by default).
 
 **Orchestration + governance**
 - **Composer** (`composer.googleapis.com`) — Composer 3 (Airflow), gated off by default; schedules
@@ -313,8 +339,12 @@ resolve; see the notebooks and `terraform/README.md` for the exact wiring.
 
 - Read [`terraform/README.md`](../terraform/README.md) for the exact command sequence (bootstrap →
   main) and the cost note.
-- **Two levers cost money.** `run_seed` is **on by default** — the first apply runs the example-data
-  seed batch once (~$0.15 / ~8.5 min at 100k; set `seed_num_series = 100` to smoke first, or
+- **`gcloud` CLI required** on the machine running Terraform (unless `build_image = false`) — the main
+  stage shells out to `gcloud builds submit` to build the runtime image.
+- **Three levers cost money.** `build_image` is **on by default** — the first apply runs a one-time
+  Cloud Build (a few minutes, cents) to build + push the runtime image; it rebuilds only when
+  `docker/` deps change. `run_seed` is **on by default** — the first apply runs the example-data seed
+  batch once (~$0.15 / ~8.5 min at 100k; set `seed_num_series = 100` to smoke first, or
   `run_seed = false` to skip). `create_composer` is **off by default** — the only real at-rest cost.
 - Run `terraform plan` and read it. Nothing is created until `apply`, and the plan is the honest
   preview of exactly what this document describes.

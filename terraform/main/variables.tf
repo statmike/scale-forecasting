@@ -136,6 +136,42 @@ variable "seed_image_tag" {
   default     = "latest"
 }
 
+# --- default-on smoke forecast -------------------------------------------------
+
+variable "run_smoke" {
+  description = <<-EOT
+    Submit a tiny, TOLERANT smoke forecast on apply, so the first `terraform apply` also proves the
+    platform forecasts: a few fast Python models on Dataproc Serverless in parallel with `arima_plus`
+    in BigQuery, under one shared run_id. Default TRUE. It needs the seeded data + the runtime image,
+    so it is effectively gated on run_seed (module.smoke.create = run_smoke && run_seed) and ordered
+    after the seed/container/network. Unlike the seed, the smoke is NON-BLOCKING: it is submitted with
+    `gcloud dataproc batches submit --async` via a null_resource with on_failure = continue, so a
+    forecast failure NEVER fails the apply — inspect the surfaced smoke_batch_id / smoke_describe_hint
+    to see its outcome. Content-addressed (batch id embeds code + config hash), so it runs on the
+    first apply and re-submits only when the code or smoke config changes. Set FALSE to skip it.
+  EOT
+  type        = bool
+  default     = true
+}
+
+# --- runtime image build -------------------------------------------------------
+
+variable "build_image" {
+  description = <<-EOT
+    Build the shared Spark/Ray runtime image with Cloud Build on apply, so a single `terraform
+    apply` creates the Artifact Registry repo AND fills it — the seed batch and forecast engines
+    all pull this image, so with build_image = false and no pre-built image, a fresh deploy has
+    nothing to run. Default TRUE. The build is content-addressed on docker/ (Dockerfile +
+    requirements.txt): it runs on the first apply and rebuilds ONLY when those deps change, never
+    on a source-code edit (code ships at runtime via python_file_uris). Requires the `gcloud` CLI
+    on the machine running Terraform. If enable_apis = false, an admin must have already enabled
+    cloudbuild.googleapis.com. Set FALSE to skip when you build the image yourself (CI / air-gapped
+    registry) — then push it to the repo tag the seed/engines consume before running compute.
+  EOT
+  type        = bool
+  default     = true
+}
+
 # --- budget --------------------------------------------------------------------
 
 variable "billing_account" {

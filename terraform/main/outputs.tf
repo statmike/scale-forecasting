@@ -72,3 +72,13 @@ output "seed_batch_state" {
   description = "Terminal state of the seed batch (null unless run_seed = true)."
   value       = module.seed.batch_state
 }
+
+output "smoke_batch_id" {
+  description = "Submitted smoke-forecast batch id (null unless run_smoke && run_seed)."
+  value       = module.smoke.batch_id
+}
+
+output "smoke_describe_hint" {
+  description = "How to inspect the tolerant smoke batch's outcome — it does NOT fail the apply."
+  value       = module.smoke.describe_hint
+}

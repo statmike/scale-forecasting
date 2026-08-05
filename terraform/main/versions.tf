@@ -33,5 +33,10 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.4"
     }
+    # Runs `gcloud builds submit` on apply to build the runtime image (modules/container).
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
   }
 }

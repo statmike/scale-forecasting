@@ -1,0 +1,9 @@
+# Bounds the source context `gcloud builds submit` uploads. Terraform's container module runs
+# `gcloud builds submit --config docker/cloudbuild.yaml .` from the repo root; the Docker build only
+# ever COPYs docker/requirements.txt, so the context genuinely needs nothing but docker/. Without
+# this file gcloud falls back to .gitignore, which does NOT exclude src/, notebooks/, configs/, etc.,
+# uploading far more than the build needs. This is the ONLY gcloud source-upload path in the repo
+# (the seed job uploads src/ via Terraform's archive_file, not gcloud), so scoping to docker/ is safe.
+*
+!/docker
+!/docker/**
