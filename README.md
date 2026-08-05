@@ -7,9 +7,9 @@ methods, and capture every run's lineage in BigQuery — from a local notebook o
 Airflow, with the *same* code. Deploy the whole thing into a fresh project with one
 `terraform apply`, complete with 100k example series to run against immediately.
 
-> ⚠️ **Status: under construction.** The local dev loop (below) is fully working; the
-> cloud deploy (Terraform, Spark/Ray/BigQuery engines) and an architecture diagram land
-> in the final polish phase.
+> **Status.** The local dev loop and the GCP Terraform deploy are both working end-to-end
+> (Spark, Ray, and BigQuery engines all run against a live deployment). An architecture
+> diagram lands in the final polish phase.
 
 ---
 
@@ -99,8 +99,41 @@ Python-runtime models on a fixed-size Ray-on-Vertex cluster ∥ the BigQuery nat
 works from any authenticated client — local or in-GCP — because the cluster is provisioned on a
 PSC-I network attachment with a dashboard-capable head node, wired by the Terraform network module).
 
-> The one-`terraform apply` cloud deploy (Spark/Ray/BigQuery at scale) lands in the
-> final polish phase; the quickstart above is the whole local dev loop today.
+## Deploy on GCP
+
+The whole platform deploys into a Google Cloud project with Terraform, in **two stages**:
+
+```bash
+# Stage 1 — bootstrap (run once): creates the project (optional) + the Terraform state bucket.
+cd terraform/bootstrap
+cp terraform.tfvars.example terraform.tfvars      # edit: project_id, billing_account, org_id
+terraform init && terraform apply
+terraform output backend_config                   # note the state bucket for stage 2
+
+# Stage 2 — main: everything else (dataset, buckets, SAs, network, connection, budget).
+cd ../main
+cp terraform.tfvars.example terraform.tfvars      # edit: project_id, billing_account
+terraform init -backend-config="bucket=<project_id>-tfstate"
+terraform plan                                    # review — nothing is created until apply
+terraform apply
+```
+
+The base deployment is **effectively free at rest** — empty buckets, an empty dataset, service
+accounts, and network plumbing cost nothing until compute runs. The two levers that start real spend,
+**Composer** (`create_composer`) and the **example-data seed job** (`run_seed`), are **off by
+default**. To materialize the shipped 100k-series example dataset, flip `run_seed = true` (start with
+`seed_num_series = 100` to smoke-test cost first).
+
+**Greenfield or brownfield.** Defaults create everything (the 5-minute path). For a locked-down org,
+flip `create_service_accounts` / `create_network` / `enable_apis` off and pass your existing SAs,
+subnet, and pre-enabled APIs in by variable — the modules then create nothing and thread your values
+through.
+
+**Reviewing the Terraform before you run it?** [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md)
+is a full walkthrough: what each module builds, which GCP services it uses and how, **why each
+permission is granted and who uses it** (including the three custom least-privilege IAM roles), and
+the greenfield-vs-brownfield toggles. The operator runbook (exact commands, cost notes) is
+[`terraform/README.md`](./terraform/README.md).
 
 ## License
 
