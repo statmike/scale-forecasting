@@ -87,6 +87,10 @@ Two things worth knowing about cost and re-runs:
   seed source. Terraform won't re-run an existing batch, so the seed runs **once** and does *not*
   re-spend on later applies unless you change `seed_num_series`, `seed_run_label`, or the seed code.
   Reseeds are deliberate, never per-apply.
+- **Re-seeding soon after a `direct` seed?** The Iceberg variant clears with `DELETE WHERE TRUE`,
+  which is blocked by the Storage Write API's ~90-min streaming buffer right after a `direct` write —
+  so an immediate re-seed should use `seed_write_method = "indirect"` (no buffer) or wait it out. The
+  native variant is unaffected (it clears with `TRUNCATE`). See NOTES.md for the full B0.4 detail.
 
 To skip the example data entirely (you'll point runs at your own source table), set
 `run_seed = false`. To smoke-test cost/runtime first, set `seed_num_series = 100` (cents, ~2 min),
