@@ -79,18 +79,25 @@ variable "compute_sa_email" {
 }
 
 # --- seed job (BUILD B0.4) -----------------------------------------------------
-# The Dataproc Serverless batch that materializes the example dataset. Gated off by default;
-# run_seed = true is real cloud spend. See modules/seed for the smoke → review → full lifecycle.
+# The Dataproc Serverless batch that materializes the example dataset. ON by default (run_seed =
+# true) so a fresh deploy ships with data; real (small) cloud spend — 100k measured at ~$0.11-0.15,
+# ~8.5 min compute. Content-addressed, so it runs once, not per-apply. See modules/seed for the
+# smoke → review → full lifecycle.
 
 variable "run_seed" {
   description = <<-EOT
-    Submit the Dataproc Serverless seed batch (real cloud spend). Default FALSE. Turn on for the
-    smoke (seed_num_series = 100) first, review cost/runtime, then the full run
-    (seed_num_series = 100000). google_dataproc_batch blocks until the batch is terminal, so
-    `terraform apply` submits and waits.
+    Submit the Dataproc Serverless seed batch that materializes the example dataset (real cloud
+    spend). Default TRUE — a fresh deploy comes with the shipped 100k-series dataset in both source
+    tables, ready to forecast against immediately (the "solution-in-a-box" promise). The batch is
+    content-addressed (batch_id embeds series count + code hash), so it runs on the FIRST apply and
+    does NOT re-run on later applies unless you change seed_num_series / seed_run_label / the seed
+    code — reseeds are deliberate, not per-apply. google_dataproc_batch blocks until the batch is
+    terminal, so the first `terraform apply` submits and waits (~8.5 min compute, ~$0.15 measured at
+    100k). Set FALSE to skip the example data (e.g. you'll bring your own source table); set
+    seed_num_series = 100 first if you want to smoke-test cost/runtime before the full 100k.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "seed_num_series" {

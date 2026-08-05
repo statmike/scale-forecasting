@@ -16,3 +16,9 @@ budget_amount_usd = 200
 # create_service_accounts = true
 # create_composer         = false   # keep off until you want scheduled DAG runs (Phase 7)
 # dataset_id              = "scale_forecasting"
+
+# --- example dataset (on by default) ---
+# run_seed        = true     # materialize the shipped example dataset on first apply (~8.5 min,
+#                            # ~$0.15); set false to skip it, or seed_num_series = 100 to smoke first.
+# seed_num_series = 100000   # 100 for a quick/cheap smoke, 100000 for the full shipped dataset.
+# seed_variant    = "both"   # seed source_series_iceberg + source_series_native (one generated panel).

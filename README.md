@@ -118,11 +118,21 @@ terraform plan                                    # review — nothing is create
 terraform apply
 ```
 
-The base deployment is **effectively free at rest** — empty buckets, an empty dataset, service
-accounts, and network plumbing cost nothing until compute runs. The two levers that start real spend,
-**Composer** (`create_composer`) and the **example-data seed job** (`run_seed`), are **off by
-default**. To materialize the shipped 100k-series example dataset, flip `run_seed = true` (start with
-`seed_num_series = 100` to smoke-test cost first).
+The infrastructure is **effectively free at rest** — empty buckets, an empty dataset, service
+accounts, and network plumbing cost nothing until compute runs. Two things cost money:
+
+- **The example dataset is created on the first apply** (`run_seed = true`, **on by default**): a
+  one-time Dataproc Serverless batch generates **100,000 deterministic time series** and writes them
+  to **both** source tables — `source_series_iceberg` (managed Apache Iceberg) and
+  `source_series_native` (native BigQuery) — from a *single generated panel*, so the series are
+  identical across formats and you can benchmark storage on the same data. This is the
+  "solution-in-a-box" promise: a fresh deploy has data to forecast against immediately. It's cheap —
+  the 100k seed is measured at **~$0.15 and ~8.5 min of compute** — and content-addressed, so it runs
+  once and does **not** re-run on later applies unless you change the series count / label / seed
+  code. Set `run_seed = false` to skip it (bring your own source table), or `seed_num_series = 100`
+  to smoke-test first.
+- **Composer** (`create_composer`) is **off by default** — the only real at-rest cost
+  (~$300–400/mo); turn it on for scheduled DAG runs.
 
 **Greenfield or brownfield.** Defaults create everything (the 5-minute path). For a locked-down org,
 flip `create_service_accounts` / `create_network` / `enable_apis` off and pass your existing SAs,

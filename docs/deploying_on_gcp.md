@@ -59,11 +59,45 @@ the services are on); everything else depends on it.
 | `container` | The Artifact Registry Docker repo for the shared Spark/Ray runtime image | Owns the *repo*; the image is built by Cloud Build from `docker/Dockerfile` |
 | `network` | VPC + subnet + firewall + PSA peering + Cloud NAT + PSC-I attachment | Serverless compute needs a private-access subnet; Ray needs the private path — see [Networking](#networking-what-each-piece-is-for) |
 | `composer` | *(gated, off by default)* Composer 3 (Airflow) environment | The only real at-rest cost (~$300–400/mo). Start/stop with one variable |
-| `seed` | *(gated, off by default)* The Dataproc Serverless batch that materializes the example dataset | `terraform apply` submits **and waits** for the batch to finish |
+| `seed` | *(on by default)* The Dataproc Serverless batch that materializes the example dataset | Runs once on the first apply; `terraform apply` submits **and waits** for the batch. See [The example dataset](#the-example-dataset) |
 
-The base deployment — everything except `composer` and `seed` — is **effectively free at rest**:
-empty buckets, an empty dataset, service accounts, a connection, and network plumbing all cost
-nothing until compute runs.
+The **infrastructure** — everything except the seed batch and `composer` — is **effectively free at
+rest**: empty buckets, an empty dataset, service accounts, a connection, and network plumbing all
+cost nothing until compute runs. The one on-by-default cost is the **example-data seed** (below): a
+one-time batch on the first apply.
+
+### The example dataset
+
+`run_seed` defaults to **true**, so a fresh deploy comes with data to forecast against immediately —
+the "solution-in-a-box" promise. On the **first** `terraform apply` the `seed` module submits a
+Dataproc Serverless Spark batch that:
+
+- generates **100,000 deterministic synthetic time series** (`seed_num_series`, default `100000`;
+  reproducible from `seed_master_seed`), and
+- writes them to **both** source tables — `source_series_iceberg` (managed Apache Iceberg on GCS) and
+  `source_series_native` (native BigQuery) — from a **single generated panel** (Spark `.cache()`s the
+  DataFrame and writes it twice), so the series are **byte-identical across formats**. That's the
+  point: you can benchmark Iceberg vs native storage on the *same* data.
+
+Two things worth knowing about cost and re-runs:
+
+- **`terraform apply` blocks** until the batch reaches a terminal state (~8.5 min of compute at 100k,
+  measured at ~$0.15; the provider wait is set to 60 min to cover provisioning too).
+- **The batch is content-addressed** — its id embeds the series count, run label, and an md5 of the
+  seed source. Terraform won't re-run an existing batch, so the seed runs **once** and does *not*
+  re-spend on later applies unless you change `seed_num_series`, `seed_run_label`, or the seed code.
+  Reseeds are deliberate, never per-apply.
+
+To skip the example data entirely (you'll point runs at your own source table), set
+`run_seed = false`. To smoke-test cost/runtime first, set `seed_num_series = 100` (cents, ~2 min),
+review, then rerun at `100000`. Select one format with `seed_variant = "iceberg"` or `"native"`
+(default `"both"`).
+
+> The **same generator** produces the local playground's sample panel — see the
+> [local quickstart](../README.md#quickstart). `playground.sample_data()` calls the identical
+> `generate_panel()` with the same master seed, just 3 series in-memory instead of 100k written to
+> BigQuery. So what you explore locally is a small slice of the same deterministic dataset the cloud
+> seed materializes (G1: same code path local and at scale).
 
 ---
 
@@ -84,7 +118,7 @@ toggles (all default to the greenfield/quickstart behavior).
 | `create_service_accounts` | `true` | You bring your own SAs | `runner_sa_email` + `compute_sa_email` (and your admin owns their grants) |
 | `create_network` | `true` | Your org already manages a VPC | `subnetwork_uri` — a subnet with **Private Google Access** + an **internal-ingress** firewall rule |
 | `create_composer` | `false` | You want scheduled DAG runs | Nothing — flip **on** (starts the ~$300–400/mo meter); flip off to stop it |
-| `run_seed` | `false` | You want the example dataset materialized | Nothing — flip **on** (real spend); start with `seed_num_series = 100` |
+| `run_seed` | `true` | You'll bring your own source table (skip the example data) | Flip **off**; then point runs at your own `source_series_*` table |
 | `create_project` *(bootstrap)* | `true` | Your org pre-creates projects | An existing `project_id` |
 
 The BYO pattern is identical across `apis`, `iam`, `network`, `composer`, and `seed`: `create = false`
@@ -275,7 +309,8 @@ resolve; see the notebooks and `terraform/README.md` for the exact wiring.
 
 - Read [`terraform/README.md`](../terraform/README.md) for the exact command sequence (bootstrap →
   main) and the cost note.
-- **Everything gated stays off by default.** `create_composer` and `run_seed` are the only two levers
-  that start real spend; both are `false` until you flip them.
+- **Two levers cost money.** `run_seed` is **on by default** — the first apply runs the example-data
+  seed batch once (~$0.15 / ~8.5 min at 100k; set `seed_num_series = 100` to smoke first, or
+  `run_seed = false` to skip). `create_composer` is **off by default** — the only real at-rest cost.
 - Run `terraform plan` and read it. Nothing is created until `apply`, and the plan is the honest
   preview of exactly what this document describes.

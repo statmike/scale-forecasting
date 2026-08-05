@@ -5,11 +5,16 @@ holds Terraform's own state. **Stage 2 (main)** creates everything else, storing
 in that bucket. This split resolves the chicken-and-egg problem (you can't keep state in a
 bucket that doesn't exist yet).
 
-> **Cost:** the base deployment is effectively free at rest — empty buckets, an empty
-> dataset, service accounts. The one real cost, **Composer 3** (~$300–400/mo), is **off by
-> default** (`create_composer = false`) and only starts when you turn it on. See
-> [`main/modules/composer/main.tf`](./main/modules/composer/main.tf) for the start/run/stop
-> lifecycle.
+> **Cost:** the infrastructure is effectively free at rest — empty buckets, an empty dataset,
+> service accounts, network plumbing. Two things cost money:
+> - **The example-data seed** (`run_seed = true`, **on by default**) runs a one-time Dataproc
+>   Serverless batch on the first apply (~8.5 min, ~$0.15 measured at the 100k default) to materialize
+>   the shipped dataset. It's content-addressed, so it does **not** re-run on later applies unless you
+>   change the series count / label / seed code. Set `run_seed = false` to skip it, or
+>   `seed_num_series = 100` to smoke-test cost first.
+> - **Composer 3** (~$300–400/mo) is **off by default** (`create_composer = false`) and only starts
+>   when you turn it on. See [`main/modules/composer/main.tf`](./main/modules/composer/main.tf) for
+>   the start/run/stop lifecycle.
 
 ## Prerequisites
 
@@ -52,7 +57,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 | `create_service_accounts` | `true` | you bring your own SAs (`runner_sa_email`, `compute_sa_email`) |
 | `create_network` | `true` | your org already has a network — pass an existing subnet (`subnetwork_uri`) with Private Google Access + internal-ingress |
 | `create_composer` | `false` | (already off) turn **on** for scheduled DAG runs |
-| `run_seed` | `false` | (already off) turn **on** to submit the seed batch (real spend) |
+| `run_seed` | `true` | (already **on**) turn **off** to skip the example dataset (bring your own source table) |
 | `create_project` (bootstrap) | `true` | your org pre-creates projects |
 
 ## Modules (one capability each)
