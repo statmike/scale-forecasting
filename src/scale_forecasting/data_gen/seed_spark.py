@@ -58,7 +58,7 @@ _log = get_logger(__name__)
 
 # The source_series column order, verbatim from the DDL (registry/ddl.py). Both the pandas
 # reconciliation and the Spark schema below follow this order so a positional write is safe.
-_SOURCE_COLUMNS: tuple[str, ...] = ("ts_id", "ds", "y", "archetype", "price_index", "is_holiday")
+_SOURCE_COLUMNS: tuple[str, ...] = ("ts_id", "ds", "y", "archetype", "is_holiday")
 
 
 @dataclass(frozen=True)
@@ -71,7 +71,6 @@ class SeedArgs:
     freq: str
     start: str
     holidays: tuple[str, ...]
-    with_exog: bool
     write_method: str  # "direct" | "indirect"
     num_partitions: int  # Spark parallelism for generation
     variant: str  # "iceberg" | "native" | "both"
@@ -87,7 +86,6 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
     p.add_argument("--start", type=str, default="2021-01-01")
     # Comma-separated country codes, e.g. "US" or "US,CA". Empty string → no holidays.
     p.add_argument("--holidays", type=str, default="US")
-    p.add_argument("--with-exog", action="store_true")
     p.add_argument("--write-method", type=str, choices=("direct", "indirect"), default="direct")
     # 0 → let the driver derive a sensible default from n_series.
     p.add_argument("--num-partitions", type=int, default=0)
@@ -110,7 +108,6 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
         freq=ns.freq,
         start=ns.start,
         holidays=holidays,
-        with_exog=ns.with_exog,
         write_method=ns.write_method,
         num_partitions=num_partitions,
         variant=ns.variant,
@@ -130,12 +127,12 @@ def _default_partitions(n_series: int) -> int:
 def _to_source_rows(df: pd.DataFrame, holidays: tuple[str, ...]) -> pd.DataFrame:
     """Reconcile one generator partition to the ``source_series`` schema (pure, no Spark).
 
-    The generator emits ``ts_id, archetype, ds(datetime64[ns]), y [, price_index]``; the table
-    is ``ts_id STRING, ds DATE, y FLOAT64, archetype STRING, price_index FLOAT64, is_holiday
-    BOOL``. This casts ``ds`` to python ``date``, derives ``is_holiday`` from the same calendar
-    as the panel's holiday bump (parity, via :func:`~data_gen.generator.is_holiday_flags`), fills
-    ``price_index`` with NA when the generator didn't emit it (``with_exog=False``), and projects
-    to the DDL column order. Pure → unit-tested offline against a tiny generator call.
+    The generator emits ``ts_id, archetype, ds(datetime64[ns]), y``; the table is
+    ``ts_id STRING, ds DATE, y FLOAT64, archetype STRING, is_holiday BOOL``. This casts ``ds`` to
+    python ``date``, derives ``is_holiday`` from the same calendar as the panel's holiday bump
+    (parity, via :func:`~data_gen.generator.is_holiday_flags`), and projects to the DDL column
+    order. The shipped example is univariate; the exog seam lives in the generator/config, not the
+    shipped source table. Pure → unit-tested offline against a tiny generator call.
     """
     import pandas as pd
 
@@ -145,18 +142,12 @@ def _to_source_rows(df: pd.DataFrame, holidays: tuple[str, ...]) -> pd.DataFrame
         empty = {c: pd.Series(dtype="object") for c in _SOURCE_COLUMNS}
         return pd.DataFrame(empty)
 
-    price = (
-        df["price_index"].astype("float64")
-        if "price_index" in df.columns
-        else pd.Series([pd.NA] * len(df), dtype="Float64")
-    )
     out = pd.DataFrame(
         {
             "ts_id": df["ts_id"].astype("string"),
             "ds": pd.to_datetime(df["ds"]).dt.date,
             "y": df["y"].astype("float64"),
             "archetype": df["archetype"].astype("string"),
-            "price_index": price,
             "is_holiday": pd.Series(is_holiday_flags(df["ds"], holidays), dtype="boolean"),
         }
     )
@@ -166,8 +157,8 @@ def _to_source_rows(df: pd.DataFrame, holidays: tuple[str, ...]) -> pd.DataFrame
 def _source_series_schema() -> object:
     """Explicit Spark ``StructType`` matching the ``source_series`` DDL (STRING/DATE/DOUBLE/BOOL).
 
-    Declared explicitly (not inferred) so an all-NULL ``price_index`` partition can't collapse
-    the column to the wrong type and so the write matches the managed-Iceberg table exactly.
+    Declared explicitly (not inferred) so a type never collapses on an all-NULL partition and so
+    the write matches the managed-Iceberg table exactly.
     """
     from pyspark.sql.types import (
         BooleanType,
@@ -184,7 +175,6 @@ def _source_series_schema() -> object:
             StructField("ds", DateType(), False),
             StructField("y", DoubleType(), True),
             StructField("archetype", StringType(), True),
-            StructField("price_index", DoubleType(), True),
             StructField("is_holiday", BooleanType(), True),
         ]
     )
@@ -272,12 +262,14 @@ def main(argv: list[str] | None = None) -> None:
     for name, iceberg in targets:
         _clear_existing(settings, name, iceberg=iceberg)
 
+    # The shipped example is univariate: with_exog stays at its GenConfig default (False), so the
+    # generator emits no price_index and _to_source_rows projects the univariate schema. The exog
+    # seam remains available for custom source tables (see registry/ddl.py + features.exog).
     gen_cfg = GenConfig(
         history=args.history,
         freq=args.freq,
         start=args.start,
         holidays=args.holidays,
-        with_exog=args.with_exog,
     )
     # Bind loop-invariants into locals so the executor closure captures values, not `args`.
     holidays = args.holidays
@@ -290,7 +282,7 @@ def main(argv: list[str] | None = None) -> None:
             return iter(())
         frame = generate_partition(id_list, gen_cfg, master_seed)
         rows = _to_source_rows(frame, holidays)
-        # pd.NA → None so Spark writes SQL NULL (e.g. price_index when with_exog=False).
+        # pd.NA → None so Spark writes SQL NULL for any missing cell.
         # (pandas-stubs<3 has no .where(cond, None) overload though it's valid at runtime.)
         records = (
             rows.astype(object)

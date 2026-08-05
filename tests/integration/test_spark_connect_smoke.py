@@ -21,9 +21,8 @@ endpoint is an environment limitation, not a product defect. Run where the endpo
     SF_DATAPROC_SUBNET=projects/<p>/regions/<r>/subnetworks/<s> \\
         uv run pytest -m "spark and gcp" tests/integration/test_spark_connect_smoke.py
 
-**Self-contained data.** Seeds its own tiny scratch ``source_series`` table (no exog needed — the
-Spark stat models don't read ``price_index``) and tears it down after. ``run_name`` varies per
-invocation so the deterministic ``run_id`` is unique.
+**Self-contained data.** Seeds its own tiny univariate scratch ``source_series`` table and tears it
+down after. ``run_name`` varies per invocation so the deterministic ``run_id`` is unique.
 """
 
 from __future__ import annotations
@@ -66,19 +65,16 @@ def scratch_source(settings: Settings) -> Iterator[str]:
     client = bigquery.Client(project=settings.project_id)
     table_ref = settings.table_ref(_SCRATCH_TABLE)
 
-    gen = GenConfig(
-        history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",), with_exog=True
-    )
+    gen = GenConfig(history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",))
     panel = generate_panel(_SERIES_LIMIT, gen, seed=7)
     rows = _to_source_rows(panel, ("US",))
-    rows = rows.astype({"y": "float64", "price_index": "float64", "is_holiday": "bool"})
+    rows = rows.astype({"y": "float64", "is_holiday": "bool"})
 
     schema = [
         bigquery.SchemaField("ts_id", "STRING"),
         bigquery.SchemaField("ds", "DATE"),
         bigquery.SchemaField("y", "FLOAT"),
         bigquery.SchemaField("archetype", "STRING"),
-        bigquery.SchemaField("price_index", "FLOAT"),
         bigquery.SchemaField("is_holiday", "BOOL"),
     ]
     job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_TRUNCATE")

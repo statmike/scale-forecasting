@@ -23,11 +23,10 @@ identity the writers resolve (``SF_PROJECT_ID`` / ``SF_CONNECTION`` / ``SF_WAREH
 This launches a real Dataproc batch (~5-9 min provision→terminal) plus the in-BigQuery engine, so it
 is materially slower + costlier than the pure-BQ B3 smoke; that spend is the point of the test.
 
-**Self-contained data.** Like the B3 native smoke, the shipped 100k seed's ``price_index`` is
-all-NULL (generated ``with_exog=False``), so ARIMA_PLUS_XREG can't train on it. This test seeds its
-own tiny exog-carrying scratch ``source_series`` table via the same generator and tears it down
-after — the "test owns its data" discipline. ``run_name`` varies per invocation so the deterministic
-``run_id`` is unique (append-only cell tables can't be DELETE-d while buffered).
+**Self-contained data.** This test seeds its own tiny univariate scratch ``source_series`` table via
+the same generator and tears it down after — the "test owns its data" discipline. ``run_name``
+varies per invocation so the deterministic ``run_id`` is unique (append-only cell tables can't be
+DELETE-d while buffered).
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ from scale_forecasting.settings import Settings
 pytestmark = pytest.mark.gcp
 
 _SPARK_MODEL = "theta"
-_NATIVE_MODELS = ["arima_plus", "arima_plus_xreg", "timesfm"]
+_NATIVE_MODELS = ["arima_plus", "timesfm"]
 _ALL_MODELS = [_SPARK_MODEL, *_NATIVE_MODELS]
 _SERIES_LIMIT = 10
 _HORIZON = 28
@@ -61,10 +60,10 @@ def settings() -> Settings:
 
 @pytest.fixture(scope="module")
 def scratch_source(settings: Settings) -> Iterator[str]:
-    """Seed an exog-carrying scratch ``source_series`` table, yield its name, drop it after.
+    """Seed a tiny univariate scratch ``source_series`` table, yield its name, drop it after.
 
-    The same generator the production seed uses (``with_exog=True``), loaded as a plain BQ table
-    both the Spark connector and the BigQuery engine read. Truncate-on-write so a rerun is clean.
+    The same generator the production seed uses, loaded as a plain BQ table both the Spark connector
+    and the BigQuery engine read. Truncate-on-write so a rerun is clean.
     """
     from google.cloud import bigquery
 
@@ -74,19 +73,16 @@ def scratch_source(settings: Settings) -> Iterator[str]:
     client = bigquery.Client(project=settings.project_id)
     table_ref = settings.table_ref(_SCRATCH_TABLE)
 
-    gen = GenConfig(
-        history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",), with_exog=True
-    )
+    gen = GenConfig(history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",))
     panel = generate_panel(_SERIES_LIMIT, gen, seed=7)
     rows = _to_source_rows(panel, ("US",))
-    rows = rows.astype({"y": "float64", "price_index": "float64", "is_holiday": "bool"})
+    rows = rows.astype({"y": "float64", "is_holiday": "bool"})
 
     schema = [
         bigquery.SchemaField("ts_id", "STRING"),
         bigquery.SchemaField("ds", "DATE"),
         bigquery.SchemaField("y", "FLOAT"),
         bigquery.SchemaField("archetype", "STRING"),
-        bigquery.SchemaField("price_index", "FLOAT"),
         bigquery.SchemaField("is_holiday", "BOOL"),
     ]
     job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_TRUNCATE")
@@ -105,7 +101,7 @@ def _cfg(source_table: str) -> RunConfig:
         spark_method="explode",
         data={"source_table": source_table, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_ALL_MODELS,
-        features={"holidays": ["US"], "exog": ["price_index"]},
+        features={"holidays": ["US"]},
         # Backtest ON so the Spark path emits an OOF metric panel: without it the Python engine only
         # forecasts (no metrics), while the BQ natives always score a held-out fold — so the Spark
         # model would land NULL mean_wape and the two runtimes wouldn't be comparable, which is the

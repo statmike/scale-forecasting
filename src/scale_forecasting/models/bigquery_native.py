@@ -1,4 +1,4 @@
-"""BigQuery-native models — arima_plus / arima_plus_xreg / timesfm (CONTRACTS §1, §5).
+"""BigQuery-native models — arima_plus / timesfm (CONTRACTS §1, §5).
 
 These register through the *same* factory (``runtime="bigquery"``) so the router and registry
 treat them uniformly with the Python models, but they are **executed as SQL** by
@@ -7,10 +7,10 @@ they exist in the factory (so fan-out, routing, and the registry see them), and 
 ``fit``/``predict`` raise :class:`NotImplementedError` pointing at BUILD step B3 where the SQL
 templates land.
 
-Three models, three classes, one file — they share nothing but a runtime and an identical
+Two models, two classes, one file — they share nothing but a runtime and an identical
 "executed elsewhere" stance, so a thin in-file base keeps each a real registered model while
-avoiding three copies of the same stub (the one-model-one-file rule is about *authorship
-locality*, and all three native models are authored here against the same BigQuery contract).
+avoiding copies of the same stub (the one-model-one-file rule is about *authorship locality*, and
+both native models are authored here against the same BigQuery contract).
 """
 
 from __future__ import annotations
@@ -48,13 +48,6 @@ class ArimaPlus(_BigQueryNativeModel):
     supports_exog = False
 
 
-class ArimaPlusXreg(_BigQueryNativeModel):
-    """BigQuery ML ``ARIMA_PLUS_XREG`` (adds exogenous regressors)."""
-
-    name = "arima_plus_xreg"
-    supports_exog = True
-
-
 class TimesFm(_BigQueryNativeModel):
     """BigQuery ``AI.FORECAST`` with TimesFM (pretrained; no training step)."""
 
@@ -63,5 +56,4 @@ class TimesFm(_BigQueryNativeModel):
 
 
 register(ArimaPlus)
-register(ArimaPlusXreg)
 register(TimesFm)

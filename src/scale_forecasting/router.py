@@ -23,7 +23,7 @@ def split_by_runtime(cfg: RunConfig) -> tuple[list[str], list[str]]:
     """Partition ``cfg.models`` into ``(python_models, bq_models)`` by declared runtime.
 
     A model routes to BigQuery iff its class sets ``runtime == "bigquery"`` (the native models
-    ``arima_plus`` / ``arima_plus_xreg`` / ``timesfm``); everything else routes to the Python
+    ``arima_plus`` / ``timesfm``); everything else routes to the Python
     runtime selected by ``cfg.python_runtime`` (spark xor ray). This is per-model, not per-run
     (DESIGN glossary): one config can list both kinds and they execute concurrently. Input order is
     preserved within each list so downstream logs/SQL are deterministic.

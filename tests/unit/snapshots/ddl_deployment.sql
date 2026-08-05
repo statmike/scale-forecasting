@@ -68,7 +68,6 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.source_series_iceberg` (
   ds          DATE NOT NULL,
   y           FLOAT64,
   archetype   STRING,
-  price_index FLOAT64,
   is_holiday  BOOL
 )
 PARTITION BY ds
@@ -85,7 +84,6 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.source_series_native` (
   ds          DATE NOT NULL,
   y           FLOAT64,
   archetype   STRING,
-  price_index FLOAT64,
   is_holiday  BOOL
 )
 PARTITION BY ds

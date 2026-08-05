@@ -6,10 +6,9 @@
     "horizon": 28,
     "series_limit": 6
   },
-  "models": ["neuralprophet", "theta", "arima_plus", "arima_plus_xreg", "timesfm"],
+  "models": ["neuralprophet", "theta", "arima_plus", "timesfm"],
   "features": {
-    "holidays": ["US"],
-    "exog": ["price_index"]
+    "holidays": ["US"]
   },
   "backtest": {
     "enabled": true,

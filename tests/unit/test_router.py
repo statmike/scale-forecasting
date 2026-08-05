@@ -1,7 +1,7 @@
 """Tests for the runtime router — partitioning a run's models by execution runtime.
 
 Covers CONTRACTS §6: ``split_by_runtime`` sends the BigQuery-native models
-(``arima_plus``/``arima_plus_xreg``/``timesfm``) to the BQ engine and everything else to the Python
+(``arima_plus``/``timesfm``) to the BQ engine and everything else to the Python
 runtime, preserving input order, and surfaces unknown names as ``ModelError``.
 """
 
@@ -32,11 +32,9 @@ def test_split_mixed_partitions_by_runtime() -> None:
 
 
 def test_split_preserves_input_order_within_each_list() -> None:
-    py, bq = split_by_runtime(
-        _cfg(["timesfm", "sarimax", "arima_plus_xreg", "theta", "arima_plus"])
-    )
+    py, bq = split_by_runtime(_cfg(["timesfm", "sarimax", "theta", "arima_plus"]))
     assert py == ["sarimax", "theta"]
-    assert bq == ["timesfm", "arima_plus_xreg", "arima_plus"]
+    assert bq == ["timesfm", "arima_plus"]
 
 
 def test_split_all_python() -> None:
@@ -46,9 +44,9 @@ def test_split_all_python() -> None:
 
 
 def test_split_all_bigquery() -> None:
-    py, bq = split_by_runtime(_cfg(["arima_plus", "arima_plus_xreg", "timesfm"]))
+    py, bq = split_by_runtime(_cfg(["arima_plus", "timesfm"]))
     assert py == []
-    assert bq == ["arima_plus", "arima_plus_xreg", "timesfm"]
+    assert bq == ["arima_plus", "timesfm"]
 
 
 def test_split_unknown_model_raises() -> None:

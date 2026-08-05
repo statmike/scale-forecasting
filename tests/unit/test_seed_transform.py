@@ -1,11 +1,12 @@
 """Tests for the pure seed shaping transform (``data_gen.seed_spark._to_source_rows``, B0.4).
 
 The Spark seed job's only non-trivial logic that isn't already covered by the generator tests is
-the reconciliation from the generator frame (``ts_id, archetype, ds(datetime64[ns]), y
-[, price_index]``) to the ``source_series`` DDL schema (``ts_id, ds DATE, y, archetype,
-price_index FLOAT64, is_holiday BOOL``). That transform is factored out as a pure pandas function
-so it can be exercised offline — no Spark, no cluster — against a real (tiny) generator call, so
-the shipped seed and the test share one code path (same discipline as the golden fixture).
+the reconciliation from the generator frame (``ts_id, archetype, ds(datetime64[ns]), y``) to the
+``source_series`` DDL schema (``ts_id, ds DATE, y, archetype, is_holiday BOOL``). The shipped
+example is univariate; the exog seam lives in the generator/config, not the shipped source table
+(see ``test_generator.py`` for that dormant path). This transform is factored out as a pure pandas
+function so it can be exercised offline — no Spark, no cluster — against a real (tiny) generator
+call, so the shipped seed and the test share one code path (same discipline as the golden fixture).
 """
 
 from __future__ import annotations
@@ -57,17 +58,13 @@ def test_is_holiday_matches_generator_calendar() -> None:
     assert rows["is_holiday"].dtype == "boolean"
 
 
-def test_price_index_null_when_no_exog() -> None:
-    cfg = _cfg(with_exog=False)
+def test_source_rows_are_univariate() -> None:
+    # The shipped seed transform is univariate — no exog/price_index column, even if the generator
+    # frame carried one. The exog seam is exercised in test_generator.py, not here.
+    cfg = _cfg()
     rows = _to_source_rows(generate_partition([0], cfg, SEED), cfg.holidays)
-    assert "price_index" in rows.columns
-    assert rows["price_index"].isna().all()
-
-
-def test_price_index_populated_with_exog() -> None:
-    cfg = _cfg(with_exog=True)
-    rows = _to_source_rows(generate_partition([0], cfg, SEED), cfg.holidays)
-    assert rows["price_index"].notna().all()
+    assert "price_index" not in rows.columns
+    assert list(rows.columns) == list(_SOURCE_COLUMNS)
 
 
 def test_ts_id_and_archetype_preserved() -> None:

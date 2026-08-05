@@ -24,7 +24,7 @@ can open any file, understand it in one read, and fork it to their needs.
 
 - **Two Python runtimes** — Dataproc Serverless (**Spark**) and **Ray** on Vertex AI —
   run the identical per-series unit of work; pick one per run via config.
-- **BigQuery-native models** (ARIMA_PLUS, ARIMA_PLUS_XREG, TimesFM) run **in parallel**,
+- **BigQuery-native models** (ARIMA_PLUS, TimesFM) run **in parallel**,
   SQL-only, no Python compute.
 - **Backtesting** (expanding/sliding folds, full metric panel) and **ensembling**
   (calculated + learned) out of the box.
@@ -117,6 +117,12 @@ terraform init -backend-config="bucket=<project_id>-tfstate"
 terraform plan                                    # review — nothing is created until apply
 terraform apply
 ```
+
+That single first apply also **builds the shared Spark/Ray runtime image for you** (Cloud Build, a
+few minutes) and pushes it to Artifact Registry, so the seed job and every forecast engine have an
+image to run — no separate build step. It's content-addressed on `docker/`, so it rebuilds only when
+the Dockerfile or locked dependencies change, never on a code edit. Set `build_image = false` if you
+build and push the image yourself.
 
 The infrastructure is **effectively free at rest** — empty buckets, an empty dataset, service
 accounts, and network plumbing cost nothing until compute runs. Two things cost money:

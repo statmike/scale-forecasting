@@ -22,9 +22,9 @@ in-BigQuery engine, so it carries the same spend + latency as the orchestration 
         uv run pytest -m gcp tests/integration/test_ensemble_smoke.py
 
 **Self-contained data.** Like the B3 native + Arc B orchestration smokes, this seeds its own tiny
-exog-carrying scratch ``source_series`` table (the shipped 100k seed's ``price_index`` is all-NULL)
-and tears it down after — "the test owns its data". ``run_name`` varies per invocation so the
-deterministic ``run_id`` is unique (append-only cell tables can't be DELETE-d while buffered).
+univariate scratch ``source_series`` table and tears it down after — "the test owns its data".
+``run_name`` varies per invocation so the deterministic ``run_id`` is unique (append-only cell
+tables can't be DELETE-d while buffered).
 
 The ensemble uses **calculated** strategies only (mean / median / inverse_error): the base Spark and
 BigQuery models forecast disjoint date windows (Spark forecasts the true future; the natives score a
@@ -66,10 +66,10 @@ def settings() -> Settings:
 
 @pytest.fixture(scope="module")
 def scratch_source(settings: Settings) -> Iterator[str]:
-    """Seed an exog-carrying scratch ``source_series`` table, yield its name, drop it after.
+    """Seed a tiny univariate scratch ``source_series`` table, yield its name, drop it after.
 
-    The same generator the production seed uses (``with_exog=True``); loaded as a plain BQ table
-    both the Spark connector and the BigQuery engine read. Truncate-on-write so a rerun is clean.
+    The same generator the production seed uses; loaded as a plain BQ table both the Spark connector
+    and the BigQuery engine read. Truncate-on-write so a rerun is clean.
     """
     from google.cloud import bigquery
 
@@ -79,19 +79,16 @@ def scratch_source(settings: Settings) -> Iterator[str]:
     client = bigquery.Client(project=settings.project_id)
     table_ref = settings.table_ref(_SCRATCH_TABLE)
 
-    gen = GenConfig(
-        history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",), with_exog=True
-    )
+    gen = GenConfig(history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",))
     panel = generate_panel(_SERIES_LIMIT, gen, seed=7)
     rows = _to_source_rows(panel, ("US",))
-    rows = rows.astype({"y": "float64", "price_index": "float64", "is_holiday": "bool"})
+    rows = rows.astype({"y": "float64", "is_holiday": "bool"})
 
     schema = [
         bigquery.SchemaField("ts_id", "STRING"),
         bigquery.SchemaField("ds", "DATE"),
         bigquery.SchemaField("y", "FLOAT"),
         bigquery.SchemaField("archetype", "STRING"),
-        bigquery.SchemaField("price_index", "FLOAT"),
         bigquery.SchemaField("is_holiday", "BOOL"),
     ]
     job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_TRUNCATE")

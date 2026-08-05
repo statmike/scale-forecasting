@@ -1,4 +1,4 @@
-"""BigQuery-native models — SQL runner for ARIMA_PLUS / ARIMA_PLUS_XREG / TimesFM (CONTRACTS §5).
+"""BigQuery-native models — SQL runner for ARIMA_PLUS / TimesFM (CONTRACTS §5).
 
 The BigQuery runtime executes forecasting *as SQL inside BigQuery* — the opposite of the Spark
 track's per-cell fan-out. ``ARIMA_PLUS`` with ``time_series_id_col`` trains **all series in one
@@ -77,9 +77,7 @@ _POSTHOLIDAY_DAYS = 1
 # BQML model_type per native model name. TimesFM has no CREATE MODEL (AI.FORECAST is serverless).
 _MODEL_TYPE: dict[str, str] = {
     "arima_plus": "ARIMA_PLUS",
-    "arima_plus_xreg": "ARIMA_PLUS_XREG",
 }
-_XREG_MODELS = frozenset({"arima_plus_xreg"})
 
 # pandas offset alias → (BQML data_frequency, DATE_SUB INTERVAL unit). Covers the common cadences;
 # anything else falls back to daily, which is the shipped generator's cadence.
@@ -238,11 +236,9 @@ def build_custom_holiday_cte(cfg: RunConfig) -> str:
     return "custom_holiday AS (\n  SELECT * FROM UNNEST([\n" + ",\n".join(rows) + "\n  ])\n)"
 
 
-def _training_select(cfg: RunConfig, source: str, model_name: str) -> str:
-    """The ``training_data`` SELECT: id/timestamp/target (+ exog for XREG) over ``ds <= cutoff``."""
+def _training_select(cfg: RunConfig, source: str) -> str:
+    """The ``training_data`` SELECT: id/timestamp/target over ``ds <= cutoff``."""
     cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col]
-    if model_name in _XREG_MODELS:
-        cols += list(cfg.features.exog)
     cutoff = _cutoff_expr(cfg, source)
     where = [f"{cfg.data.date_col} <= {cutoff}"]
     sfilter = _series_filter(cfg, source, cfg.data.ts_id_col)
@@ -252,7 +248,7 @@ def _training_select(cfg: RunConfig, source: str, model_name: str) -> str:
 
 
 def build_create_model_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
-    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS / ARIMA_PLUS_XREG native model (held-out fit).
+    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS native model (held-out fit).
 
     Trains on ``ds <= cutoff`` so the model is scored on the last ``horizon`` window it never saw.
     When holidays are configured the ``AS`` clause takes the named-subquery form
@@ -262,7 +258,7 @@ def build_create_model_sql(cfg: RunConfig, model_name: str, dataset: str = "{dat
     ref = _model_ref(cfg, model_name, dataset)
     source = _source_ref(cfg, dataset)
     options = _render_options(bqml_options(cfg, model_name))
-    training = _training_select(cfg, source, model_name)
+    training = _training_select(cfg, source)
     holiday_cte = build_custom_holiday_cte(cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
@@ -275,11 +271,9 @@ def build_create_model_sql(cfg: RunConfig, model_name: str, dataset: str = "{dat
 def _forecast_source(cfg: RunConfig, model_name: str, dataset: str) -> str:
     """The ``ML.FORECAST`` / ``AI.FORECAST`` table expression producing the held-out forecast.
 
-    ARIMA_PLUS: ``ML.FORECAST(MODEL m, STRUCT(...))``. ARIMA_PLUS_XREG: the same with the held-out
-    window's *real* future features supplied as a query *after* the STRUCT (the position BQML
-    requires). TimesFM: ``AI.FORECAST`` over the ``ds <= cutoff`` history — no model object. All
-    three yield ``forecast_timestamp`` / ``forecast_value`` /
-    ``prediction_interval_{lower,upper}_bound`` plus the id column.
+    ARIMA_PLUS: ``ML.FORECAST(MODEL m, STRUCT(...))``. TimesFM: ``AI.FORECAST`` over the
+    ``ds <= cutoff`` history — no model object. Both yield ``forecast_timestamp`` /
+    ``forecast_value`` / ``prediction_interval_{lower,upper}_bound`` plus the id column.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
@@ -304,15 +298,6 @@ def _forecast_source(cfg: RunConfig, model_name: str, dataset: str) -> str:
         )
 
     ref = _model_ref(cfg, model_name, dataset)
-    if model_name in _XREG_MODELS:
-        cutoff = _cutoff_expr(cfg, source)
-        exog_cols = ", ".join([idc, datec, *cfg.features.exog])
-        where = [f"{datec} > {cutoff}"]
-        sfilter = _series_filter(cfg, source, idc)
-        if sfilter:
-            where.append(sfilter)
-        future = f"SELECT {exog_cols} FROM `{source}` WHERE {' AND '.join(where)}"
-        return f"ML.FORECAST(MODEL {ref},\n    {struct},\n    ({future}))"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
 
 

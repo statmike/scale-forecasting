@@ -19,10 +19,10 @@ from scale_forecasting.errors import ConfigError
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
 
-# Model names by runtime: theta is a Python/Spark model; arima_plus / arima_plus_xreg / timesfm are
-# the BigQuery-native models (runtime == "bigquery").
+# Model names by runtime: theta is a Python/Spark model; arima_plus / timesfm are the
+# BigQuery-native models (runtime == "bigquery").
 _SPARK = "theta"
-_NATIVE = ["arima_plus", "arima_plus_xreg", "timesfm"]
+_NATIVE = ["arima_plus", "timesfm"]
 
 # A resolved Settings for the dispatch tests (never used to touch GCP — the submit fns are faked).
 _SETTINGS = Settings(
@@ -37,7 +37,6 @@ def _cfg(**over: Any) -> RunConfig:
         "run_name": "main test",
         "data": {"source_table": "source_series_native", "horizon": 7, "series_limit": 5},
         "models": [_SPARK, *_NATIVE],
-        "features": {"exog": ["price_index"]},
     }
     base.update(over)
     return RunConfig(**base)

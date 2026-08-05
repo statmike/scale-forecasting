@@ -27,7 +27,7 @@ _PYTHON_MODELS = {
     "prophet",
     "neuralprophet",
 }
-_BIGQUERY_MODELS = {"arima_plus", "arima_plus_xreg", "timesfm"}
+_BIGQUERY_MODELS = {"arima_plus", "timesfm"}
 _ALL_MODELS = _PYTHON_MODELS | _BIGQUERY_MODELS
 
 

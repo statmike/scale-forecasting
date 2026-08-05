@@ -5,9 +5,8 @@
     "horizon": 28,
     "series_limit": 100
   },
-  "models": ["arima_plus", "arima_plus_xreg", "timesfm"],
+  "models": ["arima_plus", "timesfm"],
   "features": {
-    "holidays": ["US"],
-    "exog": ["price_index"]
+    "holidays": ["US"]
   }
 }

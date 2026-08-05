@@ -33,10 +33,8 @@ optionally ``SF_CONTAINER_IMAGE`` / ``SF_RAY_VERSION``), then run::
 
     SF_ENABLE_RAY=1 uv run pytest -m raylive tests/integration/test_ray_cpu_smoke.py
 
-**Self-contained data.** Like the GPU smoke, the shipped seed's ``price_index`` is all-NULL, so
-ARIMA_PLUS_XREG can't train on it; this test seeds its own tiny exog-carrying scratch
-``source_series`` table and drops it after. ``run_name`` varies per invocation so the deterministic
-``run_id`` is unique.
+**Self-contained data.** This test seeds its own tiny univariate scratch ``source_series`` table and
+drops it after. ``run_name`` varies per invocation so the deterministic ``run_id`` is unique.
 """
 
 from __future__ import annotations
@@ -58,7 +56,7 @@ pytestmark = [pytest.mark.raylive, pytest.mark.gcp]
 # ``neuralprophet`` (the only ``deep_learning`` family): its absence is what drives plan_cluster's
 # GPU pool to zero, keeping this run GPU-free.
 _CPU_MODELS = ["theta", "holtwinters"]
-_NATIVE_MODELS = ["arima_plus", "arima_plus_xreg", "timesfm"]
+_NATIVE_MODELS = ["arima_plus", "timesfm"]
 _ALL_MODELS = [*_CPU_MODELS, *_NATIVE_MODELS]
 _SERIES_LIMIT = 6
 _HORIZON = 28
@@ -74,7 +72,7 @@ def settings() -> Settings:
 
 @pytest.fixture(scope="module")
 def scratch_source(settings: Settings) -> Iterator[str]:
-    """Seed an exog-carrying scratch ``source_series`` table, yield its name, drop it after."""
+    """Seed a tiny univariate scratch ``source_series`` table, yield its name, drop it after."""
     from google.cloud import bigquery
 
     from scale_forecasting.data_gen.generator import GenConfig, generate_panel
@@ -83,19 +81,16 @@ def scratch_source(settings: Settings) -> Iterator[str]:
     client = bigquery.Client(project=settings.project_id)
     table_ref = settings.table_ref(_SCRATCH_TABLE)
 
-    gen = GenConfig(
-        history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",), with_exog=True
-    )
+    gen = GenConfig(history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",))
     panel = generate_panel(_SERIES_LIMIT, gen, seed=7)
     rows = _to_source_rows(panel, ("US",))
-    rows = rows.astype({"y": "float64", "price_index": "float64", "is_holiday": "bool"})
+    rows = rows.astype({"y": "float64", "is_holiday": "bool"})
 
     schema = [
         bigquery.SchemaField("ts_id", "STRING"),
         bigquery.SchemaField("ds", "DATE"),
         bigquery.SchemaField("y", "FLOAT"),
         bigquery.SchemaField("archetype", "STRING"),
-        bigquery.SchemaField("price_index", "FLOAT"),
         bigquery.SchemaField("is_holiday", "BOOL"),
     ]
     job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_TRUNCATE")
@@ -114,7 +109,7 @@ def _cfg(source_table: str) -> RunConfig:
         python_runtime="ray",
         data={"source_table": source_table, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_ALL_MODELS,
-        features={"holidays": ["US"], "exog": ["price_index"]},
+        features={"holidays": ["US"]},
         # Backtest ON so the Ray path emits an OOF metric panel comparable to the natives (which
         # always score a held-out fold). A small fold count keeps the run cheap.
         backtest={"enabled": True, "n_folds": 2, "horizon": _HORIZON, "step": _HORIZON},

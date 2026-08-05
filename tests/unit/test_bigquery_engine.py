@@ -2,7 +2,7 @@
 
 Pure-string assertions on the rendered CREATE MODEL / forecast INSERT / eval / history SQL plus a
 full-script snapshot. No GCP — the ``run`` engine path is exercised live by the ``@gcp`` smoke test.
-Covers: model-type routing, the one-statement-all-series id column, ARIMA vs XREG vs TimesFM shape,
+Covers: model-type routing, the one-statement-all-series id column, ARIMA vs TimesFM shape,
 output-column aliasing, custom-holiday CTE presence/absence + name sanitization, the deterministic
 series_limit subset, and ``@run_id`` binding for the written run_id column.
 """
@@ -58,14 +58,6 @@ def test_create_model_arima_plus_options_and_id_col() -> None:
     assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in sql
 
 
-def test_create_model_xreg_selects_exog_into_training() -> None:
-    sql = be.build_create_model_sql(
-        _cfg(["arima_plus_xreg"], exog=["price_index"]), "arima_plus_xreg", _DS
-    )
-    assert "model_type = 'ARIMA_PLUS_XREG'" in sql
-    assert "SELECT ts_id, ds, y, price_index" in sql
-
-
 def test_create_model_name_embeds_run_id_and_is_sanitized() -> None:
     cfg = _cfg(["arima_plus"])
     sql = be.build_create_model_sql(cfg, "arima_plus", _DS)
@@ -116,19 +108,6 @@ def test_forecast_insert_aliases_and_engine_literal() -> None:
     assert "prediction_interval_lower_bound" in sql
     assert "prediction_interval_upper_bound" in sql
     assert "ML.FORECAST(MODEL" in sql
-
-
-def test_forecast_insert_xreg_supplies_future_features() -> None:
-    sql = be.build_forecast_insert_sql(
-        _cfg(["arima_plus_xreg"], exog=["price_index"]), "arima_plus_xreg", _DS
-    )
-    # XREG ML.FORECAST takes the STRUCT first, then the held-out window's real future features.
-    assert "ML.FORECAST(MODEL" in sql
-    assert "SELECT ts_id, ds, price_index" in sql
-    assert "ds > (SELECT DATE_SUB(MAX(ds)" in sql
-    assert "STRUCT(28 AS horizon, 0.8 AS confidence_level)" in sql
-    # The STRUCT precedes the future-features subquery (BQML's required argument order).
-    assert sql.index("STRUCT(28 AS horizon") < sql.index("SELECT ts_id, ds, price_index")
 
 
 def test_forecast_insert_timesfm_uses_ai_forecast_no_model() -> None:
@@ -198,9 +177,8 @@ def test_bqml_options_timesfm_returns_ai_forecast_params() -> None:
 
 def test_setup_sql_snapshot() -> None:
     cfg = _cfg(
-        ["arima_plus", "arima_plus_xreg", "timesfm"],
+        ["arima_plus", "timesfm"],
         holidays=["US"],
-        exog=["price_index"],
         series_limit=100,
     )
     rendered = "\n\n-- ===== next model =====\n\n".join(

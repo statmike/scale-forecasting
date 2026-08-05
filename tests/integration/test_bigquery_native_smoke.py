@@ -1,7 +1,7 @@
 """Live BigQuery-native engine smoke (BUILD B3, ``@gcp``).
 
-Runs :func:`scale_forecasting.engines.bigquery_engine.run` against live BigQuery for all three
-native models (``arima_plus``, ``arima_plus_xreg``, ``timesfm``) at a small ``series_limit`` and
+Runs :func:`scale_forecasting.engines.bigquery_engine.run` against live BigQuery for both
+native models (``arima_plus``, ``timesfm``) at a small ``series_limit`` and
 asserts the B3 contract: each model lands canonical ``forecast_predictions`` + ``backtest_oof`` +
 ``forecast_metadata`` rows with ``compute_engine='bigquery'`` and a non-NULL metric panel, the run
 header closes ``COMPLETED`` with ``bq_models`` populated, and the native models surface on
@@ -15,11 +15,9 @@ Skipped unless ``SF_PROJECT_ID`` (+ ADC) is set (see ``tests/conftest.py``). Run
     SF_DATASET_ID=scale_forecasting \\
         uv run pytest -m gcp tests/integration/test_bigquery_native_smoke.py
 
-**Self-contained data.** The shipped 100k seed was generated with ``with_exog=False``, so its
-``price_index`` column is all-NULL and ARIMA_PLUS_XREG cannot train on it. Rather than drop the XREG
-model from the parity check, this test seeds its *own* tiny exog-carrying scratch table via the same
-:mod:`~scale_forecasting.data_gen.generator` (``with_exog=True``) and tears it down afterward — the
-"test owns its data" discipline the registry round-trip uses. Two years of daily history keeps the
+**Self-contained data.** This test seeds its *own* tiny univariate scratch ``source_series`` table
+via the same :mod:`~scale_forecasting.data_gen.generator` and tears it down afterward — the "test
+owns its data" discipline the registry round-trip uses. Two years of daily history keeps the
 training window over a year (so ARIMA_PLUS holiday effects apply) while staying cents-cheap.
 
 The engine derives ``run_id`` deterministically from the config, so this test varies ``run_name``
@@ -43,7 +41,7 @@ from scale_forecasting.settings import Settings
 
 pytestmark = pytest.mark.gcp
 
-_MODELS = ["arima_plus", "arima_plus_xreg", "timesfm"]
+_MODELS = ["arima_plus", "timesfm"]
 _SERIES_LIMIT = 20
 _HORIZON = 28
 _HISTORY = 730  # ~2 years daily → training window > 1 year, so ARIMA_PLUS holidays apply
@@ -58,12 +56,11 @@ def settings() -> Settings:
 
 @pytest.fixture(scope="module")
 def scratch_source(settings: Settings) -> Iterator[str]:
-    """Seed an exog-carrying scratch ``source_series`` table, yield its name, drop it after.
+    """Seed a tiny univariate scratch ``source_series`` table, yield its name, drop it after.
 
-    Uses :func:`generate_panel` (``with_exog=True``) + :func:`_to_source_rows` — the identical
-    generator the production seed uses — so the panel is coherent and the exog column is populated,
-    which the shipped seed's ``price_index`` is not. Loaded as a plain BQ table (the engine only
-    SELECTs / CREATE MODELs against it), truncate-on-write so a rerun is clean.
+    Uses :func:`generate_panel` + :func:`_to_source_rows` — the identical generator the production
+    seed uses — so the panel is coherent. Loaded as a plain BQ table (the engine only SELECTs /
+    CREATE MODELs against it), truncate-on-write so a rerun is clean.
     """
     from google.cloud import bigquery
 
@@ -73,20 +70,16 @@ def scratch_source(settings: Settings) -> Iterator[str]:
     client = bigquery.Client(project=settings.project_id)
     table_ref = settings.table_ref(_SCRATCH_TABLE)
 
-    gen = GenConfig(
-        history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",), with_exog=True
-    )
+    gen = GenConfig(history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",))
     panel = generate_panel(_SERIES_LIMIT, gen, seed=7)
     rows = _to_source_rows(panel, ("US",))
-    # Plain (non-nullable) dtypes for the load — with_exog=True guarantees no NA in price_index.
-    rows = rows.astype({"y": "float64", "price_index": "float64", "is_holiday": "bool"})
+    rows = rows.astype({"y": "float64", "is_holiday": "bool"})
 
     schema = [
         bigquery.SchemaField("ts_id", "STRING"),
         bigquery.SchemaField("ds", "DATE"),
         bigquery.SchemaField("y", "FLOAT"),
         bigquery.SchemaField("archetype", "STRING"),
-        bigquery.SchemaField("price_index", "FLOAT"),
         bigquery.SchemaField("is_holiday", "BOOL"),
     ]
     job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_TRUNCATE")
@@ -104,7 +97,7 @@ def _cfg(source_table: str) -> RunConfig:
         run_name=f"b3 native smoke {int(time.time())}",
         data={"source_table": source_table, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_MODELS,
-        features={"holidays": ["US"], "exog": ["price_index"]},
+        features={"holidays": ["US"]},
     )
 
 

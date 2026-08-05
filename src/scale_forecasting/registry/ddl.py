@@ -114,16 +114,15 @@ _REGISTRY_TABLES: tuple[str, ...] = tuple(_TABLE_BODIES)
 # through BigQuery's table interface). `{name}` is filled per variant; `{{d}}` survives .format()
 # as the `{d}` dataset placeholder every other body uses.
 #
-# Columns carry business names; the config maps each to a role (date→date_col,
-# price_index→features.exog). `price_index` is the example driver the generator emits and the
-# xreg models regress on; swap it for real drivers in your own source table.
+# Columns carry business names; the config maps each to a role (date→date_col). The shipped example
+# is univariate (`y` history + holidays). To feed an exogenous regressor, add its column here and
+# name it in `features.exog` — the generic exog seam consumes it, no code change.
 _SOURCE_BODY_TEMPLATE = """\
 CREATE TABLE IF NOT EXISTS `{{d}}.{name}` (
   ts_id       STRING NOT NULL,
   ds          DATE NOT NULL,
   y           FLOAT64,
   archetype   STRING,
-  price_index FLOAT64,
   is_holiday  BOOL
 )
 PARTITION BY ds

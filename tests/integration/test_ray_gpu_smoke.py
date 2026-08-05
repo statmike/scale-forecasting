@@ -35,10 +35,8 @@ optionally ``SF_CONTAINER_IMAGE`` / ``SF_RAY_VERSION``), then run::
 
     SF_ENABLE_GPU=1 uv run --active pytest -m gpu tests/integration/test_ray_gpu_smoke.py
 
-**Self-contained data.** Like the Arc B mixed smoke, the shipped seed's ``price_index`` is all-NULL,
-so ARIMA_PLUS_XREG can't train on it; this test seeds its own tiny exog-carrying scratch
-``source_series`` table and drops it after. ``run_name`` varies per invocation so the deterministic
-``run_id`` is unique.
+**Self-contained data.** This test seeds its own tiny univariate scratch ``source_series`` table and
+drops it after. ``run_name`` varies per invocation so the deterministic ``run_id`` is unique.
 """
 
 from __future__ import annotations
@@ -58,7 +56,7 @@ pytestmark = pytest.mark.gpu
 
 _GPU_MODEL = "neuralprophet"
 _CPU_MODEL = "theta"
-_NATIVE_MODELS = ["arima_plus", "arima_plus_xreg", "timesfm"]
+_NATIVE_MODELS = ["arima_plus", "timesfm"]
 _PYTHON_MODELS = [_GPU_MODEL, _CPU_MODEL]
 _ALL_MODELS = [*_PYTHON_MODELS, *_NATIVE_MODELS]
 # Kept deliberately small so the whole live run finishes well under an hour. NeuralProphet is the
@@ -84,11 +82,10 @@ def settings() -> Settings:
 
 @pytest.fixture(scope="module")
 def scratch_source(settings: Settings) -> Iterator[str]:
-    """Seed an exog-carrying scratch ``source_series`` table, yield its name, drop it after.
+    """Seed a tiny univariate scratch ``source_series`` table, yield its name, drop it after.
 
-    The same generator the production seed uses (``with_exog=True``), loaded as a plain BQ table
-    both the Ray BigQuery read and the native BigQuery engine consume. Truncate-on-write so a rerun
-    starts clean.
+    The same generator the production seed uses, loaded as a plain BQ table both the Ray BigQuery
+    read and the native BigQuery engine consume. Truncate-on-write so a rerun starts clean.
     """
     from google.cloud import bigquery
 
@@ -98,19 +95,16 @@ def scratch_source(settings: Settings) -> Iterator[str]:
     client = bigquery.Client(project=settings.project_id)
     table_ref = settings.table_ref(_SCRATCH_TABLE)
 
-    gen = GenConfig(
-        history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",), with_exog=True
-    )
+    gen = GenConfig(history=_HISTORY, freq="D", start="2021-01-01", holidays=("US",))
     panel = generate_panel(_SERIES_LIMIT, gen, seed=7)
     rows = _to_source_rows(panel, ("US",))
-    rows = rows.astype({"y": "float64", "price_index": "float64", "is_holiday": "bool"})
+    rows = rows.astype({"y": "float64", "is_holiday": "bool"})
 
     schema = [
         bigquery.SchemaField("ts_id", "STRING"),
         bigquery.SchemaField("ds", "DATE"),
         bigquery.SchemaField("y", "FLOAT"),
         bigquery.SchemaField("archetype", "STRING"),
-        bigquery.SchemaField("price_index", "FLOAT"),
         bigquery.SchemaField("is_holiday", "BOOL"),
     ]
     job_config = bigquery.LoadJobConfig(schema=schema, write_disposition="WRITE_TRUNCATE")
@@ -129,7 +123,7 @@ def _cfg(source_table: str) -> RunConfig:
         python_runtime="ray",
         data={"source_table": source_table, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_ALL_MODELS,
-        features={"holidays": ["US"], "exog": ["price_index"]},
+        features={"holidays": ["US"]},
         # Backtest ON so the Ray path emits an OOF metric panel: without it the Python engine only
         # forecasts (no metrics) while the BQ natives always score a held-out fold — so NP
         # would land NULL mean_wape and the two runtimes wouldn't be comparable, which is the whole

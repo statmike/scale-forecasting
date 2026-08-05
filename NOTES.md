@@ -322,9 +322,11 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     The 100k hero run uses a dedicated config (`bucket_target_cells=200` → 2000 buckets to keep the
     Storage-Write stream count sane; `persist_models=false` to avoid 400k artifact objects).
 
-- **B3 BigQuery-native runtime (`engines/bigquery_engine.py`).** Three native models —
-  `arima_plus`, `arima_plus_xreg`, `timesfm` — run as SQL *in* BigQuery and land in the **same**
+- **B3 BigQuery-native runtime (`engines/bigquery_engine.py`).** Two native models —
+  `arima_plus`, `timesfm` — run as SQL *in* BigQuery and land in the **same**
   three registry tables as the Spark models, so they're directly comparable/ensemble-able.
+  (`arima_plus_xreg` was dropped along with the shipped `price_index` exog column — the system is
+  univariate by default now; the generic exog seam stays dormant, see the pre-deploy note above.)
   `run(cfg, models)` is a self-contained engine (own header lifecycle, `bq_models` array stamped);
   `router.split_by_runtime` partitions the model list by `runtime`, and a thin
   `python -m scale_forecasting.engines.bigquery_engine --config …` CLI runs a BQ-only run. Fanning
@@ -345,12 +347,11 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
     "a serverless cluster fans N×M cells," both landing in one registry.
   - **Three bugs the offline snapshot couldn't catch, surfaced by the live `@gcp` smoke:**
     (1) `client.query(...).to_dataframe()` needs **`db-dtypes`** to map DATE/NUMERIC → pandas (added
-    to core deps); (2) XREG `ML.FORECAST` argument order is `(MODEL, STRUCT(...), (future_query))` —
-    the STRUCT comes **before** the future-features query, else "Scalar subquery cannot have more than
-    one column"; (3) `bqml_options` must resolve for `timesfm` (returns the AI.FORECAST params) since
+    to core deps); (2) `bqml_options` must resolve for `timesfm` (returns the AI.FORECAST params) since
     it has no `CREATE MODEL` OPTIONS map — `run()` still stamps `best_params` for every model. TimesFM
     is serverless (`AI.FORECAST`, no training, no `model =>` arg). The smoke seeds its **own**
-    exog-carrying scratch table so `arima_plus_xreg` has a non-NULL regressor to train on.
+    univariate scratch table. (A third bug seen at the time — XREG `ML.FORECAST` argument order — is
+    moot now that `arima_plus_xreg` is dropped.)
 
 - **Arc B — `main.run`: Spark ∥ BigQuery in parallel, ONE run_id / ONE header.** The last
   orchestration stub. `python -m scale_forecasting.main --config <mixed.json>` runs the Python
