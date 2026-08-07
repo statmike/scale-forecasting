@@ -1,0 +1,152 @@
+# Running a forecast and reviewing it
+
+This is the end-to-end path: submit a run, watch it land, review which model won, and (optionally)
+re-ensemble it — all from the config you wrote (see the
+[configuration reference](./configuration_reference.md)). No image rebuild is ever part of this loop;
+your `src/` ships at submit time (see [editing code without rebuilding](./editing_code_without_rebuilding.md)).
+
+## Prerequisites
+
+- A deployed environment (see [deploying on GCP](./deploying_on_gcp.md)) — or point at any project
+  where the registry tables exist.
+- The `SF_*` identity in your environment (the same identity every writer uses, G1):
+
+  | Variable | Required | Default | Meaning |
+  |----------|----------|---------|---------|
+  | `SF_PROJECT_ID` | yes | — | GCP project. |
+  | `SF_CONNECTION` | yes | — | BigLake connection ref, `project.region.name`. |
+  | `SF_WAREHOUSE_URI` | yes | — | GCS warehouse root, `gs://<bucket>/warehouse`. |
+  | `SF_DATASET_ID` | no | `scale_forecasting` | Registry dataset. |
+  | `SF_REGION` | no | `us-central1` | Region. |
+
+  Every value comes straight from `terraform output` in `terraform/main`.
+
+- For submitting (not for reviewing), the `[spark]` or `[ray]` extra: `pip install -e '.[spark]'`
+  (Dataproc) or `'.[ray]'` (Ray). The runtime image itself is code-free — see the note above.
+
+## 1. Check the config offline first
+
+`--dry-run` resolves the config and estimates the fan-out (series × models × folds = cells) without
+touching GCP. Always cheap, always safe:
+
+```bash
+python -m scale_forecasting.main --config configs/explode_demo.json --dry-run
+```
+
+## 2. Submit the run
+
+Pick the entrypoint by runtime. Every one takes `--config` and stages your current `src/` + the
+config JSON to GCS, then submits.
+
+**Spark (Dataproc):** `--engine` selects the fan-out method.
+
+```bash
+# explode — the hero path: one task per (series, model) cell
+python -m scale_forecasting.submit --config configs/explode_demo.json --engine explode
+
+# naive — bucket on series (models run sequentially per series; the straggler anti-pattern)
+python -m scale_forecasting.submit --config configs/naive_demo.json  --engine naive
+
+# multi — one child explode batch per model family, all under ONE run_id
+python -m scale_forecasting.submit --config configs/multi_demo.json  --engine multi
+```
+
+Useful flags: `--n-series N` overrides `series_limit` (scale the same config up or down without
+editing it), `--max-executors N` caps executors, `--no-wait` returns as soon as it's submitted.
+
+**Ray (Vertex):**
+
+```bash
+python -m scale_forecasting.ray_submit --config configs/ray_cpu_demo.json
+```
+
+Ray flags: `--n-series N`, `--cluster-name NAME` (reuse a standing cluster, skipping
+create/teardown), `--no-wait`.
+
+**BigQuery-native models** need no separate submit — list them in `models` (e.g. `arima_plus`,
+`timesfm`) and they run **in parallel** with the Spark/Ray track under the same `run_id`. `main.run`
+orchestrates both.
+
+> **Scale knob.** The four `configs/*_100k.json` files are the demo configs at `series_limit=100000`
+> — the same four approaches, at scale. Submit them the same way (review spend first).
+
+## 3. Watch it land
+
+Runs are written through the Storage Write API and are **async-visible** — rows appear a few seconds
+after the engine finishes, so poll briefly. The run header:
+
+```sql
+SELECT * FROM `PROJECT.DATASET.v_run_summary` WHERE run_id = 'YOUR_RUN_ID';
+```
+
+`v_run_summary` is one row per run: `status`, `spark_method`/`python_runtime`, `n_series`/`n_models`,
+the engine's `runtime_seconds`, plus the Dataproc telemetry overlay — `total_wall_s`,
+`overhead_seconds` and `overhead_fraction` (provisioning tax, which amortizes as series grow), and
+`dcu_milli_seconds` (the cost proxy).
+
+## 4. Review — which model won
+
+```sql
+SELECT model_type, compute_engine, n_cells, no_artifact_rate,
+       median_fit_seconds, mean_wape, mean_mae
+FROM `PROJECT.DATASET.v_model_leaderboard`
+WHERE run_id = 'YOUR_RUN_ID'
+ORDER BY mean_wape;
+```
+
+`v_model_leaderboard` is one row per `(run_id, model_type, ensemble_id)`:
+
+- `compute_engine` — `spark` / `ray` / `bigquery` / `ensemble`, so the two tracks (and ensembles)
+  are distinguishable on one board.
+- `n_cells` / `no_artifact_rate` — coverage and failure signal (a model failing every cell —
+  e.g. a missing native lib — shows as `no_artifact_rate = 1.0`).
+- `median_fit_seconds` — per-cell fit time (the straggler signal under `naive`).
+- `mean_wape` / `mean_mae` — the decision metrics, populated where a backtest ran.
+
+The demo notebooks ([`notebooks/`](../notebooks)) wrap these two queries in a small polling helper
+and a chart; [`07_scale_review`](../notebooks/07_scale_review.ipynb) compares several runs
+side by side.
+
+## 5. Re-ensemble a completed run (optional)
+
+You don't have to re-run the base models to try a different consensus. `ensemble_run` reads an
+already-completed run's base predictions and scores new `ensemble_*` pseudo-models onto the same
+leaderboard:
+
+```bash
+python -m scale_forecasting.ensemble_run \
+  --config configs/mixed_demo.json \
+  --run-id YOUR_RUN_ID \
+  --strategies mean,median,inverse_error
+```
+
+- `--run-id` is the **base run** whose forecasts get blended (defaults to the config's own
+  `make_run_id`). Pass it explicitly to ensemble a run computed under a different config revision.
+- `--strategies` overrides the config's ensemble block (comma-separated; a bad name fails validation
+  with a clear error). Omit it to use the config's own `ensemble.strategies`.
+- Each distinct ensemble config lands a distinct `ensemble_id`, so several ensembles coexist under
+  one `run_id` on the leaderboard instead of overwriting each other. Re-running the *same* config is
+  idempotent (append-only + dedupe-on-read).
+
+Learned strategies (`nnls`/`ridge`/`xgb`) need the base run to have had `backtest.enabled` (they fit
+on the OOF); calculated ones (`mean`/`median`/`inverse_error`) don't.
+
+## Resetting the environment (destructive)
+
+`reset` drops the registry + source tables (for a clean reseed). It's a dry run without `--yes`:
+
+```bash
+python -m scale_forecasting.reset            # prints what WOULD be dropped, changes nothing
+python -m scale_forecasting.reset --yes      # actually drops
+```
+
+## Quick reference — entrypoints
+
+| Command | Purpose |
+|---------|---------|
+| `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run (Spark/Ray ∥ BigQuery). Rejects `multi` — use `submit`. |
+| `python -m scale_forecasting.submit --config C --engine {explode,naive,multi}` | Submit a Spark run to Dataproc. |
+| `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
+| `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
+| `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
+| `python -m scale_forecasting.reset [--yes]` | Drop registry + source tables. |

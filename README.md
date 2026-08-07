@@ -110,6 +110,18 @@ Finally, [`07_scale_review`](./notebooks/07_scale_review.ipynb) runs nothing —
 and provisioning overhead from `v_run_summary`, and accuracy parity (same model, same answer across
 engines — G1) from `v_model_leaderboard`.
 
+## Documentation
+
+- [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md) — submit a run (Spark / Ray /
+  BigQuery), watch it land, review the leaderboard, and re-ensemble a completed run — the full
+  operator loop with every entrypoint and its flags.
+- [`docs/configuration_reference.md`](./docs/configuration_reference.md) — every config field, its
+  type, default, and constraint, section by section (the run *is* the config).
+- [`docs/editing_code_without_rebuilding.md`](./docs/editing_code_without_rebuilding.md) — why a code
+  edit ships on the next run with **no** image rebuild, and the loop you actually use.
+- [`docs/adding_a_model.md`](./docs/adding_a_model.md) — add a model in one file.
+- [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) — a reviewer's guide to the Terraform.
+
 ## Deploy on GCP
 
 The whole platform deploys into a Google Cloud project with Terraform, in **two stages**:
