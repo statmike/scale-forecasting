@@ -154,6 +154,39 @@ def test_learned_strategy_with_backtest_survives() -> None:
     assert cfg.ensemble.strategies == ["median", "nnls"]
 
 
+# --- HPO config (C5) -----------------------------------------------------------
+
+
+def test_hpo_defaults_are_off_and_fleetwide() -> None:
+    cfg = RunConfig(**_minimal_dict())
+    assert cfg.hpo.enabled is False
+    assert cfg.hpo.granularity == "fleetwide"
+    assert cfg.hpo.sample_size == 20
+    assert cfg.hpo.n_trials == 20
+
+
+def test_hpo_enabled_requires_backtest() -> None:
+    # HPO tunes on the backtest folds, so enabling it with backtest off fails fast at load.
+    with pytest.raises((ValidationError, ValueError), match="requires backtest"):
+        RunConfig(**_minimal_dict(hpo={"enabled": True}, backtest={"enabled": False}))
+
+
+def test_hpo_enabled_with_backtest_is_valid() -> None:
+    cfg = RunConfig(
+        **_minimal_dict(
+            hpo={"enabled": True, "granularity": "per_series", "n_trials": 10, "sample_size": 5},
+            backtest={"enabled": True},
+        )
+    )
+    assert cfg.hpo.enabled is True
+    assert cfg.hpo.granularity == "per_series"
+
+
+def test_hpo_rejects_unknown_granularity() -> None:
+    with pytest.raises(ValidationError):
+        RunConfig(**_minimal_dict(hpo={"enabled": True, "granularity": "nonsense"}))
+
+
 # --- fanout --------------------------------------------------------------------
 
 

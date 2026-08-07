@@ -174,3 +174,51 @@ def test_error_cell_still_carries_identity() -> None:
     assert res.ts_id == "series-z"
     assert res.model_type == "nope"
     assert res.run_id  # ids computed before the failure
+
+
+# --- C5: HPO params threading into the cell -------------------------------------
+
+
+def test_pre_resolved_params_land_in_best_params() -> None:
+    # The fleetwide path: the driver tuned xgboost and hands run_cell the winning params directly.
+    # get_params (→ forecast_metadata.best_params) must reflect them, not the pre-C5 {}.
+    params = {"n_estimators": 123, "max_depth": 4, "learning_rate": 0.07}
+    res = run_cell(_series(), "xgboost", _cfg(models=["xgboost"]), params)
+    assert res.status == "ok"
+    assert res.best_params == params
+
+
+def test_default_no_params_is_empty_best_params() -> None:
+    # No params + HPO off → today's behavior: the model runs with its own defaults ({}).
+    res = run_cell(_series(), "xgboost", _cfg(models=["xgboost"]))
+    assert res.status == "ok"
+    assert res.best_params == {}
+
+
+def test_pre_resolved_params_do_not_change_the_run_id() -> None:
+    # The invariant that forces the fleetwide seam placement: params must NOT enter cfg, so the same
+    # cfg yields the same run_id whether or not tuned params are passed (reproducibility, §3.4).
+    cfg = _cfg(models=["xgboost"])
+    a = run_cell(_series(), "xgboost", cfg, {"n_estimators": 200, "max_depth": 5})
+    b = run_cell(_series(), "xgboost", cfg)
+    assert a.run_id == b.run_id
+    assert a.model_hash == b.model_hash
+
+
+def test_per_series_hpo_tunes_and_records_best_params() -> None:
+    # The per_series granularity: run_cell tunes on THIS series (no pre-resolved params) and records
+    # the winner. theta's space is {deseasonalize}, so best_params carries that key.
+    cfg = _cfg(
+        models=["theta"],
+        backtest={
+            "enabled": True,
+            "n_folds": 2,
+            "horizon": HORIZON,
+            "step": HORIZON,
+            "min_train": 60,
+        },
+        hpo={"enabled": True, "n_trials": 4, "granularity": "per_series"},
+    )
+    res = run_cell(_series(), "theta", cfg)
+    assert res.status == "ok"
+    assert set(res.best_params) == {"deseasonalize"}

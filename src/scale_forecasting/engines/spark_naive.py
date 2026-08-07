@@ -104,10 +104,15 @@ def run(
         #    its series sequentially. The frozen Settings is captured directly in the group runner's
         #    closure (no sparkContext.broadcast — Connect has no such API); applyInPandas
         #    cloudpickles it to every executor so write_cells resolves the same infra (G1).
-        cells = spark_io.read_source_series(spark, cfg, settings)
-        cells = spark_io.add_bucket(cells, cfg, n_buckets)
+        source = spark_io.read_source_series(spark, cfg, settings)
 
-        runner = spark_io.make_group_runner(cfg, settings, executed)
+        # C5: fleetwide HPO resolves once on the driver over a small sample, before fan-out (see
+        # spark_explode / spark_io.resolve_fleetwide_hpo). None unless enabled at that granularity.
+        params_by_model = spark_io.resolve_fleetwide_hpo(source, cfg, executed)
+
+        cells = spark_io.add_bucket(source, cfg, n_buckets)
+
+        runner = spark_io.make_group_runner(cfg, settings, executed, params_by_model)
         status_sdf = cells.groupBy(spark_io._BUCKET_COL).applyInPandas(
             runner, schema=spark_io.status_schema()
         )

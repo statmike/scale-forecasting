@@ -89,13 +89,30 @@ class BacktestConfig(BaseModel):
 
 
 class HpoConfig(BaseModel):
-    """Hyperparameter optimization inside the node (optional)."""
+    """Hyperparameter optimization on the aligned backtest (optional; C5).
+
+    Off by default. When ``enabled``, an Optuna study tunes each model's ``search_space`` on the
+    backtest folds and the winning params are stamped to ``forecast_metadata.best_params`` (see
+    :mod:`scale_forecasting.hpo`). HPO therefore requires ``backtest.enabled``.
+
+    ``granularity`` is the DS-facing cost knob:
+
+    * ``fleetwide`` (default) — tune each model **once** on a ``sample_size`` sample of series and
+      apply the winner across *all* series. The only granularity affordable at the 100k hero scale:
+      the study runs on the driver before fan-out (a handful of series × ``n_trials`` fits), not per
+      cell.
+    * ``per_series`` — tune inside every cell (``n_trials`` fits *per series*). Accurate for the
+      tail of hard series but multiplies fit cost by ``n_trials`` fleet-wide; an explicit opt-in.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = False
     engine: Literal["optuna"] = "optuna"
     n_trials: int = Field(default=20, gt=0)
+    granularity: Literal["fleetwide", "per_series"] = "fleetwide"
+    # Fleetwide sample: how many series to tune on before applying the winner across the fleet.
+    sample_size: int = Field(default=20, gt=0)
 
 
 class EnsembleConfig(BaseModel):
@@ -241,6 +258,14 @@ class RunConfig(BaseModel):
         # 2. Duplicate models are almost certainly a mistake — fail clearly.
         if len(set(self.models)) != len(self.models):
             raise ValueError(f"models contains duplicates: {self.models}")
+
+        # 2b. HPO tunes on the backtest folds (decision_metric), so it needs backtesting ON.
+        #     Fail fast at load rather than deep in an engine (a run with nothing to optimize).
+        if self.hpo.enabled and not self.backtest.enabled:
+            raise ValueError(
+                "hpo.enabled requires backtest.enabled: HPO optimizes the backtest "
+                "decision_metric, so there is nothing to tune with backtesting off."
+            )
 
         # 3. Learned ensembles need backtest OOF. If backtest is OFF, drop them with a
         #    warning rather than failing the whole run (DESIGN §5.2) — so the normalized

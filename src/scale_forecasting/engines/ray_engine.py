@@ -124,6 +124,29 @@ def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:
     return [source[source[id_col] == tid] for tid in ids]
 
 
+def _resolve_fleetwide_hpo(
+    source: pd.DataFrame, cfg: RunConfig, executed: list[str]
+) -> dict[str, dict[str, object]] | None:
+    """Driver-side fleetwide-HPO pre-pass over the collected pandas panel (C5; Ray twin).
+
+    Returns ``None`` unless HPO is enabled at ``fleetwide`` granularity. When it is, takes the first
+    ``hpo.sample_size`` series (deterministically, matching :func:`.ray_io._limit_series`) and tunes
+    the executed model subset on them (:func:`~scale_forecasting.hpo.resolve_fleetwide`), scoping
+    the study to the models that will actually run. The pandas analog of
+    :func:`.spark_io.resolve_fleetwide_hpo` — the Spark path samples from a Spark DataFrame, this
+    one from the panel already on the driver.
+    """
+    if not (cfg.hpo.enabled and cfg.hpo.granularity == "fleetwide"):
+        return None
+    from ..hpo import resolve_fleetwide
+
+    id_col = cfg.data.ts_id_col
+    ids = sorted(dict.fromkeys(source[id_col].tolist()))[: cfg.hpo.sample_size]
+    sample = [source[source[id_col] == tid].reset_index(drop=True) for tid in ids]
+    tuning_cfg = cfg.model_copy(update={"models": executed})
+    return resolve_fleetwide(sample, tuning_cfg)
+
+
 def _chunk_count(n_cells: int, target_cells: int) -> int:
     """Chunks (Ray tasks) for a pool: ``ceil(cells / target)`` (≥ 1), or 0 for an empty pool.
 
@@ -202,7 +225,13 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     started = time.perf_counter()
     try:
         source = _read_source_series(cfg, settings)
-        runner = ray_io.make_chunk_runner(cfg, settings, executed)
+
+        # C5: fleetwide HPO resolves once on the driver over a small sample, before fan-out — the
+        # Ray twin of spark_io.resolve_fleetwide_hpo, over the already-collected pandas panel. None
+        # unless HPO is enabled at fleetwide granularity. Tuned params flow through the chunk-runner
+        # closure to every task (not cfg → run_id stable).
+        params_by_model = _resolve_fleetwide_hpo(source, cfg, executed)
+        runner = ray_io.make_chunk_runner(cfg, settings, executed, params_by_model)
 
         # The per-task GPU fraction: fixed float passthrough, or live NeuralProphet profiling when
         # "auto". Sample series only when auto (profiling costs) and only when a GPU is present.

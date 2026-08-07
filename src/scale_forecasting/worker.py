@@ -79,6 +79,29 @@ def _model_context(cfg: RunConfig) -> ModelContext:
     )
 
 
+def _resolve_params(
+    series: pd.DataFrame,
+    model_name: str,
+    cfg: RunConfig,
+    ctx: ModelContext,
+    params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve the hyperparameters this cell builds its model with (C5; see :func:`run_cell`).
+
+    Pre-resolved ``params`` (the fleetwide driver pre-pass) win outright. Otherwise, per-series HPO
+    tunes on *this* series when enabled at that granularity; failing that, the ``{}`` default. Kept
+    tiny and separate so the resolution policy is one readable place and the HPO import stays lazy
+    (Optuna loads only when a run actually tunes).
+    """
+    if params is not None:
+        return params
+    if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
+        from .hpo import tune_model
+
+        return tune_model(model_name, [series], cfg, ctx)
+    return {}
+
+
 def _rollup_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:
     """Average the per-fold metric panels into one panel (CONTRACTS §3.2).
 
@@ -98,12 +121,28 @@ def _empty_predictions() -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype="object") for c in PREDICTION_COLUMNS})
 
 
-def run_cell(series: pd.DataFrame, model_name: str, cfg: RunConfig) -> CellResult:
+def run_cell(
+    series: pd.DataFrame,
+    model_name: str,
+    cfg: RunConfig,
+    params: dict[str, Any] | None = None,
+) -> CellResult:
     """Fit + (optional backtest) + predict ONE ``(ts_id, model)`` cell (CONTRACTS §3.1).
 
     Pure-ish and deterministic: reads nothing global, writes nothing (no BQ), returns a
     :class:`CellResult` carrying plain data. A failing cell returns ``status="error"`` and
     never raises (CONTRACTS §3.3), so one bad series can't sink a batch.
+
+    ``params`` are the hyperparameters this cell's model is built with (C5). Resolution order:
+
+    * ``params`` given (not None) → use them. This is the **fleetwide** path: the driver tuned the
+      model once on a sample (:func:`~scale_forecasting.hpo.resolve_fleetwide`) and threads the
+      winning params here — never through ``cfg`` (the config is the run_id identity key).
+    * else if ``cfg.hpo.enabled`` and ``granularity == "per_series"`` → tune on *this* series now.
+    * else → ``{}`` (the default: today's untuned behavior).
+
+    The resolved params drive **both** the backtest folds and the final fit, so
+    ``best_params = model.get_params()`` reflects what actually ran (vs the pre-C5 ``{}``).
     """
     ts_id = _ts_id(series, cfg)
     run_id = make_run_id(cfg)
@@ -132,17 +171,18 @@ def run_cell(series: pd.DataFrame, model_name: str, cfg: RunConfig) -> CellResul
     started = time.perf_counter()
     try:
         ctx = _model_context(cfg)
+        resolved = _resolve_params(series, model_name, cfg, ctx, params)
 
         # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.
         oof: pd.DataFrame | None = None
         metrics = {name: float("nan") for name in METRIC_NAMES}
         if cfg.backtest.enabled:
-            oof, fold_metrics = backtest_cell(series, lambda: model_cls({}, ctx), cfg)
+            oof, fold_metrics = backtest_cell(series, lambda: model_cls(resolved, ctx), cfg)
             metrics = _rollup_metrics(fold_metrics)
 
         # Final fit on the full history, then forecast the horizon.
         y, X = build_features(series, cfg)
-        model = model_cls({}, ctx)
+        model = model_cls(resolved, ctx)
         model.fit(y, X)
         # Offline has no *true* future exog (that arrives with a real run, Arc B). As a
         # stand-in we hand exog-aware models the first `horizon` rows of the design matrix

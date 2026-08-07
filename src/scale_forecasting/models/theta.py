@@ -40,7 +40,9 @@ class ThetaModel(BaseModel):
         if len(y) < 2:
             raise ModelError("theta requires at least 2 observations")
         period = seasonal_period(self.ctx.freq)
-        deseasonalize = len(y) >= 2 * period
+        # HPO knob (search_space): an explicit `deseasonalize` param overrides the default
+        # data-driven rule (deseasonalize only with ≥2 full seasons). Absent → the default.
+        deseasonalize = bool(self.params.get("deseasonalize", len(y) >= 2 * period))
         self._last_date = y.index[-1]
         self._fitted = _StatsmodelsTheta(
             y.astype(float), period=period, deseasonalize=deseasonalize

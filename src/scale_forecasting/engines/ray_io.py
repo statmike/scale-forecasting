@@ -35,7 +35,7 @@ import re
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # The pure Spark core is engine-agnostic — reuse it verbatim rather than duplicating (D17 / plan
 # decision 1). ``_MODEL_COL`` is the internal per-cell model tag ``run_group`` reads to take its
@@ -386,7 +386,10 @@ def chunk_cells(
 
 
 def make_chunk_runner(
-    cfg: RunConfig, settings: Settings, models: list[str] | None = None
+    cfg: RunConfig,
+    settings: Settings,
+    models: list[str] | None = None,
+    params_by_model: dict[str, dict[str, Any]] | None = None,
 ) -> Callable[[pd.DataFrame], pd.DataFrame]:
     """Build the function one Ray task runs: run a chunk's cells, write them, return status.
 
@@ -400,12 +403,16 @@ def make_chunk_runner(
     ``models`` is forwarded to :func:`run_group` for parity with the Spark path; since chunks always
     carry :data:`_MODEL_COL`, ``run_group`` takes its explode branch and the subset only matters if
     a chunk ever arrived without the tag.
+
+    ``params_by_model`` is the fleetwide-HPO resolution (C5), captured in the closure like ``cfg`` /
+    ``settings`` and forwarded to :func:`run_group` — the Ray twin of the Spark group runner's
+    fleetwide threading, so tuned params reach every task without entering ``cfg`` (run_id stable).
     """
 
     def _run(chunk: pd.DataFrame) -> pd.DataFrame:
         from ..registry import bq
 
-        results, status = run_group(chunk, cfg, models)
+        results, status = run_group(chunk, cfg, models, params_by_model)
         if results:
             bq.write_cells(results, settings=settings)
         return status

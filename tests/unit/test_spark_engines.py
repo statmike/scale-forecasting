@@ -183,6 +183,28 @@ def test_run_group_status_frame_has_fit_seconds() -> None:
     assert (status["fit_seconds"] >= 0).all()
 
 
+def test_run_group_threads_fleetwide_params_to_each_cell() -> None:
+    # C5: params_by_model (the driver's fleetwide resolution) reaches every cell of that model, so
+    # best_params reflects the tuned params — the seam that carries HPO across the fan-out.
+    cfg = _cfg(spark_method="explode", models=["xgboost", "theta"])
+    pdf = _with_model_col(_panel(["s0", "s1"]), ["xgboost", "theta"])
+    params = {"xgboost": {"n_estimators": 111, "max_depth": 3, "learning_rate": 0.09}}
+    results, _status = run_group(pdf, cfg, params_by_model=params)
+
+    xgb = [r for r in results if r.model_type == "xgboost"]
+    theta = [r for r in results if r.model_type == "theta"]
+    assert xgb and all(r.best_params == params["xgboost"] for r in xgb)  # tuned params applied
+    assert theta and all(r.best_params == {} for r in theta)  # absent from map → {} default
+
+
+def test_run_group_without_params_is_unchanged_default() -> None:
+    # No params_by_model → today's behavior: every cell runs with {} (additive-by-default).
+    cfg = _cfg(spark_method="explode", models=["xgboost"])
+    pdf = _with_model_col(_panel(["s0"]), ["xgboost"])
+    results, _status = run_group(pdf, cfg)
+    assert all(r.best_params == {} for r in results)
+
+
 # --- make_group_runner: Settings captured directly (Connect-safe) --------------
 
 

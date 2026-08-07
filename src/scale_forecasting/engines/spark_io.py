@@ -107,7 +107,10 @@ def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int
 
 
 def run_group(
-    pdf: pd.DataFrame, cfg: RunConfig, models: list[str] | None = None
+    pdf: pd.DataFrame,
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    params_by_model: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[CellResult], pd.DataFrame]:
     """Run every cell in one group's pandas frame; pure — no Spark, no BigQuery.
 
@@ -125,6 +128,11 @@ def run_group(
     must iterate the subset, not the full ``cfg.models`` (which would feed a native model into
     ``run_cell`` → ``NotImplementedError``). ``None`` means ``cfg.models`` (standalone). The explode
     path takes its models from the cross-join column, so the subset only affects the naive loop.
+
+    ``params_by_model`` is the fleetwide-HPO resolution (C5): ``{model: tuned params}`` computed
+    once on the driver and passed to every cell of that model, so the tuned params apply fleet-wide
+    without entering ``cfg`` (which would shift the run_id). A model absent from the map (or a None
+    map) resolves inside ``run_cell`` — per-series HPO if configured, else the ``{}`` default.
     """
     import pandas as pd
 
@@ -133,19 +141,20 @@ def run_group(
     id_col = cfg.data.ts_id_col
     helper_cols = [c for c in (_MODEL_COL, _BUCKET_COL) if c in pdf.columns]
     executed = models if models is not None else cfg.models
+    by_model = params_by_model or {}
 
     results: list[CellResult] = []
     if _MODEL_COL in pdf.columns:
         # explode/multi: the cross-join tagged each row with its model; one cell per (ts_id, model).
         for (_ts_id, model_name), sub in pdf.groupby([id_col, _MODEL_COL], sort=False):
             series = sub.drop(columns=helper_cols)
-            results.append(run_cell(series, str(model_name), cfg))
+            results.append(run_cell(series, str(model_name), cfg, by_model.get(str(model_name))))
     else:
         # naive: one task per series, all models sequentially — the deliberate anti-pattern.
         for _ts_id, sub in pdf.groupby(id_col, sort=False):
             series = sub.drop(columns=helper_cols)
             for model_name in executed:
-                results.append(run_cell(series, model_name, cfg))
+                results.append(run_cell(series, model_name, cfg, by_model.get(model_name)))
 
     status = pd.DataFrame(
         {
@@ -243,6 +252,43 @@ def _limit_series(df: DataFrame, cfg: RunConfig) -> DataFrame:
     return df.join(keep, on=id_col, how="leftsemi")
 
 
+def sample_series_to_driver(df: DataFrame, cfg: RunConfig, k: int) -> list[pd.DataFrame]:
+    """Collect the first ``k`` series (deterministically) to the driver as per-series frames (C5).
+
+    The fleetwide-HPO pre-pass tunes on a small sample *before* the cluster fan-out; that sample
+    must live on the driver (Optuna runs there, not in an executor). Reuses the same deterministic
+    "first ``k`` ts_ids, ordered" subset as :func:`_limit_series` so the tuning sample is stable and
+    apples-to-apples across scales. Returns one pandas frame per ts_id (the shape ``run_cell`` /
+    ``backtest_cell`` expect); an empty list if the source has no rows. Tiny by construction —
+    ``k`` is ``hpo.sample_size`` (default 20), not the fleet.
+    """
+    id_col = cfg.data.ts_id_col
+    keep = df.select(id_col).distinct().orderBy(id_col).limit(k)
+    pdf = df.join(keep, on=id_col, how="leftsemi").toPandas()
+    return [g.reset_index(drop=True) for _, g in pdf.groupby(id_col, sort=True)]
+
+
+def resolve_fleetwide_hpo(
+    source: DataFrame, cfg: RunConfig, executed: list[str]
+) -> dict[str, dict[str, Any]] | None:
+    """Driver-side fleetwide-HPO pre-pass: sample series → tune each model → ``{model: params}``.
+
+    Returns ``None`` (no fleetwide params — cells resolve per-series/off in ``run_cell``) unless HPO
+    is enabled at ``fleetwide`` granularity. When it is, collects ``hpo.sample_size`` series to the
+    driver (:func:`sample_series_to_driver`) and tunes the executed model subset on them
+    (:func:`~scale_forecasting.hpo.resolve_fleetwide`), scoping the tuning to the models that will
+    actually run (Arc B). Kept in ``spark_io`` so all Spark engines (explode/naive) share one
+    pre-pass; the Ray engine has its own analog over its already-collected pandas source.
+    """
+    if not (cfg.hpo.enabled and cfg.hpo.granularity == "fleetwide"):
+        return None
+    from ..hpo import resolve_fleetwide
+
+    sample = sample_series_to_driver(source, cfg, cfg.hpo.sample_size)
+    tuning_cfg = cfg.model_copy(update={"models": executed})
+    return resolve_fleetwide(sample, tuning_cfg)
+
+
 def cross_join_models(
     df: DataFrame, cfg: RunConfig, spark: SparkSession, models: list[str] | None = None
 ) -> DataFrame:
@@ -295,7 +341,12 @@ def status_schema() -> Any:
     )
 
 
-def make_group_runner(cfg: RunConfig, settings: Settings, models: list[str] | None = None) -> Any:
+def make_group_runner(
+    cfg: RunConfig,
+    settings: Settings,
+    models: list[str] | None = None,
+    params_by_model: dict[str, dict[str, Any]] | None = None,
+) -> Any:
     """Build the ``applyInPandas`` function: run one bucket's cells, write them, return status.
 
     Closes over the picklable ``cfg`` and the frozen :class:`Settings` dataclass **directly** — not
@@ -311,12 +362,18 @@ def make_group_runner(cfg: RunConfig, settings: Settings, models: list[str] | No
 
     ``models`` is the executed subset (Arc B), forwarded to :func:`run_group` so the naive loop runs
     only the Python-runtime models under a mixed :func:`main.run` config. ``None`` → ``cfg.models``.
+
+    ``params_by_model`` is the fleetwide-HPO resolution (C5), captured in the closure exactly like
+    ``settings``/``models`` and forwarded to :func:`run_group` — so the driver tunes once and every
+    executor builds its cells with the tuned params, without those params entering ``cfg`` (which
+    would shift the run_id). ``None`` = no fleetwide params (per-series/off resolves in
+    ``run_cell``).
     """
 
     def _run(pdf: pd.DataFrame) -> pd.DataFrame:
         from ..registry import bq
 
-        results, status = run_group(pdf, cfg, models)
+        results, status = run_group(pdf, cfg, models, params_by_model)
         if results:
             bq.write_cells(results, settings=settings)
         return status
