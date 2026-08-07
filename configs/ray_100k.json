@@ -1,0 +1,18 @@
+{
+  "run_name": "ray_100k",
+  "python_runtime": "ray",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100000
+  },
+  "models": ["theta", "holtwinters", "sarimax", "xgboost"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "compute": {
+    "use_gpu": false,
+    "ray_regions": ["us-central1", "us-east1", "us-west1"]
+  }
+}

@@ -99,10 +99,16 @@ Python-runtime models on a fixed-size Ray-on-Vertex cluster ∥ the BigQuery nat
 works from any authenticated client — local or in-GCP — because the cluster is provisioned on a
 PSC-I network attachment with a dashboard-capable head node, wired by the Terraform network module).
 
-The last two isolate the remaining Spark fan-out **methods** on the same 100 series:
+The last two run notebooks isolate the remaining Spark fan-out **methods** on the same 100 series:
 [`05_spark_naive`](./notebooks/05_spark_naive.ipynb) shows the `naive` straggler anti-pattern (a
 series' models run sequentially in one task), and [`06_spark_multi`](./notebooks/06_spark_multi.ipynb)
 shows `multi` fanning out one child `explode` batch per model family — all under **one** `run_id`.
+
+Finally, [`07_scale_review`](./notebooks/07_scale_review.ipynb) runs nothing — point it at one
+`run_id` per approach (e.g. the four `configs/*_100k.json` runs submitted via
+`python -m scale_forecasting.submit`) and it renders the **cross-approach comparison**: wall-clock
+and provisioning overhead from `v_run_summary`, and accuracy parity (same model, same answer across
+engines — G1) from `v_model_leaderboard`.
 
 ## Deploy on GCP
 
