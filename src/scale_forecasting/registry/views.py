@@ -15,10 +15,13 @@ Two views, matched to the two questions a run prompts:
   usage. This is the scaling-and-efficiency story as one ``SELECT * ORDER BY spark_method,
   n_series`` — explode's flat curve vs. naive's straggler, with overhead that amortizes at scale.
 
-- ``v_model_leaderboard`` — *which model won, per run?* One row per ``(run_id, model_type)``: cell
-  counts, the error rate (a model failing every cell — the libgomp/lightgbm class of problem —
-  shows as ``error_rate = 1.0``), median fit time, and the mean decision metrics where a backtest
-  populated them. The entry point for "is this model worth keeping" before ensembling.
+- ``v_model_leaderboard`` — *which model won, per run?* One row per ``(run_id, model_type,
+  ensemble_id)``: cell counts, the error rate (a model failing every cell — the libgomp/lightgbm
+  class of problem — shows as ``error_rate = 1.0``), median fit time, and the mean decision metrics
+  where a backtest populated them. The entry point for "is this model worth keeping" before
+  ensembling. ``ensemble_id`` is NULL for base models (so they group exactly as before) and the
+  ``EnsembleConfig`` digest for ensemble pseudo-models — so two ensemble configs scored under one
+  ``run_id`` keep their ``ensemble_<strategy>`` rows distinct instead of collapsing into one (C4).
 
 ``JSON_VALUE`` reads scalars straight out of the native ``JSON`` ``job_telemetry`` column (the
 registry is native BigQuery, so the column is the real ``JSON`` type — ``JSON_VALUE`` works on it
@@ -63,6 +66,7 @@ CREATE OR REPLACE VIEW `{d}.v_model_leaderboard` AS
 SELECT
   run_id,
   model_type,
+  ensemble_id,
   ANY_VALUE(compute_engine) AS compute_engine,
   COUNT(*) AS n_cells,
   COUNTIF(model_artifact IS NULL) AS n_no_artifact,
@@ -72,7 +76,7 @@ SELECT
   AVG(mae) AS mean_mae
 FROM `{d}.forecast_metadata`
 WHERE fold_id IS NULL
-GROUP BY run_id, model_type""",
+GROUP BY run_id, model_type, ensemble_id""",
 }
 
 VIEW_NAMES: tuple[str, ...] = tuple(_VIEW_BODIES)

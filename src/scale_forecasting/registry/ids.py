@@ -1,14 +1,18 @@
 """Deterministic identifiers for runs and cells (CONTRACTS §3).
 
-Two ids anchor the whole registry:
+Three ids anchor the whole registry:
 
 - ``run_id`` is derived from the validated config, so the *same* config yields the
   *same* run_id and any change yields a different one (queryable, reproducible — G3).
 - ``model_hash`` identifies one cell ``(run, ts_id, model)`` and is what makes writes
   idempotent: re-running a cell overwrites its rows instead of duplicating them
   (CONTRACTS §3.4).
+- ``ensemble_id`` (C4) is derived from the ``EnsembleConfig`` alone, so several ensemble
+  configurations can coexist under one ``run_id`` without their ``model_type`` pseudo-models
+  colliding — a re-run with the *same* ensemble config lands the same id (idempotent), a
+  different config lands a different one (distinctly keyed on the leaderboard).
 
-Both are pure functions of their inputs — no clocks, no randomness — so ids are stable
+All three are pure functions of their inputs — no clocks, no randomness — so ids are stable
 across machines and reruns.
 """
 
@@ -20,7 +24,7 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from scale_forecasting.config import RunConfig
+    from scale_forecasting.config import EnsembleConfig, RunConfig
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -59,3 +63,22 @@ def make_model_hash(run_id: str, ts_id: str, model_type: str, cfg: RunConfig) ->
     """
     payload = "\x1f".join([run_id, ts_id, model_type, _canonical_config(cfg)])
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def make_ensemble_id(ensemble: EnsembleConfig) -> str:
+    """Return a deterministic 12-hex id for one ``EnsembleConfig`` (C4).
+
+    A pure digest of the ensemble configuration's content (strategies, prune threshold —
+    ``sort_keys`` makes the bytes order-independent), so several ensemble configs can be scored
+    under one ``run_id`` without their ``ensemble_<strategy>`` pseudo-models colliding: re-running
+    the *same* config yields the same id (the dedupe key for idempotent re-runs), a *different*
+    config yields a different one. Excludes ``enabled`` so toggling it doesn't re-key an otherwise
+    identical config. Independent of the parent ``run_id`` — the same ensemble config keys
+    identically across runs, which is what lets the standalone entrypoint re-ensemble any run.
+    """
+    payload = json.dumps(
+        {"strategies": sorted(ensemble.strategies), "prune_threshold": ensemble.prune_threshold},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]

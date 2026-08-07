@@ -31,10 +31,12 @@ newest at the bottom. Keep entries short: what, why, and the contract section to
   - **Data generator partition-union invariant** holds (each series seeded by its own
     index) — the Spark seed job (`data_gen/seed_spark.py`, B-stub) can partition `range(n)`
     any way and the union equals `generate_panel(n)`.
-  - **Ensembler:** calculated strategies render as BigQuery SQL (`build_ensemble_sql`,
-    correct `INSERT INTO (cols) WITH cte SELECT` form); learned strategies (`fit_learned`)
-    train on OOF and refuse to run without backtest. Arc B just needs to execute the SQL
-    and persist/apply the learned weights.
+  - **Ensembler:** calculated strategies blend the base predictions in pandas
+    (`combine_calculated`) and append via the Storage Write API — the same path the learned
+    strategies use (C4 / Q4 fix: no `INSERT…SELECT` DML); learned strategies (`fit_learned`)
+    train on OOF and refuse to run without backtest. Every ensemble row is keyed by
+    `ensemble_id = make_ensemble_id(cfg.ensemble)` so several ensemble configs coexist under
+    one `run_id`.
   - **Remaining stubs for Arc B:** `main.run`, `router.split_by_runtime`, all four
     `engines/*`, `data_gen/seed_spark`, the four `registry/bq` writers, and `bigquery_native`
     fit/predict (raise `NotImplementedError(_ARC_B)`).

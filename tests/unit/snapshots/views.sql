@@ -27,6 +27,7 @@ CREATE OR REPLACE VIEW `proj.scale_forecasting.v_model_leaderboard` AS
 SELECT
   run_id,
   model_type,
+  ensemble_id,
   ANY_VALUE(compute_engine) AS compute_engine,
   COUNT(*) AS n_cells,
   COUNTIF(model_artifact IS NULL) AS n_no_artifact,
@@ -36,4 +37,4 @@ SELECT
   AVG(mae) AS mean_mae
 FROM `proj.scale_forecasting.forecast_metadata`
 WHERE fold_id IS NULL
-GROUP BY run_id, model_type;
+GROUP BY run_id, model_type, ensemble_id;

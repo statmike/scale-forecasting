@@ -36,9 +36,11 @@ Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`), ``"r
 Vertex Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`) — either way on the worker
 thread, in contributor mode, in parallel with the in-process BigQuery engine under one run_id.
 
-Out of scope here (rejected with a clear pointer): ``spark_method="multi"`` (inherently multi-run —
-each family child gets its own run_id, so it can't share one header; use ``python -m
-scale_forecasting.submit --engine multi``). ``multi`` is a Spark-only method, so the guard only
+Out of scope here (rejected with a clear pointer): ``spark_method="multi"``. multi fans out *N*
+family batches, but :func:`run`'s parallelism drives exactly one Python-runtime future alongside the
+in-process BigQuery engine — it can't own multi's N-batch fan-out. multi has its own single-run_id
+orchestrator (:func:`~scale_forecasting.submit.submit_multi`, C3): use ``python -m
+scale_forecasting.submit --engine multi``. ``multi`` is a Spark-only method, so the guard only
 applies when ``python_runtime="spark"``.
 
 Public surface: ``run(cfg, *, dry_run=False) -> run_id`` and
@@ -83,8 +85,10 @@ def _plan(cfg: RunConfig) -> _RunPlan:
     Python-runtime models to run on the Spark runtime:
 
     * ``python_runtime="spark"`` + ``spark_method="multi"`` → :class:`ConfigError` pointing at
-      ``submit --engine multi`` (multi fans out one batch *per family*, each with its own run_id, so
-      it can't share a single header). ``multi`` is Spark-only, so the Ray runtime never trips it.
+      ``submit --engine multi`` (multi fans out one batch *per family*; this orchestrator drives a
+      single Python-runtime future, not multi's N-batch fan-out — multi shares one run_id via its
+      own orchestrator, :func:`submit.submit_multi`). ``multi`` is Spark-only, so the Ray runtime
+      never trips it.
 
     Both ``python_runtime="spark"`` and ``python_runtime="ray"`` are supported (dispatched in
     :func:`run`). An all-BigQuery config is unaffected by the guard (the Python runtime is never
@@ -95,9 +99,10 @@ def _plan(cfg: RunConfig) -> _RunPlan:
 
     if python_models and cfg.python_runtime == "spark" and cfg.spark_method == "multi":
         raise ConfigError(
-            "main.run cannot run spark_method='multi' under one run_id: multi fans out one "
-            "batch per model family, each with its own run_id and header. Run it standalone "
-            "with `python -m scale_forecasting.submit --engine multi`, or choose "
+            "main.run cannot run spark_method='multi': multi fans out one batch per model "
+            "family, but this orchestrator drives a single Python-runtime future in parallel "
+            "with BigQuery, not multi's N-batch fan-out. Run it with its own single-run_id "
+            "orchestrator, `python -m scale_forecasting.submit --engine multi`, or choose "
             "spark_method='explode'/'naive' to orchestrate it in parallel with BigQuery here."
         )
 

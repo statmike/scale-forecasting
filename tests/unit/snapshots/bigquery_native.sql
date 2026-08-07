@@ -11,7 +11,7 @@ AS (
   training_data AS (
     SELECT ts_id, ds, y
   FROM `proj.scale_forecasting.source_series_native`
-  WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series_native`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)
+  WHERE ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)
   ),
   custom_holiday AS (
   SELECT * FROM UNNEST([
@@ -291,7 +291,7 @@ SELECT
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
 FROM AI.FORECAST(
-    (SELECT ts_id, ds, y FROM `proj.scale_forecasting.source_series_native` WHERE ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY) FROM `proj.scale_forecasting.source_series_native`) AND ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)),
+    (SELECT ts_id, ds, y FROM `proj.scale_forecasting.source_series_native` WHERE ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)),
     data_col => 'y',
     timestamp_col => 'ds',
     id_cols => ['ts_id'],

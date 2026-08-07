@@ -38,32 +38,78 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 
+def _storage_table_path(cfg: RunConfig, settings: Settings) -> str:
+    """Resolve the source to a Storage Read API path ``projects/P/datasets/D/tables/T`` (pure).
+
+    :func:`~scale_forecasting.engines.spark_io._resolve_source_table` yields the BigQuery
+    ``project.dataset.table`` form (qualifying a bare name against the deployment dataset, G1); the
+    Storage Read API wants the resource-path form. A two-part ``dataset.table`` (a caller-qualified
+    source in another dataset of the same project) is prefixed with ``settings.project_id``.
+    """
+    ref = _resolve_source_table(cfg, settings)
+    parts = ref.split(".")
+    if len(parts) == 3:
+        project, dataset, table = parts
+    elif len(parts) == 2:
+        project, (dataset, table) = settings.project_id, parts
+    else:  # pragma: no cover - _resolve_source_table always yields a qualified ref
+        raise ValueError(f"cannot resolve source table to a storage path: {ref!r}")
+    return f"projects/{project}/datasets/{dataset}/tables/{table}"
+
+
+def _limit_series(source: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame:
+    """Keep the first ``series_limit`` ts_ids (ordered); pass-through when unset (pure).
+
+    The pandas twin of :func:`~scale_forecasting.engines.spark_io._limit_series`: distinct ts_ids →
+    ordered → first N → filter, so Ray and Spark subset the *same* series at every scale (DESIGN
+    §13.1) — the property that makes the "10 vs 100 vs 100k" runtime comparison apples-to-apples.
+    Applied client-side (not as a Storage Read ``row_restriction``, which can't express an ordered
+    first-N over distinct ids), exactly as the Spark connector applies its limit after the read.
+    """
+    limit = cfg.data.series_limit
+    if limit is None:
+        return source
+    id_col = cfg.data.ts_id_col
+    keep = sorted(source[id_col].unique())[:limit]
+    return source[source[id_col].isin(keep)].reset_index(drop=True)
+
+
 def _read_source_series(
     cfg: RunConfig, settings: Settings
 ) -> pd.DataFrame:  # pragma: no cover - GCP I/O, exercised by the @gpu smoke
-    """Read the source series into a driver-side pandas frame (Ray's analog of the Spark read).
+    """Read the source series into a driver-side pandas frame via the BigQuery Storage Read API.
 
-    Reads via ``google-cloud-bigquery`` (no Spark here), projected to only the columns a cell needs
-    (:func:`_needed_columns`) and deterministically subset to the first ``series_limit`` ts_ids
-    (ordered) so every scale runs the *same* series (DESIGN §13.1), exactly like
-    :func:`~scale_forecasting.engines.spark_io.read_source_series`. The whole panel lands on the
-    driver, then :func:`.ray_io.chunk_cells` shards it into task-sized frames — acceptable because
-    Ray is the GPU path for modest scales, not the 100k hero (that's Spark, §11.2).
+    The Ray analog of :func:`~scale_forecasting.engines.spark_io.read_source_series`, and — like the
+    Spark connector — it reads through the **Storage Read API** (``BigQueryReadClient``), *not*
+    ``client.query()``: a direct columnar table read over the storage layer, so it consumes no
+    BigQuery query slots and streams Arrow straight to the driver (Q3 parity with Spark, C-Ray). The
+    read is column-projected to only what a cell needs (:func:`_needed_columns` →
+    ``selected_fields``); the deterministic ``series_limit`` subset is then applied in pandas
+    (:func:`_limit_series`). The whole panel lands on the driver, then :func:`.ray_io.chunk_cells`
+    shards it into task-sized frames — acceptable because Ray is the GPU path for modest scales, not
+    the 100k hero (that's Spark, §11.2).
     """
-    from google.cloud import bigquery
+    from google.cloud.bigquery_storage_v1 import BigQueryReadClient, types
 
-    table = _resolve_source_table(cfg, settings)
-    cols = ", ".join(_needed_columns(cfg))
-    sql = f"SELECT {cols} FROM `{table}`"
-    limit = cfg.data.series_limit
-    if limit is not None:
-        id_col = cfg.data.ts_id_col
-        sql += (
-            f" WHERE {id_col} IN "
-            f"(SELECT {id_col} FROM `{table}` GROUP BY {id_col} ORDER BY {id_col} LIMIT {limit})"
-        )
-    client = bigquery.Client(project=settings.project_id)
-    return client.query(sql).to_dataframe()
+    read_client = BigQueryReadClient()
+    requested = types.ReadSession(
+        table=_storage_table_path(cfg, settings),
+        data_format=types.DataFormat.ARROW,
+        read_options=types.ReadSession.TableReadOptions(selected_fields=_needed_columns(cfg)),
+    )
+    session = read_client.create_read_session(
+        parent=f"projects/{settings.project_id}",
+        read_session=requested,
+        max_stream_count=0,  # let the server choose the parallelism
+    )
+
+    frames = [
+        read_client.read_rows(stream.name).to_dataframe(session) for stream in session.streams
+    ]
+    if not frames:  # empty table → an empty, correctly-typed frame from the session schema
+        return pd.DataFrame(columns=_needed_columns(cfg))
+    source = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    return _limit_series(source, cfg)
 
 
 def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:

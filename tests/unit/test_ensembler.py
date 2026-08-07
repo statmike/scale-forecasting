@@ -1,14 +1,13 @@
-"""Tests for the ensembler — calculated combine math, learned meta-learners, SQL builders.
+"""Tests for the ensembler — calculated combine math, learned meta-learners, pandas blend.
 
 Covers CONTRACTS §6 / DESIGN §5.2 / BUILD 6a: mean/median exact, inverse-error weights sum to
 1, NNLS weights ≥ 0, the leakage guard (learned strategies refuse to run without backtest),
-multi-strategy dispatch, and a snapshot of the generated BigQuery SQL.
+multi-strategy dispatch, and the pandas :func:`combine_calculated` blend that replaced the retired
+``INSERT…SELECT`` SQL (C4 / Q4 fix — every append-only cell write now goes through the Write API).
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,15 +16,13 @@ import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.ensembler import (
-    build_ensemble_sql,
+    combine_calculated,
     fit_learned,
     inverse_error_weights,
     mean_combine,
     median_combine,
 )
 from scale_forecasting.errors import ConfigError
-
-SNAPSHOT = Path(__file__).parent / "snapshots" / "ensemble_sql.sql"
 
 
 def _cfg(strategies: list[str], *, backtest: bool = True, prune: float = 0.0) -> RunConfig:
@@ -157,50 +154,117 @@ def test_learned_missing_a_base_model_is_rejected() -> None:
         fit_learned(partial, cfg)
 
 
-# --- SQL builders --------------------------------------------------------------
+# --- combine_calculated: the pandas blend (Write-API path, C4 / Q4 fix) --------
 
 
-def test_no_calculated_strategy_yields_empty_sql() -> None:
-    assert build_ensemble_sql(_cfg(["nnls"])) == ""
+def _base_df(rows: list[tuple[str, str, str, float]]) -> pd.DataFrame:
+    """Long-format base predictions (ts_id, model_type, forecast_date, yhat); bounds mirror yhat."""
+    return pd.DataFrame(
+        [
+            {
+                "ts_id": t,
+                "model_type": m,
+                "forecast_date": d,
+                "yhat": y,
+                "yhat_lower": y - 1.0,
+                "yhat_upper": y + 1.0,
+            }
+            for (t, m, d, y) in rows
+        ]
+    )
 
 
-def test_mean_sql_aggregates_base_predictions() -> None:
-    sql = build_ensemble_sql(_cfg(["mean"]), dataset="proj.ds")
-    assert "AVG(yhat)" in sql
-    assert "'ensemble_mean'" in sql
-    assert "`proj.ds.forecast_predictions`" in sql
-    assert "@run_id" in sql
+def _metric_df(rows: list[tuple[str, float]], *, metric: str = "wape") -> pd.DataFrame:
+    """Per-model run-level metric rows (model_type, <metric>) — the forecast_metadata subset."""
+    return pd.DataFrame([{"model_type": m, metric: v} for (m, v) in rows])
 
 
-def test_median_sql_uses_approx_quantiles() -> None:
-    sql = build_ensemble_sql(_cfg(["median"]))
-    assert "APPROX_QUANTILES(yhat, 2)[OFFSET(1)]" in sql
+def test_no_calculated_strategy_yields_no_rows() -> None:
+    # a learned-only config produces nothing from the calculated blender.
+    assert combine_calculated(_base_df([("s1", "theta", "d1", 10.0)]), _cfg(["nnls"])) == []
 
 
-def test_inverse_error_sql_weights_by_metric() -> None:
-    sql = build_ensemble_sql(_cfg(["inverse_error"]))
-    assert "SAFE_DIVIDE(1, NULLIF(AVG(wape), 0))" in sql
-    assert "'ensemble_inverse_error'" in sql
+def test_empty_base_yields_no_rows() -> None:
+    assert combine_calculated(_base_df([]), _cfg(["mean"])) == []
 
 
-def test_prune_threshold_filters_models() -> None:
-    sql = build_ensemble_sql(_cfg(["mean"], prune=0.5))
-    assert "forecast_metadata" in sql
-    assert "wape > 0.5" in sql
+def test_mean_blends_base_predictions() -> None:
+    base = _base_df([("s1", "theta", "d1", 10.0), ("s1", "sarimax", "d1", 20.0)])
+    rows = combine_calculated(base, _cfg(["mean"]))
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["model_type"] == "ensemble_mean"
+    assert r["yhat"] == pytest.approx(15.0)  # (10 + 20) / 2
+    assert r["yhat_lower"] == pytest.approx(14.0)  # bounds blend the same way (yhat ± 1)
+    assert r["yhat_upper"] == pytest.approx(16.0)
+    # run_id / ensemble_id are stamped by the orchestrator, not the pure blender.
+    assert "run_id" not in r and "ensemble_id" not in r
 
 
-def test_multi_strategy_sql_emits_each() -> None:
-    sql = build_ensemble_sql(_cfg(["mean", "median", "inverse_error"]))
-    assert "'ensemble_mean'" in sql
-    assert "'ensemble_median'" in sql
-    assert "'ensemble_inverse_error'" in sql
+def test_median_is_robust_to_a_wild_base_forecast() -> None:
+    base = _base_df(
+        [
+            ("s1", "theta", "d1", 10.0),
+            ("s1", "sarimax", "d1", 12.0),
+            ("s1", "xgboost", "d1", 1000.0),
+        ]
+    )
+    rows = combine_calculated(base, _cfg(["median"]))
+    assert rows[0]["yhat"] == pytest.approx(12.0)  # median ignores the 1000 outlier
 
 
-def test_ensemble_sql_snapshot() -> None:
-    cfg = _cfg(["mean", "median", "inverse_error"], prune=0.3)
-    rendered = build_ensemble_sql(cfg, dataset="proj.scale_forecasting")
-    if os.environ.get("SF_UPDATE_SNAPSHOTS") == "1":
-        SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
-        SNAPSHOT.write_text(rendered)
-    assert SNAPSHOT.exists(), "snapshot missing; run with SF_UPDATE_SNAPSHOTS=1 to create"
-    assert rendered == SNAPSHOT.read_text()
+def test_inverse_error_weights_by_run_metric() -> None:
+    # theta far better than sarimax (lower wape) → blend pulled toward theta's 10.
+    base = _base_df([("s1", "theta", "d1", 10.0), ("s1", "sarimax", "d1", 30.0)])
+    metric = _metric_df([("theta", 0.1), ("sarimax", 0.9)])
+    rows = combine_calculated(base, _cfg(["inverse_error"]), metric)
+    # weights ∝ 1/0.1 : 1/0.9 = 9 : 1 → (9*10 + 1*30)/10 = 12.0
+    assert rows[0]["yhat"] == pytest.approx(12.0)
+
+
+def test_inverse_error_without_metric_frame_degrades_to_mean() -> None:
+    # no metadata → uniform weights (the old SQL's NULL-tolerant SAFE_DIVIDE behavior).
+    base = _base_df([("s1", "theta", "d1", 10.0), ("s1", "sarimax", "d1", 30.0)])
+    rows = combine_calculated(base, _cfg(["inverse_error"]), None)
+    assert rows[0]["yhat"] == pytest.approx(20.0)  # (10 + 30) / 2
+
+
+def test_prune_threshold_drops_weak_base_models_fleetwide() -> None:
+    # sarimax's mean wape (0.8) exceeds the 0.5 threshold → dropped; mean is theta alone.
+    base = _base_df([("s1", "theta", "d1", 10.0), ("s1", "sarimax", "d1", 30.0)])
+    metric = _metric_df([("theta", 0.1), ("sarimax", 0.8)])
+    rows = combine_calculated(base, _cfg(["mean"], prune=0.5), metric)
+    assert rows[0]["yhat"] == pytest.approx(10.0)  # sarimax pruned → theta only
+
+
+def test_blend_renormalizes_over_present_models_per_key() -> None:
+    # d2 has only theta present → its mean blend is theta alone.
+    base = _base_df(
+        [
+            ("s1", "theta", "d1", 10.0),
+            ("s1", "sarimax", "d1", 20.0),
+            ("s1", "theta", "d2", 40.0),
+        ]
+    )
+    rows = combine_calculated(base, _cfg(["mean"]))
+    by_date = {r["forecast_date"]: r["yhat"] for r in rows if r["model_type"] == "ensemble_mean"}
+    assert by_date["d1"] == pytest.approx(15.0)
+    assert by_date["d2"] == pytest.approx(40.0)
+
+
+def test_multi_strategy_emits_each_calculated_family() -> None:
+    base = _base_df([("s1", "theta", "d1", 10.0), ("s1", "sarimax", "d1", 20.0)])
+    metric = _metric_df([("theta", 0.5), ("sarimax", 0.5)])
+    rows = combine_calculated(base, _cfg(["mean", "median", "inverse_error"]), metric)
+    assert {r["model_type"] for r in rows} == {
+        "ensemble_mean",
+        "ensemble_median",
+        "ensemble_inverse_error",
+    }
+
+
+def test_learned_strategies_are_ignored_by_calculated_blender() -> None:
+    # a mixed config blends only the calculated members; learned ones are fit_learned's job.
+    base = _base_df([("s1", "theta", "d1", 10.0), ("s1", "sarimax", "d1", 20.0)])
+    rows = combine_calculated(base, _cfg(["mean", "nnls"]))
+    assert {r["model_type"] for r in rows} == {"ensemble_mean"}

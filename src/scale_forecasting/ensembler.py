@@ -1,12 +1,13 @@
-"""Consensus across base models — calculated + learned — pure logic + SQL builders.
+"""Consensus across base models — calculated + learned — pure logic, all in pandas (CONTRACTS §6).
 
 The outer loop (DESIGN §5.2) combines every base model's forecast per ``ts_id`` into a
 consensus. Two families, both **pure** here (no GCP calls — CONTRACTS §0, §6):
 
 * **Calculated** (``mean``, ``median``, ``inverse_error``) — heuristics that need no training,
-  so they work even when backtesting is off. These are emitted as **BigQuery SQL** by
-  :func:`build_ensemble_sql`; BigQuery runs the SQL and writes each as a pseudo-model
-  (``ensemble_mean`` …) into ``forecast_predictions``, comparable to the base models.
+  so they work even when backtesting is off. :func:`combine_calculated` blends the base
+  ``forecast_predictions`` **in pandas** and returns ``ensemble_<s>`` prediction rows the caller
+  appends via the Storage Write API — the same append path the learned strategies use (C4: every
+  append-only cell-table write goes through the Write API, no ``INSERT…SELECT`` DML).
 * **Learned** (``nnls``, ``ridge``, ``xgb``) — meta-learners that train on the backtest OOF to
   learn per-model trust weights. :func:`fit_learned` fits them; because it only ever sees
   ``backtest_oof`` (never in-sample fits) leakage is structurally impossible, and it refuses to
@@ -15,14 +16,14 @@ consensus. Two families, both **pure** here (no GCP calls — CONTRACTS §0, §6
 A run may request several strategies at once (``ensemble.strategies`` is a list); each yields
 its own weights/rows so calculated and learned consensuses sit side-by-side in one run.
 
-Public surface: :func:`build_ensemble_sql`, :func:`fit_learned` (plus the pure combine
-helpers :func:`mean_combine`, :func:`median_combine`, :func:`inverse_error_weights`).
+Public surface: :func:`combine_calculated`, :func:`combine_oof`, :func:`fit_learned` (plus the
+pure combine helpers :func:`mean_combine`, :func:`median_combine`, :func:`inverse_error_weights`).
 """
 
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -74,6 +75,137 @@ def inverse_error_weights(errors: np.ndarray) -> np.ndarray:
 
     inv = np.where(finite, 1.0 / err, 0.0)
     return inv / inv.sum()
+
+
+# --- OOF-space consensus (scoring) ---------------------------------------------
+
+# The columns of the OOF-blend frame combine_oof returns — the shape the scorer consumes.
+_OOF_BLEND_COLS = ("ts_id", "model_type", "fold_id", "forecast_date", "y_true", "yhat")
+
+
+def _weighted_blend(vals: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """Row-wise weighted mean over the *present* (non-NaN) models, weights renormalized per row.
+
+    ``vals`` is ``(n_rows, n_models)``; ``weights`` is ``(n_models,)``. A row where no weighted
+    model is present (all NaN, or the present weights sum to zero) yields NaN — the caller drops it.
+    Same renormalize-over-present rule as :func:`ensemble_run._apply_weights`, so the OOF-scored
+    consensus applies the identical blend the future prediction does (for the shared weights).
+    """
+    present = ~np.isnan(vals)
+    wrow = present * weights
+    denom = wrow.sum(axis=1)
+    num = np.nansum(np.where(present, vals, 0.0) * weights, axis=1)
+    return np.where(denom > 0.0, num / np.where(denom > 0.0, denom, 1.0), np.nan)
+
+
+def combine_oof(
+    oof_df: pd.DataFrame,
+    cfg: RunConfig,
+    learned_weights: dict[str, dict[str, float]] | None = None,
+) -> pd.DataFrame:
+    """Blend base-model OOF forecasts into ensemble OOF, per requested strategy (pure).
+
+    The scoring counterpart to the future-prediction consensus: after C2 aligned
+    ``forecast_predictions`` to a true beyond-data forecast (no actuals to join), each ensemble is
+    scored on the **backtest OOF window** — exactly the window the base models are scored on. This
+    applies the same consensus rules in OOF space (where ``y_true`` lives) and returns long-format
+    ``(ts_id, model_type='ensemble_<s>', fold_id, forecast_date, y_true, yhat)`` for the caller to
+    score with :func:`metrics.compute_metrics`.
+
+    Blends over whichever base models are present per ``(ts_id, fold_id, forecast_date)`` key:
+    ``mean``/``median`` are unweighted; ``inverse_error`` weights each model per ``ts_id`` by
+    ``1/WAPE`` over that model's OOF (self-contained — the same signal ``forecast_metadata`` would
+    carry); learned strategies apply ``learned_weights[strategy]`` (skipped if absent). Bounds are
+    not carried (OOF has none), so ensemble coverage/pinball are NaN — consistent with the Spark
+    base models, whose fold metrics also omit intervals. Returns an empty frame when the OOF is
+    empty or no strategy produces a blend.
+    """
+    learned_weights = learned_weights or {}
+    empty = pd.DataFrame(columns=list(_OOF_BLEND_COLS))
+    if oof_df.empty:
+        return empty
+    models = list(cfg.models)
+    keys = ["ts_id", "fold_id", "forecast_date"]
+    wide = oof_df.pivot_table(index=keys, columns="model_type", values="yhat", aggfunc="first")
+    present_models = [m for m in models if m in wide.columns]
+    if not present_models:
+        return empty
+    vals = wide.reindex(columns=present_models).to_numpy(dtype=float)
+    truth = (
+        oof_df.drop_duplicates(keys).set_index(keys)["y_true"].reindex(wide.index).to_numpy()
+    )
+    ts_ids = wide.index.get_level_values("ts_id").to_numpy()
+
+    parts: list[pd.DataFrame] = []
+    for strategy in cfg.ensemble.strategies:
+        yhat = _blend_oof_strategy(
+            strategy, vals, present_models, ts_ids, truth, learned_weights
+        )
+        if yhat is None:
+            continue
+        part = pd.DataFrame(
+            {
+                "ts_id": wide.index.get_level_values("ts_id"),
+                "model_type": f"ensemble_{strategy}",
+                "fold_id": wide.index.get_level_values("fold_id"),
+                "forecast_date": wide.index.get_level_values("forecast_date"),
+                "y_true": truth,
+                "yhat": yhat,
+            }
+        )
+        parts.append(part[~part["yhat"].isna()].reset_index(drop=True))
+    return (
+        pd.concat(parts, ignore_index=True)[list(_OOF_BLEND_COLS)] if parts else empty
+    )
+
+
+def _blend_oof_strategy(
+    strategy: str,
+    vals: np.ndarray,
+    models: list[str],
+    ts_ids: np.ndarray,
+    truth: np.ndarray,
+    learned_weights: dict[str, dict[str, float]],
+) -> np.ndarray | None:
+    """The blended yhat for one strategy over the OOF value matrix, or ``None`` to skip it.
+
+    ``vals`` is ``(n_rows, n_models)`` of base OOF yhats aligned to ``models``; ``ts_ids`` and
+    ``truth`` are per-row. Skips (returns ``None``) a learned strategy with no fitted weights.
+    """
+    if strategy == "mean":
+        return _weighted_blend(vals, np.ones(len(models)))
+    if strategy == "median":
+        return np.nanmedian(vals, axis=1)
+    if strategy == "inverse_error":
+        return _inverse_error_blend(vals, ts_ids, truth)
+    wmap = learned_weights.get(strategy)
+    if not wmap:  # learned strategy not fitted (e.g. backtest off) → nothing to score
+        return None
+    weights = np.array([wmap.get(m, 0.0) for m in models], dtype=float)
+    return _weighted_blend(vals, weights)
+
+
+def _inverse_error_blend(vals: np.ndarray, ts_ids: np.ndarray, truth: np.ndarray) -> np.ndarray:
+    """Inverse-WAPE-weighted blend, weights computed **per ts_id** from the OOF itself.
+
+    For each series, every base model's WAPE over its OOF rows sets its weight
+    (:func:`inverse_error_weights`); the blend then renormalizes over the models present per row.
+    Self-contained — computed straight from the OOF rather than read back from
+    ``forecast_metadata`` — so scoring needs no registry round-trip. (WAPE is the natural error for
+    this weighting; it need not equal ``backtest.decision_metric``, which drives the *future*
+    ``inverse_error`` blend — this is the scored counterpart, not a byte-for-byte replay.)
+    """
+    out = np.full(vals.shape[0], np.nan)
+    for tid in np.unique(ts_ids):
+        rows = ts_ids == tid
+        block = vals[rows]
+        denom = np.nansum(np.abs(truth[rows]))
+        # Per-model WAPE over this series' OOF (NaN where the model never forecast the series).
+        abs_err = np.abs(block - truth[rows][:, None])
+        wape = np.nansum(abs_err, axis=0) / denom if denom > 0 else np.nansum(abs_err, axis=0)
+        weights = inverse_error_weights(wape)
+        out[rows] = _weighted_blend(block, weights)
+    return out
 
 
 # --- learned meta-learners -----------------------------------------------------
@@ -179,113 +311,131 @@ def fit_learned(
     return weights, artifacts
 
 
-# --- SQL builders (calculated) -------------------------------------------------
+# --- calculated ensembles in pandas (Write-API path, C4 / Q4 fix) --------------
 
-# Column list shared by every ensemble INSERT into forecast_predictions.
-_INSERT_COLS = (
-    "  (run_id, ts_id, model_type, compute_engine, forecast_date,\n"
-    "   yhat, yhat_lower, yhat_upper, quantiles)"
-)
+# The prediction-row columns combine_calculated emits (ensemble_id + run_id filled by the caller).
+_PRED_OUT_COLS = ("ts_id", "model_type", "forecast_date", "yhat", "yhat_lower", "yhat_upper")
 
 
-def _base_pred_cte(cfg: RunConfig, dataset: str) -> str:
-    """``base_pred`` CTE: base-model prediction rows for this run, with optional pruning.
+def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
+    """The base models a calculated ensemble should blend, after optional pruning (pure).
 
-    Pruning (``ensemble.prune_threshold`` > 0) drops models whose backtest decision metric is
-    worse than the threshold (via ``forecast_metadata``) so a bad base model can't drag the
-    consensus down. Threshold 0.0 means no pruning.
+    Pruning (``ensemble.prune_threshold`` > 0) drops any model whose mean backtest decision metric
+    is worse than the threshold, so a bad base model can't drag the consensus down — the pandas twin
+    of the old SQL ``model_type NOT IN (… metric > threshold)`` filter, but applied fleet-wide (a
+    model pruned on its run-level metric is dropped from every series' blend). Threshold 0.0, or no
+    metric frame, means no pruning. Order follows ``cfg.models`` (stable).
     """
-    models = ", ".join(f"'{m}'" for m in cfg.models)
-    lines = [
-        "base_pred AS (",
-        "  SELECT run_id, ts_id, model_type, forecast_date, yhat, yhat_lower, yhat_upper",
-        f"  FROM `{dataset}.forecast_predictions`",
-        "  WHERE run_id = @run_id",
-        f"    AND model_type IN ({models})",
-    ]
-    if cfg.ensemble.prune_threshold > 0.0:
-        metric = cfg.backtest.decision_metric
-        lines += [
-            "    AND model_type NOT IN (",
-            f"      SELECT model_type FROM `{dataset}.forecast_metadata`",
-            f"      WHERE run_id = @run_id AND {metric} > {cfg.ensemble.prune_threshold}",
-            "    )",
-        ]
-    lines.append(")")
-    return "\n".join(lines)
-
-
-def _mean_or_median_stmt(strategy: str, cfg: RunConfig, dataset: str) -> str:
-    """A ``mean``/``median`` ensemble: aggregate base_pred, write an ``ensemble_<s>`` row set."""
-    if strategy == "mean":
-        yhat, lower, upper = "AVG(yhat)", "AVG(yhat_lower)", "AVG(yhat_upper)"
-    else:  # median
-        yhat = "APPROX_QUANTILES(yhat, 2)[OFFSET(1)]"
-        lower = "APPROX_QUANTILES(yhat_lower, 2)[OFFSET(1)]"
-        upper = "APPROX_QUANTILES(yhat_upper, 2)[OFFSET(1)]"
-    # BigQuery: the WITH clause belongs to the query that follows INSERT INTO (cols),
-    # so INSERT comes first, then WITH, then SELECT (not WITH ... INSERT).
-    return (
-        f"INSERT INTO `{dataset}.forecast_predictions`\n"
-        f"{_INSERT_COLS}\n"
-        f"WITH {_base_pred_cte(cfg, dataset)}\n"
-        f"SELECT run_id, ts_id, 'ensemble_{strategy}' AS model_type,\n"
-        "       'ensemble' AS compute_engine, forecast_date,\n"
-        f"       {yhat} AS yhat, {lower} AS yhat_lower, {upper} AS yhat_upper,\n"
-        "       CAST(NULL AS STRING) AS quantiles\n"
-        "FROM base_pred\n"
-        "GROUP BY run_id, ts_id, forecast_date;"
-    )
-
-
-def _inverse_error_stmt(cfg: RunConfig, dataset: str) -> str:
-    """Inverse-error weighting: weight ∝ 1/decision_metric per (ts_id, model), normalized."""
+    models = list(cfg.models)
+    threshold = cfg.ensemble.prune_threshold
+    if threshold <= 0.0 or metric_df is None or metric_df.empty:
+        return models
     metric = cfg.backtest.decision_metric
-    models = ", ".join(f"'{m}'" for m in cfg.models)
-    return (
-        f"INSERT INTO `{dataset}.forecast_predictions`\n"
-        f"{_INSERT_COLS}\n"
-        f"WITH {_base_pred_cte(cfg, dataset)},\n"
-        "model_weight AS (\n"
-        "  SELECT ts_id, model_type,\n"
-        f"         SAFE_DIVIDE(1, NULLIF(AVG({metric}), 0)) AS w\n"
-        f"  FROM `{dataset}.forecast_metadata`\n"
-        f"  WHERE run_id = @run_id AND model_type IN ({models})\n"
-        "  GROUP BY ts_id, model_type\n"
-        ")\n"
-        "SELECT p.run_id, p.ts_id, 'ensemble_inverse_error' AS model_type,\n"
-        "       'ensemble' AS compute_engine, p.forecast_date,\n"
-        "       SAFE_DIVIDE(SUM(p.yhat * w.w), SUM(w.w)) AS yhat,\n"
-        "       SAFE_DIVIDE(SUM(p.yhat_lower * w.w), SUM(w.w)) AS yhat_lower,\n"
-        "       SAFE_DIVIDE(SUM(p.yhat_upper * w.w), SUM(w.w)) AS yhat_upper,\n"
-        "       CAST(NULL AS STRING) AS quantiles\n"
-        "FROM base_pred p\n"
-        "JOIN model_weight w USING (ts_id, model_type)\n"
-        "WHERE w.w IS NOT NULL\n"
-        "GROUP BY p.run_id, p.ts_id, p.forecast_date;"
-    )
+    if metric not in metric_df.columns:
+        return models
+    mean_by_model = metric_df.groupby("model_type")[metric].mean()
+    return [m for m in models if not (mean_by_model.get(m, float("nan")) > threshold)]
 
 
-def build_ensemble_sql(cfg: RunConfig, dataset: str = "{dataset}") -> str:
-    """Render the BigQuery SQL for the run's **calculated** ensembles (CONTRACTS §6).
+def _calc_blend(
+    strategy: str, vals: np.ndarray, weights: np.ndarray | None
+) -> np.ndarray:
+    """Blend an ``(n_rows, n_models)`` value matrix by one calculated strategy (pure).
 
-    Emits one self-contained statement per requested calculated strategy, each writing an
-    ``ensemble_<strategy>`` pseudo-model into ``forecast_predictions`` (comparable to the base
-    models). Learned strategies are handled by :func:`fit_learned` — their weights aren't known
-    until trained — so they're skipped here. Returns an empty string when no calculated
-    strategy is requested.
+    ``mean``/``median`` are unweighted (``median`` robust to a wild base forecast);
+    ``inverse_error`` passes the per-model weights (∝ 1/decision_metric, renormalized over the
+    present models per row). NaNs (a model absent for a row) are ignored — the same
+    renormalize-over-present rule as the learned blend, so a date only some base models forecast
+    still yields a value rather than NaN.
+    """
+    if strategy == "median":
+        return np.nanmedian(vals, axis=1)
+    w = np.ones(vals.shape[1]) if weights is None else weights
+    return _weighted_blend(vals, w)
 
-    ``dataset`` defaults to a ``{dataset}`` template token so a config-only call renders; the
-    engine substitutes the real ``project.dataset`` at run time.
+
+def combine_calculated(
+    base_df: pd.DataFrame,
+    cfg: RunConfig,
+    metric_df: pd.DataFrame | None = None,
+) -> list[dict[str, Any]]:
+    """Blend base predictions into ``ensemble_<s>`` rows for every calculated strategy (pure).
+
+    The pandas replacement for the retired ``INSERT…SELECT`` SQL (C4 / Q4 fix): reads the base
+    ``forecast_predictions`` (long-format ``ts_id, model_type, forecast_date, yhat, yhat_lower,
+    yhat_upper``) and returns prediction-row dicts the caller stamps with ``run_id``/``ensemble_id``
+    and appends via the Storage Write API — the same path :func:`ensemble_run._apply_weights` uses
+    for the learned strategies. ``inverse_error`` weights each model by ``1/mean(decision_metric)``
+    from ``metric_df`` (``forecast_metadata`` for this run); ``mean``/``median`` need no metrics.
+    Optional pruning drops weak base models first (:func:`_pruned_models`). Blends over whichever
+    (pruned) base models are present per ``(ts_id, forecast_date)``, renormalizing weights over that
+    present subset. Returns an empty list when no calculated strategy is requested or the base is
+    empty. ``yhat``/bounds are floats or ``None`` (NaN → NULL); ``run_id``/``ensemble_id`` are added
+    by the orchestrator so this stays a pure, config-only function.
     """
     calculated = [s for s in cfg.ensemble.strategies if s in CALCULATED_STRATEGIES]
-    if not calculated:
-        return ""
+    if not calculated or base_df.empty:
+        return []
+    models = _pruned_models(cfg, metric_df)
+    present = [m for m in models if m in set(base_df["model_type"].unique())]
+    if not present:
+        return []
 
-    parts: list[str] = []
+    # inverse_error weights: 1/mean(metric) per model, renormalized; uniform when no metric frame.
+    ie_weights: np.ndarray | None = None
+    if "inverse_error" in calculated:
+        ie_weights = _inverse_error_run_weights(present, cfg, metric_df)
+
+    # One wide frame per value column, aligned to the present base models, reused across strategies.
+    keys = ["ts_id", "forecast_date"]
+    wide = {
+        col: base_df.pivot_table(index=keys, columns="model_type", values=col).reindex(
+            columns=present
+        )
+        for col in ("yhat", "yhat_lower", "yhat_upper")
+    }
+    index = wide["yhat"].index
+
+    rows: list[dict[str, Any]] = []
     for strategy in calculated:
-        if strategy == "inverse_error":
-            parts.append(_inverse_error_stmt(cfg, dataset))
-        else:
-            parts.append(_mean_or_median_stmt(strategy, cfg, dataset))
-    return "\n\n".join(parts)
+        weights = ie_weights if strategy == "inverse_error" else None
+        blended = {
+            col: _calc_blend(strategy, wide[col].to_numpy(dtype=float), weights)
+            for col in ("yhat", "yhat_lower", "yhat_upper")
+        }
+        model_type = f"ensemble_{strategy}"
+        for i, (ts_id, forecast_date) in enumerate(index):
+            yh = blended["yhat"][i]
+            if np.isnan(yh):
+                continue
+            lo, up = blended["yhat_lower"][i], blended["yhat_upper"][i]
+            rows.append(
+                {
+                    "ts_id": ts_id,
+                    "model_type": model_type,
+                    "forecast_date": forecast_date,
+                    "yhat": float(yh),
+                    "yhat_lower": None if np.isnan(lo) else float(lo),
+                    "yhat_upper": None if np.isnan(up) else float(up),
+                }
+            )
+    return rows
+
+
+def _inverse_error_run_weights(
+    models: list[str], cfg: RunConfig, metric_df: pd.DataFrame | None
+) -> np.ndarray:
+    """Per-model inverse-error weights from the run's ``forecast_metadata`` (pure).
+
+    Weight ∝ ``1/mean(decision_metric)`` over the model's metadata rows, via
+    :func:`inverse_error_weights` (zeros dominate, non-finite → uniform). Falls back to uniform when
+    no metric frame / column is available — degrading ``inverse_error`` to ``mean`` rather than
+    failing, mirroring the old SQL's ``SAFE_DIVIDE(1, NULLIF(AVG(metric), 0))`` NULL tolerance.
+    """
+    n = len(models)
+    metric = cfg.backtest.decision_metric
+    if metric_df is None or metric_df.empty or metric not in metric_df.columns:
+        return np.full(n, 1.0 / n)
+    mean_by_model = metric_df.groupby("model_type")[metric].mean()
+    errors = np.array([mean_by_model.get(m, np.nan) for m in models], dtype=float)
+    return inverse_error_weights(errors)

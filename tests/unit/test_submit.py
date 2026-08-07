@@ -172,6 +172,126 @@ def test_split_single_family_is_one_group() -> None:
     assert split_models_by_family(cfg) == {"statistical": ["theta", "holtwinters"]}
 
 
+# --- submit_multi: one shared run_id + header (C3) ------------------------------
+
+
+def _patch_multi(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stub submit_multi's GCP seams (header I/O + per-child submit); capture every call.
+
+    Returns a dict the test inspects: ``header`` (write/finalize calls), ``children`` (one entry per
+    submit_batch call with the args C3 cares about).
+    """
+    from scale_forecasting import submit
+    from scale_forecasting.registry import bq
+
+    captured: dict[str, Any] = {"header": [], "children": []}
+
+    monkeypatch.setattr(bq, "ensure_tables", lambda cfg, *, settings: None)
+    monkeypatch.setattr(
+        bq,
+        "write_header",
+        lambda cfg, run_id, *, settings: captured["header"].append(("write", run_id)),
+    )
+    monkeypatch.setattr(
+        bq,
+        "update_header",
+        lambda run_id, *, settings, **fields: captured["header"].append(
+            ("update", run_id, fields.get("status"))
+        ),
+    )
+
+    def _fake_submit_batch(cfg: RunConfig, **kw: Any) -> str:
+        from scale_forecasting.registry.ids import make_run_id
+
+        captured["children"].append(
+            {
+                # derived from the *staged* cfg → proves the child got the full cfg
+                "run_id": make_run_id(cfg),
+                "models": kw.get("models"),
+                "manage_header": kw.get("manage_header"),
+                "batch_id": kw.get("batch_id"),
+                "engine": kw.get("engine"),
+                "cfg_models": list(cfg.models),
+            }
+        )
+        return kw["batch_id"]
+
+    monkeypatch.setattr(submit, "submit_batch", _fake_submit_batch)
+    return captured
+
+
+def test_submit_multi_shares_one_run_id_and_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting import submit
+    from scale_forecasting.registry.ids import make_run_id
+
+    captured = _patch_multi(monkeypatch)
+    cfg = _cfg(models=["theta", "holtwinters", "xgboost", "lightgbm"], spark_method="multi")
+    expected_run_id = make_run_id(cfg)
+
+    ids = submit.submit_multi(cfg, settings=_settings(), infra=_infra(), wait=False)
+
+    # two families (statistical / ml) → two children, both under the ONE run_id from the full cfg.
+    assert len(captured["children"]) == 2
+    assert {c["run_id"] for c in captured["children"]} == {expected_run_id}
+    # each child stages the FULL cfg (all four models); models= restricts the executed subset.
+    assert all(c["cfg_models"] == cfg.models for c in captured["children"])
+    assert [c["models"] for c in captured["children"]] == [
+        ["theta", "holtwinters"],
+        ["xgboost", "lightgbm"],
+    ]
+    # contributor mode: submit_multi owns the header, so no child touches it.
+    assert all(c["manage_header"] is False for c in captured["children"])
+    # per-family batch ids are distinct (same run_id collides without the multi-<family> prefix).
+    assert len(set(ids)) == 2
+    assert all(bid.startswith("sf-multi-") for bid in ids)
+
+    # exactly one header written (RUNNING) then finalized COMPLETED, both on the shared run_id.
+    assert captured["header"] == [
+        ("write", expected_run_id),
+        ("update", expected_run_id, "COMPLETED"),
+    ]
+
+
+def test_submit_multi_finalizes_failed_and_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting import submit
+    from scale_forecasting.errors import EngineError
+    from scale_forecasting.registry.ids import make_run_id
+
+    captured = _patch_multi(monkeypatch)
+
+    # First family's submit raises; the header must still finalize FAILED and the error re-raise.
+    def _boom(cfg: RunConfig, **kw: Any) -> str:
+        raise EngineError("batch sf-multi-statistical-... terminal state FAILED")
+
+    monkeypatch.setattr(submit, "submit_batch", _boom)
+    cfg = _cfg(models=["theta", "xgboost"], spark_method="multi")
+    expected_run_id = make_run_id(cfg)
+
+    with pytest.raises(EngineError, match="FAILED"):
+        submit.submit_multi(cfg, settings=_settings(), infra=_infra(), wait=False)
+
+    assert ("write", expected_run_id) in captured["header"]
+    assert ("update", expected_run_id, "FAILED") in captured["header"]
+
+
+def test_submit_multi_n_series_keeps_one_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scale override is applied once before hashing, so all children still share one run_id
+    # (and it differs from the un-overridden id — the scale is part of the config, G3).
+    from scale_forecasting import submit
+    from scale_forecasting.registry.ids import make_run_id
+
+    captured = _patch_multi(monkeypatch)
+    cfg = _cfg(models=["theta", "xgboost"], spark_method="multi")
+    scaled = cfg.model_copy(update={"data": cfg.data.model_copy(update={"series_limit": 1000})})
+    expected_run_id = make_run_id(scaled)
+
+    submit.submit_multi(cfg, n_series=1000, settings=_settings(), infra=_infra(), wait=False)
+
+    assert {c["run_id"] for c in captured["children"]} == {expected_run_id}
+    assert expected_run_id != make_run_id(cfg)
+    assert all(c["cfg_models"] == cfg.models for c in captured["children"])
+
+
 def test_multi_on_cluster_engine_is_guarded() -> None:
     # multi is submit-side only; the on-cluster engine must refuse loudly, not run un-split.
     from scale_forecasting.engines import spark_multi

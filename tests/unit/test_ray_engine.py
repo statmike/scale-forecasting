@@ -96,6 +96,71 @@ def test_pool_cells_counts_series_times_models() -> None:
     assert ray_engine._pool_cells(pd.DataFrame(), cfg, [_CPU]) == 0  # empty panel
 
 
+# --- offline: Storage Read API read helpers (C-Ray, Q3) ------------------------
+
+
+def _settings(**over: Any) -> Settings:
+    base: dict[str, Any] = {
+        "project_id": "proj-x",
+        "connection": "proj-x.us-central1.conn",
+        "warehouse_uri": "gs://bkt/warehouse",
+        "dataset_id": "ds_x",
+    }
+    base.update(over)
+    return Settings(**base)
+
+
+def test_storage_table_path_qualifies_bare_name_against_deployment_dataset() -> None:
+    # a bare source_table resolves against the deployment project+dataset → storage resource path.
+    path = ray_engine._storage_table_path(_cfg(), _settings())
+    assert path == "projects/proj-x/datasets/ds_x/tables/source_series_native"
+
+
+def test_storage_table_path_accepts_fully_qualified_source() -> None:
+    cfg = _cfg(data={"source_table": "other_proj.other_ds.series", "horizon": 7})
+    path = ray_engine._storage_table_path(cfg, _settings())
+    assert path == "projects/other_proj/datasets/other_ds/tables/series"
+
+
+def test_storage_table_path_prefixes_two_part_source_with_project() -> None:
+    # dataset.table (another dataset in the same project) → the deployment project is prepended.
+    cfg = _cfg(data={"source_table": "other_ds.series", "horizon": 7})
+    path = ray_engine._storage_table_path(cfg, _settings())
+    assert path == "projects/proj-x/datasets/other_ds/tables/series"
+
+
+def test_limit_series_keeps_first_n_ordered_ids() -> None:
+    # 5 series, limit 3 → the first three ts_ids by sort order, all their rows, others dropped.
+    src = _panel(5)
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7, "series_limit": 3})
+    out = ray_engine._limit_series(src, cfg)
+    assert sorted(out["ts_id"].unique()) == ["s0", "s1", "s2"]
+    assert len(out) == 3 * 6  # 3 series × 6 rows each, nothing else
+
+
+def test_limit_series_passthrough_when_unset() -> None:
+    src = _panel(4)
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7})  # no series_limit
+    out = ray_engine._limit_series(src, cfg)
+    assert len(out) == len(src)
+    assert sorted(out["ts_id"].unique()) == ["s0", "s1", "s2", "s3"]
+
+
+def test_limit_series_matches_spark_ordered_subset() -> None:
+    # Parity with spark_io._limit_series: both keep the SAME first-N ordered distinct ids, so Ray
+    # and Spark run identical series at every scale (DESIGN §13.1). Ids ordered lexically.
+    src = pd.DataFrame(
+        {
+            "ts_id": ["s3", "s1", "s2", "s1", "s3", "s2"],
+            "ds": pd.date_range("2024-01-01", periods=6),
+            "y": range(6),
+        }
+    )
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7, "series_limit": 2})
+    out = ray_engine._limit_series(src, cfg)
+    assert sorted(out["ts_id"].unique()) == ["s1", "s2"]  # s1,s2 ordered-first, s3 dropped
+
+
 # --- @ray: run end-to-end on a real local Ray session --------------------------
 
 

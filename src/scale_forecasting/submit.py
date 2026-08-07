@@ -21,8 +21,10 @@ What :func:`submit_batch` does:
    the naive demo is throttled), and return the batch id.
 
 ``multi`` is orchestrated here too (:func:`submit_multi`): it fans out one child ``explode`` batch
-per model family, because ``google-cloud-dataproc`` lives in the ``[spark]`` extra and is absent
-from the runtime container — so family-splitting can only happen submit-side, not on-cluster.
+per model family — all under **one** shared ``run_id`` and one ``run_registry`` header (C3), the
+same contributor-mode contract :func:`main.run` uses. Family-splitting happens submit-side (not
+on-cluster) because ``google-cloud-dataproc`` lives in the ``[spark]`` extra and is absent from the
+runtime container.
 
 Public surface: ``BatchInfra``, ``submit_batch``, ``submit_multi``, ``main``.
 """
@@ -346,6 +348,7 @@ def submit_batch(
     max_executors: int | None = None,
     models: list[str] | None = None,
     manage_header: bool = True,
+    batch_id: str | None = None,
     wait: bool = True,
 ) -> str:
     """Stage code + config and submit one Dataproc Serverless forecast batch; return its batch id.
@@ -363,6 +366,12 @@ def submit_batch(
     executed subset on-cluster and ``manage_header=False`` runs the engine in contributor mode
     (``main.run`` owns the shared header). Both default to standalone behavior, so every existing
     caller stages and submits exactly as before.
+
+    ``batch_id`` overrides the derived ``sf-<engine>-<run_id>`` id. It exists for
+    :func:`submit_multi`, where every family child stages the **same** full cfg (one shared
+    ``run_id``) as ``explode`` — so the derived id would collide across families; the caller
+    supplies a per-family id instead. When ``None`` (every standalone caller) the id is derived as
+    before.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -374,7 +383,7 @@ def submit_batch(
             update={"data": cfg.data.model_copy(update={"series_limit": n_series})}
         )
     run_id = make_run_id(cfg)
-    batch_id = _batch_id(run_id, engine)
+    batch_id = batch_id or _batch_id(run_id, engine)
 
     package_uri, launcher_uri = _stage_code(infra)
     config_uri = _stage_config(cfg, run_id, infra)
@@ -444,36 +453,92 @@ def submit_multi(
     infra: BatchInfra | None = None,
     wait: bool = True,
 ) -> list[str]:
-    """Fan a run out into one child ``explode`` batch per model family (the ``multi`` method).
+    """Fan a run out into one child ``explode`` batch per family — under **one** shared run_id.
 
-    Splits ``cfg.models`` by each model's ``family`` (statistical / ml / deep_learning / native)
-    and submits an independent explode batch per family — separate autoscaling + failure domains,
-    and a distinct ``run_id``/header each (the family subset changes the config, hence the id).
-    ``n_series`` (if set) is threaded to every child so all families run the same scale.
+    Splits ``cfg.models`` by each model's ``family`` (statistical / ml / deep_learning / native) and
+    submits an independent explode batch per family — separate autoscaling + failure domains — but
+    all under a **single** ``run_id`` and a **single** ``run_registry`` header (C3). This is the
+    contributor-mode contract :func:`main.run` already uses:
+
+    1. **One run_id from the full cfg.** ``run_id = make_run_id(cfg)`` is computed once over the
+       whole config (``n_series`` applied first so a scale override still yields one id); every
+       child stages that same full cfg, so all children derive the identical id — the leaderboard
+       shows the whole multi run as one ``run_id`` with every family under it, not one per family.
+    2. **One header owner.** :func:`submit_multi` writes the shared header (RUNNING) up front and
+       finalizes it after every child joins; each child runs the engine with ``manage_header=False``
+       (contributor mode), so no child touches the header and there is no UPDATE race.
+    3. **Per-family executed subset + batch id.** Each child gets ``models=<family>`` (restricting
+       what it runs on-cluster while the full cfg stays staged) and an explicit per-family
+       ``batch_id`` (``sf-multi-<family>-<run_id>``), because the derived ``sf-explode-<run_id>`` id
+       would be identical across families (same run_id) and collide in Dataproc.
+
     Orchestrated here rather than on-cluster because ``google-cloud-dataproc`` isn't in the runtime
-    container. Returns the child batch ids.
+    container. Blocks per child when ``wait`` (families run sequentially — B2 keeps the submit path
+    simple; each child's own batch still autoscales independently). The shared header is finalized
+    COMPLETED iff every child succeeded, else FAILED (finalized before re-raising the first failure,
+    so the run stays queryable and the CLI exits non-zero). Returns the child batch ids.
     """
+    import time
+
+    from .registry import bq
+    from .registry.ids import make_run_id
     from .settings import Settings
 
     settings = settings or Settings.resolve()
     infra = infra or BatchInfra.resolve()
 
-    families = split_models_by_family(cfg)
-    _log.info("multi: %d family batches for run '%s'", len(families), cfg.run_name)
-    batch_ids: list[str] = []
-    for family, models in families.items():
-        child = cfg.model_copy(update={"models": models, "spark_method": "explode"})
-        batch_ids.append(
-            submit_batch(
-                child,
-                engine="explode",
-                n_series=n_series,
-                settings=settings,
-                infra=infra,
-                wait=wait,
-            )
+    # One run_id for the whole multi run: apply the scale override first (so it's part of the hashed
+    # cfg), then hash the full cfg once. Every child stages this same cfg → same run_id.
+    if n_series is not None:
+        cfg = cfg.model_copy(
+            update={"data": cfg.data.model_copy(update={"series_limit": n_series})}
         )
-        _log.info("multi: submitted family=%s models=%s", family, models)
+    run_id = make_run_id(cfg)
+
+    families = split_models_by_family(cfg)
+    _log.info(
+        "multi: %d family batches for run '%s' under one run_id=%s",
+        len(families),
+        cfg.run_name,
+        run_id,
+    )
+
+    # One header owner (mirrors main.run): write RUNNING once, finalize after all children join.
+    bq.ensure_tables(cfg, settings=settings)
+    bq.write_header(cfg, run_id, settings=settings)
+
+    started = time.perf_counter()
+    batch_ids: list[str] = []
+    first_error: BaseException | None = None
+    for family, models in families.items():
+        try:
+            batch_ids.append(
+                submit_batch(
+                    cfg,  # full cfg → shared run_id; models= restricts the on-cluster subset
+                    engine="explode",
+                    settings=settings,
+                    infra=infra,
+                    models=models,
+                    manage_header=False,  # contributor mode: this function owns the shared header
+                    batch_id=_batch_id(f"{family}-{run_id}", "multi"),
+                    wait=wait,
+                )
+            )
+            _log.info("multi: submitted family=%s models=%s", family, models)
+        except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
+            first_error = first_error or exc
+            _log.warning("multi: family=%s failed: %r", family, exc)
+
+    runtime_seconds = time.perf_counter() - started
+    bq.update_header(
+        run_id,
+        settings=settings,
+        status="COMPLETED" if first_error is None else "FAILED",
+        runtime_seconds=runtime_seconds,
+        n_series=cfg.data.series_limit,
+    )
+    if first_error is not None:
+        raise first_error
     return batch_ids
 
 

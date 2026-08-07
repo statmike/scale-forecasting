@@ -1,11 +1,13 @@
 """Live ensemble-orchestration smoke (BUILD B5, ``@gcp``).
 
 Runs :func:`scale_forecasting.main.run` end-to-end against live GCP with **ensembles enabled**, and
-asserts the B5 contract the offline tests can't reach: after both engines join, the ensembler blends
-the base forecasts, scores each consensus against held-out actuals, and lands ``ensemble_*`` rows on
-the **same ``v_model_leaderboard``** as the base Spark + BigQuery models — under one shared
-``run_id``, with a non-NULL ``mean_wape`` (i.e. the scoring join to ``source_series`` actuals
-actually produced a metric, not an empty row).
+asserts the B5 contract the offline tests can't reach: after both engines join, the ensembler
+blends the base forecasts (a true beyond-data forecast into ``forecast_predictions``), scores each
+consensus on the **backtest OOF window** (post-C2 the predictions have no actuals to join — the
+ensemble earns its metric on exactly the window the base models are scored on), and lands
+``ensemble_*`` rows on the **same ``v_model_leaderboard``** as the base Spark + BigQuery models —
+under one shared ``run_id``, with a non-NULL ``mean_wape`` (i.e. the OOF-consensus scoring actually
+produced a metric, not an empty row).
 
 This is the missing leaderboard link (``forecast_metadata WHERE fold_id IS NULL`` for each
 ``ensemble_*`` pseudo-model). Once those rows exist, the ensembles surface on the leaderboard with
@@ -26,11 +28,11 @@ univariate scratch ``source_series`` table and tears it down after — "the test
 ``run_name`` varies per invocation so the deterministic ``run_id`` is unique (append-only cell
 tables can't be DELETE-d while buffered).
 
-The ensemble uses **calculated** strategies only (mean / median / inverse_error): the base Spark and
-BigQuery models forecast disjoint date windows (Spark forecasts the true future; the natives score a
-held-out fold), and the calculated blends renormalize over whichever base models share a
-(ts_id, forecast_date) — so the scoring join to actuals is robust to that disjointness without a
-learned fit. (Learned strategies are covered by the offline unit tests.)
+The ensemble uses **calculated** strategies only (mean / median / inverse_error): post-C2 both the
+base Spark and BigQuery models forecast the same true future into ``forecast_predictions`` and
+score the same ``backtest_oof`` folds, so the calculated blends have overlapping base rows in both
+spaces. Scoring happens in OOF space (where ``y_true`` lives). (Learned strategies are covered by
+the offline unit tests.)
 """
 
 from __future__ import annotations
@@ -184,3 +186,28 @@ def test_ensemble_orchestration_smoke(settings: Settings, scratch_source: str) -
         assert row.compute_engine == "ensemble", m
         assert row.mean_wape is not None, f"{m} scored no metric — actuals join produced nothing"
         assert row.n_cells > 0, m
+
+    # C4 — two ensemble configs coexist under one run_id, distinctly keyed by ensemble_id. Re-run
+    # the ensemble stage over the *same* base predictions with a different strategy set (the
+    # standalone path, no base recompute). It must land under a *new* ensemble_id beside the first,
+    # never overwriting it (append-only) and never colliding on model_type.
+    from scale_forecasting.ensemble_run import _override_ensemble, run_ensembles
+    from scale_forecasting.registry.ids import make_ensemble_id
+
+    first_id = make_ensemble_id(cfg.ensemble)
+    cfg2 = _override_ensemble(cfg, ["mean"])  # a subset → a different ensemble_id
+    second_id = make_ensemble_id(cfg2.ensemble)
+    assert second_id != first_id
+    run_ensembles(cfg2, run_id, settings=settings)
+
+    keyed = _poll_rows(
+        client,
+        f"SELECT ensemble_id FROM `{d}.v_model_leaderboard` "
+        f"WHERE run_id=@run_id AND model_type='ensemble_mean'",
+        run_id,
+        lambda rows: {r.ensemble_id for r in rows} >= {first_id, second_id},
+    )
+    landed = {r.ensemble_id for r in keyed}
+    assert landed >= {first_id, second_id}, (
+        f"both ensemble configs should coexist; saw {landed}, want {{{first_id}, {second_id}}}"
+    )

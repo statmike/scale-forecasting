@@ -54,8 +54,44 @@ def test_create_model_arima_plus_options_and_id_col() -> None:
     assert "time_series_data_col = 'y'" in sql
     assert "horizon = 28" in sql
     assert "data_frequency = 'DAILY'" in sql
-    # Held-out cut: train up to and including the cutoff (last training date).
+
+
+def test_create_model_final_trains_on_all_history() -> None:
+    # C2 alignment: the final (true-future) model trains on ALL history — no held-out cutoff — so
+    # its ML.FORECAST(horizon) lands beyond MAX(ds), parity with the Spark final fit.
+    sql = be.build_create_model_sql(_cfg(["arima_plus"], series_limit=None), "arima_plus", _DS)
+    assert "DATE_SUB(MAX(ds)" not in sql
+    assert "ds <=" not in sql
+    assert "WHERE" not in sql  # no date bound, no series filter → no WHERE at all
+
+
+def test_create_model_backtest_fold_trains_pre_cutoff() -> None:
+    # A backtest fold trains on ds <= cutoff (MAX(ds) - back_steps) into a fold-suffixed object.
+    cfg = _cfg(["arima_plus"], series_limit=None)
+    sql = be.build_create_model_sql(cfg, "arima_plus", _DS, back_steps=28, fold_id=0)
     assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in sql
+    # Fold-suffixed model object so folds + the final model never clobber each other.
+    assert "_f0`" in sql
+
+
+def test_create_model_sliding_fold_has_fixed_window() -> None:
+    # scheme='sliding' adds a lower bound so the training window is fixed-width (min_train).
+    cfg = RunConfig(
+        run_name="bq test",
+        data={"source_table": "src", "series_limit": None},
+        models=["arima_plus"],
+        backtest={
+            "enabled": True,
+            "scheme": "sliding",
+            "min_train": 180,
+            "horizon": 28,
+            "step": 28,
+        },
+    )
+    sql = be.build_create_model_sql(cfg, "arima_plus", _DS, back_steps=28, fold_id=0)
+    assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in sql
+    # lower bound = cutoff - min_train = MAX(ds) - (28 + 180)
+    assert "ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 208 DAY)" in sql
 
 
 def test_create_model_name_embeds_run_id_and_is_sanitized() -> None:
@@ -120,22 +156,58 @@ def test_forecast_insert_timesfm_uses_ai_forecast_no_model() -> None:
     assert "horizon => 28" in sql
 
 
+def test_forecast_insert_is_true_future_not_held_out() -> None:
+    # C2: the final forecast INSERT reads from the all-history model — no held-out cutoff — so it
+    # extrapolates beyond MAX(ds). ARIMA_PLUS owns its time axis (ML.FORECAST(horizon) suffices);
+    # no future-dates input table is needed for the univariate natives.
+    sql = be.build_forecast_insert_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
+    assert "DATE_SUB(MAX(ds)" not in sql
+    # TimesFM forecasts from all history too (no ds <= cutoff bound on its inline history).
+    tsql = be.build_forecast_insert_sql(_cfg(["timesfm"]), "timesfm", _DS)
+    assert "DATE_SUB(MAX(ds)" not in tsql
+
+
+# --- fold plan -----------------------------------------------------------------
+
+
+def test_fold_plan_mirrors_make_folds_geometry() -> None:
+    # back_steps = horizon + (n_folds-1-k)*step, fold 0 = largest step-back (earliest fold),
+    # matching backtest.make_folds so native + Python OOF fold ids line up.
+    cfg = RunConfig(
+        run_name="bq test",
+        data={"source_table": "src"},
+        models=["arima_plus"],
+        backtest={"enabled": True, "n_folds": 3, "horizon": 28, "step": 28},
+    )
+    assert be.fold_plan(cfg) == [(0, 84), (1, 56), (2, 28)]
+
+
 # --- eval + history read-back --------------------------------------------------
 
 
-def test_eval_query_joins_forecast_to_actuals_with_intervals() -> None:
-    sql = be.build_eval_query(_cfg(["arima_plus"]), "arima_plus", _DS)
+def test_eval_query_joins_fold_forecast_to_actuals_with_intervals() -> None:
+    sql = be.build_eval_query(_cfg(["arima_plus"]), "arima_plus", _DS, back_steps=28, fold_id=0)
     assert "AS y_true" in sql
     assert "AS yhat" in sql
     assert "AS yhat_lower" in sql and "AS yhat_upper" in sql
     assert "JOIN `proj.scale_forecasting.source_series_native`" in sql
     assert "DATE(f.forecast_timestamp)" in sql
+    # Fold eval reads the fold-suffixed model over its held-out window (ds <= cutoff).
+    assert "_f0`" in sql
 
 
-def test_history_query_is_pre_cutoff_training_window() -> None:
-    sql = be.build_history_query(_cfg(["arima_plus"]), _DS)
+def test_history_query_is_all_history() -> None:
+    # C2: MASE/RMSSE scale comes from the full series history (natives train on all of it), so the
+    # history read is no longer clipped to a pre-cutoff window.
+    sql = be.build_history_query(_cfg(["arima_plus"], series_limit=None), _DS)
     assert "AS ts_id" in sql and "AS y" in sql
-    assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in sql
+    assert "DATE_SUB(MAX(ds)" not in sql
+
+
+def test_series_ids_query_lists_the_subset() -> None:
+    sql = be.build_series_ids_query(_cfg(["arima_plus"], series_limit=100), _DS)
+    assert "SELECT DISTINCT ts_id AS ts_id" in sql
+    assert "ORDER BY ts_id LIMIT 100" in sql
 
 
 # --- series_limit subset -------------------------------------------------------

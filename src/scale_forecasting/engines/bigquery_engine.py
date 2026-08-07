@@ -2,27 +2,35 @@
 
 The BigQuery runtime executes forecasting *as SQL inside BigQuery* — the opposite of the Spark
 track's per-cell fan-out. ``ARIMA_PLUS`` with ``time_series_id_col`` trains **all series in one
-``CREATE MODEL`` statement**; ``AI.FORECAST`` (TimesFM) forecasts every series in one call with no
+``CREATE MODEL`` statement``; ``AI.FORECAST`` (TimesFM) forecasts every series in one call with no
 training at all. Both land in the *same* three-tier registry as the Python models, so a native model
 and a Spark model are directly comparable on ``v_model_leaderboard`` (DESIGN §3.3).
 
 This module has two halves:
 
-* **Pure SQL builders** (``build_*`` / ``render_*``) — deterministic string renderers, mirroring the
-  ``ensembler.build_ensemble_sql`` house style: a ``dataset`` argument defaulting to a ``{dataset}``
-  template token so a config-only call renders, ``@run_id`` bound as a **query parameter**, and
-  identifiers (dataset, columns, model names) interpolated. Snapshot-tested offline, no GCP.
+* **Pure SQL builders** (``build_*`` / ``render_*``) — deterministic string renderers: a ``dataset``
+  argument defaulting to a ``{dataset}`` template token so a config-only call renders, ``@run_id``
+  bound as a **query parameter**, and identifiers (dataset, columns, model names) interpolated.
+  Snapshot-tested offline, no GCP.
 * **The engine** (:func:`run`) — resolves :class:`~scale_forecasting.settings.Settings`, owns the
   ``run_registry`` header lifecycle exactly like :func:`spark_naive.run`, executes the builders'
-  SQL via ``bigquery.Client``, reads the held-out forecast back, computes the metric panel through
+  SQL via ``bigquery.Client``, reads the fold forecasts back, computes the metric panel through
   the shared :func:`~scale_forecasting.metrics.compute_metrics` (no formula drift), and writes all
   three cell tables via the registry's Storage Write API row-dict path.
 
-**Held-out semantics (single fold).** Every native model trains on ``ds <= cutoff`` (where
-``cutoff = MAX(ds) - horizon``) and forecasts the last ``horizon`` window ``ds > cutoff`` — a window
-we have ground truth for. So ``forecast_predictions``, ``backtest_oof`` (``fold_id=0``), and the
-metric panel are all real, not synthetic-future. Beyond-data forecasting and alignment with the
-Spark track under one shared ``run_id`` is Arc B (``main`` orchestration), out of B3's scope.
+**Alignment with the Spark track (Arc C / C2).** The native models now mean the *same thing* as the
+Python models in every table:
+
+* ``forecast_predictions`` **always** holds a **true beyond-data forecast** — the final model is fit
+  on *all* history and forecasts the next ``data.horizon`` steps, exactly like the Spark path's
+  final-fit-then-forecast. It is never a scored within-history window.
+* Scored evaluation lives **entirely in the backtest path**, for both engines. When
+  ``backtest.enabled`` is on, a **BQML fold loop** (per fold: ``CREATE MODEL`` on ``ds <= cutoff`` +
+  ``ML.FORECAST``) mirrors :func:`backtest.make_folds`'s anchored-from-end geometry, writing
+  ``backtest_oof`` with real ``fold_id``s and a rolled-up ``forecast_metadata`` panel
+  (``fold_id=NULL``). When backtest is off, the engine writes a ``fold_id=NULL`` metadata row per
+  ``(series, model)`` with a NaN metric panel — precise parity with the Python worker, which also
+  emits an unscored metadata row when backtesting is off.
 
 **Transform.** ``cfg.features.transform`` (e.g. ``log1p``) is intentionally **not** applied here:
 ARIMA_PLUS runs its own decomposition, and TimesFM is a pretrained foundation model (DESIGN §4).
@@ -32,7 +40,8 @@ across runtimes.
 
 Public surface: ``run(cfg, models)``; builders ``build_create_model_sql``,
 ``build_forecast_insert_sql``, ``build_eval_query``, ``build_history_query``,
-``build_custom_holiday_cte``, ``render_setup_sql``, ``bqml_options``.
+``build_series_ids_query``, ``build_custom_holiday_cte``, ``render_setup_sql``, ``bqml_options``,
+``fold_plan``.
 """
 
 from __future__ import annotations
@@ -56,7 +65,7 @@ class BqOutcome:
     ``status`` is COMPLETED (the engine raises on any SQL failure rather than returning FAILED, so a
     returned outcome is always COMPLETED today; the field is explicit for symmetry with the Spark
     roll-up and future partial-success handling). ``n_series`` is the distinct series count observed
-    in the held-out eval; ``models`` is the executed native subset (feeds ``bq_models``).
+    in the source subset; ``models`` is the executed native subset (feeds ``bq_models``).
     """
 
     status: str
@@ -121,17 +130,19 @@ def _source_ref(cfg: RunConfig, dataset: str) -> str:
     return src if "." in src else f"{dataset}.{src}"
 
 
-def _model_ref(cfg: RunConfig, model_name: str, dataset: str) -> str:
-    """The backtick-quoted BQML model object path for one ``(model, run)`` (persisted, reusable).
+def _model_ref(cfg: RunConfig, model_name: str, dataset: str, *, fold_id: int | None = None) -> str:
+    """The backtick-quoted BQML model object path for one ``(model, run[, fold])`` (persisted).
 
     The object name embeds the config-pinned ``run_id`` so re-running the same config targets the
     *same* model (``CREATE OR REPLACE`` is idempotent) while a different config gets a distinct
-    object. A model object name is an identifier — it cannot be a bound query parameter — so the
-    ``run_id`` is interpolated here; it is a pure function of ``cfg`` (:func:`make_run_id`), which
-    keeps every builder a pure function of its config.
+    object. ``fold_id`` (when set) appends an ``_f{k}`` suffix so each backtest fold trains its own
+    model object without clobbering the final (true-future) model or the other folds. A model object
+    name is an identifier — it cannot be a bound query parameter — so the ``run_id`` is interpolated
+    here; it is a pure function of ``cfg`` (:func:`make_run_id`), keeping every builder pure.
     """
     run_id = make_run_id(cfg)
-    return f"`{dataset}.sf_model_{model_name}_{_sanitize_identifier(run_id)}`"
+    suffix = f"_f{fold_id}" if fold_id is not None else ""
+    return f"`{dataset}.sf_model_{model_name}_{_sanitize_identifier(run_id)}{suffix}`"
 
 
 def _series_filter(cfg: RunConfig, source: str, id_expr: str) -> str:
@@ -149,20 +160,34 @@ def _series_filter(cfg: RunConfig, source: str, id_expr: str) -> str:
     )
 
 
-def _cutoff_expr(cfg: RunConfig, source: str) -> str:
-    """Scalar subquery for the held-out cutoff date: ``MAX(ds) - horizon`` over the source.
+def _cutoff_expr(cfg: RunConfig, source: str, back_steps: int) -> str:
+    """Scalar subquery for a training cutoff date: ``MAX(ds) - back_steps`` over the source.
 
-    The cutoff is the last *training* date: models train on ``ds <= cutoff`` and are scored on
-    ``ds > cutoff`` — exactly the ``horizon`` days ``cutoff+1 … MAX(ds)``, every one of which has
-    ground truth. A single global cutoff (not per-series) keeps every series' held-out window
-    aligned — the shipped data shares one date span, so this is exact; note it if your series end on
-    different dates.
+    ``back_steps`` is the number of cadence units to step back from the last observed date, so the
+    model trains on ``ds <= cutoff`` and is scored on the ``horizon`` window after it. A single
+    global cutoff (not per-series) keeps every series' fold window aligned — the shipped data shares
+    one date span, so this is exact; note it if your series end on different dates.
     """
     _, unit = _freq(cfg)
     return (
-        f"(SELECT DATE_SUB(MAX({cfg.data.date_col}), INTERVAL {cfg.data.horizon} {unit}) "
-        f"FROM `{source}`)"
+        f"(SELECT DATE_SUB(MAX({cfg.data.date_col}), INTERVAL {back_steps} {unit}) FROM `{source}`)"
     )
+
+
+def fold_plan(cfg: RunConfig) -> list[tuple[int, int]]:
+    """The backtest folds as ``[(fold_id, back_steps)]`` — pure, mirrors ``backtest.make_folds``.
+
+    ``make_folds`` anchors folds from the end: fold ``k``'s validation window starts at position
+    ``n - horizon - (n_folds - 1 - k) * step``. In date space anchored on ``MAX(ds)`` that makes
+    the last *training* date ``MAX(ds) - back_steps`` where
+    ``back_steps = horizon + (n_folds-1-k)*step`` — independent of each series' length, so this is a
+    pure function of ``cfg.backtest``. ``fold_id`` ordering matches ``make_folds`` (fold 0 is the
+    earliest / largest step-back), so native and Python OOF fold ids line up. The per-series
+    min-train feasibility guard ``make_folds`` enforces is *not* replicated in SQL (BQML trains on
+    whatever history precedes the cutoff); series too short for a fold simply train on less.
+    """
+    bt = cfg.backtest
+    return [(k, bt.horizon + (bt.n_folds - 1 - k) * bt.step) for k in range(bt.n_folds)]
 
 
 # --- pure SQL builders ---------------------------------------------------------
@@ -236,29 +261,61 @@ def build_custom_holiday_cte(cfg: RunConfig) -> str:
     return "custom_holiday AS (\n  SELECT * FROM UNNEST([\n" + ",\n".join(rows) + "\n  ])\n)"
 
 
-def _training_select(cfg: RunConfig, source: str) -> str:
-    """The ``training_data`` SELECT: id/timestamp/target over ``ds <= cutoff``."""
+def _train_window_where(cfg: RunConfig, source: str, back_steps: int | None) -> list[str]:
+    """The training-window date predicates for a model fit (``[]`` = train on all history).
+
+    ``back_steps=None`` is the **final, true-future** fit: no date bound, train on everything.
+    Otherwise the fit is a backtest fold: ``ds <= cutoff`` (expanding), plus a lower
+    ``ds > cutoff - min_train`` bound for the sliding scheme so the window is fixed-width —
+    mirroring ``backtest.make_folds``'s ``expanding`` vs ``sliding`` ``train_start``.
+    """
+    if back_steps is None:
+        return []
+    datec = cfg.data.date_col
+    conds = [f"{datec} <= {_cutoff_expr(cfg, source, back_steps)}"]
+    if cfg.backtest.scheme == "sliding":
+        lower = _cutoff_expr(cfg, source, back_steps + cfg.backtest.min_train)
+        conds.append(f"{datec} > {lower}")
+    return conds
+
+
+def _training_select(cfg: RunConfig, source: str, *, back_steps: int | None = None) -> str:
+    """The ``training_data`` SELECT: id/timestamp/target over the fit's training window.
+
+    ``back_steps=None`` trains on **all** history (the final true-future fit); an int restricts to a
+    backtest fold's window (see :func:`_train_window_where`).
+    """
     cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col]
-    cutoff = _cutoff_expr(cfg, source)
-    where = [f"{cfg.data.date_col} <= {cutoff}"]
+    where = _train_window_where(cfg, source, back_steps)
     sfilter = _series_filter(cfg, source, cfg.data.ts_id_col)
     if sfilter:
         where.append(sfilter)
-    return f"SELECT {', '.join(cols)}\n  FROM `{source}`\n  WHERE {' AND '.join(where)}"
+    clause = f"\n  WHERE {' AND '.join(where)}" if where else ""
+    return f"SELECT {', '.join(cols)}\n  FROM `{source}`{clause}"
 
 
-def build_create_model_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
-    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS native model (held-out fit).
+def build_create_model_sql(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    back_steps: int | None = None,
+    fold_id: int | None = None,
+) -> str:
+    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS native model.
 
-    Trains on ``ds <= cutoff`` so the model is scored on the last ``horizon`` window it never saw.
+    ``back_steps=None`` (default) is the **final** model: trained on *all* history so its forecast
+    is a true beyond-data forecast (parity with the Spark final fit). A ``back_steps``/``fold_id``
+    pair builds a **backtest fold** model — trained on ``ds <= cutoff`` — into a fold-suffixed
+    object.
     When holidays are configured the ``AS`` clause takes the named-subquery form
     (``training_data AS (...), custom_holiday AS (...)``); otherwise it is a plain training query.
     TimesFM has no CREATE MODEL — see :func:`build_forecast_insert_sql`.
     """
-    ref = _model_ref(cfg, model_name, dataset)
+    ref = _model_ref(cfg, model_name, dataset, fold_id=fold_id)
     source = _source_ref(cfg, dataset)
     options = _render_options(bqml_options(cfg, model_name))
-    training = _training_select(cfg, source)
+    training = _training_select(cfg, source, back_steps=back_steps)
     holiday_cte = build_custom_holiday_cte(cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
@@ -268,36 +325,50 @@ def build_create_model_sql(cfg: RunConfig, model_name: str, dataset: str = "{dat
     return f"CREATE OR REPLACE MODEL {ref}\n{options}\n{as_clause};"
 
 
-def _forecast_source(cfg: RunConfig, model_name: str, dataset: str) -> str:
-    """The ``ML.FORECAST`` / ``AI.FORECAST`` table expression producing the held-out forecast.
+def _forecast_source(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str,
+    *,
+    back_steps: int | None = None,
+    fold_id: int | None = None,
+    horizon: int | None = None,
+) -> str:
+    """The ``ML.FORECAST`` / ``AI.FORECAST`` table expression producing a forecast.
 
-    ARIMA_PLUS: ``ML.FORECAST(MODEL m, STRUCT(...))``. TimesFM: ``AI.FORECAST`` over the
-    ``ds <= cutoff`` history — no model object. Both yield ``forecast_timestamp`` /
+    ``back_steps=None`` is the **final true-future** forecast (from the all-history model /
+    all-history TimesFM history); an int is a **backtest fold** forecast (from the fold model /
+    ``ds <= cutoff`` TimesFM history). ``horizon`` defaults to ``data.horizon`` for the final
+    forecast and ``backtest.horizon`` for a fold. Both yield ``forecast_timestamp`` /
     ``forecast_value`` / ``prediction_interval_{lower,upper}_bound`` plus the id column.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
-    horizon = cfg.data.horizon
-    struct = f"STRUCT({horizon} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
+    h = (
+        horizon
+        if horizon is not None
+        else (cfg.data.horizon if back_steps is None else cfg.backtest.horizon)
+    )
 
     if model_name == "timesfm":
-        cutoff = _cutoff_expr(cfg, source)
-        where = [f"{datec} <= {cutoff}"]
+        where = _train_window_where(cfg, source, back_steps)
         sfilter = _series_filter(cfg, source, idc)
         if sfilter:
             where.append(sfilter)
-        inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}` WHERE {' AND '.join(where)}"
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{clause}"
         return (
             "AI.FORECAST(\n"
             f"    ({inner}),\n"
             f"    data_col => '{targetc}',\n"
             f"    timestamp_col => '{datec}',\n"
             f"    id_cols => ['{idc}'],\n"
-            f"    horizon => {horizon},\n"
+            f"    horizon => {h},\n"
             f"    confidence_level => {_CONFIDENCE_LEVEL})"
         )
 
-    ref = _model_ref(cfg, model_name, dataset)
+    ref = _model_ref(cfg, model_name, dataset, fold_id=fold_id)
+    struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
 
 
@@ -309,12 +380,14 @@ _PRED_COLS = (
 
 
 def build_forecast_insert_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
-    """``INSERT INTO forecast_predictions`` the held-out forecast for one native model.
+    """``INSERT INTO forecast_predictions`` the **true beyond-data** forecast for one native model.
 
-    The showpiece statement: one query forecasts every series and lands canonical prediction rows
-    with ``compute_engine='bigquery'``. ``forecast_timestamp`` → ``DATE()`` → ``forecast_date``;
-    the interval bounds map to ``yhat_lower`` / ``yhat_upper``; ``quantiles`` is NULL (native models
-    emit an interval, not an arbitrary quantile set).
+    The showpiece statement: one query forecasts every series' next ``data.horizon`` steps from a
+    model fit on *all* history and lands canonical prediction rows with
+    ``compute_engine='bigquery'`` — directly comparable to the Spark models' true-future rows.
+    ``forecast_timestamp`` → ``DATE()`` → ``forecast_date``; the interval bounds map to
+    ``yhat_lower`` / ``yhat_upper``;
+    ``quantiles`` is NULL (native models emit an interval, not an arbitrary quantile set).
     """
     dataset_q = f"`{dataset}.forecast_predictions`"
     forecast = _forecast_source(cfg, model_name, dataset)
@@ -329,17 +402,25 @@ def build_forecast_insert_sql(cfg: RunConfig, model_name: str, dataset: str = "{
     )
 
 
-def build_eval_query(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
-    """A read-back ``SELECT`` of the held-out forecast joined to actuals (for OOF + metrics).
+def build_eval_query(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    back_steps: int,
+    fold_id: int,
+) -> str:
+    """A read-back ``SELECT`` of a **backtest fold's** forecast joined to actuals (OOF + metrics).
 
-    Returns ``(ts_id, forecast_date, y_true, yhat, yhat_lower, yhat_upper)`` for the held-out span.
-    The engine groups these by ``ts_id`` and feeds :func:`metrics.compute_metrics` — so the metric
-    math is byte-identical to the Python models. Intervals are carried (unlike ``backtest_oof``) so
-    coverage/pinball are real. ``@run_id`` only names the model here; this query writes no row.
+    Returns ``(ts_id, forecast_date, y_true, yhat, yhat_lower, yhat_upper)`` for the fold's
+    validation window (the ``backtest.horizon`` dates after ``cutoff``, all of which have ground
+    truth). The engine groups these by ``ts_id`` and feeds :func:`metrics.compute_metrics` — so the
+    metric math is byte-identical to the Python models. Intervals are carried so coverage/pinball
+    are real. ``@run_id`` only names the model here; this query writes no row.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
-    forecast = _forecast_source(cfg, model_name, dataset)
+    forecast = _forecast_source(cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id)
     return (
         f"SELECT\n"
         f"  f.{idc} AS ts_id, DATE(f.forecast_timestamp) AS forecast_date,\n"
@@ -354,34 +435,47 @@ def build_eval_query(cfg: RunConfig, model_name: str, dataset: str = "{dataset}"
 
 
 def build_history_query(cfg: RunConfig, dataset: str = "{dataset}") -> str:
-    """A ``SELECT`` of training history ``(ts_id, ds, y)`` over ``ds <= cutoff`` (for MASE/RMSSE).
+    """A ``SELECT`` of **all** training history ``(ts_id, ds, y)`` (for MASE/RMSSE scale).
 
     The scale-free metrics need each series' training actuals as ``y_train``; the engine loads this
     once, groups by ``ts_id``, and passes the per-series history to :func:`metrics.compute_metrics`.
+    Post-alignment this is the full series history (the natives train on all of it for the final
+    forecast) — a robust, freq-agnostic scale for the fold metrics.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
-    cutoff = _cutoff_expr(cfg, source)
-    where = [f"{datec} <= {cutoff}"]
     sfilter = _series_filter(cfg, source, idc)
-    if sfilter:
-        where.append(sfilter)
+    clause = f"\nWHERE {sfilter}" if sfilter else ""
     return (
         f"SELECT {idc} AS ts_id, {datec} AS ds, {targetc} AS y\n"
-        f"FROM `{source}`\n"
-        f"WHERE {' AND '.join(where)}\n"
+        f"FROM `{source}`{clause}\n"
         f"ORDER BY ts_id, ds;"
     )
+
+
+def build_series_ids_query(cfg: RunConfig, dataset: str = "{dataset}") -> str:
+    """A ``SELECT DISTINCT ts_id`` over the source subset — the run's series list (engine-agnostic).
+
+    Feeds the ``n_series`` count and, when backtesting is off, the one unscored ``fold_id=NULL``
+    metadata row per ``(series, model)`` (NaN metric panel) that keeps native parity with the Python
+    worker's always-emitted metadata row.
+    """
+    source = _source_ref(cfg, dataset)
+    idc = cfg.data.ts_id_col
+    sfilter = _series_filter(cfg, source, idc)
+    clause = f"\nWHERE {sfilter}" if sfilter else ""
+    return f"SELECT DISTINCT {idc} AS ts_id\nFROM `{source}`{clause}\nORDER BY ts_id;"
 
 
 def build_setup_statements(
     cfg: RunConfig, model_name: str, dataset: str = "{dataset}"
 ) -> list[str]:
-    """The mutating statements for one native model, in execution order.
+    """The mutating statements for one native model's **final true-future forecast**, in order.
 
-    ARIMA models: ``[CREATE MODEL, INSERT INTO forecast_predictions]``. TimesFM: just the INSERT
-    (no training). The read-back eval query (:func:`build_eval_query`) is *not* here — it returns
-    rows, it doesn't mutate — and neither is the metadata write (that's the Write API path).
+    ARIMA models: ``[CREATE MODEL (all history), INSERT INTO forecast_predictions]``. TimesFM: just
+    the INSERT (no training). The backtest fold statements (:func:`build_create_model_sql` with
+    ``back_steps``) and the read-back eval (:func:`build_eval_query`) are *not* here — this renders
+    only the always-run true-future path.
     """
     statements: list[str] = []
     if model_name in _MODEL_TYPE:
@@ -390,8 +484,23 @@ def build_setup_statements(
     return statements
 
 
+def build_fold_create_statements(
+    cfg: RunConfig, model_name: str, dataset: str, fold_id: int, back_steps: int
+) -> list[str]:
+    """The training statements for one backtest fold (``[CREATE MODEL]`` for ARIMA, ``[]`` else).
+
+    TimesFM needs no model object — its fold forecast reads the ``ds <= cutoff`` history directly in
+    :func:`build_eval_query` — so it has no fold-training statement.
+    """
+    if model_name in _MODEL_TYPE:
+        return [
+            build_create_model_sql(cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id)
+        ]
+    return []
+
+
 def render_setup_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
-    """All of a model's setup statements joined into one script (snapshot + human reading)."""
+    """All of a model's true-future setup statements joined into one script (snapshot + reading)."""
     return "\n\n".join(build_setup_statements(cfg, model_name, dataset))
 
 
@@ -408,18 +517,26 @@ def run(
     """Execute the BigQuery-native subset end-to-end, mirroring :func:`spark_naive.run`.
 
     Header lifecycle (CONTRACTS §8.2): resolve :class:`Settings`, derive the config-pinned
-    ``run_id``, ``ensure_tables`` → ``write_header`` (RUNNING), run each native model's SQL, then
-    ``update_header`` with the aggregated status, wall-clock ``runtime_seconds``, ``n_series``,
-    ``n_models``, and the ``bq_models`` array. Per model: execute the setup statements (CREATE +
-    forecast INSERT), read the held-out eval + history back, compute the metric panel through
-    :func:`metrics.compute_metrics`, and append ``backtest_oof`` + ``forecast_metadata`` rows via
-    the registry's Storage Write API row-dict path.
+    ``run_id``, ``ensure_tables`` → ``write_header`` (RUNNING), run the SQL, then ``update_header``
+    with the aggregated status, wall-clock ``runtime_seconds``, ``n_series``, ``n_models``, and the
+    ``bq_models`` array.
+
+    Two phases per run (C2 alignment — see the module docstring):
+
+    * **Final forecast (always).** Each model's :func:`build_setup_statements` fits on all history
+      and INSERTs a true beyond-data forecast into ``forecast_predictions`` — parity with Spark.
+    * **Scored evaluation (backtest only).** When ``backtest.enabled``, a fold loop
+      (:func:`fold_plan`) trains one model per fold on ``ds <= cutoff``, reads each fold's forecast
+      joined to actuals via :func:`build_eval_query`, writes ``backtest_oof`` with real
+      ``fold_id``s, and rolls the per-fold panels up (via ``worker._rollup_metrics``) into a
+      ``fold_id=NULL``
+      ``forecast_metadata`` row. When backtest is off, a single unscored ``fold_id=NULL`` metadata
+      row per ``(series, model)`` (NaN panel) is written instead — parity with the Python worker.
 
     ``manage_header=False`` is **contributor mode** (Arc B): :func:`main.run` owns the single shared
     header, so the engine skips ``ensure_tables`` / ``write_header`` / ``update_header`` and only
-    runs SQL + writes the cell tables. It returns a :class:`BqOutcome` (status + ``n_series``) so
-    the orchestrator can fold it into the combined header finalize. ``settings`` may be passed to
-    reuse the orchestrator's already-resolved infra; ``None`` resolves it here (standalone default).
+    runs SQL + writes the cell tables. ``settings`` may be passed to reuse the orchestrator's
+    already-resolved infra; ``None`` resolves it here (standalone default).
 
     Idempotent: ``run_id`` is a pure function of the config and every write is append-only /
     dedupe-on-read, so a re-run of the same config lands byte-identical rows (§3.4).
@@ -432,8 +549,9 @@ def run(
     from ..errors import RegistryError, get_logger
     from ..metrics import METRIC_NAMES, compute_metrics
     from ..registry import bq
-    from ..registry.ids import make_model_hash, make_run_id
+    from ..registry.ids import make_run_id
     from ..settings import Settings
+    from ..worker import _rollup_metrics
 
     log = get_logger(__name__)
     settings = settings or Settings.resolve()
@@ -441,7 +559,11 @@ def run(
     dataset = settings.dataset_ref
     client = bigquery.Client(project=settings.project_id)
     log.info(
-        "bigquery run start: run_id=%s models=%s manage_header=%s", run_id, models, manage_header
+        "bigquery run start: run_id=%s models=%s manage_header=%s backtest=%s",
+        run_id,
+        models,
+        manage_header,
+        cfg.backtest.enabled,
     )
 
     def _query(sql: str) -> Any:
@@ -457,55 +579,74 @@ def run(
     started = time.perf_counter()
     created_at = datetime.now(UTC)
     status = "COMPLETED"
-    n_series = 0
+    nan_panel = {name: float("nan") for name in METRIC_NAMES}
+    series_ids = [str(r.ts_id) for r in _query(build_series_ids_query(cfg, dataset))]
+    n_series = len(series_ids)
     try:
-        history = _query(build_history_query(cfg, dataset)).to_dataframe()
-        hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
-
-        oof_rows: list[dict[str, Any]] = []
-        meta_rows: list[dict[str, Any]] = []
+        # --- Phase 1: final true-future forecast → forecast_predictions (always) --------------
         for model_name in models:
             for stmt in build_setup_statements(cfg, model_name, dataset):
                 _query(stmt)
-            eval_df = _query(build_eval_query(cfg, model_name, dataset)).to_dataframe()
-            n_series = max(n_series, int(eval_df["ts_id"].nunique()))
-            best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
-            for ts_id, g in eval_df.groupby("ts_id"):
-                g = g.sort_values("forecast_date")
-                for _, r in g.iterrows():
-                    oof_rows.append(
-                        {
-                            "run_id": run_id,
-                            "ts_id": ts_id,
-                            "model_type": model_name,
-                            "fold_id": 0,
-                            "forecast_date": r["forecast_date"],
-                            "y_true": r["y_true"],
-                            "yhat": r["yhat"],
-                        }
+
+        # --- Phase 2: scored evaluation --------------------------------------------------------
+        oof_rows: list[dict[str, Any]] = []
+        meta_rows: list[dict[str, Any]] = []
+
+        if cfg.backtest.enabled:
+            history = _query(build_history_query(cfg, dataset)).to_dataframe()
+            hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
+            plan = fold_plan(cfg)
+            for model_name in models:
+                best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
+                panels_by_ts: dict[str, list[dict[str, float]]] = {}
+                for fold_id, back_steps in plan:
+                    for stmt in build_fold_create_statements(
+                        cfg, model_name, dataset, fold_id, back_steps
+                    ):
+                        _query(stmt)
+                    eval_df = _query(
+                        build_eval_query(
+                            cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id
+                        )
+                    ).to_dataframe()
+                    for ts_id, g in eval_df.groupby("ts_id"):
+                        g = g.sort_values("forecast_date")
+                        for _, r in g.iterrows():
+                            oof_rows.append(
+                                {
+                                    "run_id": run_id,
+                                    "ts_id": ts_id,
+                                    "model_type": model_name,
+                                    "fold_id": fold_id,
+                                    "forecast_date": r["forecast_date"],
+                                    "y_true": r["y_true"],
+                                    "yhat": r["yhat"],
+                                }
+                            )
+                        panel = compute_metrics(
+                            g["y_true"].to_numpy(),
+                            g["yhat"].to_numpy(),
+                            y_train=hist_by_id.get(ts_id),
+                            lower=g["yhat_lower"].to_numpy(),
+                            upper=g["yhat_upper"].to_numpy(),
+                        )
+                        panels_by_ts.setdefault(str(ts_id), []).append(panel)
+                for ts_id, panels in panels_by_ts.items():
+                    rolled = _rollup_metrics(panels)
+                    meta_rows.append(
+                        _meta_row(run_id, ts_id, model_name, rolled, best_params, created_at, cfg)
                     )
-                panel = compute_metrics(
-                    g["y_true"].to_numpy(),
-                    g["yhat"].to_numpy(),
-                    y_train=hist_by_id.get(ts_id),
-                    lower=g["yhat_lower"].to_numpy(),
-                    upper=g["yhat_upper"].to_numpy(),
-                )
-                meta_rows.append(
-                    {
-                        "run_id": run_id,
-                        "ts_id": ts_id,
-                        "model_type": model_name,
-                        "compute_engine": "bigquery",
-                        "model_hash": make_model_hash(run_id, str(ts_id), model_name, cfg),
-                        "fold_id": None,
-                        **{name: panel[name] for name in METRIC_NAMES},
-                        "fit_seconds": None,
-                        "best_params": best_params,
-                        "model_artifact": None,
-                        "created_at": created_at,
-                    }
-                )
+        else:
+            # Backtest off: one unscored fold_id=NULL metadata row per (series, model) — parity
+            # with the Python worker, which also emits an unscored metadata row when backtest off.
+            for model_name in models:
+                best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
+                for ts_id in series_ids:
+                    meta_rows.append(
+                        _meta_row(
+                            run_id, ts_id, model_name, nan_panel, best_params, created_at, cfg
+                        )
+                    )
 
         _append_rows(settings, "backtest_oof", bq._OOF_SPEC, oof_rows)
         _append_rows(settings, "forecast_metadata", bq._META_SPEC, meta_rows)
@@ -542,6 +683,34 @@ def run(
         runtime_seconds,
     )
     return BqOutcome(status=status, n_series=n_series, models=list(models))
+
+
+def _meta_row(  # pragma: no cover - GCP I/O helper, exercised by the @gcp smoke
+    run_id: str,
+    ts_id: str,
+    model_name: str,
+    panel: dict[str, float],
+    best_params: str,
+    created_at: Any,
+    cfg: RunConfig,
+) -> dict[str, Any]:
+    """Assemble one ``forecast_metadata`` row (``fold_id=NULL``) for a native model."""
+    from ..metrics import METRIC_NAMES
+    from ..registry.ids import make_model_hash
+
+    return {
+        "run_id": run_id,
+        "ts_id": ts_id,
+        "model_type": model_name,
+        "compute_engine": "bigquery",
+        "model_hash": make_model_hash(run_id, str(ts_id), model_name, cfg),
+        "fold_id": None,
+        **{name: panel[name] for name in METRIC_NAMES},
+        "fit_seconds": None,
+        "best_params": best_params,
+        "model_artifact": None,
+        "created_at": created_at,
+    }
 
 
 def _append_rows(  # pragma: no cover - GCP I/O, @gcp smoke
