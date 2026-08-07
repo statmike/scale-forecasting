@@ -201,7 +201,7 @@ output "network_attachment_id" {
     (projects/<number>/regions/<region>/networkAttachments/<name>) — same reason network_id uses
     number form: create_ray_cluster rejects the project-ID self-link. null in brownfield/BYO mode.
   EOT
-  value = var.create ? "projects/${data.google_project.this[0].number}/regions/${var.region}/networkAttachments/${google_compute_network_attachment.psc[0].name}" : null
+  value       = var.create ? "projects/${data.google_project.this[0].number}/regions/${var.region}/networkAttachments/${google_compute_network_attachment.psc[0].name}" : null
 }
 
 output "network_id" {
