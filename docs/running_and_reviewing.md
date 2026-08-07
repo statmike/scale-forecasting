@@ -19,7 +19,21 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
   | `SF_DATASET_ID` | no | `scale_forecasting` | Registry dataset. |
   | `SF_REGION` | no | `us-central1` | Region. |
 
-  Every value comes straight from `terraform output` in `terraform/main`.
+  Every value comes straight from `terraform output` in `terraform/main`. After a fresh apply, wire
+  them into your environment directly — no manual copy-paste:
+
+  ```bash
+  cd terraform/main
+  export SF_PROJECT_ID="$(terraform output -raw project_id)"
+  export SF_CONNECTION="$(terraform output -raw iceberg_connection)"
+  export SF_WAREHOUSE_URI="$(terraform output -raw warehouse_uri)"
+  export SF_DATASET_ID="$(terraform output -raw dataset_id)"
+  export SF_REGION="us-central1"   # or your deploy region
+  ```
+
+  The Ray path needs a little more, also straight from `terraform output`: `compute_sa`,
+  `code_bucket`, and (for the private path) `network_attachment_id` — `RayInfra.from_terraform_outputs()`
+  reads them for you (see notebook 04).
 
 - For submitting (not for reviewing), the `[spark]` or `[ray]` extra: `pip install -e '.[spark]'`
   (Dataproc) or `'.[ray]'` (Ray). The runtime image itself is code-free — see the note above.
