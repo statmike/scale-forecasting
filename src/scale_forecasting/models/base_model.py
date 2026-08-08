@@ -17,6 +17,7 @@ factory reads, and the ``Runtime``/``Family`` type aliases).
 from __future__ import annotations
 
 import json
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -169,8 +170,22 @@ class BaseModel(ABC):
         lower = quantile_map[qs[0]]
         upper = quantile_map[qs[-1]]
         n = len(median)
+        # Drop non-finite quantile values per step. json.dumps defaults to allow_nan=True, minting
+        # the bare literals NaN/Infinity — invalid JSON that BigQuery's JSON-column parser rejects
+        # ("syntax error while parsing value - invalid literal"), failing the whole Storage Write
+        # API append and cascading to a whole-run FAILURE. A runaway series (log1p's expm1 inverse
+        # overflowing to ±Inf) is a per-series pathology and must not take the fleet down; a step
+        # whose values are all non-finite serializes to "{}". (The scalar median/bounds columns are
+        # nulled independently at the write boundary by _as_float.)
         quantiles_json = [
-            json.dumps({str(q): float(quantile_map[q][i]) for q in qs}) for i in range(n)
+            json.dumps(
+                {
+                    str(q): fv
+                    for q in qs
+                    if math.isfinite(fv := float(quantile_map[q][i]))
+                }
+            )
+            for i in range(n)
         ]
         # Contract requires datetime64[ns] (§2.1); pandas 2.x may infer coarser units.
         ds_ns = pd.DatetimeIndex(ds).as_unit("ns")

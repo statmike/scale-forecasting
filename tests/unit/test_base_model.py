@@ -164,3 +164,26 @@ def test_assemble_frame_quantiles_json_roundtrips() -> None:
     parsed = json.loads(df["quantiles"].iloc[0])
     assert set(parsed) == {"0.1", "0.5", "0.9"}
     assert parsed["0.1"] <= parsed["0.5"] <= parsed["0.9"]
+
+
+def test_assemble_frame_drops_non_finite_quantiles() -> None:
+    # A runaway series (log1p's expm1 inverse overflowing to ±Inf/NaN) can yield non-finite
+    # quantile values. json.dumps defaults to allow_nan=True and would emit the bare literals
+    # NaN/Infinity — invalid JSON that BigQuery's JSON-column parser rejects, failing the whole
+    # Storage Write API append and cascading to a whole-run FAILURE. Those values must be dropped
+    # at serialization; an all-non-finite step collapses to "{}".
+    m = _Dummy({}, _ctx())
+    ds = pd.to_datetime(["2026-02-01", "2026-02-02"])
+    qmap = {
+        0.1: np.array([1.0, float("inf")]),
+        0.5: np.array([2.0, float("inf")]),
+        0.9: np.array([3.0, float("nan")]),
+    }
+    df = m._assemble_frame(ds, qmap)
+    # finite step: all keys survive
+    assert json.loads(df["quantiles"].iloc[0]) == {"0.1": 1.0, "0.5": 2.0, "0.9": 3.0}
+    # all-non-finite step: empty object, never a bare NaN/Infinity literal
+    row1 = df["quantiles"].iloc[1]
+    assert row1 == "{}"
+    for raw in df["quantiles"]:
+        assert "NaN" not in raw and "Infinity" not in raw  # strict JSON (BigQuery rejects these)
