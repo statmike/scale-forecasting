@@ -95,6 +95,31 @@ def test_prediction_quantiles_serialized_to_json_or_none() -> None:
     assert rows[1]["quantiles"] is None
 
 
+def test_prediction_quantiles_drop_non_finite_values() -> None:
+    # Same runaway-series pathology as the scalar columns, but on the JSON `quantiles` field:
+    # json.dumps emits the bare literal `NaN`/`Infinity` (invalid JSON), and BigQuery's JSON
+    # column parser rejects it ("syntax error while parsing value - invalid literal"), failing
+    # the whole Storage Write API append. Non-finite quantile entries must be dropped; a dict
+    # that is entirely non-finite collapses to NULL.
+    preds = pd.DataFrame(
+        {
+            "ds": pd.to_datetime(["2026-02-01", "2026-02-02"]),
+            "yhat": [10.0, 11.0],
+            "yhat_lower": [8.0, 9.0],
+            "yhat_upper": [12.0, 13.0],
+            "quantiles": [
+                {"0.1": float("nan"), "0.5": 10.0, "0.9": float("inf")},
+                {"0.5": float("nan")},
+            ],
+        }
+    )
+    rows = bq.assemble_prediction_rows(_result(predictions=preds))
+    # finite entries survive; NaN/Inf keys are dropped
+    assert rows[0]["quantiles"] == '{"0.5": 10.0}'
+    # an all-non-finite dict becomes NULL, not invalid JSON
+    assert rows[1]["quantiles"] is None
+
+
 def test_non_finite_forecast_values_coerced_to_none() -> None:
     # A runaway series (e.g. log1p's expm1 inverse overflowing) can yield +Inf/-Inf/NaN. The
     # BigQuery Storage Write API rejects those for a FLOAT64 column, and one rejected row fails

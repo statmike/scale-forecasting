@@ -186,11 +186,29 @@ def _as_float(value: Any) -> float | None:
 
 
 def _as_json(value: Any) -> str | None:
-    """Serialize a dict (or None/empty) to a JSON string, or None."""
+    """Serialize a dict (or None/empty) to a JSON string, or None.
+
+    Non-finite values (NaN/±Inf) are dropped from a dict before serializing: Python's
+    ``json.dumps`` emits the bare literals ``NaN``/``Infinity`` by default, which are invalid
+    JSON — and BigQuery's ``JSON`` column parser rejects them ("syntax error while parsing value
+    - invalid literal"), failing the whole Storage Write API append. A quantile dict on a runaway
+    series (``log1p``'s ``expm1`` overflow) can carry such values; dropping the offending keys —
+    parity with :func:`_as_float`'s scalar NULL — keeps the row writable. An all-non-finite dict
+    collapses to NULL.
+    """
     if value is None or (isinstance(value, dict) and not value):
         return None
     if isinstance(value, str):
         return value
+    if isinstance(value, dict):
+        clean = {
+            k: v
+            for k, v in value.items()
+            if not (isinstance(v, float) and not math.isfinite(v))
+        }
+        if not clean:
+            return None
+        return json.dumps(clean, sort_keys=True)
     return json.dumps(value, sort_keys=True)
 
 
