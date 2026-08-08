@@ -301,7 +301,7 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls["entrypoint"] = entrypoint
         calls["runtime_env"] = runtime_env
         calls["wait"] = wait
-        return "job-xyz", "SUCCEEDED"
+        return "job-xyz", "SUCCEEDED", ""
 
     def _fake_stamp(telemetry: dict, run_id: str, settings: Settings) -> None:
         calls["telemetry"] = telemetry
@@ -349,14 +349,19 @@ def test_submit_ray_deletes_even_when_job_raises(
 
     def _failing_submit(
         cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         calls["order"].append("submit")
-        return "job-fail", "FAILED"
+        detail = "message: boom\ndriver log tail:\nTraceback ... RuntimeError: boom"
+        return "job-fail", "FAILED", detail
 
     monkeypatch.setattr(ray_submit, "_submit_and_poll", _failing_submit)
 
-    with pytest.raises(EngineError, match="FAILED"):
+    with pytest.raises(EngineError, match="RuntimeError: boom") as excinfo:
         ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), wait=True)
+    # The driver diagnosis (message + log tail) is folded into the raised error, not just "FAILED",
+    # so the *cause* survives even after the ml_job log stream ages out.
+    assert "FAILED" in str(excinfo.value)
+    assert "message: boom" in str(excinfo.value)
     assert calls["created"] == 1
     assert calls["deleted"] == 1  # deleted despite the raise
     # telemetry is stamped before the raise, so a failed run still records its sizing.
@@ -429,10 +434,10 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
 
     def _immediate_submit(
         cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         calls["order"].append("submit")
         calls["wait"] = wait
-        return "job-nw", "PENDING"
+        return "job-nw", "PENDING", ""
 
     monkeypatch.setattr(ray_submit, "_submit_and_poll", _immediate_submit)
     job_id = ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), wait=False)
@@ -630,11 +635,64 @@ def test_submit_and_poll_refreshes_client_on_401(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(ray_submit, "_connect_job_client", _fake_connect)
     monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
 
-    job_id, status = ray_submit._submit_and_poll(
+    job_id, status, detail = ray_submit._submit_and_poll(
         resource_name, "python -m x", {"working_dir": "/src"}, wait=True
     )
     assert (job_id, status) == ("job-1", "SUCCEEDED")
+    assert detail == ""  # no failure detail on a SUCCEEDED run
     assert len(connects) == 2  # connected once to submit/poll, reconnected once after the 401
+
+
+def test_submit_and_poll_captures_driver_detail_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FAILED terminal state pulls the driver's error message + log tail at the moment of failure.
+
+    The Jobs client holds both facts (``get_job_info().message`` + ``get_job_logs()``); capturing
+    them here means the cause survives even after the ``ml_job`` log stream ages out of Cloud
+    Logging's freshness window — no post-hoc archaeology.
+    """
+    resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
+
+    class _Info:
+        message = "Job entrypoint command failed with exit code 1"
+
+    class _FakeClient:
+        def submit_job(self, *, entrypoint: str, runtime_env: dict) -> str:
+            return "job-1"
+
+        def get_job_status(self, job_id: str) -> str:
+            return "FAILED"
+
+        def get_job_info(self, job_id: str) -> _Info:
+            return _Info()
+
+        def get_job_logs(self, job_id: str) -> str:
+            return "line1\nline2\nTraceback (most recent call last):\nValueError: bad series"
+
+    monkeypatch.setattr(ray_submit, "_connect_job_client", lambda _n: _FakeClient())
+    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
+
+    job_id, status, detail = ray_submit._submit_and_poll(
+        resource_name, "python -m x", {"working_dir": "/src"}, wait=True
+    )
+    assert (job_id, status) == ("job-1", "FAILED")
+    assert "Job entrypoint command failed" in detail
+    assert "ValueError: bad series" in detail
+
+
+def test_fetch_job_failure_detail_is_defensive(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Diagnosis is best-effort: if the info/logs calls themselves raise, the helper must swallow
+    # and return what it could gather — never mask the job failure with a diagnosis crash.
+    class _BrokenClient:
+        def get_job_info(self, job_id: str) -> Any:
+            raise RuntimeError("info endpoint down")
+
+        def get_job_logs(self, job_id: str) -> str:
+            raise RuntimeError("logs endpoint down")
+
+    detail = ray_submit._fetch_job_failure_detail(_BrokenClient(), "job-1")
+    assert detail == ""  # both sources failed → empty, no exception escapes
 
 
 def test_submit_and_poll_reraises_non_401_poll_error(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -86,6 +86,9 @@ _DEFAULT_PYTHON_VERSION = "3.11"
 # Poll cadence + terminal Ray job states (the Jobs API reports these on get_job_status).
 _POLL_SECONDS = 15
 _TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "STOPPED"})
+# On a FAILED job, how many trailing driver-log lines to capture into our log + the raised error —
+# enough to carry a Python traceback without dumping the whole (potentially huge) driver stdout.
+_FAILURE_LOG_TAIL_LINES = 60
 
 # Dashboard warm-up race: a cluster reaches RUNNING *before* its Ray dashboard is reachable through
 # Vertex's public-endpoint proxy, so the first JobSubmissionClient handshake (GET /api/version) can
@@ -701,13 +704,16 @@ def _submit_and_poll(
     runtime_env: dict[str, Any],
     *,
     wait: bool,
-) -> tuple[str, str]:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
+) -> tuple[str, str, str]:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
     """Submit the on-cluster driver as a Ray Job and (when ``wait``) poll to a terminal state.
 
     Connects the Jobs client to the cluster by resource name (``vertex_ray://<resource_name>``,
     retrying past the dashboard warm-up race), submits ``entrypoint`` with ``runtime_env`` (current
-    ``src/`` + requirements), and returns ``(job_id, status)``. Without ``wait`` the status is the
-    immediate post-submit state (the caller skips telemetry + the terminal-state check).
+    ``src/`` + requirements), and returns ``(job_id, status, detail)``. ``detail`` is empty except
+    on a ``FAILED`` terminal state, where it carries the driver's error message + log tail
+    (:func:`_fetch_job_failure_detail`) captured at the moment of failure — so the cause is recorded
+    even after the ``ml_job`` log stream ages out. Without ``wait`` the status is the immediate
+    post-submit state (the caller skips telemetry + the terminal-state check).
     """
     client = _connect_job_client(cluster_resource_name)
     job_id = client.submit_job(entrypoint=entrypoint, runtime_env=runtime_env)
@@ -728,14 +734,49 @@ def _submit_and_poll(
             return str(client.get_job_status(job_id))
 
     if not wait:
-        return job_id, _status()
+        return job_id, _status(), ""
 
     status = _status()
     while status not in _TERMINAL_STATES:
         time.sleep(_POLL_SECONDS)
         status = _status()
     _log.info("Ray job %s finished: status=%s", job_id, status)
-    return job_id, status
+    detail = _fetch_job_failure_detail(client, job_id) if status == "FAILED" else ""
+    if detail:
+        _log.error("Ray job %s FAILED — driver diagnosis:\n%s", job_id, detail)
+    return job_id, status, detail
+
+
+def _fetch_job_failure_detail(
+    client: Any, job_id: str
+) -> str:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
+    """Best-effort driver error message + log tail for a FAILED Ray job (operability).
+
+    A terminal ``FAILED`` status alone says *nothing* about the cause; the driver's Python
+    traceback lives in the Ray dashboard and Cloud Logging's ``ml_job`` stream, which ages out
+    of the default freshness window within ~90 min — so a failure diagnosed later is a failure
+    diagnosed by archaeology. The Jobs client already holds both facts: ``get_job_info().message``
+    (the terminal error line) and ``get_job_logs()`` (the full driver stdout/stderr). Pull them at
+    the moment of failure so the cause is captured in *our* log and folded into the raised
+    :class:`~scale_forecasting.errors.EngineError` — never dependent on a still-warm log stream.
+    Every step is defensive: a diagnosis that itself fails must not mask the underlying job failure.
+    """
+    parts: list[str] = []
+    try:
+        info = client.get_job_info(job_id)
+        message = getattr(info, "message", None)
+        if message:
+            parts.append(f"message: {message}")
+    except Exception as exc:  # noqa: BLE001 - diagnosis is best-effort, never fatal
+        _log.warning("could not fetch Ray job info for %s: %r", job_id, exc)
+    try:
+        logs = client.get_job_logs(job_id) or ""
+        tail = "\n".join(logs.splitlines()[-_FAILURE_LOG_TAIL_LINES:]).strip()
+        if tail:
+            parts.append(f"driver log tail:\n{tail}")
+    except Exception as exc:  # noqa: BLE001 - diagnosis is best-effort, never fatal
+        _log.warning("could not fetch Ray job logs for %s: %r", job_id, exc)
+    return "\n".join(parts)
 
 
 def _stamp_ray_telemetry(telemetry: dict[str, Any], run_id: str, settings: Settings) -> None:
@@ -839,7 +880,9 @@ def submit_ray(
 
         cluster = _get_cluster(cluster_resource_name)
         started = time.perf_counter()
-        job_id, status = _submit_and_poll(cluster_resource_name, entrypoint, runtime_env, wait=wait)
+        job_id, status, detail = _submit_and_poll(
+            cluster_resource_name, entrypoint, runtime_env, wait=wait
+        )
         wall_s = round(time.perf_counter() - started, 1) if wait else None
 
         if wait:
@@ -853,7 +896,10 @@ def submit_ray(
             )
             _stamp_ray_telemetry(telemetry, run_id, settings)
             if status != "SUCCEEDED":
-                raise EngineError(f"ray job {job_id} terminal state {status}")
+                # Fold the driver diagnosis (captured before the log stream ages out) into the
+                # raised error so the *cause* — not just "FAILED" — reaches the operator.
+                suffix = f"\n{detail}" if detail else ""
+                raise EngineError(f"ray job {job_id} terminal state {status}{suffix}")
         return job_id
     finally:
         # Guaranteed teardown of an ephemeral cluster — even on a raised job *or a create that
