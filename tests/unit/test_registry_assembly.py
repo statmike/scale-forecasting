@@ -95,6 +95,29 @@ def test_prediction_quantiles_serialized_to_json_or_none() -> None:
     assert rows[1]["quantiles"] is None
 
 
+def test_non_finite_forecast_values_coerced_to_none() -> None:
+    # A runaway series (e.g. log1p's expm1 inverse overflowing) can yield +Inf/-Inf/NaN. The
+    # BigQuery Storage Write API rejects those for a FLOAT64 column, and one rejected row fails
+    # the whole append — which killed a 100k-series run mid-flight. They must land as NULL so the
+    # pathological cell is a missing value, not a fleet-wide failure.
+    preds = pd.DataFrame(
+        {
+            "ds": pd.to_datetime(["2026-02-01", "2026-02-02", "2026-02-03"]),
+            "yhat": [float("inf"), float("-inf"), float("nan")],
+            "yhat_lower": [1.0, float("inf"), 2.0],
+            "yhat_upper": [float("inf"), 3.0, 4.0],
+            "quantiles": [None, None, None],
+        }
+    )
+    rows = bq.assemble_prediction_rows(_result(predictions=preds))
+    assert [r["yhat"] for r in rows] == [None, None, None]
+    assert rows[0]["yhat_upper"] is None
+    assert rows[1]["yhat_lower"] is None
+    # finite values on the same rows are untouched
+    assert rows[0]["yhat_lower"] == 1.0
+    assert rows[2]["yhat_upper"] == 4.0
+
+
 # --- oof rows ------------------------------------------------------------------
 
 

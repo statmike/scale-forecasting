@@ -27,6 +27,7 @@ Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING, Any, get_args
 
 from ..config import DecisionMetric
@@ -169,11 +170,19 @@ def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> di
 
 
 def _as_float(value: Any) -> float | None:
-    """Coerce to float, mapping missing/NaN to None (BQ NULL)."""
+    """Coerce to float, mapping missing/non-finite to None (BQ NULL).
+
+    The BigQuery Storage Write API rejects NaN and ±Inf for a FLOAT64 column, and a single
+    rejected row fails the whole ``append_rows`` request — which, in a Spark/Ray worker, kills
+    the task and cascades to the entire run. A non-finite forecast is a per-series pathology
+    (e.g. ``log1p``'s ``expm1`` inverse overflowing to ``+Inf`` on a runaway series), so it must
+    not take the fleet down: coerce it to NULL here, at the one boundary every engine's rows flow
+    through, so the bad cell lands as a missing value and the run completes.
+    """
     if value is None:
         return None
     f = float(value)
-    return None if f != f else f  # NaN check
+    return f if math.isfinite(f) else None  # NaN and ±Inf → NULL
 
 
 def _as_json(value: Any) -> str | None:
@@ -375,9 +384,17 @@ def _append_via_write_api(
     try:
         for response in write_client.append_rows(requests=requests()):
             if response.error.code != 0:
+                # Surface the per-row detail: the top-level message only says "N Errors found";
+                # row_errors names the offending field/index/reason, which is what a caller needs
+                # to diagnose a data pathology (e.g. a non-finite float) without reverse-
+                # engineering it from the landed rows.
+                detail = "; ".join(
+                    f"row {re.index}: {re.message}" for re in getattr(response, "row_errors", [])
+                )
                 raise RegistryError(
                     f"Storage Write API append to {table} failed: "
                     f"{response.error.code} {response.error.message}"
+                    + (f" [{detail}]" if detail else "")
                 )
     except GoogleAPICallError as exc:
         raise RegistryError(f"Storage Write API append to {table} failed: {exc}") from exc
