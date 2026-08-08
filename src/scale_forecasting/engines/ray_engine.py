@@ -89,6 +89,9 @@ def _read_source_series(
     shards it into task-sized frames — acceptable because Ray is the GPU path for modest scales, not
     the 100k hero (that's Spark, §11.2).
     """
+    # Runtime import: pandas is TYPE_CHECKING-only at module scope (offline import parity), so every
+    # function that touches pandas at runtime must import it locally.
+    import pandas as pd
     from google.cloud.bigquery_storage_v1 import BigQueryReadClient, types
 
     read_client = BigQueryReadClient()

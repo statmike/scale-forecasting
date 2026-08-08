@@ -161,6 +161,86 @@ def test_limit_series_matches_spark_ordered_subset() -> None:
     assert sorted(out["ts_id"].unique()) == ["s1", "s2"]  # s1,s2 ordered-first, s3 dropped
 
 
+# --- _read_source_series: Storage Read stream assembly (no GCP) -----------------
+
+
+def _install_fake_read_client(
+    monkeypatch: pytest.MonkeyPatch, per_stream_frames: list[pd.DataFrame]
+) -> None:
+    """Stub ``google.cloud.bigquery_storage_v1`` so ``_read_source_series`` runs offline.
+
+    Each entry of ``per_stream_frames`` becomes one read stream returning that frame from
+    ``read_rows(...).to_dataframe(...)`` — so a list of length > 1 drives the multi-stream
+    ``pd.concat`` branch (the one the server picks at scale, and the one the @gpu smoke's
+    single-stream reads never hit — where a missing ``pd`` import crashed a 100k run).
+    """
+    import sys
+    import types as pytypes
+
+    class _Stream:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _Reader:
+        def __init__(self, frame: pd.DataFrame) -> None:
+            self._frame = frame
+
+        def to_dataframe(self, _session: Any) -> pd.DataFrame:
+            return self._frame
+
+    class _Session:
+        def __init__(self, n: int) -> None:
+            self.streams = [_Stream(f"stream-{i}") for i in range(n)]
+
+    class _FakeReadClient:
+        def __init__(self) -> None:
+            self._by_name = {f"stream-{i}": f for i, f in enumerate(per_stream_frames)}
+
+        def create_read_session(
+            self, *, parent: str, read_session: Any, max_stream_count: int
+        ) -> Any:
+            return _Session(len(per_stream_frames))
+
+        def read_rows(self, name: str) -> _Reader:
+            return _Reader(self._by_name[name])
+
+    # A minimal stand-in module for the lazily-imported storage client + its `types` namespace.
+    fake_mod = pytypes.ModuleType("google.cloud.bigquery_storage_v1")
+    fake_mod.BigQueryReadClient = _FakeReadClient  # type: ignore[attr-defined]
+    fake_types = pytypes.SimpleNamespace(
+        DataFormat=pytypes.SimpleNamespace(ARROW="ARROW"),
+        ReadSession=lambda **kw: pytypes.SimpleNamespace(**kw),
+    )
+    fake_types.ReadSession.TableReadOptions = lambda **kw: pytypes.SimpleNamespace(**kw)  # type: ignore[attr-defined]
+    fake_mod.types = fake_types  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "google.cloud.bigquery_storage_v1", fake_mod)
+
+
+def test_read_source_series_concats_multiple_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scale path: the Storage Read server fans the table into several streams, so the frames
+    # list has length > 1 and _read_source_series must pd.concat them. Regression for a 100k Ray run
+    # that died with `NameError: name 'pd' is not defined` on exactly this branch (pandas is
+    # TYPE_CHECKING-only at module scope, so the function must import it at runtime).
+    s0 = _panel(2)  # ts_ids s0, s1
+    s1 = _panel(2).assign(ts_id=lambda d: d["ts_id"].str.replace("s", "t"))  # t0, t1
+    _install_fake_read_client(monkeypatch, [s0, s1])
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7})
+    out = ray_engine._read_source_series(cfg, _settings())
+    assert len(out) == len(s0) + len(s1)  # both streams present
+    assert sorted(out["ts_id"].unique()) == ["s0", "s1", "t0", "t1"]
+
+
+def test_read_source_series_single_stream_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The small-scale path the @gpu smoke exercised: one stream → frames[0], no concat. Kept so both
+    # branches of the len(frames) check are covered offline.
+    only = _panel(3)
+    _install_fake_read_client(monkeypatch, [only])
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7})
+    out = ray_engine._read_source_series(cfg, _settings())
+    assert len(out) == len(only)
+    assert sorted(out["ts_id"].unique()) == ["s0", "s1", "s2"]
+
+
 # --- @ray: run end-to-end on a real local Ray session --------------------------
 
 
