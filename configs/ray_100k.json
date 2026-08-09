@@ -13,6 +13,7 @@
   },
   "compute": {
     "use_gpu": false,
+    "ray_head_machine_type": "n1-highmem-16",
     "ray_regions": ["us-central1", "us-east1", "us-west1"]
   }
 }
