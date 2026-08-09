@@ -22,19 +22,51 @@ can open any file, understand it in one read, and fork it to their needs.
 
 ## What it does
 
-- **Two Python runtimes** — Dataproc Serverless (**Spark**) and **Ray** on Vertex AI —
-  run the identical per-series unit of work; pick one per run via config.
-- **BigQuery-native models** (ARIMA_PLUS, TimesFM) run **in parallel**,
-  SQL-only, no Python compute.
-- **Backtesting** (expanding/sliding folds, full metric panel) and **ensembling**
-  (calculated + learned) out of the box.
-- **BigQuery lineage** — every run's config, per-model metrics, forecasts, and artifact
-  links are captured in native BigQuery tables (config, telemetry, and quantiles as native
-  `JSON` columns).
+**Univariate time-series forecasting at scale** — fit many methods to tens of thousands of series in
+parallel, with backtesting, custom holidays, and ensembling built in. One JSON config describes the
+whole run.
+
+- **Three runtimes, your pick.** Two **Python** runtimes — Dataproc Serverless (**Spark**) and
+  **Ray** on Vertex AI — run the identical per-series unit of work (pick one per run); **BigQuery**
+  runs its SQL-only native models **in parallel** with either, no Python compute. See
+  [Methods](#methods) and [The three runtimes](#the-three-runtimes).
+- **Ray packs fractional GPUs.** Ray's reason to exist here is **NeuralProphet on fractional GPUs** —
+  many series share one T4 (auto-profiled `gpu_fraction`), so a deep-learning model scales without a
+  GPU per series. See [The three runtimes](#the-three-runtimes).
+- **Backtesting + ensembling out of the box** — expanding/sliding folds with a full metric panel,
+  and both calculated and learned ensembles.
+- **Custom holidays and transforms** — add holiday country codes and a target transform (`log1p` /
+  `boxcox`) from config; the generic exog seam is there when you outgrow univariate.
+- **BigQuery lineage** — every run's config, per-model metrics, forecasts, and artifact links are
+  captured in native BigQuery tables, written via the **Storage Write API** for high-speed updates
+  (config, telemetry, and quantiles as native `JSON` columns). Layout:
+  [output_schemas.md](./docs/output_schemas.md).
 - **Pick your input storage** — the example series ship in **both** managed-Iceberg and
   native BigQuery, so you can benchmark the identical data on either format by name.
 - **Config-driven** — one JSON file describes the whole run; the same file runs locally
-  and under Composer.
+  and under Composer. Every setting: [configuration_reference.md](./docs/configuration_reference.md).
+
+## Methods
+
+One model per file (`src/scale_forecasting/models/`); each ends in `register(...)` so it shows up in
+`playground --list` automatically. Add your own with [`docs/adding_a_model.md`](./docs/adding_a_model.md).
+
+| Model | Runtime | Family | Notes |
+|-------|---------|--------|-------|
+| [`theta`](./src/scale_forecasting/models/theta.py) | Python | statistical | Simple, strong baseline. |
+| [`holtwinters`](./src/scale_forecasting/models/holtwinters.py) | Python | statistical | Holt-Winters exponential smoothing. |
+| [`sarimax`](./src/scale_forecasting/models/sarimax.py) | Python | statistical | Seasonal ARIMA; supports exog. |
+| [`ucm`](./src/scale_forecasting/models/ucm.py) | Python | statistical | Unobserved-components (structural) state-space. |
+| [`stl_bagging`](./src/scale_forecasting/models/stl_bagging.py) | Python | statistical | STL decomposition + bagged base forecasts. |
+| [`prophet`](./src/scale_forecasting/models/prophet_model.py) | Python | statistical | Additive trend/seasonality/holidays. |
+| [`neuralprophet`](./src/scale_forecasting/models/neuralprophet_model.py) | Python | deep learning | **The GPU model** — fractional-GPU packing on Ray. |
+| [`lightgbm`](./src/scale_forecasting/models/lightgbm_model.py) | Python | ML | Gradient boosting on lag/calendar features. |
+| [`xgboost`](./src/scale_forecasting/models/xgboost_model.py) | Python | ML | Gradient boosting on lag/calendar features. |
+| [`arima_plus`](./src/scale_forecasting/models/bigquery_native.py) | BigQuery | native | SQL-only `ARIMA_PLUS`; runs ∥ the Python runtime. |
+| [`timesfm`](./src/scale_forecasting/models/bigquery_native.py) | BigQuery | native | SQL-only foundation-model forecaster. |
+
+Plus **ensembles** across the base models (calculated: `mean`/`median`/`inverse_error`; learned:
+`nnls`/`ridge`/`xgb`) — see [configuration_reference.md](./docs/configuration_reference.md#ensemble--ensembleconfig).
 
 ## Architecture
 
@@ -42,9 +74,27 @@ A run is one validated JSON config. It selects the data, the model list, one Pyt
 runtime, backtest and ensemble settings — and is persisted verbatim into the run
 registry, so the config *is* the experiment record.
 
-- **Runtimes.** The Python model suite runs on **Spark _xor_ Ray** (one per run).
+<a name="the-three-runtimes"></a>
+
+- **The three runtimes.** The Python model suite runs on **Spark _xor_ Ray** (one per run).
   BigQuery-native models are additive and run **in parallel** with either. So a run is
   "Spark + optional BQ models" or "Ray + optional BQ models" — never Spark + Ray.
+  - **Spark** (Dataproc Serverless) is the 100k CPU workhorse, with three fan-out **methods** you
+    pick by config — same answers, different speed:
+
+    | `spark_method` | Fans out by | Best for | Watch out |
+    |----------------|-------------|----------|-----------|
+    | `explode` (default) | one task per `(series, model)` cell | max parallelism at scale — finishes in ~its slowest *cell* | many small tasks |
+    | `multi` | one child `explode` batch per model family | isolating a heavy model family | more orchestration |
+    | `naive` | one task per series (its models run sequentially) | tiny runs / a baseline to beat | drags on its slowest *series* — the straggler anti-pattern |
+
+    Notebooks [05](./notebooks/05_spark_naive.ipynb)/[06](./notebooks/06_spark_multi.ipynb) isolate
+    `naive`/`multi`; [07](./notebooks/07_scale_review.ipynb) compares all three at 100k.
+  - **Ray** (on Vertex AI) is for **fractional-GPU packing**: NeuralProphet's per-series fit is small,
+    so many series share one T4 via an auto-profiled `gpu_fraction` — a deep-learning model at fleet
+    scale without a GPU per series. (For CPU-only work at 100k, Spark is the workhorse; Ray earns its
+    place on the GPU path.)
+  - **BigQuery** runs `arima_plus` / `timesfm` in SQL, in parallel, under the same `run_id`.
 - **The one unit of work.** `worker.run_cell(series, model, cfg) -> CellResult` fits,
   (optionally) backtests, and predicts one `(series, model)` cell. The *same* function
   runs locally, inside a Spark Pandas UDF, and inside a Ray task. Engines differ only in
@@ -64,8 +114,9 @@ registry, so the config *is* the experiment record.
 - **Lineage.** Three native-BigQuery tiers — `run_registry` (config) →
   `forecast_metadata` (metrics + GCS artifact links) → `forecast_predictions` (values),
   plus `backtest_oof` for learned ensembling. These run-collection tables are always native
-  (native `JSON` columns, `WRITE_TRUNCATE` reseed); the *input* table ships in both
-  Iceberg and native so you can compare storage formats on the same run shape.
+  (native `JSON` columns, `WRITE_TRUNCATE` reseed) and are written via the **Storage Write API**;
+  the *input* table ships in both Iceberg and native so you can compare storage formats on the same
+  run shape. Full column-by-column layout: [output_schemas.md](./docs/output_schemas.md).
 
 Read `src/scale_forecasting/config.py` (the run contract) and
 `src/scale_forecasting/worker.py` (the unit of work) to see the whole shape.
@@ -117,6 +168,9 @@ engines — G1) from `v_model_leaderboard`.
   operator loop with every entrypoint and its flags.
 - [`docs/configuration_reference.md`](./docs/configuration_reference.md) — every config field, its
   type, default, and constraint, section by section (the run *is* the config).
+- [`docs/output_schemas.md`](./docs/output_schemas.md) — the output tables' layout: every column of
+  `run_registry` / `forecast_metadata` / `forecast_predictions` / `backtest_oof`, what it collects,
+  and the two analyst views over them.
 - [`docs/editing_code_without_rebuilding.md`](./docs/editing_code_without_rebuilding.md) — why a code
   edit ships on the next run with **no** image rebuild, and the loop you actually use.
 - [`docs/adding_a_model.md`](./docs/adding_a_model.md) — add a model in one file.

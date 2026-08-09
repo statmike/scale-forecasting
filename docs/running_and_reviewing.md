@@ -121,6 +121,11 @@ The demo notebooks ([`notebooks/`](../notebooks)) wrap these two queries in a sm
 and a chart; [`07_scale_review`](../notebooks/07_scale_review.ipynb) compares several runs
 side by side.
 
+Both views read from the underlying registry tables (`run_registry`, `forecast_metadata`,
+`forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or
+per-fold OOF truth — see [output_schemas.md](./output_schemas.md) for every column and how the tiers
+join.
+
 ## 5. Re-ensemble a completed run (optional)
 
 You don't have to re-run the base models to try a different consensus. `ensemble_run` reads an

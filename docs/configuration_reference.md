@@ -158,5 +158,7 @@ knobs only matter when `python_runtime="ray"`.
 ```
 
 `theta`/`holtwinters` run on Spark; `arima_plus` runs in BigQuery — both under one `run_id`, in
-parallel. See [`configs/`](../configs) for worked examples (demo and 100k), and
-[running_and_reviewing.md](./running_and_reviewing.md) to submit and review one.
+parallel. See [`configs/`](../configs) for worked examples (demo and 100k),
+[running_and_reviewing.md](./running_and_reviewing.md) to submit and review one, and
+[output_schemas.md](./output_schemas.md) for the tables the run writes to (the whole config lands
+verbatim in `run_registry.raw_config`).
