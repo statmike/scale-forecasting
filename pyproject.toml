@@ -33,6 +33,14 @@ dependencies = [
     # cell table and serializes rows against it (a transitive dep of the google libs above,
     # pinned explicit because we import google.protobuf directly).
     "protobuf>=4.25",
+    # Notebook kernel. Driving a run from a local notebook (or Colab Enterprise) is a
+    # first-class use — many notebooks are pure orchestration of the Dataproc/Ray/BigQuery
+    # work — so the kernel ships in core, not a dev extra: `uv sync` then register a kernel
+    # (`uv run python -m ipykernel install --user --name scale-forecasting`).
+    "ipykernel>=6.29",
+    # The notebooks plot forecasts + their intervals and the scale-review charts; matplotlib
+    # is their only extra import beyond pandas/google, so it rides in core with the kernel.
+    "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]

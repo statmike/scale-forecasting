@@ -38,6 +38,31 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
 - For submitting (not for reviewing), the `[spark]` or `[ray]` extra: `pip install -e '.[spark]'`
   (Dataproc) or `'.[ray]'` (Ray). The runtime image itself is code-free — see the note above.
 
+## Notebooks and kernels
+
+The notebooks run from a local kernel — most are pure **orchestration** of the Dataproc / Ray /
+BigQuery work (with ADC for auth), so a local clone drives cloud compute directly. Register the
+project kernel once:
+
+```bash
+uv sync                                                          # core deps incl. ipykernel + matplotlib
+uv run python -m ipykernel install --user --name scale-forecasting --display-name "scale-forecasting (uv)"
+```
+
+Two notebooks need **no** cluster and run fully locally: `model_playground.ipynb` (pure
+`worker.run_cell`) and `07_scale_review.ipynb` (read-only over the registry views, needs the `SF_*`
+env + ADC). The rest submit to Dataproc / Ray / BigQuery.
+
+**Python-version note (interactive Spark Connect only).** The project pins Python **3.11** — required
+for Vertex Ray client↔cluster parity and the Dataproc packed-venv. Notebook 01's *interactive* Spark
+Connect path is the one exception: Dataproc 3.0 Connect workers run **Python 3.12**, and Connect
+refuses mismatched Python minors (`PYTHON_VERSION_MISMATCH`). So from a 3.11 kernel, NB01 falls back
+to the **remote-batch** path (`main.run(cfg)` with no injected session) — the *identical* engine
+on-cluster, same `run_id`, same results. If you specifically want interactive Connect, register a
+**separate, opt-in 3.12 kernel** (e.g. via `pyenv install 3.12` in a throwaway venv +
+`ipykernel install --name sf-connect-312`) and select it for NB01 only — never as the `uv` project
+default (that would break `uv sync` and the Ray parity).
+
 ## 1. Check the config offline first
 
 `--dry-run` resolves the config and estimates the fan-out (series × models × folds = cells) without
