@@ -257,13 +257,19 @@ def _local_ray() -> Any:
     ray.shutdown()
 
 
-def _fake_runner(cfg: RunConfig, settings: Settings, models: list[str] | None = None) -> Any:
+def _fake_runner(
+    cfg: RunConfig,
+    settings: Settings,
+    models: list[str] | None = None,
+    params_by_model: dict[str, Any] | None = None,
+) -> Any:
     """A BigQuery-free stand-in for :func:`ray_io.make_chunk_runner`.
 
     Ray tasks run in separate processes, so we can't monkeypatch ``bq.write_cells`` inside a worker;
     instead we swap the whole runner for one that emits a status row per ``(ts_id, model)`` cell
     without fitting a model or touching BigQuery. Returned closure is cloudpickle-able (Ray ships it
-    to the worker). Every cell reports ``status="ok"`` so the run rolls up COMPLETED.
+    to the worker). Every cell reports ``status="ok"`` so the run rolls up COMPLETED. The
+    ``params_by_model`` arg mirrors the real signature (C5 fleetwide HPO) — ignored here.
     """
 
     def _run(chunk: pd.DataFrame) -> pd.DataFrame:
@@ -349,7 +355,10 @@ def test_run_honors_executed_subset(
     captured: dict[str, Any] = {}
 
     def _capturing_runner(
-        cfg: RunConfig, settings: Settings, models: list[str] | None = None
+        cfg: RunConfig,
+        settings: Settings,
+        models: list[str] | None = None,
+        params_by_model: dict[str, Any] | None = None,
     ) -> Any:
         captured["models"] = models
 
