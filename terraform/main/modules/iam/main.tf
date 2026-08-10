@@ -74,13 +74,14 @@ locals {
   # connection role's value is only known after apply (Terraform requires known keys, apply-time
   # values). Keys read as the role's short name; `connection` is the custom sfConnectionDelegate.
   runner_roles = {
-    "bq.dataEditor"    = "roles/bigquery.dataEditor" # write registry rows + create tables
-    "bq.jobUser"       = "roles/bigquery.jobUser"    # run queries / load jobs
-    "connection"       = local.connection_role       # get/use/delegate the BigLake connection
-    "storage.objAdmin" = "roles/storage.objectAdmin" # warehouse + artifacts + code buckets
-    "dataproc.editor"  = "roles/dataproc.editor"     # submit Dataproc Serverless batches
-    "aiplatform.user"  = "roles/aiplatform.user"     # submit Ray on Vertex jobs (get/list clusters)
-    "ray.cluster"      = local.ray_cluster_role      # create/delete the Ray cluster it runs on
+    "bq.dataEditor"    = "roles/bigquery.dataEditor"      # write registry rows + create tables
+    "bq.jobUser"       = "roles/bigquery.jobUser"         # run queries / load jobs
+    "bq.readSession"   = "roles/bigquery.readSessionUser" # Storage Read API: notebooks/tools read result + leaderboard tables as the runner SA (headless acceptance + human Colab-open both run AS this SA)
+    "connection"       = local.connection_role            # get/use/delegate the BigLake connection
+    "storage.objAdmin" = "roles/storage.objectAdmin"      # warehouse + artifacts + code buckets
+    "dataproc.editor"  = "roles/dataproc.editor"          # submit Dataproc Serverless batches
+    "aiplatform.user"  = "roles/aiplatform.user"          # submit Ray on Vertex jobs (get/list clusters)
+    "ray.cluster"      = local.ray_cluster_role           # create/delete the Ray cluster it runs on
   }
   compute_roles = {
     "bq.dataEditor"    = "roles/bigquery.dataEditor" # read source_series, write results

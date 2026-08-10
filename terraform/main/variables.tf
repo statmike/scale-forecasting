@@ -58,6 +58,56 @@ variable "create_composer" {
   default     = false
 }
 
+# --- Colab Enterprise runtime templates ----------------------------------------
+# Blueprints for the VM a Colab runtime runs on — one per Python version the notebooks need. Free at
+# rest (a template costs nothing until a runtime starts, and runtimes idle-shutdown), so ON by
+# default. See modules/colab and docs/notebook_runtimes.md.
+
+variable "create_colab_templates" {
+  description = <<-EOT
+    Create the two Colab Enterprise runtime templates (sf-main: Python 3.11 / [ray]; sf-spark-connect:
+    Python 3.12 / [spark]). Default TRUE — templates are FREE at rest (no VM until someone starts a
+    runtime, and runtimes idle-shutdown), so shipping them costs nothing and makes the notebooks
+    runnable on Colab Enterprise out of the box. Set FALSE for a CLI-only / locked-down deploy.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "colab_attach_network" {
+  description = <<-EOT
+    Attach the project VPC + subnet to the Colab runtimes (VPC-private path). Default TRUE — this
+    stack is greenfield (create_network = true) and has no `default` network, so a public runtime
+    would 404 looking for one; attaching the custom VPC gives egress with NO external IP via the
+    Cloud NAT + Private Google Access from modules/network (also compatible with a
+    compute.vmExternalIpAccess = DENY org policy). Set FALSE only in a brownfield project that has a
+    usable `default` network and permits external IPs.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "colab_main_release_name" {
+  description = <<-EOT
+    Colab image release for sf-main. py311 matches the project pin (Ray parity + Dataproc packed-venv)
+    and is applied via a REST PATCH (the provider can't set it — #25217). Bump this to re-pin before
+    a Python version reaches end-of-availability (templates auto-upgrade to Latest otherwise).
+  EOT
+  type        = string
+  default     = "py311"
+}
+
+variable "colab_spark_release_name" {
+  description = <<-EOT
+    Colab image release for sf-spark-connect. py312 matches Dataproc 3.0 Connect workers and is pinned
+    EXPLICITLY via a REST PATCH (the provider can't set it — #25217) so it can't drift to 3.13 when
+    Colab advances Latest, which would re-break NB01 interactive with PYTHON_VERSION_MISMATCH. Bump to
+    re-pin before py312 reaches end-of-availability.
+  EOT
+  type        = string
+  default     = "py312"
+}
+
 # --- naming (what Terraform creates) -------------------------------------------
 
 variable "dataset_id" {

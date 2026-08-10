@@ -28,3 +28,9 @@ budget_amount_usd = 200
 # run_smoke       = true     # tolerant/non-blocking: fast Python models on Dataproc ∥ arima_plus in
 #                            # BigQuery, one run_id. Needs run_seed (the data) — a forecast failure
 #                            # NEVER fails the apply; see the smoke_batch_id / smoke_describe_hint outputs.
+
+# --- Colab Enterprise runtime templates (on by default; free at rest) ---
+# See docs/notebook_runtimes.md for which template each notebook uses.
+# create_colab_templates  = true    # sf-main (py311/[ray]) + sf-spark-connect (py312/[spark]); false = none
+# colab_attach_network    = true    # attach the custom VPC (greenfield has no `default` network);
+#                                   # false only in a brownfield project with a usable `default` network

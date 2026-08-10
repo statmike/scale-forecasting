@@ -161,6 +161,13 @@ Finally, [`07_scale_review`](./notebooks/07_scale_review.ipynb) runs nothing —
 and provisioning overhead from `v_run_summary`, and accuracy parity (same model, same answer across
 engines — G1) from `v_model_leaderboard`.
 
+Every notebook has a one-click **Run in Colab Enterprise** header — the Terraform-deployed runtime
+templates carry the `SF_*` run identity in their env, so it's open → pick a runtime → **Run all**,
+no environment cell. The same notebooks run green headless via the acceptance harness
+(`pytest -m gcp tests/integration/test_notebook_acceptance.py`, or
+`python -m scale_forecasting.notebook_acceptance`), which the deploy and any notebook change are
+verified against. See [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md).
+
 ## Documentation
 
 - [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md) — submit a run (Spark / Ray /
@@ -171,6 +178,9 @@ engines — G1) from `v_model_leaderboard`.
 - [`docs/output_schemas.md`](./docs/output_schemas.md) — the output tables' layout: every column of
   `run_registry` / `forecast_metadata` / `forecast_predictions` / `backtest_oof`, what it collects,
   and the two analyst views over them.
+- [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md) — which Python version each notebook
+  needs (3.11 vs 3.12) and how it behaves under each, locally (ADC) and on Colab Enterprise, plus the
+  two runtime templates Terraform ships, the one-click open path, and the headless acceptance harness.
 - [`docs/editing_code_without_rebuilding.md`](./docs/editing_code_without_rebuilding.md) — why a code
   edit ships on the next run with **no** image rebuild, and the loop you actually use.
 - [`docs/adding_a_model.md`](./docs/adding_a_model.md) — add a model in one file.

@@ -133,3 +133,33 @@ module "smoke" {
   # Runs after the data is seeded and the image exists — the smoke reads what the seed wrote.
   depends_on = [module.seed, module.container, module.network, module.bigquery, module.iam, module.storage]
 }
+
+# Colab Enterprise runtime templates for running the notebooks from inside GCP: sf-main (Python 3.11
+# / [ray], the everyday template) and sf-spark-connect (Python 3.12 / [spark], for notebook 01's
+# interactive Spark Connect). ON by default — templates are free at rest (no VM until a runtime
+# starts). See modules/colab and docs/notebook_runtimes.md.
+module "colab" {
+  source          = "./modules/colab"
+  create          = var.create_colab_templates
+  project_id      = var.project_id
+  region          = var.region
+  service_account = module.iam.runner_email
+  code_bucket     = module.storage.code_bucket
+
+  attach_network     = var.colab_attach_network
+  network_id         = module.network.network_id
+  subnetwork_uri     = module.network.subnetwork_uri
+  main_release_name  = var.colab_main_release_name
+  spark_release_name = var.colab_spark_release_name
+
+  # SF_* run identity baked into the templates' env (so a headless execution / a human's fresh kernel
+  # resolves Settings.resolve() with no manual env cell). All wired from the sibling modules.
+  connection            = module.bigquery.connection_id
+  warehouse_uri         = module.storage.warehouse_uri
+  dataset_id            = module.bigquery.dataset_id
+  compute_sa            = module.iam.compute_email
+  container_image       = "${module.container.image_repo_path}:${var.seed_image_tag}"
+  network_attachment_id = module.network.network_attachment_id
+
+  depends_on = [module.apis, module.iam, module.storage, module.network, module.bigquery, module.container]
+}

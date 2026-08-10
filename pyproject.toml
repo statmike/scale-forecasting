@@ -88,6 +88,10 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
     "pandas-stubs>=2.2,<3",
+    # Parses the executed notebooks the acceptance harness downloads, to scan for cell errors
+    # (scale_forecasting.notebook_acceptance). Dev-only: the harness is a test/CI tool, not part of
+    # the shipped forecasting runtime, so it doesn't belong in core deps.
+    "nbformat>=5.10",
 ]
 
 # --- torch CUDA build selection (Ray-on-Vertex T4 GPU path) --------------------------------------

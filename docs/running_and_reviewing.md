@@ -63,6 +63,9 @@ on-cluster, same `run_id`, same results. If you specifically want interactive Co
 `ipykernel install --name sf-connect-312`) and select it for NB01 only — never as the `uv` project
 default (that would break `uv sync` and the Ray parity).
 
+For the full per-notebook Python-version mapping (3.11 vs 3.12, local and on Colab Enterprise) and
+the two runtime templates Terraform ships, see [notebook_runtimes.md](./notebook_runtimes.md).
+
 ## 1. Check the config offline first
 
 `--dry-run` resolves the config and estimates the fan-out (series × models × folds = cells) without
