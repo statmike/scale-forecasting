@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Prepend a one-click "open this notebook" header to every notebook in ``notebooks/``.
 
-Each notebook gets a scrubbed markdown header table with **functional badges only** — View on
-GitHub, Run in Colab Enterprise (one-click import), Run in Colab, Open in BigQuery Studio — plus a
-one-line runbook naming the Colab Enterprise template to pick (the templates carry the ``SF_*`` env,
-so it's open → pick template → Run all). No tracking pixel, no social/author links (generic-product
-charter). Idempotent: the header is delimited by an HTML marker, so re-running replaces it in place
-rather than stacking duplicates.
+Each notebook gets a scrubbed markdown header with a single **functional badge** — Run in Colab
+Enterprise (one-click import) — plus a one-line runbook naming the Colab Enterprise template to pick
+(the templates carry the ``SF_*`` env, so it's open → pick template → Run all). No tracking pixel,
+no social/author links (generic-product charter). Idempotent: the header is delimited by an HTML
+marker, so re-running replaces it in place rather than stacking duplicates.
 
 Run from the repo root: ``python scripts/add_notebook_headers.py``.
 """
@@ -44,42 +43,18 @@ def _template_note(stem: str) -> str:
 
 def _header_markdown(stem: str) -> str:
     path = f"notebooks/{stem}.ipynb"
-    github = f"https://github.com/{_REPO}/blob/{_BRANCH}/{path}"
     raw = f"https://raw.githubusercontent.com/{_REPO}/{_BRANCH}/{path}"
-    colab = f"https://colab.research.google.com/github/{_REPO}/blob/{_BRANCH}/{path}"
     colab_ent = f"https://console.cloud.google.com/vertex-ai/colab/import/{quote(raw, safe='')}"
-    bq_studio = f"https://console.cloud.google.com/bigquery/import?url={github}"
 
-    gh_logo = "https://www.svgrepo.com/download/217753/github.svg"
-    colab_logo = "https://www.gstatic.com/pantheon/images/bigquery/welcome_page/colab-logo.svg"
     colab_ent_logo = "https://lh3.googleusercontent.com/JmcxdQi-qOpctIvWKgPtrzZdJJK-J3sWE1RsfjZNwshCFgE_9fULcNpuXYTilIR2hjwN"
-    bq_logo = "https://www.gstatic.com/images/branding/gcpiconscolors/bigquery/v1/32px.svg"
 
     return f"""{_MARKER}
 <table align="left">
 <tr>
   <td style="text-align: center">
-    <a href="{github}">
-      <img width="32px" src="{gh_logo}" alt="GitHub logo">
-      <br>View on<br>GitHub
-    </a>
-  </td>
-  <td style="text-align: center">
     <a href="{colab_ent}">
       <img width="32px" src="{colab_ent_logo}" alt="Colab Enterprise logo">
       <br>Run in<br>Colab Enterprise
-    </a>
-  </td>
-  <td style="text-align: center">
-    <a href="{colab}">
-      <img width="32px" src="{colab_logo}" alt="Colab logo">
-      <br>Run in<br>Colab
-    </a>
-  </td>
-  <td style="text-align: center">
-    <a href="{bq_studio}">
-      <img width="32px" src="{bq_logo}" alt="BigQuery logo">
-      <br>Open in<br>BigQuery Studio
     </a>
   </td>
 </tr>
