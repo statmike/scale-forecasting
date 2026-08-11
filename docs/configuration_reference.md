@@ -22,8 +22,8 @@ schema) surfaces as a single `ConfigError`.
 |-------|------|---------|---------|
 | `run_name` | `str` | *required* | Human name for the run. |
 | `data` | `DataConfig` | *required* | Where the series come from and their shape. |
-| `python_runtime` | `"spark"` \| `"ray"` | `"spark"` | Which Python runtime runs the Python models. |
-| `spark_method` | `"explode"` \| `"multi"` \| `"naive"` \| `null` | `null` | Spark fan-out strategy; only meaningful when `python_runtime="spark"`. |
+| `python_runtime` | `"spark"` \| `"ray"` | `"spark"` | Which Python runtime runs the Python models (see below). |
+| `spark_method` | `"explode"` \| `"multi"` \| `"naive"` \| `null` | `null` | Spark fan-out strategy; only meaningful when `python_runtime="spark"` (see below). |
 | `models` | `list[str]` | *required* (≥1) | Model names to run (see `playground --list`). |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
 | `backtest` | `BacktestConfig` | `{}` | Time-series cross-validation. |
@@ -40,6 +40,23 @@ schema) surfaces as a single `ConfigError`.
 - `ensemble.enabled` without `backtest.enabled` → the **learned** strategies (`nnls`/`ridge`/`xgb`)
   are dropped with a warning (they need OOF); calculated strategies remain. Not an error.
 
+**`python_runtime` — where the Python models run** (BigQuery-native models always run in parallel in
+BigQuery regardless of this choice):
+
+- `spark` (default) — Dataproc Serverless. The **100k CPU workhorse**; pick a `spark_method` below.
+- `ray` — Ray on Vertex AI. Its reason to exist is **fractional-GPU packing** for NeuralProphet (many
+  series share one T4); the Ray `compute` knobs apply.
+
+**`spark_method` — how Spark fans the work out** (all give the *same* forecasts; they differ in the
+unit of parallelism and thus speed). Engines in
+[`engines/`](../src/scale_forecasting/engines/):
+
+| Method | Fan-out unit | Best for | Watch out |
+|--------|-------------|----------|-----------|
+| `explode` (default) | one task per **`(series, model)` cell** (series cross-joined with models) | max parallelism at scale — a run finishes in ~its slowest *cell* | many small tasks |
+| `multi` | one child `explode` **batch per model family** (statistical / ml / deep-learning), all under one `run_id` | isolating a heavy model family into its own batch | more orchestration; submit-side only |
+| `naive` | one task per **whole series** (its models run sequentially inside the task) | tiny runs / a baseline to beat | drags on its slowest *series* — the deliberate straggler anti-pattern |
+
 ## `data` — `DataConfig`
 
 | Field | Type | Default | Constraint | Purpose |
@@ -48,7 +65,7 @@ schema) surfaces as a single `ConfigError`.
 | `ts_id_col` | `str` | `"ts_id"` | — | Series-id column. |
 | `date_col` | `str` | `"ds"` | — | Date column. |
 | `target_col` | `str` | `"y"` | — | Target column. |
-| `freq` | `str` | `"D"` | — | Series frequency (pandas 3 spellings: `D`, `W`, `MS`, `ME`, `h`). |
+| `freq` | `str` | `"D"` | one of `D W MS ME h` | Series frequency (pandas ≥2.2 spellings). Sets the seasonal period used by the models — `D`=daily (period 7), `W`=weekly (52), `MS`/`ME`=month start/end (12), `h`=hourly (24). An unsupported freq is rejected at validation. |
 | `horizon` | `int` | `28` | `> 0` | Forecast horizon (steps). |
 | `series_limit` | `int` \| `null` | `null` | `> 0` when set | `null` = all series; an int subsets the shipped data (demo small → scale large). |
 
@@ -57,11 +74,32 @@ schema) surfaces as a single `ConfigError`.
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
 | `holidays` | `list[str]` | `[]` | Holiday country codes to add (e.g. `["US"]`). |
-| `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform, inverted on output. `boxcox` fits its λ per series by MLE (requires strictly positive `y`); `log1p` needs `y >= -1`. |
+| `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform, inverted on output. |
 | `exog` | `list[str]` | `[]` | Exogenous driver columns — a **started-but-unexampled** seam: consumed by `sarimax`/`ucm`/`prophet`/`lightgbm`/`xgboost`, but the shipped source is univariate (bring your own table with these columns to use it). |
 | `lags` | `list[int]` | `[]` | Lag features. |
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
-| `level_shift` | `bool` | `false` | Level-shift feature. |
+| `level_shift` | `bool` | `false` | *(Reserved — declared but not yet consumed.)* |
+
+**What each option produces** ([`features.py`](../src/scale_forecasting/features.py)):
+
+- **`transform`** — reshapes the target before fitting and inverts it on output:
+  - `none` — identity (no constraint on `y`).
+  - `log1p` — `log(1+y)` forward, `expm1` back. Tames multiplicative growth / right-skew. **Requires
+    `y >= -1`.** Stateless.
+  - `boxcox` — a **power transform** whose λ is fit **per series** by maximum likelihood; the *same* λ
+    is reused across backtest folds and the final fit. Strongest variance-stabilizer of the three.
+    **Requires strictly positive `y` (`y > 0`).**
+- **`holidays`** — adds a single `is_holiday` flag (1.0 on holiday dates) from the `holidays` package
+  for each ISO country code (e.g. `["US", "GB"]`). The same calendar feeds the BigQuery-native models,
+  so holiday handling matches across runtimes. An unknown code fails fast.
+- **`lags`** — for each integer `L`, adds a `lag_{L}` column (the target shifted back `L` steps).
+  Gives the ML models (`lightgbm`/`xgboost`) autoregressive signal. Values must be positive.
+- **`fourier`** — adds sine/cosine **yearly** seasonality terms (order 3 → 6 columns). Smooth periodic
+  signal for the regression-based models.
+- **`exog`** — passes named driver columns straight from the source table through to the models that
+  accept exogenous regressors. See the univariate-shipped-data caveat above.
+- **`level_shift`** — reserved config flag; currently inert (declared, not yet wired into feature
+  engineering).
 
 ## `backtest` — `BacktestConfig`
 
@@ -78,7 +116,44 @@ for HPO and learned ensembles.
 | `min_train` | `int` | `180` | `> 0` | Minimum training length. |
 | `decision_metric` | see below | `"wape"` | — | Metric folds are judged on. |
 
-`decision_metric` ∈ `mae, rmse, mse, mape, smape, wape, mase, rmsse, bias, coverage, pinball`.
+**`scheme` — how the training window moves** ([`backtest.py`](../src/scale_forecasting/backtest.py)).
+Folds are anchored from the **end** of each series: the latest fold validates on the final `horizon`
+points, and each earlier fold steps its validation window back by `step`. The two schemes differ only
+in where training *starts*:
+
+- **`expanding`** (default) — training uses **all history** from the series start up to each fold's
+  validation point. The train window grows fold to fold. Best default: every fold sees maximum
+  history.
+- **`sliding`** — training uses a **fixed-width** window of the last `min_train` observations
+  immediately before each fold. Older history is dropped. Use when the series' behavior drifts and
+  recent history is more representative than old history.
+
+`n_folds`, `horizon`, `step`, and `min_train` lay the folds out together; a series needs at least
+`min_train + horizon + (n_folds−1)·step` observations, or it's **skipped** for backtesting (it doesn't
+sink the run). Features are built once and a **fresh** model is fit per fold, so no state leaks across
+folds and `train_end == val_start` always (no leakage).
+
+**`decision_metric` — what folds are judged on** (definitions in
+[`metrics.py`](../src/scale_forecasting/metrics.py); `err = yhat − y_true`). This single choice drives
+fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold`.
+
+| Metric | Definition | Notes |
+|--------|-----------|-------|
+| `mae` | mean(\|err\|) | Mean absolute error. Scale-dependent. |
+| `rmse` | √mean(err²) | Penalizes large misses more than `mae`. |
+| `mse` | mean(err²) | Squared error; `rmse` without the root. |
+| `mape` | mean(\|err\| / \|y_true\|) | % error. **NaN if any `y_true == 0`.** |
+| `smape` | mean(2\|err\| / (\|y_true\|+\|yhat\|)) | Symmetric %; bounded, handles zeros gracefully. |
+| `wape` | Σ\|err\| / Σ\|y_true\| | Weighted absolute % error — the scale-safe default. NaN only if the series sums to 0. |
+| `mase` | mae / mae(naïve-1-step) | Scaled vs. a naïve forecast; **needs training history**. <1 beats naïve. |
+| `rmsse` | rmse / rmse(naïve-1-step) | Squared analog of `mase`; **needs training history**. |
+| `bias` | mean(err) | Mean error — sign shows over/under-forecast. HPO minimizes \|bias\|. |
+| `coverage` | fraction of `y_true` inside [lower, upper] | **Needs prediction intervals**; want it near the nominal level. |
+| `pinball` | avg quantile loss at the 0.1 / 0.9 bounds | **Needs prediction intervals**; scores interval sharpness+calibration. |
+
+Pick `wape` (default) or `smape` for a robust scale-independent choice; `mase`/`rmsse` when you want
+to beat a naïve baseline; `coverage`/`pinball` only when you care about the prediction intervals
+(ensemble OOF has no intervals, so those two read NaN for ensembles).
 
 ## `hpo` — `HpoConfig`
 
@@ -115,7 +190,29 @@ Consensus across the base models (scored onto the same leaderboard). See
 
 `strategies` ∈ **calculated** `mean, median, inverse_error` (no backtest needed) and **learned**
 `nnls, ridge, xgb` (need `backtest.enabled`). A bare `"strategy": "nnls"` is accepted as shorthand
-for `"strategies": ["nnls"]`.
+for `"strategies": ["nnls"]`. Run several at once — each produces its own `ensemble_<strategy>` rows
+and earns a line on the leaderboard next to the base models.
+
+**What each strategy does** (implementation in
+[`ensembler.py`](../src/scale_forecasting/ensembler.py)):
+
+| Strategy | Kind | How the blend is formed | Needs |
+|----------|------|-------------------------|-------|
+| `mean` | calculated | Unweighted arithmetic mean of the base forecasts, row by row. Missing models are skipped and weights renormalize over those present. | — |
+| `median` | calculated | Unweighted row-wise **median** — robust to a single wild base forecast. | — |
+| `inverse_error` | calculated | Weighted mean where each model's weight ∝ **1 / its error**, normalized to sum to 1. For the future forecast the error is the mean `decision_metric` from `forecast_metadata`; for the on-fold (OOF) score it's each series' own WAPE. A zero-error model captures the weight; if no error is usable it degrades to `mean`. | (weights sharpen with `backtest`) |
+| `nnls` | learned | **Non-negative least squares** meta-learner: solves for weights ≥ 0 that best reconstruct the truth from the base models' out-of-fold predictions. No intercept; weights can't go negative. | `backtest.enabled` |
+| `ridge` | learned | **L2-regularized linear regression** (closed-form, α=1.0) over the same OOF matrix. Weights *may* be negative (a model can be a corrective term). | `backtest.enabled` |
+| `xgb` | learned | **Gradient-boosted** meta-learner (`XGBRegressor`, 200 trees, depth 3) fit on the OOF matrix; captures non-linear interactions between base models. Reported "weights" are its normalized feature importances. | `backtest.enabled`, `xgboost` installed |
+
+The three **learned** strategies train **only** on `backtest_oof` rows (never in-sample), so leakage
+is structurally impossible — which is exactly why they require `backtest.enabled` (without it they're
+dropped at config-load with a warning, not an error). Each fitted meta-learner is pickled to a GCS
+artifact for lineage.
+
+**`prune_threshold`** applies only to the **calculated** strategies: when `> 0`, any base model whose
+mean `backtest.decision_metric` is *worse than* (greater than) the threshold is dropped from the blend
+fleet-wide before combining. `0.0` (default) prunes nothing.
 
 ## `compute` — `ComputeConfig`
 
@@ -126,8 +223,8 @@ knobs only matter when `python_runtime="ray"`.
 |-------|------|---------|-----------|---------|
 | `max_parallelism` | `int` | `1000` | `> 0` | Max parallel tasks. |
 | `bucket_target_cells` | `int` | `8` | `> 0` | Target cells per Spark bucket (shuffle-partition sizing). |
-| `machine_family` | `str` | `"auto"` | — | Executor machine family. |
-| `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | Dependency delivery mechanism. |
+| `machine_family` | `str` | `"auto"` | — | *(Reserved — declared, not yet consumed.)* |
+| `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | *(Reserved — dependency delivery is currently driven by the submit helpers, not this field.)* |
 | `persist_models` | `bool` | `false` | — | Persist each fitted model as a GCS artifact (lineage). |
 | `use_gpu` | `bool` | `false` | — | Enable GPU (Ray). |
 | `gpu_type` | `str` | `"T4"` | — | GPU accelerator type. |

@@ -222,6 +222,10 @@ verified against. See [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md)
 
 ## Documentation
 
+- [`docs/architecture.md`](./docs/architecture.md) — how the system works: the module-calling-module
+  call tree from entrypoints down to the one unit of work, how a model file registers and is
+  discovered, and how each runtime (Spark explode/multi/naive, Ray, BigQuery-native) fans the work
+  out — with links into the code throughout. Start here to read the codebase.
 - [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md) — submit a run (Spark / Ray /
   BigQuery), watch it land, review the leaderboard, and re-ensemble a completed run — the full
   operator loop with every entrypoint and its flags.
