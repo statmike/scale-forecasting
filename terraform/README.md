@@ -157,11 +157,21 @@ cloudshell edit terraform.tfvars
 ### 2b. Main — build everything else
 
 ```bash
-# Point ADC's quota/consumer project at the NEW project. The provider routes IAM, Service Networking,
-# and other API calls through this project; if it's still your Cloud Shell default (e.g. a shared
-# sandbox), main fails with "<API> has not been used in project <that-project> ... SERVICE_DISABLED"
-# on the service accounts, custom roles, and PSA connection. (Replace with your project_id.)
-gcloud auth application-default set-quota-project gcp-scale-forecasting
+# Point the provider's quota/consumer project at the NEW project. The provider routes IAM, Service
+# Networking, and other API calls through this project; if it's still your Cloud Shell default (e.g. a
+# shared sandbox), main fails with "<API> has not been used in project <that-project> ...
+# SERVICE_DISABLED" on the service accounts, custom roles, and PSA connection. (Replace with your id.)
+#
+# Use the env var, not `gcloud auth application-default set-quota-project`: the env var is stateless
+# and always wins, whereas set-quota-project writes into the ADC file — and in Cloud Shell that file
+# often lives under a per-session `CLOUDSDK_CONFIG` temp dir (e.g. /tmp/tmp.XXted), so the edit can
+# land in a different file than the one the provider reads. Export it in the SAME shell you apply from:
+export GOOGLE_CLOUD_QUOTA_PROJECT=gcp-scale-forecasting
+
+# The Vertex AI service agent is provisioned lazily — on a brand-new project it does NOT exist yet, so
+# the network-attachment grants in the iam module fail "Service account service-...@gcp-sa-aiplatform
+# ... does not exist." Force-create it up front so the first apply binds cleanly:
+gcloud beta services identity create --service=aiplatform.googleapis.com --project=gcp-scale-forecasting
 
 # Point Terraform's state at the bucket bootstrap just made (name is "<project_id>-tfstate"):
 terraform init -backend-config="bucket=$(cd ../bootstrap && terraform output -raw state_bucket)"
@@ -171,19 +181,41 @@ terraform apply          # type `yes`. Builds the image (Cloud Build) + seeds 10
 ```
 
 > **Re-running after a partial apply is safe.** `terraform apply` is idempotent — it keeps what's
-> already created and only builds the rest. If a first apply failed on the quota project (above) or on
-> brand-new-project API propagation, just fix the cause and re-run `terraform apply`.
+> already created and only builds the rest. If a first apply failed on the quota project (above),
+> brand-new-project API propagation, or the Vertex agent not existing yet, just fix the cause and
+> re-run `terraform apply` — the expensive image build and any completed resources are skipped.
+
+> **If you forgot the `gcloud beta services identity create` and apply failed on the vertex-agent
+> grants** (`google_project_iam_member.vertex_agent_network_user` /
+> `vertex_agent_attachment_consumer`, error `service-...@gcp-sa-aiplatform ... does not exist`), run
+> that command now and re-apply — everything else will already have been created.
 
 > The first apply **blocks** while Cloud Build builds the runtime image and the Dataproc seed batch
 > runs (~8.5 min at 100k). That's expected — it's doing real work. To smoke cheaply first, set
 > `seed_num_series = 100` in `terraform.tfvars` before `apply`.
 
-### 3. Verify — read the outputs the app consumes (from `terraform/main`)
+### 3. Verify — read the outputs, then wait for the smoke forecast to finish
 
 ```bash
 terraform output                              # dataset, connection, warehouse, buckets, SA emails
 terraform output -raw project_id
+terraform output -raw seed_batch_state        # want "SUCCEEDED" — the 100k seed ran inline with apply
 ```
+
+> **The smoke forecast finishes *after* `apply` returns.** The last thing apply does is submit a small
+> end-to-end forecast batch **`--async`** (it fires and returns, so "Apply complete!" does **not** mean
+> the forecast is done). Track it to `SUCCEEDED` yourself — this is the real proof the shipped image +
+> code forecast against the seeded data, not just that the infra stood up:
+>
+> ```bash
+> # The describe command is handed to you as an output; run it, or poll the state directly:
+> terraform output -raw smoke_describe_hint     # prints the full gcloud describe command
+> watch -n 30 "gcloud dataproc batches describe $(terraform output -raw smoke_batch_id) \
+>   --project $(terraform output -raw project_id) --region us-central1 --format='value(state)'"
+> ```
+>
+> `PENDING`/`RUNNING` → still going (a minute or two); `SUCCEEDED` → the deploy is fully proven;
+> `FAILED` → run the describe hint for the driver log. (Ctrl-C to leave `watch`.)
 
 Those outputs feed the run config and the `SF_*` environment the notebooks resolve. The Colab
 Enterprise runtime templates (`sf-main`, `sf-spark-connect`) are created on by default and already
@@ -209,14 +241,21 @@ terraform output state_bucket                  # the bucket name for stage 2
 # Stage 2 — main
 cd ../main
 cp terraform.tfvars.example terraform.tfvars   # edit: project_id, billing_account
+export GOOGLE_CLOUD_QUOTA_PROJECT=<project_id>  # route provider API calls through the NEW project
+gcloud beta services identity create --service=aiplatform.googleapis.com --project=<project_id>
 terraform init -backend-config="bucket=<project_id>-tfstate"
 terraform plan                                 # review — nothing is created until apply
-terraform apply
+terraform apply                                # seed runs inline; smoke forecast is submitted async
+
+# Confirm the async smoke forecast landed (apply returns before it finishes):
+gcloud dataproc batches describe $(terraform output -raw smoke_batch_id) \
+  --project $(terraform output -raw project_id) --region us-central1 --format='value(state)'
 ```
 
 Outputs (`terraform output`) give you the dataset, the Iceberg connection ref, the warehouse
 URI, the code/artifacts buckets, and the two service-account emails — these feed the run
-config and the seed job.
+config and the seed job. `seed_batch_state` should read `SUCCEEDED`; poll `smoke_batch_id` to
+`SUCCEEDED` (it runs after apply returns).
 
 ## The BYO toggles
 
