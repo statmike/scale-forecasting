@@ -25,9 +25,12 @@ bucket that doesn't exist yet).
 
 ### Tools
 
-- `terraform >= 1.5` and the `gcloud` CLI. **Both are pre-installed in Google
-  [Cloud Shell](https://cloud.google.com/shell)** — the recommended place to run this (see the
-  copy-paste runbook below). Locally, install both yourself.
+- The `gcloud` CLI (pre-installed in [Cloud Shell](https://cloud.google.com/shell), the recommended
+  place to run this) and `terraform >= 1.5`.
+- **Terraform is no longer pre-installed in Cloud Shell** (Google removed the bundled CLI after
+  HashiCorp's BSL license change). Install it into your Cloud Shell **home directory** so it persists
+  across sessions (Cloud Shell's home is durable; `/usr/*` is reset). Step 0a below does this; the APT
+  route from HashiCorp's docs also works but is wiped when the session VM recycles.
 - The main stage shells out to `gcloud builds submit` to build the runtime image (unless
   `build_image = false`), so `gcloud` must be authenticated for **both** the CLI *and* ADC (the
   runbook does both).
@@ -76,26 +79,44 @@ This is the fully prescriptive path — from an empty Cloud Shell to a deployed,
 the Cloud Console), then run these blocks **in order**. Cloud Shell already carries your identity and
 has `terraform` + `gcloud` installed.
 
-### 0a. Auth + clone (and confirm your roles)
+### 0a. Install Terraform, auth, clone (and confirm your roles)
 
-First authenticate ADC (the Terraform provider reads it), then grab the repo. Before going further,
-confirm you hold the operator roles from [Permissions](#permissions-you-the-operator-must-hold) above
-— `projectCreator` on the org/folder and `billing.user` on the billing account.
+Cloud Shell no longer ships Terraform, so install it into your home directory (persists across
+sessions), authenticate ADC (the Terraform provider reads it), then grab the repo. Before going
+further, confirm you hold the operator roles from
+[Permissions](#permissions-you-the-operator-must-hold) above — `projectCreator` on the org/folder and
+`billing.user` on the billing account.
 
 ```bash
+# Install a recent Terraform into ~/bin (durable in Cloud Shell; survives session recycles):
+TF_VERSION=1.9.8
+mkdir -p ~/bin && cd ~/bin
+curl -fsSL -o terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+unzip -o terraform.zip && rm terraform.zip
+grep -qxF 'export PATH="$HOME/bin:$PATH"' ~/.bashrc || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+export PATH="$HOME/bin:$PATH"
+terraform version          # confirm it's on PATH
+
 # ADC for the Terraform provider (Cloud Shell has your gcloud identity, but the provider reads ADC):
 gcloud auth application-default login
 
 # Clone the repo:
+cd ~
 git clone https://github.com/statmike/scale-forecasting.git
 cd scale-forecasting
 ```
 
-### 0b. Discover the ids you'll put in terraform.tfvars
+### 0b. Discover ids + enable the Cloud Billing API on your active project
 
 ```bash
 gcloud billing accounts list          # copy the ACCOUNT_ID (XXXXXX-XXXXXX-XXXXXX)
 gcloud organizations list             # copy your ORG_ID  (a number)
+
+# Bootstrap's billing-account permission check routes through your ADC quota project (the project
+# gcloud is currently set to). That project needs the Cloud Billing API enabled, or the project-create
+# step fails with "Cloud Billing API has not been used in project <X> ... SERVICE_DISABLED":
+gcloud config get-value project                              # <-- your active/quota project
+gcloud services enable cloudbilling.googleapis.com          # enable it there (wait ~1-2 min to propagate)
 ```
 
 ### 1a. Bootstrap — prepare the vars (edit before you apply)
