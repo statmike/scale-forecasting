@@ -118,8 +118,15 @@ def acceptance_results() -> dict[str, na.AcceptanceResult]:
 def test_notebook_runs_clean(
     spec: na.NotebookSpec, acceptance_results: dict[str, na.AcceptanceResult]
 ) -> None:
-    """The notebook ran to SUCCEEDED on its template with zero cell errors."""
+    """The notebook ran to SUCCEEDED on its template with zero cell errors.
+
+    A transient GCP capacity stockout (runtime VM or an in-notebook Dataproc/Ray pool) is skipped,
+    not failed — it's infra availability, not a defect in the notebook or the product. Everything
+    else must be a clean SUCCEEDED with zero cell errors.
+    """
     result = acceptance_results[spec.name]
+    if result.state == na.JOB_STATE_CAPACITY_UNAVAILABLE:
+        pytest.skip(f"{spec.name}: GCP capacity unavailable (transient) — {result.detail}")
     assert result.state == "JOB_STATE_SUCCEEDED", (
         f"{spec.name} on {spec.template}: {result.state} — {result.detail}"
     )

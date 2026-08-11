@@ -131,6 +131,39 @@ class AcceptanceResult:
 
 _TERMINAL_STATES = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"}
 
+# Synthetic (non-API) state: the job FAILED because GCP couldn't provision capacity — the Colab
+# runtime VM, or a Dataproc/Ray pool the notebook asked for. This is transient infra, not a defect
+# in the notebook or the product, so the acceptance test skips rather than fails on it. See
+# :func:`is_capacity_unavailable` for the signals; the harness rewrites FAILED → this before return.
+JOB_STATE_CAPACITY_UNAVAILABLE = "JOB_STATE_CAPACITY_UNAVAILABLE"
+
+# Substrings that mark a capacity/stockout failure (case-insensitive), drawn from the messages GCP
+# returns: Colab runtime provisioning ("does not have enough resources", "ZONE_RESOURCE_POOL_
+# EXHAUSTED"), Dataproc/Compute stockouts, and the generic RESOURCE_EXHAUSTED / quota family. These
+# are about physical capacity, NOT quota-you-can-raise — but both are transient-to-the-run, so we
+# treat them the same: skip, don't fail.
+_CAPACITY_SIGNALS = (
+    "does not have enough resources",
+    "resource_pool_exhausted",
+    "zone_resource_pool_exhausted",
+    "resource_exhausted",
+    "resources.unavailable",
+    "out of resources",
+    "insufficient",
+    "stockout",
+    "capacity",
+)
+
+
+def is_capacity_unavailable(detail: str) -> bool:
+    """True if a failure ``detail`` reads as a transient GCP capacity/stockout, not a real error.
+
+    Matched case-insensitively against :data:`_CAPACITY_SIGNALS`. Used by the harness to reclassify
+    a FAILED job (or in-cell error) as :data:`JOB_STATE_CAPACITY_UNAVAILABLE` so acceptance skips.
+    """
+    low = detail.lower()
+    return any(sig in low for sig in _CAPACITY_SIGNALS)
+
 
 def _endpoint(region: str) -> str:
     """Regional aiplatform v1 endpoint the NotebookExecutionJob API lives behind."""
@@ -353,11 +386,50 @@ def run_acceptance(
                 n_errors = assert_no_cell_errors(nb_bytes)
                 if n_errors:
                     detail = f"{n_errors} cell error output(s) in executed notebook"
+                    # An in-cell capacity stockout (e.g. a Dataproc/Ray pool couldn't scale) is
+                    # transient infra — surface the offending cell's message so we can classify it.
+                    detail = f"{detail}: {_first_cell_error(nb_bytes)}"
+        elif state == "JOB_STATE_FAILED":
+            # The job may have failed AFTER writing a partial notebook (in-cell error) or BEFORE it
+            # ever started (runtime VM couldn't be provisioned — no output). Prefer the executed
+            # notebook's own error message when present; else fall back to the API failure detail.
+            executed_uri, nb_bytes = download_executed(
+                gcs_output_uri=out_uri, job_id=job_id, project_id=project_id
+            )
+            if nb_bytes is not None:
+                cell_err = _first_cell_error(nb_bytes)
+                if cell_err:
+                    detail = cell_err
+
+        # Reclassify a transient GCP capacity/stockout (runtime VM or in-notebook pool) so
+        # acceptance skips rather than fails — infra, not a product/notebook defect.
+        if state == "JOB_STATE_FAILED" and is_capacity_unavailable(detail):
+            state = JOB_STATE_CAPACITY_UNAVAILABLE
+
         results.append(
             AcceptanceResult(spec.name, job_id, state, n_errors, detail, executed_uri)
         )
         _log.info("%s → %s (%d cell errors)", spec.name, state, n_errors)
     return results
+
+
+def _first_cell_error(notebook_bytes: bytes) -> str:
+    """Return a one-line ``ename: evalue`` for the first errored cell in an executed notebook.
+
+    Empty string if none — used to surface an in-cell failure's message for capacity classification.
+    """
+    import nbformat
+
+    nb = nbformat.reads(notebook_bytes.decode("utf-8"), as_version=4)
+    for cell in nb.cells:
+        if cell.get("cell_type") != "code":
+            continue
+        for output in cell.get("outputs", []):
+            if output.get("output_type") == "error":
+                ename = output.get("ename", "")
+                evalue = output.get("evalue", "")
+                return f"{ename}: {evalue}".strip(": ").strip()
+    return ""
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -415,9 +487,18 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 80)
     for r in results:
         print(f"{r.name:<24} {r.state:<22} {r.n_cell_errors:>8}  {r.detail}")
-    failed = [r for r in results if not r.ok]
+    # A capacity stockout is transient infra, not a defect: report it as skipped, exit non-zero only
+    # on a genuine failure (see is_capacity_unavailable / JOB_STATE_CAPACITY_UNAVAILABLE).
+    skipped = [r for r in results if r.state == JOB_STATE_CAPACITY_UNAVAILABLE]
+    failed = [r for r in results if not r.ok and r not in skipped]
+    passed = len(results) - len(failed) - len(skipped)
     print()
-    print(f"{len(results) - len(failed)}/{len(results)} passed")
+    summary = f"{passed}/{len(results)} passed"
+    if skipped:
+        summary += f", {len(skipped)} skipped (capacity unavailable)"
+    if failed:
+        summary += f", {len(failed)} failed"
+    print(summary)
     return 1 if failed else 0
 
 

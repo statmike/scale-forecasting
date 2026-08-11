@@ -213,6 +213,17 @@ resource "google_service_account_iam_member" "runner_impersonates_compute" {
   member             = "serviceAccount:${local.runner_email}"
 }
 
+# Let the runner act as ITSELF. Creating a Dataproc Spark Connect Session (notebook 01, run headless
+# AS the runner) requires serviceAccountUser on the session's own service account — without this the
+# Session create fails "User not authorized to act as service account <runner>". Batch/Ray jobs run
+# as the compute SA (grant above); only the interactive Connect Session runs as the runner itself.
+resource "google_service_account_iam_member" "runner_impersonates_self" {
+  count              = var.create ? 1 : 0
+  service_account_id = google_service_account.runner[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${local.runner_email}"
+}
+
 output "runner_email" {
   description = "scale-forecasting-runner service account email."
   value       = local.runner_email
