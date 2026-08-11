@@ -223,6 +223,11 @@ locals {
   spark_env = merge(local.identity_env, {
     SF_DATAPROC_REGION = var.region
     SF_DATAPROC_SUBNET = var.subnetwork_uri == null ? null : replace(var.subnetwork_uri, "/^https://[^/]+/compute/v1//", "")
+    # Runtime SA the Spark Connect Session runs as. Mirrors the batch path (submit.py): the session
+    # runtime needs dataprocrm.nodes.mintOAuthToken (a roles/dataproc.worker permission carried by the
+    # compute SA, deliberately NOT the runner). The runner holds serviceAccountUser on compute
+    # (runner_impersonates_compute), so it can create the session with compute as the runtime SA.
+    SF_COMPUTE_SA = var.compute_sa
   })
 
   # Drop null/empty entries — a template env can't carry a value we don't have.
