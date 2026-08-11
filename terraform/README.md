@@ -157,12 +157,22 @@ cloudshell edit terraform.tfvars
 ### 2b. Main — build everything else
 
 ```bash
+# Point ADC's quota/consumer project at the NEW project. The provider routes IAM, Service Networking,
+# and other API calls through this project; if it's still your Cloud Shell default (e.g. a shared
+# sandbox), main fails with "<API> has not been used in project <that-project> ... SERVICE_DISABLED"
+# on the service accounts, custom roles, and PSA connection. (Replace with your project_id.)
+gcloud auth application-default set-quota-project gcp-scale-forecasting
+
 # Point Terraform's state at the bucket bootstrap just made (name is "<project_id>-tfstate"):
 terraform init -backend-config="bucket=$(cd ../bootstrap && terraform output -raw state_bucket)"
 
 terraform plan           # read it — nothing is created until apply
 terraform apply          # type `yes`. Builds the image (Cloud Build) + seeds 100k series; ~15-20 min total.
 ```
+
+> **Re-running after a partial apply is safe.** `terraform apply` is idempotent — it keeps what's
+> already created and only builds the rest. If a first apply failed on the quota project (above) or on
+> brand-new-project API propagation, just fix the cause and re-run `terraform apply`.
 
 > The first apply **blocks** while Cloud Build builds the runtime image and the Dataproc seed batch
 > runs (~8.5 min at 100k). That's expected — it's doing real work. To smoke cheaply first, set
