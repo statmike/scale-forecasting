@@ -220,14 +220,16 @@ locals {
     SF_RAY_NETWORK_ATTACHMENT = var.network_attachment_id
   })
 
-  spark_env = merge(local.identity_env, {
+  # NB01 uses BOTH paths, so sf-spark-connect carries the full batch infra env (main_env) PLUS the
+  # Connect-specific vars: the interactive Spark Connect path runs the explode fan-out over the
+  # session, and the remote-batch FALLBACK cell (main.run(cfg)) submits a Dataproc batch that needs
+  # SF_CODE_BUCKET / SF_CONTAINER_IMAGE / SF_SUBNETWORK_URI — exactly what main_env provides. Layering
+  # on main_env (not identity_env) keeps a single source for the batch keys, no drift with sf-main.
+  spark_env = merge(local.main_env, {
     SF_DATAPROC_REGION = var.region
     SF_DATAPROC_SUBNET = var.subnetwork_uri == null ? null : replace(var.subnetwork_uri, "/^https://[^/]+/compute/v1//", "")
-    # Runtime SA the Spark Connect Session runs as. Mirrors the batch path (submit.py): the session
-    # runtime needs dataprocrm.nodes.mintOAuthToken (a roles/dataproc.worker permission carried by the
-    # compute SA, deliberately NOT the runner). The runner holds serviceAccountUser on compute
-    # (runner_impersonates_compute), so it can create the session with compute as the runtime SA.
-    SF_COMPUTE_SA = var.compute_sa
+    # SF_COMPUTE_SA is already in main_env; the Session runs its runtime AS it (mintOAuthToken, a
+    # roles/dataproc.worker permission the runner lacks but compute has; runner impersonates compute).
   })
 
   # Drop null/empty entries — a template env can't carry a value we don't have.
