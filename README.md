@@ -289,8 +289,10 @@ through.
 **Reviewing the Terraform before you run it?** [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md)
 is a full walkthrough: what each module builds, which GCP services it uses and how, **why each
 permission is granted and who uses it** (including the three custom least-privilege IAM roles), and
-the greenfield-vs-brownfield toggles. The operator runbook (exact commands, cost notes) is
-[`terraform/README.md`](./terraform/README.md).
+the greenfield-vs-brownfield toggles. The operator runbook —
+[`terraform/README.md`](./terraform/README.md) — has the **zero-to-deployed Cloud Shell walkthrough**
+(auth → clone → bootstrap → main → verify, copy-paste), the exact **org/project permissions the
+operator must hold**, and the cost notes.
 
 ## License
 

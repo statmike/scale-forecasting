@@ -4,9 +4,9 @@
 #   # edit the values, then:
 #   terraform init && terraform apply
 
-project_id      = "statmike-scale-forecasting"
+project_id      = "my-scale-forecasting"
 billing_account = "XXXXXX-XXXXXX-XXXXXX" # from: gcloud billing accounts list
-org_id          = "798987785246"         # statmike.altostrat.com; or set folder_id instead
+org_id          = "000000000000"         # from: gcloud organizations list; or set folder_id instead
 region          = "us-central1"
 
 # create_project    = true                # false if your org pre-creates projects

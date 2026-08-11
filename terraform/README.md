@@ -23,25 +23,134 @@ bucket that doesn't exist yet).
 
 ## Prerequisites
 
-- `terraform >= 1.5` and the `gcloud` CLI, authenticated: `gcloud auth application-default login`
-  (the main stage shells out to `gcloud builds submit` to build the runtime image unless
-  `build_image = false`).
-- A **billing account id** (`gcloud billing accounts list`) and your **org or folder id**.
-- Permission to create projects under that org/folder.
+### Tools
 
-## Stage 1 — bootstrap (once)
+- `terraform >= 1.5` and the `gcloud` CLI. **Both are pre-installed in Google
+  [Cloud Shell](https://cloud.google.com/shell)** — the recommended place to run this (see the
+  copy-paste runbook below). Locally, install both yourself.
+- The main stage shells out to `gcloud builds submit` to build the runtime image (unless
+  `build_image = false`), so `gcloud` must be authenticated for **both** the CLI *and* ADC (the
+  runbook does both).
+
+### Identifiers you need up front
+
+| You need | Get it with |
+|----------|-------------|
+| **Billing account id** (`XXXXXX-XXXXXX-XXXXXX`) | `gcloud billing accounts list` |
+| **Org id** *(or a folder id)* | `gcloud organizations list` (org) / `gcloud resource-manager folders list --organization=<ORG_ID>` (folder) |
+| A **globally-unique project id** to create | you choose (e.g. `my-scale-forecasting`) |
+
+### Permissions **you** (the operator) must hold
+
+These are the roles the *human running Terraform* needs — distinct from the two service accounts the
+deployment creates for the workload (those are in
+[`docs/deploying_on_gcp.md`](../docs/deploying_on_gcp.md#permissions-why-each-is-granted-and-who-uses-it)).
+
+**At the org (or folder) level** — needed by **bootstrap**, because it creates a project and links
+billing:
+
+| Role | Why |
+|------|-----|
+| `roles/resourcemanager.projectCreator` | Create the new project (`google_project`). Grant on the org or the parent folder. |
+| `roles/billing.user` | Link the project to your billing account. Granted on the **billing account** (`gcloud billing accounts add-iam-policy-binding`), not the org. |
+
+> Skipping bootstrap? If your org **pre-creates projects** (`create_project = false`), you don't need
+> `projectCreator` — but you still need `billing.user` on the billing account unless an admin has
+> already linked billing, plus `roles/storage.admin` on the pre-made project to create the state bucket.
+
+**At the project level** — needed by **main**, which enables APIs, creates SAs + role bindings,
+buckets, network, dataset, and runs Cloud Build. The simplest correct grant is **`roles/owner`** on
+the project bootstrap just created. If your org forbids `owner`, the equivalent least-privilege set is:
+`roles/serviceusage.serviceUsageAdmin`, `roles/iam.serviceAccountAdmin`,
+`roles/resourcemanager.projectIamAdmin`, `roles/iam.roleAdmin` (three custom roles),
+`roles/storage.admin`, `roles/bigquery.admin`, `roles/compute.networkAdmin`,
+`roles/dataproc.admin`, `roles/aiplatform.admin`, `roles/cloudbuild.builds.editor`,
+`roles/artifactregistry.admin`, and `roles/billingbudgets.budgetsEditor`.
+
+---
+
+## Zero-to-deployed from Cloud Shell (copy-paste runbook)
+
+This is the fully prescriptive path — from an empty Cloud Shell to a deployed, seeded platform.
+[Open Cloud Shell](https://console.cloud.google.com/?cloudshell=true) (the terminal icon, top-right of
+the Cloud Console), then run these blocks **in order**. Cloud Shell already carries your identity and
+has `terraform` + `gcloud` installed.
+
+### 0. One-time setup — auth, IDs, clone
 
 ```bash
+# ADC for the Terraform provider (Cloud Shell has your gcloud identity, but the provider reads ADC):
+gcloud auth application-default login
+
+# Discover your ids:
+gcloud billing accounts list          # copy the ACCOUNT_ID (XXXXXX-XXXXXX-XXXXXX)
+gcloud organizations list             # copy your ORG_ID  (a number)
+
+# Clone the repo:
+git clone https://github.com/statmike/scale-forecasting.git
+cd scale-forecasting
+```
+
+### 1. Bootstrap — create the project + the Terraform state bucket (run once)
+
+```bash
+cd terraform/bootstrap
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars: set project_id (unique), billing_account, org_id (or folder_id).
+# In Cloud Shell you can use the built-in editor:  cloudshell edit terraform.tfvars
+
+terraform init
+terraform apply          # review the plan, type `yes`. Creates the project + <project_id>-tfstate bucket.
+```
+
+### 2. Main — build everything else
+
+```bash
+cd ../main
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars: set project_id + billing_account to the SAME values as bootstrap.
+#   cloudshell edit terraform.tfvars
+
+# Point Terraform's state at the bucket bootstrap just made (name is "<project_id>-tfstate"):
+terraform init -backend-config="bucket=$(cd ../bootstrap && terraform output -raw state_bucket)"
+
+terraform plan           # read it — nothing is created until apply
+terraform apply          # type `yes`. Builds the image (Cloud Build) + seeds 100k series; ~15-20 min total.
+```
+
+> The first apply **blocks** while Cloud Build builds the runtime image and the Dataproc seed batch
+> runs (~8.5 min at 100k). That's expected — it's doing real work. To smoke cheaply first, set
+> `seed_num_series = 100` in `terraform.tfvars` before `apply`.
+
+### 3. Verify — read the outputs the app consumes
+
+```bash
+terraform output                              # dataset, connection, warehouse, buckets, SA emails
+terraform output -raw project_id
+```
+
+Those outputs feed the run config and the `SF_*` environment the notebooks resolve. The Colab
+Enterprise runtime templates (`sf-main`, `sf-spark-connect`) are created on by default and already
+carry that `SF_*` identity in their env — so from here you can open any notebook in Colab Enterprise
+and **Run all** with no environment cell. See
+[`docs/notebook_runtimes.md`](../docs/notebook_runtimes.md) for the per-notebook template mapping and
+the headless acceptance harness that verifies every notebook runs green.
+
+---
+
+## The commands, condensed
+
+If you don't want the narrated runbook, this is the whole sequence:
+
+```bash
+# Stage 1 — bootstrap (once)
 cd terraform/bootstrap
 cp terraform.tfvars.example terraform.tfvars   # edit: project_id, billing_account, org_id
 terraform init
 terraform apply                                # creates the project + state bucket
-terraform output backend_config                # note the bucket name for stage 2
-```
+terraform output state_bucket                  # the bucket name for stage 2
 
-## Stage 2 — main
-
-```bash
+# Stage 2 — main
 cd ../main
 cp terraform.tfvars.example terraform.tfvars   # edit: project_id, billing_account
 terraform init -backend-config="bucket=<project_id>-tfstate"
