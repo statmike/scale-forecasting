@@ -37,10 +37,15 @@ fans out. Submitting all four gives `07_scale_review` one run per approach to co
 Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true), then:
 
 ```bash
-# Clone (skip if you still have the deploy clone) and install the submit extras:
+# Clone (skip if you still have the deploy clone) and install with uv — the repo is uv-managed
+# (pyproject.toml + uv.lock). --extra spark --extra ray pulls the submit dependencies for both paths:
 cd ~ && git clone https://github.com/statmike/scale-forecasting.git 2>/dev/null; cd ~/scale-forecasting
-pip install -e '.[spark,ray]'
+uv sync --extra spark --extra ray
 ```
+
+> **`uv` in Cloud Shell.** If `uv` isn't on `PATH`, install it once (it lands in `~/.local/bin`, which
+> is durable): `curl -LsSf https://astral.sh/uv/install.sh | sh` then `source ~/.bashrc`. `uv sync`
+> creates `.venv` from the locked `uv.lock`; prefix the run commands below with `uv run` so they use it.
 
 **Wire the `SF_*` identity.** These values are **deterministic from your project id + region** — the
 deployment names everything by convention — so you can set them in **any** Cloud Shell session without
@@ -77,17 +82,17 @@ export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJEC
 `series × models × folds`, touches no GCP):
 
 ```bash
-python -m scale_forecasting.main --config configs/explode_100k.json --dry-run
+uv run python -m scale_forecasting.main --config configs/explode_100k.json --dry-run
 ```
 
 **Submit all four** — three Spark methods + Ray. Each returns once submitted; drop `--no-wait` to
 block until it lands, or keep it and watch them run in parallel from the Dataproc / Vertex consoles:
 
 ```bash
-python -m scale_forecasting.submit     --config configs/explode_100k.json --engine explode
-python -m scale_forecasting.submit     --config configs/multi_100k.json   --engine multi
-python -m scale_forecasting.submit     --config configs/naive_100k.json   --engine naive
-python -m scale_forecasting.ray_submit --config configs/ray_100k.json
+uv run python -m scale_forecasting.submit     --config configs/explode_100k.json --engine explode
+uv run python -m scale_forecasting.submit     --config configs/multi_100k.json   --engine multi
+uv run python -m scale_forecasting.submit     --config configs/naive_100k.json   --engine naive
+uv run python -m scale_forecasting.ray_submit --config configs/ray_100k.json
 ```
 
 | Config | Runtime | What it demonstrates |
