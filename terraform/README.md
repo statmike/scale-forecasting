@@ -224,6 +224,11 @@ and **Run all** with no environment cell. See
 [`docs/notebook_runtimes.md`](../docs/notebook_runtimes.md) for the per-notebook template mapping and
 the headless acceptance harness that verifies every notebook runs green.
 
+> **Deployed and want to run a demo?** [`docs/workshop.md`](../docs/workshop.md) is the guided path
+> from here: submit one run per approach at 100k, then walk the notebooks in Colab Enterprise ending on
+> the cross-approach comparison. It links the exact **human IAM roles** a presenter and attendees need
+> ([Human users](../docs/deploying_on_gcp.md#human-users-running-jobs--notebooks)).
+
 ---
 
 ## The commands, condensed

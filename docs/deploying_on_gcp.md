@@ -333,6 +333,69 @@ project *as themselves*:
 In brownfield mode (`create_service_accounts = false`) the `iam` module grants **nothing** — your
 admin owns all of the above, and you simply hand in the two SA emails.
 
+### Human users (running jobs + notebooks)
+
+The Terraform grants roles to the two **service accounts**, not to people — so a **human** who will
+submit runs or drive the notebooks needs their own grants on top. The design keeps this small: the
+data-plane power lives on the SAs, and a human mostly needs permission to **act as** the right SA and
+to **read results**. There are two personas, and a workshop presenter is usually both.
+
+**Notebook user (Colab Enterprise).** The deployed runtime templates **execute as the runner SA**
+(`colab` module `service_account = runner_email`), which already holds every BigQuery / Storage /
+Dataproc / Ray role. So a notebook user needs almost nothing on the data itself — only the right to
+launch a runtime that runs as that SA:
+
+| Role | Granted on | Why |
+|------|-----------|-----|
+| `roles/aiplatform.user` | project | Create + use Colab Enterprise runtimes from the `sf-main` / `sf-spark-connect` templates. |
+| `roles/iam.serviceAccountUser` | the **runner** SA | Launch a runtime that runs **as** the runner SA (which carries the data roles). Without it, runtime creation is denied. |
+| `roles/bigquery.dataViewer` + `roles/bigquery.jobUser` | project | *Optional* — only to browse the registry tables/views yourself in **BigQuery Studio**. The notebooks read as the runner SA, so this is for the human's own console poking. |
+
+**CLI submitter (populating the run history — the workshop's Act 1).** Running
+`python -m scale_forecasting.submit` / `ray_submit` from **Cloud Shell** (or locally) under your own
+identity, you submit jobs that
+**run as the compute SA** — so you need job-submission roles **plus** the right to act as that SA, and
+write access to the code bucket the submitter stages the package zip into:
+
+| Role | Granted on | Why |
+|------|-----------|-----|
+| `roles/dataproc.editor` | project | Submit Dataproc Serverless batches (`submit.py`, all three Spark methods). |
+| `roles/aiplatform.user` | project | Submit Ray-on-Vertex jobs (`ray_submit.py`). |
+| **`sfRayClusterManager`** | project | Create + delete the fixed-size Ray cluster `ray_submit` stands up (the same custom role the runner uses). Ray only. |
+| `roles/iam.serviceAccountUser` | the **compute** SA | The batch/cluster runs **as** the compute SA; submitting a job that impersonates it requires this. |
+| `roles/storage.objectAdmin` | the **code** bucket | The submitter stages the code zip + launcher to `gs://<project>-code/` before submitting. Bucket-scoped, not project-wide. |
+| `roles/bigquery.jobUser` + `roles/bigquery.dataViewer` | project | Resolve the config and review results (`v_run_summary` / `v_model_leaderboard`) after the run lands. |
+
+> **Why direct grants and not impersonation here.** The runner SA already holds the full submission
+> role set, so an alternative is to grant the human `roles/iam.serviceAccountTokenCreator` on the
+> runner and `login --impersonate-service-account=<runner>` — inheriting everything with no direct
+> data grants. We document the **direct** grants above because they're explicit and easy to reason
+> about on stage; the impersonation path is a valid, keyless alternative if your org prefers it.
+
+All of the above are grants to a **human principal** (`user:you@example.com` or a `group:`), e.g.:
+
+```bash
+PROJECT=<your project_id>
+RUNNER=scale-forecasting-runner@$PROJECT.iam.gserviceaccount.com
+COMPUTE=scale-forecasting-compute@$PROJECT.iam.gserviceaccount.com
+USER=user:presenter@example.com     # or group:workshop-attendees@example.com
+
+# Notebook user (Colab Enterprise):
+gcloud projects add-iam-policy-binding $PROJECT --member=$USER --role=roles/aiplatform.user
+gcloud iam service-accounts add-iam-policy-binding $RUNNER --member=$USER --role=roles/iam.serviceAccountUser
+gcloud projects add-iam-policy-binding $PROJECT --member=$USER --role=roles/bigquery.dataViewer
+gcloud projects add-iam-policy-binding $PROJECT --member=$USER --role=roles/bigquery.jobUser
+
+# CLI submitter (Act 1) — additionally:
+gcloud projects add-iam-policy-binding $PROJECT --member=$USER --role=roles/dataproc.editor
+gcloud iam service-accounts add-iam-policy-binding $COMPUTE --member=$USER --role=roles/iam.serviceAccountUser
+gcloud projects add-iam-policy-binding $PROJECT --member=$USER --role=roles/aiplatform.user
+gcloud projects add-iam-policy-binding $PROJECT --member=$USER --role=projects/$PROJECT/roles/sfRayClusterManager
+gcloud storage buckets add-iam-policy-binding gs://$PROJECT-code --member=$USER --role=roles/storage.objectAdmin
+```
+
+For a workshop, grant a **group** once and add attendees to it — one binding, not one per person.
+
 ---
 
 ## What you get back (outputs)

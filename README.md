@@ -288,11 +288,16 @@ through.
 
 **Reviewing the Terraform before you run it?** [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md)
 is a full walkthrough: what each module builds, which GCP services it uses and how, **why each
-permission is granted and who uses it** (including the three custom least-privilege IAM roles), and
-the greenfield-vs-brownfield toggles. The operator runbook —
-[`terraform/README.md`](./terraform/README.md) — has the **zero-to-deployed Cloud Shell walkthrough**
-(auth → clone → bootstrap → main → verify, copy-paste), the exact **org/project permissions the
-operator must hold**, and the cost notes.
+permission is granted and who uses it** (including the three custom least-privilege IAM roles and the
+**human IAM roles** a job/notebook runner needs), and the greenfield-vs-brownfield toggles. The
+operator runbook — [`terraform/README.md`](./terraform/README.md) — has the **zero-to-deployed Cloud
+Shell walkthrough** (auth → clone → bootstrap → main → verify, copy-paste), the exact **org/project
+permissions the operator must hold**, and the cost notes.
+
+**Deployed and want to demo it?** [`docs/workshop.md`](./docs/workshop.md) is the guided workshop
+runbook: submit one run per approach at 100k (Cloud Shell), then walk the notebooks in order in Colab
+Enterprise, ending on the cross-approach comparison over those runs — with the human IAM roles a
+presenter and attendees need.
 
 ## License
 
