@@ -40,22 +40,36 @@ Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true), then:
 # Clone (skip if you still have the deploy clone) and install the submit extras:
 cd ~ && git clone https://github.com/statmike/scale-forecasting.git 2>/dev/null; cd ~/scale-forecasting
 pip install -e '.[spark,ray]'
-
-# Wire the SF_* identity straight from terraform output (the submitters read these):
-cd terraform/main
-export SF_PROJECT_ID="$(terraform output -raw project_id)"
-export SF_CONNECTION="$(terraform output -raw iceberg_connection)"
-export SF_WAREHOUSE_URI="$(terraform output -raw warehouse_uri)"
-export SF_DATASET_ID="$(terraform output -raw dataset_id)"
-export SF_REGION=us-central1
-export SF_CODE_BUCKET="$(terraform output -raw code_bucket)"
-export SF_CONTAINER_IMAGE="$(terraform output -raw runtime_image_repo):latest"
-export SF_COMPUTE_SA="$(terraform output -raw compute_sa)"
-export SF_SUBNETWORK_URI="$(terraform output -raw subnetwork_uri)"
-cd ~/scale-forecasting
 ```
 
-> The `SF_*` wiring, the config reference, and the review SQL all live in
+**Wire the `SF_*` identity.** These values are **deterministic from your project id + region** — the
+deployment names everything by convention — so you can set them in **any** Cloud Shell session without
+being in the Terraform directory or having its state. Set the two variables at the top and paste the
+rest as-is:
+
+```bash
+# --- set these two (the same values you deployed with) ----------------------
+PROJECT=<your project_id>       # e.g. my-scale-forecasting
+REGION=us-central1              # your deploy region
+# ---------------------------------------------------------------------------
+export SF_PROJECT_ID="$PROJECT"
+export SF_REGION="$REGION"
+export SF_DATASET_ID="scale_forecasting"                                   # deploy default
+export SF_CONNECTION="$PROJECT.$REGION.sf-iceberg"
+export SF_WAREHOUSE_URI="gs://$PROJECT-warehouse/warehouse"
+export SF_CODE_BUCKET="$PROJECT-code"
+export SF_COMPUTE_SA="scale-forecasting-compute@$PROJECT.iam.gserviceaccount.com"
+export SF_CONTAINER_IMAGE="$REGION-docker.pkg.dev/$PROJECT/scale-forecasting/spark-runtime:latest"
+export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJECT/regions/$REGION/subnetworks/scale-forecasting-compute"
+```
+
+> These follow the deployment's naming convention, which holds as long as you kept the defaults for
+> `dataset_id`, the bucket/connection/subnet/repo names, and the region. **If you overrode any of those
+> in `terraform.tfvars`,** read the exact values instead — from the same Cloud Shell you deployed in
+> (`cd terraform/main && terraform init -backend-config="bucket=$PROJECT-tfstate" && terraform output`),
+> or from the console (BigQuery for the dataset/connection, Cloud Storage for the buckets).
+>
+> The `SF_*` reference, the config reference, and the review SQL all live in
 > [`docs/running_and_reviewing.md`](./running_and_reviewing.md) — this runbook just orchestrates it for
 > the workshop. If a submit errors on a missing var, that doc's Prerequisites table is the checklist.
 
