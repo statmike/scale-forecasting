@@ -35,8 +35,12 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
   `code_bucket`, and (for the private path) `network_attachment_id` — `RayInfra.from_terraform_outputs()`
   reads them for you (see notebook 04).
 
-- For submitting (not for reviewing), the `[spark]` or `[ray]` extra: `pip install -e '.[spark]'`
-  (Dataproc) or `'.[ray]'` (Ray). The runtime image itself is code-free — see the note above.
+- For submitting (not for reviewing), install the client deps. The lean, disk-light choice is the
+  `[submit]` extra — `uv sync --extra submit` — the Dataproc **and** Ray submit clients with **no**
+  pyspark, so it fits a thin client like Cloud Shell (pyspark's ~300MB of JARs are only needed for
+  notebook 01's interactive Spark Connect path, not for launching batches). Use `[spark]` / `[ray]`
+  only when you also want that interactive Connect session or a local Spark session. The runtime
+  image itself is code-free — see the note above.
 
 ## Notebooks and kernels
 

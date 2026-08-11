@@ -38,9 +38,12 @@ Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true), then:
 
 ```bash
 # Clone (skip if you still have the deploy clone) and install with uv — the repo is uv-managed
-# (pyproject.toml + uv.lock). --extra spark --extra ray pulls the submit dependencies for both paths:
+# (pyproject.toml + uv.lock). The `submit` extra is the thin client set: it pulls the Dataproc +
+# Ray submit clients (both fan-out paths) but NOT pyspark — batch submission never imports it, and
+# pyspark's ~300MB of JARs overflow Cloud Shell's home quota. (pyspark is only for notebook 01's
+# interactive Spark Connect path, which runs in Colab Enterprise — Act 2 — not here.)
 cd ~ && git clone https://github.com/statmike/scale-forecasting.git 2>/dev/null; cd ~/scale-forecasting
-uv sync --extra spark --extra ray
+uv sync --extra submit
 ```
 
 > **`uv` in Cloud Shell.** If `uv` isn't on `PATH`, install it once (it lands in `~/.local/bin`, which

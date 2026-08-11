@@ -3037,6 +3037,12 @@ spark = [
     { name = "google-cloud-dataproc" },
     { name = "pyspark" },
 ]
+submit = [
+    { name = "google-cloud-aiplatform" },
+    { name = "google-cloud-dataproc" },
+    { name = "immutabledict" },
+    { name = "ray", extra = ["default"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -3053,12 +3059,15 @@ requires-dist = [
     { name = "dataproc-spark-connect", marker = "extra == 'spark'", specifier = ">=0.7" },
     { name = "db-dtypes", specifier = ">=1.2" },
     { name = "google-cloud-aiplatform", marker = "extra == 'ray'", specifier = ">=1.60" },
+    { name = "google-cloud-aiplatform", marker = "extra == 'submit'", specifier = ">=1.60" },
     { name = "google-cloud-bigquery", specifier = ">=3.25" },
     { name = "google-cloud-bigquery-storage", specifier = ">=2.25" },
     { name = "google-cloud-dataproc", marker = "extra == 'spark'", specifier = ">=5.9" },
+    { name = "google-cloud-dataproc", marker = "extra == 'submit'", specifier = ">=5.9" },
     { name = "google-cloud-storage", specifier = ">=2.17" },
     { name = "holidays", specifier = ">=0.50" },
     { name = "immutabledict", marker = "extra == 'ray'", specifier = ">=4.0" },
+    { name = "immutabledict", marker = "extra == 'submit'", specifier = ">=4.0" },
     { name = "ipykernel", specifier = ">=6.29" },
     { name = "lightgbm", marker = "extra == 'models'", specifier = ">=4.3" },
     { name = "matplotlib", specifier = ">=3.8" },
@@ -3072,6 +3081,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyspark", marker = "extra == 'spark'", specifier = ">=3.5" },
     { name = "ray", extras = ["default"], marker = "extra == 'ray'", specifier = ">=2.42,<2.48" },
+    { name = "ray", extras = ["default"], marker = "extra == 'submit'", specifier = ">=2.42,<2.48" },
     { name = "scikit-learn", specifier = ">=1.5" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "statsmodels", specifier = ">=0.14" },
@@ -3079,7 +3089,7 @@ requires-dist = [
     { name = "torch", marker = "(platform_machine != 'x86_64' and extra == 'models') or (sys_platform != 'linux' and extra == 'models')", specifier = ">=2.13,<2.14" },
     { name = "xgboost", marker = "extra == 'models'", specifier = ">=2.0" },
 ]
-provides-extras = ["spark", "ray", "models"]
+provides-extras = ["spark", "ray", "submit", "models"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -72,6 +72,18 @@ ray = [
     # [ray] extra, which would pin ray[default]<=2.47.1 and conflict with ours — so pull it directly.
     "immutabledict>=4.0",
 ]
+# Submit-only client set — everything needed to LAUNCH runs from a thin client (Cloud Shell, CI)
+# without the on-cluster runtimes. The three batch entrypoints (`main --dry-run`, `submit`,
+# `ray_submit`) build API messages via these clients and never import pyspark (spark_io imports it
+# only under TYPE_CHECKING), so this deliberately OMITS the [spark] extra's pyspark (~300MB of JARs
+# that overflow Cloud Shell's home quota and are only needed for notebook 01's interactive Connect
+# path, which runs in Colab). It is the union of the dataproc submit client + the [ray] client deps.
+submit = [
+    "google-cloud-dataproc>=5.9",
+    "ray[default]>=2.42,<2.48",
+    "google-cloud-aiplatform>=1.60",
+    "immutabledict>=4.0",
+]
 # Boosted-tree and deep-learning models (optional — heavier installs).
 models = [
     "xgboost>=2.0",
