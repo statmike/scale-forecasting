@@ -76,41 +76,66 @@ This is the fully prescriptive path — from an empty Cloud Shell to a deployed,
 the Cloud Console), then run these blocks **in order**. Cloud Shell already carries your identity and
 has `terraform` + `gcloud` installed.
 
-### 0. One-time setup — auth, IDs, clone
+### 0a. Auth + clone (and confirm your roles)
+
+First authenticate ADC (the Terraform provider reads it), then grab the repo. Before going further,
+confirm you hold the operator roles from [Permissions](#permissions-you-the-operator-must-hold) above
+— `projectCreator` on the org/folder and `billing.user` on the billing account.
 
 ```bash
 # ADC for the Terraform provider (Cloud Shell has your gcloud identity, but the provider reads ADC):
 gcloud auth application-default login
-
-# Discover your ids:
-gcloud billing accounts list          # copy the ACCOUNT_ID (XXXXXX-XXXXXX-XXXXXX)
-gcloud organizations list             # copy your ORG_ID  (a number)
 
 # Clone the repo:
 git clone https://github.com/statmike/scale-forecasting.git
 cd scale-forecasting
 ```
 
-### 1. Bootstrap — create the project + the Terraform state bucket (run once)
+### 0b. Discover the ids you'll put in terraform.tfvars
+
+```bash
+gcloud billing accounts list          # copy the ACCOUNT_ID (XXXXXX-XXXXXX-XXXXXX)
+gcloud organizations list             # copy your ORG_ID  (a number)
+```
+
+### 1a. Bootstrap — prepare the vars (edit before you apply)
 
 ```bash
 cd terraform/bootstrap
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars: set project_id (unique), billing_account, org_id (or folder_id).
-# In Cloud Shell you can use the built-in editor:  cloudshell edit terraform.tfvars
+```
 
+Now **edit `terraform.tfvars`** — set `project_id` (globally unique), `billing_account`, and `org_id`
+(or `folder_id`) from the ids you copied in 0b. In Cloud Shell, open the built-in editor:
+
+```bash
+cloudshell edit terraform.tfvars
+```
+
+### 1b. Bootstrap — create the project + the Terraform state bucket (run once)
+
+```bash
 terraform init
 terraform apply          # review the plan, type `yes`. Creates the project + <project_id>-tfstate bucket.
 ```
 
-### 2. Main — build everything else
+### 2a. Main — prepare the vars (edit before you apply)
 
 ```bash
 cd ../main
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars: set project_id + billing_account to the SAME values as bootstrap.
-#   cloudshell edit terraform.tfvars
+```
 
+Now **edit `terraform.tfvars`** — set `project_id` + `billing_account` to the **same** values you used
+in bootstrap:
+
+```bash
+cloudshell edit terraform.tfvars
+```
+
+### 2b. Main — build everything else
+
+```bash
 # Point Terraform's state at the bucket bootstrap just made (name is "<project_id>-tfstate"):
 terraform init -backend-config="bucket=$(cd ../bootstrap && terraform output -raw state_bucket)"
 
@@ -122,7 +147,7 @@ terraform apply          # type `yes`. Builds the image (Cloud Build) + seeds 10
 > runs (~8.5 min at 100k). That's expected — it's doing real work. To smoke cheaply first, set
 > `seed_num_series = 100` in `terraform.tfvars` before `apply`.
 
-### 3. Verify — read the outputs the app consumes
+### 3. Verify — read the outputs the app consumes (from `terraform/main`)
 
 ```bash
 terraform output                              # dataset, connection, warehouse, buckets, SA emails
