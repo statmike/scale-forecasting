@@ -282,21 +282,18 @@ def _stage_code(infra: BatchInfra) -> tuple[str, str]:
     launcher is ``src/spark_main.py`` — a top-level shim (absolute import), *not* the in-package
     ``spark_entry`` module: Dataproc runs the main file as ``__main__`` with no package context, so
     a file with relative imports would ``ImportError``. The zip supplies the package it imports.
-    """
-    import hashlib
-    import io
-    import zipfile
 
+    The zip itself is built by :func:`.code_delivery.build_package_zip` — the SAME builder the
+    interactive Spark Connect path (notebook 01) uses to ship code to its workers, so worker code
+    can't drift between the batch and Connect delivery mechanisms.
+    """
     from google.cloud import storage
 
-    # Build the zip in memory (deterministic walk) and hash it for the object name.
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        pkg_root = _SRC_DIR / "scale_forecasting"
-        for path in sorted(pkg_root.rglob("*.py")):
-            zf.write(path, arcname=str(path.relative_to(_SRC_DIR)))
-    data = buf.getvalue()
-    code_hash = hashlib.md5(data).hexdigest()[:8]  # noqa: S324 - non-crypto object-name tag
+    from .code_delivery import build_package_zip
+
+    # Build the zip in memory (deterministic walk) and hash it for the object name — shared with the
+    # Connect path so both deliver byte-identical package code.
+    data, code_hash = build_package_zip()
 
     client = storage.Client()
     bucket = client.bucket(infra.code_bucket)

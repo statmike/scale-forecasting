@@ -156,3 +156,41 @@ def test_no_terraform_module_bakes_source_into_the_image() -> None:
     modules = _REPO_ROOT / "terraform" / "main" / "modules"
     for tf in modules.rglob("*.tf"):
         assert "COPY src" not in tf.read_text(), f"{tf} bakes src/ into an image"
+
+
+# --- the shared package-zip builder (batch + interactive Spark Connect both use it) --------------
+
+
+def test_build_package_zip_is_root_importable() -> None:
+    import io
+    import zipfile
+
+    from scale_forecasting import code_delivery
+
+    data, code_hash = code_delivery.build_package_zip()
+    names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+    # The package sits at the zip ROOT (no src/ prefix) so it imports the moment it's on sys.path —
+    # the same layout python_file_uris (batch) and addArtifacts(pyfile=True) (Connect) both need.
+    assert "scale_forecasting/__init__.py" in names
+    assert not any(n.startswith("src/") for n in names)
+    assert all(n.endswith(".py") for n in names)
+    assert len(code_hash) == 8
+
+
+def test_build_package_zip_is_deterministic() -> None:
+    from scale_forecasting import code_delivery
+
+    d1, h1 = code_delivery.build_package_zip()
+    d2, h2 = code_delivery.build_package_zip()
+    # Same source → same hash → a stable artifact name (no in-place-overwrite races).
+    assert h1 == h2 and d1 == d2
+
+
+def test_write_package_zip_round_trips(tmp_path: Path) -> None:
+    from scale_forecasting import code_delivery
+
+    out = code_delivery.write_package_zip(tmp_path)
+    assert out.exists() and out.parent == tmp_path
+    _, code_hash = code_delivery.build_package_zip()
+    # Filename carries the hash so re-adding after an edit is a distinct artifact.
+    assert code_hash in out.name

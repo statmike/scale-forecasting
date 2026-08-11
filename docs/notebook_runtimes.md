@@ -80,6 +80,17 @@ result. The two that genuinely care:
 Note NB01's own bootstrap cell installs the package *plain* (not `[spark]`), so the `sf-spark-connect`
 template is what carries `dataproc-spark-connect` — see below.
 
+- **The interactive Connect path ships code + identity to its workers explicitly.** The `applyInPandas`
+  fan-out pickles the group-runner closure on the notebook kernel and runs it on the session's
+  executors, so those workers need (1) the `scale_forecasting` package on their path and (2) a runtime
+  identity with the Dataproc-worker permissions the session needs. NB01 sets both on the `Session`: it
+  runs the session runtime **as the compute SA** (`SF_COMPUTE_SA`, which carries
+  `dataprocrm.nodes.mintOAuthToken` via `roles/dataproc.worker`; the runner impersonates it) and calls
+  `spark.addArtifacts(zip, pyfile=True)` with the **same** package zip the batch delivers via
+  `python_file_uris` (both built by `scale_forecasting.code_delivery`), so Connect and batch workers
+  run byte-identical code (G1). The remote-batch fallback needs neither — it runs on the custom
+  container that already carries the deps, as the compute SA.
+
 ## On Colab Enterprise
 
 Terraform ships **two runtime templates** (a template is a blueprint for the VM a runtime runs on).
