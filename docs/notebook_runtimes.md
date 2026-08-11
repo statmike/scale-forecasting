@@ -5,9 +5,10 @@ Dataproc / Ray / BigQuery work over ADC. This page maps **which Python version e
 and how it behaves under 3.11 vs 3.12** — both locally and on **Colab Enterprise** — and documents
 the two runtime templates Terraform ships.
 
-## The one load-bearing fact: the project pins Python 3.11
+## The one load-bearing fact: the project targets Python 3.11
 
-`pyproject.toml` sets `requires-python = ">=3.11,<3.12"`. This is deliberate:
+`pyproject.toml` sets `requires-python = ">=3.11,<3.13"`, but **3.11 is the tested, supported
+default everywhere**. This is deliberate:
 
 - **Vertex Ray parity** — the client-side Ray must match the cluster's Ray version (2.47); on Python
   3.11 the supported versions are 2.42 / 2.47. A mismatched client floats to an unsupported Ray and
@@ -15,7 +16,12 @@ the two runtime templates Terraform ships.
 - **Dataproc packed-venv** — the packed virtual-env shipped to Serverless is built against 3.11.
 
 So **3.11 is the default everywhere** — the `uv` project kernel, the runtime image, every cluster.
-There is exactly **one** exception, notebook 01's *interactive* Spark Connect path (below).
+There is exactly **one** exception, notebook 01's *interactive* Spark Connect path (below): its
+Colab template is Python **3.12** (Dataproc 3.0 Connect workers are 3.12 and refuse mismatched
+minors), and the notebook's bootstrap `pip install -e .` must be allowed to run there. That single
+requirement is why the ceiling is `<3.13` rather than `<3.12` — the core is pure-Python and
+3.12-safe, and NB01 pulls only the `[spark]` extra (not `[models]`). Nothing else is tested or
+supported on 3.12.
 
 ## Running locally
 

@@ -75,8 +75,8 @@ class NeuralProphetModel(BaseModel):
         z = norm.ppf(_BAND[1])
         sigma = (hi - lo) / (2.0 * z)
 
-        t = self.ctx.transform
-        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t) for q in quantiles}
+        t, lam = self.ctx.transform, self.ctx.transform_lambda
+        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 

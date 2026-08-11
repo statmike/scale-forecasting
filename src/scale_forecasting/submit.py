@@ -1,10 +1,10 @@
-"""Submit a forecast run to Dataproc Serverless (BUILD B2) — the local/Composer launcher.
+"""Submit a forecast run to Dataproc Serverless — the local/Composer launcher.
 
 This is the ``[spark]``-extra, ADC-authenticated helper that turns a validated
 :class:`~scale_forecasting.config.RunConfig` into a running Dataproc Serverless batch. It is the
-same call path a Composer DAG uses later (B6): reproducing at runtime the exact delivery the
-Terraform ``seed`` module does for the seed job, but for *forecast* runs and driven from Python
-(runs live in the registry, not Terraform state).
+same call path a scheduled Composer DAG would use (that orchestration is in development):
+reproducing at runtime the exact delivery the Terraform ``seed`` module does for the seed job, but
+for *forecast* runs and driven from Python (runs live in the registry, not Terraform state).
 
 What :func:`submit_batch` does:
 

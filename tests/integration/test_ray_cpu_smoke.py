@@ -40,6 +40,7 @@ drops it after. ``run_name`` varies per invocation so the deterministic ``run_id
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -115,9 +116,12 @@ def _cfg(source_table: str) -> RunConfig:
         backtest={"enabled": True, "n_folds": 2, "horizon": _HORIZON, "step": _HORIZON},
         # use_gpu=false → plan_cluster sizes the GPU pool to zero; only the CPU worker pool is
         # provisioned. ray_regions: hop across US regions if one transiently stocks out on capacity.
+        # ray_read_mode defaults to the proven driver_collect; SF_RAY_READ_MODE=ray_data exercises
+        # the opt-in ray.data.read_bigquery reader (#163) on the same billed cluster.
         compute={
             "use_gpu": False,
             "ray_regions": ["us-central1", "us-east1", "us-west1"],
+            "ray_read_mode": os.environ.get("SF_RAY_READ_MODE", "driver_collect"),
         },
     )
 
@@ -179,8 +183,12 @@ def test_ray_cpu_fixed_cluster_smoke(settings: Settings, scratch_source: str) ->
     assert header.python_runtime == "ray"
     assert set(header.bq_models.split(",")) == set(_NATIVE_MODELS)
 
-    # job_telemetry records the CPU-only sizing that actually ran (no GPU pool).
-    tel = json.loads(header.job_telemetry)
+    # job_telemetry records the CPU-only sizing that actually ran (no GPU pool). It's a native JSON
+    # column now, so the BigQuery client hands it back already deserialized (a dict); older STRING
+    # rows arrive as text — accept either so it's storage-agnostic (as the GPU smoke does).
+    tel = header.job_telemetry
+    if isinstance(tel, str):
+        tel = json.loads(tel)
     assert tel["runtime"] == "ray"
     assert tel["gpu_node_count"] == 0
     assert tel["cpu_node_count"] >= 1

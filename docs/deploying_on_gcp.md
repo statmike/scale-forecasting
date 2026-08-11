@@ -114,7 +114,7 @@ Two things worth knowing about cost and re-runs:
 - **Re-seeding soon after a `direct` seed?** The Iceberg variant clears with `DELETE WHERE TRUE`,
   which is blocked by the Storage Write API's ~90-min streaming buffer right after a `direct` write —
   so an immediate re-seed should use `seed_write_method = "indirect"` (no buffer) or wait it out. The
-  native variant is unaffected (it clears with `TRUNCATE`). See NOTES.md for the full B0.4 detail.
+  native variant is unaffected (it clears with `TRUNCATE`).
 
 To skip the example data entirely (you'll point runs at your own source table), set
 `run_seed = false`. To smoke-test cost/runtime first, set `seed_num_series = 100` (cents, ~2 min),
@@ -168,7 +168,7 @@ The `apis` module enables exactly these, grouped by what they're for:
 
 **Data + lineage**
 - **BigQuery** (`bigquery.googleapis.com`) — the run registry (three native tables + backtest OOF),
-  the BigQuery-native models (`ARIMA_PLUS`, `ARIMA_PLUS_XREG`, `TimesFM`, SQL-only), and the example
+  the BigQuery-native models (`ARIMA_PLUS`, `TimesFM`, SQL-only), and the example
   input tables. This is the system's spine: every run's config, metrics, forecasts, and artifact
   links land here.
 - **BigLake / Cloud Resource connection** (`bigqueryconnection.googleapis.com`) — the managed-Iceberg
@@ -215,7 +215,13 @@ prefixes, because **GCS applies IAM, versioning, lifecycle, and force-destroy at
 - **`artifacts`** carry lineage (a forecast row points back to the exact fitted model) — they must
   never be force-destroyed and want no aggressive TTL.
 - **`code`** is a derivable deploy artifact (source of truth is GitHub) — it tolerates `force_destroy`
-  and a TTL. One bucket can't hold both retention stances at once.
+  and a TTL, so it's the **only** bucket with a noncurrent-version lifecycle rule (prune archived
+  versions past the 3 most recent after 30 days) — its per-deploy churn doesn't accrete cost, while
+  `warehouse`/`artifacts` keep every version. One bucket can't hold both retention stances at once.
+
+All three enforce **uniform bucket-level access** (no legacy ACLs) and **public-access prevention =
+`enforced`** — anonymous (`allUsers` / `allAuthenticatedUsers`) grants are hard-blocked regardless of
+org policy, so your data and models can never be made public by a stray ACL.
 
 Cost is identical either way (GCS bills per byte + operations, not per bucket), so the split is free
 and buys policy isolation.
@@ -315,7 +321,11 @@ project *as themselves*:
   with object access alone, `append_rows` failed 403 on `storage.buckets.get`.
 - **The Vertex AI service agent** gets `roles/compute.networkUser` **plus** the custom
   `sfNetworkAttachmentConsumer` role, so the managed Vertex tenant can reach back through the PSC-I
-  attachment into your VPC.
+  attachment into your VPC. This is the single-project topology, where Google's docs prescribe the
+  broader `compute.networkAdmin`; we take the *leaner* `networkUser` (for the `compute.subnetworks.use`
+  that interface-IP allocation needs) plus the four exact attachment verbs in the custom role. A
+  further trim to a subnet-scoped custom role is possible but deferred until a greenfield Ray run
+  confirms the working permission floor (over-tightening here silently 403s cluster creation).
 - **The Cloud Build SA** (the project's Compute Engine default SA) gets `cloudbuild.builds.builder` +
   `artifactregistry.writer`, scoped to exactly the build-and-push path, so `gcloud builds submit` can
   build the runtime image and push it to Artifact Registry.

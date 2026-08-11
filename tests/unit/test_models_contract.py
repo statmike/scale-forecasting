@@ -126,6 +126,27 @@ def test_original_units_after_log1p(model_name: str) -> None:
     assert df["yhat"].median() > 5.0
 
 
+def test_original_units_after_boxcox(model_name: str) -> None:
+    # Box-Cox is stateful: λ is fit per cell and handed to the model on ctx. Every model must
+    # invert it in predict() and return original-scale forecasts. This exercises *every*
+    # registered Python model, so a model that forgets ctx.transform_lambda fails loudly here.
+    from scale_forecasting.features import apply_transform, fit_transform_lambda
+
+    m = get_model(model_name)
+    dep = _MODEL_DEP.get(model_name)
+    if dep is not None and importlib.util.find_spec(dep) is None:
+        pytest.skip(f"optional dependency '{dep}' not installed")
+    y, X = _golden_series(with_exog=m({}, _ctx()).supports_exog)
+    lam = fit_transform_lambda(y, "boxcox")
+    inst = m({}, _ctx(transform="boxcox", transform_lambda=lam))
+    inst.fit(apply_transform(y, "boxcox", lam).rename("y"), X)
+    fx = X.iloc[:HORIZON] if (X is not None and inst.supports_exog) else None
+    df = inst.predict(HORIZON, fx)
+    # original data sits in ~[10, 45]; inverted forecast should be in a sane band, not boxcox-space.
+    assert df["yhat"].median() > 5.0
+    assert np.isfinite(df["yhat"].to_numpy()).all()
+
+
 def test_deterministic_under_seed(model_name: str) -> None:
     y, X0 = _golden_series(with_exog=get_model(model_name).supports_exog)
 

@@ -49,6 +49,10 @@ class ModelContext:
     seed: int = 0
     holidays: pd.DataFrame | None = None
     transform: str = "none"
+    # Fitted Box-Cox λ for the cell (from features.fit_transform_lambda), or None for the
+    # stateless transforms. Set once per cell and shared by the backtest folds + final fit, so
+    # every invert_transform in predict() uses the same λ — never refit at predict (G1).
+    transform_lambda: float | None = None
 
 
 # The factory registry: name → concrete model class. Populated by register() at import.

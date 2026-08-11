@@ -57,7 +57,9 @@ class _LastValue(BaseModel):
     ) -> pd.DataFrame:
         ds = pd.date_range("2026-01-01", periods=horizon, freq="D")
         # predict returns original units (§2.1): invert the transform on the way out.
-        yhat = invert_transform(np.full(horizon, self._last), self.ctx.transform)
+        yhat = invert_transform(
+            np.full(horizon, self._last), self.ctx.transform, self.ctx.transform_lambda
+        )
         return self._assemble_frame(ds, {q: yhat for q in quantiles})
 
 

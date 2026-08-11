@@ -4,8 +4,7 @@
 # (src/scale_forecasting/registry/ddl.py, snapshot-tested) and created by
 # registry.bq.ensure_tables() at run time. We deliberately do NOT re-declare those schemas
 # in HCL — two copies of the DDL would drift. Terraform owns the *containers* (dataset,
-# connection, bucket grant); the app owns the *tables*. (Deviation from BUILD B0.2's literal
-# "registry tables via Terraform"; recorded in NOTES.md.)
+# connection, bucket grant); the app owns the *tables* — one source of truth for the DDL, no HCL/Python drift.
 #
 # Storage split (D19): the four run-collection tables (run_registry, forecast_metadata,
 # forecast_predictions, backtest_oof) are always NATIVE BigQuery — they carry native JSON

@@ -10,12 +10,15 @@ data crosses the network. Two entry points:
   ``holiday`` columns) computed from ``features.holidays``, fed to *both* Python models and
   the BQML custom-holiday input so "holiday" is identical everywhere (DESIGN §4).
 
-Transforms are **stateless** (``none``/``log1p``) so a model can invert with only
-``ctx.transform`` (a name) inside ``predict``; ``boxcox`` needs a fitted λ that the
-``(y, X)`` seam can't carry, so it is rejected here rather than silently mis-inverted.
+Transforms come in two flavors. ``none``/``log1p`` are **stateless** — a model inverts with
+only ``ctx.transform`` (a name). ``boxcox`` is **stateful**: its λ is fit per series (MLE),
+so it must travel with the cell. We fit λ once in the worker (:func:`fit_transform_lambda`),
+put it on ``ctx.transform_lambda``, and every ``apply``/``invert`` call passes that same λ —
+never refit at predict, so the backtest folds and the final fit use one λ (G1). ``λ = None``
+for the stateless transforms.
 
 Public surface: ``build_features``, ``holiday_frame``, ``apply_transform``,
-``invert_transform``.
+``invert_transform``, ``fit_transform_lambda``.
 """
 
 from __future__ import annotations
@@ -32,11 +35,37 @@ if TYPE_CHECKING:
     from .config import RunConfig
 
 
-# --- transforms (stateless) ----------------------------------------------------
+# --- transforms ----------------------------------------------------------------
 
 
-def apply_transform(y: pd.Series, transform: str) -> pd.Series:
-    """Apply the configured target transform to ``y`` (forward direction)."""
+def fit_transform_lambda(y: pd.Series, transform: str) -> float | None:
+    """Fit the transform's stateful parameter on ``y`` (the full series' target).
+
+    Only ``boxcox`` has one: its λ, fit by maximum likelihood (``scipy.stats.boxcox_normmax``)
+    on the raw target. Returns ``None`` for the stateless transforms (``none``/``log1p``), whose
+    inverse needs no fitted state. Box-Cox is defined only for **strictly positive** data, so a
+    non-positive value raises ``ConfigError`` naming the constraint (symmetric with log1p's
+    ``y >= -1`` rule — we *validate*, never silently shift). Deterministic: same series → same λ.
+    """
+    if transform != "boxcox":
+        return None
+    from scipy.stats import boxcox_normmax
+
+    arr = y.to_numpy(dtype=float)
+    if not np.all(arr > 0):
+        raise ConfigError(
+            "boxcox transform requires strictly positive y (got values <= 0); "
+            "use 'log1p' for non-negative data with zeros"
+        )
+    return float(boxcox_normmax(arr, method="mle"))
+
+
+def apply_transform(y: pd.Series, transform: str, lam: float | None = None) -> pd.Series:
+    """Apply the configured target transform to ``y`` (forward direction).
+
+    ``lam`` is the fitted Box-Cox λ from :func:`fit_transform_lambda` (ignored by the stateless
+    transforms). Required when ``transform == "boxcox"``.
+    """
     if transform == "none":
         return y
     if transform == "log1p":
@@ -44,23 +73,34 @@ def apply_transform(y: pd.Series, transform: str) -> pd.Series:
             raise ConfigError("log1p transform requires y >= -1 (got values < -1)")
         return pd.Series(np.log1p(y.to_numpy()), index=y.index, name=y.name)
     if transform == "boxcox":
-        raise ConfigError(
-            "boxcox transform is not yet supported (stateful λ); use 'none' or 'log1p'"
-        )
+        if lam is None:
+            raise ConfigError("boxcox requires a fitted lambda (call fit_transform_lambda first)")
+        from scipy.special import boxcox as boxcox_apply
+
+        arr = y.to_numpy(dtype=float)
+        if not np.all(arr > 0):
+            raise ConfigError("boxcox transform requires strictly positive y (got values <= 0)")
+        return pd.Series(boxcox_apply(arr, lam), index=y.index, name=y.name)
     raise ConfigError(f"unknown transform '{transform}'")
 
 
-def invert_transform(values: np.ndarray, transform: str) -> np.ndarray:
-    """Invert a transform on forecasts/bounds so the frame is in original units (§2.1)."""
+def invert_transform(values: np.ndarray, transform: str, lam: float | None = None) -> np.ndarray:
+    """Invert a transform on forecasts/bounds so the frame is in original units (§2.1).
+
+    ``lam`` is the same fitted Box-Cox λ used in the forward direction (ignored by the stateless
+    transforms), so ``invert(apply(y)) == y``.
+    """
     arr = np.asarray(values, dtype=float)
     if transform == "none":
         return arr
     if transform == "log1p":
         return np.expm1(arr)
     if transform == "boxcox":
-        raise ConfigError(
-            "boxcox transform is not yet supported (stateful λ); use 'none' or 'log1p'"
-        )
+        if lam is None:
+            raise ConfigError("boxcox requires a fitted lambda (call fit_transform_lambda first)")
+        from scipy.special import inv_boxcox
+
+        return np.asarray(inv_boxcox(arr, lam), dtype=float)
     raise ConfigError(f"unknown transform '{transform}'")
 
 
@@ -99,13 +139,19 @@ def holiday_frame(cfg: RunConfig) -> pd.DataFrame:
 # --- feature assembly ----------------------------------------------------------
 
 
-def build_features(series: pd.DataFrame, cfg: RunConfig) -> tuple[pd.Series, pd.DataFrame | None]:
+def build_features(
+    series: pd.DataFrame, cfg: RunConfig, lam: float | None = None
+) -> tuple[pd.Series, pd.DataFrame | None]:
     """Build ``(y, X)`` fit inputs for one series (DESIGN §4).
 
     ``series`` is one ts_id's rows with the configured date/target (and optional exog)
     columns. ``y`` is returned indexed by ds, sorted, with the transform applied. ``X``
     carries any configured exog, an ``is_holiday`` flag, Fourier terms, and lag columns —
     aligned to ``y`` — or None when nothing is configured.
+
+    ``lam`` is the fitted Box-Cox λ (from :func:`fit_transform_lambda`), threaded in so the
+    forward transform matches the inverse a model applies at predict; ``None`` (the default)
+    for the stateless transforms.
     """
     d, f = cfg.data, cfg.features
     if d.date_col not in series or d.target_col not in series:
@@ -120,7 +166,7 @@ def build_features(series: pd.DataFrame, cfg: RunConfig) -> tuple[pd.Series, pd.
     frame.index.name = "ds"
 
     y = frame[d.target_col].astype(float)
-    y = apply_transform(y, f.transform)
+    y = apply_transform(y, f.transform, lam)
     y.name = "y"
 
     cols: dict[str, np.ndarray] = {}

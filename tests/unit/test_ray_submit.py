@@ -539,7 +539,7 @@ def test_connect_job_client_uses_resource_name_form(
 ) -> None:
     # We address the cluster by its resource name; the [ray] resolver discovers and authenticates
     # the dashboard itself. (Dashboard reachability is an execution-context property, not something
-    # the addressing form controls — see NOTES.md for the handshake status.)
+    # the addressing form controls.)
     resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
     seen: list[str] = []
 

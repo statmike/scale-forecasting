@@ -94,6 +94,7 @@ def backtest_cell(
     series: pd.DataFrame,
     model_factory: Callable[[], BaseModel],
     cfg: RunConfig,
+    lam: float | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, float]]]:
     """Run CV for one series and model factory (CONTRACTS §2.2).
 
@@ -102,6 +103,8 @@ def backtest_cell(
         model_factory: returns a freshly-constructed model, called once per fold so no
             fitted state leaks across folds.
         cfg: the run config (drives features and fold geometry).
+        lam: the cell's fitted Box-Cox λ (None for stateless transforms), so the forward
+            transform here matches the inverse the folds' models apply — one λ per cell (G1).
 
     Returns:
         ``(oof, fold_metrics)`` where ``oof`` is the canonical OOF frame (§2.2: ``ds``,
@@ -110,7 +113,7 @@ def backtest_cell(
         frame with ``ts_id``/``model_type`` and renames ``ds``→``forecast_date`` before the
         ensembler consumes it (see ``ensembler._pivot_oof``) — this cell emits the bare form.
     """
-    y, X = build_features(series, cfg)
+    y, X = build_features(series, cfg, lam)
     n = len(y)
     folds = make_folds(n, cfg)
 
@@ -131,8 +134,8 @@ def backtest_cell(
         # yhat is already in original units (predict inverts the transform, §2.1), so
         # y_true / y_train are inverted here to score in the same units.
         yhat = pred["yhat"].to_numpy()[: fold.val_size]
-        y_true = invert_transform(y_val.to_numpy(), cfg.features.transform)
-        y_train_orig = invert_transform(y_train.to_numpy(), cfg.features.transform)
+        y_true = invert_transform(y_val.to_numpy(), cfg.features.transform, lam)
+        y_train_orig = invert_transform(y_train.to_numpy(), cfg.features.transform, lam)
         val_dates = y_val.index
 
         oof_parts.append(

@@ -202,6 +202,16 @@ class ComputeConfig(BaseModel):
     # headroom multiplier applied to measured peak GPU memory before dividing by device memory.
     gpu_calibration_samples: int = Field(default=3, gt=0)
     gpu_safety_margin: float = Field(default=1.3, gt=1.0)
+    # How the Ray driver reads the source panel. Both paths hit the SAME BigQuery Storage Read API
+    # (no query slots, Q3 parity with Spark) and yield the SAME driver-side pandas panel, so the
+    # downstream fan-out is byte-identical either way — this knob only chooses the client:
+    #   driver_collect (default) : google-cloud-bigquery-storage BigQueryReadClient, assembling the
+    #                              Arrow streams. The proven path (@gpu smoke + 100k run use it).
+    #   ray_data                 : ray.data.read_bigquery(project_id=, dataset=), the Ray-native
+    #                              reader (same Storage Read API underneath), then .to_pandas().
+    #                              Opt-in — the Ray-native ingest path, kept off by default so the
+    #                              known-good reader stays the default until a live Ray run vets it.
+    ray_read_mode: Literal["driver_collect", "ray_data"] = "driver_collect"
 
     @model_validator(mode="after")
     def _check_gpu_fraction(self) -> ComputeConfig:

@@ -20,8 +20,8 @@ import numpy as np
 import pandas as pd
 
 from .backtest import backtest_cell
-from .errors import get_logger
-from .features import build_features, holiday_frame
+from .errors import ConfigError, get_logger
+from .features import build_features, fit_transform_lambda, holiday_frame
 from .metrics import METRIC_NAMES
 from .models import get_model
 from .models.base_model import PREDICTION_COLUMNS, BaseModel, ModelContext
@@ -67,8 +67,12 @@ def _compute_engine(model_cls: type[BaseModel], cfg: RunConfig) -> str:
     return "bigquery" if model_cls.runtime == "bigquery" else cfg.python_runtime
 
 
-def _model_context(cfg: RunConfig) -> ModelContext:
-    """Build the per-cell :class:`ModelContext` from the run config (CONTRACTS §1)."""
+def _model_context(cfg: RunConfig, transform_lambda: float | None = None) -> ModelContext:
+    """Build the per-cell :class:`ModelContext` from the run config (CONTRACTS §1).
+
+    ``transform_lambda`` is the cell's fitted Box-Cox λ (None for stateless transforms), fit
+    once in :func:`run_cell` and shared by the backtest folds and the final fit.
+    """
     holidays = holiday_frame(cfg) if cfg.features.holidays else None
     return ModelContext(
         freq=cfg.data.freq,
@@ -76,6 +80,7 @@ def _model_context(cfg: RunConfig) -> ModelContext:
         seed=0,
         holidays=holidays,
         transform=cfg.features.transform,
+        transform_lambda=transform_lambda,
     )
 
 
@@ -170,18 +175,22 @@ def run_cell(
     engine = _compute_engine(model_cls, cfg)
     started = time.perf_counter()
     try:
-        ctx = _model_context(cfg)
+        # Fit the transform's stateful λ once per cell (None for none/log1p), on the raw target.
+        # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
+        # predict (the whole point of carrying it on the cell, G1).
+        lam = fit_transform_lambda(_target(series, cfg), cfg.features.transform)
+        ctx = _model_context(cfg, transform_lambda=lam)
         resolved = _resolve_params(series, model_name, cfg, ctx, params)
 
         # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.
         oof: pd.DataFrame | None = None
         metrics = {name: float("nan") for name in METRIC_NAMES}
         if cfg.backtest.enabled:
-            oof, fold_metrics = backtest_cell(series, lambda: model_cls(resolved, ctx), cfg)
+            oof, fold_metrics = backtest_cell(series, lambda: model_cls(resolved, ctx), cfg, lam)
             metrics = _rollup_metrics(fold_metrics)
 
         # Final fit on the full history, then forecast the horizon.
-        y, X = build_features(series, cfg)
+        y, X = build_features(series, cfg, lam)
         model = model_cls(resolved, ctx)
         model.fit(y, X)
         # Offline has no *true* future exog (that arrives with a real run, Arc B). As a
@@ -226,3 +235,17 @@ def _ts_id(series: pd.DataFrame, cfg: RunConfig) -> str:
     if col in series.columns and len(series):
         return str(series[col].iloc[0])
     return "unknown"
+
+
+def _target(series: pd.DataFrame, cfg: RunConfig) -> pd.Series:
+    """The raw target column as a float Series, for fitting the transform λ (before features).
+
+    Raises ``ConfigError`` if the target column is absent — the same failure ``build_features``
+    would raise a moment later, surfaced here so the λ fit names it.
+    """
+    col = cfg.data.target_col
+    if col not in series:
+        raise ConfigError(
+            f"series missing required target column '{col}'; has {list(series.columns)}"
+        )
+    return series[col].astype(float)

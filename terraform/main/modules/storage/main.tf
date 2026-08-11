@@ -26,7 +26,9 @@
 # isolation and clean per-bucket cost visibility for free.
 #
 # Bucket names are globally unique, so all three are prefixed with the project id. Uniform
-# access (no legacy ACLs), and versioning on so an overwrite is recoverable.
+# access (no legacy ACLs), public-access prevention enforced (no anonymous reach, ever), and
+# versioning on so an overwrite is recoverable — with a noncurrent-version TTL on `code` only
+# (see the lifecycle rule below) so its churn doesn't accrete cost.
 
 variable "project_id" {
   type = string
@@ -59,8 +61,34 @@ resource "google_storage_bucket" "b" {
   uniform_bucket_level_access = true
   force_destroy               = var.force_destroy
 
+  # Defense in depth: hard-block any public (allUsers / allAuthenticatedUsers) grant on these
+  # buckets, independent of whatever org policy the deploying project does or doesn't carry. The
+  # warehouse holds your data and artifacts hold your models — neither should ever be reachable
+  # anonymously. Enforced is stricter than uniform access alone and cannot be relaxed by a later ACL.
+  public_access_prevention = "enforced"
+
   versioning {
     enabled = true
+  }
+
+  # Versioning keeps every overwrite forever, which quietly grows cost on the one bucket that gets
+  # rewritten each deploy — `code` (the packaged src/ + seed_spark.py; its source of truth is
+  # GitHub, so old versions are pure waste). Prune noncurrent versions there after 30 days / beyond
+  # the 3 most recent. warehouse + artifacts are deliberately EXCLUDED: artifacts carry G3 lineage
+  # (a forecast row points back to the exact fitted model) and must never be auto-deleted, and the
+  # warehouse is the data lake — retention there is the operator's call, not a default TTL.
+  dynamic "lifecycle_rule" {
+    for_each = each.key == "code" ? [1] : []
+    content {
+      condition {
+        num_newer_versions         = 3
+        days_since_noncurrent_time = 30
+        with_state                 = "ARCHIVED"
+      }
+      action {
+        type = "Delete"
+      }
+    }
   }
 }
 

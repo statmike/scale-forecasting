@@ -1,8 +1,8 @@
 # container — the Artifact Registry Docker repo that holds the shared Spark runtime image.
 #
-# This is the dependency-delivery mechanism for every Spark path (the seed job in B0.4 and the
-# forecast engines in B2): one image = the `scale_forecasting` package + core deps, so the same
-# code runs local == Managed Spark == (later) Ray. The image itself is built by Cloud Build from
+# This is the dependency-delivery mechanism for every Spark and Ray path (the seed job and the
+# forecast engines): one image = the `scale_forecasting` package + core deps, so the same
+# code runs local == Managed Spark == Ray on Vertex. The image itself is built by Cloud Build from
 # docker/Dockerfile (see docker/cloudbuild.yaml) and pushed here; this module owns only the
 # *repository* (the container), mirroring how bigquery owns the dataset and the app owns the
 # tables — one source of truth for the image (the Dockerfile), no HCL/Docker drift.
@@ -19,9 +19,13 @@
 #     --substitutions=_REGION=<region>,_REPO=<repo>,_IMAGE=spark-runtime,_TAG=latest \
 #     --project <project_id>
 #
-# A git-push-triggered rebuild (google_cloudbuild_trigger) is intentionally DEFERRED: it needs a
-# GitHub repo connection, which waits on the first push to the private repo (§A-PUSH). Wiring it
-# now would fail to plan (no connection to reference). The one-shot build here needs no trigger.
+# There is deliberately NO git-push-triggered rebuild (google_cloudbuild_trigger). Source code ships
+# at runtime via python_file_uris, so a push that only edits src/ must NOT rebuild the image — the
+# image changes only when docker/Dockerfile or docker/requirements.txt do. The one-shot build above
+# is content-addressed on exactly those two files, so a normal `terraform apply` after a dependency
+# change rebuilds automatically and nothing else does. When you bump deps, re-apply (or run the
+# manual `gcloud builds submit` above). A push-trigger would add a GitHub-connection dependency and
+# rebuild on every commit for no benefit, so it is intentionally omitted.
 
 variable "project_id" {
   type = string
@@ -66,7 +70,7 @@ resource "google_artifact_registry_repository" "images" {
 # Cloud Build runs as the project's Compute Engine default SA (fresh projects no longer grant it
 # roles automatically). It needs to read its own source-staging bucket + push to Artifact
 # Registry, so grant it the builder role + AR writer. Scoped to exactly the build path — this is
-# the identity `gcloud builds submit` uses until a dedicated build SA/trigger lands (§A-PUSH).
+# the identity `gcloud builds submit` uses for the one-shot build on apply.
 data "google_project" "this" {
   project_id = var.project_id
 }

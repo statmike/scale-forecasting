@@ -129,6 +129,17 @@ def test_storage_table_path_prefixes_two_part_source_with_project() -> None:
     assert path == "projects/proj-x/datasets/other_ds/tables/series"
 
 
+def test_storage_dataset_path_drops_scaffolding_to_dataset_dot_table() -> None:
+    # ray.data.read_bigquery(dataset=...) wants D.T; the resource path is stripped back to it.
+    ref = ray_engine._storage_dataset_path(_cfg(), _settings())
+    assert ref == "ds_x.source_series_native"
+
+
+def test_storage_dataset_path_uses_source_dataset_not_deployment() -> None:
+    cfg = _cfg(data={"source_table": "other_proj.other_ds.series", "horizon": 7})
+    assert ray_engine._storage_dataset_path(cfg, _settings()) == "other_ds.series"
+
+
 def test_limit_series_keeps_first_n_ordered_ids() -> None:
     # 5 series, limit 3 → the first three ts_ids by sort order, all their rows, others dropped.
     src = _panel(5)
@@ -239,6 +250,83 @@ def test_read_source_series_single_stream_passthrough(monkeypatch: pytest.Monkey
     out = ray_engine._read_source_series(cfg, _settings())
     assert len(out) == len(only)
     assert sorted(out["ts_id"].unique()) == ["s0", "s1", "s2"]
+
+
+# --- ray_read_mode dispatch: default reader vs ray.data reader ------------------
+
+
+def test_read_source_series_defaults_to_driver_collect(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The default mode dispatches to the proven BigQueryReadClient path — the one the morning
+    # greenfield Ray smoke runs on. ray.data must NOT be touched when the mode is left unset.
+    sentinel = _panel(2)
+    seen: dict[str, bool] = {"driver": False, "ray_data": False}
+
+    def _fake_driver(cfg: RunConfig, settings: Settings) -> pd.DataFrame:
+        seen["driver"] = True
+        return sentinel
+
+    def _fake_ray_data(cfg: RunConfig, settings: Settings) -> pd.DataFrame:
+        seen["ray_data"] = True
+        return sentinel
+
+    monkeypatch.setattr(ray_engine, "_read_driver_collect", _fake_driver)
+    monkeypatch.setattr(ray_engine, "_read_ray_data", _fake_ray_data)
+    out = ray_engine._read_source_series(_cfg(), _settings())  # ray_read_mode defaults to driver
+    assert seen == {"driver": True, "ray_data": False}
+    assert len(out) == len(sentinel)
+
+
+def test_read_source_series_ray_data_mode_dispatches_and_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ray_read_mode="ray_data" routes to the ray.data reader, and the shared series_limit subset is
+    # still applied on top — so both readers produce the identical panel the fan-out expects.
+    def _fake_ray_data(cfg: RunConfig, settings: Settings) -> pd.DataFrame:
+        return _panel(5)  # 5 series; the cfg limit below must trim to the first 2
+
+    monkeypatch.setattr(ray_engine, "_read_ray_data", _fake_ray_data)
+    cfg = _cfg(
+        compute=_compute(ray_read_mode="ray_data"),
+        data={"source_table": "source_series_native", "horizon": 7, "series_limit": 2},
+    )
+    out = ray_engine._read_source_series(cfg, _settings())
+    assert sorted(out["ts_id"].unique()) == ["s0", "s1"]  # limit applied after the ray.data read
+
+
+def test_read_ray_data_reads_by_dataset_and_projects_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_read_ray_data`` calls ``ray.data.read_bigquery(project_id=, dataset=)`` and projects cols.
+
+    Stubs ``ray.data`` so the reader runs offline: assert it passes the deployment project + the
+    ``D.T`` dataset ref (never a ``query=``, so no query slots), and that the returned frame is
+    column-projected to :func:`_needed_columns` — matching the default reader's shape.
+    """
+    import sys
+    import types as pytypes
+
+    captured: dict[str, Any] = {}
+
+    class _FakeDataset:
+        def to_pandas(self) -> pd.DataFrame:
+            # An extra column the projection must drop, on top of the needed ts_id/ds/y.
+            return _panel(2).assign(extra="drop me")
+
+    def _read_bigquery(**kw: Any) -> _FakeDataset:
+        captured.update(kw)
+        return _FakeDataset()
+
+    fake_ray = pytypes.ModuleType("ray")
+    fake_ray.data = pytypes.SimpleNamespace(read_bigquery=_read_bigquery)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7})
+    out = ray_engine._read_ray_data(cfg, _settings())
+
+    assert captured == {"project_id": "proj-x", "dataset": "ds_x.source_series_native"}
+    assert "query" not in captured  # a pure table scan, not a slot-consuming query
+    assert "extra" not in out.columns  # projected down to the needed columns
+    assert set(out.columns) == set(ray_engine._needed_columns(cfg))
 
 
 # --- @ray: run end-to-end on a real local Ray session --------------------------

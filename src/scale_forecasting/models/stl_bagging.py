@@ -67,8 +67,8 @@ class StlBagging(BaseModel):
 
         # Empirical quantiles off the bagged ensemble — monotonic in q, so bounds stay
         # ordered by construction.
-        t = self.ctx.transform
-        qmap = {q: invert_transform(np.quantile(paths, q, axis=0), t) for q in quantiles}
+        t, lam = self.ctx.transform, self.ctx.transform_lambda
+        qmap = {q: invert_transform(np.quantile(paths, q, axis=0), t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 

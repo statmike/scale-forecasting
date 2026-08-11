@@ -48,8 +48,8 @@ class HoltWinters(BaseModel):
     ) -> pd.DataFrame:
         mean = np.asarray(self._fitted.forecast(horizon), dtype=float)
         qmap_t = self.residual_intervals(mean, quantiles)
-        t = self.ctx.transform
-        qmap = {q: invert_transform(v, t) for q, v in qmap_t.items()}
+        t, lam = self.ctx.transform, self.ctx.transform_lambda
+        qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 

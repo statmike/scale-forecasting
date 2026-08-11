@@ -41,7 +41,8 @@ A model is a `BaseModel` subclass (see `models/base_model.py`). The seams:
 **`fit(y, X)`** — `y` is one series' target (a `pd.Series` indexed by datetime `ds`), already
 transformed per the run config (e.g. `log1p`). `X` is the aligned feature/exog frame, or
 `None`. Stash what `predict` needs on `self`. Per-run context is on `self.ctx`
-(`freq`, `horizon`, `seed`, `transform`); HPO hyperparameters are on `self.params`. Raise
+(`freq`, `horizon`, `seed`, `transform`, `transform_lambda`); HPO hyperparameters are on
+`self.params`. Raise
 `ModelError` on a genuinely unfittable series — the worker captures it into an *error cell*
 and the batch survives; it never propagates.
 
@@ -53,8 +54,9 @@ bounds (`lower ≤ yhat ≤ upper`). The base class does the assembly for you:
 - turn it into a `{quantile: array}` map — either from your own native bounds, or via
   `self.residual_intervals(mean, quantiles)` if you recorded residuals in `fit` with
   `self._set_residuals(...)`,
-- invert the transform with `invert_transform(values, self.ctx.transform)` so values are in
-  original units,
+- invert the transform with `invert_transform(values, self.ctx.transform,
+  self.ctx.transform_lambda)` so values are in original units (the λ is fit once per cell by
+  the worker and passed on `ctx`; it's `None` for `none`/`log1p`),
 - call `self._assemble_frame(ds, qmap)` (use `self._future_index(last_date, horizon)` for the
   dates).
 

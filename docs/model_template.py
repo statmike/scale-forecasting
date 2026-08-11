@@ -81,8 +81,11 @@ class TemplateModel(BaseModel):
         # native bounds, build the quantile map directly instead of calling this.
         qmap_transformed = self.residual_intervals(mean, quantiles)
 
-        t = self.ctx.transform
-        qmap = {q: invert_transform(v, t) for q, v in qmap_transformed.items()}
+        # Invert the target transform so the frame is in original units (§2.1). Pass both the
+        # transform name and the cell's fitted λ (None for none/log1p; set for boxcox) — the
+        # worker fits λ once per cell and hands it to you on ctx, so predict never refits it.
+        t, lam = self.ctx.transform, self.ctx.transform_lambda
+        qmap = {q: invert_transform(v, t, lam) for q, v in qmap_transformed.items()}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 

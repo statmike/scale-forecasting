@@ -44,6 +44,7 @@ pytestmark = pytest.mark.gcp
 _MODELS = ["arima_plus", "timesfm"]
 _SERIES_LIMIT = 20
 _HORIZON = 28
+_N_FOLDS = 2  # multi-fold backtest → exercises the fold loop + per-fold DROP MODEL cleanup
 _HISTORY = 730  # ~2 years daily → training window > 1 year, so ARIMA_PLUS holidays apply
 _SCRATCH_TABLE = "b3_native_smoke_source"
 
@@ -98,6 +99,10 @@ def _cfg(source_table: str) -> RunConfig:
         data={"source_table": source_table, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_MODELS,
         features={"holidays": ["US"]},
+        # Scored evaluation lives entirely in the backtest path (C2 alignment): the OOF rows and the
+        # non-NaN metric panel this test asserts are only produced when backtesting is on. A
+        # multi-fold plan also exercises the native fold loop + per-fold DROP MODEL cleanup (#161).
+        backtest={"enabled": True, "n_folds": _N_FOLDS, "horizon": _HORIZON, "step": _HORIZON},
     )
 
 
@@ -172,10 +177,12 @@ def test_bigquery_native_smoke(settings: Settings, scratch_source: str) -> None:
         assert r.wrong_engine == 0, r.model_type
         assert r.null_yhat == 0, r.model_type
 
-    # backtest_oof: one held-out fold (fold_id=0), horizon × series per model, y_true present.
+    # backtest_oof: N_FOLDS held-out folds (fold_id 0..N-1), horizon × series × folds per model,
+    # y_true present. Multi-fold exercises the native fold loop + per-fold DROP cleanup (#161).
     oof = _poll_rows(
         client,
-        f"SELECT model_type, COUNT(*) AS n, COUNTIF(fold_id != 0) AS bad_fold, "
+        f"SELECT model_type, COUNT(*) AS n, COUNT(DISTINCT fold_id) AS n_folds, "
+        f"COUNTIF(fold_id NOT BETWEEN 0 AND {_N_FOLDS - 1}) AS bad_fold, "
         f"COUNTIF(y_true IS NULL) AS null_true "
         f"FROM `{d}.backtest_oof` WHERE run_id=@run_id GROUP BY model_type",
         run_id,
@@ -183,7 +190,8 @@ def test_bigquery_native_smoke(settings: Settings, scratch_source: str) -> None:
     )
     assert {r.model_type for r in oof} == set(_MODELS)
     for r in oof:
-        assert r.n == _SERIES_LIMIT * _HORIZON, r.model_type
+        assert r.n == _SERIES_LIMIT * _HORIZON * _N_FOLDS, r.model_type
+        assert r.n_folds == _N_FOLDS, r.model_type
         assert r.bad_fold == 0, r.model_type
         assert r.null_true == 0, r.model_type
 
@@ -221,3 +229,20 @@ def test_bigquery_native_smoke(settings: Settings, scratch_source: str) -> None:
         assert r.compute_engine == "bigquery", r.model_type
         assert r.n_cells == _SERIES_LIMIT, r.model_type
         assert r.mean_wape is not None, r.model_type
+
+    # Fold-model cleanup (#161): each backtest fold trains a persisted sf_model_*_f{k} object solely
+    # to read its held-out forecast, then DROPs it. After the run the final true-future model must
+    # remain (it backs forecast_predictions) while no orphaned fold objects linger. TimesFM trains
+    # no object, so this concerns arima_plus only. list_models is the live ground truth (no
+    # INFORMATION_SCHEMA path-quoting to fight).
+    from scale_forecasting.engines.bigquery_engine import _sanitize_identifier
+
+    final_model = f"sf_model_arima_plus_{_sanitize_identifier(run_id)}"
+    models_seen = {
+        m.model_id
+        for m in client.list_models(settings.dataset_ref)
+        if m.model_id.startswith(final_model)
+    }
+    assert final_model in models_seen, models_seen
+    orphaned_folds = {m for m in models_seen if m.startswith(f"{final_model}_f")}
+    assert orphaned_folds == set(), orphaned_folds

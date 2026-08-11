@@ -74,8 +74,8 @@ class ProphetModel(BaseModel):
         z = norm.ppf(0.5 + _INTERVAL_WIDTH / 2.0)
         sigma = (fc["yhat_upper"].to_numpy() - fc["yhat_lower"].to_numpy()) / (2.0 * z)
 
-        t = self.ctx.transform
-        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t) for q in quantiles}
+        t, lam = self.ctx.transform, self.ctx.transform_lambda
+        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         return self._assemble_frame(ds, qmap)
 
     @classmethod

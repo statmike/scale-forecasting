@@ -672,8 +672,7 @@ def _connect_job_client(
     ``JobSubmissionClient.__init__`` does a GET ``/api/version`` handshake; right after the cluster
     hits RUNNING that endpoint may not be reachable yet, so the first attempts can raise a proxy
     gateway timeout (524/504/…). We back off and retry the *connection only* (never a partial
-    submit) until it succeeds or the budget is spent, then let the last error propagate. See
-    NOTES.md for the current status of the dashboard-proxy handshake on Vertex Ray.
+    submit) until it succeeds or the budget is spent, then let the last error propagate.
     """
     from google.cloud.aiplatform import vertex_ray  # noqa: F401 - registers vertex_ray:// + auth
     from ray.job_submission import JobSubmissionClient

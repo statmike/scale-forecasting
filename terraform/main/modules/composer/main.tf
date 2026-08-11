@@ -2,14 +2,19 @@
 #
 # ─── LIFECYCLE: start → run → stop (the whole point of the create_composer toggle) ───────
 #
-#   START  (turn scheduling on):
-#     set create_composer = true, then `terraform apply`. ~25 min to build. From then on the
-#     DAG (Phase 7 / B6) runs on a schedule. This starts the meter (~$300-400/mo, smallest env).
+#   NOTE — the run DAG is not shipped yet (in development). This module provisions the Composer
+#   environment; the Airflow DAG it is designed to host does not exist in the repo (there is no
+#   dags/ directory). Turning this on today gives you a running-but-idle Airflow environment for
+#   developing that orchestration — it will not schedule forecasts on its own until a DAG lands.
 #
-#   RUN:
-#     the environment hosts the Airflow DAG that orchestrates prep → fan-out (Spark|Ray + BQ)
+#   START  (turn scheduling on):
+#     set create_composer = true, then `terraform apply`. ~25 min to build. This starts the meter
+#     (~$300-400/mo, smallest env). Scheduled runs begin once the run DAG is added (see NOTE).
+#
+#   RUN (design intent, once the DAG ships):
+#     the environment hosts an Airflow DAG that orchestrates prep → fan-out (Spark|Ray + BQ)
 #     → fan-in → ensemble → finalize. Git-Sync pulls the DAG from the repo. The SAME run_cell
-#     code runs here as locally (G1) — Composer only schedules and fans out.
+#     code runs there as locally (G1) — Composer only schedules and fans out.
 #
 #   STOP  (turn the meter off):
 #     set create_composer = false, then `terraform apply`. Terraform destroys just this

@@ -141,7 +141,8 @@ def test_persist_failure_degrades_to_no_artifact(monkeypatch: Any) -> None:
 
 
 def test_bigquery_native_routes_to_bigquery_engine() -> None:
-    # arima_plus raises NotImplementedError in Arc A → error cell, but engine is bigquery.
+    # arima_plus is executed as SQL in BigQuery; its in-process fit/predict raises (never called
+    # on the real path) → error cell here, but compute_engine is still tagged bigquery.
     res = run_cell(_series(), "arima_plus", _cfg(models=["arima_plus"]))
     assert res.status == "error"
     assert res.compute_engine == "bigquery"

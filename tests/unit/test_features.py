@@ -18,6 +18,7 @@ from scale_forecasting.errors import ConfigError
 from scale_forecasting.features import (
     apply_transform,
     build_features,
+    fit_transform_lambda,
     holiday_frame,
     invert_transform,
 )
@@ -62,11 +63,50 @@ def test_log1p_rejects_below_neg_one() -> None:
         apply_transform(pd.Series([-2.0, 0.0]), "log1p")
 
 
-def test_boxcox_rejected_for_now() -> None:
-    with pytest.raises(ConfigError, match="boxcox"):
-        apply_transform(pd.Series([1.0]), "boxcox")
-    with pytest.raises(ConfigError, match="boxcox"):
-        invert_transform(np.array([1.0]), "boxcox")
+def test_boxcox_roundtrips_with_fitted_lambda() -> None:
+    # λ fit on the series drives both directions; apply→invert is identity.
+    y = pd.Series([10.0, 12.0, 15.0, 11.0, 14.0, 20.0, 25.0, 18.0, 22.0, 30.0])
+    lam = fit_transform_lambda(y, "boxcox")
+    assert lam is not None
+    fwd = apply_transform(y, "boxcox", lam)
+    back = invert_transform(fwd.to_numpy(), "boxcox", lam)
+    assert np.allclose(back, y.to_numpy())
+
+
+def test_boxcox_lambda_is_deterministic() -> None:
+    y = pd.Series([3.0, 7.0, 2.0, 9.0, 5.0, 11.0, 4.0])
+    assert fit_transform_lambda(y, "boxcox") == fit_transform_lambda(y, "boxcox")
+
+
+def test_fit_transform_lambda_none_for_stateless() -> None:
+    y = pd.Series([1.0, 2.0, 3.0])
+    assert fit_transform_lambda(y, "none") is None
+    assert fit_transform_lambda(y, "log1p") is None
+
+
+def test_boxcox_requires_positive_y() -> None:
+    with pytest.raises(ConfigError, match="strictly positive"):
+        fit_transform_lambda(pd.Series([1.0, 0.0, 3.0]), "boxcox")
+    with pytest.raises(ConfigError, match="strictly positive"):
+        fit_transform_lambda(pd.Series([1.0, -2.0]), "boxcox")
+
+
+def test_boxcox_without_lambda_raises() -> None:
+    # A caller that forgets to fit λ gets a clear error, not a silent mis-transform.
+    with pytest.raises(ConfigError, match="fitted lambda"):
+        apply_transform(pd.Series([1.0, 2.0]), "boxcox")
+    with pytest.raises(ConfigError, match="fitted lambda"):
+        invert_transform(np.array([1.0, 2.0]), "boxcox")
+
+
+def test_build_features_applies_boxcox_with_lambda() -> None:
+    s = _series(8)  # y = 1..8, strictly positive
+    y_raw = s["y"].astype(float)
+    lam = fit_transform_lambda(y_raw, "boxcox")
+    y, _ = build_features(s, _cfg(features={"transform": "boxcox"}), lam)
+    # forward-transformed values differ from raw but invert back to raw.
+    assert not np.allclose(y.to_numpy(), y_raw.to_numpy())
+    assert np.allclose(invert_transform(y.to_numpy(), "boxcox", lam), y_raw.to_numpy())
 
 
 def test_unknown_transform_raises() -> None:

@@ -57,8 +57,8 @@ schema) surfaces as a single `ConfigError`.
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
 | `holidays` | `list[str]` | `[]` | Holiday country codes to add (e.g. `["US"]`). |
-| `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform (inverted on output). |
-| `exog` | `list[str]` | `[]` | Exogenous driver columns (the generic seam; the shipped source is univariate). |
+| `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform, inverted on output. `boxcox` fits its λ per series by MLE (requires strictly positive `y`); `log1p` needs `y >= -1`. |
+| `exog` | `list[str]` | `[]` | Exogenous driver columns — a **started-but-unexampled** seam: consumed by `sarimax`/`ucm`/`prophet`/`lightgbm`/`xgboost`, but the shipped source is univariate (bring your own table with these columns to use it). |
 | `lags` | `list[int]` | `[]` | Lag features. |
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
 | `level_shift` | `bool` | `false` | Level-shift feature. |
@@ -143,6 +143,7 @@ knobs only matter when `python_runtime="ray"`.
 | `ray_max_nodes` | `int` | `16` | `> 0` | Hard ceiling on cluster node count. |
 | `gpu_calibration_samples` | `int` | `3` | `> 0` | Series to profile for auto `gpu_fraction`. |
 | `gpu_safety_margin` | `float` | `1.3` | `> 1.0` | Headroom multiplier on measured peak GPU memory. |
+| `ray_read_mode` | `"driver_collect"` \| `"ray_data"` | `"driver_collect"` | — | Ray source reader: the proven Storage Read client, or `ray.data.read_bigquery` (same Storage Read API, opt-in). |
 
 ## A minimal config
 

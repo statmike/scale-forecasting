@@ -58,8 +58,8 @@ class Sarimax(BaseModel):
         fc = self._fitted.get_forecast(horizon, exog=X)
         mean = np.asarray(fc.predicted_mean, dtype=float)
         sigma = np.asarray(fc.se_mean, dtype=float)
-        t = self.ctx.transform
-        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t) for q in quantiles}
+        t, lam = self.ctx.transform, self.ctx.transform_lambda
+        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 

@@ -40,8 +40,8 @@ across runtimes.
 
 Public surface: ``run(cfg, models)``; builders ``build_create_model_sql``,
 ``build_forecast_insert_sql``, ``build_eval_query``, ``build_history_query``,
-``build_series_ids_query``, ``build_custom_holiday_cte``, ``render_setup_sql``, ``bqml_options``,
-``fold_plan``.
+``build_series_ids_query``, ``build_custom_holiday_cte``, ``build_fold_create_statements``,
+``build_fold_drop_statements``, ``render_setup_sql``, ``bqml_options``, ``fold_plan``.
 """
 
 from __future__ import annotations
@@ -499,6 +499,24 @@ def build_fold_create_statements(
     return []
 
 
+def build_fold_drop_statements(
+    cfg: RunConfig, model_name: str, dataset: str, fold_id: int
+) -> list[str]:
+    """The cleanup statement for one backtest fold (``[DROP MODEL]`` for ARIMA, ``[]`` else).
+
+    Each fold trains a persisted ``sf_model_{model}_{run_id}_f{k}`` object solely to produce that
+    fold's held-out forecast; once :func:`build_eval_query` has read it back the object has no
+    further use. Without this it would linger in the dataset — orphaned fold models accumulating
+    every run. The *final* true-future model (``fold_id=None``) is deliberately **not** dropped: it
+    backs ``forecast_predictions`` and its ``CREATE OR REPLACE`` idempotency (lineage).
+    ``IF EXISTS`` keeps the drop safe if a fold's CREATE failed. TimesFM trains no object, so
+    nothing to drop.
+    """
+    if model_name in _MODEL_TYPE:
+        return [f"DROP MODEL IF EXISTS {_model_ref(cfg, model_name, dataset, fold_id=fold_id)};"]
+    return []
+
+
 def render_setup_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
     """All of a model's true-future setup statements joined into one script (snapshot + reading)."""
     return "\n\n".join(build_setup_statements(cfg, model_name, dataset))
@@ -609,6 +627,16 @@ def run(
                             cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id
                         )
                     ).to_dataframe()
+                    # The fold model has served its forecast — drop it so backtest runs don't
+                    # leave orphaned sf_model_*_f{k} objects behind. Best-effort: a failed cleanup
+                    # must not sink an otherwise-good run (results are already read back above).
+                    for stmt in build_fold_drop_statements(cfg, model_name, dataset, fold_id):
+                        try:
+                            _query(stmt)
+                        except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                            log.warning(
+                                "fold model cleanup failed (%s f%d): %s", model_name, fold_id, exc
+                            )
                     for ts_id, g in eval_df.groupby("ts_id"):
                         g = g.sort_values("forecast_date")
                         for _, r in g.iterrows():

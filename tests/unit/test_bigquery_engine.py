@@ -182,6 +182,37 @@ def test_fold_plan_mirrors_make_folds_geometry() -> None:
     assert be.fold_plan(cfg) == [(0, 84), (1, 56), (2, 28)]
 
 
+def test_fold_create_and_drop_target_the_same_object() -> None:
+    # Every fold trains a fold-suffixed object; the matching DROP must name that exact object so
+    # backtest runs leave no orphaned sf_model_*_f{k} models behind.
+    cfg = _cfg(["arima_plus"])
+    create = be.build_fold_create_statements(cfg, "arima_plus", _DS, fold_id=1, back_steps=56)
+    drop = be.build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=1)
+    assert len(create) == 1 and len(drop) == 1
+    obj = be._model_ref(cfg, "arima_plus", _DS, fold_id=1)
+    assert obj in create[0] and obj in drop[0]
+    assert drop[0].startswith("DROP MODEL IF EXISTS ")  # safe if the fold CREATE failed
+
+
+def test_fold_drop_never_targets_the_final_model() -> None:
+    # The final true-future model (fold_id=None) backs forecast_predictions and must survive; only
+    # fold-suffixed objects are dropped.
+    cfg = _cfg(["arima_plus"])
+    final_obj = be._model_ref(cfg, "arima_plus", _DS)  # no fold suffix
+    for k in range(3):
+        drop = be.build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=k)
+        assert final_obj not in drop[0]
+        assert f"_f{k}`" in drop[0]
+
+
+def test_timesfm_has_no_fold_create_or_drop() -> None:
+    # TimesFM trains no model object (AI.FORECAST reads history directly), so it has neither a fold
+    # CREATE nor a DROP — nothing to clean up.
+    cfg = _cfg(["timesfm"])
+    assert be.build_fold_create_statements(cfg, "timesfm", _DS, fold_id=0, back_steps=28) == []
+    assert be.build_fold_drop_statements(cfg, "timesfm", _DS, fold_id=0) == []
+
+
 # --- eval + history read-back --------------------------------------------------
 
 

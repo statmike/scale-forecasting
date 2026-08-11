@@ -3,7 +3,13 @@ name = "scale-forecasting"
 version = "0.1.0"
 description = "Massively-parallel time-series forecasting on Google Cloud — Spark, Ray, and BigQuery, one config away."
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+# 3.11 is the tested/supported default everywhere (Vertex Ray client↔cluster parity at 2.47;
+# Dataproc packed-venv is built against 3.11). The ceiling is <3.13 rather than <3.12 for exactly
+# one reason: notebook 01's *interactive* Spark Connect path must run on Python 3.12 (Dataproc 3.0
+# Connect workers are 3.12 and refuse mismatched minors), and its bootstrap `pip install -e .`
+# needs this metadata to permit 3.12. The core is pure-Python and 3.12-safe; only run the [spark]
+# extra there — see docs/notebook_runtimes.md.
+requires-python = ">=3.11,<3.13"
 license = { text = "Apache-2.0" }
 authors = [{ name = "scale-forecasting contributors" }]
 

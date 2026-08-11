@@ -8,8 +8,11 @@ Airflow, with the *same* code. Deploy the whole thing into a fresh project with 
 `terraform apply`, complete with 100k example series to run against immediately.
 
 > **Status.** The local dev loop and the GCP Terraform deploy are both working end-to-end
-> (Spark, Ray, and BigQuery engines all run against a live deployment). An architecture
-> diagram lands in the final polish phase.
+> (Spark, Ray, and BigQuery engines all run against a live deployment). Composer/Airflow
+> **scheduled** orchestration is **in development** — the Terraform provisions the environment,
+> but the run DAG it would host is not shipped yet; today runs are driven ad-hoc from a notebook,
+> CLI, or local script (the *same* `main.run` code a DAG will call). See the
+> [Architecture](#architecture) diagram for how a config flows through the runtimes to the registry.
 
 ---
 
@@ -36,7 +39,11 @@ whole run.
 - **Backtesting + ensembling out of the box** — expanding/sliding folds with a full metric panel,
   and both calculated and learned ensembles.
 - **Custom holidays and transforms** — add holiday country codes and a target transform (`log1p` /
-  `boxcox`) from config; the generic exog seam is there when you outgrow univariate.
+  `boxcox`) from config. A generic exogenous-regressor seam is **started but not shipped end-to-end**:
+  the `exog` config field and the model `X` frame are plumbed through and several models consume
+  them (`sarimax`, `ucm`, `prophet`, `lightgbm`, `xgboost`), but the shipped example series are
+  univariate — bring your own source table with driver columns to exercise it. Treat multivariate
+  as a supported-but-unexampled path, not a turnkey feature.
 - **BigQuery lineage** — every run's config, per-model metrics, forecasts, and artifact links are
   captured in native BigQuery tables, written via the **Storage Write API** for high-speed updates
   (config, telemetry, and quantiles as native `JSON` columns). Layout:
@@ -74,6 +81,48 @@ A run is one validated JSON config. It selects the data, the model list, one Pyt
 runtime, backtest and ensemble settings — and is persisted verbatim into the run
 registry, so the config *is* the experiment record.
 
+```mermaid
+flowchart TB
+    cfg["RunConfig (one JSON)<br/>data · models · runtime · backtest · ensemble"]
+    entry["main.run(cfg)<br/>route by python_runtime + split BQ-native models"]
+    cfg --> entry
+
+    subgraph py["Python model suite — one runtime per run (Spark XOR Ray)"]
+        direction LR
+        spark["Spark engine<br/>Dataproc Serverless<br/>explode · multi · naive<br/>(100k CPU workhorse)"]
+        ray["Ray engine<br/>Ray on Vertex AI<br/>fractional-GPU packing (T4)<br/>CPU + GPU pools"]
+    end
+
+    bq["BigQuery-native models<br/>arima_plus · timesfm<br/>SQL only — runs in parallel"]
+
+    entry -->|"python_runtime = spark"| spark
+    entry -->|"python_runtime = ray"| ray
+    entry -->|"native models, always parallel"| bq
+
+    cell["worker.run_cell(series, model, cfg)<br/>the ONE unit of work — identical local / Spark / Ray (G1)"]
+    spark --> cell
+    ray --> cell
+
+    data[("Source series<br/>managed-Iceberg or native BigQuery<br/>read via Storage Read API")]
+    data -.->|reads| spark
+    data -.->|reads| ray
+    data -.->|reads| bq
+
+    subgraph reg["Run registry — native-BigQuery tiers (Storage Write API)"]
+        direction LR
+        r1["run_registry<br/>config + telemetry"]
+        r2["forecast_metadata<br/>metrics + GCS artifact links"]
+        r3["forecast_predictions<br/>forecast values"]
+        r4["backtest_oof<br/>OOF rows for learned ensembling"]
+    end
+
+    cell -->|write_cells| reg
+    bq -->|ML.FORECAST| reg
+    art[("GCS artifacts<br/>fitted-model ObjectRefs")]
+    cell -.->|persist_models| art
+    art -.->|lineage| r2
+```
+
 <a name="the-three-runtimes"></a>
 
 - **The three runtimes.** The Python model suite runs on **Spark _xor_ Ray** (one per run).
@@ -105,9 +154,12 @@ registry, so the config *is* the experiment record.
   the storage format is transparent to engine code. You get Ray ∥ BigQuery under one `run_id`
   with no Spark session to stand up or tune — and because the Ray ecosystem can also host
   Spark workloads (via RayDP), a team can consolidate many frameworks on one cluster.
-  *(Today the Ray engine reads via the BQ Storage Read API; Ray-native Iceberg reads
-  (`ray.data`) and Spark-on-Ray (RayDP) are a documented future direction, not a current
-  claim.)*
+  *(The Ray engine reads the source panel two ways, selected by `compute.ray_read_mode`: the
+  default `driver_collect` (BigQuery Storage Read API client) and the opt-in `ray_data`
+  (`ray.data.read_bigquery`) — both hit the same Storage Read API, so the storage format stays
+  transparent. Distributing the read as `ray.data` blocks straight into the fan-out (skipping
+  the driver round-trip) and Spark-on-Ray (RayDP) are the documented next steps, not yet
+  shipped.)*
 - **Scale without a bottleneck.** Workers return data, not RPCs; results are written to
   BigQuery in bulk (Storage Write API). Parallelism is bounded by compute, not a tracking
   server's QPS.
@@ -225,7 +277,9 @@ accounts, and network plumbing cost nothing until compute runs. Two things cost 
   code. Set `run_seed = false` to skip it (bring your own source table), or `seed_num_series = 100`
   to smoke-test first.
 - **Composer** (`create_composer`) is **off by default** — the only real at-rest cost
-  (~$300–400/mo); turn it on for scheduled DAG runs.
+  (~$300–400/mo). It provisions the Composer 3 environment; the scheduled run **DAG** that would
+  run on it is **in development / not shipped yet**, so leave it off unless you're developing that
+  orchestration.
 
 **Greenfield or brownfield.** Defaults create everything (the 5-minute path). For a locked-down org,
 flip `create_service_accounts` / `create_network` / `enable_apis` off and pass your existing SAs,

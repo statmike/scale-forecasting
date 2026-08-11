@@ -25,6 +25,7 @@ fan-out.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -94,14 +95,25 @@ def _score_params(
     is skipped rather than sinking the trial — the same fault-tolerance ``run_cell`` gives a cell.
     An empty sample (or all-skipped) scores ``+inf``.
     """
+    from functools import partial
+
     from .backtest import backtest_cell
+    from .features import fit_transform_lambda
 
     model_cls = get_model(model_name)
     metric = cfg.backtest.decision_metric
     per_series: list[float] = []
     for series in sample:
         try:
-            _, fold_metrics = backtest_cell(series, lambda: model_cls(params, ctx), cfg)
+            # Box-Cox λ is per-series: fit it on this series and hand the same λ to both the
+            # forward features and the folds' inverse (mirrors run_cell). None for none/log1p.
+            target = series[cfg.data.target_col].astype(float)
+            lam = fit_transform_lambda(target, cfg.features.transform)
+            series_ctx = replace(ctx, transform_lambda=lam)
+            # partial binds this iteration's series_ctx (no loop-var capture; mypy-typed).
+            _, fold_metrics = backtest_cell(
+                series, partial(model_cls, params, series_ctx), cfg, lam
+            )
         except Exception as e:  # noqa: BLE001 - a bad series must not sink the whole trial
             _log.debug("hpo: skipping a series for %s: %r", model_name, e)
             continue

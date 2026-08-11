@@ -86,7 +86,10 @@ REGISTRY: dict[str, NotebookSpec] = {
         NotebookSpec("01_spark_via_connect", TEMPLATE_SPARK, TIER_BATCH, 1800),
         NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 1800),
         NotebookSpec("05_spark_naive", TEMPLATE_MAIN, TIER_BATCH, 1800),
-        NotebookSpec("06_spark_multi", TEMPLATE_MAIN, TIER_BATCH, 1800),
+        # 06's "multi" method fans out one child explode-batch per model family, so its wall-clock
+        # is the sum of the slowest cell across families — it ran ~34 min live, past the 1800s
+        # sibling budget. 3600s gives headroom without masking a genuine hang (natives < 20 min).
+        NotebookSpec("06_spark_multi", TEMPLATE_MAIN, TIER_BATCH, 3600),
         NotebookSpec("04_ray_on_vertex", TEMPLATE_MAIN, TIER_FULL, 5400),
     )
 }

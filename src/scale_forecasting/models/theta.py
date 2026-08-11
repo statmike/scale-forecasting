@@ -61,8 +61,8 @@ class ThetaModel(BaseModel):
         z90 = norm.ppf(0.9)
         sigma = (pi["upper"].to_numpy() - pi["lower"].to_numpy()) / (2.0 * z90)
 
-        t = self.ctx.transform
-        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t) for q in quantiles}
+        t, lam = self.ctx.transform, self.ctx.transform_lambda
+        qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 

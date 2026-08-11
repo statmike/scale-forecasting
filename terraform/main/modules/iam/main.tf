@@ -145,10 +145,23 @@ resource "google_project_iam_member" "grant" {
 
 # Ray on Vertex over a PSC-I (Private Service Connect Interface) network attachment: the managed
 # Vertex tenant reaches back into this VPC through the attachment, and it does so AS the Vertex AI
-# Service Agent (service-<project_number>@gcp-sa-aiplatform.iam.gserviceaccount.com). Consuming the
-# attachment requires compute.networkAttachments.get/use — the console create fails 403 without it.
-# roles/compute.networkUser carries exactly that. (Broad predefined role for now; trim to a custom
-# least-privilege role once the PSC-I path is confirmed as the supported one.)
+# Service Agent (service-<project_number>@gcp-sa-aiplatform.iam.gserviceaccount.com).
+#
+# This is a SINGLE-project topology (attachment, subnet, and Vertex agent all in this project), not
+# Shared VPC. Google's PSC-I setup docs prescribe roles/compute.networkAdmin for the single-project
+# case; roles/compute.networkUser is the Shared-VPC (host→service) grant. We deliberately take the
+# LEANER networkUser here (not networkAdmin) plus the custom sfNetworkAttachmentConsumer below —
+# together they cover what the agent actually exercises: pulling an interface IP from the subnet
+# (compute.subnetworks.use, carried by networkUser) and consuming the attachment
+# (get/use/update/list, in the custom role). networkUser is broader than the four attachment verbs
+# but is NOT redundant with the custom role: subnetworks.use ships only in networkUser/networkAdmin,
+# so dropping it would 403 the interface-IP allocation.
+#
+# DEFERRED least-privilege trim: to replace networkUser entirely, add compute.subnetworks.use to a
+# custom role scoped to the compute subnet (a subnet-level IAM binding, not project-wide). Not done
+# pre-first-greenfield-apply on purpose — networkUser is the documented-adjacent, known-good grant,
+# and narrowing subnet IP allocation is the exact change that risks a silent 403 on cluster create.
+# Trim it in a follow-up once a greenfield Ray run has confirmed the working permission floor.
 data "google_project" "this" {
   project_id = var.project_id
 }

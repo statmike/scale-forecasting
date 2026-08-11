@@ -74,20 +74,37 @@ def _limit_series(source: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame:
     return source[source[id_col].isin(keep)].reset_index(drop=True)
 
 
-def _read_source_series(
+def _read_source_series(cfg: RunConfig, settings: Settings) -> pd.DataFrame:
+    """Read the source series to a driver-side pandas panel, then apply the ``series_limit`` subset.
+
+    The Ray analog of :func:`~scale_forecasting.engines.spark_io.read_source_series`. Two readers
+    chosen by ``cfg.compute.ray_read_mode`` — both hit the **same** BigQuery Storage Read API (no
+    query slots, Q3 parity with Spark) and return the **same** column-projected pandas panel, so the
+    downstream fan-out is byte-identical whichever runs:
+
+    * ``driver_collect`` (default) — :func:`_read_driver_collect`, the ``BigQueryReadClient`` path
+      the @gpu smoke and the 100k run are proven on.
+    * ``ray_data`` — :func:`_read_ray_data`, the Ray-native ``ray.data.read_bigquery`` reader.
+
+    The whole panel lands on the driver either way, then :func:`.ray_io.chunk_cells` shards it into
+    task-sized frames — acceptable because Ray is the GPU path for modest scales, not the 100k hero
+    (that's Spark, §11.2). The deterministic ``series_limit`` subset (:func:`_limit_series`) is
+    applied here so both readers subset identically.
+    """
+    reader = _read_ray_data if cfg.compute.ray_read_mode == "ray_data" else _read_driver_collect
+    return _limit_series(reader(cfg, settings), cfg)
+
+
+def _read_driver_collect(
     cfg: RunConfig, settings: Settings
 ) -> pd.DataFrame:  # pragma: no cover - GCP I/O, exercised by the @gpu smoke
-    """Read the source series into a driver-side pandas frame via the BigQuery Storage Read API.
+    """Read the source panel via the BigQuery Storage Read API (``BigQueryReadClient``).
 
-    The Ray analog of :func:`~scale_forecasting.engines.spark_io.read_source_series`, and — like the
-    Spark connector — it reads through the **Storage Read API** (``BigQueryReadClient``), *not*
-    ``client.query()``: a direct columnar table read over the storage layer, so it consumes no
-    BigQuery query slots and streams Arrow straight to the driver (Q3 parity with Spark, C-Ray). The
-    read is column-projected to only what a cell needs (:func:`_needed_columns` →
-    ``selected_fields``); the deterministic ``series_limit`` subset is then applied in pandas
-    (:func:`_limit_series`). The whole panel lands on the driver, then :func:`.ray_io.chunk_cells`
-    shards it into task-sized frames — acceptable because Ray is the GPU path for modest scales, not
-    the 100k hero (that's Spark, §11.2).
+    Like the Spark connector, this reads through the **Storage Read API**, *not* ``client.query()``:
+    a direct columnar table read over the storage layer, so it consumes no BigQuery query slots and
+    streams Arrow straight to the driver (Q3 parity with Spark, C-Ray). The read is column-projected
+    to only what a cell needs (:func:`_needed_columns` → ``selected_fields``). Returns the raw
+    panel; the caller (:func:`_read_source_series`) applies the ``series_limit`` subset.
     """
     # Runtime import: pandas is TYPE_CHECKING-only at module scope (offline import parity), so every
     # function that touches pandas at runtime must import it locally.
@@ -111,8 +128,48 @@ def _read_source_series(
     ]
     if not frames:  # empty table → an empty, correctly-typed frame from the session schema
         return pd.DataFrame(columns=_needed_columns(cfg))
-    source = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    return _limit_series(source, cfg)
+    return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
+
+def _read_ray_data(
+    cfg: RunConfig, settings: Settings
+) -> pd.DataFrame:  # pragma: no cover - GCP I/O + live Ray, exercised by the @raylive smoke
+    """Read the source panel with the Ray-native ``ray.data.read_bigquery`` reader (opt-in).
+
+    ``ray.data.read_bigquery`` reads over the **same** BigQuery Storage Read API underneath (no
+    query slots, Q3 parity), returning a distributed :class:`ray.data.Dataset`. We pass ``dataset=``
+    (not ``query=``) so the read stays a pure table scan — matching :func:`_read_driver_collect` and
+    then materialize to a single driver-side pandas panel with ``.to_pandas()`` so the rest of the
+    fan-out is identical to the default path. Column projection is applied in pandas after the read
+    (the reader takes no ``selected_fields``), keeping the two readers' outputs the same shape.
+
+    Kept off by default (``ray_read_mode == "driver_collect"``): this is the Ray-native ingest path,
+    the same Storage Read API as the proven reader, but a live Ray run should vet it before it
+    becomes the default. Distributing the panel as ``ray.data`` blocks straight into the fan-out
+    (skipping the driver round-trip) is the documented next step from here — see README / NB04.
+    """
+    import ray
+
+    dataset_ref = _storage_dataset_path(cfg, settings)
+    ds = ray.data.read_bigquery(project_id=settings.project_id, dataset=dataset_ref)
+    frame = ds.to_pandas()
+    needed = _needed_columns(cfg)
+    # The reader has no server-side column projection, so project in pandas to match the default
+    # path's shape. Guard on presence so a lean source table (only the needed columns) still works.
+    projected = [c for c in needed if c in frame.columns]
+    return frame[projected] if projected else frame
+
+
+def _storage_dataset_path(cfg: RunConfig, settings: Settings) -> str:
+    """Resolve the source to the ``dataset.table`` form ``ray.data.read_bigquery`` wants (pure).
+
+    ``read_bigquery(dataset=...)`` takes ``<dataset>.<table>`` (the project is passed separately as
+    ``project_id``). :func:`_storage_table_path` already resolves the full resource path; reuse it
+    and drop the ``projects/P/datasets/`` / ``/tables/`` scaffolding back to ``D.T``.
+    """
+    path = _storage_table_path(cfg, settings)  # projects/P/datasets/D/tables/T
+    _, _, _, dataset, _, table = path.split("/")
+    return f"{dataset}.{table}"
 
 
 def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:

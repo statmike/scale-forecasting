@@ -1,4 +1,4 @@
-# network — a minimal VPC + subnet for the serverless compute (Dataproc Serverless, later Ray).
+# network — a minimal VPC + subnet for the serverless compute (Dataproc Serverless and Ray on Vertex).
 #
 # Fresh projects in this org are created WITHOUT a `default` network, and Dataproc Serverless (and
 # Ray on Vertex) require a subnet that has **Private Google Access** enabled plus a firewall rule
