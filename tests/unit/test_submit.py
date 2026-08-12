@@ -96,6 +96,41 @@ def test_build_batch_wires_launcher_package_and_args() -> None:
     assert ec.subnetwork_uri.endswith("/subnetworks/sf")
 
 
+def test_build_batch_sets_explicit_ttl_over_dataproc_default() -> None:
+    # An explicit ttl must be on the batch — Dataproc's silent 4h default would cancel a healthy
+    # long 100k run mid-flight (before it writes its run_registry summary). Default is 24h.
+    from datetime import timedelta
+
+    from scale_forecasting import submit
+
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        engine="explode",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+    )
+    ec = batch.environment_config.execution_config
+    assert ec.ttl == timedelta(seconds=submit._DEFAULT_TTL_SECONDS)
+    assert ec.ttl > timedelta(hours=4)  # the point: strictly beyond the platform default
+
+
+def test_build_batch_honours_custom_ttl() -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    batch = build_batch(
+        infra=replace(_infra(), ttl_seconds=10800),
+        settings=_settings(),
+        engine="explode",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+    )
+    assert batch.environment_config.execution_config.ttl == timedelta(seconds=10800)
+
+
 def test_build_batch_without_max_executors_sets_no_cap() -> None:
     batch = build_batch(
         infra=_infra(),

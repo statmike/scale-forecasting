@@ -59,6 +59,15 @@ _ENV_SUBNETWORK = "SF_SUBNETWORK_URI"
 
 _DEFAULT_RUNTIME_VERSION = "2.2"
 
+# Batch max-runtime cap (``ExecutionConfig.ttl``). Dataproc Serverless applies a DEFAULT ttl of 4h
+# when none is set — which silently CANCELS a longer-running batch mid-flight (a full 100k explode
+# run can exceed 4h, and the cancel kills it before it writes its run_registry summary row, so the
+# efficiency views render blank). We set an explicit, generous 24h so a full-scale run finishes on
+# its own. Override per-submit with ``--ttl``. This bounds the batch's lifetime, NOT the client wait
+# (that's _WAIT_TIMEOUT_SECONDS): a serverless batch bills only for what it uses, so a high ceiling
+# costs nothing extra — it just stops the platform from guillotining a healthy long run.
+_DEFAULT_TTL_SECONDS = 86400
+
 # How long ``wait=True`` blocks on the batch LRO before giving up. The google-api-core polling
 # default is 900s (15 min) — shorter than a 100k forecast batch, so the bare ``operation.result()``
 # would raise a client-side TimeoutError on a batch that is still running perfectly server-side
@@ -81,6 +90,7 @@ class BatchInfra:
     compute_sa: str  # runtime SA the batch runs as (scale-forecasting-compute)
     subnetwork_uri: str  # subnet with Private Google Access + internal-ingress firewall
     runtime_version: str = _DEFAULT_RUNTIME_VERSION
+    ttl_seconds: int = _DEFAULT_TTL_SECONDS  # batch max-runtime cap; > default 4h so 100k finishes
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -248,6 +258,8 @@ def build_batch(
     Both are appended to ``args`` **only when non-default**, so a standalone submit builds the exact
     same arg list as before (existing batches / snapshot tests unchanged).
     """
+    from datetime import timedelta
+
     from google.cloud import dataproc_v1 as dataproc
 
     args = ["--engine", engine, "--config-uri", config_uri, *infra_args_from(settings)]
@@ -274,6 +286,9 @@ def build_batch(
             execution_config=dataproc.ExecutionConfig(
                 service_account=infra.compute_sa,
                 subnetwork_uri=infra.subnetwork_uri,
+                # Explicit max-runtime cap — overrides Dataproc's silent 4h default that would
+                # cancel a healthy long 100k run mid-flight (see _DEFAULT_TTL_SECONDS).
+                ttl=timedelta(seconds=infra.ttl_seconds),
             )
         ),
     )
@@ -586,12 +601,29 @@ def main(argv: list[str] | None = None) -> None:
         help=f"seconds to block on the batch when waiting (default {_WAIT_TIMEOUT_SECONDS:.0f}; a "
         "100k batch exceeds the 900s api-core default)",
     )
+    p.add_argument(
+        "--ttl",
+        type=int,
+        default=_DEFAULT_TTL_SECONDS,
+        help=f"batch max-runtime cap in seconds (default {_DEFAULT_TTL_SECONDS}; overrides "
+        "Dataproc's silent 4h default that cancels a healthy long 100k run)",
+    )
     ns = p.parse_args(argv)
 
     cfg = load_config(ns.config)
+    # Build infra once so --ttl overrides the default cap on every (child) batch this run submits.
+    infra = BatchInfra.resolve()
+    if ns.ttl != _DEFAULT_TTL_SECONDS:
+        from dataclasses import replace
+
+        infra = replace(infra, ttl_seconds=ns.ttl)
     if ns.engine == "multi":
         ids = submit_multi(
-            cfg, n_series=ns.n_series, wait=not ns.no_wait, wait_timeout=ns.wait_timeout
+            cfg,
+            n_series=ns.n_series,
+            infra=infra,
+            wait=not ns.no_wait,
+            wait_timeout=ns.wait_timeout,
         )
         _log.info("multi submitted: %s", ids)
     else:
@@ -599,6 +631,7 @@ def main(argv: list[str] | None = None) -> None:
             cfg,
             engine=ns.engine,
             n_series=ns.n_series,
+            infra=infra,
             max_executors=ns.max_executors,
             wait=not ns.no_wait,
             wait_timeout=ns.wait_timeout,
