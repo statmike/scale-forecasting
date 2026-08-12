@@ -216,12 +216,19 @@ def submit_job(
     timeout_s: int,
     credentials: object,
     display_name: str,
+    ack_out_of_org: bool = False,
 ) -> str:
     """Submit one notebook to run headless on a template; return the API-minted job id.
 
     The notebook is sent inline as base64 (``directNotebookSource`` — no pre-upload to GCS). We do
     NOT set ``notebookExecutionJobId`` (a custom id hangs in PENDING) and recover the id from the
     returned operation name. serviceAccount mode → the run executes as ``service_account``.
+
+    ``ack_out_of_org`` opts in to running on a project **outside a Google-corp org** (a personal or
+    standalone project). Vertex rejects such a submit with FAILED_PRECONDITION
+    (``NOTEBOOK_RUNTIME_OUT_OF_ORGANIZATION``) unless the request carries an acknowledgement label;
+    that ack states the runtime SA's credentials may be visible to the project owner, so it's an
+    explicit operator opt-in (``--ack-out-of-org``), never sent silently. No-op inside a corp org.
     """
     import requests
 
@@ -235,6 +242,8 @@ def submit_job(
         "serviceAccount": service_account,
         "executionTimeout": f"{timeout_s}s",
     }
+    if ack_out_of_org:
+        body["labels"] = {"aiplatform.googleapis.com/notebook_runtime_out_of_org_warning": "ack"}
     resp = requests.post(
         url,
         headers={
@@ -349,6 +358,7 @@ def run_acceptance(
     gcs_output_uri: str,
     credentials: object | None = None,
     run_label: str,
+    ack_out_of_org: bool = False,
 ) -> list[AcceptanceResult]:
     """Run each notebook headless on its template and collect per-notebook results.
 
@@ -392,6 +402,7 @@ def run_acceptance(
             timeout_s=spec.timeout_s,
             credentials=credentials,
             display_name=f"sf-accept-{spec.name}-{run_label}",
+            ack_out_of_org=ack_out_of_org,
         )
         state, detail = poll_to_terminal(
             project_id=project_id,
@@ -452,6 +463,7 @@ def run_fanout(
     credentials: object | None = None,
     run_label: str,
     display_prefix: str = "sf-demo",
+    ack_out_of_org: bool = False,
 ) -> list[FanOutResult]:
     """Submit every notebook headless and return immediately — do NOT wait for them to finish.
 
@@ -494,6 +506,7 @@ def run_fanout(
                 timeout_s=spec.timeout_s,
                 credentials=credentials,
                 display_name=display_name,
+                ack_out_of_org=ack_out_of_org,
             )
         except Exception as exc:  # noqa: BLE001 — one bad submit must not sink the rest of the fan-out
             results.append(FanOutResult(spec.name, "", display_name, "", f"submit failed: {exc}"))
@@ -559,6 +572,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "assert cell errors). They run concurrently server-side — watch them in the Colab "
         "Enterprise Executions menu. Use to pre-render the notebooks before a demo.",
     )
+    parser.add_argument(
+        "--ack-out-of-org",
+        action="store_true",
+        help="acknowledge running on a project outside a Google-corp org (a personal or standalone "
+        "project). Required there: Vertex rejects the submit with FAILED_PRECONDITION "
+        "(NOTEBOOK_RUNTIME_OUT_OF_ORGANIZATION) otherwise. The ack states the runtime SA's "
+        "credentials may be visible to the project owner — pass only if you trust the project.",
+    )
     return parser.parse_args(argv)
 
 
@@ -579,6 +600,7 @@ def _run_fanout_cli(
         service_account=args.service_account,
         gcs_output_uri=args.gcs_output,
         run_label=args.run_label,
+        ack_out_of_org=args.ack_out_of_org,
     )
     print()
     print(f"{'notebook':<24} {'job_id':<24}  detail")
@@ -619,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
         service_account=args.service_account,
         gcs_output_uri=args.gcs_output,
         run_label=args.run_label,
+        ack_out_of_org=args.ack_out_of_org,
     )
     print()
     print(f"{'notebook':<24} {'state':<22} {'cell_err':>8}  detail")

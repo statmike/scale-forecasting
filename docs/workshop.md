@@ -226,11 +226,17 @@ cd ~/scale-forecasting
 RUNNER_SA="scale-forecasting-runner@$PROJECT.iam.gserviceaccount.com"
 CODE_BUCKET="$PROJECT-code"
 # The template ids are API-minted, so fetch them by their stable display name (sf-main /
-# sf-spark-connect) — works from any shell, no Terraform:
-MAIN_TEMPLATE=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
+# sf-spark-connect) — works from any shell, no Terraform. NOTE: on some projects
+# `--format="value(name)"` returns only the bare numeric id, but the CLI needs the FULL resource
+# path, so we normalise to `projects/.../notebookRuntimeTemplates/<id>` either way:
+_main_id=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
   --filter="displayName=sf-main" --format="value(name)")
-SPARK_TEMPLATE=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
+_spark_id=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
   --filter="displayName=sf-spark-connect" --format="value(name)")
+_prefix="projects/$PROJECT/locations/$REGION/notebookRuntimeTemplates"
+MAIN_TEMPLATE="$_prefix/${_main_id##*/}"
+SPARK_TEMPLATE="$_prefix/${_spark_id##*/}"
+echo "MAIN=[$MAIN_TEMPLATE]"; echo "SPARK=[$SPARK_TEMPLATE]"   # both should start with projects/
 
 uv run python -m scale_forecasting.notebook_acceptance \
   --no-wait --tier full \
@@ -238,13 +244,20 @@ uv run python -m scale_forecasting.notebook_acceptance \
   --main-template "$MAIN_TEMPLATE" --spark-template "$SPARK_TEMPLATE" \
   --service-account "$RUNNER_SA" \
   --gcs-output "gs://$CODE_BUCKET/notebooks" \
-  --run-label "demo-$(date +%Y%m%d)"
+  --run-label "demo-$(date +%Y%m%d)" \
+  --ack-out-of-org
 ```
 
 > **Note:** this fan-out does *not* need the `SF_*` env block from Act 1 — the notebooks it launches
 > get their `SF_*` identity from the **template env** (baked in at deploy), and the submitter takes
 > everything it needs as explicit `--flags` above. The only prerequisites are `uv sync` (Act 1's
 > install) and being authenticated (`gcloud auth login` — Cloud Shell already is).
+
+> **`--ack-out-of-org`** is required when your project is a **personal or standalone project outside
+> a Google-corp org** (which is the usual case). Without it, Vertex rejects the submit with
+> `FAILED_PRECONDITION (NOTEBOOK_RUNTIME_OUT_OF_ORGANIZATION)`. The flag acknowledges that the
+> runtime service account's credentials may be visible to the project owner — pass it only for a
+> project you trust (your own deploy qualifies). Inside a corp org it's unnecessary (a harmless no-op).
 
 It prints each notebook's **job id** and a link to the **Executions** menu — the console page where
 the jobs appear with live state, and where a finished one **opens as the executed notebook with

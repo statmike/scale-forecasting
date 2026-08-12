@@ -154,6 +154,64 @@ def test_run_fanout_submits_all_without_polling(
     assert r07.executed_uri.endswith(f"fanout/tonight/07_scale_review/{r07.job_id}/content.ipynb")
 
 
+class _FakeResp:
+    """Minimal stand-in for a requests.Response carrying a created-job operation name."""
+
+    def raise_for_status(self) -> None:  # noqa: D102 - trivial stub
+        return None
+
+    def json(self) -> dict[str, str]:  # noqa: D102 - trivial stub
+        return {"name": "projects/p/locations/us-central1/notebookExecutionJobs/42/operations/1"}
+
+
+def _capture_submit_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ack_out_of_org: bool
+) -> dict[str, object]:
+    """Call submit_job with a stubbed POST and return the JSON body it sent."""
+    nb = tmp_path / "nb.ipynb"
+    nb.write_bytes(b"{}")
+    captured: dict[str, object] = {}
+
+    def _fake_post(url: str, **kwargs: object) -> _FakeResp:
+        captured.update(kwargs["json"])  # type: ignore[arg-type]
+        return _FakeResp()
+
+    monkeypatch.setattr(na, "_token", lambda _c: "tok")
+    import requests
+
+    monkeypatch.setattr(requests, "post", _fake_post)
+    na.submit_job(
+        project_id="p",
+        region="us-central1",
+        notebook_path=nb,
+        template_resource_name="tmpl/main",
+        service_account="runner@p.iam.gserviceaccount.com",
+        gcs_output_uri="gs://p-code/nb",
+        timeout_s=900,
+        credentials=object(),
+        display_name="d",
+        ack_out_of_org=ack_out_of_org,
+    )
+    return captured
+
+
+def test_submit_job_omits_ack_label_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = _capture_submit_body(tmp_path, monkeypatch, ack_out_of_org=False)
+    # No silent acknowledgement of credential exposure — the label must be absent unless opted in.
+    assert "labels" not in body
+
+
+def test_submit_job_sends_ack_label_when_opted_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = _capture_submit_body(tmp_path, monkeypatch, ack_out_of_org=True)
+    assert body["labels"] == {
+        "aiplatform.googleapis.com/notebook_runtime_out_of_org_warning": "ack"
+    }
+
+
 def test_run_fanout_missing_file_does_not_sink_others(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
