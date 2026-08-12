@@ -13,7 +13,9 @@ import pytest
 
 from scale_forecasting.playground import (
     available_models,
+    bakeoff,
     build_config,
+    model_catalog,
     run_model,
     sample_data,
     summarize,
@@ -33,6 +35,58 @@ def test_available_models_is_the_factory_registry() -> None:
 
     expected = [n for n in list_models() if get_model(n).runtime != "bigquery"]
     assert available_models() == expected
+
+
+def test_model_catalog_covers_every_registered_model() -> None:
+    from scale_forecasting.models import list_models
+
+    df = model_catalog()
+    # Every registered model appears — Python AND BigQuery-native (the whole suite, one table).
+    assert set(df["model"]) == set(list_models())
+    assert {"arima_plus", "timesfm"}.issubset(set(df["model"]))
+
+
+def test_model_catalog_runtime_flags_are_consistent() -> None:
+    df = model_catalog().set_index("model")
+    # Python models run on local/spark/ray; native models run only in BigQuery.
+    py = df[df["runtime"] == "python"]
+    assert py[["local", "spark", "ray"]].all().all()
+    assert not py["bigquery"].any()
+    native = df[df["runtime"] == "bigquery"]
+    assert native["bigquery"].all()
+    assert not native[["local", "spark", "ray"]].any().any()
+    # GPU is only the deep-learning family (neuralprophet), never a native model.
+    assert bool(df.loc["neuralprophet", "gpu"]) is True
+    assert not df[df["family"] != "deep_learning"]["gpu"].any()
+
+
+def test_bakeoff_runs_base_models_and_two_ensembles() -> None:
+    bo = bakeoff(models=["theta", "holtwinters", "stl_bagging"], horizon=14, n_folds=2)
+    kinds = set(bo.leaderboard["kind"])
+    assert kinds == {"base", "ensemble"}
+    # One calculated + one learned ensemble pseudo-model, both scored onto the board.
+    ens = set(bo.leaderboard[bo.leaderboard["kind"] == "ensemble"]["model"])
+    assert "ensemble_inverse_error" in ens and "ensemble_nnls" in ens
+    # Base rows are the models we asked for.
+    base = set(bo.leaderboard[bo.leaderboard["kind"] == "base"]["model"])
+    assert base == {"theta", "holtwinters", "stl_bagging"}
+
+
+def test_bakeoff_leaderboard_is_scored_and_ranked() -> None:
+    bo = bakeoff(models=["theta", "holtwinters"], horizon=14, n_folds=2)
+    # Backtest is on, so the decision metric is finite for every ok row, and rows are sorted.
+    ok = bo.leaderboard[bo.leaderboard["status"] == "ok"]
+    assert (ok["wape"] == ok["wape"]).all()  # no NaN
+    assert list(ok["wape"]) == sorted(ok["wape"])
+
+
+def test_bakeoff_predictions_cover_base_and_ensembles() -> None:
+    bo = bakeoff(models=["theta", "holtwinters"], horizon=14, n_folds=2)
+    preds = bo.predictions
+    assert set(preds["kind"]) == {"base", "ensemble"}
+    # Every ensemble on the board also has a future forecast to plot.
+    board_ens = set(bo.leaderboard[bo.leaderboard["kind"] == "ensemble"]["model"])
+    assert board_ens <= set(preds[preds["kind"] == "ensemble"]["model"])
 
 
 def test_sample_data_is_wellformed_and_deterministic() -> None:
