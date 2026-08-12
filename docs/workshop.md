@@ -57,7 +57,7 @@ rest as-is:
 
 ```bash
 # --- set these two (the same values you deployed with) ----------------------
-PROJECT=<your project_id>       # e.g. my-scale-forecasting
+PROJECT=gcp-scale-forecasting   # ← your project_id (this is the reference deploy's)
 REGION=us-central1              # your deploy region
 # ---------------------------------------------------------------------------
 export SF_PROJECT_ID="$PROJECT"
@@ -145,8 +145,9 @@ the real health signal is simply: *are rows accumulating?* Run this in
 counts climb, the runs are healthy (not wedged):
 
 ```sql
+-- swap gcp-scale-forecasting for your project_id if you deployed elsewhere
 SELECT run_id, COUNT(*) AS cells_written, MAX(created_at) AS latest_write
-FROM `<project>.scale_forecasting.forecast_metadata`
+FROM `gcp-scale-forecasting.scale_forecasting.forecast_metadata`
 WHERE run_id LIKE '%100k%'
 GROUP BY run_id
 ORDER BY latest_write DESC;
@@ -177,8 +178,9 @@ config, so the shipped configs always produce the **same** ids — but confirm v
 than assume. In [BigQuery Studio](https://console.cloud.google.com/bigquery) (or `bq query`):
 
 ```sql
+-- swap gcp-scale-forecasting for your project_id if you deployed elsewhere
 SELECT run_id, created_at, status, spark_method, python_runtime, n_series, n_models
-FROM `<project>.scale_forecasting.v_run_summary`
+FROM `gcp-scale-forecasting.scale_forecasting.v_run_summary`
 ORDER BY created_at DESC
 LIMIT 25;
 ```
@@ -208,17 +210,27 @@ It reuses the same Vertex `NotebookExecutionJob` machinery as the acceptance har
 returns in ~1s) and returns — **the notebooks then run concurrently, server-side, decoupled from your
 shell.** You can close Cloud Shell; they keep going. No `tmux` needed for this step (nothing blocks).
 
-From Cloud Shell (the same `SF_*` identity from Act 1 must be set — re-paste it if this is a fresh
-shell), read the deploy's ids from Terraform and fan out:
+This runs in its **own** Cloud Shell, at a different time from Act 1 — so it's **self-contained** and
+does **not** need the Terraform directory or state. Everything it needs is either a naming convention
+(the runner SA and code bucket, exactly like Act 1's `SF_*` block) or looked up from the deployed
+resources by their stable display name (the two Colab templates). Set the two variables at the top and
+paste the rest as-is:
 
 ```bash
-cd ~/scale-forecasting/terraform/main
-terraform init -backend-config="bucket=$PROJECT-tfstate" >/dev/null
-MAIN_TEMPLATE=$(terraform output -raw colab_main_runtime_template_id)
-SPARK_TEMPLATE=$(terraform output -raw colab_spark_runtime_template_id)
-RUNNER_SA=$(terraform output -raw runner_sa)
-CODE_BUCKET=$(terraform output -raw code_bucket)
+# --- set these two (the values you deployed with) --------------------------
+PROJECT=gcp-scale-forecasting   # ← your project_id (this is the reference deploy's)
+REGION=us-central1              # your deploy region
+# ---------------------------------------------------------------------------
 cd ~/scale-forecasting
+# By convention (same names Terraform assigns) — no state lookup needed:
+RUNNER_SA="scale-forecasting-runner@$PROJECT.iam.gserviceaccount.com"
+CODE_BUCKET="$PROJECT-code"
+# The template ids are API-minted, so fetch them by their stable display name (sf-main /
+# sf-spark-connect) — works from any shell, no Terraform:
+MAIN_TEMPLATE=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
+  --filter="displayName=sf-main" --format="value(name)")
+SPARK_TEMPLATE=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
+  --filter="displayName=sf-spark-connect" --format="value(name)")
 
 uv run python -m scale_forecasting.notebook_acceptance \
   --no-wait --tier full \
@@ -228,6 +240,11 @@ uv run python -m scale_forecasting.notebook_acceptance \
   --gcs-output "gs://$CODE_BUCKET/notebooks" \
   --run-label "demo-$(date +%Y%m%d)"
 ```
+
+> **Note:** this fan-out does *not* need the `SF_*` env block from Act 1 — the notebooks it launches
+> get their `SF_*` identity from the **template env** (baked in at deploy), and the submitter takes
+> everything it needs as explicit `--flags` above. The only prerequisites are `uv sync` (Act 1's
+> install) and being authenticated (`gcloud auth login` — Cloud Shell already is).
 
 It prints each notebook's **job id** and a link to the **Executions** menu — the console page where
 the jobs appear with live state, and where a finished one **opens as the executed notebook with
