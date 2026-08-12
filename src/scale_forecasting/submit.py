@@ -59,6 +59,14 @@ _ENV_SUBNETWORK = "SF_SUBNETWORK_URI"
 
 _DEFAULT_RUNTIME_VERSION = "2.2"
 
+# How long ``wait=True`` blocks on the batch LRO before giving up. The google-api-core polling
+# default is 900s (15 min) — shorter than a 100k forecast batch, so the bare ``operation.result()``
+# would raise a client-side TimeoutError on a batch that is still running perfectly server-side
+# (the batch is unaffected — only the local wait aborts). We poll for up to 2h so a full-scale run
+# is actually waited out (and its DCU/wall-clock telemetry stamped). Not a cost knob — the batch's
+# own runtime is what it is; this only bounds how long the submitter blocks.
+_WAIT_TIMEOUT_SECONDS = 7200.0
+
 
 @dataclass(frozen=True)
 class BatchInfra:
@@ -347,6 +355,7 @@ def submit_batch(
     manage_header: bool = True,
     batch_id: str | None = None,
     wait: bool = True,
+    wait_timeout: float = _WAIT_TIMEOUT_SECONDS,
 ) -> str:
     """Stage code + config and submit one Dataproc Serverless forecast batch; return its batch id.
 
@@ -401,7 +410,9 @@ def submit_batch(
     _log.info("submitting batch %s (engine=%s) to %s", batch_id, engine, parent)
     operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
     if wait:
-        result = operation.result()  # blocks until terminal
+        # Block until terminal, but with a timeout long enough for a full-scale (100k) batch — the
+        # api-core polling default is only 900s, which a 100k run exceeds (_WAIT_TIMEOUT_SECONDS).
+        result = operation.result(timeout=wait_timeout)  # blocks until terminal
         state = getattr(result, "state", None)
         state_name = getattr(state, "name", str(state))
         _log.info("batch %s finished: state=%s", batch_id, state_name)
@@ -449,6 +460,7 @@ def submit_multi(
     settings: Settings | None = None,
     infra: BatchInfra | None = None,
     wait: bool = True,
+    wait_timeout: float = _WAIT_TIMEOUT_SECONDS,
 ) -> list[str]:
     """Fan a run out into one child ``explode`` batch per family — under **one** shared run_id.
 
@@ -519,6 +531,7 @@ def submit_multi(
                     manage_header=False,  # contributor mode: this function owns the shared header
                     batch_id=_batch_id(f"{family}-{run_id}", "multi"),
                     wait=wait,
+                    wait_timeout=wait_timeout,
                 )
             )
             _log.info("multi: submitted family=%s models=%s", family, models)
@@ -566,11 +579,20 @@ def main(argv: list[str] | None = None) -> None:
         "--max-executors", type=int, default=None, help="cap dynamicAllocation executors"
     )
     p.add_argument("--no-wait", action="store_true", help="return once submitted (don't block)")
+    p.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=_WAIT_TIMEOUT_SECONDS,
+        help=f"seconds to block on the batch when waiting (default {_WAIT_TIMEOUT_SECONDS:.0f}; a "
+        "100k batch exceeds the 900s api-core default)",
+    )
     ns = p.parse_args(argv)
 
     cfg = load_config(ns.config)
     if ns.engine == "multi":
-        ids = submit_multi(cfg, n_series=ns.n_series, wait=not ns.no_wait)
+        ids = submit_multi(
+            cfg, n_series=ns.n_series, wait=not ns.no_wait, wait_timeout=ns.wait_timeout
+        )
         _log.info("multi submitted: %s", ids)
     else:
         batch_id = submit_batch(
@@ -579,6 +601,7 @@ def main(argv: list[str] | None = None) -> None:
             n_series=ns.n_series,
             max_executors=ns.max_executors,
             wait=not ns.no_wait,
+            wait_timeout=ns.wait_timeout,
         )
         _log.info("submitted: %s", batch_id)
 

@@ -88,8 +88,22 @@ export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJEC
 uv run python -m scale_forecasting.main --config configs/explode_100k.json --dry-run
 ```
 
-**Submit all four** — three Spark methods + Ray. Each returns once submitted; drop `--no-wait` to
-block until it lands, or keep it and watch them run in parallel from the Dataproc / Vertex consoles:
+**Submit all four** — three Spark methods + Ray. Each command **blocks until its batch finishes**
+(that's how it stamps the wall-clock / DCU telemetry `07_scale_review` charts), so the four run
+**one after another** — budget for the sum, not the max.
+
+> **Run them under `tmux` so a lost tab doesn't sever the wait.** Cloud Shell disconnects if the
+> browser tab sleeps or the network blips, which SIGHUPs a foreground process — killing the current
+> `wait` and every command queued behind it in the line. `tmux` keeps the session alive server-side
+> so you can reattach:
+>
+> ```bash
+> tmux new -s runs        # start (reattach later with: tmux attach -t runs)
+> ```
+>
+> Then, inside tmux, submit the four. The Dataproc batches themselves run server-side and survive a
+> disconnect regardless — but only a live `wait` stamps their telemetry, so `tmux` is what protects
+> the `07` charts.
 
 ```bash
 uv run python -m scale_forecasting.submit     --config configs/explode_100k.json --engine explode
@@ -97,6 +111,13 @@ uv run python -m scale_forecasting.submit     --config configs/multi_100k.json  
 uv run python -m scale_forecasting.submit     --config configs/naive_100k.json   --engine naive
 uv run python -m scale_forecasting.ray_submit --config configs/ray_100k.json
 ```
+
+> **On the wait timeout.** A 100k batch runs longer than the client's old 15-minute default wait, so
+> the submitter now blocks up to **2 h** (`--wait-timeout <seconds>` to change it). If you ever *do*
+> see a client-side `TimeoutError`, the **batch is unaffected** — it keeps running server-side; only
+> the local wait gave up. Check its true state with
+> `gcloud dataproc batches list --project $PROJECT --region $REGION` or the `v_run_summary` query
+> below, and re-submit only what didn't land.
 
 | Config | Runtime | What it demonstrates |
 |--------|---------|----------------------|

@@ -360,7 +360,8 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
         return f"gs://code-bkt/runs/{run_id}.json"
 
     class _FakeOp:
-        def result(self) -> Any:
+        def result(self, timeout: float | None = None) -> Any:
+            staged["wait_timeout"] = timeout
             return type("R", (), {"state": "SUCCEEDED"})()
 
     class _FakeClient:
@@ -393,6 +394,9 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     assert staged["parent"] == "projects/proj-x/locations/us-central1"
     assert batch_id.startswith("sf-explode-")
     assert staged["batch_id"] == batch_id
+    # The blocking wait must use the long timeout (a 100k batch exceeds api-core's 900s default),
+    # not the bare no-arg result() that regressed to it.
+    assert staged["wait_timeout"] == submit._WAIT_TIMEOUT_SECONDS
 
 
 def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,7 +412,7 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
         state_message = "ImportError: attempted relative import with no known parent package"
 
     class _FakeOp:
-        def result(self) -> Any:
+        def result(self, timeout: float | None = None) -> Any:
             return _FakeResult()
 
     class _FakeClient:
