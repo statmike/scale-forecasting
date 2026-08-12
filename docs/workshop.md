@@ -138,6 +138,40 @@ uv run python -m scale_forecasting.ray_submit --config configs/ray_100k.json
 | `naive_100k.json` | Spark (`naive`) | The straggler anti-pattern — one task per series, models run sequentially. |
 | `ray_100k.json` | Ray on Vertex | The Python-runtime path on a Ray cluster (CPU here; GPU is the NeuralProphet demo). |
 
+**Watch them make progress (healthy vs. stuck).** A 100k batch runs for 1–2 h, so "is it working or
+hung?" is the natural question. The runs write forecast rows to `forecast_metadata` **as they go**, so
+the real health signal is simply: *are rows accumulating?* Run this in
+[BigQuery Studio](https://console.cloud.google.com/bigquery), then **run it again in ~5 min** — if the
+counts climb, the runs are healthy (not wedged):
+
+```sql
+SELECT run_id, COUNT(*) AS cells_written, MAX(created_at) AS latest_write
+FROM `<project>.scale_forecasting.forecast_metadata`
+WHERE run_id LIKE '%100k%'
+GROUP BY run_id
+ORDER BY latest_write DESC;
+```
+
+Each run's target is **`n_series` × `n_models` cells** — the 100k configs are 100,000 × 4 models =
+**~400,000 cells** — so `cells_written / 400000` is a rough % complete. Reading the numbers:
+
+- **Counts climbing between two checks = healthy.** Leave the batches alone; they're serverless and
+  finish server-side regardless of your shell. **Don't kill them to "restart"** — you'd discard the
+  cells already written and pay to recompute (re-submitting the same config reuses the same
+  deterministic `run_id` and dedupes-on-read, so nothing already done is wasted).
+- **`naive` fills slowest and unevenly** — that's its anti-pattern signature (one task per *series*,
+  models run sequentially, so it drags on the slowest series). Expected, not a problem.
+- **Genuinely stuck** looks like: count **flat** across several minutes **and** the batch's Spark UI
+  (batch detail page → *View Spark UI*) shows no task progress. Only then investigate.
+
+> **The metric columns (`mae`/`rmse`/`wape`/…) are NULL — by design.** Accuracy metrics need a
+> held-out actual to score against, which only exists when **backtest is on**. The 100k configs run
+> with **backtest off** (the fleet-scale default — at 100k you're proving *throughput*, and folds
+> would multiply the compute), so every accuracy column is NULL for these runs. The forecasts and the
+> scale telemetry (wall-clock, DCU) — the actual 100k showpiece — are fully populated. Accuracy parity
+> across engines is the **notebook 03** story (small scale, backtest on). Same point the `07`
+> expectation-setter below makes.
+
 **Confirm they landed and capture the `run_id`s.** The `run_id` is a deterministic digest of the
 config, so the shipped configs always produce the **same** ids — but confirm via the registry rather
 than assume. In [BigQuery Studio](https://console.cloud.google.com/bigquery) (or `bq query`):
