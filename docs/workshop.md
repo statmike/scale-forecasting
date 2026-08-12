@@ -161,6 +161,63 @@ You want four `SUCCEEDED` rows — one `explode-100k-…`, one `multi-100k-…`,
 
 ---
 
+## Act 1.5 — Pre-render the notebook tour (optional, the night before)
+
+Act 2 is a **live** tour — but the expensive notebooks (`04_ray_on_vertex` stands up a Ray cluster;
+`05`/`06` submit Dataproc batches) take too long to run in front of an audience. This step
+**pre-executes every notebook headless** so tomorrow you walk **already-rendered** notebooks (outputs
+baked in) from the Colab Enterprise **Executions** menu — and run only the cheap, fast ones (`07`,
+`01`, `02`, `03`, playground) live if you want.
+
+It reuses the same Vertex `NotebookExecutionJob` machinery as the acceptance harness, but in
+**fire-and-forget** mode (`--no-wait`): it submits all the notebooks back-to-back (each submit
+returns in ~1s) and returns — **the notebooks then run concurrently, server-side, decoupled from your
+shell.** You can close Cloud Shell; they keep going. No `tmux` needed for this step (nothing blocks).
+
+From Cloud Shell (the same `SF_*` identity from Act 1 must be set — re-paste it if this is a fresh
+shell), read the deploy's ids from Terraform and fan out:
+
+```bash
+cd ~/scale-forecasting/terraform/main
+terraform init -backend-config="bucket=$PROJECT-tfstate" >/dev/null
+MAIN_TEMPLATE=$(terraform output -raw colab_main_runtime_template_id)
+SPARK_TEMPLATE=$(terraform output -raw colab_spark_runtime_template_id)
+RUNNER_SA=$(terraform output -raw runner_sa)
+CODE_BUCKET=$(terraform output -raw code_bucket)
+cd ~/scale-forecasting
+
+uv run python -m scale_forecasting.notebook_acceptance \
+  --no-wait --tier full \
+  --project "$PROJECT" --region "$REGION" \
+  --main-template "$MAIN_TEMPLATE" --spark-template "$SPARK_TEMPLATE" \
+  --service-account "$RUNNER_SA" \
+  --gcs-output "gs://$CODE_BUCKET/notebooks" \
+  --run-label "demo-$(date +%Y%m%d)"
+```
+
+It prints each notebook's **job id** and a link to the **Executions** menu — the console page where
+the jobs appear with live state, and where a finished one **opens as the executed notebook with
+rendered outputs**. That menu is your tour surface tomorrow.
+
+> **`--tier` picks how much to pre-render** (same cost tiers as the acceptance harness):
+> `smoke` = the 4 BQ/local notebooks (cheap); `batch` = those + the 3 Dataproc ones (`01`,`05`,`06`);
+> `full` = **all 8**, adding `04_ray_on_vertex`. `full` fires the whole tour at once — that's the
+> **same total spend as one full acceptance run** (8 Colab runtimes + the Dataproc batches + a live
+> Ray cluster), just concurrent. Pre-workshop prep, not free — but it's what pre-renders everything.
+
+> **Run this *after* Act 1's four 100k runs land.** `07_scale_review` reads those runs, so pre-render
+> it only once they're `SUCCEEDED` — otherwise its rendered output shows missing data. (`07` reads
+> its `RUN_IDS` from the shipped deterministic defaults, which match the unchanged configs — if you
+> overrode a config, edit `07`'s `RUN_IDS` cell before this step or run `07` live instead.)
+
+**Tomorrow:** open the [Executions menu](https://console.cloud.google.com/vertex-ai/colab/execution-jobs),
+find each `sf-demo-…` job, and click into the pre-rendered notebook. Run `07` and `01` (and any other
+cheap one) **live** in the console on the right runtime — `07` on `sf-main`, `01` on
+`sf-spark-connect` (see the Act 2 table) — for the interactive moments, and lean on the pre-rendered
+set for the expensive `04`/`05`/`06`.
+
+---
+
 ## Act 2 — The guided notebook tour (Colab Enterprise, live)
 
 Every notebook has a one-click **Run in Colab Enterprise** badge in its first cell. Clicking it

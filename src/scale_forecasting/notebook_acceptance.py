@@ -125,6 +125,33 @@ class AcceptanceResult:
         return self.state == "JOB_STATE_SUCCEEDED" and self.n_cell_errors == 0
 
 
+@dataclass(frozen=True)
+class FanOutResult:
+    """Outcome of a fire-and-forget notebook *submission* (no wait for completion).
+
+    Unlike :class:`AcceptanceResult`, this records only that the job was *created* — the notebook
+    runs on server-side afterwards. ``detail`` is empty on a clean submit, else the reason it could
+    not be submitted (missing file, no template id, API error). ``executed_uri`` is where the
+    executed notebook *will* land once the job reaches SUCCEEDED (see :func:`download_executed`).
+    """
+
+    name: str
+    job_id: str  # "" if the submit itself failed
+    display_name: str  # "" if the submit failed
+    executed_uri: str  # gs:// path the executed .ipynb will land at (empty on submit failure)
+    detail: str  # "" on a clean submit; else why it wasn't submitted
+
+
+def executions_console_url(project_id: str) -> str:
+    """Colab Enterprise **Executions** menu URL for a project (where fanned-out jobs appear).
+
+    This is the console page a presenter watches: each fanned-out ``NotebookExecutionJob`` shows up
+    here with its live state, and a finished one opens as the executed notebook with rendered
+    outputs. Region isn't in the path — the console lists a project's jobs and filters client-side.
+    """
+    return f"https://console.cloud.google.com/vertex-ai/colab/execution-jobs?project={project_id}"
+
+
 # --- Vertex AI NotebookExecutionJob REST helpers ------------------------------------------------
 # serviceAccount mode → v1 endpoint (v1beta1 is for executionUser + OAuth consent, which hangs in
 # PENDING on v1). Token refreshed on every request so a long poll (NB04 > 60 min) never 401s.
@@ -413,6 +440,72 @@ def run_acceptance(
     return results
 
 
+def run_fanout(
+    *,
+    specs: list[NotebookSpec],
+    project_id: str,
+    region: str,
+    notebooks_dir: Path,
+    template_ids: dict[str, str],
+    service_account: str,
+    gcs_output_uri: str,
+    credentials: object | None = None,
+    run_label: str,
+    display_prefix: str = "sf-demo",
+) -> list[FanOutResult]:
+    """Submit every notebook headless and return immediately — do NOT wait for them to finish.
+
+    This is the presenter's fan-out: it fires one :func:`submit_job` per spec back-to-back (each
+    returns as soon as the job is *created*, ~1s), so all notebooks then run **concurrently
+    server-side**, decoupled from this process — you can close the shell and watch them in the
+    Colab Enterprise Executions menu (:func:`executions_console_url`). Contrast
+    :func:`run_acceptance`, which polls each job to terminal because a *test* needs the verdict; a
+    presenter just needs the jobs launched. One notebook's submit failure never stops the others.
+    """
+    if credentials is None:
+        import google.auth
+
+        credentials, _ = google.auth.default()
+
+    results: list[FanOutResult] = []
+    for spec in specs:
+        notebook_path = notebooks_dir / f"{spec.name}.ipynb"
+        if not notebook_path.exists():
+            results.append(FanOutResult(spec.name, "", "", "", "notebook file missing"))
+            continue
+        template_resource = template_ids.get(spec.template)
+        if not template_resource:
+            results.append(
+                FanOutResult(spec.name, "", "", "", f"no template id for {spec.template}")
+            )
+            continue
+
+        out_uri = f"{gcs_output_uri.rstrip('/')}/fanout/{run_label}/{spec.name}"
+        display_name = f"{display_prefix}-{spec.name}-{run_label}"
+        _log.info("fanning out %s on template %s", spec.name, spec.template)
+        try:
+            job_id = submit_job(
+                project_id=project_id,
+                region=region,
+                notebook_path=notebook_path,
+                template_resource_name=template_resource,
+                service_account=service_account,
+                gcs_output_uri=out_uri,
+                timeout_s=spec.timeout_s,
+                credentials=credentials,
+                display_name=display_name,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad submit must not sink the rest of the fan-out
+            results.append(FanOutResult(spec.name, "", display_name, "", f"submit failed: {exc}"))
+            _log.warning("fan-out submit failed for %s: %s", spec.name, exc)
+            continue
+
+        executed_uri = f"{out_uri}/{job_id}/content.ipynb"
+        results.append(FanOutResult(spec.name, job_id, display_name, executed_uri, ""))
+        _log.info("fanned out %s → job %s", spec.name, job_id)
+    return results
+
+
 def _first_cell_error(notebook_bytes: bytes) -> str:
     """Return a one-line ``ename: evalue`` for the first errored cell in an executed notebook.
 
@@ -459,7 +552,50 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--run-label", default="cli", help="label disambiguating this run's outputs"
     )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="fan out: submit all notebooks and return immediately (don't poll to terminal or "
+        "assert cell errors). They run concurrently server-side — watch them in the Colab "
+        "Enterprise Executions menu. Use to pre-render the notebooks before a demo.",
+    )
     return parser.parse_args(argv)
+
+
+def _run_fanout_cli(
+    args: argparse.Namespace, notebooks_dir: Path, specs: list[NotebookSpec]
+) -> int:
+    """``--no-wait`` path: fan the notebooks out and print job ids + the Executions link."""
+    print(
+        f"Fan-out tier={args.tier}: submitting {len(specs)} notebook(s) on project {args.project} "
+        "(not waiting for completion)"
+    )
+    results = run_fanout(
+        specs=specs,
+        project_id=args.project,
+        region=args.region,
+        notebooks_dir=notebooks_dir,
+        template_ids={TEMPLATE_MAIN: args.main_template, TEMPLATE_SPARK: args.spark_template},
+        service_account=args.service_account,
+        gcs_output_uri=args.gcs_output,
+        run_label=args.run_label,
+    )
+    print()
+    print(f"{'notebook':<24} {'job_id':<24}  detail")
+    print("-" * 80)
+    for r in results:
+        print(f"{r.name:<24} {r.job_id or '—':<24}  {r.detail}")
+    submitted = [r for r in results if r.job_id]
+    failed = [r for r in results if not r.job_id]
+    print()
+    summary = f"{len(submitted)}/{len(results)} submitted"
+    if failed:
+        summary += f", {len(failed)} failed"
+    print(summary)
+    print("\nWatch them run (and open the rendered notebooks when done):")
+    print(f"  {executions_console_url(args.project)}")
+    # Non-zero only if a submission itself failed; the runs' own success is watched in the console.
+    return 1 if failed else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -471,6 +607,8 @@ def main(argv: list[str] | None = None) -> int:
         else Path(__file__).resolve().parents[2] / "notebooks"
     )
     specs = notebooks_for_tier(args.tier)
+    if args.no_wait:
+        return _run_fanout_cli(args, notebooks_dir, specs)
     print(f"Acceptance tier={args.tier}: {len(specs)} notebook(s) on project {args.project}")
     results = run_acceptance(
         specs=specs,
