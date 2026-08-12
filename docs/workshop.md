@@ -71,6 +71,12 @@ export SF_CONTAINER_IMAGE="$REGION-docker.pkg.dev/$PROJECT/scale-forecasting/spa
 export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJECT/regions/$REGION/subnetworks/scale-forecasting-compute"
 ```
 
+> **These `export`s live only in the current shell.** They don't survive a disconnect, and a **new
+> `tmux` session is a new shell** — so if Cloud Shell drops, you reconnect, or you start/attach a
+> different tmux session, **re-paste this whole block before submitting** or the submit fails with
+> `ConfigError: missing required environment variable SF_PROJECT_ID`. (Only files persist across a
+> Cloud Shell disconnect; environment variables do not.)
+
 > These follow the deployment's naming convention, which holds as long as you kept the defaults for
 > `dataset_id`, the bucket/connection/subnet/repo names, and the region. **If you overrode any of those
 > in `terraform.tfvars`,** read the exact values instead — from the same Cloud Shell you deployed in
@@ -104,6 +110,12 @@ uv run python -m scale_forecasting.main --config configs/explode_100k.json --dry
 > Then, inside tmux, submit the four. The Dataproc batches themselves run server-side and survive a
 > disconnect regardless — but only a live `wait` stamps their telemetry, so `tmux` is what protects
 > the `07` charts.
+>
+> **A new tmux session is a new shell** — it does *not* inherit the `SF_*` exports from the tab you
+> ran them in. Re-paste the `SF_*` block above **inside** tmux before submitting, or the submit fails
+> with `missing required environment variable SF_PROJECT_ID`. (Already inside tmux? `tmux new` will
+> warn `sessions should be nested with care` and no-op — just re-export and submit in the session
+> you're in.)
 
 ```bash
 uv run python -m scale_forecasting.submit     --config configs/explode_100k.json --engine explode
