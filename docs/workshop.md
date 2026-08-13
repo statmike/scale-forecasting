@@ -267,6 +267,27 @@ cd ~ && git clone https://github.com/statmike/scale-forecasting.git; cd ~/scale-
 uv sync --extra submit          # thin client: Dataproc + Ray submit clients, no pyspark
 ```
 
+> **Want to run Terraform from this VM too** (e.g. to update the Colab runtime template)? Two extra
+> one-time steps, because the VM is authenticated as the *runner* SA, which has only data/compute
+> roles — **not** the admin permissions Terraform needs:
+>
+> ```bash
+> # a) install Terraform (not preinstalled on the VM):
+> sudo apt-get update -qq && sudo apt-get install -y -qq unzip
+> TF_VERSION=1.9.8; mkdir -p ~/bin && cd ~/bin
+> curl -fsSL -o tf.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+> unzip -o tf.zip && rm tf.zip
+> grep -qxF 'export PATH="$HOME/bin:$PATH"' ~/.bashrc || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+> export PATH="$HOME/bin:$PATH"; cd ~/scale-forecasting
+>
+> # b) authenticate Terraform AS YOU (the provider reads ADC, not the attached SA):
+> gcloud auth application-default login
+> ```
+>
+> Then follow [`terraform/README.md`](../terraform/README.md) for `init` / `plan` / `apply`. When the
+> apply is done, **revoke the human ADC** so subsequent runs on this VM revert to the runner SA:
+> `gcloud auth application-default revoke`.
+
 **5. Wire the `SF_*` identity** — the same deterministic block as Act 1 (the VM runs as the runner SA,
 so ADC is already in place; these vars just tell the orchestrator *what* to talk to):
 

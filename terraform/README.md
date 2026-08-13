@@ -151,8 +151,20 @@ Now **edit `terraform.tfvars`** — set `project_id` + `billing_account` to the 
 in bootstrap:
 
 ```bash
-cloudshell edit terraform.tfvars
+cloudshell edit terraform.tfvars     # Cloud Shell; on a plain VM use: nano terraform.tfvars
 ```
+
+> **Re-running later from a fresh checkout** (a new machine, a recycled Cloud Shell disk, or a GCE
+> VM)? `terraform.tfvars` is git-ignored, so a fresh clone won't have it — recreate it with the
+> `cp … && edit` above **before** `terraform plan`, or Terraform will interactively prompt for
+> `project_id` and `billing_account` on every command. The Terraform **state** is safe regardless —
+> it lives in the `<project_id>-tfstate` bucket, and `init -backend-config` (below) re-attaches to it,
+> so a re-apply only proposes real drift, never a from-scratch rebuild.
+>
+> **Running Terraform from a GCE VM** (e.g. the workshop's `sf-runner`, which is authenticated as the
+> *runner* SA)? That SA has only data/compute roles, not Terraform's admin permissions — so first run
+> `gcloud auth application-default login` to authenticate the provider **as you**, and
+> `gcloud auth application-default revoke` when you're done.
 
 ### 2b. Main — build everything else
 
