@@ -7,11 +7,12 @@ approach at **100k series**, then walk the notebooks in **Colab Enterprise** —
 
 Everything here runs **in the browser** — [Cloud Shell](https://console.cloud.google.com/?cloudshell=true)
 for the Act 1 submits, [Colab Enterprise](https://console.cloud.google.com/vertex-ai/colab) for the
-Act 2 notebooks. No local machine or SDK install is assumed.
+Act 4 notebooks. No local machine or SDK install is assumed.
 
-> **Two acts, two moments.** Act 1 (below) submits the four 100k runs — that's real compute
-> (~minutes each) and is best done **before** the workshop so the run history is already populated.
-> Act 2 is the live tour. `07_scale_review` needs Act 1's runs to have data to show.
+> **Prep before, present live.** Acts 1–3 populate the run history and (optionally) pre-render the
+> tour — real compute (~minutes to hours), best done **before** the workshop. Act 4 is the live tour;
+> `07_scale_review` needs Act 1's runs to have data to show. The four acts run **in order**, and the
+> section numbers are strictly sequential (1 → 2 → 3 → 4).
 
 ---
 
@@ -19,7 +20,7 @@ Act 2 notebooks. No local machine or SDK install is assumed.
 
 A workshop presenter and any attendees you invite need their own grants (the Terraform grants roles to
 the *service accounts*, not to people). The complete, copy-paste role set — for both the **Cloud Shell
-submitter** (Act 1) and the **Colab Enterprise notebook user** (Act 2) — lives in one place:
+submitter** (Act 1) and the **Colab Enterprise notebook user** (Act 4) — lives in one place:
 
 ➡️ **[Human users (running jobs + notebooks)](./deploying_on_gcp.md#human-users-running-jobs--notebooks)**
 
@@ -41,7 +42,7 @@ Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true), then:
 # (pyproject.toml + uv.lock). The `submit` extra is the thin client set: it pulls the Dataproc +
 # Ray submit clients (both fan-out paths) but NOT pyspark — batch submission never imports it, and
 # pyspark's ~300MB of JARs overflow Cloud Shell's home quota. (pyspark is only for notebook 01's
-# interactive Spark Connect path, which runs in Colab Enterprise — Act 2 — not here.)
+# interactive Spark Connect path, which runs in Colab Enterprise — Act 4 — not here.)
 cd ~ && git clone https://github.com/statmike/scale-forecasting.git 2>/dev/null; cd ~/scale-forecasting
 uv sync --extra submit
 ```
@@ -186,7 +187,7 @@ LIMIT 25;
 ```
 
 You want four `SUCCEEDED` rows — one `explode-100k-…`, one `multi-100k-…`, one `naive-100k-…`, one
-`ray-100k-…`. Copy those four `run_id`s; Act 2's notebook 07 reads them.
+`ray-100k-…`. Copy those four `run_id`s; Act 4's notebook 07 reads them.
 
 > **Expectation-setter for the accuracy chart.** The 100k configs run with **backtest off** (that's
 > the fleet-scale default), so `07_scale_review`'s accuracy-parity panel (`mean_wape`) is **all-NULL**
@@ -197,7 +198,7 @@ You want four `SUCCEEDED` rows — one `explode-100k-…`, one `multi-100k-…`,
 
 ---
 
-## Act 1B — The long Ray run on a persistent VM (when the run outlasts Cloud Shell)
+## Act 2 — The long Ray run on a persistent VM (when the run outlasts Cloud Shell)
 
 Some runs are **too long to babysit from Cloud Shell** — the full-suite Ray config
 `configs/all_methods_100k_full.json` (100k series × 7 models, **backtest on**, `persist_models`,
@@ -361,9 +362,9 @@ gcloud compute instances delete sf-runner --project "$PROJECT" --zone "$ZONE" --
 
 ---
 
-## Act 1.5 — Pre-render the notebook tour (optional, the night before)
+## Act 3 — Pre-render the notebook tour (optional, the night before)
 
-Act 2 is a **live** tour — but the expensive notebooks (`04_ray_on_vertex` stands up a Ray cluster;
+Act 4 is a **live** tour — but the expensive notebooks (`04_ray_on_vertex` stands up a Ray cluster;
 `05`/`06` submit Dataproc batches) take too long to run in front of an audience. This step
 **pre-executes every notebook headless** so tomorrow you walk **already-rendered** notebooks (outputs
 baked in) from the Colab Enterprise **Executions** menu — and run only the cheap, fast ones (`07`,
@@ -437,12 +438,12 @@ rendered outputs**. That menu is your tour surface tomorrow.
 
 **Tomorrow:** open the [Executions menu](https://console.cloud.google.com/vertex-ai/colab/execution-jobs),
 find each `sf-demo-…` job, and click into the pre-rendered notebook. Run `07` and `01` (and any other
-cheap one) **live** in the console on `sf-main` (every notebook uses that one template — see the Act 2
+cheap one) **live** in the console on `sf-main` (every notebook uses that one template — see the Act 4
 table) for the interactive moments, and lean on the pre-rendered set for the expensive `04`/`05`/`06`.
 
 ---
 
-## Act 2 — The guided notebook tour (Colab Enterprise, live)
+## Act 4 — The guided notebook tour (Colab Enterprise, live)
 
 Every notebook has a one-click **Run in Colab Enterprise** badge in its first cell. Clicking it
 imports the notebook; then **pick the runtime template it names** and **Run all** — the deployed
@@ -494,8 +495,8 @@ be sure.)
 
 - **Act 1 (four 100k runs):** each Spark method is a Dataproc Serverless batch (single-digit dollars,
   minutes); the Ray run stands up and tears down a fixed-size cluster. Run once before the workshop and
-  the results persist in the registry — Act 2 just reads them.
-- **Act 2 (notebooks):** the demo-scale notebooks (100 series or fewer) are cents. `07_scale_review`
+  the results persist in the registry — Act 4 just reads them.
+- **Act 4 (notebooks):** the demo-scale notebooks (100 series or fewer) are cents. `07_scale_review`
   runs no compute — it only queries views.
 - **Reset when you're done:** the destructive teardown is documented in
   [`docs/running_and_reviewing.md`](./running_and_reviewing.md#resetting-the-environment-destructive),
