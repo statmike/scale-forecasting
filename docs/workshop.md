@@ -261,9 +261,9 @@ gcloud compute ssh sf-runner --project "$PROJECT" --zone "$ZONE" --tunnel-throug
 ```
 
 **4. On the VM: install `git` + `uv`, clone, sync.** (First login may prompt to generate an SSH key —
-accept.) The minimal Debian image ships **neither `git` nor `uv`**, and the `uv` installer drops its
-binary in `~/.local/bin` which isn't on `PATH` until you source its env — so install both, put `uv` on
-`PATH`, then clone and sync:
+accept.) The minimal Debian image ships **none of `git`, `tmux` (step 8 needs it), or `uv`**, and the
+`uv` installer drops its binary in `~/.local/bin` which isn't on `PATH` until you source its env — so
+install all three, put `uv` on `PATH`, then clone and sync:
 
 ```bash
 # the minimal image ships neither git nor tmux (step 8 needs tmux) — install both:
@@ -343,20 +343,41 @@ tmux new -s ray100k \
   'uv run python -m scale_forecasting.main --config configs/all_methods_100k_full.json 2>&1 | tee ~/ray100k.log'
 ```
 
-Detach with **`Ctrl-b` then `d`** — the run keeps going. Now you can safely close Cloud Shell.
+Detach with **`Ctrl-b` then `d`** (two keystrokes: hold Ctrl + tap `b`, release both, then tap `d`) —
+the run keeps going. Now you can safely close Cloud Shell.
 
-**9. Reattach / check on it.** From any new Cloud Shell, SSH back in and reattach:
+**9. Check on it — WITHOUT `tmux attach`.** Prefer watching the **log file** or **BigQuery**, not the
+live tmux viewer. `tmux attach` opens a full-screen console that's easy to get stuck in (`Ctrl-b d` is
+the only clean exit, and stray keys like `:q`/`Ctrl-Z` just jam it) — and you never need it, because
+`tee` already mirrors everything to `~/ray100k.log`. SSH back in from any new Cloud Shell and tail the
+log (exit the tail with a plain **`Ctrl-C`** — it stops the *viewer*, not the run):
 
 ```bash
 gcloud compute ssh sf-runner --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap
-tmux attach -t ray100k          # live console; Ctrl-b d to leave it running again
-tail -f ~/ray100k.log           # or just watch the log
+tmux ls                          # confirm the ray100k session is still alive
+tail -f ~/ray100k.log            # follow progress; Ctrl-C to stop watching (run keeps going)
 ```
 
-Progress is also visible in BigQuery exactly as in Act 1 — watch `forecast_metadata` counts climb, and
+The best monitor needs no VM at all — **watch it from BigQuery in the browser**, exactly as in Act 1.
+Re-run this every 5–10 min; climbing counts = healthy (early zeros are normal — the Ray cluster is
+still provisioning, which is what the "uploading package" log line means):
+
+```sql
+-- swap gcp-scale-forecasting for your project_id; the run_id is the config's deterministic digest
+SELECT run_id, COUNT(*) AS cells_written, MAX(created_at) AS latest_write
+FROM `gcp-scale-forecasting.scale_forecasting.forecast_metadata`
+WHERE run_id = 'all-methods-100k-full-036327523e0a'
+GROUP BY run_id;
+```
+
 `v_run_summary` flips the header to `COMPLETED` when the orchestrator finalizes it. Because this config
 has **backtest on**, its accuracy columns (`mean_wape`, …) *are* populated — unlike the throughput-only
 Act 1 runs.
+
+> **If the tmux viewer traps you** (you attached and can't get out): don't restart Cloud Shell — from
+> a **second** SSH session run `tmux detach-client -t ray100k` to free the stuck viewer from outside,
+> or just close the tab. The run is in tmux on the VM and survives disconnects, closed tabs, and Cloud
+> Shell restarts regardless — none of that can kill it.
 
 **10. Clean up the VM when the run lands** (it bills while it exists, ~cents/hr, but tidy is tidy):
 
