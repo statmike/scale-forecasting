@@ -1,33 +1,28 @@
-# colab — Colab Enterprise runtime templates for running the notebooks from inside GCP.
+# colab — Colab Enterprise runtime template for running the notebooks from inside GCP.
 #
 # WHAT THIS OWNS ───────────────────────────────────────────────────────────────────────────
-# Two durable, free-at-rest runtime TEMPLATES (blueprints for the VM a Colab runtime runs on).
+# One durable, free-at-rest runtime TEMPLATE (a blueprint for the VM a Colab runtime runs on).
 # A template costs nothing until someone starts a runtime from it, and runtimes idle-shutdown, so
-# both ship on by default (create = true from the root):
+# it ships on by default (create = true from the root):
 #
-#   * sf-main          — Python 3.11, the everyday template. Matches the project's requires-python
-#                        pin (>=3.11,<3.12), which is load-bearing for Vertex Ray client↔cluster
-#                        parity and the Dataproc packed-venv. Drives notebooks 02–07 + the
-#                        playground; the [ray] extra is what notebook 04 needs.
-#   * sf-spark-connect — Python 3.12, ONLY for notebook 01's interactive Spark Connect path.
-#                        Dataproc 3.0 Connect workers run Python 3.12 and Connect refuses mismatched
-#                        minors (PYTHON_VERSION_MISMATCH); the [spark] extra carries
-#                        dataproc-spark-connect. From a 3.11 kernel NB01 falls back to remote-batch.
+#   * sf-main — Python 3.11, the one template for every notebook. Matches the project's
+#               requires-python pin (>=3.11,<3.12), which is load-bearing for Vertex Ray
+#               client↔cluster parity and the Dataproc packed-venv. Drives notebooks 01–07 + the
+#               playground; the [ray,spark] extras cover notebook 04 (Ray) and notebook 01 (the
+#               Spark Connect client), and notebook 01's interactive Connect path runs on Dataproc
+#               runtime 2.3 — whose workers are ALSO Python 3.11, so driver↔worker parity holds from
+#               this same template (no second, py3.12 template needed).
 #
 # See docs/notebook_runtimes.md for the per-notebook Python-version mapping.
 #
-# THE PYTHON-VERSION PIN (why there are null_resources) ──────────────────────────────────────
+# THE PYTHON-VERSION PIN (why there is a null_resource) ───────────────────────────────────────
 # The pinned google provider (6.x) resource google_colab_runtime_template CANNOT set the Python
 # version — software_config exposes only env + a deprecated post_startup_script_config, with no
 # colab_image/release_name field (hashicorp/terraform-provider-google#25217, still open). The only
 # lever is the REST field software_config.colab_image.release_name (py310|py311|py312; empty =
 # Latest). So the TF resource owns the durable template and every spec it CAN express, and a
-# tolerant REST PATCH pins the one field it can't. BOTH templates are pinned explicitly: sf-main to
-# py311 and sf-spark-connect to py312. (sf-spark-connect must track Dataproc 3.0 Connect workers,
-# which run 3.12; if we left it on the API default of "latest" it would silently drift to 3.13 when
-# Colab advances Latest, re-breaking NB01 interactive with PYTHON_VERSION_MISMATCH — the exact
-# failure this template exists to avoid.) When the provider adds the image field, delete these
-# null_resources and set release_name inline on each resource.
+# tolerant REST PATCH pins the one field it can't: sf-main to py311 (matches the project pin). When
+# the provider adds the image field, delete the null_resource and set release_name inline.
 #
 # PACKAGES ──────────────────────────────────────────────────────────────────────────────────
 # By default the notebooks' own bootstrap cell installs the repo + extra on first cell-run (a bit
@@ -148,22 +143,10 @@ variable "main_release_name" {
   default     = "py311"
 }
 
-variable "spark_release_name" {
-  description = "Colab image release for sf-spark-connect. py312 pinned explicitly (required by Dataproc 3.0 Connect workers; pinned so it can't drift off Latest)."
-  type        = string
-  default     = "py312"
-}
-
 variable "main_extra" {
-  description = "Optional-dependency extra pre-installed on sf-main when install_via_post_startup = true."
+  description = "Optional-dependency extras pre-installed on sf-main when install_via_post_startup = true. Covers notebook 04's [ray] and notebook 01's [spark] client."
   type        = string
-  default     = "ray"
-}
-
-variable "spark_extra" {
-  description = "Optional-dependency extra pre-installed on sf-spark-connect when install_via_post_startup = true."
-  type        = string
-  default     = "spark"
+  default     = "ray,spark"
 }
 
 variable "install_via_post_startup" {
@@ -190,20 +173,19 @@ locals {
   # clones the repo and editable-installs the package with its extra — the same thing the notebooks'
   # bootstrap cell does, just at runtime-creation time so the notebook's install cell is a fast no-op.
   post_startup = {
-    main  = "#!/bin/bash\nset -e\ngit clone --depth 1 ${var.repo_url} /opt/scale-forecasting || true\npip install -e '/opt/scale-forecasting[${var.main_extra}]'\n"
-    spark = "#!/bin/bash\nset -e\ngit clone --depth 1 ${var.repo_url} /opt/scale-forecasting || true\npip install -e '/opt/scale-forecasting[${var.spark_extra}]'\n"
+    main = "#!/bin/bash\nset -e\ngit clone --depth 1 ${var.repo_url} /opt/scale-forecasting || true\npip install -e '/opt/scale-forecasting[${var.main_extra}]'\n"
   }
   gate = var.create && var.install_via_post_startup
 
-  # SF_* run identity baked into each template's software_config.env. Settings.resolve() reads the
-  # first five (SF_PROJECT_ID/REGION/CONNECTION/WAREHOUSE_URI/DATASET_ID); sf-main also carries the
-  # batch + Ray infra vars (submit.py:BatchInfra, ray_submit.py:RayInfra) and sf-spark-connect the
-  # Dataproc-Connect vars NB01 reads. Note the subnet ALIAS: submit.py wants SF_SUBNETWORK_URI in
-  # ABSOLUTE form; NB01 wants SF_DATAPROC_SUBNET in RELATIVE form (same strip the network_spec uses).
-  # SF_RUNTIME_VERSION / SF_RAY_VERSION / SF_RAY_NETWORK are intentionally NOT set so the code
-  # defaults (submit.py 2.2, ray_submit.py 2.47; attachment beats peering in RayInfra) stay the
-  # single source of truth. compact() + the null-safe values below drop any entry that isn't wired
-  # (BYO deploys / create = false), so the env map only ever contains resolved values.
+  # SF_* run identity baked into sf-main's software_config.env. Settings.resolve() reads the first
+  # five (SF_PROJECT_ID/REGION/CONNECTION/WAREHOUSE_URI/DATASET_ID); sf-main also carries the batch +
+  # Ray infra vars (submit.py:BatchInfra, ray_submit.py:RayInfra) AND the Dataproc-Connect vars NB01
+  # reads (SF_DATAPROC_REGION/SUBNET) — one template serves every notebook. Note the subnet ALIAS:
+  # submit.py wants SF_SUBNETWORK_URI in ABSOLUTE form; NB01 wants SF_DATAPROC_SUBNET in RELATIVE
+  # form (same strip the network_spec uses). SF_RUNTIME_VERSION / SF_RAY_VERSION / SF_RAY_NETWORK are
+  # intentionally NOT set so the code defaults (submit.py 2.2, ray_submit.py 2.47; attachment beats
+  # peering in RayInfra) stay the single source of truth. The null-safe filter below drops any entry
+  # that isn't wired (BYO deploys / create = false), so the env map only ever contains resolved values.
   identity_env = {
     SF_PROJECT_ID    = var.project_id
     SF_REGION        = var.region
@@ -218,23 +200,15 @@ locals {
     SF_CONTAINER_IMAGE        = var.container_image
     SF_SUBNETWORK_URI         = var.subnetwork_uri
     SF_RAY_NETWORK_ATTACHMENT = var.network_attachment_id
-  })
-
-  # NB01 uses BOTH paths, so sf-spark-connect carries the full batch infra env (main_env) PLUS the
-  # Connect-specific vars: the interactive Spark Connect path runs the explode fan-out over the
-  # session, and the remote-batch FALLBACK cell (main.run(cfg)) submits a Dataproc batch that needs
-  # SF_CODE_BUCKET / SF_CONTAINER_IMAGE / SF_SUBNETWORK_URI — exactly what main_env provides. Layering
-  # on main_env (not identity_env) keeps a single source for the batch keys, no drift with sf-main.
-  spark_env = merge(local.main_env, {
+    # NB01's interactive Spark Connect session reads these: SF_DATAPROC_REGION and SF_DATAPROC_SUBNET
+    # (relative form). SF_COMPUTE_SA (above) is the identity the Session runs its runtime AS
+    # (mintOAuthToken, a roles/dataproc.worker permission the runner lacks but compute has).
     SF_DATAPROC_REGION = var.region
     SF_DATAPROC_SUBNET = var.subnetwork_uri == null ? null : replace(var.subnetwork_uri, "/^https://[^/]+/compute/v1//", "")
-    # SF_COMPUTE_SA is already in main_env; the Session runs its runtime AS it (mintOAuthToken, a
-    # roles/dataproc.worker permission the runner lacks but compute has; runner impersonates compute).
   })
 
   # Drop null/empty entries — a template env can't carry a value we don't have.
-  main_env_clean  = { for k, v in local.main_env : k => v if v != null && v != "" }
-  spark_env_clean = { for k, v in local.spark_env : k => v if v != null && v != "" }
+  main_env_clean = { for k, v in local.main_env : k => v if v != null && v != "" }
 }
 
 # Colab validates the gcsOutputUri bucket with storage.buckets.get before running a notebook. The
@@ -255,13 +229,6 @@ resource "google_storage_bucket_object" "post_startup_main" {
   bucket  = var.code_bucket
   name    = "colab/post_startup_main-${substr(md5(local.post_startup.main), 0, 8)}.sh"
   content = local.post_startup.main
-}
-
-resource "google_storage_bucket_object" "post_startup_spark" {
-  count   = local.gate ? 1 : 0
-  bucket  = var.code_bucket
-  name    = "colab/post_startup_spark-${substr(md5(local.post_startup.spark), 0, 8)}.sh"
-  content = local.post_startup.spark
 }
 
 # sf-main — the everyday template (Python 3.11, [ray]). The Python version is pinned by
@@ -323,68 +290,13 @@ resource "google_colab_runtime_template" "main" {
   }
 }
 
-# sf-spark-connect — Python 3.12 ([spark]) for notebook 01's interactive Spark Connect ONLY. The
-# Python version is pinned by null_resource.pin_spark_python below, NOT here (provider can't set it).
-# It's pinned EXPLICITLY (not left on the API default of "latest") so it can't drift off 3.12 when
-# Colab advances Latest — see header.
-resource "google_colab_runtime_template" "spark" {
-  count        = var.create ? 1 : 0
-  project      = var.project_id
-  location     = var.region
-  display_name = "sf-spark-connect"
-
-  machine_spec {
-    machine_type = var.machine_type
-  }
-
-  data_persistent_disk_spec {
-    disk_type    = "pd-standard"
-    disk_size_gb = "100"
-  }
-
-  network_spec {
-    enable_internet_access = !var.attach_network
-    network                = var.attach_network ? var.network_id : null
-    subnetwork             = var.attach_network ? replace(var.subnetwork_uri, "/^https://[^/]+/compute/v1//", "") : null
-  }
-
-  idle_shutdown_config {
-    idle_timeout = var.idle_timeout
-  }
-
-  shielded_vm_config {
-    enable_secure_boot = true
-  }
-
-  # Always-present software_config (same rationale as sf-main): the SF_* env below is what lets a
-  # headless execution / a human's fresh kernel resolve the run identity. sf-spark-connect carries the
-  # slimmer identity + the Dataproc-Connect vars NB01 reads (SF_DATAPROC_REGION/SUBNET).
-  software_config {
-    dynamic "env" {
-      for_each = local.spark_env_clean
-      content {
-        name  = env.key
-        value = env.value
-      }
-    }
-    dynamic "post_startup_script_config" {
-      for_each = local.gate ? [1] : []
-      content {
-        post_startup_script_url      = "gs://${var.code_bucket}/${google_storage_bucket_object.post_startup_spark[0].name}"
-        post_startup_script_behavior = "RUN_ONCE"
-      }
-    }
-  }
-}
-
-# Pin each template's Python version via a TOLERANT REST PATCH — the one field the provider can't set
+# Pin sf-main's Python version via a TOLERANT REST PATCH — the one field the provider can't set
 # (#25217). Mirrors modules/smoke's null_resource: on_failure = continue so a transient PATCH error
 # never fails the apply (the template just stays on Latest until the next apply / a manual patch);
 # triggers content-addressed on release_name + the template id so it re-patches only when either
-# changes; --project explicit, never the ambient ADC project (DESIGN §13.0). BOTH templates are
-# pinned — sf-spark-connect to py312 explicitly, so it can't drift to 3.13 when Colab advances Latest
-# and re-break NB01 (see header). Delete these blocks once the provider adds the image field and set
-# the release_name inline on each google_colab_runtime_template.
+# changes; --project explicit, never the ambient ADC project (DESIGN §13.0). Pinned to py311 to match
+# the project pin. Delete this block once the provider adds the image field and set the release_name
+# inline on the google_colab_runtime_template.
 resource "null_resource" "pin_main_python" {
   count = var.create ? 1 : 0
 
@@ -407,35 +319,8 @@ resource "null_resource" "pin_main_python" {
   depends_on = [google_colab_runtime_template.main]
 }
 
-resource "null_resource" "pin_spark_python" {
-  count = var.create ? 1 : 0
-
-  triggers = {
-    release_name = var.spark_release_name
-    template_id  = google_colab_runtime_template.spark[0].id
-  }
-
-  provisioner "local-exec" {
-    on_failure = continue
-    command = join(" ", [
-      "curl -sS -X PATCH",
-      "-H \"Authorization: Bearer $(gcloud auth print-access-token --project=${var.project_id})\"",
-      "-H \"Content-Type: application/json\"",
-      "\"${local.api_host}/${google_colab_runtime_template.spark[0].id}?updateMask=software_config.colab_image.release_name\"",
-      "-d '${jsonencode({ softwareConfig = { colabImage = { releaseName = var.spark_release_name } } })}'",
-    ])
-  }
-
-  depends_on = [google_colab_runtime_template.spark]
-}
-
 output "main_runtime_template_id" {
-  description = "Full resource name of the sf-main (Python 3.11 / [ray]) runtime template. null when gated off."
+  description = "Full resource name of the sf-main (Python 3.11 / [ray,spark]) runtime template. null when gated off."
   # .id is the full projects/.../notebookRuntimeTemplates/<n> form the API wants; .name is the bare <n>.
   value = var.create ? google_colab_runtime_template.main[0].id : null
-}
-
-output "spark_runtime_template_id" {
-  description = "Full resource name of the sf-spark-connect (Python 3.12 / [spark]) runtime template. null when gated off."
-  value       = var.create ? google_colab_runtime_template.spark[0].id : null
 }

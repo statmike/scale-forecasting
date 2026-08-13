@@ -13,7 +13,7 @@ the same shape as ``@gpu``/``@raylive`` in ``tests/conftest.py``:
 * **smoke** (default, ``@gcp``) — the 3 BQ-only / fully-local notebooks. Cheap; runs whenever
   ``SF_PROJECT_ID`` + ADC are present.
 * **batch** (``SF_ENABLE_NB_BATCH``) — adds the 4 notebooks that submit a Dataproc Serverless batch
-  (real, small spend), including NB01 on sf-spark-connect and NB03's Spark ∥ BQ combo.
+  (real, small spend), including NB01's Spark Connect run and NB03's Spark ∥ BQ combo.
 * **full** (``SF_ENABLE_NB_FULL``) — adds ``04_ray_on_vertex``, which provisions a live Vertex Ray
   cluster (biggest cost + wall-clock).
 
@@ -93,10 +93,9 @@ def acceptance_results() -> dict[str, na.AcceptanceResult]:
     """
     outputs = _terraform_outputs()
     main_template = outputs.get("colab_main_runtime_template_id")
-    spark_template = outputs.get("colab_spark_runtime_template_id")
-    if not main_template or not spark_template:
+    if not main_template:
         pytest.skip(
-            "colab runtime templates not in terraform outputs "
+            "colab runtime template not in terraform outputs "
             "(set create_colab_templates = true and apply)"
         )
 
@@ -105,7 +104,7 @@ def acceptance_results() -> dict[str, na.AcceptanceResult]:
         project_id=outputs["project_id"],
         region=outputs.get("region") or "us-central1",
         notebooks_dir=_NOTEBOOKS_DIR,
-        template_ids={na.TEMPLATE_MAIN: main_template, na.TEMPLATE_SPARK: spark_template},
+        template_ids={na.TEMPLATE_MAIN: main_template},
         service_account=outputs["runner_sa"],
         gcs_output_uri=f"gs://{outputs['code_bucket']}",
         run_label="pytest",

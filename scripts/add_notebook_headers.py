@@ -23,16 +23,11 @@ _BRANCH = "main"
 _MARKER = "<!--- sf-header --->"
 
 # Which Colab Enterprise template each notebook wants (mirrors notebook_acceptance.REGISTRY).
-_SPARK_CONNECT = {"01_spark_via_connect"}
+# Every notebook runs on the single `sf-main` template (Python 3.11); notebook 01's interactive
+# Spark Connect path uses Dataproc runtime 2.3, whose workers are also 3.11 — so no second template.
 
 
 def _template_note(stem: str) -> str:
-    if stem in _SPARK_CONNECT:
-        return (
-            "Runs on the **`sf-spark-connect`** runtime template (Python 3.12) for the interactive "
-            "Spark Connect path. From `sf-main` (3.11) it still runs, via the remote-batch "
-            "fallback."
-        )
     if stem == "model_playground":
         return (
             "Runs on the **`sf-main`** runtime template (Python 3.11) — or fully locally with just "

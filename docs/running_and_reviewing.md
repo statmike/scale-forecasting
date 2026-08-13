@@ -57,18 +57,15 @@ Two notebooks need **no** cluster and run fully locally: `model_playground.ipynb
 `worker.run_cell`) and `07_scale_review.ipynb` (read-only over the registry views, needs the `SF_*`
 env + ADC). The rest submit to Dataproc / Ray / BigQuery.
 
-**Python-version note (interactive Spark Connect only).** The project pins Python **3.11** — required
-for Vertex Ray client↔cluster parity and the Dataproc packed-venv. Notebook 01's *interactive* Spark
-Connect path is the one exception: Dataproc 3.0 Connect workers run **Python 3.12**, and Connect
-refuses mismatched Python minors (`PYTHON_VERSION_MISMATCH`). So from a 3.11 kernel, NB01 falls back
-to the **remote-batch** path (`main.run(cfg)` with no injected session) — the *identical* engine
-on-cluster, same `run_id`, same results. If you specifically want interactive Connect, register a
-**separate, opt-in 3.12 kernel** (e.g. via `pyenv install 3.12` in a throwaway venv +
-`ipykernel install --name sf-connect-312`) and select it for NB01 only — never as the `uv` project
-default (that would break `uv sync` and the Ray parity).
+**Python-version note.** The project pins Python **3.11** everywhere — required for Vertex Ray
+client↔cluster parity, the Dataproc packed-venv, and notebook 01's interactive Spark Connect path,
+which runs on **Dataproc runtime 2.3** (the Connect floor; its workers are *also* Python 3.11, so the
+driver↔worker minor parity Connect enforces holds from the same 3.11 kernel — no separate kernel, no
+`PYTHON_VERSION_MISMATCH`). NB01 also documents a **remote-batch** escape hatch (`main.run(cfg)` with
+no injected session) — the *identical* engine on-cluster, same `run_id`, same results.
 
-For the full per-notebook Python-version mapping (3.11 vs 3.12, local and on Colab Enterprise) and
-the two runtime templates Terraform ships, see [notebook_runtimes.md](./notebook_runtimes.md).
+For the full per-notebook Python-version mapping (local and on Colab Enterprise) and the runtime
+template Terraform ships, see [notebook_runtimes.md](./notebook_runtimes.md).
 
 ## 1. Check the config offline first
 

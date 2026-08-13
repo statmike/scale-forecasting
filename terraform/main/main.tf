@@ -134,10 +134,10 @@ module "smoke" {
   depends_on = [module.seed, module.container, module.network, module.bigquery, module.iam, module.storage]
 }
 
-# Colab Enterprise runtime templates for running the notebooks from inside GCP: sf-main (Python 3.11
-# / [ray], the everyday template) and sf-spark-connect (Python 3.12 / [spark], for notebook 01's
-# interactive Spark Connect). ON by default — templates are free at rest (no VM until a runtime
-# starts). See modules/colab and docs/notebook_runtimes.md.
+# Colab Enterprise runtime template for running the notebooks from inside GCP: sf-main (Python 3.11
+# / [ray,spark]) serves every notebook, including notebook 01's interactive Spark Connect (which runs
+# on Dataproc runtime 2.3 — also Python 3.11). ON by default — templates are free at rest (no VM
+# until a runtime starts). See modules/colab and docs/notebook_runtimes.md.
 module "colab" {
   source          = "./modules/colab"
   create          = var.create_colab_templates
@@ -146,11 +146,10 @@ module "colab" {
   service_account = module.iam.runner_email
   code_bucket     = module.storage.code_bucket
 
-  attach_network     = var.colab_attach_network
-  network_id         = module.network.network_id
-  subnetwork_uri     = module.network.subnetwork_uri
-  main_release_name  = var.colab_main_release_name
-  spark_release_name = var.colab_spark_release_name
+  attach_network    = var.colab_attach_network
+  network_id        = module.network.network_id
+  subnetwork_uri    = module.network.subnetwork_uri
+  main_release_name = var.colab_main_release_name
 
   # SF_* run identity baked into the templates' env (so a headless execution / a human's fresh kernel
   # resolves Settings.resolve() with no manual env cell). All wired from the sibling modules.

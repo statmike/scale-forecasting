@@ -84,11 +84,6 @@ output "smoke_describe_hint" {
 }
 
 output "colab_main_runtime_template_id" {
-  description = "sf-main (Python 3.11 / [ray]) Colab runtime template. Pick it in Colab Enterprise for notebooks 02–07 + the playground. null unless create_colab_templates = true."
+  description = "sf-main (Python 3.11 / [ray,spark]) Colab runtime template — the one template for every notebook (01–07 + the playground). Pick it in Colab Enterprise. null unless create_colab_templates = true."
   value       = module.colab.main_runtime_template_id
-}
-
-output "colab_spark_runtime_template_id" {
-  description = "sf-spark-connect (Python 3.12 / [spark]) Colab runtime template. Pick it for notebook 01's interactive Spark Connect. null unless create_colab_templates = true."
-  value       = module.colab.spark_runtime_template_id
 }

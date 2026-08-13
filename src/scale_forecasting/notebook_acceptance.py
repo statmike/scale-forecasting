@@ -44,11 +44,10 @@ from .errors import EngineError, get_logger
 
 _log = get_logger(__name__)
 
-# Template routing keys. The caller maps these to the two runtime-template resource names Terraform
-# outputs (colab_main_runtime_template_id / colab_spark_runtime_template_id) — the harness stays
-# id-agnostic so the same registry works across deploys.
+# Template routing key. The caller maps this to the runtime-template resource name Terraform outputs
+# (colab_main_runtime_template_id) — the harness stays id-agnostic so the same registry works across
+# deploys. There is one template (sf-main, Python 3.11); every notebook runs on it.
 TEMPLATE_MAIN = "main"
-TEMPLATE_SPARK = "spark"
 
 # Acceptance tiers, cheapest first. A tier RUNS its own notebooks plus every cheaper tier's, so
 # "batch" implies "smoke" and "full" implies everything — escalate deliberately (each step adds real
@@ -64,7 +63,7 @@ class NotebookSpec:
     """One notebook's acceptance spec: which template runs it, its tier, and a timeout."""
 
     name: str  # file stem under notebooks/, e.g. "02_bigquery_native"
-    template: str  # TEMPLATE_MAIN | TEMPLATE_SPARK
+    template: str  # TEMPLATE_MAIN (the one template every notebook runs on)
     tier: str  # TIER_SMOKE | TIER_BATCH | TIER_FULL
     timeout_s: int  # executionTimeout budget (also the local poll ceiling)
 
@@ -72,18 +71,18 @@ class NotebookSpec:
 # The acceptance matrix. Tier rationale:
 #   * smoke  — BQ-only / fully-local notebooks: cheap, fast, safe to run on every change.
 #   * batch  — notebooks that submit a Dataproc Serverless batch (real, small spend). 01 is here
-#              too: its interactive Spark Connect path needs sf-spark-connect (py312). 03 is here
-#              because its combo run is python_runtime="spark" → main.run launches a Dataproc batch
-#              (not BQ-only): it incurs the same Spark spend as 05/06 and outlasts the smoke budget.
+#              too: its interactive Spark Connect path runs on Dataproc runtime 2.3 and submits real
+#              cluster work. 03 is here because its combo run is python_runtime="spark" → main.run
+#              launches a Dataproc batch (not BQ-only): same Spark spend as 05/06, outlasts smoke.
 #   * full   — 04_ray_on_vertex provisions a live Vertex Ray cluster (biggest cost + wall-clock).
-# Routing: only NB01 runs on sf-spark-connect; everything else on sf-main (py311, matches the pin).
+# Routing: every notebook runs on the single sf-main template (py311, matches the pin).
 REGISTRY: dict[str, NotebookSpec] = {
     spec.name: spec
     for spec in (
         NotebookSpec("model_playground", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("02_bigquery_native", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("07_scale_review", TEMPLATE_MAIN, TIER_SMOKE, 900),
-        NotebookSpec("01_spark_via_connect", TEMPLATE_SPARK, TIER_BATCH, 1800),
+        NotebookSpec("01_spark_via_connect", TEMPLATE_MAIN, TIER_BATCH, 1800),
         NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 1800),
         NotebookSpec("05_spark_naive", TEMPLATE_MAIN, TIER_BATCH, 1800),
         # 06's "multi" method fans out one child explode-batch per model family, so its wall-clock
@@ -364,8 +363,8 @@ def run_acceptance(
 
     Submits, polls to terminal, downloads the executed notebook, and scans it for cell errors. One
     notebook's failure never stops the others — every spec produces an :class:`AcceptanceResult`.
-    ``template_ids`` maps ``TEMPLATE_MAIN``/``TEMPLATE_SPARK`` to the runtime-template resource
-    names Terraform outputs. ``run_label`` disambiguates concurrent runs' output paths + names.
+    ``template_ids`` maps ``TEMPLATE_MAIN`` to the runtime-template resource name Terraform outputs.
+    ``run_label`` disambiguates concurrent runs' output paths + names.
     """
     if credentials is None:
         import google.auth
@@ -551,9 +550,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--main-template", required=True, help="sf-main runtime template resource name"
     )
     parser.add_argument(
-        "--spark-template", required=True, help="sf-spark-connect runtime template resource name"
-    )
-    parser.add_argument(
         "--service-account", required=True, help="runner SA the notebooks execute as"
     )
     parser.add_argument("--gcs-output", required=True, help="gs:// prefix for executed notebooks")
@@ -596,7 +592,7 @@ def _run_fanout_cli(
         project_id=args.project,
         region=args.region,
         notebooks_dir=notebooks_dir,
-        template_ids={TEMPLATE_MAIN: args.main_template, TEMPLATE_SPARK: args.spark_template},
+        template_ids={TEMPLATE_MAIN: args.main_template},
         service_account=args.service_account,
         gcs_output_uri=args.gcs_output,
         run_label=args.run_label,
@@ -637,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
         project_id=args.project,
         region=args.region,
         notebooks_dir=notebooks_dir,
-        template_ids={TEMPLATE_MAIN: args.main_template, TEMPLATE_SPARK: args.spark_template},
+        template_ids={TEMPLATE_MAIN: args.main_template},
         service_account=args.service_account,
         gcs_output_uri=args.gcs_output,
         run_label=args.run_label,

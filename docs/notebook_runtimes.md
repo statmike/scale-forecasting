@@ -1,27 +1,25 @@
 # Notebook runtimes — Python versions, locally and on Colab
 
 The notebooks are first-class run drivers: two run fully local, the rest **orchestrate** the
-Dataproc / Ray / BigQuery work over ADC. This page maps **which Python version each notebook needs
-and how it behaves under 3.11 vs 3.12** — both locally and on **Colab Enterprise** — and documents
-the two runtime templates Terraform ships.
+Dataproc / Ray / BigQuery work over ADC. This page maps **which Python version and extra each
+notebook needs** — both locally and on **Colab Enterprise** — and documents the runtime template
+Terraform ships.
 
-## The one load-bearing fact: the project targets Python 3.11
+## The one load-bearing fact: the project targets Python 3.11 everywhere
 
-`pyproject.toml` sets `requires-python = ">=3.11,<3.13"`, but **3.11 is the tested, supported
-default everywhere**. This is deliberate:
+`pyproject.toml` sets `requires-python = ">=3.11,<3.12"` — **3.11 is the single tested, supported
+version everywhere**. This is deliberate:
 
 - **Vertex Ray parity** — the client-side Ray must match the cluster's Ray version (2.47); on Python
   3.11 the supported versions are 2.42 / 2.47. A mismatched client floats to an unsupported Ray and
   the `JobSubmissionClient` handshake hangs (HTTP 524).
 - **Dataproc packed-venv** — the packed virtual-env shipped to Serverless is built against 3.11.
 
-So **3.11 is the default everywhere** — the `uv` project kernel, the runtime image, every cluster.
-There is exactly **one** exception, notebook 01's *interactive* Spark Connect path (below): its
-Colab template is Python **3.12** (Dataproc 3.0 Connect workers are 3.12 and refuse mismatched
-minors), and the notebook's bootstrap `pip install -e .` must be allowed to run there. That single
-requirement is why the ceiling is `<3.13` rather than `<3.12` — the core is pure-Python and
-3.12-safe, and NB01 pulls only the `[spark]` extra (not `[models]`). Nothing else is tested or
-supported on 3.12.
+So **3.11 is the version everywhere** — the `uv` project kernel, the runtime image, every cluster,
+and every Colab template. Even notebook 01's *interactive* Spark Connect path stays on 3.11: it runs
+on **Dataproc runtime 2.3** (the Spark Connect floor), whose workers are **also Python 3.11**, so the
+driver↔worker minor-version parity `applyInPandas` requires holds from the same `sf-main` template —
+no separate py3.12 template, no `PYTHON_VERSION_MISMATCH`.
 
 ## Running locally
 
@@ -34,9 +32,9 @@ uv sync                                        # core deps incl. ipykernel + mat
 uv run python -m ipykernel install --user --name scale-forecasting --display-name "scale-forecasting (uv)"
 ```
 
-Then select the **scale-forecasting (uv)** kernel. Full kernel guidance (and the interactive-Connect
-3.12 note) lives in [running_and_reviewing.md](./running_and_reviewing.md#notebooks-and-kernels) —
-this page is the per-notebook mapping.
+Then select the **scale-forecasting (uv)** kernel. Full kernel guidance lives in
+[running_and_reviewing.md](./running_and_reviewing.md#notebooks-and-kernels) — this page is the
+per-notebook mapping.
 
 ### The `SF_*` identity (read by `Settings.resolve()`)
 
@@ -54,64 +52,63 @@ value comes straight from `terraform output` (see
 
 ## Per-notebook mapping
 
-| Notebook | Cloud compute | Python | 3.11 vs 3.12 | Extra | Colab template |
-|----------|---------------|--------|--------------|-------|----------------|
-| `model_playground` | none (fully local) | 3.11 | either — pure local, no cloud | none | `sf-main` |
-| `02_bigquery_native` | BigQuery | 3.11 | either — orchestration only | none | `sf-main` |
-| `03_combo_and_ensemble` | Dataproc (submit) + BigQuery | 3.11 | either — submits a Spark batch ∥ BQ, runs on-cluster | none | `sf-main` |
-| `05_spark_naive` | Dataproc (submit) | 3.11 | either — submits a batch, runs on-cluster | none | `sf-main` |
-| `07_scale_review` | BigQuery (read-only) | 3.11 | either — reads the registry views | none | `sf-main` |
-| `06_spark_multi` | Dataproc (submit) | 3.11 | either — client submits, cluster runs | `[spark]` | `sf-main` |
-| `04_ray_on_vertex` | Ray on Vertex | **3.11** | **3.11 required** — client↔cluster Ray parity (2.47); a 3.12 client floats to an unsupported Ray → HTTP 524 | `[ray]` | `sf-main` |
-| `01_spark_via_connect` | Dataproc Spark Connect | **3.12** (interactive) | **3.12 for interactive Connect**; from 3.11 it uses the remote-batch fallback | `[spark]` | `sf-spark-connect` |
+| Notebook | Cloud compute | Python | Notes | Extra | Colab template |
+|----------|---------------|--------|-------|-------|----------------|
+| `model_playground` | none (fully local) | 3.11 | pure local, no cloud | none | `sf-main` |
+| `02_bigquery_native` | BigQuery | 3.11 | orchestration only | none | `sf-main` |
+| `03_combo_and_ensemble` | Dataproc (submit) + BigQuery | 3.11 | submits a Spark batch ∥ BQ, runs on-cluster | none | `sf-main` |
+| `05_spark_naive` | Dataproc (submit) | 3.11 | submits a batch, runs on-cluster | none | `sf-main` |
+| `07_scale_review` | BigQuery (read-only) | 3.11 | reads the registry views | none | `sf-main` |
+| `06_spark_multi` | Dataproc (submit) | 3.11 | client submits, cluster runs | `[spark]` | `sf-main` |
+| `04_ray_on_vertex` | Ray on Vertex | 3.11 | client↔cluster Ray parity (2.47); an unsupported client Ray → HTTP 524 | `[ray]` | `sf-main` |
+| `01_spark_via_connect` | Dataproc Spark Connect | 3.11 | interactive Connect on runtime **2.3** (py3.11 workers); remote-batch fallback available | `[spark]` | `sf-main` |
 
-**How to read the "3.11 vs 3.12" column.** Most notebooks are *orchestration* — they submit work to
-Dataproc / Ray / BigQuery, which runs on-cluster Python, so the local/kernel minor doesn't change the
-result. The two that genuinely care:
+Every notebook runs on the single `sf-main` (py3.11) template. Most are *orchestration* — they submit
+work to Dataproc / Ray / BigQuery, which runs on-cluster Python, so the kernel minor doesn't change
+the result. The two that touch a live client↔cluster boundary both hold parity on 3.11:
 
-- **`04_ray_on_vertex` needs 3.11.** Not the Python minor per se — the *Ray package* version. On 3.11
-  the client resolves to a Vertex-supported Ray (2.47) that matches the cluster. Run it on `sf-main`.
-- **`01_spark_via_connect` needs 3.12 for the interactive path.** Dataproc 3.0 Spark Connect workers
-  run Python 3.12 and Connect refuses mismatched minors (`PYTHON_VERSION_MISMATCH`). From a **3.11**
-  kernel the notebook falls back to the **remote-batch** path (`main.run(cfg)` with no injected
-  session) — the *identical* engine on-cluster, same `run_id`, same results — so 01 still works on
-  `sf-main`, just non-interactively. For live interactive Connect, use `sf-spark-connect` (3.12).
+- **`04_ray_on_vertex`.** The *Ray package* version must match the cluster's (2.47); on 3.11 the
+  client resolves to a Vertex-supported Ray that matches, so the `JobSubmissionClient` handshake
+  succeeds. An unsupported client Ray hangs the handshake (HTTP 524).
+- **`01_spark_via_connect`.** The interactive Connect session runs on **Dataproc runtime 2.3** (the
+  Spark Connect floor), whose workers are **Python 3.11** — the same minor as the `sf-main` kernel, so
+  `applyInPandas` fan-out satisfies the driver↔worker parity Connect enforces (`PYTHON_VERSION_MISMATCH`
+  otherwise). NB01's bootstrap installs the `[spark]` extra so `dataproc-spark-connect` is present on
+  `sf-main`. A **remote-batch** fallback (`main.run(cfg)` with no injected session — the *identical*
+  engine on-cluster, same `run_id`, same results) is documented in the notebook as an escape hatch.
 
-Note NB01's own bootstrap cell installs the package *plain* (not `[spark]`), so the `sf-spark-connect`
-template is what carries `dataproc-spark-connect` — see below.
-
-- **The interactive Connect path ships code + identity to its workers explicitly.** The `applyInPandas`
-  fan-out pickles the group-runner closure on the notebook kernel and runs it on the session's
-  executors, so those workers need (1) the `scale_forecasting` package on their path and (2) a runtime
-  identity with the Dataproc-worker permissions the session needs. NB01 sets both on the `Session`: it
-  runs the session runtime **as the compute SA** (`SF_COMPUTE_SA`, which carries
-  `dataprocrm.nodes.mintOAuthToken` via `roles/dataproc.worker`; the runner impersonates it) and calls
+- **The interactive Connect path ships code + deps + identity to its workers explicitly.** The
+  `applyInPandas` fan-out pickles the group-runner closure on the notebook kernel and runs it on the
+  session's executors, so those workers need (1) the third-party deps (`holidays`, `statsmodels`, …),
+  (2) the `scale_forecasting` package on their path, and (3) a runtime identity with the Dataproc-worker
+  permissions the session needs. NB01 sets all three on the `Session`: it pins the session's
+  **container image** to `SF_CONTAINER_IMAGE` (the project image, which carries the deps), calls
   `spark.addArtifacts(zip, pyfile=True)` with the **same** package zip the batch delivers via
-  `python_file_uris` (both built by `scale_forecasting.code_delivery`), so Connect and batch workers
-  run byte-identical code (G1). The remote-batch fallback needs neither — it runs on the custom
+  `python_file_uris` (both built by `scale_forecasting.code_delivery`, so Connect and batch workers run
+  byte-identical source — G1), and runs the session runtime **as the compute SA** (`SF_COMPUTE_SA`,
+  which carries `dataprocrm.nodes.mintOAuthToken` via `roles/dataproc.worker`; the runner impersonates
+  it). The remote-batch fallback needs none of this wiring on the kernel — it runs on the custom
   container that already carries the deps, as the compute SA.
 
 ## On Colab Enterprise
 
-Terraform ships **two runtime templates** (a template is a blueprint for the VM a runtime runs on).
-They are **free at rest** — a template costs nothing until you start a runtime from it, and runtimes
-idle-shutdown — so both are created **on by default** (`create_colab_templates = true`).
+Terraform ships **one runtime template** (a template is a blueprint for the VM a runtime runs on).
+It is **free at rest** — a template costs nothing until you start a runtime from it, and runtimes
+idle-shutdown — so it is created **on by default** (`create_colab_templates = true`).
 
 | Template | Python | Extra | Use it for |
 |----------|--------|-------|------------|
-| `sf-main` | **3.11** | `.[ray]` | notebooks 02–07 + `model_playground` (everything but interactive 01) |
-| `sf-spark-connect` | **3.12** | `.[spark]` | **only** notebook 01's interactive Spark Connect |
+| `sf-main` | **3.11** | `.[ray,spark]` | **all** notebooks + `model_playground` |
 
-After `terraform apply`, the template resource names are surfaced as outputs
-(`colab_main_runtime_template_id`, `colab_spark_runtime_template_id`).
+After `terraform apply`, the template resource name is surfaced as an output
+(`colab_main_runtime_template_id`).
 
 ### One-click open + run (no environment cell)
 
 Each notebook carries a header with a **Run in Colab Enterprise** badge. The click-path is:
 
 1. Click the badge — it imports the notebook straight into Colab Enterprise.
-2. Create/pick a runtime from the matching template (`sf-main` for everything but interactive 01;
-   `sf-spark-connect` for notebook 01's interactive Spark Connect).
+2. Create/pick a runtime from the `sf-main` template (all notebooks use it).
 3. **Run all.**
 
 There is **no `SF_*` environment cell to fill in**. Terraform bakes the full run identity
@@ -147,7 +144,6 @@ SF_ENABLE_NB_FULL=1  uv run --active pytest -m gcp tests/integration/test_notebo
 uv run --active python -m scale_forecasting.notebook_acceptance --tier smoke \
   --project "$(terraform -chdir=terraform/main output -raw project_id)" \
   --main-template  "$(terraform -chdir=terraform/main output -raw colab_main_runtime_template_id)" \
-  --spark-template "$(terraform -chdir=terraform/main output -raw colab_spark_runtime_template_id)" \
   --service-account "$(terraform -chdir=terraform/main output -raw runner_sa)" \
   --gcs-output "gs://$(terraform -chdir=terraform/main output -raw code_bucket)"
 ```
@@ -169,13 +165,12 @@ network and permits external IPs.
 
 The Terraform provider can't set a template's Python version (issue
 [hashicorp/terraform-provider-google#25217](https://github.com/hashicorp/terraform-provider-google/issues/25217)),
-so **both** templates are pinned via a tolerant REST PATCH inside the module — `sf-main` to `py311`
-and `sf-spark-connect` to `py312`. `sf-spark-connect` is pinned *explicitly* even though `py312` is
-Colab's current Latest: if it were left on Latest it would silently drift to `py313` when Colab
-advances Latest, re-breaking NB01 interactive Connect with `PYTHON_VERSION_MISMATCH` (Dataproc 3.0
-Connect workers run 3.12). When a Python version reaches **end-of-availability**, Colab auto-upgrades
-templates to Latest; bump `colab_main_release_name` / `colab_spark_release_name` and re-apply
-**before** that date to keep each pin. Track the supported versions in the
+so the `sf-main` template is pinned to `py311` via a tolerant REST PATCH inside the module. It is
+pinned *explicitly* even though `py311` may not be Colab's Latest: left on Latest it would silently
+drift to a newer minor when Colab advances, breaking Ray client↔cluster parity (2.47 is a 3.11 build)
+and NB01 interactive Connect (Dataproc 2.3 workers run 3.11). When a Python version reaches
+**end-of-availability**, Colab auto-upgrades templates to Latest; bump `colab_main_release_name` and
+re-apply **before** that date to keep the pin. Track the supported versions in the
 [Colab Enterprise runtime docs](https://cloud.google.com/colab/docs/runtimes).
 
 ---

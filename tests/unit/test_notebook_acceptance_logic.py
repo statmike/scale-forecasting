@@ -136,7 +136,7 @@ def test_run_fanout_submits_all_without_polling(
         project_id="proj-x",
         region="us-central1",
         notebooks_dir=nb_dir,
-        template_ids={na.TEMPLATE_MAIN: "tmpl/main", na.TEMPLATE_SPARK: "tmpl/spark"},
+        template_ids={na.TEMPLATE_MAIN: "tmpl/main"},
         service_account="runner@proj-x.iam.gserviceaccount.com",
         gcs_output_uri="gs://proj-x-code/nb",
         credentials=object(),
@@ -145,9 +145,9 @@ def test_run_fanout_submits_all_without_polling(
 
     assert len(results) == len(specs) == len(calls)
     assert all(r.job_id for r in results) and all(r.detail == "" for r in results)
-    # NB01 routes to the spark template; everything else to main (the registry's routing).
+    # Every notebook routes to the single sf-main template (the registry's routing).
     by_name = {c["notebook_path"].name: c["template_resource_name"] for c in calls}  # type: ignore[union-attr]
-    assert by_name["01_spark_via_connect.ipynb"] == "tmpl/spark"
+    assert by_name["01_spark_via_connect.ipynb"] == "tmpl/main"
     assert by_name["07_scale_review.ipynb"] == "tmpl/main"
     # executed_uri is the path the run WILL land at: {out}/fanout/{label}/{name}/{job}/content.ipynb
     r07 = next(r for r in results if r.name == "07_scale_review")
@@ -226,7 +226,7 @@ def test_run_fanout_missing_file_does_not_sink_others(
         project_id="proj-x",
         region="us-central1",
         notebooks_dir=nb_dir,
-        template_ids={na.TEMPLATE_MAIN: "tmpl/main", na.TEMPLATE_SPARK: "tmpl/spark"},
+        template_ids={na.TEMPLATE_MAIN: "tmpl/main"},
         service_account="runner@proj-x.iam.gserviceaccount.com",
         gcs_output_uri="gs://proj-x-code/nb",
         credentials=object(),

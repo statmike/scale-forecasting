@@ -218,9 +218,9 @@ terraform output -raw seed_batch_state        # want "SUCCEEDED" — the 100k se
 > `FAILED` → run the describe hint for the driver log. (Ctrl-C to leave `watch`.)
 
 Those outputs feed the run config and the `SF_*` environment the notebooks resolve. The Colab
-Enterprise runtime templates (`sf-main`, `sf-spark-connect`) are created on by default and already
-carry that `SF_*` identity in their env — so from here you can open any notebook in Colab Enterprise
-and **Run all** with no environment cell. See
+Enterprise runtime template (`sf-main`) is created on by default and already carries that `SF_*`
+identity in its env — so from here you can open any notebook in Colab Enterprise and **Run all** with
+no environment cell. See
 [`docs/notebook_runtimes.md`](../docs/notebook_runtimes.md) for the per-notebook template mapping and
 the headless acceptance harness that verifies every notebook runs green.
 

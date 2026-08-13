@@ -46,7 +46,10 @@ _SERIES_LIMIT = 6
 _HORIZON = 28
 _HISTORY = 730
 _SCRATCH_TABLE = "b5_connect_smoke_source"
-_RUNTIME_VERSION = "3.0"  # Spark Connect requires >= 3.0 (the batch default is left untouched)
+# Runtime 2.3 is the Spark Connect floor, and its workers run Python 3.11 — matching the project's
+# custom container and every runtime, so the driver↔worker Python parity applyInPandas requires
+# holds without a special kernel. Mirrors notebook 01's cell (the batch default is left untouched).
+_RUNTIME_VERSION = "2.3"
 
 
 @pytest.fixture(scope="module")
@@ -88,11 +91,12 @@ def scratch_source(settings: Settings) -> Iterator[str]:
 def _connect_session(settings: Settings) -> Any:
     """Build a reachable Spark Connect session, or ``pytest.skip`` if it can't be reached.
 
-    Creates a ``DataprocSparkSession`` pinned to runtime 3.0, then runs a scratch job to confirm the
-    endpoint is reachable *and* a one-row ``applyInPandas`` to confirm driver↔worker Python parity
-    (Dataproc 3.0 workers are Python 3.12). Any failure — missing client dep, provisioning error,
-    egress block, or Python-minor skew — skips; the remote-batch fallback runs the same engine code
-    with no local driver and is verified green in the ensemble/orchestration smokes.
+    Creates a ``DataprocSparkSession`` pinned to runtime 2.3 (attaching the project container image
+    for deps, like notebook 01), then runs a scratch job to confirm the endpoint is reachable *and*
+    a one-row ``applyInPandas`` to confirm driver↔worker Python parity (Dataproc 2.3 workers are
+    Python 3.11). Any failure — missing client dep, provisioning error, egress block, or
+    Python-minor skew — skips; the remote-batch fallback runs the same engine code with no local
+    driver and is verified green in the ensemble/orchestration smokes.
     """
     import os
 
@@ -104,9 +108,16 @@ def _connect_session(settings: Settings) -> Any:
 
     region = os.environ.get("SF_DATAPROC_REGION", settings.region)
     subnet = os.environ.get("SF_DATAPROC_SUBNET")
+    container_image = os.environ.get("SF_CONTAINER_IMAGE")  # deps image (holidays, statsmodels, …)
 
     session_cfg = Session()
     session_cfg.runtime_config.version = _RUNTIME_VERSION
+    # Attach the project container image so the engine's applyInPandas workers carry the third-party
+    # deps the stock runtime lacks (holidays et al.) — without it the shared pre-fit path errors and
+    # every cell fails silently. Mirrors notebook 01; image = deps, addArtifacts (in the engine) =
+    # source.
+    if container_image:
+        session_cfg.runtime_config.container_image = container_image
     if subnet:
         session_cfg.environment_config.execution_config.subnetwork_uri = subnet
 
@@ -123,7 +134,7 @@ def _connect_session(settings: Settings) -> Any:
 
     # Python-worker parity probe. range().count() is JVM-only, so it can't catch a driver↔worker
     # Python minor-version skew — but the engine's applyInPandas fan-out runs Python on the
-    # workers, and Connect refuses to run mismatched minors. Dataproc 3.0 workers are Python 3.12;
+    # workers, and Connect refuses to run mismatched minors. Dataproc 2.3 workers are Python 3.11;
     # if this driver venv is a different minor, skip (the remote-batch path runs the same engine
     # with no local driver, and is verified green in the ensemble/orchestration smokes).
     try:
@@ -134,7 +145,7 @@ def _connect_session(settings: Settings) -> Any:
     except Exception as exc:  # noqa: BLE001 - worker-side failure (e.g. Python skew) → skip
         pytest.skip(
             "Spark Connect endpoint reachable but Python-worker parity unmet (driver Python "
-            f"must match Dataproc 3.0 workers = 3.12); use remote-batch fallback: {exc}"
+            f"must match Dataproc 2.3 workers = 3.11); use remote-batch fallback: {exc}"
         )
     return spark
 

@@ -347,7 +347,7 @@ launch a runtime that runs as that SA:
 
 | Role | Granted on | Why |
 |------|-----------|-----|
-| `roles/aiplatform.user` | project | Create + use Colab Enterprise runtimes from the `sf-main` / `sf-spark-connect` templates. |
+| `roles/aiplatform.user` | project | Create + use Colab Enterprise runtimes from the `sf-main` template. |
 | `roles/iam.serviceAccountUser` | the **runner** SA | Launch a runtime that runs **as** the runner SA (which carries the data roles). Without it, runtime creation is denied. |
 | `roles/bigquery.dataViewer` + `roles/bigquery.jobUser` | project | *Optional* — only to browse the registry tables/views yourself in **BigQuery Studio**. The notebooks read as the runner SA, so this is for the human's own console poking. |
 

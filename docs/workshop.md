@@ -197,6 +197,149 @@ You want four `SUCCEEDED` rows — one `explode-100k-…`, one `multi-100k-…`,
 
 ---
 
+## Act 1B — The long Ray run on a persistent VM (when the run outlasts Cloud Shell)
+
+Some runs are **too long to babysit from Cloud Shell** — the full-suite Ray config
+`configs/all_methods_100k_full.json` (100k series × 7 models, **backtest on**, `persist_models`,
+NeuralProphet on T4 GPUs) runs for **hours**. Cloud Shell isn't built for that: it idles out after
+~20 min of inactivity and hard-caps a session at ~12 h, and when the tab closes it SIGHUPs your
+process. The Ray *cluster* survives server-side, but the **orchestrator** (`main.py`) is what polls
+the jobs and **finalizes the run-registry header** (`COMPLETED`/`FAILED`) — kill it and the header is
+stranded `RUNNING` even though the work finished.
+
+The fix is a **persistent GCE VM** that owns the orchestrator process. You drive it entirely from
+Cloud Shell — create it, SSH into it, launch under `tmux`, and detach. The VM keeps running when Cloud
+Shell disconnects; reattach any time to watch. The VM is a thin **driver**, not compute — the fan-out
+happens on the Ray cluster — so a small `e2-standard-4` is plenty.
+
+> **Everything below runs in [Cloud Shell](https://console.cloud.google.com/?cloudshell=true).** Set
+> the same `PROJECT` / `REGION` you used in Act 1.
+
+**1. One-time: allow IAP to SSH the VM.** The deploy's VPC has **no external IPs** (Cloud NAT for
+egress only; many orgs deny external IPs by policy), so you reach the VM over
+[IAP TCP forwarding](https://cloud.google.com/iap/docs/using-tcp-forwarding), which tunnels SSH from
+IAP's range `35.235.240.0/20`. Add the firewall rule that permits it (idempotent — skip if it exists):
+
+```bash
+PROJECT=gcp-scale-forecasting   # ← your project_id
+REGION=us-central1              # your deploy region
+ZONE=$REGION-a
+
+gcloud compute firewall-rules create scale-forecasting-allow-iap-ssh \
+  --project "$PROJECT" --network scale-forecasting \
+  --direction INGRESS --action ALLOW --rules tcp:22 \
+  --source-ranges 35.235.240.0/20 2>/dev/null \
+  || echo "rule already exists — continuing"
+```
+
+You also need `roles/iap.tunnelResourceAccessor` on the project (the deploy grants the runner SA the
+data roles; this is a *human* role, like the Act 1 submitter roles — see
+[Human users](./deploying_on_gcp.md#human-users-running-jobs--notebooks)).
+
+**2. Create the VM** — on the deploy's subnet, **no external IP**, running **as the runner SA** so its
+ADC already carries every data/compute permission a run needs (no keys). `cloud-platform` scope lets
+the SA's roles do the gating:
+
+```bash
+gcloud compute instances create sf-runner \
+  --project "$PROJECT" --zone "$ZONE" \
+  --machine-type e2-standard-4 \
+  --image-family debian-12 --image-project debian-cloud \
+  --boot-disk-size 50GB \
+  --network scale-forecasting --subnet scale-forecasting-compute \
+  --no-address \
+  --service-account "scale-forecasting-runner@$PROJECT.iam.gserviceaccount.com" \
+  --scopes cloud-platform
+```
+
+**3. SSH in from Cloud Shell** (the `--tunnel-through-iap` flag is what makes a no-external-IP VM
+reachable):
+
+```bash
+gcloud compute ssh sf-runner --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap
+```
+
+**4. On the VM: install `uv`, clone, sync.** (First login may prompt to generate an SSH key — accept.)
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.bashrc
+cd ~ && git clone https://github.com/statmike/scale-forecasting.git; cd ~/scale-forecasting
+uv sync --extra submit          # thin client: Dataproc + Ray submit clients, no pyspark
+```
+
+**5. Wire the `SF_*` identity** — the same deterministic block as Act 1 (the VM runs as the runner SA,
+so ADC is already in place; these vars just tell the orchestrator *what* to talk to):
+
+```bash
+PROJECT=gcp-scale-forecasting   # ← your project_id (re-set on the VM — a new shell)
+REGION=us-central1
+export SF_PROJECT_ID="$PROJECT"
+export SF_REGION="$REGION"
+export SF_DATASET_ID="scale_forecasting"
+export SF_CONNECTION="$PROJECT.$REGION.sf-iceberg"
+export SF_WAREHOUSE_URI="gs://$PROJECT-warehouse/warehouse"
+export SF_CODE_BUCKET="$PROJECT-code"
+export SF_COMPUTE_SA="scale-forecasting-compute@$PROJECT.iam.gserviceaccount.com"
+export SF_CONTAINER_IMAGE="$REGION-docker.pkg.dev/$PROJECT/scale-forecasting/spark-runtime:latest"
+export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJECT/regions/$REGION/subnetworks/scale-forecasting-compute"
+```
+
+**6. Clear the OUTPUT tables only** (optional — do this to reset the registry before a clean run).
+This **keeps** the seeded source data (`source_series_iceberg`) and truncates only the four run
+outputs, so you don't pay to reseed 100k series. Run in
+[BigQuery Studio](https://console.cloud.google.com/bigquery) (or `bq query --use_legacy_sql=false`):
+
+```sql
+-- swap gcp-scale-forecasting for your project_id if you deployed elsewhere
+TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.run_registry`;
+TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.forecast_metadata`;
+TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.forecast_predictions`;
+TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.backtest_oof`;
+```
+
+> **This clears *all* runs**, including Act 1's four. Run it only if you want a clean slate;
+> otherwise skip — the orchestrator dedupes-on-read against the deterministic `run_id`, so re-running
+> never double-counts. Do **not** touch `source_series_iceberg` — that's the 100k seeded panel every
+> run reads.
+
+**7. Preflight offline** (resolves the config + estimates the fan-out, touches no GCP):
+
+```bash
+uv run python -m scale_forecasting.main --config configs/all_methods_100k_full.json --dry-run
+```
+
+**8. Launch under `tmux` and detach.** `tmux` keeps the orchestrator alive on the VM when you close
+Cloud Shell — so it lives to poll the Ray jobs and **finalize the header**. `tee` mirrors the log to a
+file you can tail later:
+
+```bash
+tmux new -s ray100k \
+  'uv run python -m scale_forecasting.main --config configs/all_methods_100k_full.json 2>&1 | tee ~/ray100k.log'
+```
+
+Detach with **`Ctrl-b` then `d`** — the run keeps going. Now you can safely close Cloud Shell.
+
+**9. Reattach / check on it.** From any new Cloud Shell, SSH back in and reattach:
+
+```bash
+gcloud compute ssh sf-runner --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap
+tmux attach -t ray100k          # live console; Ctrl-b d to leave it running again
+tail -f ~/ray100k.log           # or just watch the log
+```
+
+Progress is also visible in BigQuery exactly as in Act 1 — watch `forecast_metadata` counts climb, and
+`v_run_summary` flips the header to `COMPLETED` when the orchestrator finalizes it. Because this config
+has **backtest on**, its accuracy columns (`mean_wape`, …) *are* populated — unlike the throughput-only
+Act 1 runs.
+
+**10. Clean up the VM when the run lands** (it bills while it exists, ~cents/hr, but tidy is tidy):
+
+```bash
+gcloud compute instances delete sf-runner --project "$PROJECT" --zone "$ZONE" --quiet
+```
+
+---
+
 ## Act 1.5 — Pre-render the notebook tour (optional, the night before)
 
 Act 2 is a **live** tour — but the expensive notebooks (`04_ray_on_vertex` stands up a Ray cluster;
@@ -213,8 +356,8 @@ shell.** You can close Cloud Shell; they keep going. No `tmux` needed for this s
 This runs in its **own** Cloud Shell, at a different time from Act 1 — so it's **self-contained** and
 does **not** need the Terraform directory or state. Everything it needs is either a naming convention
 (the runner SA and code bucket, exactly like Act 1's `SF_*` block) or looked up from the deployed
-resources by their stable display name (the two Colab templates). Set the two variables at the top and
-paste the rest as-is:
+resources by its stable display name (the `sf-main` Colab template). Set the two variables at the top
+and paste the rest as-is:
 
 ```bash
 # --- set these two (the values you deployed with) --------------------------
@@ -225,23 +368,20 @@ cd ~/scale-forecasting
 # By convention (same names Terraform assigns) — no state lookup needed:
 RUNNER_SA="scale-forecasting-runner@$PROJECT.iam.gserviceaccount.com"
 CODE_BUCKET="$PROJECT-code"
-# The template ids are API-minted, so fetch them by their stable display name (sf-main /
-# sf-spark-connect) — works from any shell, no Terraform. NOTE: on some projects
-# `--format="value(name)"` returns only the bare numeric id, but the CLI needs the FULL resource
-# path, so we normalise to `projects/.../notebookRuntimeTemplates/<id>` either way:
+# The template id is API-minted, so fetch it by its stable display name (sf-main) — works from any
+# shell, no Terraform. NOTE: on some projects `--format="value(name)"` returns only the bare numeric
+# id, but the CLI needs the FULL resource path, so we normalise to
+# `projects/.../notebookRuntimeTemplates/<id>`:
 _main_id=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
   --filter="displayName=sf-main" --format="value(name)")
-_spark_id=$(gcloud colab runtime-templates list --project "$PROJECT" --region "$REGION" \
-  --filter="displayName=sf-spark-connect" --format="value(name)")
 _prefix="projects/$PROJECT/locations/$REGION/notebookRuntimeTemplates"
 MAIN_TEMPLATE="$_prefix/${_main_id##*/}"
-SPARK_TEMPLATE="$_prefix/${_spark_id##*/}"
-echo "MAIN=[$MAIN_TEMPLATE]"; echo "SPARK=[$SPARK_TEMPLATE]"   # both should start with projects/
+echo "MAIN=[$MAIN_TEMPLATE]"   # should start with projects/
 
 uv run python -m scale_forecasting.notebook_acceptance \
   --no-wait --tier full \
   --project "$PROJECT" --region "$REGION" \
-  --main-template "$MAIN_TEMPLATE" --spark-template "$SPARK_TEMPLATE" \
+  --main-template "$MAIN_TEMPLATE" \
   --service-account "$RUNNER_SA" \
   --gcs-output "gs://$CODE_BUCKET/notebooks" \
   --run-label "demo-$(date +%Y%m%d)" \
@@ -276,9 +416,8 @@ rendered outputs**. That menu is your tour surface tomorrow.
 
 **Tomorrow:** open the [Executions menu](https://console.cloud.google.com/vertex-ai/colab/execution-jobs),
 find each `sf-demo-…` job, and click into the pre-rendered notebook. Run `07` and `01` (and any other
-cheap one) **live** in the console on the right runtime — `07` on `sf-main`, `01` on
-`sf-spark-connect` (see the Act 2 table) — for the interactive moments, and lean on the pre-rendered
-set for the expensive `04`/`05`/`06`.
+cheap one) **live** in the console on `sf-main` (every notebook uses that one template — see the Act 2
+table) for the interactive moments, and lean on the pre-rendered set for the expensive `04`/`05`/`06`.
 
 ---
 
@@ -295,7 +434,7 @@ Run them **in this order** — each builds on the story of the last:
 | # | Notebook | Template | What you show | Scale |
 |---|----------|----------|---------------|-------|
 | 1 | [`model_playground`](../notebooks/model_playground.ipynb) | `sf-main` | Pick any registered model, fit it on a small panel — the one unit of work, no cluster. | sample |
-| 2 | [`01_spark_via_connect`](../notebooks/01_spark_via_connect.ipynb) | `sf-spark-connect` | The Spark UDF fan-out (`applyInPandas`, one task per cell) over a live Dataproc Connect endpoint. | 100 |
+| 2 | [`01_spark_via_connect`](../notebooks/01_spark_via_connect.ipynb) | `sf-main` | The Spark UDF fan-out (`applyInPandas`, one task per cell) over a live Dataproc Connect endpoint. | 100 |
 | 3 | [`02_bigquery_native`](../notebooks/02_bigquery_native.ipynb) | `sf-main` | The BigQuery-native track — `ARIMA_PLUS` + `TimesFM` as pure SQL, no cluster. | 100 |
 | 4 | [`03_combo_and_ensemble`](../notebooks/03_combo_and_ensemble.ipynb) | `sf-main` | One config mixing a Spark model **and** the BQ natives under one `run_id`, with ensembles on — **and the accuracy-parity leaderboard** (backtest is on here). | 10 |
 | 5 | [`04_ray_on_vertex`](../notebooks/04_ray_on_vertex.ipynb) | `sf-main` | The Python models on a Ray-on-Vertex cluster ∥ the BQ natives — job submission from any authenticated client via the PSC-I attachment. | demo |
@@ -322,10 +461,11 @@ renders wall-clock + provisioning overhead from `v_run_summary` and the per-mode
 unchanged, the deterministic default ids in the cell often already match your runs — but paste yours to
 be sure.)
 
-> **Runtime note for notebook 01.** The `sf-spark-connect` template is Python **3.12** for the
-> interactive Connect path. If you open 01 on a 3.11 runtime it falls back to the identical
-> **remote-batch** engine — same result, just not the interactive Connect session. Either is a fine
-> demo; the header names the intended template.
+> **Runtime note for notebook 01.** It runs interactively on `sf-main` like every other notebook: the
+> Spark Connect session pins **Dataproc runtime 2.3** (the Connect floor; py3.11 workers, matching the
+> 3.11 kernel) and attaches the project container image for deps. A **remote-batch** escape hatch is
+> documented at the bottom of the notebook — the identical engine on-cluster, same result — if you'd
+> rather not open a live Connect session.
 
 ---
 
