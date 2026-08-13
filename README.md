@@ -234,9 +234,12 @@ verified against. See [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md)
 - [`docs/output_schemas.md`](./docs/output_schemas.md) — the output tables' layout: every column of
   `run_registry` / `forecast_metadata` / `forecast_predictions` / `backtest_oof`, what it collects,
   and the two analyst views over them.
+- [`docs/version_matrix.md`](./docs/version_matrix.md) — the Python / Spark / Ray version of every
+  surface (batch, Spark Connect, Ray, container, Colab) and **why the whole system is pinned to Python
+  3.11**; the runtime 2.3-vs-3.0 Spark Connect decision.
 - [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md) — which Python version each notebook
-  needs (3.11 vs 3.12) and how it behaves under each, locally (ADC) and on Colab Enterprise, plus the
-  two runtime templates Terraform ships, the one-click open path, and the headless acceptance harness.
+  needs and how it behaves, locally (ADC) and on Colab Enterprise, plus the single runtime template
+  Terraform ships, the one-click open path, and the headless acceptance harness.
 - [`docs/editing_code_without_rebuilding.md`](./docs/editing_code_without_rebuilding.md) — why a code
   edit ships on the next run with **no** image rebuild, and the loop you actually use.
 - [`docs/adding_a_model.md`](./docs/adding_a_model.md) — add a model in one file.
