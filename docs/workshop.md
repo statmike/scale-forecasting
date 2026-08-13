@@ -260,12 +260,24 @@ reachable):
 gcloud compute ssh sf-runner --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap
 ```
 
-**4. On the VM: install `uv`, clone, sync.** (First login may prompt to generate an SSH key — accept.)
+**4. On the VM: install `git` + `uv`, clone, sync.** (First login may prompt to generate an SSH key —
+accept.) The minimal Debian image ships **neither `git` nor `uv`**, and the `uv` installer drops its
+binary in `~/.local/bin` which isn't on `PATH` until you source its env — so install both, put `uv` on
+`PATH`, then clone and sync:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.bashrc
-cd ~ && git clone https://github.com/statmike/scale-forecasting.git; cd ~/scale-forecasting
-uv sync --extra submit          # thin client: Dataproc + Ray submit clients, no pyspark
+# git isn't on the minimal image — install it:
+sudo apt-get update -qq && sudo apt-get install -y -qq git
+
+# install uv and put it on PATH for THIS shell (its installer prints this same `source` line):
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv --version                    # confirm uv is on PATH
+
+# clone + sync the thin client (Dataproc + Ray submit clients, no pyspark):
+cd ~ && git clone https://github.com/statmike/scale-forecasting.git
+cd ~/scale-forecasting
+uv sync --extra submit
 ```
 
 > **Want to run Terraform from this VM too** (e.g. to update the Colab runtime template)? Two extra
