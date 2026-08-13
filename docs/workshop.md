@@ -266,8 +266,8 @@ binary in `~/.local/bin` which isn't on `PATH` until you source its env — so i
 `PATH`, then clone and sync:
 
 ```bash
-# git isn't on the minimal image — install it:
-sudo apt-get update -qq && sudo apt-get install -y -qq git
+# the minimal image ships neither git nor tmux (step 8 needs tmux) — install both:
+sudo apt-get update -qq && sudo apt-get install -y -qq git tmux
 
 # install uv and put it on PATH for THIS shell (its installer prints this same `source` line):
 curl -LsSf https://astral.sh/uv/install.sh | sh
