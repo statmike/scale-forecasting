@@ -35,6 +35,12 @@ bucket that doesn't exist yet).
   `build_image = false`), so `gcloud` must be authenticated for **both** the CLI *and* ADC (the
   runbook does both).
 
+> **Cloud Shell disk (~5 GB home).** Terraform's cached providers plus a `uv` venv can exhaust it, and
+> a full home makes Terraform die with a **`Bus error`** (a disk symptom, not a Terraform bug). If you
+> hit it, reclaim with `uv cache clean` and `rm -rf ~/.terraform.d/plugin-cache`. Terraform needs no
+> Python, so don't `uv sync` for a deploy. Full disk-hygiene guidance (and the re-apply / reset / rerun
+> paths) is in [`docs/operations.md`](../docs/operations.md).
+
 ### Identifiers you need up front
 
 | You need | Get it with |

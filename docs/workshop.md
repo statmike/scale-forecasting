@@ -307,22 +307,14 @@ export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJEC
 ```
 
 **6. Clear the OUTPUT tables only** (optional — do this to reset the registry before a clean run).
-This **keeps** the seeded source data (`source_series_iceberg`) and truncates only the four run
-outputs, so you don't pay to reseed 100k series. Run in
-[BigQuery Studio](https://console.cloud.google.com/bigquery) (or `bq query --use_legacy_sql=false`):
+The canonical reset — the output-only `TRUNCATE` that **keeps** the seeded source data
+(`source_series_iceberg`), so you don't pay to reseed 100k series — lives in the operations runbook:
+➡️ **[operations.md §2a — Output-only reset](./operations.md#2a-output-only-reset-keep-the-seed--the-usual-rework)**.
 
-```sql
--- swap gcp-scale-forecasting for your project_id if you deployed elsewhere
-TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.run_registry`;
-TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.forecast_metadata`;
-TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.forecast_predictions`;
-TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.backtest_oof`;
-```
-
-> **This clears *all* runs**, including Act 1's four. Run it only if you want a clean slate;
-> otherwise skip — the orchestrator dedupes-on-read against the deterministic `run_id`, so re-running
-> never double-counts. Do **not** touch `source_series_iceberg` — that's the 100k seeded panel every
-> run reads.
+> This clears **all** runs, including Act 1's four — run it only for a clean slate; otherwise skip (the
+> orchestrator dedupes-on-read against the deterministic `run_id`, so re-running never double-counts).
+> Do **not** touch `source_series_iceberg`. To drop the seed too (schema change), see
+> [operations.md §2b](./operations.md#2b-full-reset-drop-everything-incl-the-seed--needs-a-reseed-after).
 
 **7. Preflight offline** (resolves the config + estimates the fan-out, touches no GCP):
 
