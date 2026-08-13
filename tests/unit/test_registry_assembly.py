@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.registry import artifacts, bq
@@ -266,3 +267,117 @@ def test_artifact_uri_is_run_scoped_and_deterministic() -> None:
     assert uri == artifacts.artifact_gcs_uri(
         "/tmp/model.pkl", "my-run-abc123", "gs://bucket/warehouse"
     )
+
+
+# --- Storage Write API retry-on-transient (_append_via_write_api) ---------------
+#
+# The append path is the single chokepoint every engine's writes funnel through (Ray, all Spark
+# methods, BigQuery-native). A transient service 500/503/429 must be retried — not fail an
+# otherwise-complete multi-hour run — while a permanent error still fails fast. These tests drive
+# a fake write_client so they stay offline; time.sleep is neutralized so backoff is instant.
+
+
+class _FakeWriteClient:
+    """Minimal stand-in for BigQueryWriteClient.
+
+    ``append_rows`` consumes the request generator (so the lazy iterator is exercised) and then
+    replays a scripted outcome per call: raise a supplied exception, or return an iterable of
+    fake responses. ``table_path`` just formats a path like the real client.
+    """
+
+    def __init__(self, outcomes: list[Any]) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def table_path(self, project: str, dataset: str, table: str) -> str:
+        return f"projects/{project}/datasets/{dataset}/tables/{table}"
+
+    def append_rows(self, requests: Any) -> Any:
+        list(requests)  # drain the generator, matching the real bidi call
+        outcome = self._outcomes[self.calls]
+        self.calls += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _OkResponse:
+    class _Err:
+        code = 0
+        message = ""
+
+    error = _Err()
+    row_errors: list[Any] = []
+
+
+def _append(client: Any) -> None:
+    # Build a real descriptor + serialized row so the request generator (which the fake client
+    # drains) constructs a valid AppendRowsRequest — same machinery write_cells uses.
+    _msg, descriptor = bq._proto_for("backtest_oof", bq._OOF_SPEC)
+    serialized = bq._encode_rows(
+        _msg, bq._OOF_SPEC, [{"run_id": "r", "ts_id": "s", "model_type": "theta", "fold_id": 0}]
+    )
+    bq._append_via_write_api(client, "proj", "ds", "backtest_oof", descriptor, serialized)
+
+
+def test_append_retries_transient_then_succeeds(monkeypatch: Any) -> None:
+    from google.api_core.exceptions import InternalServerError
+
+    monkeypatch.setattr(bq.time, "sleep", lambda *_a, **_k: None)
+    # two transient 500s, then a clean response
+    client = _FakeWriteClient(
+        [
+            InternalServerError("500 An error occurred while verifying authorization"),
+            InternalServerError("500 transient"),
+            [_OkResponse()],
+        ]
+    )
+    _append(client)  # must not raise
+    assert client.calls == 3
+
+
+def test_append_transient_exhausts_attempts_and_raises(monkeypatch: Any) -> None:
+    from google.api_core.exceptions import ServiceUnavailable
+
+    from scale_forecasting.errors import RegistryError
+
+    monkeypatch.setattr(bq.time, "sleep", lambda *_a, **_k: None)
+    client = _FakeWriteClient(
+        [ServiceUnavailable("503") for _ in range(bq._WRITE_RETRY_ATTEMPTS)]
+    )
+    with pytest.raises(RegistryError, match="after 5 attempts"):
+        _append(client)
+    assert client.calls == bq._WRITE_RETRY_ATTEMPTS
+
+
+def test_append_permanent_api_error_fails_fast(monkeypatch: Any) -> None:
+    from google.api_core.exceptions import Forbidden
+
+    from scale_forecasting.errors import RegistryError
+
+    monkeypatch.setattr(bq.time, "sleep", lambda *_a, **_k: None)
+    # a non-transient GoogleAPICallError (e.g. real 403) is not retried
+    client = _FakeWriteClient([Forbidden("403 permission denied")])
+    with pytest.raises(RegistryError, match="failed:"):
+        _append(client)
+    assert client.calls == 1
+
+
+def test_append_response_level_error_fails_fast(monkeypatch: Any) -> None:
+    from scale_forecasting.errors import RegistryError
+
+    monkeypatch.setattr(bq.time, "sleep", lambda *_a, **_k: None)
+
+    class _BadResponse:
+        class _Err:
+            code = 7
+            message = "N Errors found"
+
+        error = _Err()
+        row_errors: list[Any] = []
+
+    # a response-level error is a data/schema problem — fail on the first call, no retry
+    client = _FakeWriteClient([[_BadResponse()]])
+    with pytest.raises(RegistryError, match="backtest_oof failed: 7"):
+        _append(client)
+    assert client.calls == 1

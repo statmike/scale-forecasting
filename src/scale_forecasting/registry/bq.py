@@ -28,9 +28,13 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from typing import TYPE_CHECKING, Any, get_args
 
 from ..config import DecisionMetric
+from ..errors import get_logger
+
+_log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -279,6 +283,15 @@ _CELL_TABLES: tuple[str, ...] = ("forecast_predictions", "backtest_oof", "foreca
 _MAX_REQUEST_BYTES = 9 * 1024 * 1024
 _MAX_REQUEST_ROWS = 10_000
 
+# Retry-on-transient for the Storage Write API append. The service returns transient 500/503/429s
+# (e.g. a 500 "error while verifying authorization") that Google's own guidance says to retry with
+# backoff — over a multi-hour 100k run we make thousands of appends, so ≥1 blip is likely and must
+# not fail an otherwise-complete run. Safe by construction: the default stream is at-least-once and
+# the registry dedupes-on-read under a deterministic run_id, so re-sending a whole append never
+# double-counts. Naming mirrors ray_submit.py's manual-retry idiom.
+_WRITE_RETRY_ATTEMPTS = 5  # total attempts per append (1 initial + 4 retries)
+_WRITE_RETRY_BACKOFF_SECONDS = 2.0  # exponential base: 2, 4, 8, 16s
+
 
 def _proto_for(table_name: str, spec: tuple[tuple[str, str], ...]) -> tuple[Any, Any]:
     """Build a protobuf message class + descriptor matching a table's column spec.
@@ -374,13 +387,27 @@ def _append_via_write_api(
 
     Uses the direct ``append_rows(requests=...)`` bidi call (not the ``AppendRowsStream``
     wrapper, which masks the underlying gRPC error — B0.3): the first request carries the
-    stream + writer schema, each subsequent request carries only rows. Any failure is
-    re-raised as :class:`RegistryError` with the real error attached.
+    stream + writer schema, each subsequent request carries only rows.
+
+    Transient service errors (500/503/429/deadline) are retried with exponential backoff — safe
+    because the default stream is at-least-once and the registry dedupes-on-read (re-sending the
+    whole append can't double-count). A permanent error (bad schema/data, a response-level row
+    error, or a non-transient API error) is re-raised as :class:`RegistryError` with the real
+    error attached, unchanged.
     """
-    from google.api_core.exceptions import GoogleAPICallError
+    from google.api_core.exceptions import (
+        DeadlineExceeded,
+        GoogleAPICallError,
+        InternalServerError,
+        ServiceUnavailable,
+        TooManyRequests,
+    )
     from google.cloud.bigquery_storage_v1 import types
 
     from ..errors import RegistryError
+
+    # Transient server-side errors the append should retry rather than fail the run on.
+    transient = (InternalServerError, ServiceUnavailable, TooManyRequests, DeadlineExceeded)
 
     parent = write_client.table_path(project, dataset, table)
     stream = f"{parent}/_default"  # default stream = at-least-once, no stream management
@@ -399,23 +426,45 @@ def _append_via_write_api(
             request.proto_rows = proto_data
             yield request
 
-    try:
-        for response in write_client.append_rows(requests=requests()):
-            if response.error.code != 0:
-                # Surface the per-row detail: the top-level message only says "N Errors found";
-                # row_errors names the offending field/index/reason, which is what a caller needs
-                # to diagnose a data pathology (e.g. a non-finite float) without reverse-
-                # engineering it from the landed rows.
-                detail = "; ".join(
-                    f"row {re.index}: {re.message}" for re in getattr(response, "row_errors", [])
-                )
+    # Rebuild the request iterator per attempt: requests() is a generator *function*, so each call
+    # yields a fresh, complete iterator (a retry re-sends the whole append).
+    for attempt in range(1, _WRITE_RETRY_ATTEMPTS + 1):
+        try:
+            for response in write_client.append_rows(requests=requests()):
+                if response.error.code != 0:
+                    # Surface the per-row detail: the top-level message only says "N Errors
+                    # found"; row_errors names the offending field/index/reason, which is what a
+                    # caller needs to diagnose a data pathology (e.g. a non-finite float) without
+                    # reverse-engineering it from the landed rows. A response-level error is a
+                    # data/schema problem, not a transient blip — fail fast, don't retry.
+                    detail = "; ".join(
+                        f"row {re.index}: {re.message}"
+                        for re in getattr(response, "row_errors", [])
+                    )
+                    raise RegistryError(
+                        f"Storage Write API append to {table} failed: "
+                        f"{response.error.code} {response.error.message}"
+                        + (f" [{detail}]" if detail else "")
+                    )
+            return
+        except transient as exc:
+            if attempt == _WRITE_RETRY_ATTEMPTS:
                 raise RegistryError(
-                    f"Storage Write API append to {table} failed: "
-                    f"{response.error.code} {response.error.message}"
-                    + (f" [{detail}]" if detail else "")
-                )
-    except GoogleAPICallError as exc:
-        raise RegistryError(f"Storage Write API append to {table} failed: {exc}") from exc
+                    f"Storage Write API append to {table} failed after {attempt} attempts: {exc}"
+                ) from exc
+            backoff = _WRITE_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            _log.warning(
+                "transient Storage Write API error on %s (attempt %d/%d), retrying in %.0fs: %s",
+                table,
+                attempt,
+                _WRITE_RETRY_ATTEMPTS,
+                backoff,
+                exc,
+            )
+            time.sleep(backoff)
+        except GoogleAPICallError as exc:
+            # Non-transient API error — same behavior as before this retry loop existed.
+            raise RegistryError(f"Storage Write API append to {table} failed: {exc}") from exc
 
 
 # --- I/O: the four registry writers --------------------------------------------
