@@ -409,6 +409,20 @@ def _append_via_write_api(
     # Transient server-side errors the append should retry rather than fail the run on.
     transient = (InternalServerError, ServiceUnavailable, TooManyRequests, DeadlineExceeded)
 
+    def _is_retryable(exc: GoogleAPICallError) -> bool:
+        """Whether an append error is a transient blip worth retrying (vs a real data/config fault).
+
+        Covers the transient status types plus one intermittent 400 the Storage Write API emits
+        under long, high-volume append streams: ``Cannot route on empty project id ''`` — a gRPC
+        routing-header race, NOT a real empty project (the same client wrote fine for hours before
+        it). A fresh ``append_rows`` call repopulates the routing header. Genuine 400s (bad schema,
+        proto mismatch) don't mention routing, so they still fail fast.
+        """
+        if isinstance(exc, transient):
+            return True
+        msg = str(exc).lower()
+        return "empty project id" in msg or "cannot route" in msg
+
     parent = write_client.table_path(project, dataset, table)
     stream = f"{parent}/_default"  # default stream = at-least-once, no stream management
     batches = _chunk_rows(serialized)
@@ -447,7 +461,13 @@ def _append_via_write_api(
                         + (f" [{detail}]" if detail else "")
                     )
             return
-        except transient as exc:
+        except GoogleAPICallError as exc:
+            # Non-retryable API error (real bad schema/data) — same behavior as before the retry
+            # loop existed: fail fast with the real error attached.
+            if not _is_retryable(exc):
+                raise RegistryError(
+                    f"Storage Write API append to {table} failed: {exc}"
+                ) from exc
             if attempt == _WRITE_RETRY_ATTEMPTS:
                 raise RegistryError(
                     f"Storage Write API append to {table} failed after {attempt} attempts: {exc}"
@@ -462,9 +482,6 @@ def _append_via_write_api(
                 exc,
             )
             time.sleep(backoff)
-        except GoogleAPICallError as exc:
-            # Non-transient API error — same behavior as before this retry loop existed.
-            raise RegistryError(f"Storage Write API append to {table} failed: {exc}") from exc
 
 
 # --- I/O: the four registry writers --------------------------------------------

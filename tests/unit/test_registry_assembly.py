@@ -350,6 +350,21 @@ def test_append_transient_exhausts_attempts_and_raises(monkeypatch: Any) -> None
     assert client.calls == bq._WRITE_RETRY_ATTEMPTS
 
 
+def test_append_retries_routing_400_then_succeeds(monkeypatch: Any) -> None:
+    from google.api_core.exceptions import BadRequest
+
+    monkeypatch.setattr(bq.time, "sleep", lambda *_a, **_k: None)
+    # the intermittent Storage Write API routing glitch: a 400 that IS retryable despite being a 400
+    client = _FakeWriteClient(
+        [
+            BadRequest("400 Cannot route on empty project id ''"),
+            [_OkResponse()],
+        ]
+    )
+    _append(client)  # must not raise — the routing 400 is retried
+    assert client.calls == 2
+
+
 def test_append_permanent_api_error_fails_fast(monkeypatch: Any) -> None:
     from google.api_core.exceptions import Forbidden
 
@@ -358,6 +373,19 @@ def test_append_permanent_api_error_fails_fast(monkeypatch: Any) -> None:
     monkeypatch.setattr(bq.time, "sleep", lambda *_a, **_k: None)
     # a non-transient GoogleAPICallError (e.g. real 403) is not retried
     client = _FakeWriteClient([Forbidden("403 permission denied")])
+    with pytest.raises(RegistryError, match="failed:"):
+        _append(client)
+    assert client.calls == 1
+
+
+def test_append_genuine_400_fails_fast(monkeypatch: Any) -> None:
+    from google.api_core.exceptions import BadRequest
+
+    from scale_forecasting.errors import RegistryError
+
+    monkeypatch.setattr(bq.time, "sleep", lambda *_a, **_k: None)
+    # a real 400 (bad schema/proto) has no routing text → not retryable, fail on first call
+    client = _FakeWriteClient([BadRequest("400 The proto field is incompatible with the column")])
     with pytest.raises(RegistryError, match="failed:"):
         _append(client)
     assert client.calls == 1
