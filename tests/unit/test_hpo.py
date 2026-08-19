@@ -1,7 +1,7 @@
-"""Offline tests for the HPO execution path (``scale_forecasting.hpo``, C5).
+"""Offline tests for the HPO execution path (``scale_forecasting.hpo``).
 
-Covers PLANS_PROD §C5: an Optuna study over the aligned backtest that *actually* varies params and
-records a winner (vs the pre-C5 ``{}``), the two granularities (fleetwide default + per-series),
+Covers an Optuna study over the aligned backtest that *actually* varies params and
+records a winner (vs an earlier no-op ``{}``), the two granularities (fleetwide + per-series),
 the no-search-space / native / disabled short-circuits, and the ``require_backtest`` guard. It is
 deterministic (fixed-seed TPE) and fully offline — no GCP, no Spark.
 
@@ -128,7 +128,7 @@ def test_tune_model_returns_params_from_the_search_space() -> None:
 
 
 def test_tune_model_is_deterministic() -> None:
-    # fixed-seed TPE → same sample + config → same winner (reproducible, G3).
+    # fixed-seed TPE → same sample + config → same winner (reproducible).
     a = tune_model("xgboost", _sample(), _cfg())
     b = tune_model("xgboost", _sample(), _cfg())
     assert a == b

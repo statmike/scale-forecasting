@@ -1,9 +1,9 @@
 """Tests for the ensembler — calculated combine math, learned meta-learners, pandas blend.
 
-Covers CONTRACTS §6 / DESIGN §5.2 / BUILD 6a: mean/median exact, inverse-error weights sum to
+Covers mean/median exact, inverse-error weights sum to
 1, NNLS weights ≥ 0, the leakage guard (learned strategies refuse to run without backtest),
 multi-strategy dispatch, and the pandas :func:`combine_calculated` blend that replaced the retired
-``INSERT…SELECT`` SQL (C4 / Q4 fix — every append-only cell write now goes through the Write API).
+``INSERT…SELECT`` SQL (every append-only cell write now goes through the Write API).
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ def test_learned_missing_a_base_model_is_rejected() -> None:
         fit_learned(partial, cfg)
 
 
-# --- combine_calculated: the pandas blend (Write-API path, C4 / Q4 fix) --------
+# --- combine_calculated: the pandas blend (Write-API path) ---------------------
 
 
 def _base_df(rows: list[tuple[str, str, str, float]]) -> pd.DataFrame:

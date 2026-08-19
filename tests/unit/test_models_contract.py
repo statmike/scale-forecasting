@@ -1,4 +1,4 @@
-"""Shared model contract test (CONTRACTS §1, §2.1, BUILD 2.5).
+"""Shared model contract test.
 
 Parametrized over every registered Python model: fit a deterministic golden series,
 then assert ``predict`` returns the canonical frame — right columns/dtypes, length =

@@ -1,4 +1,4 @@
-"""Error taxonomy (CONTRACTS §0) + a single logger factory.
+"""Error taxonomy + a single logger factory.
 
 One base class so callers can catch everything from this package with
 ``except ScaleForecastError``. Subclasses are intentionally few and boring — add one
@@ -32,7 +32,7 @@ class ModelError(ScaleForecastError):
     """A model failed to fit or predict.
 
     Note: inside a worker cell this is *captured* into the CellResult, never raised
-    out of ``run_cell`` (CONTRACTS §3.3). It is raised only in direct/unit use.
+    out of ``run_cell``. It is raised only in direct/unit use.
     """
 
 

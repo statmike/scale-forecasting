@@ -1,26 +1,25 @@
-"""In-node hyperparameter optimization — an Optuna study over the aligned backtest (C5).
+"""In-node hyperparameter optimization — an Optuna study over the aligned backtest.
 
 Gated on ``cfg.hpo.enabled``; a strict no-op otherwise (a model with no search space, or HPO
 off, tunes nothing and yields ``{}`` — exactly today's behavior). Two granularities, the DS-facing
-knob in :class:`~scale_forecasting.config.HpoConfig`:
+knob in `HpoConfig`:
 
 * ``fleetwide`` (default): tune each model **once** on a representative sample of series and apply
   the winning params across *all* series — the only granularity affordable at 100k. Resolved on the
-  driver (:func:`resolve_fleetwide`) before the engine fans out, then threaded to
-  :func:`~scale_forecasting.worker.run_cell` as pre-resolved ``params`` (never via ``cfg`` — the
+  driver (`resolve_fleetwide`) before the engine fans out, then threaded to
+  `run_cell` as pre-resolved ``params`` (never via ``cfg`` — the
   config is the run_id identity key, so putting tuned params in it would shift the run_id and break
-  reproducibility/idempotency; see :func:`~scale_forecasting.registry.ids.make_run_id`).
+  reproducibility/idempotency; see `make_run_id`).
 * ``per_series``: tune on each series inside ``run_cell`` (heavier; a DS opt-in for the tail of
   hard series).
 
-The objective reuses the C2-aligned backtest: for one trial's params it runs
-:func:`~scale_forecasting.backtest.backtest_cell` on each sampled series, averages the per-fold
+The objective reuses the aligned backtest: for one trial's params it runs
+`backtest_cell` on each sampled series, averages the per-fold
 panels, and scores on ``cfg.backtest.decision_metric``. HPO therefore *requires* backtesting
-(:func:`require_backtest`) — there are no folds to tune on otherwise.
+(`require_backtest`) — there are no folds to tune on otherwise.
 
-Pure + offline: no GCP, no Spark, deterministic (fixed-seed TPE sampler). This is the substance of
-C5; the engines only add a tiny driver-side sample-and-resolve call in front of their existing
-fan-out.
+Pure + offline: no GCP, no Spark, deterministic (fixed-seed TPE sampler). The engines only add a
+tiny driver-side sample-and-resolve call in front of their existing fan-out.
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ def require_backtest(cfg: RunConfig) -> None:
 
 
 def _has_search_space(model_cls: type[BaseModel]) -> bool:
-    """True if the model overrides :meth:`BaseModel.search_space` (i.e. has params to tune).
+    """True if the model overrides `BaseModel.search_space` (i.e. has params to tune).
 
     A model that inherits the base (empty) space has nothing to optimize, so HPO skips it and it
     keeps its ``{}`` defaults — the additive-by-default contract. BigQuery-native models tune in
@@ -132,8 +131,8 @@ def tune_model(
     """Tune one model on ``sample`` and return its winning params (``{}`` if nothing to tune).
 
     Builds a deterministic Optuna study (fixed-seed TPE) of ``cfg.hpo.n_trials`` trials whose
-    objective is :func:`_score_params`. Returns ``{}`` immediately — creating no study — when the
-    model has no search space (:func:`_has_search_space`), so an all-defaults model costs nothing.
+    objective is `_score_params`. Returns ``{}`` immediately — creating no study — when the
+    model has no search space (`_has_search_space`), so an all-defaults model costs nothing.
     The returned dict is exactly what ``search_space`` proposes for the best trial, ready to hand a
     model constructor as ``model_cls(params, ctx)``.
     """
@@ -186,7 +185,7 @@ def resolve_fleetwide(
 
 
 def _context(cfg: RunConfig) -> ModelContext:
-    """Build the per-run :class:`ModelContext` (lazy import of the worker helper avoids a cycle)."""
+    """Build the per-run `ModelContext` (lazy import of the worker helper avoids a cycle)."""
     from .worker import _model_context
 
     return _model_context(cfg)

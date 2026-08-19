@@ -1,11 +1,11 @@
-"""Live parallel-orchestration smoke (BUILD Arc B, ``@gcp``).
+"""Live parallel-orchestration smoke (``@gcp``).
 
 Runs :func:`scale_forecasting.main.run` end-to-end against live GCP: a **mixed** config (one Spark
 model + the three BigQuery-native models) executes both runtimes **in parallel under one shared
 ``run_id`` and one ``run_registry`` header**, landing a real Dataproc Serverless batch *and* the
-in-BigQuery SQL engine in the same run. This is the Arc B contract the offline tests can't reach —
-that the two compute tracks share a header and are comparable on ``v_model_leaderboard`` (DESIGN
-§3.3, the "wall-clock ≈ max(python, bq), not sum" thesis).
+in-BigQuery SQL engine in the same run. This is the contract the offline tests can't reach —
+that the two compute tracks share a header and are comparable on ``v_model_leaderboard`` (the
+"wall-clock ≈ max(python, bq), not sum" thesis).
 
 Asserts: exactly **one** ``run_registry`` row, ``COMPLETED``, ``bq_models`` populated with the three
 natives, ``n_models`` == the full model count; ``v_model_leaderboard`` shows the Spark model with
@@ -21,7 +21,7 @@ identity the writers resolve (``SF_PROJECT_ID`` / ``SF_CONNECTION`` / ``SF_WAREH
     uv run pytest -m gcp tests/integration/test_main_orchestration_smoke.py
 
 This launches a real Dataproc batch (~5-9 min provision→terminal) plus the in-BigQuery engine, so it
-is materially slower + costlier than the pure-BQ B3 smoke; that spend is the point of the test.
+is materially slower + costlier than the pure-BQ native smoke; that spend is the point of the test.
 
 **Self-contained data.** This test seeds its own tiny univariate scratch ``source_series`` table via
 the same generator and tears it down after — the "test owns its data" discipline. ``run_name``
@@ -49,7 +49,7 @@ _ALL_MODELS = [_SPARK_MODEL, *_NATIVE_MODELS]
 _SERIES_LIMIT = 10
 _HORIZON = 28
 _HISTORY = 730  # ~2 years daily → training window > 1 year, so ARIMA_PLUS holidays apply
-_SCRATCH_TABLE = "arc_b_mixed_smoke_source"
+_SCRATCH_TABLE = "oncluster_mixed_smoke_source"
 
 
 @pytest.fixture(scope="module")

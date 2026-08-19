@@ -1,8 +1,8 @@
-"""Reset the deployment's BigQuery tables — drop everything for a clean re-``ensure_tables`` (D19).
+"""Reset the deployment's BigQuery tables — drop everything for a clean re-``ensure_tables``.
 
 **Destructive.** This drops all six tables (the four native run-collection tables + both source
-variants) and the two analyst views via :func:`registry.bq.drop_all`, so a subsequent run's
-:func:`registry.bq.ensure_tables` recreates them in the current native/dual-format shape. The
+variants) and the two analyst views via `registry.bq.drop_all`, so a subsequent run's
+`registry.bq.ensure_tables` recreates them in the current native/dual-format shape. The
 Iceberg→native registry switch is a drop-and-recreate, not an ``ALTER``, which is why a reset seam
 exists at all.
 
@@ -10,8 +10,8 @@ Two guards keep an accidental wipe from happening:
 
 * The CLI **requires ``--yes``** to actually drop; without it the command prints what *would* be
   dropped (resolved dataset + table/view names) and exits without touching BigQuery.
-* Identity comes from the ``SF_*`` environment via :class:`~scale_forecasting.settings.Settings`
-  (G1) — the same seam every writer uses — so a reset can only ever hit the deployment the caller
+* Identity comes from the ``SF_*`` environment via `Settings`
+  — the same seam every writer uses — so a reset can only ever hit the deployment the caller
   has explicitly pointed the environment at.
 
 After a reset, reseed the source tables (``data_gen.seed_spark`` / the Terraform ``seed`` module).

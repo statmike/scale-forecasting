@@ -1,10 +1,10 @@
 """Load, validate, and freeze the run config — the single source of run behavior.
 
-A run is one JSON file (DESIGN §9). It is validated here *before* anything executes,
+A run is one JSON file. It is validated here *before* anything executes,
 and the frozen, normalized object is what gets logged verbatim to
-``run_registry.raw_config`` — so the config *is* the experiment record (G2/G3).
+``run_registry.raw_config`` — so the config *is* the experiment record.
 
-Public surface (CONTRACTS §6):
+Public surface:
 - ``RunConfig`` — the frozen pydantic model.
 - ``load_config(path) -> RunConfig`` — read + validate a JSON file.
 - ``estimate_fanout(cfg) -> Fanout`` — the dry-run cell-count estimate.
@@ -25,13 +25,13 @@ _log = get_logger(__name__)
 
 # --- shared vocabularies -------------------------------------------------------
 
-# The full metric panel (CONTRACTS §2.3 / DESIGN §5.1). Kept here so the config's
-# decision-metric field is self-contained; metrics.py (BUILD 2.1) must match this set.
+# The full metric panel. Kept here so the config's decision-metric field is
+# self-contained; the metrics module must match this set.
 DecisionMetric = Literal[
     "mae", "rmse", "mse", "mape", "smape", "wape", "mase", "rmsse", "bias", "coverage", "pinball"
 ]
 
-# Ensemble strategies (DESIGN §5.2). "Learned" strategies train on backtest OOF and
+# Ensemble strategies. "Learned" strategies train on backtest OOF and
 # therefore require backtesting to be ON; "calculated" ones work either way.
 CALCULATED_STRATEGIES = frozenset({"mean", "median", "inverse_error"})
 LEARNED_STRATEGIES = frozenset({"nnls", "ridge", "xgb"})
@@ -53,15 +53,15 @@ class DataConfig(BaseModel):
     freq: str = "D"
     horizon: int = Field(default=28, gt=0)
     # None = use every series; an int subsets the shipped data to demo small→large
-    # on the *same* series (DESIGN §13.1). Must be positive when set.
+    # on the *same* series. Must be positive when set.
     series_limit: int | None = Field(default=None, gt=0)
 
 
 class FeaturesConfig(BaseModel):
-    """Optional feature engineering for the Python models (DESIGN §4).
+    """Optional feature engineering for the Python models.
 
     Defaults are conservative/generic (no transform, no holidays); the shipped
-    ``example_config.json`` turns on holidays + log1p (D2).
+    ``example_config.json`` turns on holidays + log1p.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -75,7 +75,7 @@ class FeaturesConfig(BaseModel):
 
 
 class BacktestConfig(BaseModel):
-    """Time-series cross-validation (DESIGN §5.1). Off by default (cheapest first run)."""
+    """Time-series cross-validation. Off by default (cheapest first run)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -89,11 +89,11 @@ class BacktestConfig(BaseModel):
 
 
 class HpoConfig(BaseModel):
-    """Hyperparameter optimization on the aligned backtest (optional; C5).
+    """Hyperparameter optimization on the aligned backtest (optional).
 
     Off by default. When ``enabled``, an Optuna study tunes each model's ``search_space`` on the
     backtest folds and the winning params are stamped to ``forecast_metadata.best_params`` (see
-    :mod:`scale_forecasting.hpo`). HPO therefore requires ``backtest.enabled``.
+    `scale_forecasting.hpo`). HPO therefore requires ``backtest.enabled``.
 
     ``granularity`` is the DS-facing cost knob:
 
@@ -116,7 +116,7 @@ class HpoConfig(BaseModel):
 
 
 class EnsembleConfig(BaseModel):
-    """Consensus across base models (DESIGN §5.2).
+    """Consensus across base models.
 
     ``strategies`` is a list so several ensembles can run at once. The singular
     ``strategy`` string is accepted as shorthand for a one-element list.
@@ -155,32 +155,31 @@ class ComputeConfig(BaseModel):
     machine_family: str = "auto"
     spark_deps: Literal["packed_venv", "container"] = "packed_venv"
     # Persist each fitted model as a GCS artifact (ObjectRef in forecast_metadata.model_artifact,
-    # G3 lineage). Off by default: at 100k×N cells the object count + write cost is material, so a
-    # run opts in explicitly (demos do; the hero scale run need not). See BaseModel.serialize.
+    # model-artifact lineage). Off by default: at 100k×N cells the object count + write cost is
+    # material, so a run opts in explicitly (demos do; the hero scale run need not). See
+    # BaseModel.serialize.
     persist_models: bool = False
     use_gpu: bool = False
     gpu_type: str = "T4"
-    # "auto" = profile-driven calibration (DESIGN §11.1), or a fixed fraction in (0, 1].
+    # "auto" = profile-driven calibration, or a fixed fraction in (0, 1].
     gpu_fraction: Literal["auto"] | float = "auto"
     budget_usd: float = Field(default=50.0, ge=0.0)
 
-    # --- Ray on Vertex (B4) ----------------------------------------------------
-    # The Ray runtime sizes an *autoscaling* cluster to the run's fan-out (default; D17 reversed
-    # post-demo — see below) and packs GPU-benefiting models (NeuralProphet) onto fractional T4
-    # slots while stats/ML run on CPU (DESIGN §11.1). These knobs feed engines/ray_io.plan_cluster +
-    # calibrate_gpu_fraction; they are inert unless python_runtime == "ray".
+    # --- Ray on Vertex ---------------------------------------------------------
+    # The Ray runtime sizes an *autoscaling* cluster to the run's fan-out (default) and packs
+    # GPU-benefiting models (NeuralProphet) onto fractional T4 slots while stats/ML run on CPU.
+    # These knobs feed engines/ray_io.plan_cluster + calibrate_gpu_fraction; they are inert unless
+    # python_runtime == "ray".
     #
-    # Autoscaling (D17 reversal). The B4 design shipped a *fixed*-size cluster ("deterministic
-    # sizing, not autoscaling"). The overnight 100k run showed that is the wrong default for a
-    # bursty, embarrassingly-parallel fleet: a fixed pool can neither grow to chew a deep task queue
-    # nor shrink the expensive T4 pool when idle. So autoscaling is now the default (ray_autoscale):
-    # each pool scales in [min, max] driven by Ray's pending-task demand. Determinism is preserved a
-    # better way: the whole spec (the flag, the per-pool min/max, and the fixed-size-equivalent the
-    # fan-out implies) is a pure function of the config, snapshotted into run_id + job_telemetry.
-    # ray_autoscale=False restores the proven fixed-size path. NOTE: under autoscaling the Vertex
-    # SDK ignores a pool's node_count (it starts at min_replica_count and scales to max); the
-    # derived per-pool node count is therefore the *initial* size only for the fixed path, and
-    # telemetry otherwise.
+    # Autoscaling. Autoscaling is the default (ray_autoscale): each pool scales in [min, max] driven
+    # by Ray's pending-task demand, so a pool can grow to chew a deep task queue and shrink the
+    # expensive T4 pool when idle — the right default for a bursty, embarrassingly-parallel fleet
+    # where a fixed pool can do neither. Determinism is preserved because the whole spec (the flag,
+    # the per-pool min/max, and the fixed-size-equivalent the fan-out implies) is a pure function of
+    # the config, snapshotted into run_id + job_telemetry. ray_autoscale=False selects a fixed-size
+    # cluster instead. NOTE: under autoscaling the Vertex SDK ignores a pool's node_count (it starts
+    # at min_replica_count and scales to max); the derived per-pool node count is therefore the
+    # *initial* size only for the fixed path, and telemetry otherwise.
     #
     # Reuse opt-in: target an existing cluster by name (skip create + skip teardown). None (default)
     # = ephemeral per-run cluster (create → submit → delete-in-finally).
@@ -198,7 +197,7 @@ class ComputeConfig(BaseModel):
     # floor (n1-standard-4 = 15GB is rejected at create), but the *operational* floor is higher: a
     # 30GB/8-vCPU head (n1-standard-8) boots and reaches RUNNING yet its managed dashboard proxy
     # never comes up, so the JobSubmissionClient `/api/version` handshake 524s (30s timeout, 0
-    # bytes) — proven repeatedly. n1-standard-16 (60GB/16-vCPU) serves the handshake in <7s. So the
+    # bytes). n1-standard-16 (60GB/16-vCPU) serves the handshake in <7s. So the
     # head default is n1-standard-16; do not drop it below that or Ray job submission will hang.
     ray_head_machine_type: str = "n1-standard-16"
     ray_cpu_machine_type: str = "n1-standard-8"
@@ -210,9 +209,9 @@ class ComputeConfig(BaseModel):
     # unbounded cluster. n_gpu_nodes/n_cpu_nodes are derived, then clamped to [1, ray_max_nodes].
     ray_target_cells_per_slot: int = Field(default=8, gt=0)
     ray_max_nodes: int = Field(default=16, gt=0)
-    # Autoscaling (default-on; D17 reversal). When True each worker pool is created with a Vertex
+    # Autoscaling (default-on). When True each worker pool is created with a Vertex
     # AutoscalingSpec(min, max) and grows/shrinks with Ray's task demand; when False both pools are
-    # fixed at their derived node_count (the pre-reversal behavior). The per-pool min/max are
+    # fixed at their derived node_count. The per-pool min/max are
     # resolved offline in plan_cluster and snapshotted into run_id + job_telemetry, so an autoscaled
     # run stays as reproducible/auditable as a fixed one.
     ray_autoscale: bool = True
@@ -231,10 +230,10 @@ class ComputeConfig(BaseModel):
     gpu_calibration_samples: int = Field(default=3, gt=0)
     gpu_safety_margin: float = Field(default=1.3, gt=1.0)
     # How the Ray driver reads the source panel. Both paths hit the SAME BigQuery Storage Read API
-    # (no query slots, Q3 parity with Spark) and yield the SAME driver-side pandas panel, so the
+    # (no query slots, matching Spark) and yield the SAME driver-side pandas panel, so the
     # downstream fan-out is byte-identical either way — this knob only chooses the client:
     #   driver_collect (default) : google-cloud-bigquery-storage BigQueryReadClient, assembling the
-    #                              Arrow streams. The proven path (@gpu smoke + 100k run use it).
+    #                              Arrow streams. The default, known-good path.
     #   ray_data                 : ray.data.read_bigquery(project_id=, dataset=), the Ray-native
     #                              reader (same Storage Read API underneath), then .to_pandas().
     #                              Opt-in — the Ray-native ingest path, kept off by default so the
@@ -270,7 +269,7 @@ class ComputeConfig(BaseModel):
 
 
 class RunConfig(BaseModel):
-    """A complete, validated, frozen run specification (DESIGN §9)."""
+    """A complete, validated, frozen run specification."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -281,7 +280,7 @@ class RunConfig(BaseModel):
     #   explode : cross-join series × model, key = (ts_id, model_type); independent cells (hero).
     #   multi   : one serverless batch per model family (submitted by the CLI submit helper).
     #   naive   : group by ts_id only, sequential model loop — the straggler anti-pattern, for
-    #             demonstrating why explode's per-cell fan-out matters (DESIGN §2.1). Small scales.
+    #             demonstrating why explode's per-cell fan-out matters. Small scales.
     spark_method: Literal["explode", "multi", "naive"] | None = None
     models: list[str] = Field(min_length=1)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
@@ -319,7 +318,7 @@ class RunConfig(BaseModel):
             )
 
         # 3. Learned ensembles need backtest OOF. If backtest is OFF, drop them with a
-        #    warning rather than failing the whole run (DESIGN §5.2) — so the normalized
+        #    warning rather than failing the whole run — so the normalized
         #    config that lands in the registry honestly reflects what will run.
         if self.ensemble.enabled and not self.backtest.enabled:
             learned = [s for s in self.ensemble.strategies if s in LEARNED_STRATEGIES]
@@ -343,7 +342,7 @@ class RunConfig(BaseModel):
 
 @dataclass(frozen=True)
 class Fanout:
-    """Dry-run estimate of the work a run will schedule (DESIGN §11)."""
+    """Dry-run estimate of the work a run will schedule."""
 
     n_series: int | None  # None = unlimited (unknown until the data is read)
     n_models: int
@@ -372,7 +371,7 @@ def load_config(path: str | Path) -> RunConfig:
 
     All failure modes (missing file, bad JSON, invalid schema) surface as a single
     ``ConfigError`` with a clear message, so callers fail fast and never log an
-    invalid run (DESIGN §9).
+    invalid run.
     """
     p = Path(path)
     try:

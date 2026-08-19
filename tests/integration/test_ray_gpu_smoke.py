@@ -1,8 +1,8 @@
-"""Live fixed-size T4 Vertex Ray smoke (BUILD B4, ``@gpu``).
+"""Live fixed-size T4 Vertex Ray smoke (``@gpu``).
 
 Runs a mixed ``python_runtime="ray"`` config end-to-end through :func:`scale_forecasting.main.run`
 against live GCP: a **fixed-size T4 Vertex Ray cluster** (sized deterministically from the run's
-fan-out, no autoscaling — DESIGN §11.1/D17) runs the Python-runtime models in parallel with the
+fan-out, no autoscaling) runs the Python-runtime models in parallel with the
 in-BigQuery native engine, all under one shared ``run_id`` / one ``run_registry`` header. The point
 Spark can't reach: NeuralProphet cells pack onto a **fractional** T4 while stats/ML cells run on CPU
 (heterogeneous routing), and the calibrated GPU fraction + fixed cluster plan are stamped to the
@@ -20,7 +20,7 @@ Asserts:
 * the ephemeral cluster is **gone afterward** (``vertex_ray.list_ray_clusters`` no longer lists
   it) — the teardown-in-``finally`` guarantee, so no orphaned T4 bills.
 
-The **"resize for scale"** half of the B4 story — a larger ``series_limit`` yields a strictly larger
+The **"resize for scale"** half of the story — a larger ``series_limit`` yields a strictly larger
 fixed :func:`~scale_forecasting.engines.ray_io.plan_cluster` (more nodes, no autoscaling) — is
 proven offline+free by the ``plan_cluster`` sizing tests in ``tests/unit/test_ray_io.py``; this file
 is the one authorized *live* run.

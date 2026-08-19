@@ -1,10 +1,10 @@
-"""Offline tests for the Dataproc submit helper (BUILD B2, ``scale_forecasting.submit``).
+"""Offline tests for the Dataproc submit helper (``scale_forecasting.submit``).
 
 No network: the pure batch-spec assembly (:func:`build_batch`), the family-split that drives the
 ``multi`` method (:func:`split_models_by_family`), the ``n_series`` scale override, infra
 resolution (:class:`BatchInfra`), and the batch-id slug are all exercised against real
 ``RunConfig``/``Settings`` objects. The live ``create_batch`` path is covered by the ``@gcp``
-serverless smoke in B2.2.
+serverless smoke.
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ def test_build_batch_without_max_executors_sets_no_cap() -> None:
     assert "spark.dynamicAllocation.maxExecutors" not in dict(batch.runtime_config.properties)
 
 
-def test_build_batch_defaults_omit_arc_b_flags() -> None:
+def test_build_batch_defaults_omit_oncluster_flags() -> None:
     # Standalone submit (no models subset, header-owning) must build the exact arg list it always
     # did — no --models / --manage-header — so existing batches and callers are byte-stable.
     batch = build_batch(
@@ -159,7 +159,7 @@ def test_build_batch_defaults_omit_arc_b_flags() -> None:
     assert "--manage-header" not in args
 
 
-def test_build_batch_appends_arc_b_flags_when_non_default() -> None:
+def test_build_batch_appends_oncluster_flags_when_non_default() -> None:
     # main.run's contributor launch: restrict the executed subset + hand header ownership to main.
     batch = build_batch(
         infra=_infra(),
@@ -207,14 +207,14 @@ def test_split_single_family_is_one_group() -> None:
     assert split_models_by_family(cfg) == {"statistical": ["theta", "holtwinters"]}
 
 
-# --- submit_multi: one shared run_id + header (C3) ------------------------------
+# --- submit_multi: one shared run_id + header ----------------------------------
 
 
 def _patch_multi(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stub submit_multi's GCP seams (header I/O + per-child submit); capture every call.
 
     Returns a dict the test inspects: ``header`` (write/finalize calls), ``children`` (one entry per
-    submit_batch call with the args C3 cares about).
+    submit_batch call with the args the multi path cares about).
     """
     from scale_forecasting import submit
     from scale_forecasting.registry import bq
@@ -311,7 +311,7 @@ def test_submit_multi_finalizes_failed_and_reraises(monkeypatch: pytest.MonkeyPa
 
 def test_submit_multi_n_series_keeps_one_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
     # The scale override is applied once before hashing, so all children still share one run_id
-    # (and it differs from the un-overridden id — the scale is part of the config, G3).
+    # (and it differs from the un-overridden id — the scale is part of the config).
     from scale_forecasting import submit
     from scale_forecasting.registry.ids import make_run_id
 

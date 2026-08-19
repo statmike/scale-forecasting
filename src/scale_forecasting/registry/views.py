@@ -1,4 +1,4 @@
-"""Analyst-facing SQL views over the registry (CONTRACTS §4, DESIGN §8.2).
+"""Analyst-facing SQL views over the registry.
 
 The three-tier registry stores raw rows; a data scientist reviewing a run shouldn't have to
 re-derive the same roll-ups every time. These views are the *curated read surface* — the point
@@ -21,11 +21,11 @@ Two views, matched to the two questions a run prompts:
   where a backtest populated them. The entry point for "is this model worth keeping" before
   ensembling. ``ensemble_id`` is NULL for base models (so they group exactly as before) and the
   ``EnsembleConfig`` digest for ensemble pseudo-models — so two ensemble configs scored under one
-  ``run_id`` keep their ``ensemble_<strategy>`` rows distinct instead of collapsing into one (C4).
+  ``run_id`` keep their ``ensemble_<strategy>`` rows distinct instead of collapsing into one.
 
 ``JSON_VALUE`` reads scalars straight out of the native ``JSON`` ``job_telemetry`` column (the
 registry is native BigQuery, so the column is the real ``JSON`` type — ``JSON_VALUE`` works on it
-unchanged; see ``ddl.py``, D19). Views tolerate a NULL ``job_telemetry`` (runs before this column,
+unchanged; see ``ddl.py``). Views tolerate a NULL ``job_telemetry`` (runs before this column,
 or whose telemetry capture was skipped): the unpacked fields come back NULL, the row still renders.
 
 Public surface: ``VIEW_NAMES``, ``render_create_views``.

@@ -1,8 +1,8 @@
-"""Engine dispatch for the Dataproc Serverless forecast batches (BUILD B2).
+"""Engine dispatch for the Dataproc Serverless forecast batches.
 
 Dataproc's ``main_python_file_uri`` must be a single ``gs://`` file that it runs as ``__main__``
 (no package context — relative imports would ``ImportError``), so the batch's *main file* is the
-standalone :mod:`spark_main` shim (``src/spark_main.py``), which absolute-imports :func:`main` here.
+standalone `spark_main` shim (``src/spark_main.py``), which absolute-imports `main` here.
 This module is the in-package dispatch logic it calls — imported as a submodule from the
 ``python_file_uris`` zip (a zip of ``src/``, supplied at RUNTIME, never baked into the container
 image — the same code-delivery pattern the seed job uses, see ``modules/seed``). It loads the run
@@ -12,13 +12,13 @@ Flow on the driver:
 
 1. Parse ``--engine`` (which Spark method to run) + ``--config-uri`` (the run config, staged to GCS
    as JSON by the submit helper — the JSON *is* the reproducibility record) + the ``--sf-*`` infra
-   args, which :func:`~scale_forecasting._infra_args.export_infra_env` promotes to ``os.environ``
+   args, which `export_infra_env` promotes to ``os.environ``
    before anything resolves ``Settings`` (Dataproc rejects driver-env, so args are the delivery
-   path — see :mod:`._infra_args`).
-2. ``load_config`` the JSON into a validated, frozen :class:`~scale_forecasting.config.RunConfig`.
+   path — see `_infra_args`).
+2. ``load_config`` the JSON into a validated, frozen `RunConfig`.
 3. Call the engine's ``run(cfg, models=..., manage_header=...)``.
 
-``--models`` / ``--manage-header`` carry the Arc B contract on-cluster (see :func:`main.run`):
+``--models`` / ``--manage-header`` carry the on-cluster contract (see `main.run`):
 ``--models m1,m2`` restricts the executed subset (the staged config's ``run_id`` is unchanged, so
 both runtimes share it) and ``--manage-header false`` puts the engine in contributor mode (``main``
 owns the single shared header). Both are optional — absent, the engine runs its standalone lifecycle
@@ -79,13 +79,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--models",
         default=None,
-        help="optional comma-separated executed subset (Arc B); absent runs all cfg.models",
+        help="optional comma-separated executed subset; absent runs all cfg.models",
     )
     p.add_argument(
         "--manage-header",
         default="true",
         choices=("true", "false"),
-        help="false = contributor mode; main.run owns the shared header (Arc B)",
+        help="false = contributor mode; main.run owns the shared header",
     )
     add_infra_args(p)
     ns = p.parse_args(argv)

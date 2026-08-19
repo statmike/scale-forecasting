@@ -1,4 +1,4 @@
-"""Offline tests for the smoke-forecast launcher (Arc B, ``smoke_run``).
+"""Offline tests for the smoke-forecast launcher (``smoke_run``).
 
 No Spark, no GCP: the launcher parses ``--config-uri`` + the ``--sf-*`` infra args (exporting them
 to ``os.environ`` so env-based ``Settings`` resolves), loads a local config, and calls

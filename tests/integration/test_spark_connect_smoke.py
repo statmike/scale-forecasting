@@ -1,4 +1,4 @@
-"""Live Spark Connect smoke (BUILD B5 demo arc, ``@spark`` + ``@gcp``).
+"""Live Spark Connect smoke (``@spark`` + ``@gcp``).
 
 Drives :func:`scale_forecasting.engines.spark_explode.run` over a **Dataproc Spark Connect**
 endpoint from this process — the notebook path — instead of submitting a remote Dataproc batch. It

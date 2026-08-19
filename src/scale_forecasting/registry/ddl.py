@@ -1,7 +1,6 @@
-"""CREATE TABLE DDL for the registry + example data (CONTRACTS §4, DESIGN §8, D19).
+"""CREATE TABLE DDL for the registry + example data.
 
-Six tables are the source of truth for the whole system; the column definitions below are
-verbatim from CONTRACTS §4. Storage format is split by role (D19):
+Six tables are the source of truth for the whole system. Storage format is split by role:
 
 - The four **run-collection** tables (``run_registry``, ``forecast_metadata``,
   ``forecast_predictions``, ``backtest_oof``) are always **native BigQuery**. Native gives us
@@ -14,7 +13,7 @@ verbatim from CONTRACTS §4. Storage format is split by role (D19):
   on either storage. The engines read both transparently through BigQuery's table interface.
 
 Rendering is a pure string operation (no BigQuery client), so it is snapshot-tested
-offline; ``registry/bq.ensure_tables`` (Arc B) executes what ``render_deployment_ddl`` renders.
+offline; ``registry/bq.ensure_tables`` executes what ``render_deployment_ddl`` renders.
 
 The ``JSON`` columns use the native ``JSON`` type (only the native registry carries them; the
 Iceberg source table has none). The row assemblers in ``bq.py`` serialize JSON text, which a
@@ -32,7 +31,7 @@ Public surface: ``TABLE_NAMES``, ``SOURCE_TABLE_ICEBERG``, ``SOURCE_TABLE_NATIVE
 
 from __future__ import annotations
 
-# Table bodies: columns + PARTITION BY + CLUSTER BY, verbatim from CONTRACTS §4.
+# Table bodies: columns + PARTITION BY + CLUSTER BY.
 # `{d}` is the dataset ref (`project.dataset` or `dataset`). No trailing semicolon —
 # the renderer appends the OPTIONS clause and the semicolon.
 _TABLE_BODIES: dict[str, str] = {
@@ -105,8 +104,8 @@ PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",
 }
 
-# The four collection tables above are the run registry. They are ALWAYS native BigQuery
-# (D19): native supports the JSON column type (so raw_config/job_telemetry/quantiles/best_params
+# The four collection tables above are the run registry. They are ALWAYS native BigQuery:
+# native supports the JSON column type (so raw_config/job_telemetry/quantiles/best_params
 # are real JSON, not STRING) and WRITE_TRUNCATE (so a reseed is a clean truncate, not a
 # streaming-buffer-bounded DELETE). No BigLake connection or warehouse bucket is needed for them.
 _REGISTRY_TABLES: tuple[str, ...] = tuple(_TABLE_BODIES)
@@ -185,7 +184,7 @@ def render_migrations(dataset: str) -> dict[str, str]:
 
 
 def _iceberg_options(table_name: str, warehouse_uri: str) -> str:
-    """The OPTIONS block that makes a table a managed Iceberg table (DESIGN §8)."""
+    """The OPTIONS block that makes a table a managed Iceberg table."""
     storage_uri = f"{warehouse_uri.rstrip('/')}/{table_name}"
     return (
         "OPTIONS (\n"
@@ -212,7 +211,7 @@ def render_create_tables(
         warehouse_uri: GCS warehouse root (e.g. ``gs://bucket/warehouse``); required
             when ``iceberg`` is True.
         iceberg: when True (default) render managed-Iceberg DDL; when False render
-            plain native BigQuery tables (the D1 fallback, or for a BQ emulator).
+            plain native BigQuery tables (the native-BigQuery fallback, or for a BQ emulator).
 
     Every statement is idempotent (``CREATE TABLE IF NOT EXISTS``).
     """
@@ -248,7 +247,7 @@ def render_deployment_ddl(
     connection: str,
     warehouse_uri: str,
 ) -> dict[str, str]:
-    """Render the CREATE DDL for a real deployment: native registry + both source variants (D19).
+    """Render the CREATE DDL for a real deployment: native registry + both source variants.
 
     The storage policy is fixed here so callers don't juggle a per-table flag:
 

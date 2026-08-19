@@ -303,7 +303,7 @@ comment for what and why. `container` owns the Artifact Registry repo for the sh
 runtime image **and builds + pushes it on apply** (via `docker/cloudbuild.yaml`, `build_image`
 toggle), so one apply fills the repo the seed/engines pull from; `network` provides the VPC + subnet (Private
 Google Access) that serverless compute requires; `seed` submits the gated Dataproc Serverless
-batch that materializes the example dataset (BUILD B0.4).
+batch that materializes the example dataset.
 
 **Table schemas live in Python, not here.** The five registry/data tables are defined once in
 `src/scale_forecasting/registry/ddl.py` and created by `registry.bq.ensure_tables()` at run

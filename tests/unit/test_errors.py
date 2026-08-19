@@ -1,4 +1,4 @@
-"""Tests for the error taxonomy and logger factory (CONTRACTS §0)."""
+"""Tests for the error taxonomy and logger factory."""
 
 from __future__ import annotations
 

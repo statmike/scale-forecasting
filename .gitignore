@@ -53,9 +53,8 @@ spikes/
 # NeuralProphet / PyTorch-Lightning training artifacts (written to CWD on fit)
 lightning_logs/
 
-# Working-session files — kept locally, never shipped in the product repo.
-# CLAUDE.md stays on disk so it auto-loads for AI/dev contributors, but is not tracked;
-# NOTES.md (the internal build log) lives in the control tower, not here.
+# Local-only working files — never tracked. CLAUDE.md stays on disk so it auto-loads for
+# AI/dev contributors; NOTES.md is a scratch build log.
 CLAUDE.md
 NOTES.md
 

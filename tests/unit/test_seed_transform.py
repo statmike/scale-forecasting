@@ -1,4 +1,4 @@
-"""Tests for the pure seed shaping transform (``data_gen.seed_spark._to_source_rows``, B0.4).
+"""Tests for the pure seed shaping transform (``data_gen.seed_spark._to_source_rows``).
 
 The Spark seed job's only non-trivial logic that isn't already covered by the generator tests is
 the reconciliation from the generator frame (``ts_id, archetype, ds(datetime64[ns]), y``) to the

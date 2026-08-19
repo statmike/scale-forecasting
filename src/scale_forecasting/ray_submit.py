@@ -1,32 +1,32 @@
-"""Submit a forecast run to Ray on Vertex AI (BUILD B4) — the autoscaling-cluster launcher.
+"""Submit a forecast run to Ray on Vertex AI — the autoscaling-cluster launcher.
 
-The Ray analog of :mod:`~scale_forecasting.submit`: the ``[ray]``-extra, ADC-authenticated helper
-that turns a validated :class:`~scale_forecasting.config.RunConfig` into a run on an **autoscaling**
-Vertex Ray cluster (DESIGN §11.1 / D17 — reversed post-demo; ``ray_autoscale=False`` restores fixed
+The Ray analog of `submit`: the ``[ray]``-extra, ADC-authenticated helper
+that turns a validated `RunConfig` into a run on an **autoscaling**
+Vertex Ray cluster (``ray_autoscale=False`` selects fixed
 sizing). It owns the cluster lifecycle the way ``submit`` owns the Dataproc batch; the on-cluster
 compute is
-:func:`~scale_forecasting.engines.ray_engine.run`, reached through the
-:mod:`~scale_forecasting.ray_entry` Jobs entrypoint.
+`run`, reached through the
+`ray_entry` Jobs entrypoint.
 
-What :func:`submit_ray` does:
+What `submit_ray` does:
 
-1. **Size the cluster to the run's fan-out** — :func:`.ray_io.plan_cluster` turns the config into a
+1. **Size the cluster to the run's fan-out** — `plan_cluster` turns the config into a
    ``RayClusterPlan`` (a GPU worker pool for NeuralProphet + a CPU worker pool for everything else).
    By default each pool carries a Vertex ``AutoscalingSpec(min, max)`` and scales with Ray's task
    demand; ``ray_autoscale=False`` gives each pool a fixed ``node_count`` and no spec. Either way
    the whole spec is a pure product of the config — logged and stamped to the run.
 2. **Stage the run config** — write the validated config to ``gs://<code>/runs/<run_id>.json`` and
-   pass it as ``--config-uri`` (the lossless reproducibility record, G3 — same contract as Spark).
+   pass it as ``--config-uri`` (the lossless reproducibility record — same contract as Spark).
 3. **Provision (ephemeral default) or target (reuse opt-in) the cluster** — ephemeral:
    ``create_ray_cluster`` from the planned spec, run, then ``delete_ray_cluster`` in a
    ``finally`` (teardown guaranteed even on failure); reuse: ``compute.ray_cluster_name`` /
    ``cluster_name=`` targets a standing cluster by name and skips both create and delete.
 4. **Submit the on-cluster driver** — a Ray Job via
-   :class:`~ray.job_submission.JobSubmissionClient` (``vertex_ray://<dashboard>``) whose entrypoint
+   `JobSubmissionClient` (``vertex_ray://<dashboard>``) whose entrypoint
    is ``python -m scale_forecasting.ray_entry`` with the same ``--config-uri`` / ``--models`` /
    ``--manage-header`` / ``--sf-*`` contract the Spark entry uses. Current ``src/`` ships as the
-   job's ``runtime_env`` working dir (runtime code delivery, never baked into the image — the G1
-   seam), with ``requirements.txt`` for the on-cluster deps.
+   job's ``runtime_env`` working dir (runtime code delivery, never baked into the image — the same
+   code runs locally and in the cloud), with ``requirements.txt`` for the on-cluster deps.
 5. **Poll to terminal + stamp telemetry** — with ``wait``, block until the job is terminal, stamp a
    Ray analog of Spark's ``job_telemetry`` (cluster name, node counts, machine/accelerator types,
    calibrated-vs-sizing GPU fraction, wall-clock, job id) into ``run_registry.job_telemetry`` via
@@ -110,7 +110,7 @@ _DASHBOARD_CONNECT_BACKOFF_SECONDS = 15
 
 @dataclass(frozen=True)
 class RayInfra:
-    """Vertex-Ray infra identity — what launching a cluster needs beyond :class:`Settings`.
+    """Vertex-Ray infra identity — what launching a cluster needs beyond `Settings`.
 
     Resolved from ``SF_*`` env (parity with ``Settings`` / ``BatchInfra``) or ``terraform output``.
 
@@ -209,11 +209,11 @@ def build_entrypoint(
 ) -> str:
     """The Ray Job entrypoint shell command — ``python -m scale_forecasting.ray_entry ...`` (pure).
 
-    The Ray analog of :func:`~scale_forecasting.submit.build_batch`'s arg list, as a single shell
+    The Ray analog of `build_batch`'s arg list, as a single shell
     string (what the Jobs API runs on the cluster head). Carries the same contract: ``--config-uri``
     (the staged config, whose digest is the shared ``run_id``), the ``--sf-*`` infra identity, and
-    — only when non-default — ``--models m1,m2`` (executed subset, Arc B) and ``--manage-header
-    false`` (contributor mode; :func:`main.run` owns the shared header). Defaults omit the Arc B
+    — only when non-default — ``--models m1,m2`` (executed subset) and ``--manage-header
+    false`` (contributor mode; `main.run` owns the shared header). Defaults omit these
     flags so a standalone submit builds the plain command.
     """
     parts = ["python", "-m", "scale_forecasting.ray_entry", "--config-uri", config_uri]
@@ -237,7 +237,7 @@ def _requirements_packages() -> list[str]:
 
     The uv-exported file is ``name==version [; marker]`` lines interleaved with ``# via`` comment
     blocks; we keep only the requirement lines and skip anything whose project name is in
-    :data:`_CLUSTER_PROVIDED` (see its note — Ray must come from the image, not pip).
+    `_CLUSTER_PROVIDED` (see its note — Ray must come from the image, not pip).
     """
     packages: list[str] = []
     for raw in _REQUIREMENTS.read_text().splitlines():
@@ -257,14 +257,15 @@ def build_runtime_env() -> dict[str, Any]:
 
     Delivers code at RUNTIME the way the Spark path uploads a ``src/`` zip: ``working_dir`` is the
     package root (so ``python -m scale_forecasting.ray_entry`` imports the code that was just
-    submitted, not anything baked into the image — the G1 "same code" seam), and ``pip`` is the
-    requirements package **list minus Ray** (:func:`_requirements_packages`): a Vertex prebuilt
+    submitted, not anything baked into the image — the "same code local and in the cloud" seam), and
+    ``pip`` is the
+    requirements package **list minus Ray** (`_requirements_packages`): a Vertex prebuilt
     image gains our deps, while Ray itself stays the image's version rather than being swapped by a
     conflicting pip pin. With a custom node image that already bundles them the pip step is a fast
     no-op, so it is always kept for safety.
 
     The list leads with ``--extra-index-url`` for the PyTorch CUDA wheels
-    (:data:`_TORCH_CUDA_INDEX`, mirroring docker/Dockerfile): the x86_64/linux torch pin is a
+    (`_TORCH_CUDA_INDEX`, mirroring docker/Dockerfile): the x86_64/linux torch pin is a
     ``+cu126`` local build that only resolves from that index, so without it the on-cluster pip
     fails the whole job at env setup. pip reads the option line from the requirements file Ray
     materializes; PyPI stays the primary index.
@@ -286,7 +287,7 @@ def extract_ray_telemetry(
 ) -> dict[str, Any]:
     """Flatten the plan + cluster into the JSON-able telemetry dict stamped on the header (pure).
 
-    The Ray analog of :func:`~scale_forecasting.submit.extract_job_telemetry`, answering the same
+    The Ray analog of `extract_job_telemetry`, answering the same
     operability questions — *how big was the pool (and its elastic bounds), what did it cost in
     wall-clock, and what sizing produced it* — so a Ray run is as auditable on ``v_run_summary`` as
     a Spark one. Reads only fields already on the ``plan`` and the ``cluster`` object; every cluster
@@ -303,7 +304,7 @@ def extract_ray_telemetry(
         "cpu_node_count": plan.cpu_node_count,
         "gpu_node_count": plan.gpu_node_count,
         "total_worker_nodes": plan.total_worker_nodes,
-        # Elastic spec (D17 reversal): the flag + per-pool bounds the cluster was created with, so
+        # Elastic spec: the flag + per-pool bounds the cluster was created with, so
         # v_run_summary shows whether/how the pools autoscaled. node_count above is the derived
         # fixed-size-equivalent (the reference size; under autoscaling the pool starts at min).
         "autoscale": plan.autoscale,
@@ -329,9 +330,9 @@ def extract_ray_telemetry(
 
 
 def _stage_config(cfg: RunConfig, run_id: str, infra: RayInfra) -> str:
-    """Write the validated config to ``gs://<code>/runs/<run_id>.json`` and return the URI (G3).
+    """Write the validated config to ``gs://<code>/runs/<run_id>.json`` and return the URI.
 
-    Byte-for-byte the Spark staging contract (:func:`~scale_forecasting.submit._stage_config`) so a
+    Byte-for-byte the Spark staging contract (`_stage_config`) so a
     mixed run stages one config the same way regardless of runtime — the JSON *is* the shared
     reproducibility record, and its digest is the shared ``run_id``.
     """
@@ -352,7 +353,7 @@ def _stage_config(cfg: RunConfig, run_id: str, infra: RayInfra) -> str:
 
 
 def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]:
-    """Build the worker ``Resources`` list — one entry per non-empty pool (D17, reversed post-demo).
+    """Build the worker ``Resources`` list — one entry per non-empty pool.
 
     A GPU pool (``accelerator_type``/``accelerator_count``) for NeuralProphet and a CPU pool for
     everything else. When ``plan.autoscale`` (the default) each pool carries a Vertex
@@ -360,7 +361,7 @@ def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]
     with task demand — note the SDK ignores ``node_count`` here (the pool starts at ``min``), but we
     still pass the derived count as the documented fixed-size-equivalent. When ``autoscale``
     is False both pools are fixed at their derived ``node_count`` with **no** ``autoscaling_spec``
-    (the pre-reversal deterministic path). A pool with zero planned nodes is omitted (Vertex rejects
+    (a deterministic fixed-size path). A pool with zero planned nodes is omitted (Vertex rejects
     a zero-node worker type). The optional custom node image is applied to every pool so the
     on-cluster code sees the bundled deps.
     """
@@ -409,8 +410,8 @@ def _init_vertex(
     location — they read them from the SDK's global config, which else falls back to the ambient
     ``GOOGLE_CLOUD_PROJECT`` / gcloud default. That would silently provision the cluster in the
     wrong project when the deployment's project differs from the environment's (Composer, local dev,
-    any multi-project setup). Binding it from :class:`Settings` here keeps the same code targeting
-    the configured project everywhere (G1) — never whatever project the shell happens to point at.
+    any multi-project setup). Binding it from `Settings` here keeps the same code targeting
+    the configured project everywhere — never whatever project the shell happens to point at.
 
     ``region`` is explicit (not ``settings.region``) because the *cluster* may hop across regions on
     a capacity stockout while the *data plane* stays pinned to ``settings.region`` — so every
@@ -476,11 +477,11 @@ def _create_cluster(
     ``cluster_resource_name``.
 
     Head node is a single small CPU box (no accelerator, never autoscaled); workers are the planned
-    GPU/CPU pools (:func:`_worker_resources`), each with a Vertex ``AutoscalingSpec`` by default
-    (D17 reversed post-demo) or a fixed ``node_count`` when ``ray_autoscale=False``. Labels tag the
+    GPU/CPU pools (`_worker_resources`), each with a Vertex ``AutoscalingSpec`` by default
+    or a fixed ``node_count`` when ``ray_autoscale=False``. Labels tag the
     run.
 
-    Connectivity follows :class:`RayInfra`'s three modes (first set wins): a PSC-I network
+    Connectivity follows `RayInfra`'s three modes (first set wins): a PSC-I network
     attachment (``psc_interface_config`` — the supported private path, the only mode whose managed
     dashboard/``JobSubmissionClient`` handshake is reachable off-cluster on this org), else VPC
     peering (``network=``), else a public endpoint (both unset — Vertex's default). PSC-I and
@@ -587,18 +588,18 @@ def _create_cluster_across_regions(
     """Create the cluster, walking ``regions`` in order until one has T4 capacity.
 
     Returns ``(cluster_resource_name, region)`` for the region that succeeded. On a *regional
-    capacity* failure (:func:`_is_capacity_error`) the stocked-out attempt's (deterministic)
+    capacity* failure (`_is_capacity_error`) the stocked-out attempt's (deterministic)
     resource is torn down and the next region tried; any *other* error (bad machine type, missing
     quota, permission) is re-raised at once because another region won't fix it. Exhausting every
-    region raises :class:`EngineError` naming the regions tried.
+    region raises `EngineError` naming the regions tried.
 
     The capacity signal is read from the failed resource's ``error.message`` (via
-    :func:`_cluster_error_message`) *and* the raised exception string — the SDK's exception is a
+    `_cluster_error_message`) *and* the raised exception string — the SDK's exception is a
     generic "returned an error" while the "Resources are insufficient in region" text lives only on
     the resource, so classifying on the exception alone would never detect a stockout.
 
     Only the cluster hops — the data plane (config staging, registry writes) stays in
-    ``settings.region``. The SDK is re-pinned to each attempted region via :func:`_init_vertex`
+    ``settings.region``. The SDK is re-pinned to each attempted region via `_init_vertex`
     just before the create, so ``vertex_ray`` provisions there.
     """
     last_exc: Exception | None = None
@@ -687,7 +688,7 @@ def _is_dashboard_warmup_error(exc: Exception) -> bool:
 def _is_auth_expiry_error(exc: Exception) -> bool:
     """True if ``exc`` is an expired-credential ``401`` from the dashboard proxy (refresh & retry).
 
-    Distinct from :func:`_is_dashboard_warmup_error`, which treats a 401 as a *connect-time* fault
+    Distinct from `_is_dashboard_warmup_error`, which treats a 401 as a *connect-time* fault
     that won't fix itself by waiting (right — spinning the warm-up loop on bad auth is pointless).
     During a *long poll*, however, a 401 means something different: the ``vertex_ray://`` Jobs
     client caches an OAuth Bearer token minted at construction (~60-min TTL), so a run outliving the
@@ -757,7 +758,7 @@ def _submit_and_poll(
     retrying past the dashboard warm-up race), submits ``entrypoint`` with ``runtime_env`` (current
     ``src/`` + requirements), and returns ``(job_id, status, detail)``. ``detail`` is empty except
     on a ``FAILED`` terminal state, where it carries the driver's error message + log tail
-    (:func:`_fetch_job_failure_detail`) captured at the moment of failure — so the cause is recorded
+    (`_fetch_job_failure_detail`) captured at the moment of failure — so the cause is recorded
     even after the ``ml_job`` log stream ages out. Without ``wait`` the status is the immediate
     post-submit state (the caller skips telemetry + the terminal-state check).
     """
@@ -804,7 +805,7 @@ def _fetch_job_failure_detail(
     diagnosed by archaeology. The Jobs client already holds both facts: ``get_job_info().message``
     (the terminal error line) and ``get_job_logs()`` (the full driver stdout/stderr). Pull them at
     the moment of failure so the cause is captured in *our* log and folded into the raised
-    :class:`~scale_forecasting.errors.EngineError` — never dependent on a still-warm log stream.
+    `EngineError` — never dependent on a still-warm log stream.
     Every step is defensive: a diagnosis that itself fails must not mask the underlying job failure.
     """
     parts: list[str] = []
@@ -828,11 +829,11 @@ def _fetch_job_failure_detail(
 def _stamp_ray_telemetry(telemetry: dict[str, Any], run_id: str, settings: Settings) -> None:
     """Write the Ray telemetry dict to the run header's native JSON column (best-effort).
 
-    The pure :func:`extract_ray_telemetry` output → ``update_header(job_telemetry=<dict>)``. The
+    The pure `extract_ray_telemetry` output → ``update_header(job_telemetry=<dict>)``. The
     header column is a native ``JSON`` type whose query parameter serializes the value itself, so we
     pass the telemetry **dict** (not a pre-serialized string, which would double-encode). Wrapped so
     any failure (API error, header not yet written) is logged and swallowed: telemetry is a
-    nice-to-have overlay on an already-complete run, never a reason to fail it (CONTRACTS §3.3).
+    nice-to-have overlay on an already-complete run, never a reason to fail it.
     """
     from .registry import bq
 
@@ -856,10 +857,10 @@ def submit_ray(
 ) -> str:
     """Size, provision, run, and (ephemeral) tear down a Ray-on-Vertex forecast run; return job id.
 
-    The Ray analog of :func:`~scale_forecasting.submit.submit_batch`. Resolves infra from the
-    environment when not passed (G1), sizes an **autoscaling** cluster to the run's fan-out
-    (:func:`.ray_io.plan_cluster` — D17 reversed post-demo; ``ray_autoscale=False`` for fixed),
-    stages the full config to GCS (so its ``run_id`` matches :func:`main.run`'s), then runs the
+    The Ray analog of `submit_batch`. Resolves infra from the
+    environment when not passed, sizes an **autoscaling** cluster to the run's fan-out
+    (`plan_cluster`; ``ray_autoscale=False`` for fixed),
+    stages the full config to GCS (so its ``run_id`` matches `main.run`'s), then runs the
     lifecycle:
 
     * **ephemeral (default):** create the planned cluster → submit the on-cluster driver as a Ray
@@ -872,9 +873,9 @@ def submit_ray(
     ``n_series`` overrides ``series_limit`` at submit time (the scale knob — a different scale is a
     different fixed plan *and* a distinct ``run_id``/header, so each scale is its own queryable run;
     this is how "resize for a larger/smaller scale" is driven). ``models`` / ``manage_header`` carry
-    the Arc B contract: the full ``cfg`` is always staged (shared ``run_id``) while ``models``
+    the on-cluster contract: the full ``cfg`` is always staged (shared ``run_id``) while ``models``
     restricts the on-cluster executed subset and ``manage_header=False`` runs the engine in
-    contributor mode (:func:`main.run` owns the shared header). With ``wait`` a non-SUCCEEDED
+    contributor mode (`main.run` owns the shared header). With ``wait`` a non-SUCCEEDED
     terminal state raises so a failed run never exits 0; the telemetry stamp precedes the raise so a
     failed run still records its sizing.
     """
@@ -950,7 +951,7 @@ def submit_ray(
         return job_id
     finally:
         # Guaranteed teardown of an ephemeral cluster — even on a raised job *or a create that
-        # errored mid-provision* — mirroring the §10 all_done intent. teardown_target is set (to the
+        # errored mid-provision*. teardown_target is set (to the
         # deterministic path) for every ephemeral run and None for reuse, so a reused cluster is
         # left standing while a half-created ephemeral one is still cleaned up. _delete_cluster is
         # best-effort, so a target that never actually materialized is a harmless no-op.

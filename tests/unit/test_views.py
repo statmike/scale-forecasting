@@ -1,4 +1,4 @@
-"""Tests for the analyst-view renderer (CONTRACTS §4, DESIGN §8.2).
+"""Tests for the analyst-view renderer.
 
 Offline snapshot test: rendering is a pure string op, so we pin the exact SQL. If the view
 definitions change intentionally, regenerate the snapshot with SF_UPDATE_SNAPSHOTS=1.

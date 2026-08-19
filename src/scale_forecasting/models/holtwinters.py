@@ -1,6 +1,6 @@
 """Holt-Winters exponential smoothing (statsmodels).
 
-One model, one file (CONTRACTS §1). Runtime python, statistical family. No native
+One model, one file. Runtime python, statistical family. No native
 intervals — uses the base-class residual-quantile helper for its PI.
 """
 

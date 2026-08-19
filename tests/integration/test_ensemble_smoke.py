@@ -1,9 +1,9 @@
-"""Live ensemble-orchestration smoke (BUILD B5, ``@gcp``).
+"""Live ensemble-orchestration smoke (``@gcp``).
 
 Runs :func:`scale_forecasting.main.run` end-to-end against live GCP with **ensembles enabled**, and
-asserts the B5 contract the offline tests can't reach: after both engines join, the ensembler
+asserts the contract the offline tests can't reach: after both engines join, the ensembler
 blends the base forecasts (a true beyond-data forecast into ``forecast_predictions``), scores each
-consensus on the **backtest OOF window** (post-C2 the predictions have no actuals to join — the
+consensus on the **backtest OOF window** (the predictions have no actuals to join — the
 ensemble earns its metric on exactly the window the base models are scored on), and lands
 ``ensemble_*`` rows on the **same ``v_model_leaderboard``** as the base Spark + BigQuery models —
 under one shared ``run_id``, with a non-NULL ``mean_wape`` (i.e. the OOF-consensus scoring actually
@@ -23,12 +23,12 @@ in-BigQuery engine, so it carries the same spend + latency as the orchestration 
     SF_DATASET_ID=scale_forecasting \\
         uv run pytest -m gcp tests/integration/test_ensemble_smoke.py
 
-**Self-contained data.** Like the B3 native + Arc B orchestration smokes, this seeds its own tiny
+**Self-contained data.** Like the native and orchestration smokes, this seeds its own tiny
 univariate scratch ``source_series`` table and tears it down after — "the test owns its data".
 ``run_name`` varies per invocation so the deterministic ``run_id`` is unique (append-only cell
 tables can't be DELETE-d while buffered).
 
-The ensemble uses **calculated** strategies only (mean / median / inverse_error): post-C2 both the
+The ensemble uses **calculated** strategies only (mean / median / inverse_error): both the
 base Spark and BigQuery models forecast the same true future into ``forecast_predictions`` and
 score the same ``backtest_oof`` folds, so the calculated blends have overlapping base rows in both
 spaces. Scoring happens in OOF space (where ``y_true`` lives). (Learned strategies are covered by
@@ -147,7 +147,7 @@ def test_ensemble_orchestration_smoke(settings: Settings, scratch_source: str) -
     run_id = make_run_id(cfg)
     d = settings.dataset_ref
 
-    # One call: Spark ∥ BigQuery under one run_id, then B5 ensembles fire after the join.
+    # One call: Spark ∥ BigQuery under one run_id, then the ensembles fire after the join.
     returned = main.run(cfg)
     assert returned == run_id
 
@@ -187,7 +187,7 @@ def test_ensemble_orchestration_smoke(settings: Settings, scratch_source: str) -
         assert row.mean_wape is not None, f"{m} scored no metric — actuals join produced nothing"
         assert row.n_cells > 0, m
 
-    # C4 — two ensemble configs coexist under one run_id, distinctly keyed by ensemble_id. Re-run
+    # Two ensemble configs coexist under one run_id, distinctly keyed by ensemble_id. Re-run
     # the ensemble stage over the *same* base predictions with a different strategy set (the
     # standalone path, no base recompute). It must land under a *new* ensemble_id beside the first,
     # never overwriting it (append-only) and never colliding on model_type.

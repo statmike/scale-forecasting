@@ -1,6 +1,6 @@
 """Tests for the runtime router — partitioning a run's models by execution runtime.
 
-Covers CONTRACTS §6: ``split_by_runtime`` sends the BigQuery-native models
+``split_by_runtime`` sends the BigQuery-native models
 (``arima_plus``/``timesfm``) to the BQ engine and everything else to the Python
 runtime, preserving input order, and surfaces unknown names as ``ModelError``.
 """

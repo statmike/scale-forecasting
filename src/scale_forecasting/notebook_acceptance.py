@@ -10,7 +10,7 @@ It uses the Vertex AI **NotebookExecutionJob** API: submit a notebook to run hea
 poll to a terminal state, download the executed ``.ipynb`` from GCS, and assert no cell errored. The
 notebook runs in a **fresh, empty kernel**, so it relies entirely on the ``SF_*`` env baked into the
 template — the same identity a human gets when they open the template — which is why this harness
-and the human-open path validate the *same* thing (G1).
+and the human-open path validate the *same* thing.
 
 **Auth / endpoint choices** (learned from prior art, see docs/notebook_runtimes.md):
 
@@ -24,10 +24,10 @@ and the human-open path validate the *same* thing (G1).
 * The executed notebook lands at ``{gcsOutputUri}/{JOB_ID}/content.ipynb``.
 
 **Tiers** bound cost — most notebooks orchestrate real Dataproc/Ray compute, so the harness
-escalates deliberately (smoke → batch → full); see :data:`REGISTRY` and :func:`notebooks_for_tier`.
+escalates deliberately (smoke → batch → full); see `REGISTRY` and `notebooks_for_tier`.
 
-Public surface: :data:`REGISTRY`, :class:`AcceptanceResult`, :func:`run_acceptance`,
-:func:`notebooks_for_tier`, and a ``python -m scale_forecasting.notebook_acceptance`` CLI.
+Public surface: `REGISTRY`, `AcceptanceResult`, `run_acceptance`,
+`notebooks_for_tier`, and a ``python -m scale_forecasting.notebook_acceptance`` CLI.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def notebooks_for_tier(tier: str) -> list[NotebookSpec]:
     """Every notebook at ``tier`` or a cheaper one (cumulative), in registry order.
 
     ``smoke`` → the 3 BQ/local notebooks; ``batch`` → those + the 4 Dataproc ones; ``full`` →
-    all 8 (adds Ray). Raises :class:`EngineError` on an unknown tier so a CLI typo fails clearly.
+    all 8 (adds Ray). Raises `EngineError` on an unknown tier so a CLI typo fails clearly.
     """
     if tier not in _TIER_ORDER:
         raise EngineError(f"unknown tier {tier!r}; choose one of {', '.join(_TIER_ORDER)}")
@@ -128,10 +128,10 @@ class AcceptanceResult:
 class FanOutResult:
     """Outcome of a fire-and-forget notebook *submission* (no wait for completion).
 
-    Unlike :class:`AcceptanceResult`, this records only that the job was *created* — the notebook
+    Unlike `AcceptanceResult`, this records only that the job was *created* — the notebook
     runs on server-side afterwards. ``detail`` is empty on a clean submit, else the reason it could
     not be submitted (missing file, no template id, API error). ``executed_uri`` is where the
-    executed notebook *will* land once the job reaches SUCCEEDED (see :func:`download_executed`).
+    executed notebook *will* land once the job reaches SUCCEEDED (see `download_executed`).
     """
 
     name: str
@@ -160,7 +160,7 @@ _TERMINAL_STATES = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCEL
 # Synthetic (non-API) state: the job FAILED because GCP couldn't provision capacity — the Colab
 # runtime VM, or a Dataproc/Ray pool the notebook asked for. This is transient infra, not a defect
 # in the notebook or the product, so the acceptance test skips rather than fails on it. See
-# :func:`is_capacity_unavailable` for the signals; the harness rewrites FAILED → this before return.
+# `is_capacity_unavailable` for the signals; the harness rewrites FAILED → this before return.
 JOB_STATE_CAPACITY_UNAVAILABLE = "JOB_STATE_CAPACITY_UNAVAILABLE"
 
 # Substrings that mark a capacity/stockout failure (case-insensitive), drawn from the messages GCP
@@ -184,8 +184,8 @@ _CAPACITY_SIGNALS = (
 def is_capacity_unavailable(detail: str) -> bool:
     """True if a failure ``detail`` reads as a transient GCP capacity/stockout, not a real error.
 
-    Matched case-insensitively against :data:`_CAPACITY_SIGNALS`. Used by the harness to reclassify
-    a FAILED job (or in-cell error) as :data:`JOB_STATE_CAPACITY_UNAVAILABLE` so acceptance skips.
+    Matched case-insensitively against `_CAPACITY_SIGNALS`. Used by the harness to reclassify
+    a FAILED job (or in-cell error) as `JOB_STATE_CAPACITY_UNAVAILABLE` so acceptance skips.
     """
     low = detail.lower()
     return any(sig in low for sig in _CAPACITY_SIGNALS)
@@ -362,7 +362,7 @@ def run_acceptance(
     """Run each notebook headless on its template and collect per-notebook results.
 
     Submits, polls to terminal, downloads the executed notebook, and scans it for cell errors. One
-    notebook's failure never stops the others — every spec produces an :class:`AcceptanceResult`.
+    notebook's failure never stops the others — every spec produces an `AcceptanceResult`.
     ``template_ids`` maps ``TEMPLATE_MAIN`` to the runtime-template resource name Terraform outputs.
     ``run_label`` disambiguates concurrent runs' output paths + names.
     """
@@ -466,11 +466,11 @@ def run_fanout(
 ) -> list[FanOutResult]:
     """Submit every notebook headless and return immediately — do NOT wait for them to finish.
 
-    This is the presenter's fan-out: it fires one :func:`submit_job` per spec back-to-back (each
+    This is the presenter's fan-out: it fires one `submit_job` per spec back-to-back (each
     returns as soon as the job is *created*, ~1s), so all notebooks then run **concurrently
     server-side**, decoupled from this process — you can close the shell and watch them in the
-    Colab Enterprise Executions menu (:func:`executions_console_url`). Contrast
-    :func:`run_acceptance`, which polls each job to terminal because a *test* needs the verdict; a
+    Colab Enterprise Executions menu (`executions_console_url`). Contrast
+    `run_acceptance`, which polls each job to terminal because a *test* needs the verdict; a
     presenter just needs the jobs launched. One notebook's submit failure never stops the others.
     """
     if credentials is None:

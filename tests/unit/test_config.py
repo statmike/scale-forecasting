@@ -1,4 +1,4 @@
-"""Tests for config loading, validation, normalization, and fanout (DESIGN §9, CONTRACTS §6)."""
+"""Tests for config loading, validation, normalization, and fanout."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def test_minimal_config_is_valid_and_frozen() -> None:
 
 
 def test_full_config_round_trips_from_design_example() -> None:
-    # Mirrors the DESIGN §9 example config.
+    # Mirrors the documented example config.
     cfg = RunConfig(
         **_minimal_dict(
             run_name="example_daily_v1",
@@ -105,7 +105,7 @@ def test_gpu_fraction_float_in_range_ok() -> None:
     assert cfg.compute.gpu_fraction == 0.25
 
 
-# --- ray autoscaling bounds (D17 reversal) -------------------------------------
+# --- ray autoscaling bounds ----------------------------------------------------
 
 
 def test_ray_autoscale_defaults_on() -> None:
@@ -149,7 +149,7 @@ def test_ray_leaves_spark_method_none() -> None:
 
 
 def test_naive_spark_method_accepted() -> None:
-    # naive is a first-class Spark method (the straggler-demo anti-pattern, DESIGN §2.1).
+    # naive is a first-class Spark method (the straggler-demo anti-pattern).
     cfg = RunConfig(**_minimal_dict(python_runtime="spark", spark_method="naive"))
     assert cfg.spark_method == "naive"
 
@@ -162,7 +162,7 @@ def test_singular_strategy_shorthand_becomes_list() -> None:
 
 
 def test_learned_strategy_without_backtest_is_dropped_not_error() -> None:
-    # DESIGN §5.2: learned strategies need backtest ON; without it they're dropped
+    # Learned strategies need backtest ON; without it they're dropped
     # (logged), not fatal. Calculated strategies survive.
     cfg = RunConfig(
         **_minimal_dict(
@@ -184,7 +184,7 @@ def test_learned_strategy_with_backtest_survives() -> None:
     assert cfg.ensemble.strategies == ["median", "nnls"]
 
 
-# --- HPO config (C5) -----------------------------------------------------------
+# --- HPO config ----------------------------------------------------------------
 
 
 def test_hpo_defaults_are_off_and_fleetwide() -> None:

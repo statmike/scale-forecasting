@@ -1,4 +1,4 @@
-"""Tests for the Ray on-cluster driver (BUILD B4, ``scale_forecasting.engines.ray_engine``).
+"""Tests for the Ray on-cluster driver (``scale_forecasting.engines.ray_engine``).
 
 Two tiers, mirroring the pure/I-O seam:
 
@@ -96,7 +96,7 @@ def test_pool_cells_counts_series_times_models() -> None:
     assert ray_engine._pool_cells(pd.DataFrame(), cfg, [_CPU]) == 0  # empty panel
 
 
-# --- offline: Storage Read API read helpers (C-Ray, Q3) ------------------------
+# --- offline: Storage Read API read helpers ------------------------------------
 
 
 def _settings(**over: Any) -> Settings:
@@ -159,7 +159,7 @@ def test_limit_series_passthrough_when_unset() -> None:
 
 def test_limit_series_matches_spark_ordered_subset() -> None:
     # Parity with spark_io._limit_series: both keep the SAME first-N ordered distinct ids, so Ray
-    # and Spark run identical series at every scale (DESIGN §13.1). Ids ordered lexically.
+    # and Spark run identical series at every scale. Ids ordered lexically.
     src = pd.DataFrame(
         {
             "ts_id": ["s3", "s1", "s2", "s1", "s3", "s2"],
@@ -357,7 +357,7 @@ def _fake_runner(
     instead we swap the whole runner for one that emits a status row per ``(ts_id, model)`` cell
     without fitting a model or touching BigQuery. Returned closure is cloudpickle-able (Ray ships it
     to the worker). Every cell reports ``status="ok"`` so the run rolls up COMPLETED. The
-    ``params_by_model`` arg mirrors the real signature (C5 fleetwide HPO) — ignored here.
+    ``params_by_model`` arg mirrors the real signature (fleetwide HPO) — ignored here.
     """
 
     def _run(chunk: pd.DataFrame) -> pd.DataFrame:
@@ -425,7 +425,7 @@ def test_run_owner_mode_fans_all_cells_and_closes_header(
 def test_run_contributor_mode_skips_header_lifecycle(
     _local_ray: Any, _stubbed_engine: dict[str, Any]
 ) -> None:
-    # manage_header=False (Arc B): main.run owns the header, so the engine touches none of it.
+    # manage_header=False: main.run owns the header, so the engine touches none of it.
     cfg = _cfg(compute=_compute(use_gpu=False))
     ray_engine.run(cfg, manage_header=False)
 
@@ -439,7 +439,7 @@ def test_run_contributor_mode_skips_header_lifecycle(
 def test_run_honors_executed_subset(
     _local_ray: Any, _stubbed_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arc B hands only the Python-runtime subset; only those models become Ray cells.
+    # main.run hands only the Python-runtime subset; only those models become Ray cells.
     captured: dict[str, Any] = {}
 
     def _capturing_runner(

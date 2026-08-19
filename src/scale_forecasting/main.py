@@ -1,29 +1,28 @@
-"""Orchestrate one run end-to-end — Spark + BigQuery-native in parallel, one run_id (CONTRACTS §6).
+"""Orchestrate one run end-to-end — Spark + BigQuery-native in parallel, one run_id.
 
-This is the top of the run spine (BUILD Arc B). A single config can mix Python-runtime models (run
+A single config can mix Python-runtime models (run
 by the Spark engine as per-cell fan-out) and BigQuery-native models (run as SQL inside BigQuery);
-:func:`run` executes **both runtimes in parallel under one shared ``run_id`` and one
+`run` executes **both runtimes in parallel under one shared ``run_id`` and one
 ``run_registry`` header row**, so a native model and a Spark model land in the same run and are
-directly comparable on ``v_model_leaderboard`` (the DESIGN §3.3 "wall-clock ≈ max(python, bq), not
+directly comparable on ``v_model_leaderboard`` (the "wall-clock ≈ max(python, bq), not
 sum" thesis).
 
-Two invariants make the single-run parallelism work (see :func:`~scale_forecasting.registry.ids`
-and the Arc B engine seam):
+Two invariants make the single-run parallelism work (see `ids`):
 
 1. **One run_id from the full config.** ``make_run_id`` is a pure digest over the *whole* config
    incl. ``cfg.models``; both engines receive the full ``cfg`` so they derive the same id. Each is
    handed only its own executed subset (``python_models`` / ``bq_models``) via the ``models``
    argument, so the BigQuery-native models never become Spark cells (which would raise
    ``NotImplementedError`` in ``worker.run_cell``) and vice-versa.
-2. **One header owner.** :func:`run` alone writes the header (RUNNING) up front and finalizes it;
+2. **One header owner.** `run` alone writes the header (RUNNING) up front and finalizes it;
    both engines run in **contributor mode** (``manage_header=False``), skipping the header lifecycle
    and only writing their cell rows. No two writers ever touch the header, so there is no UPDATE
    race — the only in-window header write is ``submit_batch``'s best-effort telemetry stamp, which
-   completes inside the joined future before :func:`run`'s finalize.
+   completes inside the joined future before `run`'s finalize.
 
 **Parallelism.** The remote Spark batch is launched on a worker thread (``submit_batch(wait=True)``)
 while the in-process BigQuery engine runs on the main thread; the BQ work (minutes, in-process)
-overlaps the Spark provisioning floor. :func:`run` joins both, rolls the two outcomes into one
+overlaps the Spark provisioning floor. `run` joins both, rolls the two outcomes into one
 combined status (COMPLETED iff both green, else FAILED — finalized *before* re-raising so the run
 stays queryable and the CLI exits non-zero), and returns the shared ``run_id``.
 
@@ -32,14 +31,14 @@ cells errored) to the orchestrator, so a SUCCEEDED batch is reported COMPLETED; 
 stays visible on ``v_model_leaderboard`` (a failed model → NULL metric AVGs).
 
 Both Python runtimes are supported and dispatched by ``cfg.python_runtime``: ``"spark"`` launches a
-Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`), ``"ray"`` an autoscaling
-Vertex Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`) — either way on the worker
+Dataproc Serverless batch (`submit_batch`), ``"ray"`` an autoscaling
+Vertex Ray cluster (`submit_ray`) — either way on the worker
 thread, in contributor mode, in parallel with the in-process BigQuery engine under one run_id.
 
 Out of scope here (rejected with a clear pointer): ``spark_method="multi"``. multi fans out *N*
-family batches, but :func:`run`'s parallelism drives exactly one Python-runtime future alongside the
+family batches, but `run`'s parallelism drives exactly one Python-runtime future alongside the
 in-process BigQuery engine — it can't own multi's N-batch fan-out. multi has its own single-run_id
-orchestrator (:func:`~scale_forecasting.submit.submit_multi`, C3): use ``python -m
+orchestrator (`submit_multi`): use ``python -m
 scale_forecasting.submit --engine multi``. ``multi`` is a Spark-only method, so the guard only
 applies when ``python_runtime="spark"``.
 
@@ -67,7 +66,7 @@ _log = get_logger(__name__)
 class _RunPlan:
     """The offline-resolvable shape of a run: its id and the per-runtime executed subsets.
 
-    Pure product of the config (:func:`_plan`) — no GCP. ``spark_method`` is the engine the Spark
+    Pure product of the config (`_plan`) — no GCP. ``spark_method`` is the engine the Spark
     batch runs as (``None`` when there are no Python models to run).
     """
 
@@ -80,18 +79,18 @@ class _RunPlan:
 def _plan(cfg: RunConfig) -> _RunPlan:
     """Resolve the run_id + per-runtime model split, rejecting shapes this orchestrator can't run.
 
-    Pure and offline: computes ``make_run_id(cfg)`` and :func:`router.split_by_runtime`, then guards
+    Pure and offline: computes ``make_run_id(cfg)`` and `router.split_by_runtime`, then guards
     the one out-of-scope shape — but only when it would actually bite, i.e. when there *are*
     Python-runtime models to run on the Spark runtime:
 
-    * ``python_runtime="spark"`` + ``spark_method="multi"`` → :class:`ConfigError` pointing at
+    * ``python_runtime="spark"`` + ``spark_method="multi"`` → `ConfigError` pointing at
       ``submit --engine multi`` (multi fans out one batch *per family*; this orchestrator drives a
       single Python-runtime future, not multi's N-batch fan-out — multi shares one run_id via its
-      own orchestrator, :func:`submit.submit_multi`). ``multi`` is Spark-only, so the Ray runtime
+      own orchestrator, `submit.submit_multi`). ``multi`` is Spark-only, so the Ray runtime
       never trips it.
 
     Both ``python_runtime="spark"`` and ``python_runtime="ray"`` are supported (dispatched in
-    :func:`run`). An all-BigQuery config is unaffected by the guard (the Python runtime is never
+    `run`). An all-BigQuery config is unaffected by the guard (the Python runtime is never
     used), so it plans and runs regardless of ``python_runtime`` / ``spark_method``.
     """
     run_id = make_run_id(cfg)
@@ -119,19 +118,19 @@ def _launch_python_runtime(
 ) -> None:
     """Run the Python-runtime models on the runtime ``cfg.python_runtime`` picks (contributor mode).
 
-    The one dispatch point between the two Python runtimes, called on :func:`run`'s worker thread:
-    ``"ray"`` → an autoscaling Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`);
-    otherwise → a Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`) as the
+    The one dispatch point between the two Python runtimes, called on `run`'s worker thread:
+    ``"ray"`` → an autoscaling Ray cluster (`submit_ray`);
+    otherwise → a Dataproc Serverless batch (`submit_batch`) as the
     ``plan.spark_method`` engine. Both run ``plan.python_models`` with ``manage_header=False`` (this
     orchestrator owns the single shared header) and block until terminal, so the caller joins one
     future regardless of runtime. Kept a plain module function (not a lambda) so the worker thread's
     traceback names it and the import stays lazy (Ray/Spark extras load only for the chosen path).
 
-    ``spark`` is an optional injected :class:`SparkSession`. When it is supplied **and**
+    ``spark`` is an optional injected `SparkSession`. When it is supplied **and**
     ``python_runtime == "spark"``, the Spark engine runs **in-process against that session**
     (``spark_explode``/``spark_naive`` with ``spark=…``) instead of submitting a remote Dataproc
     batch — the notebook / Spark Connect path. This is the same engine code the batch runs (the
-    injectable-session seam), so no logic forks per environment (G1). ``spark`` is ignored for the
+    injectable-session seam), so no logic forks per environment. ``spark`` is ignored for the
     Ray runtime and for a remote batch (the default when no session is passed).
     """
     if cfg.python_runtime == "ray":
@@ -179,34 +178,34 @@ def run(
 ) -> str:
     """Execute one run: Spark + BigQuery-native in parallel under one run_id; return that run_id.
 
-    Resolves the plan (:func:`_plan`, which rejects Spark ``multi``), then:
+    Resolves the plan (`_plan`, which rejects Spark ``multi``), then:
 
-    * ``dry_run=True`` → log the run_id + :func:`~scale_forecasting.config.estimate_fanout` and
-      return, touching no GCP. The offline "what would this schedule" path (DESIGN §11).
-    * otherwise → resolve :class:`Settings`, ``ensure_tables`` + ``write_header`` (RUNNING, the one
+    * ``dry_run=True`` → log the run_id + `estimate_fanout` and
+      return, touching no GCP. The offline "what would this schedule" path.
+    * otherwise → resolve `Settings`, ``ensure_tables`` + ``write_header`` (RUNNING, the one
       shared header), launch the remote Spark batch on a worker thread and run the BigQuery engine
       inline (both in contributor mode), join, then — when both engines succeeded and
-      ``cfg.ensemble.enabled`` — run the ensembles (:func:`ensemble_run.run_ensembles`, which reads
+      ``cfg.ensemble.enabled`` — run the ensembles (`ensemble_run.run_ensembles`, which reads
       the just-written base predictions/OOF and scores each consensus onto the leaderboard), and
       finalize the header with the combined status + wall-clock ``runtime_seconds`` + ``bq_models``
       (+ the BQ engine's observed ``n_series`` when it ran). On any engine *or* ensemble failure the
       header is finalized FAILED before the error re-raises, so the run stays queryable and the CLI
       exits non-zero.
 
-    ``spark`` is an optional injected :class:`SparkSession` (incl. a Spark Connect
+    ``spark`` is an optional injected `SparkSession` (incl. a Spark Connect
     ``DataprocSparkSession``). When supplied and ``python_runtime == "spark"``, the Spark models run
     **in-process against that session** instead of a remote Dataproc batch — the notebook / Connect
-    demo path — using the identical engine code (the injectable-session seam, G1). The default
+    demo path — using the identical engine code (the injectable-session seam). The default
     (``None``) keeps the remote-batch behavior every CLI/Composer caller relies on. The BigQuery
     engine still runs in parallel on the main thread under the one shared run_id.
 
-    ``settings`` optionally injects a resolved :class:`Settings` (the GCP infra identity); the
+    ``settings`` optionally injects a resolved `Settings` (the GCP infra identity); the
     default (``None``) resolves it from the ``SF_*`` environment exactly as before, so every
     existing caller is unchanged. The SDK ``Forecaster`` uses this to thread an explicit identity
     instead of relying on process env.
 
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
-    the same config lands byte-identical rows (§3.4).
+    the same config lands byte-identical rows.
     """
     import time
     from concurrent.futures import ThreadPoolExecutor

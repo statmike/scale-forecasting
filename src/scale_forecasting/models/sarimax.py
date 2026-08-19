@@ -1,6 +1,6 @@
 """SARIMAX — seasonal ARIMA with exogenous regressors (statsmodels).
 
-One model, one file (CONTRACTS §1). Runtime python, statistical family. Supports exog
+One model, one file. Runtime python, statistical family. Supports exog
 and emits native prediction intervals (Gaussian, from the forecast standard error).
 """
 

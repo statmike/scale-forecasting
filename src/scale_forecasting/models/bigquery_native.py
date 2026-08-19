@@ -5,7 +5,7 @@ treat them uniformly with the Python models, but they are **executed as SQL** by
 ``engines/bigquery_engine.py`` — never by this Python code. That is by design, not a gap: the
 classes exist so fan-out, routing, and the registry see them as first-class models, while the
 actual ``CREATE MODEL`` / ``ML.FORECAST`` / ``AI.FORECAST`` runs in BigQuery. The in-process
-``fit``/``predict`` therefore raise :class:`BigQueryNativeExecutionError` — reaching them means a
+``fit``/``predict`` therefore raise `BigQueryNativeExecutionError` — reaching them means a
 native model was mistakenly dispatched to the Python worker path instead of the BigQuery engine.
 
 Two models, two classes, one file — they share nothing but a runtime and an identical
@@ -29,8 +29,8 @@ _EXECUTED_IN_BIGQUERY = (
 class BigQueryNativeExecutionError(NotImplementedError):
     """Raised if a BigQuery-native model's in-process fit/predict is called.
 
-    Native models run as SQL in :mod:`engines.bigquery_engine`; hitting this means one was
-    dispatched to the Python worker path by mistake. Subclasses :class:`NotImplementedError` so
+    Native models run as SQL in `engines.bigquery_engine`; hitting this means one was
+    dispatched to the Python worker path by mistake. Subclasses `NotImplementedError` so
     existing ``except NotImplementedError`` handlers and tests keep working.
     """
 

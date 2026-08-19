@@ -1,6 +1,6 @@
 """Prophet — additive trend/seasonality/holiday model.
 
-One model, one file (CONTRACTS §1). Runtime python, statistical family. Prophet is an
+One model, one file. Runtime python, statistical family. Prophet is an
 optional dependency, imported lazily in ``fit`` so the model registers without it. It emits
 its own uncertainty interval; we read the symmetric band once and place arbitrary requested
 quantiles from it (same trick as ``theta``), so any quantile set is honored. Exogenous

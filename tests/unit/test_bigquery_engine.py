@@ -1,4 +1,4 @@
-"""Tests for the BigQuery-native SQL builders (CONTRACTS §5, DESIGN §3.3).
+"""Tests for the BigQuery-native SQL builders.
 
 Pure-string assertions on the rendered CREATE MODEL / forecast INSERT / eval / history SQL plus a
 full-script snapshot. No GCP — the ``run`` engine path is exercised live by the ``@gcp`` smoke test.
@@ -57,7 +57,7 @@ def test_create_model_arima_plus_options_and_id_col() -> None:
 
 
 def test_create_model_final_trains_on_all_history() -> None:
-    # C2 alignment: the final (true-future) model trains on ALL history — no held-out cutoff — so
+    # The final (true-future) model trains on ALL history — no held-out cutoff — so
     # its ML.FORECAST(horizon) lands beyond MAX(ds), parity with the Spark final fit.
     sql = be.build_create_model_sql(_cfg(["arima_plus"], series_limit=None), "arima_plus", _DS)
     assert "DATE_SUB(MAX(ds)" not in sql
@@ -157,7 +157,7 @@ def test_forecast_insert_timesfm_uses_ai_forecast_no_model() -> None:
 
 
 def test_forecast_insert_is_true_future_not_held_out() -> None:
-    # C2: the final forecast INSERT reads from the all-history model — no held-out cutoff — so it
+    # The final forecast INSERT reads from the all-history model — no held-out cutoff — so it
     # extrapolates beyond MAX(ds). ARIMA_PLUS owns its time axis (ML.FORECAST(horizon) suffices);
     # no future-dates input table is needed for the univariate natives.
     sql = be.build_forecast_insert_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
@@ -228,7 +228,7 @@ def test_eval_query_joins_fold_forecast_to_actuals_with_intervals() -> None:
 
 
 def test_history_query_is_all_history() -> None:
-    # C2: MASE/RMSSE scale comes from the full series history (natives train on all of it), so the
+    # MASE/RMSSE scale comes from the full series history (natives train on all of it), so the
     # history read is no longer clipped to a pre-cutoff window.
     sql = be.build_history_query(_cfg(["arima_plus"], series_limit=None), _DS)
     assert "AS ts_id" in sql and "AS y" in sql

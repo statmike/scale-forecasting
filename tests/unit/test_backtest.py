@@ -1,4 +1,4 @@
-"""Tests for backtest folds + OOF (CONTRACTS §2.2, BUILD 2.4).
+"""Tests for backtest folds + out-of-fold predictions.
 
 Covers fold geometry, the no-leakage invariant (train_end == val_start), expanding vs
 sliding schemes, too-little-data guard, and OOF frame shape/units.
@@ -56,7 +56,7 @@ class _LastValue(BaseModel):
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
         ds = pd.date_range("2026-01-01", periods=horizon, freq="D")
-        # predict returns original units (§2.1): invert the transform on the way out.
+        # predict returns original units: invert the transform on the way out.
         yhat = invert_transform(
             np.full(horizon, self._last), self.ctx.transform, self.ctx.transform_lambda
         )

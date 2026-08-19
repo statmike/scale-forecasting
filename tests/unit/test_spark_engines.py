@@ -1,9 +1,9 @@
-"""Offline tests for the pure Spark-engine helpers (BUILD B2, ``engines.spark_io``).
+"""Offline tests for the pure Spark-engine helpers (``engines.spark_io``).
 
 Everything here runs without Spark or BigQuery — it exercises the grouped-UDF body
 (:func:`run_group`), the run-level status roll-up (:func:`aggregate_status`), and the bucketing
 policy that is the crux of the explode-vs-naive scaling story. The Spark shell (connector read,
-cross-join, applyInPandas) is covered by the ``@spark``/``@gcp`` gates in B2.2.
+cross-join, applyInPandas) is covered by the ``@spark``/``@gcp`` gates.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def test_run_group_error_cell_becomes_status_row() -> None:
     assert len(results) == 1
     assert results[0].status == "error"
     assert results[0].error is not None
-    # The batch survives (CONTRACTS §3.3): an error is a status row, not an exception.
+    # The batch survives: an error is a status row, not an exception.
     assert status.iloc[0]["status"] == "error"
 
 
@@ -184,7 +184,7 @@ def test_run_group_status_frame_has_fit_seconds() -> None:
 
 
 def test_run_group_threads_fleetwide_params_to_each_cell() -> None:
-    # C5: params_by_model (the driver's fleetwide resolution) reaches every cell of that model, so
+    # params_by_model (the driver's fleetwide resolution) reaches every cell of that model, so
     # best_params reflects the tuned params — the seam that carries HPO across the fan-out.
     cfg = _cfg(spark_method="explode", models=["xgboost", "theta"])
     pdf = _with_model_col(_panel(["s0", "s1"]), ["xgboost", "theta"])

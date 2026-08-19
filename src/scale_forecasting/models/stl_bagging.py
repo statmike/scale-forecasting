@@ -1,6 +1,6 @@
 """STL decomposition + bagged base forecasts.
 
-One model, one file (CONTRACTS §1). Runtime python, statistical family. STL splits the
+One model, one file. Runtime python, statistical family. STL splits the
 series into trend + seasonal + remainder; the deseasonalized series is forecast with a
 simple ARIMA and the seasonal component is projected forward periodically. Prediction
 intervals come from **bagging**: block-bootstrap the STL remainder to build an ensemble of

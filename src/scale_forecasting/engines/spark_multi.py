@@ -1,4 +1,4 @@
-"""Spark method B — one serverless batch per model family (DESIGN §2.1, §6).
+"""Spark method B — one serverless batch per model family.
 
 ``multi`` is orchestrated **submit-side, not on-cluster**: it fans a run out into one independent
 Dataproc batch per model family (statistical / ml / deep_learning / native), each an ``explode`` run
@@ -7,8 +7,8 @@ over that family's models — separate autoscaling and failure domains, one ``ru
 The decisive reason it can't run on the cluster: family-splitting needs ``google-cloud-dataproc`` to
 *submit* the child batches, and that client lives in the ``[spark]`` extra which is **excluded from
 the runtime container** (the container is deps-only; code arrives via ``python_file_uris``). So the
-orchestration lives in :func:`scale_forecasting.submit.submit_multi`, where the ``[spark]`` extra
-and ADC credentials both exist. The launcher (:mod:`scale_forecasting.spark_entry`) maps only
+orchestration lives in `scale_forecasting.submit.submit_multi`, where the ``[spark]`` extra
+and ADC credentials both exist. The launcher (`scale_forecasting.spark_entry`) maps only
 ``explode``/``naive`` to on-cluster engines, so ``multi`` never dispatches here in normal use.
 
 This module's ``run`` is therefore a **guard**, not an implementation: if a ``multi`` config somehow
@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 def run(cfg: RunConfig) -> None:
     """Guard: ``multi`` is orchestrated by the submit helper, never run on-cluster (see module doc).
 
-    Always raises :class:`~scale_forecasting.errors.EngineError`. The ``multi`` fan-out is performed
-    by :func:`scale_forecasting.submit.submit_multi`, which loops model families and submits one
+    Always raises `EngineError`. The ``multi`` fan-out is performed
+    by `scale_forecasting.submit.submit_multi`, which loops model families and submits one
     child ``explode`` batch each; there is nothing for an on-cluster engine to do.
     """
     raise EngineError(

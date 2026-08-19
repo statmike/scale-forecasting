@@ -1,4 +1,4 @@
-"""Model factory (CONTRACTS §1, §6).
+"""Model factory.
 
 Importing this package registers every model file by name (each model module ends with
 ``register(...)``); ``get_model(name)`` returns the class and ``list_models()`` lists the
@@ -6,7 +6,7 @@ registered names. Adding a model is one new file + one register call listed belo
 other edits.
 
 The model modules are imported here for their registration side effect. The import block
-grows by one line per model as Phase 2.5 lands each file.
+grows by one line per model.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from __future__ import annotations
 from ..errors import ModelError
 
 # --- model registration imports (side-effect: each calls register()) -----------
-# One line per model file; added as BUILD 2.5 lands each.
+# One line per model file.
 from . import (  # noqa: E402,F401
     bigquery_native,
     holtwinters,
@@ -31,7 +31,7 @@ from .base_model import _REGISTRY, BaseModel
 
 
 def get_model(name: str) -> type[BaseModel]:
-    """Return the registered model class for ``name`` (CONTRACTS §6).
+    """Return the registered model class for ``name``.
 
     Raises ``ModelError`` with the available names when ``name`` is unknown.
     """
@@ -43,5 +43,5 @@ def get_model(name: str) -> type[BaseModel]:
 
 
 def list_models() -> list[str]:
-    """All registered model names, sorted (CONTRACTS §6)."""
+    """All registered model names, sorted."""
     return sorted(_REGISTRY)

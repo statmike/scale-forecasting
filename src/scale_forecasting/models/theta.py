@@ -1,11 +1,11 @@
 """Theta method — simple, strong baseline; proves the model pattern first.
 
-One model, one file (CONTRACTS §1): a ``BaseModel`` subclass ending in ``register(...)``.
+One model, one file: a ``BaseModel`` subclass ending in ``register(...)``.
 Runtime python, statistical family, native prediction intervals (statsmodels ThetaModel
 emits its own PI, so ``supports_native_intervals = True``).
 
 This file is the template every other Python model follows: fit on the transformed target,
-predict the canonical §2.1 frame in *original* units (transform inverted here), build the
+predict the canonical frame in *original* units (transform inverted here), build the
 quantile map, and hand it to ``_assemble_frame``.
 """
 

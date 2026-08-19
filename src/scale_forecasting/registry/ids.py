@@ -1,13 +1,12 @@
-"""Deterministic identifiers for runs and cells (CONTRACTS §3).
+"""Deterministic identifiers for runs and cells.
 
 Three ids anchor the whole registry:
 
 - ``run_id`` is derived from the validated config, so the *same* config yields the
-  *same* run_id and any change yields a different one (queryable, reproducible — G3).
+  *same* run_id and any change yields a different one (queryable, reproducible).
 - ``model_hash`` identifies one cell ``(run, ts_id, model)`` and is what makes writes
-  idempotent: re-running a cell overwrites its rows instead of duplicating them
-  (CONTRACTS §3.4).
-- ``ensemble_id`` (C4) is derived from the ``EnsembleConfig`` alone, so several ensemble
+  idempotent: re-running a cell overwrites its rows instead of duplicating them.
+- ``ensemble_id`` is derived from the ``EnsembleConfig`` alone, so several ensemble
   configurations can coexist under one ``run_id`` without their ``model_type`` pseudo-models
   colliding — a re-run with the *same* ensemble config lands the same id (idempotent), a
   different config lands a different one (distinctly keyed on the leaderboard).
@@ -66,7 +65,7 @@ def make_model_hash(run_id: str, ts_id: str, model_type: str, cfg: RunConfig) ->
 
 
 def make_ensemble_id(ensemble: EnsembleConfig) -> str:
-    """Return a deterministic 12-hex id for one ``EnsembleConfig`` (C4).
+    """Return a deterministic 12-hex id for one ``EnsembleConfig``.
 
     A pure digest of the ensemble configuration's content (strategies, prune threshold —
     ``sort_keys`` makes the bytes order-independent), so several ensemble configs can be scored

@@ -1,12 +1,12 @@
-"""Registry writers — the bulk BigQuery lineage layer (CONTRACTS §3.4, §4).
+"""Registry writers — the bulk BigQuery lineage layer.
 
-Split into two halves along the pure/I-O seam (CONTRACTS §0):
+Split into two halves along the pure/I-O seam:
 
-- **Pure row assembly** (tested offline now, BUILD 1.4): turn a :class:`CellResult` and
-  a :class:`RunConfig` into the exact ``list[dict]`` rows each table expects — column
+- **Pure row assembly** (tested offline): turn a `CellResult` and
+  a `RunConfig` into the exact ``list[dict]`` rows each table expects — column
   mapping, stamping ``run_id``/``ts_id``/``model_type``/``compute_engine``, JSON
   serialization, and the per-cell idempotency key.
-- **I/O** (implemented in Arc B step B1, GCP-verified by the ``@gcp`` round-trip test):
+- **I/O** (GCP-verified by the ``@gcp`` round-trip test):
   ``ensure_tables``, ``write_header``, ``update_header``, ``write_cells`` — execute DDL,
   INSERT/UPDATE the single-row header, and stream the three cell tables via the Storage
   Write API. Idempotency is **append-only + dedupe-on-read**: ``write_cells`` only appends
@@ -14,8 +14,8 @@ Split into two halves along the pure/I-O seam (CONTRACTS §0):
   and serving views dedupe with ``DISTINCT``/``GROUP BY`` on ``run_id`` (+ cell keys).
 
 The infra identity (project / dataset / connection / warehouse) is not on ``RunConfig`` —
-it is resolved from the environment via :class:`~scale_forecasting.settings.Settings`, so the
-identical writer code runs locally under ADC and on Composer under the runner SA (G1). Each
+it is resolved from the environment via `Settings`, so the identical writer code runs locally
+under ADC and on Composer under the runner SA. Each
 writer accepts an optional ``settings=`` for tests/callers that already hold one; otherwise it
 resolves from ``SF_*`` env vars. GCP client libraries are imported lazily inside the writers so
 the pure layer (and its offline tests) never need them installed.
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from ..worker import CellResult
 
 # The full metric panel, in table-column order — derived from the config's DecisionMetric
-# literal so there is exactly one source of truth (CONTRACTS §2.3 / DESIGN §5.1).
+# literal so there is exactly one source of truth.
 METRIC_COLUMNS: tuple[str, ...] = get_args(DecisionMetric)
 
 
@@ -52,12 +52,12 @@ METRIC_COLUMNS: tuple[str, ...] = get_args(DecisionMetric)
 
 
 def cell_dedup_key(result: CellResult) -> dict[str, str]:
-    """The run-scoped identity anchor for a cell's rows (CONTRACTS §3.4).
+    """The run-scoped identity anchor for a cell's rows.
 
-    Idempotency is **append-only + dedupe-on-read**, anchored on ``run_id``. :func:`write_cells`
+    Idempotency is **append-only + dedupe-on-read**, anchored on ``run_id``. `write_cells`
     never DELETEs — a DELETE that matches rows still in the Storage Write API streaming buffer
     is rejected for the whole buffer window (~90 min), so a clear-then-append is not viable
-    against the default stream (B1 live-gate finding, foreshadowed by B0.3). Instead we rely on
+    against the default stream. Instead we rely on
     ``run_id`` being a pure function of the config (``make_run_id``): the same ``run_id`` implies
     the same config implies byte-identical rows, so a re-run's "duplicates" are exact copies.
     Serving views dedupe with ``DISTINCT``/``GROUP BY`` on ``run_id`` (+ cell keys); no write-time
@@ -68,7 +68,7 @@ def cell_dedup_key(result: CellResult) -> dict[str, str]:
 
 
 def assemble_prediction_rows(result: CellResult) -> list[dict[str, Any]]:
-    """Canonical prediction frame (§2.1) → ``forecast_predictions`` rows (§4).
+    """Canonical prediction frame → ``forecast_predictions`` rows.
 
     Stamps run/series/model/engine onto each row and maps ``ds`` → ``forecast_date``.
     ``quantiles`` is serialized to a JSON string (or None).
@@ -92,7 +92,7 @@ def assemble_prediction_rows(result: CellResult) -> list[dict[str, Any]]:
 
 
 def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
-    """Canonical OOF frame (§2.2) → ``backtest_oof`` rows (§4). Empty if no backtest."""
+    """Canonical OOF frame → ``backtest_oof`` rows. Empty if no backtest."""
     if result.oof is None:
         return []
     rows: list[dict[str, Any]] = []
@@ -114,7 +114,7 @@ def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
 def assemble_metadata_row(
     result: CellResult, created_at: datetime, model_artifact: str | None = None
 ) -> dict[str, Any]:
-    """One full-fit ``forecast_metadata`` row (§4): metrics panel + artifact link.
+    """One full-fit ``forecast_metadata`` row: metrics panel + artifact link.
 
     ``fold_id`` is None (this is the full-fit summary row). ``model_artifact`` is the
     ObjectRef/URI filled in by the writer after the artifact upload.
@@ -137,13 +137,13 @@ def assemble_metadata_row(
 
 
 def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> dict[str, Any]:
-    """Build the ``run_registry`` header row from a config (§4, §8.2).
+    """Build the ``run_registry`` header row from a config.
 
-    ``raw_config`` is the validated config as a **dict** — the config *is* the record (G3).
+    ``raw_config`` is the validated config as a **dict** — the config *is* the record.
     ``run_registry.raw_config`` is a native ``JSON`` column, and the client's JSON query
     parameter serializes the value itself (``json.dumps``), so the row must carry the dict, not
     a pre-serialized string (a string would be double-encoded). ``bq_models`` is left empty here
-    and filled by the router once model runtimes are known (Arc B); status starts RUNNING.
+    and filled by the router once model runtimes are known; status starts RUNNING.
     """
     return {
         "run_id": run_id,
@@ -165,7 +165,7 @@ def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> di
         # JSON column filled in after the batch finishes by the submitter (extract_job_telemetry →
         # update_header) as a **dict** (the JSON query param serializes it). NULL here at RUNNING
         # and for any run whose telemetry couldn't be read (best-effort — never blocks a run).
-        # See run_registry DDL / DESIGN §8.2.
+        # See the run_registry DDL.
         "job_telemetry": None,
     }
 
@@ -197,7 +197,7 @@ def _as_json(value: Any) -> str | None:
     JSON — and BigQuery's ``JSON`` column parser rejects them ("syntax error while parsing value
     - invalid literal"), failing the whole Storage Write API append. A quantile dict on a runaway
     series (``log1p``'s ``expm1`` overflow) can carry such values; dropping the offending keys —
-    parity with :func:`_as_float`'s scalar NULL — keeps the row writable. An all-non-finite dict
+    parity with `_as_float`'s scalar NULL — keeps the row writable. An all-non-finite dict
     collapses to NULL.
     """
     if value is None or (isinstance(value, dict) and not value):
@@ -227,7 +227,7 @@ def _as_date(value: Any) -> Any:
 #
 # The Storage Write API serializes rows as protobuf. Each cell table has a fixed column
 # order (its "spec"): the field number is the write order and the type char selects the
-# proto scalar type. These specs mirror the DDL (§4) and the keys the pure assemblers emit,
+# proto scalar type. These specs mirror the DDL and the keys the pure assemblers emit,
 # so a spec and its assembler must be edited together.
 #
 # Type chars → proto scalar (and how the value is encoded):
@@ -297,7 +297,7 @@ def _proto_for(table_name: str, spec: tuple[tuple[str, str], ...]) -> tuple[Any,
     """Build a protobuf message class + descriptor matching a table's column spec.
 
     Fields are proto2-optional (so an unset field → BigQuery NULL) and numbered by write
-    order. A private :class:`DescriptorPool` isolates the registration so repeated calls (or
+    order. A private `DescriptorPool` isolates the registration so repeated calls (or
     two tables in one process) never collide on a duplicate proto file name.
     """
     from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
@@ -386,13 +386,13 @@ def _append_via_write_api(
     """Append serialized rows to a table's default stream via the Storage Write API.
 
     Uses the direct ``append_rows(requests=...)`` bidi call (not the ``AppendRowsStream``
-    wrapper, which masks the underlying gRPC error — B0.3): the first request carries the
+    wrapper, which masks the underlying gRPC error): the first request carries the
     stream + writer schema, each subsequent request carries only rows.
 
     Transient service errors (500/503/429/deadline) are retried with exponential backoff — safe
     because the default stream is at-least-once and the registry dedupes-on-read (re-sending the
     whole append can't double-count). A permanent error (bad schema/data, a response-level row
-    error, or a non-transient API error) is re-raised as :class:`RegistryError` with the real
+    error, or a non-transient API error) is re-raised as `RegistryError` with the real
     error attached, unchanged.
     """
     from google.api_core.exceptions import (
@@ -488,7 +488,7 @@ def _append_via_write_api(
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
-    """Return the passed settings, or resolve from the ``SF_*`` environment (G1)."""
+    """Return the passed settings, or resolve from the ``SF_*`` environment."""
     if settings is not None:
         return settings
     from ..settings import Settings as _Settings
@@ -499,13 +499,13 @@ def _resolve_settings(settings: Settings | None) -> Settings:
 def ensure_tables(
     cfg: RunConfig | None = None, *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Create every registry + source table if absent (idempotent DDL, §4, D19).
+    """Create every registry + source table if absent (idempotent DDL).
 
     Renders the deployment DDL for the resolved dataset — native registry (native ``JSON``
     columns) plus both source variants, ``source_series_iceberg`` (managed Iceberg) and
     ``source_series_native`` (plain) — and executes each statement. ``cfg`` is accepted for
     signature symmetry with the other writers but is unused — the schema is fixed, not
-    config-driven. Raises :class:`RegistryError` on a DDL failure.
+    config-driven. Raises `RegistryError` on a DDL failure.
     """
     from google.cloud import bigquery
 
@@ -543,11 +543,11 @@ def ensure_tables(
 def ensure_views(
     *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Create/replace the analyst views over the registry (idempotent, §4).
+    """Create/replace the analyst views over the registry (idempotent).
 
-    Renders the ``CREATE OR REPLACE VIEW`` statements (:func:`registry.views.render_create_views`)
-    for the resolved dataset and executes each. Called by :func:`ensure_tables`; safe to call on its
-    own to refresh view definitions after a change. Raises :class:`RegistryError` on failure.
+    Renders the ``CREATE OR REPLACE VIEW`` statements (`registry.views.render_create_views`)
+    for the resolved dataset and executes each. Called by `ensure_tables`; safe to call on its
+    own to refresh view definitions after a change. Raises `RegistryError` on failure.
     """
     from google.cloud import bigquery
 
@@ -567,13 +567,13 @@ def ensure_views(
 def drop_all(
     *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Drop all six registry + source tables and the analyst views (the reset path, D19).
+    """Drop all six registry + source tables and the analyst views (the reset path).
 
-    **Destructive.** Renders :func:`registry.ddl.render_drop_tables` and executes each
+    **Destructive.** Renders `registry.ddl.render_drop_tables` and executes each
     ``DROP TABLE IF EXISTS`` (plus ``DROP VIEW IF EXISTS`` for the two analyst views), so a
-    subsequent :func:`ensure_tables` recreates everything in the current native/dual-format
+    subsequent `ensure_tables` recreates everything in the current native/dual-format
     shape — the Iceberg→native registry switch is a drop-and-recreate, not an ``ALTER``. Callers
-    are responsible for confirming intent before invoking. Raises :class:`RegistryError` on
+    are responsible for confirming intent before invoking. Raises `RegistryError` on
     failure.
     """
     from google.cloud import bigquery
@@ -635,10 +635,10 @@ def _header_param(name: str, value: Any) -> Any:
 def write_header(
     cfg: RunConfig, run_id: str, *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Insert the run's ``run_registry`` header row (status RUNNING) from its config (§8.2).
+    """Insert the run's ``run_registry`` header row (status RUNNING) from its config.
 
     A single-row parameterized INSERT (not the Write API — no benefit for one row, and the
-    header is updated in place later by :func:`update_header`). Raises :class:`RegistryError`
+    header is updated in place later by `update_header`). Raises `RegistryError`
     on failure.
     """
     from datetime import UTC, datetime
@@ -666,10 +666,10 @@ def write_header(
 def update_header(
     run_id: str, *, settings: Settings | None = None, **fields: Any
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Update named columns on a run's header row (§8.2), e.g. status/runtime_seconds.
+    """Update named columns on a run's header row, e.g. status/runtime_seconds.
 
     ``update_header(run_id, status="COMPLETED", runtime_seconds=42.0)`` → a parameterized
-    ``UPDATE … SET … WHERE run_id=@run_id``. Unknown column names raise :class:`RegistryError`;
+    ``UPDATE … SET … WHERE run_id=@run_id``. Unknown column names raise `RegistryError`;
     a no-op call (no fields) returns without touching BigQuery.
     """
     from google.cloud import bigquery
@@ -697,12 +697,12 @@ def update_header(
 def write_cells(
     results: list[CellResult], *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Persist a run's cell results to the three cell tables (§3.4).
+    """Persist a run's cell results to the three cell tables.
 
-    Idempotency is **append-only + dedupe-on-read** (see :func:`cell_dedup_key`): this appends
+    Idempotency is **append-only + dedupe-on-read** (see `cell_dedup_key`): this appends
     and never DELETEs. A DELETE that matches rows still in the Storage Write API streaming buffer
     is rejected for the whole buffer window (~90 min), so a clear-then-append against the default
-    stream is not viable (B1 live-gate finding). Instead, ``run_id`` is a pure function of the
+    stream is not viable. Instead, ``run_id`` is a pure function of the
     config, so a re-run of the same config writes byte-identical rows; serving views dedupe on
     ``run_id`` (+ cell keys). Steps:
 
@@ -713,7 +713,7 @@ def write_cells(
 
     ``write_cells`` may be called once per run (driver-side collect) or many times per run (per
     Spark/Ray partition) — appends compose, so both are safe. Empty input is a no-op. Raises
-    :class:`RegistryError` on any BigQuery/GCS failure.
+    `RegistryError` on any BigQuery/GCS failure.
     """
     from datetime import UTC, datetime
 

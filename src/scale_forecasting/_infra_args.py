@@ -1,11 +1,11 @@
-"""Infra-identity CLI args ↔ ``SF_*`` environment — the one delivery mapping (G1).
+"""Infra-identity CLI args ↔ ``SF_*`` environment — the one delivery mapping.
 
 Dataproc Serverless allowlists Spark property prefixes and rejects driver-env
 (``spark.kubernetes.driverEnv.*`` → "unsupported properties"), so a batch cannot hand the
 infra identity to the driver as environment variables. Instead every entrypoint accepts the
 identity as ``--sf-*`` job args and exports them into ``os.environ`` before
-:meth:`~scale_forecasting.settings.Settings.resolve` runs — keeping env-based ``Settings`` the
-single G1 seam rather than forking a "resolve from args" path.
+`resolve` runs — keeping env-based ``Settings`` the
+single local/cloud seam rather than forking a "resolve from args" path.
 
 This module owns that mapping in ONE place so the seed job, the Spark forecast launcher
 (``spark_entry``), the local submit helper (``submit``), and the Terraform modules that build the
@@ -41,7 +41,7 @@ def add_infra_args(parser: argparse.ArgumentParser) -> None:
     """Register the ``--sf-*`` infra-identity flags on a parser (all default ``None``).
 
     When unset (local runs) the ambient ``SF_*`` environment is used as-is; when set (a cluster
-    batch) :func:`export_infra_env` promotes them to ``os.environ`` before resolution.
+    batch) `export_infra_env` promotes them to ``os.environ`` before resolution.
     """
     for dest, env_name in INFRA_ARG_ENV:
         flag = "--" + dest.replace("_", "-")
@@ -53,8 +53,9 @@ def add_infra_args(parser: argparse.ArgumentParser) -> None:
 def export_infra_env(ns: argparse.Namespace) -> None:
     """Copy any provided ``--sf-*`` args from ``ns`` into ``os.environ`` (only when set).
 
-    Keeps env-based ``Settings.resolve()`` the single G1 seam without a parallel "resolve from
-    args" path. Values left unset are skipped, so a local run's ambient environment is untouched.
+    Keeps env-based ``Settings.resolve()`` the single local/cloud seam without a parallel
+    "resolve from args" path. Values left unset are skipped, so a local run's ambient environment
+    is untouched.
     """
     for dest, env_name in INFRA_ARG_ENV:
         value = getattr(ns, dest, None)
@@ -65,8 +66,8 @@ def export_infra_env(ns: argparse.Namespace) -> None:
 def infra_args_from(settings: Settings) -> list[str]:
     """Build the ``--sf-*`` arg list carrying ``settings`` to a cluster batch (submit side).
 
-    The inverse of :func:`add_infra_args` / :func:`export_infra_env`: turns a resolved
-    :class:`~scale_forecasting.settings.Settings` into the flat ``["--sf-project-id", ...]`` list a
+    The inverse of `add_infra_args` / `export_infra_env`: turns a resolved
+    `Settings` into the flat ``["--sf-project-id", ...]`` list a
     Dataproc batch passes so the driver re-materializes the same identity via env.
     """
     values = {

@@ -1,16 +1,16 @@
-"""Spark method A — cross-join series × model, grouped Pandas UDF (CONTRACTS §6, DESIGN §6).
+"""Spark method A — cross-join series × model, grouped Pandas UDF.
 
 The hero fan-out. Each ``(ts_id, model_type)`` cell is an independent unit of work: the source
 series are cross-joined with the (small) model list, hashed into per-cell buckets, and run one
 Spark task per bucket via ``groupBy(bucket).applyInPandas``. A slow ``(series, deep-model)`` cell
 occupies its own bucket while that series' fast cells run concurrently in other buckets, so the
 autoscaler spreads work and no single cell blocks the batch — the property ``spark_naive``
-deliberately lacks (DESIGN §2.1). This is the method that carries the 10 → 100 → 1k → 100k scale-up.
+deliberately lacks. This is the method that carries the 10 → 100 → 1k → 100k scale-up.
 
 Runs on the Dataproc Serverless driver via ``spark_entry`` (the ``gs://`` launcher). All the
 reusable mechanics — connector read + deterministic ``series_limit`` subset, cross-join, bucketing,
-the executor-side write of each bucket's :class:`~scale_forecasting.worker.CellResult`s through the
-B1-validated writer, and the status roll-up — live in :mod:`.spark_io`; this module is just the
+the executor-side write of each bucket's `CellResult`s through the
+writer, and the status roll-up — live in `spark_io`; this module is just the
 driver shell that wires them into a run with a proper registry header lifecycle.
 
 Public surface: ``run(cfg) -> None``.
@@ -42,38 +42,38 @@ def run(
 ) -> None:
     """Execute an explode run end-to-end: header → fan cells across Spark → close header.
 
-    Driver-side lifecycle (CONTRACTS §3.4, §8.2):
+    Driver-side lifecycle:
 
-    1. Resolve infra :class:`~scale_forecasting.settings.Settings` from the environment (G1),
+    1. Resolve infra `Settings` from the environment,
        ``ensure_tables``, and ``write_header`` (status RUNNING) with a ``run_id`` derived from the
        config — computed once here so every executor's ``write_cells`` shares it.
     2. Read + subset the source series, cross-join the model list, hash into per-cell buckets, and
-       ``groupBy(bucket).applyInPandas`` the group runner (:func:`spark_io.make_group_runner`),
+       ``groupBy(bucket).applyInPandas`` the group runner (`spark_io.make_group_runner`),
        which runs each cell and appends its results executor-side. Only the compact status frame
        returns to the driver.
     3. Aggregate the statuses and ``update_header`` (COMPLETED/PARTIAL/FAILED, wall-clock
        ``runtime_seconds``, ``n_series``).
 
-    ``models`` is the executed subset (Arc B): ``None`` (the default, standalone) runs every model
-    in ``cfg.models``; :func:`main.run` passes only the Python-runtime models of a mixed config so
+    ``models`` is the executed subset: ``None`` (the default, standalone) runs every model
+    in ``cfg.models``; `main.run` passes only the Python-runtime models of a mixed config so
     the BigQuery-native ones don't become Spark cells. run_id is always derived from the *full*
-    ``cfg`` so both runtimes share it (:func:`make_run_id`).
+    ``cfg`` so both runtimes share it (`make_run_id`).
 
-    ``manage_header=False`` puts the engine in **contributor mode** (Arc B): :func:`main.run` owns
+    ``manage_header=False`` puts the engine in **contributor mode**: `main.run` owns
     the single shared header, so the engine skips ``ensure_tables`` / ``write_header`` /
     ``update_header`` and only fans cells + writes results. The default ``True`` preserves the
     self-contained standalone lifecycle every existing caller (CLI, ``@spark`` smoke) relies on.
 
-    ``spark`` is an **optional injected session** (a :class:`SparkSession`, incl. a Spark Connect
+    ``spark`` is an **optional injected session** (a `SparkSession`, incl. a Spark Connect
     ``DataprocSparkSession``). When ``None`` — the Dataproc batch path (``spark_entry`` passes
     none) — the engine self-creates a session via ``getOrCreate()`` and ``stop()``s it in
     ``finally``, exactly as before. When a session is injected — the notebook/Connect path — the
     engine uses it and does **not** stop it (the caller owns its lifecycle). The fan-out code is
-    identical either way, so Connect and batch share one engine (G1). ``settings`` similarly lets a
-    caller pass an already-resolved :class:`Settings`; ``None`` resolves it from the environment.
+    identical either way, so Connect and batch share one engine. ``settings`` similarly lets a
+    caller pass an already-resolved `Settings`; ``None`` resolves it from the environment.
 
     Idempotent by construction: the config-derived ``run_id`` + append-only/dedupe-on-read writes
-    mean a re-run of the same config lands byte-identical rows (§3.4).
+    mean a re-run of the same config lands byte-identical rows.
     """
     import time
 
@@ -97,7 +97,7 @@ def run(
     )
 
     # 1. Header first, so a run is visible in the registry even if the Spark job dies mid-flight.
-    #    In contributor mode (Arc B) main.run already wrote the shared header — skip both.
+    #    In contributor mode main.run already wrote the shared header — skip both.
     if manage_header:
         bq.ensure_tables(cfg, settings=settings)
         bq.write_header(cfg, run_id, settings=settings)
@@ -111,10 +111,10 @@ def run(
     try:
         # 2. Fan cells across the cluster. The frozen Settings is captured directly in the group
         #    runner's closure (no sparkContext.broadcast — Connect has no such API); applyInPandas
-        #    cloudpickles it to every executor so write_cells resolves the same infra (G1).
+        #    cloudpickles it to every executor so write_cells resolves the same infra.
         source = spark_io.read_source_series(spark, cfg, settings)
 
-        # C5: fleetwide HPO resolves once on the driver over a small sample, before fan-out. The
+        # Fleetwide HPO resolves once on the driver over a small sample, before fan-out. The
         # tuned params flow to executors through the group-runner closure (not cfg → run_id stable).
         params_by_model = spark_io.resolve_fleetwide_hpo(source, cfg, executed)
 

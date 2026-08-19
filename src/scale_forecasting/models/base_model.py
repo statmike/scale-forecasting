@@ -1,14 +1,14 @@
-"""The model interface every model file implements (CONTRACTS §1).
+"""The model interface every model file implements.
 
 This is the linchpin of the one-model-one-file rule and the factory. Every Python model
-is a subclass of :class:`BaseModel` living in its own file that ends with ``register(...)``;
+is a subclass of `BaseModel` living in its own file that ends with ``register(...)``;
 the factory (``models/__init__.py``) builds ``{name: class}`` at import. Adding a model is
 a new file plus one register call — no edits anywhere else.
 
 Models never read global config: everything they need at fit/predict time arrives through
-:class:`ModelContext`. Models that don't emit their own prediction intervals
-(``supports_native_intervals = False``) call :meth:`BaseModel.residual_intervals` so every
-model still returns the canonical frame with ordered bounds (CONTRACTS §2.1).
+`ModelContext`. Models that don't emit their own prediction intervals
+(``supports_native_intervals = False``) call `BaseModel.residual_intervals` so every
+model still returns the canonical frame with ordered bounds.
 
 Public surface: ``BaseModel``, ``ModelContext``, ``register`` (plus the ``_REGISTRY`` the
 factory reads, and the ``Runtime``/``Family`` type aliases).
@@ -33,16 +33,16 @@ if TYPE_CHECKING:
 Runtime = Literal["python", "bigquery"]
 Family = Literal["statistical", "ml", "deep_learning", "native"]
 
-# Canonical prediction-frame columns (CONTRACTS §2.1), in order.
+# Canonical prediction-frame columns, in order.
 PREDICTION_COLUMNS: tuple[str, ...] = ("ds", "yhat", "yhat_lower", "yhat_upper", "quantiles")
 
-# Default quantile set for predict() and the residual helper (CONTRACTS §1, §2.1).
+# Default quantile set for predict() and the residual helper.
 DEFAULT_QUANTILES: tuple[float, ...] = (0.1, 0.5, 0.9)
 
 
 @dataclass(frozen=True)
 class ModelContext:
-    """Per-run context handed to every model so it never reads global config (CONTRACTS §1)."""
+    """Per-run context handed to every model so it never reads global config."""
 
     freq: str
     horizon: int
@@ -51,7 +51,7 @@ class ModelContext:
     transform: str = "none"
     # Fitted Box-Cox λ for the cell (from features.fit_transform_lambda), or None for the
     # stateless transforms. Set once per cell and shared by the backtest folds + final fit, so
-    # every invert_transform in predict() uses the same λ — never refit at predict (G1).
+    # every invert_transform in predict() uses the same λ — never refit at predict.
     transform_lambda: float | None = None
 
 
@@ -60,7 +60,7 @@ _REGISTRY: dict[str, type[BaseModel]] = {}
 
 
 def register(model_cls: type[BaseModel]) -> type[BaseModel]:
-    """Register a model class under its ``name`` (CONTRACTS §1). Returns the class so it
+    """Register a model class under its ``name``. Returns the class so it
     doubles as a decorator. Raises on a missing or duplicate name.
     """
     name = getattr(model_cls, "name", None)
@@ -76,7 +76,7 @@ def register(model_cls: type[BaseModel]) -> type[BaseModel]:
 
 
 class BaseModel(ABC):
-    """Base class for every forecasting model (CONTRACTS §1)."""
+    """Base class for every forecasting model."""
 
     # --- class-level registration metadata (read by the factory) ---
     name: ClassVar[str]
@@ -102,18 +102,18 @@ class BaseModel(ABC):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        """Return the canonical prediction frame (CONTRACTS §2.1) in original units."""
+        """Return the canonical prediction frame in original units."""
 
     def get_params(self) -> dict[str, Any]:
         """Resolved params actually used (post-HPO). Logged to ``forecast_metadata.best_params``."""
         return dict(self.params)
 
     def serialize(self) -> bytes | None:
-        """Serialize the fitted model for artifact persistence (CONTRACTS §3.4).
+        """Serialize the fitted model for artifact persistence.
 
         Returns the bytes to store as the cell's ``model_artifact`` — the registry writer
         uploads them under ``<warehouse>/artifacts/<run_id>/`` and stamps the GCS ObjectRef
-        onto the ``forecast_metadata`` row (lineage, G3). Default: pickle the instance.
+        onto the ``forecast_metadata`` row (lineage). Default: pickle the instance.
         Override to use a model-native format (e.g. ``Booster.save_model``) or return
         ``None`` to opt out for models cheap enough to refit. Called only when the run sets
         ``persist_models``; a ``None`` return (or a raised error, which the worker catches)
@@ -133,10 +133,10 @@ class BaseModel(ABC):
     def residual_intervals(
         self, yhat: np.ndarray, quantiles: tuple[float, ...] = DEFAULT_QUANTILES
     ) -> dict[float, np.ndarray]:
-        """Empirical residual-quantile prediction intervals (CONTRACTS §1).
+        """Empirical residual-quantile prediction intervals.
 
         For models without native intervals: fit() records residuals via
-        :meth:`_set_residuals`, and this adds their empirical quantiles to the point
+        `_set_residuals`, and this adds their empirical quantiles to the point
         forecast so bounds are naturally ordered (lower ≤ yhat ≤ upper) for any monotone
         quantile set. Falls back to a point-mass band (bounds == yhat) if no residuals
         were recorded.
@@ -147,7 +147,7 @@ class BaseModel(ABC):
         return {q: yhat + float(np.quantile(self._residuals, q)) for q in quantiles}
 
     def _set_residuals(self, residuals: np.ndarray | pd.Series) -> None:
-        """Record in-sample residuals (actual − fitted) for :meth:`residual_intervals`."""
+        """Record in-sample residuals (actual − fitted) for `residual_intervals`."""
         arr = np.asarray(residuals, dtype=float)
         self._residuals = arr[~np.isnan(arr)]
 
@@ -162,7 +162,7 @@ class BaseModel(ABC):
         ds: pd.DatetimeIndex | pd.Series,
         quantile_map: dict[float, np.ndarray],
     ) -> pd.DataFrame:
-        """Build the canonical prediction frame from a quantile map (CONTRACTS §2.1).
+        """Build the canonical prediction frame from a quantile map.
 
         ``yhat`` is the 0.5 quantile (median); bounds are the min/max quantiles so they
         stay ordered. ``quantiles`` is the full map serialized to a JSON string per row.
@@ -191,7 +191,7 @@ class BaseModel(ABC):
             )
             for i in range(n)
         ]
-        # Contract requires datetime64[ns] (§2.1); pandas 2.x may infer coarser units.
+        # The contract requires datetime64[ns]; pandas 2.x may infer coarser units.
         ds_ns = pd.DatetimeIndex(ds).as_unit("ns")
         return pd.DataFrame(
             {

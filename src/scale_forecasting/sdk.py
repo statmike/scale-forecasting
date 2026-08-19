@@ -1,11 +1,11 @@
-"""The easy path: a thin, well-typed ``Forecaster`` facade over :func:`main.run`.
+"""The easy path: a thin, well-typed ``Forecaster`` facade over `main.run`.
 
 This is the "simple SDK on top" — one class you point at a config and call. It adds **no**
 forecasting logic; every method delegates to the same code the CLI and Composer run
-(:func:`scale_forecasting.main.run`, the run registry, the config layer), so a run driven from the
-SDK is byte-for-byte the run driven from ``python -m scale_forecasting.main`` (G1). Users who need
+(`scale_forecasting.main.run`, the run registry, the config layer), so a run driven from the
+SDK is byte-for-byte the run driven from ``python -m scale_forecasting.main``. Users who need
 to drive Spark or Ray themselves skip this class entirely and call the direct surface
-(:func:`~scale_forecasting.engines.spark_io.run_group`, ``make_group_runner``,
+(`run_group`, ``make_group_runner``,
 ``make_chunk_runner``, ``run_cell``) — both paths reuse the identical model machinery. See
 ``docs/using_the_sdk.md``.
 
@@ -51,7 +51,7 @@ class RunResult:
     """A pointer to where a run's results live — the run_id plus how to query them.
 
     ``dataset_ref`` is ``project.dataset`` (``None`` when the GCP identity can't be resolved, e.g.
-    an offline :meth:`Forecaster.review`); ``views`` are the registry view names to query under it
+    an offline `Forecaster.review`); ``views`` are the registry view names to query under it
     (e.g. ``v_run_summary``, ``v_model_leaderboard``). Filter any of them by ``run_id``.
     """
 
@@ -61,11 +61,11 @@ class RunResult:
 
 
 class Forecaster:
-    """The easy path: point it at a config, then :meth:`dry_run`, :meth:`run`, or :meth:`review`.
+    """The easy path: point it at a config, then `dry_run`, `run`, or `review`.
 
     A run driven here is identical to the CLI/Composer run — this class only wraps
-    :func:`scale_forecasting.main.run`. Construct from an in-memory :class:`RunConfig`, or use
-    :meth:`from_file` / :meth:`from_dict`. An optional ``settings`` injects the GCP infra identity;
+    `scale_forecasting.main.run`. Construct from an in-memory `RunConfig`, or use
+    `from_file` / `from_dict`. An optional ``settings`` injects the GCP infra identity;
     ``None`` resolves it from the ``SF_*`` environment at run time (the default deployments use).
     """
 
@@ -76,14 +76,14 @@ class Forecaster:
     @classmethod
     def from_file(cls, path: str | Path, *, settings: Settings | None = None) -> Forecaster:
         """Build from a JSON config file (delegates to
-        :func:`~scale_forecasting.config.load_config`, which raises
-        :class:`~scale_forecasting.errors.ConfigError` on a bad file)."""
+        `load_config`, which raises
+        `ConfigError` on a bad file)."""
         return cls(load_config(path), settings=settings)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, settings: Settings | None = None) -> Forecaster:
-        """Build from an already-parsed config dict (validates via :class:`RunConfig`, raising
-        :class:`~scale_forecasting.errors.ConfigError` on a schema violation)."""
+        """Build from an already-parsed config dict (validates via `RunConfig`, raising
+        `ConfigError` on a schema violation)."""
         try:
             cfg = RunConfig.model_validate(data)
         except Exception as exc:  # pydantic ValidationError → the package's ConfigError
@@ -105,7 +105,7 @@ class Forecaster:
     def dry_run(self) -> DryRunResult:
         """Validate the config and report the planned fan-out + runtime split — touches no GCP.
 
-        Delegates the run_id to :func:`main.run` (``dry_run=True``) so it is the single source of
+        Delegates the run_id to `main.run` (``dry_run=True``) so it is the single source of
         truth, then adds the estimated fanout and the python/BigQuery model split.
         """
         from . import main
@@ -122,10 +122,10 @@ class Forecaster:
     def run(self, *, spark: object | None = None) -> RunResult:
         """Execute the run (Spark/Ray ∥ BigQuery under one run_id) and return where to query it.
 
-        Delegates to :func:`main.run`, threading this forecaster's ``settings`` (so an injected
-        identity is honored). ``spark`` optionally injects a :class:`SparkSession` /
+        Delegates to `main.run`, threading this forecaster's ``settings`` (so an injected
+        identity is honored). ``spark`` optionally injects a `SparkSession` /
         ``DataprocSparkSession`` for the in-process Spark path (notebook / Connect demo). Returns a
-        :class:`RunResult` pointing at the registry views under the resolved dataset.
+        `RunResult` pointing at the registry views under the resolved dataset.
         """
         from . import main
 
@@ -145,8 +145,8 @@ class Forecaster:
         )
 
     def _resolved_dataset_ref(self) -> str | None:
-        """``project.dataset`` from the injected/resolved :class:`Settings`, or ``None`` if
-        unresolvable (missing ``SF_*`` env) — keeps :meth:`review` graceful offline."""
+        """``project.dataset`` from the injected/resolved `Settings`, or ``None`` if
+        unresolvable (missing ``SF_*`` env) — keeps `review` graceful offline."""
         settings = self._settings
         if settings is None:
             from .errors import ConfigError

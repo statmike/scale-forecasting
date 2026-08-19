@@ -1,11 +1,11 @@
-"""Live BigQuery-native engine smoke (BUILD B3, ``@gcp``).
+"""Live BigQuery-native engine smoke (``@gcp``).
 
 Runs :func:`scale_forecasting.engines.bigquery_engine.run` against live BigQuery for both
 native models (``arima_plus``, ``timesfm``) at a small ``series_limit`` and
-asserts the B3 contract: each model lands canonical ``forecast_predictions`` + ``backtest_oof`` +
+asserts the contract: each model lands canonical ``forecast_predictions`` + ``backtest_oof`` +
 ``forecast_metadata`` rows with ``compute_engine='bigquery'`` and a non-NULL metric panel, the run
 header closes ``COMPLETED`` with ``bq_models`` populated, and the native models surface on
-``v_model_leaderboard`` — the same read surface the Spark models land on (DESIGN §3.3).
+``v_model_leaderboard`` — the same read surface the Spark models land on.
 
 Skipped unless ``SF_PROJECT_ID`` (+ ADC) is set (see ``tests/conftest.py``). Run manually::
 
@@ -99,7 +99,7 @@ def _cfg(source_table: str) -> RunConfig:
         data={"source_table": source_table, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_MODELS,
         features={"holidays": ["US"]},
-        # Scored evaluation lives entirely in the backtest path (C2 alignment): the OOF rows and the
+        # Scored evaluation lives entirely in the backtest path: the OOF rows and the
         # non-NaN metric panel this test asserts are only produced when backtesting is on. A
         # multi-fold plan also exercises the native fold loop + per-fold DROP MODEL cleanup (#161).
         backtest={"enabled": True, "n_folds": _N_FOLDS, "horizon": _HORIZON, "step": _HORIZON},

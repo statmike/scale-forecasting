@@ -1,23 +1,23 @@
-"""Pure example-data generator — no I/O (CONTRACTS §6, DESIGN §13.1).
+"""Pure example-data generator — no I/O.
 
 Deterministic panel math: each series is a sum of readable components —
 ``trend + short-cycle & yearly seasonality + holiday bumps + AR(1) noise`` — then shaped by
 an **archetype** (smooth-seasonal, intermittent, trending, promo-spiky, noisy) that applies
 intermittency, level shifts, and promo spikes. Seasonality is measured in *steps* (via the
-shared :mod:`seasonality` maps), so the panel is coherent at any ``freq`` — daily, weekly,
+shared `seasonality` maps), so the panel is coherent at any ``freq`` — daily, weekly,
 monthly, hourly — and daily output is byte-for-byte the same as day-count math. Every series
 draws its parameters from an rng **seeded by its own index**, so:
 
 * series ``i`` is byte-for-byte identical no matter which partition produced it — hence
   ``generate_panel(n)`` equals the union of any partitioning of ``range(n)`` (the property
-  the Spark seed job in Arc B relies on), and
+  the Spark seed job relies on), and
 * one master ``seed`` reproduces the whole 100k dataset on every deployment.
 
 The five archetypes deliberately favor different models — that's what makes the ensemble and
 straggler contrasts visible downstream. The golden test fixture is a tiny call into this same
 code, so tests and shipped data share one path.
 
-Public surface: :class:`GenConfig`, :func:`generate_partition`, :func:`generate_panel`.
+Public surface: `GenConfig`, `generate_partition`, `generate_panel`.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ class Archetype:
     level_shift_prob: float  # P(the series has one abrupt level shift)
 
 
-# ~5 buckets (DESIGN §13.1). Order fixed so ``i % len`` assigns them reproducibly.
+# ~5 buckets. Order fixed so ``i % len`` assigns them reproducibly.
 ARCHETYPES: tuple[Archetype, ...] = (
     Archetype(
         name="smooth_seasonal",
@@ -169,7 +169,7 @@ def _holiday_mask(index: pd.DatetimeIndex, codes: Sequence[str]) -> np.ndarray:
     """Boolean mask over ``index`` marking holidays for the given country codes.
 
     Uses the same ``holidays`` package the models/features use, so generated holiday bumps
-    line up with the holiday features the models see (parity, DESIGN §4).
+    line up with the holiday features the models see (parity).
     """
     if not codes:
         return np.zeros(len(index), dtype=bool)
@@ -190,8 +190,8 @@ def is_holiday_flags(ds: Sequence[object] | pd.Series, holidays: Sequence[str]) 
     The generator applies holidays as a numeric *bump* on ``y`` (it emits no holiday column),
     but the ``source_series`` table carries an ``is_holiday`` column the models read. This
     derives that flag from the **same** ``holidays`` calendar the bump uses, so the shipped
-    ``is_holiday`` agrees with the effect baked into ``y`` (parity, DESIGN §4). Pure — used by
-    the Spark seed transform (:mod:`data_gen.seed_spark`).
+    ``is_holiday`` agrees with the effect baked into ``y`` (parity). Pure — used by
+    the Spark seed transform (`data_gen.seed_spark`).
 
     ``ds`` is any date-like sequence (a column of ``generate_partition`` output, a list of
     ``date``/``Timestamp``); ``holidays`` is the country codes (e.g. ``("US",)``). Returns a
@@ -285,7 +285,7 @@ def _one_series(
 
 
 def generate_partition(id_range: Iterable[int], cfg: GenConfig, seed: int) -> pd.DataFrame:
-    """Generate the long-format panel for a set of series ids (CONTRACTS §6).
+    """Generate the long-format panel for a set of series ids.
 
     ``id_range`` is any iterable of integer series indices (a partition of the full range in
     the Spark seed job). Returns a frame with columns ``ts_id, archetype, ds, y`` (plus

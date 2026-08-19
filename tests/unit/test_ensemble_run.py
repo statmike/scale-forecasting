@@ -1,4 +1,4 @@
-"""Offline tests for the B5 ensemble orchestrator (``scale_forecasting.ensemble_run``).
+"""Offline tests for the ensemble orchestrator (``scale_forecasting.ensemble_run``).
 
 The GCP path (``run_ensembles`` executing SQL + Write API) is the ``@gcp`` smoke in
 ``tests/integration/test_ensemble_smoke.py``; here we cover what is offline-testable:
@@ -8,7 +8,7 @@ The GCP path (``run_ensembles`` executing SQL + Write API) is the ``@gcp`` smoke
   and row-dropping when nothing is present.
 * :func:`ensemble_run.run_ensembles` short-circuits to a no-op when ``ensemble.enabled`` is false,
   without touching any GCP seam (it returns before importing ``google.cloud``).
-* :func:`ensembler.combine_oof` — the pure OOF-consensus scoring core (post-C2 ensembles earn their
+* :func:`ensembler.combine_oof` — the pure OOF-consensus scoring core (ensembles earn their
   leaderboard metric on the backtest OOF window, not by joining true-future predictions to actuals).
 """
 
@@ -286,7 +286,7 @@ def test_run_ensembles_disabled_is_noop() -> None:
     run_ensembles(cfg, "rid", settings=_SETTINGS)
 
 
-# --- ensemble_id: config-keyed coexistence (C4) --------------------------------
+# --- ensemble_id: config-keyed coexistence -------------------------------------
 
 
 def test_ensemble_id_is_stable_for_identical_config() -> None:

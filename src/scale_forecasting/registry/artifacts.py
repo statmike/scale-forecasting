@@ -1,14 +1,14 @@
-"""GCS artifact upload + ObjectRef construction (CONTRACTS §3.4, §6).
+"""GCS artifact upload + ObjectRef construction.
 
 A fitted model (or any per-cell binary) is written to GCS under a deterministic,
 run-scoped path and referenced from ``forecast_metadata.model_artifact`` so every
-prediction is traceable back to the exact object that produced it (lineage, DESIGN §8.3).
+prediction is traceable back to the exact object that produced it (lineage).
 
-Split along the pure/I-O seam (CONTRACTS §0):
+Split along the pure/I-O seam:
 
-- **Pure** (tested offline now): ``artifact_gcs_uri`` builds the deterministic
+- **Pure** (tested offline): ``artifact_gcs_uri`` builds the deterministic
   ``gs://.../<run_id>/<basename>`` destination from a local path — no client, no upload.
-- **I/O** (structured now, GCP-verified in Arc B step B1): ``upload_artifact`` streams a
+- **I/O** (GCP-verified by the ``@gcp`` round-trip test): ``upload_artifact`` streams a
   local file, ``upload_artifact_bytes`` streams in-memory bytes (the executor-side path —
   the fitted model is serialized to bytes in ``run_cell`` and never touches local disk);
   both return the URI.
@@ -48,9 +48,9 @@ def upload_artifact(
 ) -> str:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Upload one local artifact to its deterministic GCS destination; return the URI.
 
-    Destination is :func:`artifact_gcs_uri` (pure), so re-running a cell overwrites the
+    Destination is `artifact_gcs_uri` (pure), so re-running a cell overwrites the
     same object in place — idempotent, matching the run-scoped registry writes. Raises
-    :class:`RegistryError` if the local file is missing or the upload fails.
+    `RegistryError` if the local file is missing or the upload fails.
     """
     from google.cloud import storage
 
@@ -79,7 +79,7 @@ def upload_artifact_bytes(
     disk), and the registry writer calls this with a deterministic ``basename`` (the cell's
     ``model_hash`` + extension) so each cell maps to its own object and a re-run overwrites
     in place — idempotent, matching the run-scoped registry writes. Raises
-    :class:`RegistryError` if the upload fails.
+    `RegistryError` if the upload fails.
     """
     from google.cloud import storage
 

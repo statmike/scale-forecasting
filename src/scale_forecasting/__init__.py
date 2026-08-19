@@ -1,23 +1,23 @@
 """scale-forecasting — massively-parallel time-series forecasting on Google Cloud.
 
-The package is deliberately flat and readable: one capability per file. Start with
-``DESIGN`` in the README, then read ``config.py`` (the run contract), ``worker.py``
-(the unit of work), and one file under ``models/`` to see the whole shape.
+The package is deliberately flat and readable: one capability per file. Start with the
+architecture overview in the README, then read ``config.py`` (the run contract),
+``worker.py`` (the unit of work), and one file under ``models/`` to see the whole shape.
 
 Public surface — two ways in, one engine underneath:
 
-* **The easy path.** :class:`Forecaster` — point it at a config and call
-  :meth:`~scale_forecasting.sdk.Forecaster.dry_run` / :meth:`~scale_forecasting.sdk.Forecaster.run`
-  / :meth:`~scale_forecasting.sdk.Forecaster.review`. Thin wrapper over :func:`run`; no logic of its
+* **The easy path.** `Forecaster` — point it at a config and call
+  `dry_run` / `run`
+  / `review`. Thin wrapper over `run`; no logic of its
   own.
 * **The direct path.** Drive Spark or Ray yourself and reuse the *same* model machinery:
-  :func:`run_group` (pure, per-bucket), :func:`make_group_runner` / :func:`make_chunk_runner` (the
-  writer-attached ``applyInPandas`` / Ray-task closures), :func:`chunk_cells`, and the unit of work
-  :func:`run_cell`. Both paths run byte-identical cell code (G1). See ``docs/using_the_sdk.md``.
+  `run_group` (pure, per-bucket), `make_group_runner` / `make_chunk_runner` (the
+  writer-attached ``applyInPandas`` / Ray-task closures), `chunk_cells`, and the unit of work
+  `run_cell`. Both paths run byte-identical cell code. See ``docs/using_the_sdk.md``.
 
 Import cost: ``import scale_forecasting`` is near-instant. Light names (config, settings, errors)
 are eager; the heavy names above load the model modules and are therefore **lazy** — resolved on
-first attribute access via :pep:`562`. Touching ``Forecaster``/``run``/``run_cell`` pays the model
+first attribute access via PEP 562. Touching ``Forecaster``/``run``/``run_cell`` pays the model
 import cost; touching ``RunConfig``/``Settings`` does not. ``test_sdk.py`` guards this contract.
 """
 

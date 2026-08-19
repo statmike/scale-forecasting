@@ -1,21 +1,21 @@
-"""Ray on Vertex — the on-cluster driver: read → route GPU/CPU → fan chunks → close (DESIGN §11).
+"""Ray on Vertex — the on-cluster driver: read → route GPU/CPU → fan chunks → close.
 
-The Ray analog of :func:`~scale_forecasting.engines.spark_explode.run`, and its structural twin:
+The Ray analog of `run`, and its structural twin:
 header → fan cells across the cluster → aggregate statuses → close header. Everything reusable —
-the per-cell work (:func:`~scale_forecasting.engines.spark_io.run_group`), the executor-side write
-(:func:`~scale_forecasting.registry.bq.write_cells`), and the run-level roll-up
-(:func:`~scale_forecasting.engines.spark_io.aggregate_status`) — is shared verbatim through
-:mod:`.ray_io`; this module owns only the Ray-specific driver shell.
+the per-cell work (`run_group`), the executor-side write
+(`write_cells`), and the run-level roll-up
+(`aggregate_status`) — is shared verbatim through
+`ray_io`; this module owns only the Ray-specific driver shell.
 
-**What's different from Spark, and why Ray is in the design (DESIGN §11.2).** The models are split
+**What's different from Spark, and why Ray is in the design.** The models are split
 into a GPU pool (NeuralProphet — ``family == "deep_learning"``) and a CPU pool (everything else).
 GPU cells run in ``@ray.remote(num_gpus=<fraction>)`` tasks that *pack several onto one T4* — the
 fractional-GPU sharing Spark can't do — while CPU cells run in ``@ray.remote(num_cpus=1)`` tasks.
-Both pools run the exact same chunk runner. The cluster they land on autoscales per pool by default
-(D17), planned at submit time by :func:`.ray_io.plan_cluster`; this driver just fans work across
+Both pools run the exact same chunk runner. The cluster they land on autoscales per pool by default,
+planned at submit time by `plan_cluster`; this driver just fans work across
 whatever the cluster is.
 
-Runs on the Ray cluster head via :mod:`~scale_forecasting.ray_entry` (the Jobs API entrypoint).
+Runs on the Ray cluster head via `ray_entry` (the Jobs API entrypoint).
 
 Public surface: ``run(cfg, models=None, *, manage_header=True) -> None``.
 """
@@ -41,8 +41,8 @@ _log = get_logger(__name__)
 def _storage_table_path(cfg: RunConfig, settings: Settings) -> str:
     """Resolve the source to a Storage Read API path ``projects/P/datasets/D/tables/T`` (pure).
 
-    :func:`~scale_forecasting.engines.spark_io._resolve_source_table` yields the BigQuery
-    ``project.dataset.table`` form (qualifying a bare name against the deployment dataset, G1); the
+    `_resolve_source_table` yields the BigQuery
+    ``project.dataset.table`` form (qualifying a bare name against the deployment dataset); the
     Storage Read API wants the resource-path form. A two-part ``dataset.table`` (a caller-qualified
     source in another dataset of the same project) is prefixed with ``settings.project_id``.
     """
@@ -60,9 +60,9 @@ def _storage_table_path(cfg: RunConfig, settings: Settings) -> str:
 def _limit_series(source: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame:
     """Keep the first ``series_limit`` ts_ids (ordered); pass-through when unset (pure).
 
-    The pandas twin of :func:`~scale_forecasting.engines.spark_io._limit_series`: distinct ts_ids →
-    ordered → first N → filter, so Ray and Spark subset the *same* series at every scale (DESIGN
-    §13.1) — the property that makes the "10 vs 100 vs 100k" runtime comparison apples-to-apples.
+    The pandas twin of `_limit_series`: distinct ts_ids →
+    ordered → first N → filter, so Ray and Spark subset the *same* series at every scale — the
+    property that makes the "10 vs 100 vs 100k" runtime comparison apples-to-apples.
     Applied client-side (not as a Storage Read ``row_restriction``, which can't express an ordered
     first-N over distinct ids), exactly as the Spark connector applies its limit after the read.
     """
@@ -77,18 +77,18 @@ def _limit_series(source: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame:
 def _read_source_series(cfg: RunConfig, settings: Settings) -> pd.DataFrame:
     """Read the source series to a driver-side pandas panel, then apply the ``series_limit`` subset.
 
-    The Ray analog of :func:`~scale_forecasting.engines.spark_io.read_source_series`. Two readers
+    The Ray analog of `read_source_series`. Two readers
     chosen by ``cfg.compute.ray_read_mode`` — both hit the **same** BigQuery Storage Read API (no
-    query slots, Q3 parity with Spark) and return the **same** column-projected pandas panel, so the
+    query slots, matching Spark) and return the **same** column-projected pandas panel, so the
     downstream fan-out is byte-identical whichever runs:
 
-    * ``driver_collect`` (default) — :func:`_read_driver_collect`, the ``BigQueryReadClient`` path
+    * ``driver_collect`` (default) — `_read_driver_collect`, the ``BigQueryReadClient`` path
       the @gpu smoke and the 100k run are proven on.
-    * ``ray_data`` — :func:`_read_ray_data`, the Ray-native ``ray.data.read_bigquery`` reader.
+    * ``ray_data`` — `_read_ray_data`, the Ray-native ``ray.data.read_bigquery`` reader.
 
-    The whole panel lands on the driver either way, then :func:`.ray_io.chunk_cells` shards it into
+    The whole panel lands on the driver either way, then `chunk_cells` shards it into
     task-sized frames — acceptable because Ray is the GPU path for modest scales, not the 100k hero
-    (that's Spark, §11.2). The deterministic ``series_limit`` subset (:func:`_limit_series`) is
+    (that's Spark). The deterministic ``series_limit`` subset (`_limit_series`) is
     applied here so both readers subset identically.
     """
     reader = _read_ray_data if cfg.compute.ray_read_mode == "ray_data" else _read_driver_collect
@@ -102,9 +102,9 @@ def _read_driver_collect(
 
     Like the Spark connector, this reads through the **Storage Read API**, *not* ``client.query()``:
     a direct columnar table read over the storage layer, so it consumes no BigQuery query slots and
-    streams Arrow straight to the driver (Q3 parity with Spark, C-Ray). The read is column-projected
-    to only what a cell needs (:func:`_needed_columns` → ``selected_fields``). Returns the raw
-    panel; the caller (:func:`_read_source_series`) applies the ``series_limit`` subset.
+    streams Arrow straight to the driver (matching Spark). The read is column-projected
+    to only what a cell needs (`_needed_columns` → ``selected_fields``). Returns the raw
+    panel; the caller (`_read_source_series`) applies the ``series_limit`` subset.
     """
     # Runtime import: pandas is TYPE_CHECKING-only at module scope (offline import parity), so every
     # function that touches pandas at runtime must import it locally.
@@ -137,8 +137,8 @@ def _read_ray_data(
     """Read the source panel with the Ray-native ``ray.data.read_bigquery`` reader (opt-in).
 
     ``ray.data.read_bigquery`` reads over the **same** BigQuery Storage Read API underneath (no
-    query slots, Q3 parity), returning a distributed :class:`ray.data.Dataset`. We pass ``dataset=``
-    (not ``query=``) so the read stays a pure table scan — matching :func:`_read_driver_collect` and
+    query slots, matching Spark), returning a distributed `ray.data.Dataset`. We pass ``dataset=``
+    (not ``query=``) so the read stays a pure table scan — matching `_read_driver_collect` and
     then materialize to a single driver-side pandas panel with ``.to_pandas()`` so the rest of the
     fan-out is identical to the default path. Column projection is applied in pandas after the read
     (the reader takes no ``selected_fields``), keeping the two readers' outputs the same shape.
@@ -164,7 +164,7 @@ def _storage_dataset_path(cfg: RunConfig, settings: Settings) -> str:
     """Resolve the source to the ``dataset.table`` form ``ray.data.read_bigquery`` wants (pure).
 
     ``read_bigquery(dataset=...)`` takes ``<dataset>.<table>`` (the project is passed separately as
-    ``project_id``). :func:`_storage_table_path` already resolves the full resource path; reuse it
+    ``project_id``). `_storage_table_path` already resolves the full resource path; reuse it
     and drop the ``projects/P/datasets/`` / ``/tables/`` scaffolding back to ``D.T``.
     """
     path = _storage_table_path(cfg, settings)  # projects/P/datasets/D/tables/T
@@ -175,7 +175,7 @@ def _storage_dataset_path(cfg: RunConfig, settings: Settings) -> str:
 def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:
     """The first few per-series frames, for live GPU-memory calibration (auto fraction only).
 
-    :func:`.ray_io.calibrate_gpu_fraction` fits NeuralProphet on these to measure peak GPU memory;
+    `calibrate_gpu_fraction` fits NeuralProphet on these to measure peak GPU memory;
     ``gpu_calibration_samples`` caps how many so calibration is a few fits, not the whole panel.
     """
     id_col = cfg.data.ts_id_col
@@ -187,13 +187,13 @@ def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:
 def _resolve_fleetwide_hpo(
     source: pd.DataFrame, cfg: RunConfig, executed: list[str]
 ) -> dict[str, dict[str, object]] | None:
-    """Driver-side fleetwide-HPO pre-pass over the collected pandas panel (C5; Ray twin).
+    """Driver-side fleetwide-HPO pre-pass over the collected pandas panel (the Ray twin).
 
     Returns ``None`` unless HPO is enabled at ``fleetwide`` granularity. When it is, takes the first
-    ``hpo.sample_size`` series (deterministically, matching :func:`.ray_io._limit_series`) and tunes
-    the executed model subset on them (:func:`~scale_forecasting.hpo.resolve_fleetwide`), scoping
+    ``hpo.sample_size`` series (deterministically, matching `_limit_series`) and tunes
+    the executed model subset on them (`resolve_fleetwide`), scoping
     the study to the models that will actually run. The pandas analog of
-    :func:`.spark_io.resolve_fleetwide_hpo` — the Spark path samples from a Spark DataFrame, this
+    `resolve_fleetwide_hpo` — the Spark path samples from a Spark DataFrame, this
     one from the panel already on the driver.
     """
     if not (cfg.hpo.enabled and cfg.hpo.granularity == "fleetwide"):
@@ -210,10 +210,10 @@ def _resolve_fleetwide_hpo(
 def _chunk_count(n_cells: int, target_cells: int) -> int:
     """Chunks (Ray tasks) for a pool: ``ceil(cells / target)`` (≥ 1), or 0 for an empty pool.
 
-    Mirrors Spark's bucket count (:func:`~scale_forecasting.engines.spark_io.default_bucket_count`):
+    Mirrors Spark's bucket count (`default_bucket_count`):
     each chunk carries ~``target_cells`` cells so per-task memory stays bounded and the scheduler
-    has many units to pack onto the fixed nodes. Clamped to :data:`.ray_io._MAX_CHUNKS` downstream
-    by :func:`.ray_io.chunk_cells`.
+    has many units to pack onto the fixed nodes. Clamped to `_MAX_CHUNKS` downstream
+    by `chunk_cells`.
     """
     if n_cells <= 0:
         return 0
@@ -223,31 +223,31 @@ def _chunk_count(n_cells: int, target_cells: int) -> int:
 def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool = True) -> None:
     """Execute a Ray run end-to-end: header → route + fan chunks across the cluster → close header.
 
-    Driver-side lifecycle, the structural twin of :func:`spark_explode.run`:
+    Driver-side lifecycle, the structural twin of `spark_explode.run`:
 
-    1. Resolve infra :class:`~scale_forecasting.settings.Settings` (G1), derive the ``run_id`` from
+    1. Resolve infra `Settings`, derive the ``run_id`` from
        the *full* ``cfg`` (so a mixed run shares one id across runtimes), and — in owner mode —
        ``ensure_tables`` + ``write_header`` (RUNNING).
     2. Read the source panel to the driver, split the executed models into GPU/CPU pools
-       (:func:`.ray_io.split_gpu_cpu_models`), calibrate the per-task GPU fraction
-       (:func:`.ray_io.calibrate_gpu_fraction` — live NeuralProphet memory profiling when ``auto``),
-       chunk each pool's cells (:func:`.ray_io.chunk_cells`), and dispatch one Ray task per chunk —
+       (`split_gpu_cpu_models`), calibrate the per-task GPU fraction
+       (`calibrate_gpu_fraction` — live NeuralProphet memory profiling when ``auto``),
+       chunk each pool's cells (`chunk_cells`), and dispatch one Ray task per chunk —
        GPU chunks as ``@ray.remote(num_gpus=fraction)`` (packed onto T4s), CPU chunks as
-       ``num_cpus=1``. Every task runs the shared chunk runner (:func:`.ray_io.make_chunk_runner`),
-       which calls the exact :func:`run_group` + :func:`~scale_forecasting.registry.bq.write_cells`
+       ``num_cpus=1``. Every task runs the shared chunk runner (`make_chunk_runner`),
+       which calls the exact `run_group` + `write_cells`
        and returns only the compact status frame.
-    3. Concatenate the statuses, :func:`.ray_io.aggregate_status`, and — in owner mode —
+    3. Concatenate the statuses, `aggregate_status`, and — in owner mode —
        ``update_header`` (COMPLETED/PARTIAL/FAILED, wall-clock, ``n_series``).
 
-    ``models`` is the executed subset (Arc B): ``None`` runs every model in ``cfg.models``;
-    :func:`main.run` passes only the Python-runtime models of a mixed config so the BigQuery-native
+    ``models`` is the executed subset: ``None`` runs every model in ``cfg.models``;
+    `main.run` passes only the Python-runtime models of a mixed config so the BigQuery-native
     ones run in BigQuery, not as Ray tasks. ``manage_header=False`` is contributor mode — the engine
-    skips the header lifecycle because :func:`main.run` owns the single shared header (parity with
+    skips the header lifecycle because `main.run` owns the single shared header (parity with
     the Spark contributor mode). Idempotent by construction: the config-derived ``run_id`` + append/
-    dedupe-on-read writes mean a re-run of the same config lands byte-identical rows (§3.4).
+    dedupe-on-read writes mean a re-run of the same config lands byte-identical rows.
 
     Assumes Ray is reachable: connects with a plain ``ray.init()`` only if not already connected
-    (the :mod:`~scale_forecasting.ray_entry` Jobs entrypoint normally owns the session), and tears
+    (the `ray_entry` Jobs entrypoint normally owns the session), and tears
     down only a session it opened — so a caller-managed session (e.g. the local-mode test) is left
     intact.
     """
@@ -274,7 +274,7 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     )
 
     # 1. Header first, so a run is visible even if the cluster dies mid-flight. Contributor mode
-    #    (Arc B) skips it — main.run already wrote the shared header.
+    #    contributor mode skips it — main.run already wrote the shared header.
     if manage_header:
         bq.ensure_tables(cfg, settings=settings)
         bq.write_header(cfg, run_id, settings=settings)
@@ -286,7 +286,7 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     try:
         source = _read_source_series(cfg, settings)
 
-        # C5: fleetwide HPO resolves once on the driver over a small sample, before fan-out — the
+        # Fleetwide HPO resolves once on the driver over a small sample, before fan-out — the
         # Ray twin of spark_io.resolve_fleetwide_hpo, over the already-collected pandas panel. None
         # unless HPO is enabled at fleetwide granularity. Tuned params flow through the chunk-runner
         # closure to every task (not cfg → run_id stable).
@@ -312,9 +312,10 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
         )
 
         # One Ray task per chunk. The remote closes over the picklable runner (cloudpickle handles
-        # the cfg/settings closure — the G1 seam, no second env path). GPU tasks request a fraction
-        # of a T4 so several pack onto one device; when no GPU is provisioned, NeuralProphet cells
-        # fall back to CPU inside the task, so route them as CPU work too (see _task_options).
+        # the cfg/settings closure — the single local/cloud seam, no second env path). GPU tasks
+        # request a fraction of a T4 so several pack onto one device; when no GPU is provisioned,
+        # NeuralProphet cells fall back to CPU inside the task, so route them as CPU work too (see
+        # _task_options).
         @ray.remote
         def _task(chunk: pd.DataFrame) -> pd.DataFrame:
             return runner(chunk)

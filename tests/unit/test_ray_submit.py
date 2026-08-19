@@ -1,4 +1,4 @@
-"""Offline tests for the Vertex Ray submit helper (BUILD B4, ``scale_forecasting.ray_submit``).
+"""Offline tests for the Vertex Ray submit helper (``scale_forecasting.ray_submit``).
 
 No network: the pure job-spec assembly (:func:`build_entrypoint`, :func:`build_runtime_env`,
 :func:`extract_ray_telemetry`), infra resolution (:class:`RayInfra`), and the whole cluster
@@ -68,14 +68,14 @@ def test_build_entrypoint_wires_config_and_infra_args() -> None:
     assert "--sf-project-id proj-x" in ep
 
 
-def test_build_entrypoint_defaults_omit_arc_b_flags() -> None:
-    # Standalone submit (no subset, header-owning) omits both Arc B flags, parity with build_batch.
+def test_build_entrypoint_defaults_omit_oncluster_flags() -> None:
+    # Standalone submit (no subset, header-owning) omits both coordination flags, like build_batch.
     ep = ray_submit.build_entrypoint("gs://c/r.json", _settings())
     assert "--models" not in ep
     assert "--manage-header" not in ep
 
 
-def test_build_entrypoint_appends_arc_b_flags_when_non_default() -> None:
+def test_build_entrypoint_appends_oncluster_flags_when_non_default() -> None:
     ep = ray_submit.build_entrypoint(
         "gs://c/r.json", _settings(), models=[_CPU, _GPU], manage_header=False
     )
@@ -231,7 +231,7 @@ def test_extract_ray_telemetry_flattens_plan_and_cluster() -> None:
     assert tel["gpu_node_count"] == plan.gpu_node_count
     assert tel["accelerator_type"] == "NVIDIA_TESLA_T4"
     assert tel["ray_version"] == "2.47"
-    # Elastic spec (D17 reversal) shows up for auditability on v_run_summary.
+    # Elastic spec shows up for auditability on v_run_summary.
     assert tel["autoscale"] is True
     assert tel["cpu_min_nodes"] == plan.cpu_min_nodes
     assert tel["cpu_max_nodes"] == plan.cpu_max_nodes
@@ -265,7 +265,7 @@ def test_extract_ray_telemetry_degrades_on_bare_cluster() -> None:
     assert tel["reuse"] is True
 
 
-# --- _worker_resources: the AutoscalingSpec wiring (D17 reversal) ----------------
+# --- _worker_resources: the AutoscalingSpec wiring ------------------------------
 #
 # The pool builder imports vertex_ray lazily, so we inject fakes via sys.modules — this keeps the
 # test offline and independent of whether the [ray] extra is installed. The fakes record the kwargs
@@ -466,7 +466,7 @@ def test_submit_ray_cluster_name_override_forces_reuse(_stubbed_lifecycle: dict[
     assert calls["telemetry"]["reuse"] is True
 
 
-def test_submit_ray_carries_arc_b_contract_to_entrypoint(
+def test_submit_ray_carries_oncluster_contract_to_entrypoint(
     _stubbed_lifecycle: dict[str, Any],
 ) -> None:
     calls = _stubbed_lifecycle

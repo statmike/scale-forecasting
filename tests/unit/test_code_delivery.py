@@ -1,6 +1,6 @@
-"""The code-from-outside-container guarantee, made un-regressable (PLANS_PROD §C1).
+"""The code-from-outside-container guarantee, made un-regressable.
 
-Q1's architecture ships the ``scale_forecasting`` package **at runtime** on every compute path —
+The architecture ships the ``scale_forecasting`` package **at runtime** on every compute path —
 never baked into the container image — so a data scientist edits ``src/`` and re-runs against the
 *existing* slow-moving image, with no rebuild and no stale code hiding in the container. These tests
 lock that property at every seam:

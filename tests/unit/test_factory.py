@@ -1,4 +1,4 @@
-"""Factory gate (CONTRACTS §1, §6; BUILD 2.5).
+"""Factory gate.
 
 The factory is the whole point of one-model-one-file: importing ``models`` registers every
 model by name, ``get_model`` resolves a name to its class, and ``list_models`` enumerates
@@ -14,7 +14,7 @@ from scale_forecasting.errors import ModelError
 from scale_forecasting.models import get_model, list_models
 from scale_forecasting.models.base_model import BaseModel
 
-# Every model authored through Phase 2.5, by runtime. Kept explicit (not derived from
+# Every model in the suite, by runtime. Kept explicit (not derived from
 # list_models) so the test fails loudly if a model silently stops registering.
 _PYTHON_MODELS = {
     "theta",

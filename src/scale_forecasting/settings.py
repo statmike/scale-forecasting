@@ -1,18 +1,19 @@
-"""Infrastructure settings — where the run's GCP identity is resolved (DESIGN §13.0).
+"""Infrastructure settings — where the run's GCP identity is resolved.
 
-This is the one seam that separates the *run spec* (:class:`~scale_forecasting.config.RunConfig`
+This is the one seam that separates the *run spec* (`RunConfig`
 — models, backtest, ensembling) from the *infrastructure* it runs against (project, dataset,
 BigLake connection, warehouse bucket). ``RunConfig`` is portable and reproducible; ``Settings``
 is deployment-specific, so they are deliberately kept apart.
 
-Resolution is **environment-based** (``SF_*`` vars), for one reason: G1 — the identical writer
-code must run locally under ADC and on Composer under the runner service account. Composer sets
+Resolution is **environment-based** (``SF_*`` vars), for one reason: the same code must run
+locally and in the cloud — the identical writer code runs locally under ADC and on Composer
+under the runner service account. Composer sets
 env vars on the workers; a local shell (or the ``@gcp`` test) sets the same vars. No config file,
 no hardcoded ids, no ``terraform output`` call baked into the product — the values come from
-whoever launched the process. :meth:`Settings.from_terraform_outputs` is a convenience for local
+whoever launched the process. `Settings.from_terraform_outputs` is a convenience for local
 dev/tests that reads the exact keys ``terraform output -json`` emits.
 
-Public surface: :class:`Settings`.
+Public surface: `Settings`.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ class Settings:
 
     project_id: str
     # BigLake connection + warehouse root stay REQUIRED even though the run-collection tables are
-    # native (D19): the example input still ships a managed-Iceberg variant (source_series_iceberg)
+    # native: the example input still ships a managed-Iceberg variant (source_series_iceberg)
     # that reads/writes its GCS files through the connection. Source storage format is chosen per
     # run via cfg.data.source_table (…_iceberg vs …_native) — not a Settings knob (config-driven).
     connection: str  # BigLake connection ref, "project.region.name"
@@ -66,7 +67,7 @@ class Settings:
 
         ``SF_PROJECT_ID``, ``SF_CONNECTION``, and ``SF_WAREHOUSE_URI`` are required;
         ``SF_DATASET_ID`` and ``SF_REGION`` fall back to their defaults. Raises
-        :class:`ConfigError` naming the first missing required var, so a misconfigured
+        `ConfigError` naming the first missing required var, so a misconfigured
         deployment fails fast with a clear message instead of a downstream BigQuery 404.
         """
         required = {
@@ -98,7 +99,7 @@ class Settings:
         Accepts the keys the ``terraform/main`` stage emits — ``project_id``, ``dataset_id``,
         ``iceberg_connection``, ``warehouse_uri`` (with ``connection`` accepted as an alias) —
         so a developer can wire the live infra without hand-copying ids. Missing keys raise
-        :class:`ConfigError`.
+        `ConfigError`.
         """
         try:
             connection = outputs.get("iceberg_connection") or outputs["connection"]

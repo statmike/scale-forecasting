@@ -1,6 +1,6 @@
 """XGBoost regressor on lag/calendar features.
 
-One model, one file (CONTRACTS §1). Runtime python, ml family. XGBoost is an optional
+One model, one file. Runtime python, ml family. XGBoost is an optional
 dependency, so it is imported lazily inside ``fit`` — the model still *registers* without
 it (the factory stays complete), and only fails if actually used without the extra
 installed. Recursive multi-step forecasting + design matrix come from the shared

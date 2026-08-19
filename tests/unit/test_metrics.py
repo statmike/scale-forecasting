@@ -1,7 +1,7 @@
-"""Tests for the metric panel (CONTRACTS §2.3, BUILD 2.1).
+"""Tests for the metric panel.
 
 Each metric is checked against a hand-computed value on a tiny fixed array, plus the
-edge cases TESTING.md calls out: MAPE with zeros → NaN, MASE/RMSSE need y_train,
+edge cases worth calling out: MAPE with zeros → NaN, MASE/RMSSE need y_train,
 coverage in [0,1], pinball ≥ 0.
 """
 
@@ -39,7 +39,7 @@ def test_panel_has_every_metric() -> None:
 
 def test_metric_names_match_config_decision_metric() -> None:
     # The panel metrics.py produces must be exactly the DecisionMetric vocabulary in the
-    # config — same order, one source of truth (metrics ↔ config ↔ DDL, CONTRACTS §2.3).
+    # config — same order, one source of truth (metrics ↔ config ↔ DDL).
     assert METRIC_NAMES == get_args(DecisionMetric)
 
 

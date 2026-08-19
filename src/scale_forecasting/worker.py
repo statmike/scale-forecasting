@@ -1,13 +1,13 @@
-"""The cell runner — the G1 unit of work that runs identically local / Spark / Ray.
+"""The cell runner — the unit of work that runs identically local / Spark / Ray.
 
-``run_cell`` (BUILD step 2.6) fits, optionally backtests, and predicts ONE
-``(ts_id, model)`` cell and returns a :class:`CellResult`. Engines differ only in how
+``run_cell`` fits, optionally backtests, and predicts ONE
+``(ts_id, model)`` cell and returns a `CellResult`. Engines differ only in how
 they *call* it and *collect* its results — that symmetry is what makes "same code
-everywhere" (G1) real.
+everywhere" real.
 
-:class:`CellResult` is defined here because it is the worker's output type; the registry
+`CellResult` is defined here because it is the worker's output type; the registry
 writers (``registry/bq.py``) consume it. It carries plain data (frames + scalars), no
-behavior, so it is the clean seam between compute and lineage (CONTRACTS §3.2).
+behavior, so it is the clean seam between compute and lineage.
 """
 
 from __future__ import annotations
@@ -35,10 +35,10 @@ _log = get_logger(__name__)
 
 @dataclass(frozen=True)
 class CellResult:
-    """The result of one ``(ts_id, model)`` cell (CONTRACTS §3.2).
+    """The result of one ``(ts_id, model)`` cell.
 
     A failing cell sets ``status="error"`` with ``error`` populated and empty
-    ``predictions`` — it never raises out of ``run_cell`` (CONTRACTS §3.3), so one bad
+    ``predictions`` — it never raises out of ``run_cell``, so one bad
     cell can't sink a 100k-series batch.
     """
 
@@ -49,15 +49,15 @@ class CellResult:
     model_hash: str
     status: str  # "ok" | "error"
     error: str | None
-    predictions: pd.DataFrame  # canonical §2.1
-    oof: pd.DataFrame | None  # canonical §2.2, or None if backtest off
-    metrics: dict[str, float]  # §2.3 (full-fit metrics)
+    predictions: pd.DataFrame  # canonical prediction frame
+    oof: pd.DataFrame | None  # canonical OOF frame, or None if backtest off
+    metrics: dict[str, float]  # full-fit metrics
     best_params: dict[str, Any] = field(default_factory=dict)
     fit_seconds: float = 0.0
     # Serialized fitted model (from BaseModel.serialize), or None when persistence is off / the
     # model opts out. Carried as bytes rather than a temp-file path so it crosses the executor
     # boundary as plain data with no local-fs lifecycle; the registry writer uploads it to GCS and
-    # stamps the ObjectRef onto forecast_metadata.model_artifact (CONTRACTS §3.4, G3).
+    # stamps the ObjectRef onto forecast_metadata.model_artifact for model-artifact lineage.
     artifact_bytes: bytes | None = None
 
 
@@ -68,10 +68,10 @@ def _compute_engine(model_cls: type[BaseModel], cfg: RunConfig) -> str:
 
 
 def _model_context(cfg: RunConfig, transform_lambda: float | None = None) -> ModelContext:
-    """Build the per-cell :class:`ModelContext` from the run config (CONTRACTS §1).
+    """Build the per-cell `ModelContext` from the run config.
 
     ``transform_lambda`` is the cell's fitted Box-Cox λ (None for stateless transforms), fit
-    once in :func:`run_cell` and shared by the backtest folds and the final fit.
+    once in `run_cell` and shared by the backtest folds and the final fit.
     """
     holidays = holiday_frame(cfg) if cfg.features.holidays else None
     return ModelContext(
@@ -91,7 +91,7 @@ def _resolve_params(
     ctx: ModelContext,
     params: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Resolve the hyperparameters this cell builds its model with (C5; see :func:`run_cell`).
+    """Resolve the hyperparameters this cell builds its model with (see `run_cell`).
 
     Pre-resolved ``params`` (the fleetwide driver pre-pass) win outright. Otherwise, per-series HPO
     tunes on *this* series when enabled at that granularity; failing that, the ``{}`` default. Kept
@@ -108,7 +108,7 @@ def _resolve_params(
 
 
 def _rollup_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:
-    """Average the per-fold metric panels into one panel (CONTRACTS §3.2).
+    """Average the per-fold metric panels into one panel.
 
     NaNs are ignored per metric (a metric undefined on one fold shouldn't sink the mean);
     a metric NaN on every fold stays NaN. Always returns the full panel.
@@ -122,7 +122,7 @@ def _rollup_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:
 
 
 def _empty_predictions() -> pd.DataFrame:
-    """An empty canonical §2.1 prediction frame (for error cells)."""
+    """An empty canonical prediction frame (for error cells)."""
     return pd.DataFrame({c: pd.Series(dtype="object") for c in PREDICTION_COLUMNS})
 
 
@@ -132,22 +132,22 @@ def run_cell(
     cfg: RunConfig,
     params: dict[str, Any] | None = None,
 ) -> CellResult:
-    """Fit + (optional backtest) + predict ONE ``(ts_id, model)`` cell (CONTRACTS §3.1).
+    """Fit + (optional backtest) + predict ONE ``(ts_id, model)`` cell.
 
     Pure-ish and deterministic: reads nothing global, writes nothing (no BQ), returns a
-    :class:`CellResult` carrying plain data. A failing cell returns ``status="error"`` and
-    never raises (CONTRACTS §3.3), so one bad series can't sink a batch.
+    `CellResult` carrying plain data. A failing cell returns ``status="error"`` and
+    never raises, so one bad series can't sink a batch.
 
-    ``params`` are the hyperparameters this cell's model is built with (C5). Resolution order:
+    ``params`` are the hyperparameters this cell's model is built with. Resolution order:
 
     * ``params`` given (not None) → use them. This is the **fleetwide** path: the driver tuned the
-      model once on a sample (:func:`~scale_forecasting.hpo.resolve_fleetwide`) and threads the
+      model once on a sample (`resolve_fleetwide`) and threads the
       winning params here — never through ``cfg`` (the config is the run_id identity key).
     * else if ``cfg.hpo.enabled`` and ``granularity == "per_series"`` → tune on *this* series now.
     * else → ``{}`` (the default: today's untuned behavior).
 
     The resolved params drive **both** the backtest folds and the final fit, so
-    ``best_params = model.get_params()`` reflects what actually ran (vs the pre-C5 ``{}``).
+    ``best_params = model.get_params()`` reflects what actually ran.
     """
     ts_id = _ts_id(series, cfg)
     run_id = make_run_id(cfg)
@@ -177,7 +177,7 @@ def run_cell(
     try:
         # Fit the transform's stateful λ once per cell (None for none/log1p), on the raw target.
         # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
-        # predict (the whole point of carrying it on the cell, G1).
+        # predict (the whole point of carrying it on the cell).
         lam = fit_transform_lambda(_target(series, cfg), cfg.features.transform)
         ctx = _model_context(cfg, transform_lambda=lam)
         resolved = _resolve_params(series, model_name, cfg, ctx, params)
@@ -193,16 +193,16 @@ def run_cell(
         y, X = build_features(series, cfg, lam)
         model = model_cls(resolved, ctx)
         model.fit(y, X)
-        # Offline has no *true* future exog (that arrives with a real run, Arc B). As a
+        # Offline has no *true* future exog (that arrives with a real run). As a
         # stand-in we hand exog-aware models the first `horizon` rows of the design matrix
         # so shapes line up; values are historical, so exog-driven forecasts are indicative
         # only. Tree models ignore any lag_* columns here (see _lag_forecaster).
         future_exog = X.iloc[: cfg.data.horizon] if X is not None else None
         predictions = model.predict(cfg.data.horizon, future_exog)
 
-        # Persist the fitted model as an artifact only when the run opts in (G3 lineage). A
-        # serialize failure must not sink an otherwise-good forecast, so it degrades to no
-        # artifact (CONTRACTS §3.3) rather than turning the cell into an error.
+        # Persist the fitted model as an artifact only when the run opts in (model-artifact
+        # lineage). A serialize failure must not sink an otherwise-good forecast, so it degrades to
+        # no artifact rather than turning the cell into an error.
         artifact_bytes: bytes | None = None
         if cfg.compute.persist_models:
             try:
@@ -225,7 +225,7 @@ def run_cell(
             fit_seconds=time.perf_counter() - started,
             artifact_bytes=artifact_bytes,
         )
-    except Exception as e:  # any failure → error cell, batch survives (CONTRACTS §3.3)
+    except Exception as e:  # any failure → error cell, batch survives
         return _error(repr(e), engine)
 
 

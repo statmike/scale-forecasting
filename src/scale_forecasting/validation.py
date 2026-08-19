@@ -1,4 +1,4 @@
-"""Pre-flight input-contract validator — pure, offline (CONTRACTS §2, DESIGN §9).
+"""Pre-flight input-contract validator — pure, offline.
 
 The product **specifies** the data shape (via the config) and **validates** that the input
 conforms — it never *prepares* data. Resampling, aggregation, timezone/DST handling, and
@@ -68,12 +68,12 @@ def _required_min_history(cfg: RunConfig) -> tuple[int, str]:
 def validate_panel(
     df: pd.DataFrame, cfg: RunConfig, *, min_history: int | None = None
 ) -> ValidationReport:
-    """Validate that ``df`` conforms to the shape ``cfg`` declares (CONTRACTS §2).
+    """Validate that ``df`` conforms to the shape ``cfg`` declares.
 
     ``df`` is the long-format panel using the *business* column names the config maps
     (``data.ts_id_col`` / ``date_col`` / ``target_col`` and ``features.exog``) — the same
-    columns ``features.build_features`` reads. Returns a :class:`ValidationReport` on
-    success; raises :class:`DataError` naming the first offender on any violation.
+    columns ``features.build_features`` reads. Returns a `ValidationReport` on
+    success; raises `DataError` naming the first offender on any violation.
 
     ``min_history`` overrides the auto-derived per-series minimum (from horizon/backtest)
     when a caller wants a stricter floor.
@@ -156,7 +156,7 @@ def _require_numeric(col: pd.Series, name: str) -> None:
 
 
 def _check_series_spacing(ts_id: str, dates: pd.DatetimeIndex, freq: str) -> None:
-    """Confirm one series' sorted timestamps are regular at ``freq`` (CONTRACTS §2).
+    """Confirm one series' sorted timestamps are regular at ``freq``.
 
     Duplicates, gaps, and off-grid points are all reported against the *expected* grid
     ``date_range(first, last, freq)``, naming the first place the actual dates diverge.

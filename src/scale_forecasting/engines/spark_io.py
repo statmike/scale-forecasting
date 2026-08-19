@@ -1,36 +1,36 @@
 """Shared Spark-engine plumbing — the pieces ``spark_explode`` and ``spark_naive`` both need.
 
-Split along the pure/I-O seam (CONTRACTS §0) so the interesting logic is offline-testable:
+Split along the pure/I-O seam so the interesting logic is offline-testable:
 
-* **Pure** (no Spark, no BigQuery): :func:`run_group` — the body of the grouped-Pandas UDF, which
-  runs :func:`~scale_forecasting.worker.run_cell` for every cell in one group's pandas frame and
-  returns ``(results, status_frame)``; :func:`aggregate_status` — fold the per-cell status frame
-  into a run-level :class:`RunOutcome`; :func:`default_bucket_count`, :func:`bucket_key_cols`.
+* **Pure** (no Spark, no BigQuery): `run_group` — the body of the grouped-Pandas UDF, which
+  runs `run_cell` for every cell in one group's pandas frame and
+  returns ``(results, status_frame)``; `aggregate_status` — fold the per-cell status frame
+  into a run-level `RunOutcome`; `default_bucket_count`, `bucket_key_cols`.
 * **I/O / Spark shell** (pyspark imported lazily, parity with the seed job):
-  :func:`read_source_series` (connector read + deterministic ``series_limit`` subset),
-  :func:`add_bucket`, :func:`cross_join_models`, :func:`status_schema`, :func:`make_group_runner`.
+  `read_source_series` (connector read + deterministic ``series_limit`` subset),
+  `add_bucket`, `cross_join_models`, `status_schema`, `make_group_runner`.
 
 **Fan-out mechanics.** Both engines shuffle cells into *buckets* and run one Spark task per bucket
 (``groupBy(bucket).applyInPandas``). The bucket key is the natural unit of independence for the
-method (:func:`bucket_key_cols`):
+method (`bucket_key_cols`):
 
 * ``explode`` buckets on ``(ts_id, model_type)`` — the whole *cell*. A slow ``(series, deep-model)``
   cell lands in its own bucket while that same series' fast cells sit in *other* buckets and run
   concurrently, so the scheduler spreads cells and autoscales. Every history row of a given cell
   shares both keys, so a cell's full series stays intact in one bucket.
 * ``naive`` buckets on ``ts_id`` alone — all of a series' models land together and run sequentially
-  in one task (the loop in :func:`run_group`). One slow model holds an executor for the whole
+  in one task (the loop in `run_group`). One slow model holds an executor for the whole
   series → the straggler anti-pattern the demo exists to show.
 
-**Writes are executor-side, once per bucket.** :func:`make_group_runner` wraps :func:`run_group`
-and calls the B1-validated :func:`~scale_forecasting.registry.bq.write_cells` on each bucket's
-results (all three cell tables + artifact upload, unchanged). Append-only + dedupe-on-read
-(§3.4) makes per-partition appends safe. The UDF returns only the compact status frame; the driver
-owns the header. Infra identity reaches executors by capturing the frozen :class:`Settings`
+**Writes are executor-side, once per bucket.** `make_group_runner` wraps `run_group`
+and calls `write_cells` on each bucket's
+results (all three cell tables + artifact upload). Append-only + dedupe-on-read
+makes per-partition appends safe. The UDF returns only the compact status frame; the driver
+owns the header. Infra identity reaches executors by capturing the frozen `Settings`
 dataclass (picklable, tiny, read-only) directly in the group-runner closure, which ``applyInPandas``
-cloudpickles to each executor — preserving the G1 seam without a second env-based delivery path, and
-without the ``sparkContext.broadcast`` call that a Spark Connect session does not expose (so the
-same engine runs both as a Dataproc batch and driven over a Connect endpoint).
+cloudpickles to each executor — preserving the single local/cloud seam without a second env-based
+delivery path, and without the ``sparkContext.broadcast`` call that a Spark Connect session does not
+expose (so the same engine runs both as a Dataproc batch and driven over a Connect endpoint).
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int
 
     With ``series_limit`` set the cell count is known offline (series × models for explode, series
     for naive); an unbounded run falls back to ``max_parallelism`` buckets (best guess without a
-    known cell count). ``models`` is the executed subset (Arc B); ``None`` means ``cfg.models`` — so
+    known cell count). ``models`` is the executed subset; ``None`` means ``cfg.models`` — so
     a standalone run and a subset run size buckets to the work they actually fan out.
     """
     executed = models if models is not None else cfg.models
@@ -118,18 +118,18 @@ def run_group(
     series were cross-joined with the model list), each ``(ts_id, model_type)`` sub-frame is one
     cell. Otherwise (naive) every model in the executed list is run for each ``ts_id`` in a
     sequential loop. Helper columns are dropped so each sub-frame is a clean series frame for
-    :func:`~scale_forecasting.worker.run_cell` (which derives the run_id from ``cfg`` itself, so no
-    id needs threading here). Returns the :class:`CellResult` list (for the writer) and the compact
-    :data:`STATUS_COLUMNS` frame (for the driver's header roll-up). Never raises per cell —
-    ``run_cell`` maps a failure to a ``status="error"`` result (CONTRACTS §3.3).
+    `run_cell` (which derives the run_id from ``cfg`` itself, so no
+    id needs threading here). Returns the `CellResult` list (for the writer) and the compact
+    `STATUS_COLUMNS` frame (for the driver's header roll-up). Never raises per cell —
+    ``run_cell`` maps a failure to a ``status="error"`` result.
 
-    ``models`` is the executed subset (Arc B): under :func:`main.run` a mixed config routes only its
+    ``models`` is the executed subset: under `main.run` a mixed config routes only its
     Python-runtime models here while the BigQuery-native models run elsewhere, so the naive loop
     must iterate the subset, not the full ``cfg.models`` (which would feed a native model into
     ``run_cell`` → ``NotImplementedError``). ``None`` means ``cfg.models`` (standalone). The explode
     path takes its models from the cross-join column, so the subset only affects the naive loop.
 
-    ``params_by_model`` is the fleetwide-HPO resolution (C5): ``{model: tuned params}`` computed
+    ``params_by_model`` is the fleetwide-HPO resolution: ``{model: tuned params}`` computed
     once on the driver and passed to every cell of that model, so the tuned params apply fleet-wide
     without entering ``cfg`` (which would shift the run_id). A model absent from the map (or a None
     map) resolves inside ``run_cell`` — per-series HPO if configured, else the ``{}`` default.
@@ -183,7 +183,7 @@ class RunOutcome:
 
 
 def aggregate_status(status_pdf: pd.DataFrame) -> RunOutcome:
-    """Fold the collected per-cell status frame into a :class:`RunOutcome` (pure).
+    """Fold the collected per-cell status frame into a `RunOutcome` (pure).
 
     ``COMPLETED`` = every cell ok; ``PARTIAL`` = a mix of ok and error; ``FAILED`` = no ok cells
     (all errored, or nothing ran at all). This is what the driver writes to
@@ -209,7 +209,7 @@ def aggregate_status(status_pdf: pd.DataFrame) -> RunOutcome:
 
 def _resolve_source_table(cfg: RunConfig, settings: Settings) -> str:
     """Fully-qualify the source table: use ``source_table`` as-is if it already has a dataset
-    qualifier, else resolve a bare name against the deployment's dataset (G1)."""
+    qualifier, else resolve a bare name against the deployment's dataset."""
     src = cfg.data.source_table
     return src if "." in src else settings.table_ref(src)
 
@@ -234,7 +234,7 @@ def read_source_series(spark: SparkSession, cfg: RunConfig, settings: Settings) 
     """Read the source series via the spark-bigquery connector, projected + optionally subset.
 
     Applies ``data.series_limit`` deterministically (distinct ts_ids → ordered → first N →
-    semi-join) so every scale in the demo runs the *same* series (DESIGN §13.1) — the property that
+    semi-join) so every scale in the demo runs the *same* series — the property that
     makes "10 vs 100 vs 100k" a clean apples-to-apples runtime comparison.
     """
     table = _resolve_source_table(cfg, settings)
@@ -253,11 +253,11 @@ def _limit_series(df: DataFrame, cfg: RunConfig) -> DataFrame:
 
 
 def sample_series_to_driver(df: DataFrame, cfg: RunConfig, k: int) -> list[pd.DataFrame]:
-    """Collect the first ``k`` series (deterministically) to the driver as per-series frames (C5).
+    """Collect the first ``k`` series (deterministically) to the driver as per-series frames.
 
     The fleetwide-HPO pre-pass tunes on a small sample *before* the cluster fan-out; that sample
     must live on the driver (Optuna runs there, not in an executor). Reuses the same deterministic
-    "first ``k`` ts_ids, ordered" subset as :func:`_limit_series` so the tuning sample is stable and
+    "first ``k`` ts_ids, ordered" subset as `_limit_series` so the tuning sample is stable and
     apples-to-apples across scales. Returns one pandas frame per ts_id (the shape ``run_cell`` /
     ``backtest_cell`` expect); an empty list if the source has no rows. Tiny by construction —
     ``k`` is ``hpo.sample_size`` (default 20), not the fleet.
@@ -275,9 +275,9 @@ def resolve_fleetwide_hpo(
 
     Returns ``None`` (no fleetwide params — cells resolve per-series/off in ``run_cell``) unless HPO
     is enabled at ``fleetwide`` granularity. When it is, collects ``hpo.sample_size`` series to the
-    driver (:func:`sample_series_to_driver`) and tunes the executed model subset on them
-    (:func:`~scale_forecasting.hpo.resolve_fleetwide`), scoping the tuning to the models that will
-    actually run (Arc B). Kept in ``spark_io`` so all Spark engines (explode/naive) share one
+    driver (`sample_series_to_driver`) and tunes the executed model subset on them
+    (`resolve_fleetwide`), scoping the tuning to the models that will
+    actually run. Kept in ``spark_io`` so all Spark engines (explode/naive) share one
     pre-pass; the Ray engine has its own analog over its already-collected pandas source.
     """
     if not (cfg.hpo.enabled and cfg.hpo.granularity == "fleetwide"):
@@ -295,10 +295,10 @@ def cross_join_models(
     """Cross-join the series with the (small) model list → one row-set per ``(series, model)``.
 
     The model list is broadcast (a handful of rows), so this is a map-side replication of each
-    series, not a shuffle join. The resulting :data:`_MODEL_COL` is the cell's model and part of
+    series, not a shuffle join. The resulting `_MODEL_COL` is the cell's model and part of
     the explode bucket key.
 
-    ``models`` is the executed subset (Arc B): a mixed config under :func:`main.run` cross-joins
+    ``models`` is the executed subset: a mixed config under `main.run` cross-joins
     only its Python-runtime models — cross-joining a BigQuery-native model would create Spark cells
     whose ``run_cell`` raises ``NotImplementedError``. ``None`` means ``cfg.models`` (standalone).
     """
@@ -310,7 +310,7 @@ def cross_join_models(
 
 
 def add_bucket(df: DataFrame, cfg: RunConfig, n_buckets: int) -> DataFrame:
-    """Add ``_BUCKET_COL`` = ``pmod(hash(<key cols>), n_buckets)`` (see :func:`bucket_key_cols`).
+    """Add ``_BUCKET_COL`` = ``pmod(hash(<key cols>), n_buckets)`` (see `bucket_key_cols`).
 
     Spark's ``hash`` keeps identical keys together (so a cell's full history shares a bucket) and
     ``pmod`` folds it into ``[0, n_buckets)`` non-negative. The bucket is the ``groupBy`` key the
@@ -323,7 +323,7 @@ def add_bucket(df: DataFrame, cfg: RunConfig, n_buckets: int) -> DataFrame:
 
 
 def status_schema() -> Any:
-    """The Spark ``StructType`` for the UDF's return frame (:data:`STATUS_COLUMNS`)."""
+    """The Spark ``StructType`` for the UDF's return frame (`STATUS_COLUMNS`)."""
     from pyspark.sql.types import (
         DoubleType,
         StringType,
@@ -349,22 +349,22 @@ def make_group_runner(
 ) -> Any:
     """Build the ``applyInPandas`` function: run one bucket's cells, write them, return status.
 
-    Closes over the picklable ``cfg`` and the frozen :class:`Settings` dataclass **directly** — not
+    Closes over the picklable ``cfg`` and the frozen `Settings` dataclass **directly** — not
     a Spark broadcast. ``applyInPandas`` cloudpickles the whole closure to each executor, so
     capturing the small immutable ``Settings`` by value is equivalent to a broadcast here (the
     object is tiny and read-only) while dropping the ``sparkContext.broadcast`` call that a **Spark
     Connect** session does not expose (Connect has no RDD/``sparkContext`` API). This is what lets
     the *same* engine run both as a classic Dataproc batch and driven over a Connect endpoint from a
-    notebook (G1: one code path, no per-environment fork). On each bucket it calls the pure
-    :func:`run_group`, appends the results with the B1 writer
-    (:func:`~scale_forecasting.registry.bq.write_cells`, executor-side, once per bucket), and
+    notebook (one code path, no per-environment fork). On each bucket it calls the pure
+    `run_group`, appends the results with the writer
+    (`write_cells`, executor-side, once per bucket), and
     returns only the compact status frame — so no forecast payload ever crosses back to the driver.
 
-    ``models`` is the executed subset (Arc B), forwarded to :func:`run_group` so the naive loop runs
-    only the Python-runtime models under a mixed :func:`main.run` config. ``None`` → ``cfg.models``.
+    ``models`` is the executed subset, forwarded to `run_group` so the naive loop runs
+    only the Python-runtime models under a mixed `main.run` config. ``None`` → ``cfg.models``.
 
-    ``params_by_model`` is the fleetwide-HPO resolution (C5), captured in the closure exactly like
-    ``settings``/``models`` and forwarded to :func:`run_group` — so the driver tunes once and every
+    ``params_by_model`` is the fleetwide-HPO resolution, captured in the closure exactly like
+    ``settings``/``models`` and forwarded to `run_group` — so the driver tunes once and every
     executor builds its cells with the tuned params, without those params entering ``cfg`` (which
     would shift the run_id). ``None`` = no fleetwide params (per-series/off resolves in
     ``run_cell``).

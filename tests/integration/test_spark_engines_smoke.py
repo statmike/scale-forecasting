@@ -1,4 +1,4 @@
-"""Local-Spark smoke for the explode engine (BUILD B2, ``@spark`` gate).
+"""Local-Spark smoke for the explode engine (``@spark`` gate).
 
 This runs :func:`scale_forecasting.engines.spark_explode.run` on a real *local* ``SparkSession`` —
 no cluster, no BigQuery. The connector read is swapped for a local DataFrame and the executor-side

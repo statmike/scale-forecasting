@@ -1,6 +1,6 @@
-"""Offline tests for the Spark launcher dispatch (BUILD B2 / Arc B, ``spark_entry``).
+"""Offline tests for the Spark launcher dispatch (``spark_entry``).
 
-No Spark, no GCP: the launcher parses ``--engine`` + ``--config-uri`` + the Arc B ``--models`` /
+No Spark, no GCP: the launcher parses ``--engine`` + ``--config-uri`` + the ``--models`` /
 ``--manage-header`` flags, loads a local config, and forwards to the engine's
 ``run(cfg, models=..., manage_header=...)``. The engine module's ``run`` is monkeypatched to capture
 the forwarded call, so the actual pyspark path (covered by ``@spark``/``@gcp``) never runs here. The
@@ -58,7 +58,7 @@ def test_parse_models_all_empty_collapses_to_none() -> None:
 
 
 def test_main_defaults_forward_standalone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # No Arc B flags: forward models=None, manage_header=True — the pre-Arc-B dispatch, unchanged.
+    # No coordination flags: forward models=None, manage_header=True — the standalone dispatch.
     captured: dict[str, Any] = {}
 
     def _fake_run(cfg: Any, models: Any = None, *, manage_header: bool = True) -> None:
@@ -74,7 +74,7 @@ def test_main_defaults_forward_standalone(tmp_path: Path, monkeypatch: pytest.Mo
     assert captured["cfg"].run_name == "spark entry test"
 
 
-def test_main_forwards_arc_b_contributor_flags(
+def test_main_forwards_oncluster_contributor_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # main.run's launch: a subset + contributor mode reach the engine as parsed values.

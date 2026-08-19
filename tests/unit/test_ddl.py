@@ -1,4 +1,4 @@
-"""Tests for the registry DDL renderer (CONTRACTS §4, DESIGN §8, D19).
+"""Tests for the registry DDL renderer.
 
 Offline snapshot test: rendering is a pure string op, so we pin the exact SQL. If the
 DDL changes intentionally, regenerate the snapshot with SF_UPDATE_SNAPSHOTS=1.
@@ -51,7 +51,7 @@ def test_every_statement_is_idempotent_and_terminated() -> None:
 
 
 def test_registry_tables_are_native_in_deployment() -> None:
-    # The run-collection tables are always native BigQuery (D19) — no Iceberg wrapping, so they
+    # The run-collection tables are always native BigQuery — no Iceberg wrapping, so they
     # can carry the native JSON column type and be reseeded with WRITE_TRUNCATE.
     stmts = render_deployment_ddl("d", **_KW)
     for name in _REGISTRY_TABLES:

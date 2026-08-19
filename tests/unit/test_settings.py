@@ -1,4 +1,4 @@
-"""Tests for the infra-settings seam (``settings.py``, BUILD B1).
+"""Tests for the infra-settings seam (``settings.py``).
 
 Offline: env-var resolution, the fail-fast error on a missing required var, defaults, and
 the terraform-outputs convenience mapping. No GCP client is constructed here.

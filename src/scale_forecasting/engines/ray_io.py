@@ -1,37 +1,35 @@
 """Shared Ray-engine plumbing — deterministic cluster sizing, GPU/CPU routing, cell chunking.
 
-The Ray-on-Vertex analog of :mod:`spark_io`. Split along the same pure/I-O seam (CONTRACTS §0) so
+The Ray-on-Vertex analog of `spark_io`. Split along the same pure/I-O seam so
 the interesting logic is offline-testable without a cluster, a GPU, or BigQuery:
 
-* **Pure** (no Ray, no Vertex, no GPU): :func:`split_gpu_cpu_models` (which models want a GPU),
-  :func:`plan_cluster` (size an *autoscaling* cluster to the run's fan-out, DESIGN §11.1 / D17),
-  :func:`calibrate_gpu_fraction` (profile-driven ``num_gpus`` per NeuralProphet task,
-  unit-tested with injected memory numbers), :func:`chunk_cells` (shuffle cells into task-sized
-  pandas frames), :func:`make_chunk_runner` (the body one Ray task runs).
+* **Pure** (no Ray, no Vertex, no GPU): `split_gpu_cpu_models` (which models want a GPU),
+  `plan_cluster` (size an *autoscaling* cluster to the run's fan-out),
+  `calibrate_gpu_fraction` (profile-driven ``num_gpus`` per NeuralProphet task,
+  unit-tested with injected memory numbers), `chunk_cells` (shuffle cells into task-sized
+  pandas frames), `make_chunk_runner` (the body one Ray task runs).
 * **Reuse, not re-implementation.** The executor-side work is the *exact* Spark core:
-  :func:`~scale_forecasting.engines.spark_io.run_group` runs each cell, and the status roll-up is
-  :func:`~scale_forecasting.engines.spark_io.aggregate_status`. A Ray "chunk" is the Spark "bucket"
-  by another name — same pandas shape, same :func:`run_cell`. This module owns only what is
+  `run_group` runs each cell, and the status roll-up is
+  `aggregate_status`. A Ray "chunk" is the Spark "bucket"
+  by another name — same pandas shape, same `run_cell`. This module owns only what is
   genuinely Ray-specific: the deterministic sizing and the heterogeneous GPU/CPU split.
 
-**Why autoscaling by default (D17, reversed post-demo).** The B4 design shipped a *fixed*-size pool
-on the reasoning that a run's fan-out is known up front. The overnight 100k run showed that is the
-wrong default for a bursty, embarrassingly-parallel fleet: a fixed pool can neither grow to chew a
-deep task queue nor shrink the expensive T4 pool when idle. So each pool is now created with a
-Vertex ``AutoscalingSpec(min, max)`` and scales with Ray's pending-task demand. Determinism is kept
-a better way — :func:`plan_cluster` stays a pure function of the config: the autoscale flag, the
-per-pool ``[min, max]``, and the fixed-size-equivalent node count the fan-out implies are all
-derived offline and snapshotted into ``run_id`` + ``job_telemetry``. ``ray_autoscale=False`` gives
-the fixed path (a fixed ``node_count`` and **no** ``autoscaling_spec``). NOTE: under autoscaling the
+**Autoscaling by default.** Each worker pool is created with a Vertex ``AutoscalingSpec(min, max)``
+and scales with Ray's pending-task demand, so a bursty, embarrassingly-parallel fleet can grow to
+chew a deep task queue and shrink the expensive T4 pool when idle. Determinism is preserved:
+`plan_cluster` stays a pure function of the config — the autoscale flag, the per-pool
+``[min, max]``, and the fixed-size-equivalent node count the fan-out implies are all derived offline
+and snapshotted into ``run_id`` + ``job_telemetry``. ``ray_autoscale=False`` selects a fixed-size
+mode instead (a fixed ``node_count`` and **no** ``autoscaling_spec``). NOTE: under autoscaling the
 Vertex SDK ignores ``node_count`` (the pool starts at ``min`` and scales to ``max``), so the derived
 count is the *initial* size only for the fixed path.
 
 **Why heterogeneous routing.** Only NeuralProphet (``family == "deep_learning"``) benefits from a
-GPU, and Spark can't share a GPU fractionally across tasks (DESIGN §11.2) — which is the whole
+GPU, and Spark can't share a GPU fractionally across tasks — which is the whole
 reason Ray is in the design. So NeuralProphet cells run in ``@ray.remote(num_gpus=<fraction>)``
 tasks that pack several onto one T4, while every other model runs in ``@ray.remote(num_cpus=1)``.
 The routing decision (which models, which fraction, how many nodes) lives here; the decorators that
-act on it live in :mod:`.ray_engine`.
+act on it live in `ray_engine`.
 """
 
 from __future__ import annotations
@@ -43,8 +41,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-# The pure Spark core is engine-agnostic — reuse it verbatim rather than duplicating (D17 / plan
-# decision 1). ``_MODEL_COL`` is the internal per-cell model tag ``run_group`` reads to take its
+# The pure Spark core is engine-agnostic — reuse it verbatim rather than duplicating.
+# ``_MODEL_COL`` is the internal per-cell model tag ``run_group`` reads to take its
 # explode branch (one cell per ``(ts_id, model)``); a Ray chunk carries it exactly like a Spark
 # bucket does.
 from .spark_io import _MODEL_COL, aggregate_status, run_group
@@ -69,7 +67,7 @@ __all__ = [
 _GPU_FAMILY = "deep_learning"
 
 # T4 device memory (16 GiB). The denominator when auto-calibration turns a measured peak-memory
-# footprint into a GPU fraction. A T4 is the design's GPU (cheap, ubiquitous — DESIGN §11).
+# footprint into a GPU fraction. A T4 is the design's GPU (cheap, ubiquitous).
 _T4_MEMORY_BYTES = 16 * 1024**3
 
 # Accelerator type strings Vertex expects, keyed by the config's short ``gpu_type``.
@@ -77,7 +75,7 @@ _ACCELERATOR_TYPES = {"T4": "NVIDIA_TESLA_T4"}
 
 # When ``gpu_fraction == "auto"`` we can't run the live calibration at *submit* time (no cluster
 # yet) to size the pool, so sizing uses this nominal fraction (→ 2 NeuralProphet slots per T4). The
-# on-cluster :func:`calibrate_gpu_fraction` refines the *actual* ``num_gpus`` per task once a T4 is
+# on-cluster `calibrate_gpu_fraction` refines the *actual* ``num_gpus`` per task once a T4 is
 # available; the node count is fixed at create time, so only the sizing math uses this.
 _NOMINAL_AUTO_FRACTION = 0.5
 
@@ -99,10 +97,10 @@ def split_gpu_cpu_models(
     """Partition the executed models into ``(gpu_models, cpu_models)`` by family (pure).
 
     A model routes to the GPU pool iff its registered ``family`` is ``deep_learning``
-    (NeuralProphet) — the only family a GPU helps (§11.2). Everything else (statistical/ml) is CPU.
-    ``models`` is the executed subset (Arc B / :func:`main.run`); ``None`` means ``cfg.models``.
+    (NeuralProphet) — the only family a GPU helps. Everything else (statistical/ml) is CPU.
+    ``models`` is the executed subset (`main.run`); ``None`` means ``cfg.models``.
     Order is preserved within each list so logs and chunking stay deterministic. Unknown names raise
-    :class:`~scale_forecasting.errors.ModelError` via the factory — the same up-front validation the
+    `ModelError` via the factory — the same up-front validation the
     router does.
     """
     from ..models import get_model
@@ -118,7 +116,7 @@ def split_gpu_cpu_models(
     return gpu_models, cpu_models
 
 
-# --- pure: auto-fraction calibration (DESIGN §11.1) ----------------------------
+# --- pure: auto-fraction calibration -------------------------------------------
 
 
 def _clamp_fraction(fraction: float) -> float:
@@ -142,7 +140,7 @@ def calibrate_gpu_fraction(
     sample_series: list[pd.DataFrame] | None = None,
     measured_peaks_bytes: list[int] | None = None,
 ) -> float:
-    """Resolve the ``num_gpus`` fraction each NeuralProphet task requests (DESIGN §11.1).
+    """Resolve the ``num_gpus`` fraction each NeuralProphet task requests.
 
     Two paths, mirroring the config's ``compute.gpu_fraction``:
 
@@ -152,11 +150,11 @@ def calibrate_gpu_fraction(
       by the T4's 16 GiB — so ``fraction ≈ peak × margin / 16GiB`` and ``floor(1/fraction)`` tasks
       pack without an OOM. Clamped to ``[_MIN_FRACTION, 1.0]``.
 
-    The measurement is injectable so the sizing math is unit-testable **without a GPU** (BUILD B4's
-    offline gate): pass ``measured_peaks_bytes`` to skip the live fit entirely. On a real cluster
-    (:func:`~scale_forecasting.engines.ray_engine.run`) the peaks are measured live via
-    :func:`_measure_np_peak_bytes` over ``sample_series``. With nothing to measure it falls back to
-    :data:`_NOMINAL_AUTO_FRACTION`. The chosen fraction + measurements are logged to the registry so
+    The measurement is injectable so the sizing math is unit-testable **without a GPU** in the
+    offline gate: pass ``measured_peaks_bytes`` to skip the live fit entirely. On a real cluster
+    (`run`) the peaks are measured live via
+    `_measure_np_peak_bytes` over ``sample_series``. With nothing to measure it falls back to
+    `_NOMINAL_AUTO_FRACTION`. The chosen fraction + measurements are logged to the registry so
     the sizing decision is auditable (done by the caller).
     """
     fraction = cfg.compute.gpu_fraction
@@ -181,7 +179,7 @@ def _measure_np_peak_bytes(
     """Fit NeuralProphet on one series and return the peak CUDA bytes it allocated.
 
     Live-only (needs a real GPU): resets the torch allocator's high-water mark, fits one cell via
-    the shared :func:`~scale_forecasting.worker.run_cell`, and reads
+    the shared `run_cell`, and reads
     ``torch.cuda.max_memory_allocated``. Any failure degrades to 0 (the caller's ``max`` skips it),
     so a flaky probe never sinks the run — it just widens to the nominal fraction.
     """
@@ -197,17 +195,17 @@ def _measure_np_peak_bytes(
         return 0
 
 
-# --- pure: deterministic per-pool autoscaling cluster sizing (D17) -------------
+# --- pure: deterministic per-pool autoscaling cluster sizing -------------------
 
 
 @dataclass(frozen=True)
 class RayClusterPlan:
     """An autoscaling Vertex Ray cluster spec, sized to a run's fan-out (pure product of config).
 
-    Autoscaling by default (D17, reversed post-demo): when ``autoscale`` each worker pool is created
+    Autoscaling by default: when ``autoscale`` each worker pool is created
     with a Vertex ``AutoscalingSpec`` bounded by its resolved ``[cpu|gpu]_min_nodes`` /
     ``[cpu|gpu]_max_nodes`` and starts at its min; when ``autoscale`` is False both pools are fixed
-    at ``cpu_node_count`` / ``gpu_node_count`` (the pre-reversal path, no ``autoscaling_spec``).
+    at ``cpu_node_count`` / ``gpu_node_count`` (a fixed-size mode, no ``autoscaling_spec``).
 
     ``cpu_node_count`` / ``gpu_node_count`` are the deterministic fixed-size-equivalent the fan-out
     implies — the actual node count on the fixed path, and the initial/reference size on the
@@ -230,7 +228,7 @@ class RayClusterPlan:
     sizing_gpu_fraction: float
     n_gpu_cells: int
     n_cpu_cells: int
-    # Autoscaling spec (D17 reversal). ``autoscale`` gates whether the pools carry an
+    # Autoscaling spec. ``autoscale`` gates whether the pools carry an
     # ``AutoscalingSpec``; the resolved per-pool ``[min, max]`` bounds it (max already defaulted
     # from ``ray_max_nodes`` when unset). All pure products of the config → snapshotted for audit.
     autoscale: bool
@@ -285,7 +283,7 @@ def _sizing_fraction(cfg: RunConfig) -> float:
     """The GPU fraction used to *size* the pool: the fixed float, or the nominal when ``auto``.
 
     Sizing happens offline at submit time (no cluster to calibrate against), so an ``auto`` fraction
-    sizes with :data:`_NOMINAL_AUTO_FRACTION`; the live calibration later refines the per-task
+    sizes with `_NOMINAL_AUTO_FRACTION`; the live calibration later refines the per-task
     request but not the (already-created) node count.
     """
     fraction = cfg.compute.gpu_fraction
@@ -314,20 +312,20 @@ def _clamp_pool_nodes(nodes: int, min_nodes: int) -> int:
     A zero-cell pool is omitted at create (``nodes == 0`` stays 0), so the min floor applies only
     when the pool is actually used. Keeps the fixed-path node count and the autoscaling reference
     size consistent with the resolved ``[min, max]`` bounds. The max clamp already happened inside
-    :func:`_pool_node_count` (its ``max_nodes`` arg is the pool max).
+    `_pool_node_count` (its ``max_nodes`` arg is the pool max).
     """
     return max(nodes, min_nodes) if nodes > 0 else 0
 
 
 def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str) -> RayClusterPlan:
-    """Size an autoscaling Vertex Ray cluster to this run's fan-out (pure; D17 reversed post-demo).
+    """Size an autoscaling Vertex Ray cluster to this run's fan-out (pure).
 
     Deterministic function of the config — no GCP, no GPU. Splits the executed models into GPU
     (NeuralProphet) and CPU pools, counts the cells each pool must run (``series × models``, using
     ``max_parallelism`` as the basis when ``series_limit`` is unbounded), and derives each pool's
-    fixed-size-equivalent ``node_count`` from those cell counts (:func:`_pool_node_count`), clamped
+    fixed-size-equivalent ``node_count`` from those cell counts (`_pool_node_count`), clamped
     into the pool's resolved ``[min, max]``. Folds are *not* a factor in the node count — a cell
-    runs all its backtest folds internally in one :func:`run_cell`, so folds add per-cell time, not
+    runs all its backtest folds internally in one `run_cell`, so folds add per-cell time, not
     more tasks.
 
     Per-pool autoscaling bounds are resolved here (min from config; max from the per-pool override,
@@ -405,14 +403,14 @@ def chunk_cells(
     """Shuffle ``(series × models)`` cells into ``n_chunks`` task-sized pandas frames (pure).
 
     The Ray analog of Spark's cross-join + bucket, done in pandas on the driver: replicate the
-    source once per model (tagging each copy with :data:`_MODEL_COL`), then assign every
+    source once per model (tagging each copy with `_MODEL_COL`), then assign every
     ``(ts_id, model)`` cell to a chunk by a stable CRC32 of its key so a cell's whole history lands
-    in one chunk. Each returned frame carries :data:`_MODEL_COL`, so :func:`run_group` takes its
+    in one chunk. Each returned frame carries `_MODEL_COL`, so `run_group` takes its
     per-cell explode branch over it — identical to what a Spark bucket feeds. Empty chunks are
     dropped; an empty ``models`` or empty source yields ``[]``.
 
     ``n_chunks`` is clamped to ``[1, _MAX_CHUNKS]``. Cross-joining in memory is bounded by
-    ``series_limit`` for demos; Ray is not the 100k hero path (that's Spark, DESIGN §11.2), so a
+    ``series_limit`` for demos; Ray is not the 100k hero path (that's Spark), so a
     driver-side replicate is acceptable here.
     """
     import pandas as pd
@@ -447,19 +445,19 @@ def make_chunk_runner(
 ) -> Callable[[pd.DataFrame], pd.DataFrame]:
     """Build the function one Ray task runs: run a chunk's cells, write them, return status.
 
-    The Ray analog of :func:`~scale_forecasting.engines.spark_io.make_group_runner`. Closes over
+    The Ray analog of `make_group_runner`. Closes over
     the picklable ``cfg`` + ``settings`` (both frozen → cross the Ray task boundary as plain data,
-    the G1 seam without a second env path), calls the shared pure :func:`run_group` on the chunk,
-    appends the results with the B1 writer (:func:`~scale_forecasting.registry.bq.write_cells`,
-    task-side, once per chunk — appends compose, §3.4), and returns only the compact status frame so
-    no forecast payload crosses back to the driver.
+    the single local/cloud seam without a second env path), calls the shared pure `run_group` on the
+    chunk, appends the results with the writer (`write_cells`, task-side, once per chunk — appends
+    compose), and returns only the compact status frame so no forecast payload crosses back to the
+    driver.
 
-    ``models`` is forwarded to :func:`run_group` for parity with the Spark path; since chunks always
-    carry :data:`_MODEL_COL`, ``run_group`` takes its explode branch and the subset only matters if
+    ``models`` is forwarded to `run_group` for parity with the Spark path; since chunks always
+    carry `_MODEL_COL`, ``run_group`` takes its explode branch and the subset only matters if
     a chunk ever arrived without the tag.
 
-    ``params_by_model`` is the fleetwide-HPO resolution (C5), captured in the closure like ``cfg`` /
-    ``settings`` and forwarded to :func:`run_group` — the Ray twin of the Spark group runner's
+    ``params_by_model`` is the fleetwide-HPO resolution, captured in the closure like ``cfg`` /
+    ``settings`` and forwarded to `run_group` — the Ray twin of the Spark group runner's
     fleetwide threading, so tuned params reach every task without entering ``cfg`` (run_id stable).
     """
 

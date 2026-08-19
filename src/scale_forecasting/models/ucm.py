@@ -1,6 +1,6 @@
 """Unobserved Components (structural) model (statsmodels).
 
-One model, one file (CONTRACTS §1). Runtime python, statistical family. A state-space
+One model, one file. Runtime python, statistical family. A state-space
 structural model (local linear trend + optional seasonal); native Gaussian intervals.
 """
 

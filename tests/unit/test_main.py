@@ -1,4 +1,4 @@
-"""Offline tests for the run orchestrator (BUILD Arc B, ``scale_forecasting.main``).
+"""Offline tests for the run orchestrator (``scale_forecasting.main``).
 
 No GCP: the pure plan (:func:`main._plan`) — run_id parity, the per-runtime model split, and the
 ray/multi rejections — plus the ``dry_run`` path and the CLI's dispatch of it. The live parallel
@@ -75,7 +75,7 @@ def test_plan_all_python_has_no_bq_models() -> None:
 
 
 def test_plan_accepts_ray_when_python_models_present() -> None:
-    # B4: the Ray engine is built, so main.run now dispatches ray — _plan must NOT reject it.
+    # The Ray engine is built, so main.run now dispatches ray — _plan must NOT reject it.
     plan = main._plan(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"))
     assert plan.python_models == [_SPARK]
     assert plan.bq_models == _NATIVE

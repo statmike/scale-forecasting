@@ -1,4 +1,4 @@
-"""Feature engineering for the Python models — pure (CONTRACTS §6, DESIGN §4).
+"""Feature engineering for the Python models — pure.
 
 Everything here is declarative-from-config and runs *inside* the execution node, so no
 data crosses the network. Two entry points:
@@ -8,13 +8,13 @@ data crosses the network. Two entry points:
   + Fourier + lag columns aligned to ``y``, or None when no feature is configured).
 - ``holiday_frame(cfg) -> DataFrame`` — the one canonical holiday calendar (``ds``,
   ``holiday`` columns) computed from ``features.holidays``, fed to *both* Python models and
-  the BQML custom-holiday input so "holiday" is identical everywhere (DESIGN §4).
+  the BQML custom-holiday input so "holiday" is identical everywhere.
 
 Transforms come in two flavors. ``none``/``log1p`` are **stateless** — a model inverts with
 only ``ctx.transform`` (a name). ``boxcox`` is **stateful**: its λ is fit per series (MLE),
-so it must travel with the cell. We fit λ once in the worker (:func:`fit_transform_lambda`),
+so it must travel with the cell. We fit λ once in the worker (`fit_transform_lambda`),
 put it on ``ctx.transform_lambda``, and every ``apply``/``invert`` call passes that same λ —
-never refit at predict, so the backtest folds and the final fit use one λ (G1). ``λ = None``
+never refit at predict, so the backtest folds and the final fit use one λ. ``λ = None``
 for the stateless transforms.
 
 Public surface: ``build_features``, ``holiday_frame``, ``apply_transform``,
@@ -63,7 +63,7 @@ def fit_transform_lambda(y: pd.Series, transform: str) -> float | None:
 def apply_transform(y: pd.Series, transform: str, lam: float | None = None) -> pd.Series:
     """Apply the configured target transform to ``y`` (forward direction).
 
-    ``lam`` is the fitted Box-Cox λ from :func:`fit_transform_lambda` (ignored by the stateless
+    ``lam`` is the fitted Box-Cox λ from `fit_transform_lambda` (ignored by the stateless
     transforms). Required when ``transform == "boxcox"``.
     """
     if transform == "none":
@@ -85,7 +85,7 @@ def apply_transform(y: pd.Series, transform: str, lam: float | None = None) -> p
 
 
 def invert_transform(values: np.ndarray, transform: str, lam: float | None = None) -> np.ndarray:
-    """Invert a transform on forecasts/bounds so the frame is in original units (§2.1).
+    """Invert a transform on forecasts/bounds so the frame is in original units.
 
     ``lam`` is the same fitted Box-Cox λ used in the forward direction (ignored by the stateless
     transforms), so ``invert(apply(y)) == y``.
@@ -108,7 +108,7 @@ def invert_transform(values: np.ndarray, transform: str, lam: float | None = Non
 
 
 def holiday_frame(cfg: RunConfig) -> pd.DataFrame:
-    """Canonical holiday calendar for the run (DESIGN §4).
+    """Canonical holiday calendar for the run.
 
     ``features.holidays`` lists ISO country codes (e.g. ``["US"]``). Returns a frame with
     ``ds`` (datetime64[ns]) and ``holiday`` (name) columns, empty when none configured.
@@ -142,14 +142,14 @@ def holiday_frame(cfg: RunConfig) -> pd.DataFrame:
 def build_features(
     series: pd.DataFrame, cfg: RunConfig, lam: float | None = None
 ) -> tuple[pd.Series, pd.DataFrame | None]:
-    """Build ``(y, X)`` fit inputs for one series (DESIGN §4).
+    """Build ``(y, X)`` fit inputs for one series.
 
     ``series`` is one ts_id's rows with the configured date/target (and optional exog)
     columns. ``y`` is returned indexed by ds, sorted, with the transform applied. ``X``
     carries any configured exog, an ``is_holiday`` flag, Fourier terms, and lag columns —
     aligned to ``y`` — or None when nothing is configured.
 
-    ``lam`` is the fitted Box-Cox λ (from :func:`fit_transform_lambda`), threaded in so the
+    ``lam`` is the fitted Box-Cox λ (from `fit_transform_lambda`), threaded in so the
     forward transform matches the inverse a model applies at predict; ``None`` (the default)
     for the stateless transforms.
     """

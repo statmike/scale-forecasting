@@ -1,6 +1,6 @@
 """LightGBM regressor on lag/calendar features.
 
-One model, one file (CONTRACTS §1). Runtime python, ml family. LightGBM is an optional
+One model, one file. Runtime python, ml family. LightGBM is an optional
 dependency, imported lazily in ``fit`` so the model registers without it. Shares the
 recursive multi-step forecasting + design matrix with XGBoost via ``_lag_forecaster``;
 residual-quantile intervals.

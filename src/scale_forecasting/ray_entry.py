@@ -1,29 +1,30 @@
-"""On-cluster entrypoint for the Ray-on-Vertex forecast run (BUILD B4).
+"""On-cluster entrypoint for the Ray-on-Vertex forecast run.
 
-The Ray analog of :mod:`spark_entry`, but simpler: a Vertex Ray Job's entrypoint is a shell command
+The Ray analog of `spark_entry`, but simpler: a Vertex Ray Job's entrypoint is a shell command
 (``python -m scale_forecasting.ray_entry ...``) that runs **with** package context, so — unlike the
-Dataproc ``main_python_file_uri`` (a bare ``__main__`` file needing the :mod:`spark_main` shim) —
+Dataproc ``main_python_file_uri`` (a bare ``__main__`` file needing the `spark_main` shim) —
 this module *is* the entrypoint; there is no top-level shim. The current ``src/`` is delivered as
-the job's ``runtime_env`` working dir (runtime code, never baked into the image — the G1 seam), so
-``python -m scale_forecasting.ray_entry`` resolves against the code that was just submitted.
+the job's ``runtime_env`` working dir (runtime code, never baked into the image — the same code runs
+locally and in the cloud), so ``python -m scale_forecasting.ray_entry`` resolves against the code
+that was just submitted.
 
 Flow on the cluster head:
 
-1. Parse ``--config-uri`` (the run config, staged to GCS as JSON by :mod:`ray_submit` — the JSON
+1. Parse ``--config-uri`` (the run config, staged to GCS as JSON by `ray_submit` — the JSON
    *is* the reproducibility record) + the ``--sf-*`` infra args, which
-   :func:`~scale_forecasting._infra_args.export_infra_env` promotes to ``os.environ`` before
-   anything resolves :class:`~scale_forecasting.settings.Settings` (one G1 seam, parity with Spark).
-2. ``load_config`` the JSON into a validated, frozen :class:`~scale_forecasting.config.RunConfig`.
-3. Call :func:`scale_forecasting.engines.ray_engine.run` with the executed subset + header mode.
+   `export_infra_env` promotes to ``os.environ`` before
+   anything resolves `Settings` (one local/cloud seam, parity with Spark).
+2. ``load_config`` the JSON into a validated, frozen `RunConfig`.
+3. Call `scale_forecasting.engines.ray_engine.run` with the executed subset + header mode.
 
-``--models`` / ``--manage-header`` carry the Arc B contract on-cluster exactly as they do for Spark
-(see :func:`main.run`): ``--models m1,m2`` restricts the executed subset (the staged config's
+``--models`` / ``--manage-header`` carry the on-cluster contract exactly as they do for Spark
+(see `main.run`): ``--models m1,m2`` restricts the executed subset (the staged config's
 ``run_id`` is unchanged, so both runtimes share it) and ``--manage-header false`` puts the engine in
 contributor mode (``main`` owns the single shared header). Both are optional — absent, the engine
 runs its standalone lifecycle over ``cfg.models``.
 
 Public surface: ``main(argv)``. ``ray`` and the engine import lazily so this file imports cleanly
-offline (parity with :mod:`spark_entry`).
+offline (parity with `spark_entry`).
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ _log = get_logger(__name__)
 def _load_uri(uri: str) -> str:
     """Read a config file's text from a ``gs://`` URI (or a local path, for tests/local runs).
 
-    Identical delivery to :func:`spark_entry._load_uri` — the on-cluster driver fetches the staged
+    Identical delivery to `spark_entry._load_uri` — the on-cluster driver fetches the staged
     config the same way regardless of runtime.
     """
     if uri.startswith("gs://"):
@@ -59,7 +60,7 @@ def _parse_models(raw: str | None) -> list[str] | None:
 
     Empty/whitespace-only tokens are dropped so a trailing comma is harmless; an all-empty value
     collapses to ``None`` (standalone) rather than an empty subset (which would run nothing). Same
-    semantics as :func:`spark_entry._parse_models`.
+    semantics as `spark_entry._parse_models`.
     """
     if raw is None:
         return None
@@ -73,13 +74,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--models",
         default=None,
-        help="optional comma-separated executed subset (Arc B); absent runs all cfg.models",
+        help="optional comma-separated executed subset; absent runs all cfg.models",
     )
     p.add_argument(
         "--manage-header",
         default="true",
         choices=("true", "false"),
-        help="false = contributor mode; main.run owns the shared header (Arc B)",
+        help="false = contributor mode; main.run owns the shared header",
     )
     add_infra_args(p)
     ns = p.parse_args(argv)
@@ -88,7 +89,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Load the config and dispatch to :func:`engines.ray_engine.run`."""
+    """Load the config and dispatch to `engines.ray_engine.run`."""
     import json
     import tempfile
     from pathlib import Path

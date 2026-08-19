@@ -1,4 +1,4 @@
-"""Tests for the pure example-data generator (CONTRACTS §6, DESIGN §13.1, BUILD 2.5a).
+"""Tests for the pure example-data generator.
 
 The generator is the one piece of "shipped data" that runs offline, so it must be
 byte-for-byte deterministic, cover every archetype, produce clean numbers, and — critically

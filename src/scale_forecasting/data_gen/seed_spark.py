@@ -1,43 +1,43 @@
-"""PySpark serverless seed entrypoint (Arc B) — CONTRACTS §6, DESIGN §13.1-seed.
+"""PySpark serverless seed entrypoint.
 
 Generates the shipped example dataset — ``n_series`` deterministic synthetic series — and writes
 it to the source table(s) with a **Dataproc Serverless Spark** job. The example input ships in
-**both** storage formats (D19): ``source_series_iceberg`` (managed Apache Iceberg on GCS) and
+**both** storage formats: ``source_series_iceberg`` (managed Apache Iceberg on GCS) and
 ``source_series_native`` (plain native BigQuery), seeded from the *same* generated panel so a
 deployment can benchmark the identical series on either storage. This is deliberately the
 platform's own core pattern (parallel Spark + high-throughput BigQuery writes), so the very first
 thing a deployment does also serves as a **Spark scale smoke** for the write path before any
 forecast runs.
 
-Pure/shell split (mirrors worker vs engines, CONTRACTS §0):
+Pure/shell split (mirrors worker vs engines):
 
-* :mod:`data_gen.generator` — pure panel math. Each series is seeded by its own index, so
+* `data_gen.generator` — pure panel math. Each series is seeded by its own index, so
   ``generate_panel(n)`` equals the union of any partitioning of ``range(n)`` — the invariant
   this job relies on to fan generation across executors.
 * This module — the Spark shell: partition ``range(n_series)`` across executors, call the pure
-  generator per partition, reconcile to the ``source_series`` schema (:func:`_to_source_rows`,
+  generator per partition, reconcile to the ``source_series`` schema (`_to_source_rows`,
   pure and offline-tested), and write via the spark-bigquery connector.
 
-**Write path (B0.4 decision).** Primary is the connector's ``writeMethod=direct`` (BigQuery
+**Write path.** Primary is the connector's ``writeMethod=direct`` (BigQuery
 Storage Write API, no temp bucket) — pre-installed on Dataproc Serverless. ``indirect`` (Spark
 writes Parquet to GCS, then a BigQuery load) is the documented fallback if direct-write has a
 rough edge; select it with ``--write-method indirect``. Both variants are written in APPEND mode;
 replace-on-reseed differs by format: the **native** table is cleared with ``TRUNCATE TABLE`` (a
 metadata op that clears even the streaming buffer), while **managed Iceberg** rejects truncate so
-its reseed is a driver-side ``DELETE ... WHERE TRUE`` (the B0.3-proven delete-then-append shape;
+its reseed is a driver-side ``DELETE ... WHERE TRUE`` (the delete-then-append shape;
 subject to the ~90-min buffer window on an immediate re-seed).
 
 Which variant(s) to seed is selected with ``--variant {iceberg,native,both}`` (default ``both``).
 Both are generated from one panel pass, so the series are identical across formats.
 
-**Infra identity** is resolved from the ``SF_*`` environment via :class:`~scale_forecasting.
-settings.Settings` (G1). Dataproc Serverless rejects driver-env Spark properties, so the batch
-passes the identity as ``--sf-*`` job args, which :func:`main` exports into ``os.environ`` on the
-driver before resolution — keeping env-based ``Settings`` the single G1 seam.
+**Infra identity** is resolved from the ``SF_*`` environment via `Settings`. Dataproc
+Serverless rejects driver-env Spark properties, so the batch passes the identity as ``--sf-*``
+job args, which `main` exports into ``os.environ`` on the driver before resolution — keeping
+env-based ``Settings`` the single seam.
 
 Public surface: ``main(argv)``. ``pyspark`` and GCP clients import lazily inside the functions
 that need them, so this module imports cleanly offline (parity with the engines) and
-:func:`_to_source_rows` is unit-testable without Spark.
+`_to_source_rows` is unit-testable without Spark.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
     p.add_argument("--variant", type=str, choices=("iceberg", "native", "both"), default="both")
     # Infra identity delivered as args (not env): Dataproc Serverless allowlists Spark property
     # prefixes and rejects driver-env, so the batch passes SF_* here and main() exports them to
-    # os.environ before Settings.resolve() — keeping env-based resolution the single G1 seam. The
+    # os.environ before Settings.resolve() — keeping env-based resolution the single seam. The
     # --sf-* flags + the exporter live in _infra_args so every entrypoint shares one mapping.
     add_infra_args(p)
     ns = p.parse_args(argv)
@@ -130,7 +130,7 @@ def _to_source_rows(df: pd.DataFrame, holidays: tuple[str, ...]) -> pd.DataFrame
     The generator emits ``ts_id, archetype, ds(datetime64[ns]), y``; the table is
     ``ts_id STRING, ds DATE, y FLOAT64, archetype STRING, is_holiday BOOL``. This casts ``ds`` to
     python ``date``, derives ``is_holiday`` from the same calendar as the panel's holiday bump
-    (parity, via :func:`~data_gen.generator.is_holiday_flags`), and projects to the DDL column
+    (parity, via `is_holiday_flags`), and projects to the DDL column
     order. The shipped example is univariate; the exog seam lives in the generator/config, not the
     shipped source table. Pure → unit-tested offline against a tiny generator call.
     """
@@ -181,14 +181,14 @@ def _source_series_schema() -> object:
 
 
 def _clear_existing(settings: Settings, table_name: str, *, iceberg: bool) -> None:
-    """Clear a source table's rows for a clean re-seed, format-appropriately (D19).
+    """Clear a source table's rows for a clean re-seed, format-appropriately.
 
     The **native** table uses ``TRUNCATE TABLE`` — a metadata op that clears the table including
     any rows still in the Storage Write API streaming buffer, so an immediate re-seed is clean. The
-    **managed-Iceberg** table rejects truncate (B0.3), so it falls back to ``DELETE ... WHERE
+    **managed-Iceberg** table rejects truncate, so it falls back to ``DELETE ... WHERE
     TRUE``; right after a ``direct`` write those rows sit in the ~90-min buffer and can't be
-    DELETE-d during that window (use ``--write-method indirect`` or wait it out — see the B0.4
-    NOTES). A no-op on the first seed (empty table).
+    DELETE-d during that window (use ``--write-method indirect`` or wait it out). A no-op on the
+    first seed (empty table).
     """
     from google.cloud import bigquery
 
@@ -204,7 +204,7 @@ def _clear_existing(settings: Settings, table_name: str, *, iceberg: bool) -> No
 
 
 def _variant_tables(variant: str) -> tuple[tuple[str, bool], ...]:
-    """Resolve ``--variant`` to the ``(table_name, iceberg)`` pairs to seed (D19)."""
+    """Resolve ``--variant`` to the ``(table_name, iceberg)`` pairs to seed."""
     from ..registry.ddl import SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE
 
     iceberg = (SOURCE_TABLE_ICEBERG, True)
@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> None:
 
     Entrypoint for the Dataproc Serverless PySpark batch (invoked via ``seed_entry.py``). Both
     source variants (when ``--variant both``) are seeded from a single generated panel so the
-    series are byte-identical across storage formats (D19).
+    series are byte-identical across storage formats.
     """
     from pyspark.sql import SparkSession
 

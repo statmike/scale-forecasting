@@ -11,7 +11,7 @@ understands end-to-end: daily ``D``, weekly ``W``, month-start ``MS``, month-end
 and hourly ``h``. These are the pandas ≥2.2 / 3.x spellings — the old ``M``/``H`` aliases
 were removed in pandas 3, so we use ``ME``/``h``. Unknown frequencies fall back to a
 weekly/daily-ish default rather than raising, so a model still runs on an exotic freq — but
-:func:`is_supported` lets callers (the input validator) reject one up front with a message.
+`is_supported` lets callers (the input validator) reject one up front with a message.
 
 Public surface: ``SUPPORTED_FREQS``, ``seasonal_period``, ``periods_per_year``,
 ``is_supported``.
@@ -45,7 +45,7 @@ def seasonal_period(freq: str) -> int:
     """Steps in one seasonal cycle for ``freq`` (e.g. 7 for daily, 12 for monthly).
 
     Falls back to a weekly-ish default for an unrecognized frequency so a model still
-    runs; use :func:`is_supported` to reject unknown frequencies up front instead.
+    runs; use `is_supported` to reject unknown frequencies up front instead.
     """
     return _SEASONAL_PERIOD.get(freq, _DEFAULT_PERIOD)
 

@@ -1,23 +1,23 @@
-"""Consensus across base models — calculated + learned — pure logic, all in pandas (CONTRACTS §6).
+"""Consensus across base models — calculated + learned — pure logic, all in pandas.
 
-The outer loop (DESIGN §5.2) combines every base model's forecast per ``ts_id`` into a
-consensus. Two families, both **pure** here (no GCP calls — CONTRACTS §0, §6):
+The outer loop combines every base model's forecast per ``ts_id`` into a
+consensus. Two families, both **pure** here (no GCP calls):
 
 * **Calculated** (``mean``, ``median``, ``inverse_error``) — heuristics that need no training,
-  so they work even when backtesting is off. :func:`combine_calculated` blends the base
+  so they work even when backtesting is off. `combine_calculated` blends the base
   ``forecast_predictions`` **in pandas** and returns ``ensemble_<s>`` prediction rows the caller
-  appends via the Storage Write API — the same append path the learned strategies use (C4: every
+  appends via the Storage Write API — the same append path the learned strategies use (every
   append-only cell-table write goes through the Write API, no ``INSERT…SELECT`` DML).
 * **Learned** (``nnls``, ``ridge``, ``xgb``) — meta-learners that train on the backtest OOF to
-  learn per-model trust weights. :func:`fit_learned` fits them; because it only ever sees
+  learn per-model trust weights. `fit_learned` fits them; because it only ever sees
   ``backtest_oof`` (never in-sample fits) leakage is structurally impossible, and it refuses to
   run when backtesting is off.
 
 A run may request several strategies at once (``ensemble.strategies`` is a list); each yields
 its own weights/rows so calculated and learned consensuses sit side-by-side in one run.
 
-Public surface: :func:`combine_calculated`, :func:`combine_oof`, :func:`fit_learned` (plus the
-pure combine helpers :func:`mean_combine`, :func:`median_combine`, :func:`inverse_error_weights`).
+Public surface: `combine_calculated`, `combine_oof`, `fit_learned` (plus the
+pure combine helpers `mean_combine`, `median_combine`, `inverse_error_weights`).
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def median_combine(yhats: np.ndarray) -> np.ndarray:
 
 
 def inverse_error_weights(errors: np.ndarray) -> np.ndarray:
-    """Weights ∝ 1/error, normalized to sum to 1 (DESIGN §5.2).
+    """Weights ∝ 1/error, normalized to sum to 1.
 
     Lower-error models get more weight. A zero-error model would divide by zero, so zeros are
     treated as "perfectly trusted" and share the weight equally among themselves. Falls back to
@@ -88,7 +88,7 @@ def _weighted_blend(vals: np.ndarray, weights: np.ndarray) -> np.ndarray:
 
     ``vals`` is ``(n_rows, n_models)``; ``weights`` is ``(n_models,)``. A row where no weighted
     model is present (all NaN, or the present weights sum to zero) yields NaN — the caller drops it.
-    Same renormalize-over-present rule as :func:`ensemble_run._apply_weights`, so the OOF-scored
+    Same renormalize-over-present rule as `ensemble_run._apply_weights`, so the OOF-scored
     consensus applies the identical blend the future prediction does (for the shared weights).
     """
     present = ~np.isnan(vals)
@@ -105,12 +105,12 @@ def combine_oof(
 ) -> pd.DataFrame:
     """Blend base-model OOF forecasts into ensemble OOF, per requested strategy (pure).
 
-    The scoring counterpart to the future-prediction consensus: after C2 aligned
-    ``forecast_predictions`` to a true beyond-data forecast (no actuals to join), each ensemble is
+    The scoring counterpart to the future-prediction consensus: because the base
+    ``forecast_predictions`` are a true beyond-data forecast (no actuals to join), each ensemble is
     scored on the **backtest OOF window** — exactly the window the base models are scored on. This
     applies the same consensus rules in OOF space (where ``y_true`` lives) and returns long-format
     ``(ts_id, model_type='ensemble_<s>', fold_id, forecast_date, y_true, yhat)`` for the caller to
-    score with :func:`metrics.compute_metrics`.
+    score with `metrics.compute_metrics`.
 
     Blends over whichever base models are present per ``(ts_id, fold_id, forecast_date)`` key:
     ``mean``/``median`` are unweighted; ``inverse_error`` weights each model per ``ts_id`` by
@@ -189,7 +189,7 @@ def _inverse_error_blend(vals: np.ndarray, ts_ids: np.ndarray, truth: np.ndarray
     """Inverse-WAPE-weighted blend, weights computed **per ts_id** from the OOF itself.
 
     For each series, every base model's WAPE over its OOF rows sets its weight
-    (:func:`inverse_error_weights`); the blend then renormalizes over the models present per row.
+    (`inverse_error_weights`); the blend then renormalizes over the models present per row.
     Self-contained — computed straight from the OOF rather than read back from
     ``forecast_metadata`` — so scoring needs no registry round-trip. (WAPE is the natural error for
     this weighting; it need not equal ``backtest.decision_metric``, which drives the *future*
@@ -268,7 +268,7 @@ def _fit_xgb(X: np.ndarray, y: np.ndarray, seed: int) -> tuple[np.ndarray, objec
 def fit_learned(
     oof_df: pd.DataFrame, cfg: RunConfig
 ) -> tuple[dict[str, dict[str, float]], dict[str, bytes]]:
-    """Fit every learned strategy in ``cfg`` on the backtest OOF (CONTRACTS §6, DESIGN §5.2).
+    """Fit every learned strategy in ``cfg`` on the backtest OOF.
 
     Returns ``(weights, artifacts)``:
       * ``weights[strategy]`` maps base-model name → learned weight,
@@ -311,7 +311,7 @@ def fit_learned(
     return weights, artifacts
 
 
-# --- calculated ensembles in pandas (Write-API path, C4 / Q4 fix) --------------
+# --- calculated ensembles in pandas (Write-API path) ---------------------------
 
 # The prediction-row columns combine_calculated emits (ensemble_id + run_id filled by the caller).
 _PRED_OUT_COLS = ("ts_id", "model_type", "forecast_date", "yhat", "yhat_lower", "yhat_upper")
@@ -321,10 +321,10 @@ def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
     """The base models a calculated ensemble should blend, after optional pruning (pure).
 
     Pruning (``ensemble.prune_threshold`` > 0) drops any model whose mean backtest decision metric
-    is worse than the threshold, so a bad base model can't drag the consensus down — the pandas twin
-    of the old SQL ``model_type NOT IN (… metric > threshold)`` filter, but applied fleet-wide (a
-    model pruned on its run-level metric is dropped from every series' blend). Threshold 0.0, or no
-    metric frame, means no pruning. Order follows ``cfg.models`` (stable).
+    is worse than the threshold, so a bad base model can't drag the consensus down — equivalent to
+    a ``model_type NOT IN (… metric > threshold)`` filter, but applied fleet-wide (a model pruned
+    on its run-level metric is dropped from every series' blend). Threshold 0.0, or no metric
+    frame, means no pruning. Order follows ``cfg.models`` (stable).
     """
     models = list(cfg.models)
     threshold = cfg.ensemble.prune_threshold
@@ -361,13 +361,13 @@ def combine_calculated(
 ) -> list[dict[str, Any]]:
     """Blend base predictions into ``ensemble_<s>`` rows for every calculated strategy (pure).
 
-    The pandas replacement for the retired ``INSERT…SELECT`` SQL (C4 / Q4 fix): reads the base
+    Builds the ``ensemble_<s>`` rows in pandas rather than via SQL ``INSERT…SELECT``: reads the base
     ``forecast_predictions`` (long-format ``ts_id, model_type, forecast_date, yhat, yhat_lower,
     yhat_upper``) and returns prediction-row dicts the caller stamps with ``run_id``/``ensemble_id``
-    and appends via the Storage Write API — the same path :func:`ensemble_run._apply_weights` uses
+    and appends via the Storage Write API — the same path `ensemble_run._apply_weights` uses
     for the learned strategies. ``inverse_error`` weights each model by ``1/mean(decision_metric)``
     from ``metric_df`` (``forecast_metadata`` for this run); ``mean``/``median`` need no metrics.
-    Optional pruning drops weak base models first (:func:`_pruned_models`). Blends over whichever
+    Optional pruning drops weak base models first (`_pruned_models`). Blends over whichever
     (pruned) base models are present per ``(ts_id, forecast_date)``, renormalizing weights over that
     present subset. Returns an empty list when no calculated strategy is requested or the base is
     empty. ``yhat``/bounds are floats or ``None`` (NaN → NULL); ``run_id``/``ensemble_id`` are added
@@ -428,9 +428,9 @@ def _inverse_error_run_weights(
     """Per-model inverse-error weights from the run's ``forecast_metadata`` (pure).
 
     Weight ∝ ``1/mean(decision_metric)`` over the model's metadata rows, via
-    :func:`inverse_error_weights` (zeros dominate, non-finite → uniform). Falls back to uniform when
+    `inverse_error_weights` (zeros dominate, non-finite → uniform). Falls back to uniform when
     no metric frame / column is available — degrading ``inverse_error`` to ``mean`` rather than
-    failing, mirroring the old SQL's ``SAFE_DIVIDE(1, NULLIF(AVG(metric), 0))`` NULL tolerance.
+    failing (the ``SAFE_DIVIDE(1, NULLIF(AVG(metric), 0))`` NULL-tolerant behavior).
     """
     n = len(models)
     metric = cfg.backtest.decision_metric

@@ -24,7 +24,7 @@ def _true_exog(exog: pd.DataFrame | None) -> pd.DataFrame | None:
 
     Tree models own their lags via the recursion below, so config-driven ``features.lags``
     (which arrive as ``lag_*`` columns in ``exog``) must not leak in — otherwise a config
-    lag that overlaps :data:`LAGS` would silently overwrite the recursively-computed value.
+    lag that overlaps `LAGS` would silently overwrite the recursively-computed value.
     """
     if exog is None:
         return None

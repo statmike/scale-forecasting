@@ -1,4 +1,4 @@
-"""Tests for the model ABC, registry, and shared helpers (CONTRACTS §1, BUILD 2.2)."""
+"""Tests for the model ABC, registry, and shared helpers."""
 
 from __future__ import annotations
 

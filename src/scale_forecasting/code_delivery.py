@@ -5,7 +5,7 @@ baked into the runtime container image (``docker/Dockerfile``: deps ship in the 
 runtime, so a code edit never needs an image rebuild and no stale code can hide). The two delivery
 mechanisms both build the SAME zip from this one place, so worker code can never drift between them:
 
-* **Dataproc batch** (:mod:`.submit`) uploads the zip to GCS and passes it on ``python_file_uris``.
+* **Dataproc batch** (`submit`) uploads the zip to GCS and passes it on ``python_file_uris``.
 * **Interactive Spark Connect** (notebook 01) adds it to the session with
   ``spark.addArtifacts(path, pyfile=True)`` — Connect only accepts *local* files, so the notebook
   writes the zip to a temp path first.

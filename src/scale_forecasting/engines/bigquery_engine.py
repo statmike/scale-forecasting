@@ -1,10 +1,10 @@
-"""BigQuery-native models — SQL runner for ARIMA_PLUS / TimesFM (CONTRACTS §5).
+"""BigQuery-native models — SQL runner for ARIMA_PLUS / TimesFM.
 
 The BigQuery runtime executes forecasting *as SQL inside BigQuery* — the opposite of the Spark
 track's per-cell fan-out. ``ARIMA_PLUS`` with ``time_series_id_col`` trains **all series in one
 ``CREATE MODEL`` statement``; ``AI.FORECAST`` (TimesFM) forecasts every series in one call with no
 training at all. Both land in the *same* three-tier registry as the Python models, so a native model
-and a Spark model are directly comparable on ``v_model_leaderboard`` (DESIGN §3.3).
+and a Spark model are directly comparable on ``v_model_leaderboard``.
 
 This module has two halves:
 
@@ -12,13 +12,13 @@ This module has two halves:
   argument defaulting to a ``{dataset}`` template token so a config-only call renders, ``@run_id``
   bound as a **query parameter**, and identifiers (dataset, columns, model names) interpolated.
   Snapshot-tested offline, no GCP.
-* **The engine** (:func:`run`) — resolves :class:`~scale_forecasting.settings.Settings`, owns the
-  ``run_registry`` header lifecycle exactly like :func:`spark_naive.run`, executes the builders'
+* **The engine** (`run`) — resolves `Settings`, owns the
+  ``run_registry`` header lifecycle exactly like `spark_naive.run`, executes the builders'
   SQL via ``bigquery.Client``, reads the fold forecasts back, computes the metric panel through
-  the shared :func:`~scale_forecasting.metrics.compute_metrics` (no formula drift), and writes all
+  the shared `compute_metrics` (no formula drift), and writes all
   three cell tables via the registry's Storage Write API row-dict path.
 
-**Alignment with the Spark track (Arc C / C2).** The native models now mean the *same thing* as the
+**Alignment with the Spark track.** The native models mean the *same thing* as the
 Python models in every table:
 
 * ``forecast_predictions`` **always** holds a **true beyond-data forecast** — the final model is fit
@@ -26,16 +26,16 @@ Python models in every table:
   final-fit-then-forecast. It is never a scored within-history window.
 * Scored evaluation lives **entirely in the backtest path**, for both engines. When
   ``backtest.enabled`` is on, a **BQML fold loop** (per fold: ``CREATE MODEL`` on ``ds <= cutoff`` +
-  ``ML.FORECAST``) mirrors :func:`backtest.make_folds`'s anchored-from-end geometry, writing
+  ``ML.FORECAST``) mirrors `backtest.make_folds`'s anchored-from-end geometry, writing
   ``backtest_oof`` with real ``fold_id``s and a rolled-up ``forecast_metadata`` panel
   (``fold_id=NULL``). When backtest is off, the engine writes a ``fold_id=NULL`` metadata row per
   ``(series, model)`` with a NaN metric panel — precise parity with the Python worker, which also
   emits an unscored metadata row when backtesting is off.
 
 **Transform.** ``cfg.features.transform`` (e.g. ``log1p``) is intentionally **not** applied here:
-ARIMA_PLUS runs its own decomposition, and TimesFM is a pretrained foundation model (DESIGN §4).
+ARIMA_PLUS runs its own decomposition, and TimesFM is a pretrained foundation model.
 Holidays *are* honored — the custom-holiday CTE is built from the same
-:func:`~scale_forecasting.features.holiday_frame` the Python suite uses, so "holiday" is identical
+`holiday_frame` the Python suite uses, so "holiday" is identical
 across runtimes.
 
 Public surface: ``run(cfg, models)``; builders ``build_create_model_sql``,
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class BqOutcome:
-    """The BigQuery engine's run summary — what :func:`main.run` folds into the shared header.
+    """The BigQuery engine's run summary — what `main.run` folds into the shared header.
 
     ``status`` is COMPLETED (the engine raises on any SQL failure rather than returning FAILED, so a
     returned outcome is always COMPLETED today; the field is explicit for symmetry with the Spark
@@ -124,7 +124,7 @@ def _sanitize_identifier(text: str) -> str:
 def _source_ref(cfg: RunConfig, dataset: str) -> str:
     """Fully-qualify the source table: pass through a dotted name, else qualify against ``dataset``.
 
-    Mirrors ``spark_io._resolve_source_table`` so both runtimes read the identical table (G1).
+    Mirrors ``spark_io._resolve_source_table`` so both runtimes read the identical table.
     """
     src = cfg.data.source_table
     return src if "." in src else f"{dataset}.{src}"
@@ -138,7 +138,7 @@ def _model_ref(cfg: RunConfig, model_name: str, dataset: str, *, fold_id: int | 
     object. ``fold_id`` (when set) appends an ``_f{k}`` suffix so each backtest fold trains its own
     model object without clobbering the final (true-future) model or the other folds. A model object
     name is an identifier — it cannot be a bound query parameter — so the ``run_id`` is interpolated
-    here; it is a pure function of ``cfg`` (:func:`make_run_id`), keeping every builder pure.
+    here; it is a pure function of ``cfg`` (`make_run_id`), keeping every builder pure.
     """
     run_id = make_run_id(cfg)
     suffix = f"_f{fold_id}" if fold_id is not None else ""
@@ -198,7 +198,7 @@ def bqml_options(cfg: RunConfig, model_name: str) -> dict[str, Any]:
 
     For the ARIMA models this is the ``CREATE MODEL`` ``OPTIONS(...)`` body *and* the
     ``best_params`` JSON on each ``forecast_metadata`` row — the registry records what trained.
-    TimesFM has no ``CREATE MODEL``; :func:`_render_options` never sees its dict, but ``run`` still
+    TimesFM has no ``CREATE MODEL``; `_render_options` never sees its dict, but ``run`` still
     stamps ``best_params`` for every model, so we return the resolved ``AI.FORECAST`` arguments here
     — keeping the metadata row's provenance non-NULL and meaningful across both native shapes.
     """
@@ -233,7 +233,7 @@ def _render_options(opts: dict[str, Any]) -> str:
 
 
 def build_custom_holiday_cte(cfg: RunConfig) -> str:
-    """Render the ``custom_holiday`` CTE from :func:`features.holiday_frame`, or ``""`` if none.
+    """Render the ``custom_holiday`` CTE from `features.holiday_frame`, or ``""`` if none.
 
     Emits one row per (holiday, occurrence) — ``region``, sanitized ``holiday_name``,
     ``primary_date``, and a symmetric ``preholiday_days`` / ``postholiday_days`` window — via a
@@ -283,7 +283,7 @@ def _training_select(cfg: RunConfig, source: str, *, back_steps: int | None = No
     """The ``training_data`` SELECT: id/timestamp/target over the fit's training window.
 
     ``back_steps=None`` trains on **all** history (the final true-future fit); an int restricts to a
-    backtest fold's window (see :func:`_train_window_where`).
+    backtest fold's window (see `_train_window_where`).
     """
     cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col]
     where = _train_window_where(cfg, source, back_steps)
@@ -310,7 +310,7 @@ def build_create_model_sql(
     object.
     When holidays are configured the ``AS`` clause takes the named-subquery form
     (``training_data AS (...), custom_holiday AS (...)``); otherwise it is a plain training query.
-    TimesFM has no CREATE MODEL — see :func:`build_forecast_insert_sql`.
+    TimesFM has no CREATE MODEL — see `build_forecast_insert_sql`.
     """
     ref = _model_ref(cfg, model_name, dataset, fold_id=fold_id)
     source = _source_ref(cfg, dataset)
@@ -414,7 +414,7 @@ def build_eval_query(
 
     Returns ``(ts_id, forecast_date, y_true, yhat, yhat_lower, yhat_upper)`` for the fold's
     validation window (the ``backtest.horizon`` dates after ``cutoff``, all of which have ground
-    truth). The engine groups these by ``ts_id`` and feeds :func:`metrics.compute_metrics` — so the
+    truth). The engine groups these by ``ts_id`` and feeds `metrics.compute_metrics` — so the
     metric math is byte-identical to the Python models. Intervals are carried so coverage/pinball
     are real. ``@run_id`` only names the model here; this query writes no row.
     """
@@ -438,7 +438,7 @@ def build_history_query(cfg: RunConfig, dataset: str = "{dataset}") -> str:
     """A ``SELECT`` of **all** training history ``(ts_id, ds, y)`` (for MASE/RMSSE scale).
 
     The scale-free metrics need each series' training actuals as ``y_train``; the engine loads this
-    once, groups by ``ts_id``, and passes the per-series history to :func:`metrics.compute_metrics`.
+    once, groups by ``ts_id``, and passes the per-series history to `metrics.compute_metrics`.
     Post-alignment this is the full series history (the natives train on all of it for the final
     forecast) — a robust, freq-agnostic scale for the fold metrics.
     """
@@ -473,8 +473,8 @@ def build_setup_statements(
     """The mutating statements for one native model's **final true-future forecast**, in order.
 
     ARIMA models: ``[CREATE MODEL (all history), INSERT INTO forecast_predictions]``. TimesFM: just
-    the INSERT (no training). The backtest fold statements (:func:`build_create_model_sql` with
-    ``back_steps``) and the read-back eval (:func:`build_eval_query`) are *not* here — this renders
+    the INSERT (no training). The backtest fold statements (`build_create_model_sql` with
+    ``back_steps``) and the read-back eval (`build_eval_query`) are *not* here — this renders
     only the always-run true-future path.
     """
     statements: list[str] = []
@@ -490,7 +490,7 @@ def build_fold_create_statements(
     """The training statements for one backtest fold (``[CREATE MODEL]`` for ARIMA, ``[]`` else).
 
     TimesFM needs no model object — its fold forecast reads the ``ds <= cutoff`` history directly in
-    :func:`build_eval_query` — so it has no fold-training statement.
+    `build_eval_query` — so it has no fold-training statement.
     """
     if model_name in _MODEL_TYPE:
         return [
@@ -505,7 +505,7 @@ def build_fold_drop_statements(
     """The cleanup statement for one backtest fold (``[DROP MODEL]`` for ARIMA, ``[]`` else).
 
     Each fold trains a persisted ``sf_model_{model}_{run_id}_f{k}`` object solely to produce that
-    fold's held-out forecast; once :func:`build_eval_query` has read it back the object has no
+    fold's held-out forecast; once `build_eval_query` has read it back the object has no
     further use. Without this it would linger in the dataset — orphaned fold models accumulating
     every run. The *final* true-future model (``fold_id=None``) is deliberately **not** dropped: it
     backs ``forecast_predictions`` and its ``CREATE OR REPLACE`` idempotency (lineage).
@@ -532,32 +532,32 @@ def run(
     manage_header: bool = True,
     settings: Settings | None = None,
 ) -> BqOutcome:  # pragma: no cover - GCP I/O, @gcp smoke
-    """Execute the BigQuery-native subset end-to-end, mirroring :func:`spark_naive.run`.
+    """Execute the BigQuery-native subset end-to-end, mirroring `spark_naive.run`.
 
-    Header lifecycle (CONTRACTS §8.2): resolve :class:`Settings`, derive the config-pinned
+    Header lifecycle: resolve `Settings`, derive the config-pinned
     ``run_id``, ``ensure_tables`` → ``write_header`` (RUNNING), run the SQL, then ``update_header``
     with the aggregated status, wall-clock ``runtime_seconds``, ``n_series``, ``n_models``, and the
     ``bq_models`` array.
 
-    Two phases per run (C2 alignment — see the module docstring):
+    Two phases per run (see the module docstring):
 
-    * **Final forecast (always).** Each model's :func:`build_setup_statements` fits on all history
+    * **Final forecast (always).** Each model's `build_setup_statements` fits on all history
       and INSERTs a true beyond-data forecast into ``forecast_predictions`` — parity with Spark.
     * **Scored evaluation (backtest only).** When ``backtest.enabled``, a fold loop
-      (:func:`fold_plan`) trains one model per fold on ``ds <= cutoff``, reads each fold's forecast
-      joined to actuals via :func:`build_eval_query`, writes ``backtest_oof`` with real
+      (`fold_plan`) trains one model per fold on ``ds <= cutoff``, reads each fold's forecast
+      joined to actuals via `build_eval_query`, writes ``backtest_oof`` with real
       ``fold_id``s, and rolls the per-fold panels up (via ``worker._rollup_metrics``) into a
       ``fold_id=NULL``
       ``forecast_metadata`` row. When backtest is off, a single unscored ``fold_id=NULL`` metadata
       row per ``(series, model)`` (NaN panel) is written instead — parity with the Python worker.
 
-    ``manage_header=False`` is **contributor mode** (Arc B): :func:`main.run` owns the single shared
+    ``manage_header=False`` is **contributor mode**: `main.run` owns the single shared
     header, so the engine skips ``ensure_tables`` / ``write_header`` / ``update_header`` and only
     runs SQL + writes the cell tables. ``settings`` may be passed to reuse the orchestrator's
     already-resolved infra; ``None`` resolves it here (standalone default).
 
     Idempotent: ``run_id`` is a pure function of the config and every write is append-only /
-    dedupe-on-read, so a re-run of the same config lands byte-identical rows (§3.4).
+    dedupe-on-read, so a re-run of the same config lands byte-identical rows.
     """
     import time
     from datetime import UTC, datetime
@@ -750,7 +750,7 @@ def _append_rows(  # pragma: no cover - GCP I/O, @gcp smoke
     """Append plain row dicts to a cell table via the registry's Storage Write API path.
 
     Reuses the same ``_proto_for`` / ``_encode_rows`` / ``_append_via_write_api`` machinery that
-    :func:`registry.bq.write_cells` uses — the ``CellResult`` requirement lives only in the
+    `registry.bq.write_cells` uses — the ``CellResult`` requirement lives only in the
     ``assemble_*`` wrappers, not the write path, so the native engine feeds ``_*_SPEC``-shaped dicts
     directly. Empty input is a no-op.
     """
@@ -780,7 +780,7 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
     """``python -m scale_forecasting.engines.bigquery_engine --config path.json``.
 
     Loads the config, routes its models to the BigQuery subset via
-    :func:`~scale_forecasting.router.split_by_runtime`, and runs the engine on that subset. A config
+    `split_by_runtime`, and runs the engine on that subset. A config
     with no native models is a no-op (the Python runtime owns the rest).
     """
     import argparse

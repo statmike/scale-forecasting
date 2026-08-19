@@ -1,7 +1,7 @@
-"""Tests for the pure registry row-assembly layer (CONTRACTS §3.4, §4, BUILD 1.4).
+"""Tests for the pure registry row-assembly layer.
 
 Offline only: a :class:`CellResult` (plus a :class:`RunConfig` for the header) maps to the
-exact row dicts each table expects. No BigQuery client — the I/O writers are Arc B (B1).
+exact row dicts each table expects. No BigQuery client — the I/O writers are covered elsewhere.
 Covers frame→rows mapping, run/series/model/engine stamping, dtype/NaN coercion, JSON
 serialization, and the model_hash idempotency key.
 """
@@ -185,7 +185,7 @@ def test_metadata_row_carries_artifact_link() -> None:
 
 
 def test_metadata_metric_columns_match_ddl() -> None:
-    # The assembled metric keys must be exactly the metric columns in the DDL (§4).
+    # The assembled metric keys must be exactly the metric columns in the DDL.
     ddl_metrics = {
         "mae",
         "rmse",
@@ -220,7 +220,7 @@ def test_empty_best_params_serialized_to_none() -> None:
 
 def test_dedup_key_is_run_scoped() -> None:
     # Idempotency is enforced at the run grain (run-level clear + append), so the key is
-    # run_id alone — not model_hash (B0.3: can't DELETE the streaming buffer per-cell).
+    # run_id alone — not model_hash (can't DELETE the streaming buffer per-cell).
     key = bq.cell_dedup_key(_result())
     assert key == {"run_id": "my-run-abc123def456"}
 
@@ -240,7 +240,7 @@ def test_header_row_snapshots_config() -> None:
     assert row["backtest_on"] is False
     assert row["created_at"] is _CREATED
     # raw_config is the verbatim validated config as a dict (the native JSON column's query
-    # parameter serializes it; a pre-serialized string would double-encode — D19).
+    # parameter serializes it; a pre-serialized string would double-encode).
     assert isinstance(row["raw_config"], dict)
     assert row["raw_config"]["run_name"] == "my run"
     assert row["raw_config"]["models"] == ["theta", "sarimax"]

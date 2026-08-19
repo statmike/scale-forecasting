@@ -5,7 +5,7 @@ the selected tier headless on its Colab Enterprise template (via the Vertex AI N
 API, serviceAccount mode) and asserts the job SUCCEEDED with zero cell errors. This is the
 repeatable proof that every notebook runs green on the right template — and the regression guard
 when a notebook changes. The templates carry the ``SF_*`` run identity in their env, so the kernel
-resolves ``Settings`` exactly as a human who just opens the template would (G1).
+resolves ``Settings`` exactly as a human who just opens the template would.
 
 **Tiers escalate cost** (see the harness registry), each gated so money-spending runs are opt-in —
 the same shape as ``@gpu``/``@raylive`` in ``tests/conftest.py``:

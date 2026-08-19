@@ -1,4 +1,4 @@
-"""Tests for deterministic run_id and model_hash (CONTRACTS §3, TESTING §2)."""
+"""Tests for deterministic run_id and model_hash."""
 
 from __future__ import annotations
 

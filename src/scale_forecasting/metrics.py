@@ -1,8 +1,8 @@
-"""Forecast metric panel — pure (CONTRACTS §2.3, DESIGN §5.1).
+"""Forecast metric panel — pure.
 
 One entry point, ``compute_metrics``, returns the full panel every run so users never
-re-run to get a different metric; the decision metric is then a pure config choice
-(DESIGN §5.1). All values are floats, with NaN where a metric is undefined (e.g. MAPE
+re-run to get a different metric; the decision metric is then a pure config choice.
+All values are floats, with NaN where a metric is undefined (e.g. MAPE
 with zeros, MASE/RMSSE without training history, coverage without intervals) rather than
 raising — a metric that can't be computed for one cell must not sink the batch.
 
@@ -30,7 +30,7 @@ import numpy as np
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-# The interval bounds follow the canonical convention (CONTRACTS §2.1): lower at the 0.1
+# The interval bounds follow the canonical convention: lower at the 0.1
 # quantile, upper at the 0.9 quantile. Pinball loss is averaged over both.
 _LOWER_Q = 0.1
 _UPPER_Q = 0.9
@@ -58,7 +58,7 @@ def compute_metrics(
     lower: Sequence[float] | np.ndarray | None = None,
     upper: Sequence[float] | np.ndarray | None = None,
 ) -> dict[str, float]:
-    """Compute the full metric panel for one forecast window (CONTRACTS §2.3).
+    """Compute the full metric panel for one forecast window.
 
     Args:
         y_true: actuals over the evaluation window.
@@ -68,7 +68,7 @@ def compute_metrics(
         upper: upper prediction bound.
 
     Returns:
-        ``{name: float}`` for every name in :data:`METRIC_NAMES`. Undefined metrics are NaN.
+        ``{name: float}`` for every name in `METRIC_NAMES`. Undefined metrics are NaN.
 
     Raises:
         ValueError: if ``y_true`` and ``yhat`` have different lengths or are empty.

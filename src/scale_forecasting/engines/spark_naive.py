@@ -1,7 +1,7 @@
-"""Spark method C — group by ts_id, sequential model loop: the anti-pattern (DESIGN §2.1).
+"""Spark method C — group by ts_id, sequential model loop: the anti-pattern.
 
 The deliberate straggler baseline that makes explode's per-cell fan-out *visible* in the registry.
-Where :mod:`.spark_explode` cross-joins series × model so every ``(ts_id, model_type)`` cell is an
+Where `spark_explode` cross-joins series × model so every ``(ts_id, model_type)`` cell is an
 independent unit, naive keeps a whole series in one Spark task and runs *all* its models back to
 back. One slow ``(series, deep-model)`` fit therefore blocks every other model for that series, and
 — throttled with ``--max-executors`` — a handful of long series set the batch wall-clock while most
@@ -9,11 +9,11 @@ executors sit idle. That poor autoscaling is the point: the run's ``runtime_seco
 ``run_registry`` lands materially higher than explode's at the same scale, so the scaling story is a
 single query, not a slide. Small scales only (10 / 100); it is not meant to reach 100k.
 
-Mechanically this is :mod:`.spark_explode` minus the cross-join: :func:`spark_io.bucket_key_cols`
+Mechanically this is `spark_explode` minus the cross-join: `spark_io.bucket_key_cols`
 returns ``[ts_id]`` for the naive method (so a series' whole history shares one bucket) and
-:func:`spark_io.run_group` sees no model column and loops ``cfg.models`` per series. Everything else
+`spark_io.run_group` sees no model column and loops ``cfg.models`` per series. Everything else
 — the connector read + deterministic subset, executor-side batched write of each bucket's
-:class:`~scale_forecasting.worker.CellResult`s, and the driver's header lifecycle + status roll-up —
+`CellResult`s, and the driver's header lifecycle + status roll-up —
 is the shared code, unchanged.
 
 Public surface: ``run(cfg) -> None``.
@@ -45,26 +45,27 @@ def run(
 ) -> None:
     """Execute a naive run end-to-end: header → fan *series* across Spark → close header.
 
-    Same driver-side lifecycle as :func:`spark_explode.run` (CONTRACTS §3.4, §8.2): resolve
-    :class:`~scale_forecasting.settings.Settings`, derive the ``run_id`` once, ``ensure_tables`` +
+    Same driver-side lifecycle as `spark_explode.run`: resolve
+    `Settings`, derive the ``run_id`` once, ``ensure_tables`` +
     ``write_header`` (RUNNING), fan the work across the cluster, then ``update_header`` with the
     aggregated status + wall-clock ``runtime_seconds`` + ``n_series``.
 
     The one structural difference is the unit of parallelism: no cross-join, so the bucket key is
     ``ts_id`` alone and each Spark task owns a whole series and runs every executed model
-    sequentially (:func:`spark_io.run_group`). The throttle that exposes the straggler
+    sequentially (`spark_io.run_group`). The throttle that exposes the straggler
     (``spark.dynamicAllocation.maxExecutors``) is applied at submit time (``--max-executors``), not
-    here — the engine code is identical to the un-throttled case, which keeps the G1 seam clean.
+    here — the engine code is identical to the un-throttled case, which keeps the single local/cloud
+    seam clean.
 
-    ``models`` / ``manage_header`` mirror :func:`spark_explode.run`: ``models`` is the executed
-    subset (``None`` → ``cfg.models``) so a mixed :func:`main.run` config runs only its
+    ``models`` / ``manage_header`` mirror `spark_explode.run`: ``models`` is the executed
+    subset (``None`` → ``cfg.models``) so a mixed `main.run` config runs only its
     Python-runtime models here, and ``manage_header=False`` is contributor mode (main owns the
     shared header). Both default to standalone behavior. ``settings`` / ``spark`` also mirror
-    :func:`spark_explode.run`: an injected caller-owned session (notebook / Spark Connect) is used
+    `spark_explode.run`: an injected caller-owned session (notebook / Spark Connect) is used
     but not stopped, while ``None`` self-creates + stops one (the Dataproc batch path).
 
     Idempotent by construction: the config-derived ``run_id`` + append-only/dedupe-on-read writes
-    mean a re-run of the same config lands byte-identical rows (§3.4).
+    mean a re-run of the same config lands byte-identical rows.
     """
     import time
 
@@ -88,7 +89,7 @@ def run(
     )
 
     # 1. Header first, so a run is visible in the registry even if the Spark job dies mid-flight.
-    #    In contributor mode (Arc B) main.run already wrote the shared header — skip both.
+    #    In contributor mode main.run already wrote the shared header — skip both.
     if manage_header:
         bq.ensure_tables(cfg, settings=settings)
         bq.write_header(cfg, run_id, settings=settings)
@@ -103,10 +104,10 @@ def run(
         # 2. Fan whole series across the cluster — NO cross-join, so each task runs all models for
         #    its series sequentially. The frozen Settings is captured directly in the group runner's
         #    closure (no sparkContext.broadcast — Connect has no such API); applyInPandas
-        #    cloudpickles it to every executor so write_cells resolves the same infra (G1).
+        #    cloudpickles it to every executor so write_cells resolves the same infra.
         source = spark_io.read_source_series(spark, cfg, settings)
 
-        # C5: fleetwide HPO resolves once on the driver over a small sample, before fan-out (see
+        # Fleetwide HPO resolves once on the driver over a small sample, before fan-out (see
         # spark_explode / spark_io.resolve_fleetwide_hpo). None unless enabled at that granularity.
         params_by_model = spark_io.resolve_fleetwide_hpo(source, cfg, executed)
 

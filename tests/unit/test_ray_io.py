@@ -1,12 +1,12 @@
-"""Offline tests for the Ray-engine core (BUILD B4, ``scale_forecasting.engines.ray_io``).
+"""Offline tests for the Ray-engine core (``scale_forecasting.engines.ray_io``).
 
 No Ray, no Vertex, no GPU, no BigQuery: the pure sizing/routing/chunking logic is exercised against
 real ``RunConfig`` objects. The live cluster + fractional-GPU path is the ``@gpu`` smoke in
 ``tests/integration/test_ray_gpu_smoke.py``; the on-cluster driver is ``test_ray_engine.py``.
 
-The two load-bearing properties for the user's "size to the run's scale, and show resizing" brief:
+The two load-bearing properties — sizing to the run's scale, and showing resizing:
 :func:`plan_cluster` is a deterministic function of the config, and a larger ``series_limit`` yields
-a strictly larger fixed-size-equivalent (and vice-versa). Autoscaling (D17 reversed post-demo) is
+a strictly larger fixed-size-equivalent (and vice-versa). Autoscaling is
 the default: the plan carries per-pool ``[min, max]`` bounds that the launcher turns into an
 ``AutoscalingSpec``; ``ray_autoscale=False`` restores the fixed path.
 """
@@ -56,7 +56,7 @@ def test_split_routes_neuralprophet_to_gpu_rest_to_cpu() -> None:
 
 
 def test_split_honors_executed_subset() -> None:
-    # Arc B: main.run hands only the Python-runtime subset; split must respect it, not cfg.models.
+    # main.run hands only the Python-runtime subset; split must respect it, not cfg.models.
     gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(), models=[_CPU])
     assert gpu == []
     assert cpu == [_CPU]
@@ -128,7 +128,7 @@ def test_plan_is_deterministic() -> None:
 
 
 def test_plan_autoscale_default_on_with_resolved_bounds() -> None:
-    # D17 reversed: autoscaling is the default, and each pool carries resolved [min, max] bounds.
+    # Autoscaling is the default, and each pool carries resolved [min, max] bounds.
     plan = ray_io.plan_cluster(_cfg(compute=_compute()), run_id="rid")
     assert plan.autoscale is True
     assert plan.cpu_min_nodes == 1

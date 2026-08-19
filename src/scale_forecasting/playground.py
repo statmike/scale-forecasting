@@ -1,13 +1,13 @@
-"""Local model-dev loop — try any model on sample data, offline (DESIGN §13.2).
+"""Local model-dev loop — try any model on sample data, offline.
 
 This is the on-ramp for a data scientist opening the repo: pick a model, get a small
 sample dataset, run the *real* worker cell, and read the prediction frame + metric panel —
 no GCP, no config files. The notebook (``notebooks/model_playground.ipynb``) and the CLI
 (``python -m scale_forecasting.playground``) are both thin skins over the functions here,
-so the dev loop and production run the identical code path (G1): sample → validate →
-:func:`worker.run_cell`.
+so the dev loop and production run the identical code path: sample → validate →
+`worker.run_cell`.
 
-Adding a model needs no change here — :func:`available_models` reads the factory registry,
+Adding a model needs no change here — `available_models` reads the factory registry,
 so a new file under ``models/`` that ends in ``register(...)`` appears automatically.
 
 Public surface: ``available_models``, ``sample_data``, ``build_config``, ``run_model``,
@@ -34,7 +34,7 @@ _SAMPLE_SEED = 20260726
 def available_models(*, include_bigquery: bool = False) -> list[str]:
     """Registered model names, sorted (the factory is the source of truth).
 
-    BigQuery-native models run as SQL in BigQuery (Arc B), not in a local cell, so they're
+    BigQuery-native models run as SQL in BigQuery, not in a local cell, so they're
     excluded by default — the playground runs the Python models offline.
     """
     names = list_models()
@@ -89,7 +89,7 @@ def sample_data(
     with_exog: bool = False,
     seed: int = _SAMPLE_SEED,
 ) -> pd.DataFrame:
-    """A small deterministic sample panel from the real generator (DESIGN §13.1).
+    """A small deterministic sample panel from the real generator.
 
     Same code path as the shipped 100k dataset, so what you see locally is what runs at
     scale. Columns: ``ts_id, archetype, ds, y`` (+ ``price_index`` when ``with_exog``).
@@ -107,7 +107,7 @@ def build_config(
     backtest: bool = False,
     with_exog: bool = False,
 ) -> RunConfig:
-    """A minimal :class:`RunConfig` for running ``model`` on :func:`sample_data`.
+    """A minimal `RunConfig` for running ``model`` on `sample_data`.
 
     Wires the generator's column names (``ts_id``/``ds``/``y``, and ``price_index`` as the
     exog role) so the config matches the sample panel out of the box. ``backtest`` turns on
@@ -148,7 +148,7 @@ class BakeOff:
     ``leaderboard`` is one row per model — base models *and* the ensemble pseudo-models —
     ranked by the decision metric. ``predictions`` is the long-format future forecast for
     every model (base + ensemble) so the notebook can overlay them. ``series`` is the history
-    they were fit on; ``config`` is the frozen :class:`RunConfig` that drove the whole thing.
+    they were fit on; ``config`` is the frozen `RunConfig` that drove the whole thing.
     """
 
     leaderboard: pd.DataFrame
@@ -172,21 +172,21 @@ def bakeoff(
     """Run several models head-to-head on one series and add two ensembles — via the framework.
 
     The playground's showcase of the *whole* pipeline offline: it runs every model in
-    ``models`` on one series with backtesting on (:func:`worker.run_cell`, the same cell a
+    ``models`` on one series with backtesting on (`worker.run_cell`, the same cell a
     100k run executes), then builds **one calculated** and **one learned** ensemble by calling
     the *exact* framework functions the real ensemble stage uses — no reimplementation:
 
-    - **calculated** (default ``inverse_error``): :func:`ensembler.combine_calculated` blends
+    - **calculated** (default ``inverse_error``): `ensembler.combine_calculated` blends
       the base future forecasts, weighting by ``1/decision_metric`` from the backtest.
-    - **learned** (default ``nnls``): :func:`ensembler.fit_learned` trains the meta-learner on
-      the base backtest OOF, then :func:`ensemble_run._apply_weights` applies the weights.
-    - **scoring**: :func:`ensembler.combine_oof` + :func:`metrics.compute_metrics` /
-      :func:`worker._rollup_metrics` score every ensemble on the OOF window — the identical
-      path :func:`ensemble_run.run_ensembles` uses, minus the BigQuery I/O.
+    - **learned** (default ``nnls``): `ensembler.fit_learned` trains the meta-learner on
+      the base backtest OOF, then `ensemble_run._apply_weights` applies the weights.
+    - **scoring**: `ensembler.combine_oof` + `metrics.compute_metrics` /
+      `worker._rollup_metrics` score every ensemble on the OOF window — the identical
+      path `ensemble_run.run_ensembles` uses, minus the BigQuery I/O.
 
     Because it drives real framework code, the leaderboard here is what a scaled run would
     produce for the same series. ``models`` defaults to a fast, reliable subset; pass your own
-    (see :func:`available_models`) to compare any Python models. Returns a :class:`BakeOff`.
+    (see `available_models`) to compare any Python models. Returns a `BakeOff`.
     """
     from .ensemble_run import _apply_weights
     from .ensembler import combine_calculated, combine_oof, fit_learned
@@ -317,10 +317,10 @@ def run_model(
 ) -> PlaygroundRun:
     """Run one model on one series and return the result (validates first).
 
-    ``data`` defaults to a fresh :func:`sample_data` panel (matching ``freq``/``with_exog``).
-    The whole panel is validated up front (:func:`validation.validate_panel`) so a shape
+    ``data`` defaults to a fresh `sample_data` panel (matching ``freq``/``with_exog``).
+    The whole panel is validated up front (`validation.validate_panel`) so a shape
     problem fails fast with a clear message — the same guard a real run uses. Then a single
-    series (``ts_id``, or the first one) is handed to :func:`worker.run_cell`, exactly as an
+    series (``ts_id``, or the first one) is handed to `worker.run_cell`, exactly as an
     engine would. ``run_cell`` never raises: a model failure comes back as an error cell.
     """
     if data is None:

@@ -1,10 +1,10 @@
-"""End-to-end registry round-trip against live BigQuery (BUILD B1, @gcp).
+"""End-to-end registry round-trip against live BigQuery (@gcp).
 
-This is the permanent successor to the B0.3 write-path spike: it exercises the real writers
+Exercises the real writers
 (``ensure_tables`` → ``write_header`` → ``write_cells`` → ``update_header``) against a live
-managed-Iceberg dataset and asserts the B1 contract — every write route lands the right rows,
-a re-run appends but the dedupe-on-read logical count is stable (append-only idempotency,
-§3.4), an artifact uploads to a readable GCS object, and an error cell yields a PARTIAL header.
+managed-Iceberg dataset and asserts the contract — every write route lands the right rows,
+a re-run appends but the dedupe-on-read logical count is stable (append-only idempotency),
+an artifact uploads to a readable GCS object, and an error cell yields a PARTIAL header.
 
 Skipped unless ``SF_PROJECT_ID`` (+ ADC) is set (see ``tests/conftest.py``). Run manually::
 
@@ -134,7 +134,7 @@ def _poll_count(client: Any, table_ref: str, run_id: str, expected: int) -> int:
     return n
 
 
-# The natural cell keys serving views dedupe on (append-only + dedupe-on-read, §3.4).
+# The natural cell keys serving views dedupe on (append-only + dedupe-on-read).
 _DEDUP_KEYS: dict[str, str] = {
     "forecast_predictions": "ts_id, model_type, forecast_date",
     "backtest_oof": "ts_id, model_type, fold_id, forecast_date",
@@ -227,7 +227,7 @@ def test_registry_roundtrip(settings: Settings) -> None:
     assert blob.download_as_bytes() == b"fake-fitted-model-bytes"
 
     # Re-run: append-only (no DELETE — the Write API buffer forbids it). Raw rows may double,
-    # but the dedupe-on-read logical count is stable — the idempotency contract (§3.4).
+    # but the dedupe-on-read logical count is stable — the idempotency contract.
     bq.write_cells(results, settings=settings)
     assert _poll_count(client, preds, run_id, 12) == 12  # raw rows appended
     assert _distinct_count(client, "forecast_predictions", preds, run_id) == 6

@@ -1,6 +1,6 @@
-"""NeuralProphet — the one model that benefits from a GPU (DESIGN §11).
+"""NeuralProphet — the one model that benefits from a GPU.
 
-One model, one file (CONTRACTS §1). Runtime python, deep_learning family. NeuralProphet is
+One model, one file. Runtime python, deep_learning family. NeuralProphet is
 an optional dependency, imported lazily in ``fit`` so the model registers without it (and
 without dragging torch into the base install). It supports quantile regression, but quantiles
 are fixed at construction; our contract passes the quantile set at *predict* time, so — like

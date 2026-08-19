@@ -1,7 +1,7 @@
-"""Time-series cross-validation folds + out-of-fold capture — pure (CONTRACTS §2.2).
+"""Time-series cross-validation folds + out-of-fold capture — pure.
 
 Backtesting fits on history, validates on a held-out future window, and records the
-out-of-fold (OOF) predictions the learned ensembler trains on (DESIGN §5.1/§5.2). Two
+out-of-fold (OOF) predictions the learned ensembler trains on. Two
 entry points:
 
 - ``make_folds(n, cfg) -> list[Fold]`` — integer-indexed CV splits over ``n`` sorted
@@ -55,7 +55,7 @@ class Fold:
 
 
 def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
-    """Build the CV folds for ``n`` observations (CONTRACTS §2.2).
+    """Build the CV folds for ``n`` observations.
 
     Uses ``cfg.backtest``: ``n_folds``, ``horizon``, ``step``, ``min_train``, ``scheme``.
     Raises ``ConfigError`` if ``n`` is too small to support the requested folds.
@@ -96,7 +96,7 @@ def backtest_cell(
     cfg: RunConfig,
     lam: float | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, float]]]:
-    """Run CV for one series and model factory (CONTRACTS §2.2).
+    """Run CV for one series and model factory.
 
     Args:
         series: one ts_id's raw rows (date/target/exog columns).
@@ -104,10 +104,10 @@ def backtest_cell(
             fitted state leaks across folds.
         cfg: the run config (drives features and fold geometry).
         lam: the cell's fitted Box-Cox λ (None for stateless transforms), so the forward
-            transform here matches the inverse the folds' models apply — one λ per cell (G1).
+            transform here matches the inverse the folds' models apply — one λ per cell.
 
     Returns:
-        ``(oof, fold_metrics)`` where ``oof`` is the canonical OOF frame (§2.2: ``ds``,
+        ``(oof, fold_metrics)`` where ``oof`` is the canonical OOF frame (``ds``,
         ``fold_id``, ``y_true``, ``yhat``) concatenated across folds, and ``fold_metrics``
         is the per-fold metric panel (list, in fold order). The registry later augments this
         frame with ``ts_id``/``model_type`` and renames ``ds``→``forecast_date`` before the
@@ -131,7 +131,7 @@ def backtest_cell(
         pred = est.predict(fold.val_size, X_val)
 
         # Align yhat to the true validation dates by position (folds are contiguous).
-        # yhat is already in original units (predict inverts the transform, §2.1), so
+        # yhat is already in original units (predict inverts the transform), so
         # y_true / y_train are inverted here to score in the same units.
         yhat = pred["yhat"].to_numpy()[: fold.val_size]
         y_true = invert_transform(y_val.to_numpy(), cfg.features.transform, lam)

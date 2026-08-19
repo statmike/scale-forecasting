@@ -1,16 +1,16 @@
-"""Execute + score the run's ensembles into the registry (DESIGN §5.2, the B5 orchestration seam).
+"""Execute + score the run's ensembles into the registry (the orchestration seam).
 
-:mod:`ensembler` is **pure** — it blends the base forecasts (calculated) and fits the learned
+`ensembler` is **pure** — it blends the base forecasts (calculated) and fits the learned
 meta-learners, but touches no GCP. This module is the thin I/O orchestrator that makes those
 consensuses *real*: it reads the base rows, computes both families **in pandas**, appends the
 ``ensemble_<s>`` prediction rows via the Storage Write API, and — the missing leaderboard link —
 **scores every ensemble pseudo-model into ``forecast_metadata``** so it appears on
 ``v_model_leaderboard`` beside the base models. It is engine-agnostic (it only reads the shared
-registry) and runs either inline from :func:`main.run` (after both engines join, under the one
+registry) and runs either inline from `main.run` (after both engines join, under the one
 shared ``run_id``) or standalone via ``python -m scale_forecasting.ensemble_run`` (re-ensembling an
-already-completed run — see :func:`_main`).
+already-completed run — see `_main`).
 
-**Config-keyed ensembles (C4).** Every ensemble row carries an ``ensemble_id =
+**Config-keyed ensembles.** Every ensemble row carries an ``ensemble_id =
 make_ensemble_id(cfg.ensemble)`` — a digest of the ensemble configuration alone — so *several*
 ensemble configs can be scored under one ``run_id`` without their ``ensemble_<strategy>``
 pseudo-models colliding. Re-running the *same* ensemble config lands the same ``ensemble_id`` (and,
@@ -22,21 +22,21 @@ Three responsibilities, in order:
 
 1. **Calculated** (``mean`` / ``median`` / ``inverse_error``) — read the base
    ``forecast_predictions`` (+ ``forecast_metadata`` for the inverse-error weights / pruning) and
-   blend them **in pandas** (:func:`ensembler.combine_calculated`), then append the ``ensemble_<s>``
-   rows via the **Storage Write API** — the same append path the learned strategies use (C4 / Q4
-   fix: no ``INSERT…SELECT`` DML). ``compute_engine='ensemble'``.
+   blend them **in pandas** (`ensembler.combine_calculated`), then append the ``ensemble_<s>``
+   rows via the **Storage Write API** — the same append path the learned strategies use (no
+   ``INSERT…SELECT`` DML). ``compute_engine='ensemble'``.
 2. **Learned** (``nnls`` / ``ridge`` / ``xgb``) — read the base predictions + ``backtest_oof``,
    ``fit_learned`` on the OOF, then apply the weights **in pandas** (``yhat = Σ wₘ·yhatₘ``,
    renormalized over whichever base models are present per ``(ts_id, forecast_date)`` — robust when
    the Spark future window and the native held-out window don't overlap), and append the resulting
    ``ensemble_<s>`` prediction rows via the Storage Write API. Each fitted meta-learner is uploaded
    as a GCS artifact and linked from its scored metadata row. These prediction rows are a **true
-   beyond-data forecast** (the base predictions they blend are, post-C2), so — like the base
+   beyond-data forecast** (the base predictions they blend are, too), so — like the base
    models — they carry no ground truth of their own.
 3. **Score** — blend the base ``backtest_oof`` into an **ensemble OOF** with the same consensus
-   rules (:func:`ensembler.combine_oof`) and run the shared :func:`metrics.compute_metrics` per
+   rules (`ensembler.combine_oof`) and run the shared `metrics.compute_metrics` per
    ``(model, ts_id)`` → ``forecast_metadata`` rows with ``fold_id=NULL`` and
-   ``compute_engine='ensemble'``. Scoring lives on the OOF window because, post-C2, the base
+   ``compute_engine='ensemble'``. Scoring lives on the OOF window because the base
    predictions (and therefore every ensemble prediction) are a true beyond-data forecast with no
    actuals to join — so an ensemble earns its leaderboard metric on **exactly the window the base
    models are scored on** (``backtest_oof``, where ``y_true`` lives). OOF carries no interval
@@ -46,17 +46,17 @@ Three responsibilities, in order:
    land, the leaderboard shows the ensembles automatically — **no view change** beyond the
    ``ensemble_id`` group key.
 
-**Idempotency (append-only + dedupe-on-read, §3.4).** Every ensemble row is now written through the
+**Idempotency (append-only + dedupe-on-read).** Every ensemble row is now written through the
 Write API and is deterministic in ``(run_id, ensemble_id, ts_id, model_type)``, so a re-run of the
 same ensemble config lands byte-identical rows — correct-but-wasteful (a re-append is a duplicate):
 the leaderboard view dedupes on read (``GROUP BY run_id, model_type, ensemble_id``), and duplicated
 identical ``(y_true, yhat)`` pairs leave the ratio/mean metrics unchanged, so the leaderboard is
 unaffected. No pre-delete — a ``DELETE`` matching rows still in the ~90-min Write API streaming
-buffer is rejected for the whole window (the constraint every cell writer already lives under, B1).
+buffer is rejected for the whole window (the constraint every cell writer already lives under).
 A *different* ensemble config keys distinctly (different ``ensemble_id``), so it never overwrites
 and never collides — both coexist.
 
-Public surface: :func:`run_ensembles`, ``python -m scale_forecasting.ensemble_run``.
+Public surface: `run_ensembles`, ``python -m scale_forecasting.ensemble_run``.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def run_ensembles(
     consensuses in pandas, appends their ``ensemble_<s>`` prediction rows via the Storage Write API,
     and scores every ensemble pseudo-model into ``forecast_metadata`` (see the module docstring),
     all stamped with ``ensemble_id = make_ensemble_id(cfg.ensemble)`` so multiple ensemble configs
-    coexist under one ``run_id``. Raises on any failure so :func:`main.run` can finalize the shared
+    coexist under one ``run_id``. Raises on any failure so `main.run` can finalize the shared
     header FAILED — mirroring how an engine error is surfaced. ``settings`` is the orchestrator's
     already-resolved infra (never re-resolved here, so one identity governs the whole run).
     """
@@ -147,7 +147,7 @@ def run_ensembles(
     # stamped with run_id + ensemble_id here so the pure blenders stay config-only.
     pred_rows: list[dict[str, Any]] = []
 
-    # 1. Calculated ensembles — blend the base predictions in pandas (Q4 fix: Write API, not DML).
+    # 1. Calculated ensembles — blend the base predictions in pandas (Write API, not DML).
     for row in combine_calculated(base_df, cfg, metric_df):
         row.update(
             run_id=run_id, ensemble_id=ensemble_id, compute_engine="ensemble", quantiles=None
@@ -176,7 +176,7 @@ def run_ensembles(
         cfg.ensemble.strategies,
     )
 
-    # 3. Score every ensemble_* pseudo-model into forecast_metadata (fold_id=NULL). Post-C2 the base
+    # 3. Score every ensemble_* pseudo-model into forecast_metadata (fold_id=NULL). The base
     #    predictions are a true beyond-data forecast (no actuals to join), so ensembles earn their
     #    metric on the backtest OOF window — the same window the base models are scored on. We blend
     #    the base OOF with the same consensus rules, then compute_metrics per (model, ts_id) and
@@ -303,7 +303,7 @@ def _override_ensemble(cfg: RunConfig, strategies: list[str] | None) -> RunConfi
     """Return ``cfg`` with its ``ensemble`` block overridden to ``strategies`` (pure).
 
     ``None`` leaves the config's own ensemble block untouched; a list rebuilds
-    :class:`~scale_forecasting.config.EnsembleConfig` (so the strategies are **re-validated**
+    `EnsembleConfig` (so the strategies are **re-validated**
     against the known calculated/learned sets and enabled), preserving the original
     ``prune_threshold``. This is what lets one base run be ensembled several ways from the CLI —
     each override is a distinct ``EnsembleConfig`` and thus a distinct ``ensemble_id`` per run.
@@ -328,9 +328,9 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
     """``python -m scale_forecasting.ensemble_run --config c.json [--run-id …] [--strategies …]``.
 
     Re-runs the ensemble stage against an *already-completed* run's base predictions — the
-    standalone counterpart to the inline call :func:`main.run` makes. Loads the config, optionally
+    standalone counterpart to the inline call `main.run` makes. Loads the config, optionally
     overrides the ensemble strategies (``--strategies mean,median``), resolves the infra identity
-    from the ``SF_*`` environment (``--sf-*`` promoted first, G1), and calls :func:`run_ensembles`.
+    from the ``SF_*`` environment (``--sf-*`` promoted first), and calls `run_ensembles`.
 
     ``--run-id`` is the **base run whose forecasts are blended**; it defaults to the config's own
     ``make_run_id`` (re-ensembling the run that config produced), but is passed explicitly to

@@ -1,4 +1,4 @@
-"""Live CPU-only Vertex Ray smoke (BUILD B4, ``@raylive`` + ``@gcp``).
+"""Live CPU-only Vertex Ray smoke (``@raylive`` + ``@gcp``).
 
 The GPU-free sibling of ``test_ray_gpu_smoke``. It proves the part that was never in doubt about
 the *models* but had never been exercised *live* — the Vertex Ray **lifecycle** itself: stage the
@@ -12,7 +12,7 @@ can't cover — that's ``test_ray_gpu_smoke``'s job when T4 quota is in hand.
 
 With ``compute.use_gpu=false`` and no ``deep_learning`` model in the mix,
 :func:`~scale_forecasting.engines.ray_io.plan_cluster` sizes the GPU pool to **zero** nodes and
-provisions the CPU worker pool only — the same code the GPU path runs, one config flag apart (G2).
+provisions the CPU worker pool only — the same code the GPU path runs, one config flag apart.
 
 Asserts:
 

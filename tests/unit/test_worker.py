@@ -1,4 +1,4 @@
-"""Tests for ``run_cell`` — the G1 unit of work (CONTRACTS §3.1–3.3, BUILD 2.6).
+"""Tests for ``run_cell`` — the unit of work that runs the same locally and in the cloud.
 
 ``run_cell`` wires features → (optional backtest) → fit → predict into a ``CellResult`` and
 must **never raise**: a failing cell comes back as ``status="error"`` so one bad series can't
@@ -177,12 +177,12 @@ def test_error_cell_still_carries_identity() -> None:
     assert res.run_id  # ids computed before the failure
 
 
-# --- C5: HPO params threading into the cell -------------------------------------
+# --- HPO params threading into the cell -----------------------------------------
 
 
 def test_pre_resolved_params_land_in_best_params() -> None:
     # The fleetwide path: the driver tuned xgboost and hands run_cell the winning params directly.
-    # get_params (→ forecast_metadata.best_params) must reflect them, not the pre-C5 {}.
+    # get_params (→ forecast_metadata.best_params) must reflect them, not an empty {}.
     params = {"n_estimators": 123, "max_depth": 4, "learning_rate": 0.07}
     res = run_cell(_series(), "xgboost", _cfg(models=["xgboost"]), params)
     assert res.status == "ok"
@@ -198,7 +198,7 @@ def test_default_no_params_is_empty_best_params() -> None:
 
 def test_pre_resolved_params_do_not_change_the_run_id() -> None:
     # The invariant that forces the fleetwide seam placement: params must NOT enter cfg, so the same
-    # cfg yields the same run_id whether or not tuned params are passed (reproducibility, §3.4).
+    # cfg yields the same run_id whether or not tuned params are passed (reproducibility).
     cfg = _cfg(models=["xgboost"])
     a = run_cell(_series(), "xgboost", cfg, {"n_estimators": 200, "max_depth": 5})
     b = run_cell(_series(), "xgboost", cfg)

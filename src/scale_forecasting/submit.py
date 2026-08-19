@@ -1,28 +1,28 @@
 """Submit a forecast run to Dataproc Serverless — the local/Composer launcher.
 
 This is the ``[spark]``-extra, ADC-authenticated helper that turns a validated
-:class:`~scale_forecasting.config.RunConfig` into a running Dataproc Serverless batch. It is the
+`RunConfig` into a running Dataproc Serverless batch. It is the
 same call path a scheduled Composer DAG would use (that orchestration is in development):
 reproducing at runtime the exact delivery the Terraform ``seed`` module does for the seed job, but
 for *forecast* runs and driven from Python (runs live in the registry, not Terraform state).
 
-What :func:`submit_batch` does:
+What `submit_batch` does:
 
 1. **Package the code at runtime** — zip ``src/`` and upload it to the code bucket, so the batch
-   loads current code via ``python_file_uris`` rather than anything baked into the container image
-   (the B0.4 code-delivery decision). Upload the standalone ``spark_main`` shim as the ``gs://``
+   loads current code via ``python_file_uris`` rather than anything baked into the container image.
+   Upload the standalone ``spark_main`` shim as the ``gs://``
    main file (Dataproc runs it as ``__main__``; it absolute-imports the in-package dispatch logic).
 2. **Stage the run config** — write the validated config to ``gs://<code>/runs/<run_id>.json`` and
-   pass it as ``--config-uri``. The JSON is the lossless reproducibility record (G3).
+   pass it as ``--config-uri``. The JSON is the lossless reproducibility record.
 3. **Deliver infra identity as args** — the ``--sf-*`` flags (Dataproc rejects driver-env), built
-   from :class:`~scale_forecasting.settings.Settings` via :func:`._infra_args.infra_args_from`.
-4. **Submit** through :class:`~google.cloud.dataproc_v1.BatchControllerClient` (regional endpoint),
+   from `Settings` via `infra_args_from`.
+4. **Submit** through `BatchControllerClient` (regional endpoint),
    optionally capping executors (``--max-executors`` → ``spark.dynamicAllocation.maxExecutors``, how
    the naive demo is throttled), and return the batch id.
 
-``multi`` is orchestrated here too (:func:`submit_multi`): it fans out one child ``explode`` batch
-per model family — all under **one** shared ``run_id`` and one ``run_registry`` header (C3), the
-same contributor-mode contract :func:`main.run` uses. Family-splitting happens submit-side (not
+``multi`` is orchestrated here too (`submit_multi`): it fans out one child ``explode`` batch
+per model family — all under **one** shared ``run_id`` and one ``run_registry`` header, the
+same contributor-mode contract `main.run` uses. Family-splitting happens submit-side (not
 on-cluster) because ``google-cloud-dataproc`` lives in the ``[spark]`` extra and is absent from the
 runtime container.
 
@@ -79,7 +79,7 @@ _WAIT_TIMEOUT_SECONDS = 7200.0
 
 @dataclass(frozen=True)
 class BatchInfra:
-    """Dataproc-batch infra identity — what submitting a batch needs beyond :class:`Settings`.
+    """Dataproc-batch infra identity — what submitting a batch needs beyond `Settings`.
 
     Resolved from ``SF_*`` env (parity with ``Settings``) or ``terraform output``. Frozen and
     passed down so a run's every child batch (multi) targets the same infra.
@@ -252,7 +252,7 @@ def build_batch(
     ``spark_main`` shim as the ``gs://`` main file, ``--engine``/``--config-uri`` + the ``--sf-*``
     infra args. ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (naive throttle).
 
-    ``models`` / ``manage_header`` carry the Arc B contract on-cluster: ``--models m1,m2`` restricts
+    ``models`` / ``manage_header`` carry the on-cluster contract: ``--models m1,m2`` restricts
     the executed subset (run_id still derives from the full staged config) and ``--manage-header
     false`` puts the on-cluster engine in contributor mode (``main.run`` owns the shared header).
     Both are appended to ``args`` **only when non-default**, so a standalone submit builds the exact
@@ -306,7 +306,7 @@ def _stage_code(infra: BatchInfra) -> tuple[str, str]:
     ``spark_entry`` module: Dataproc runs the main file as ``__main__`` with no package context, so
     a file with relative imports would ``ImportError``. The zip supplies the package it imports.
 
-    The zip itself is built by :func:`.code_delivery.build_package_zip` — the SAME builder the
+    The zip itself is built by `build_package_zip` — the SAME builder the
     interactive Spark Connect path (notebook 01) uses to ship code to its workers, so worker code
     can't drift between the batch and Connect delivery mechanisms.
     """
@@ -334,7 +334,7 @@ def _stage_code(infra: BatchInfra) -> tuple[str, str]:
 
 
 def _stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
-    """Write the validated config to ``gs://<code>/runs/<run_id>.json`` and return the URI (G3)."""
+    """Write the validated config to ``gs://<code>/runs/<run_id>.json`` and return the URI."""
     import json
 
     from google.cloud import storage
@@ -349,7 +349,7 @@ def _stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
 
 
 def _batch_client(region: str) -> object:
-    """A regional :class:`BatchControllerClient` (Dataproc batches are a regional resource)."""
+    """A regional `BatchControllerClient` (Dataproc batches are a regional resource)."""
     from google.api_core.client_options import ClientOptions
     from google.cloud import dataproc_v1 as dataproc
 
@@ -374,22 +374,22 @@ def submit_batch(
 ) -> str:
     """Stage code + config and submit one Dataproc Serverless forecast batch; return its batch id.
 
-    Resolves infra from the environment when not passed (G1). ``engine`` is the Spark method
-    (``explode``/``naive``); ``multi`` fans out via :func:`submit_multi`. ``n_series`` overrides
+    Resolves infra from the environment when not passed. ``engine`` is the Spark method
+    (``explode``/``naive``); ``multi`` fans out via `submit_multi`. ``n_series`` overrides
     ``data.series_limit`` at submit time — the scale knob for the 10 → 100 → 1k → 100k story;
     because it changes the config it yields a distinct ``run_id``/header per scale (each scale is
     its own queryable run). With ``wait`` the call blocks until the batch is terminal (parity with
     the Terraform seed apply) and then stamps Dataproc job telemetry onto the header
-    (:func:`_stamp_job_telemetry`, best-effort); otherwise it returns once submitted (no telemetry).
+    (`_stamp_job_telemetry`, best-effort); otherwise it returns once submitted (no telemetry).
 
-    ``models`` / ``manage_header`` carry the Arc B contract to the cluster. The **full** ``cfg`` is
-    always staged (so its ``run_id`` matches :func:`main.run`'s), while ``models`` restricts the
+    ``models`` / ``manage_header`` carry the on-cluster contract. The **full** ``cfg`` is
+    always staged (so its ``run_id`` matches `main.run`'s), while ``models`` restricts the
     executed subset on-cluster and ``manage_header=False`` runs the engine in contributor mode
     (``main.run`` owns the shared header). Both default to standalone behavior, so every existing
     caller stages and submits exactly as before.
 
     ``batch_id`` overrides the derived ``sf-<engine>-<run_id>`` id. It exists for
-    :func:`submit_multi`, where every family child stages the **same** full cfg (one shared
+    `submit_multi`, where every family child stages the **same** full cfg (one shared
     ``run_id``) as ``explode`` — so the derived id would collide across families; the caller
     supplies a per-family id instead. When ``None`` (every standalone caller) the id is derived as
     before.
@@ -451,11 +451,11 @@ def _stamp_job_telemetry(
     """Read the finished batch's telemetry and write it to the run header (best-effort).
 
     A fresh ``get_batch`` (the LRO result can carry incomplete ``approximate_usage``) → the pure
-    :func:`extract_job_telemetry` → ``update_header(job_telemetry=<dict>)``. The header column is a
+    `extract_job_telemetry` → ``update_header(job_telemetry=<dict>)``. The header column is a
     native ``JSON`` type whose query parameter serializes the value itself, so we pass the telemetry
     **dict** (not a pre-serialized string, which would double-encode). Wrapped so any failure (API
     error, missing field, header not yet written) is logged and swallowed: telemetry is a
-    nice-to-have overlay on an already-complete run, never a reason to fail it (CONTRACTS §3.3).
+    nice-to-have overlay on an already-complete run, never a reason to fail it.
     """
     from .registry import bq
 
@@ -481,14 +481,14 @@ def submit_multi(
 
     Splits ``cfg.models`` by each model's ``family`` (statistical / ml / deep_learning / native) and
     submits an independent explode batch per family — separate autoscaling + failure domains — but
-    all under a **single** ``run_id`` and a **single** ``run_registry`` header (C3). This is the
-    contributor-mode contract :func:`main.run` already uses:
+    all under a **single** ``run_id`` and a **single** ``run_registry`` header. This is the
+    contributor-mode contract `main.run` already uses:
 
     1. **One run_id from the full cfg.** ``run_id = make_run_id(cfg)`` is computed once over the
        whole config (``n_series`` applied first so a scale override still yields one id); every
        child stages that same full cfg, so all children derive the identical id — the leaderboard
        shows the whole multi run as one ``run_id`` with every family under it, not one per family.
-    2. **One header owner.** :func:`submit_multi` writes the shared header (RUNNING) up front and
+    2. **One header owner.** `submit_multi` writes the shared header (RUNNING) up front and
        finalizes it after every child joins; each child runs the engine with ``manage_header=False``
        (contributor mode), so no child touches the header and there is no UPDATE race.
     3. **Per-family executed subset + batch id.** Each child gets ``models=<family>`` (restricting
@@ -497,7 +497,7 @@ def submit_multi(
        would be identical across families (same run_id) and collide in Dataproc.
 
     Orchestrated here rather than on-cluster because ``google-cloud-dataproc`` isn't in the runtime
-    container. Blocks per child when ``wait`` (families run sequentially — B2 keeps the submit path
+    container. Blocks per child when ``wait`` (families run sequentially — keeping the submit path
     simple; each child's own batch still autoscales independently). The shared header is finalized
     COMPLETED iff every child succeeded, else FAILED (finalized before re-raising the first failure,
     so the run stays queryable and the CLI exits non-zero). Returns the child batch ids.
@@ -570,7 +570,7 @@ def submit_multi(
 def split_models_by_family(cfg: RunConfig) -> dict[str, list[str]]:
     """Group ``cfg.models`` by each model's registered ``family`` (pure; order-preserving).
 
-    The grouping ``multi`` fans out on. Unknown model names surface as a :class:`ModelError` from
+    The grouping ``multi`` fans out on. Unknown model names surface as a `ModelError` from
     the factory rather than being silently dropped.
     """
     from .models import get_model

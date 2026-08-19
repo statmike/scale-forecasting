@@ -1,4 +1,4 @@
-"""Tests for feature engineering (CONTRACTS §6, DESIGN §4, BUILD 2.3).
+"""Tests for feature engineering.
 
 Covers: log1p round-trips (apply→invert is identity), holiday parity to the `holidays`
 package, exog pass-through, lag/Fourier/holiday-flag columns, and the (y, X) shape/index.
