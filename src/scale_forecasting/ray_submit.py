@@ -64,6 +64,15 @@ _SRC_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _SRC_DIR.parent
 _REQUIREMENTS = _REPO_ROOT / "docker" / "requirements.txt"
 
+# torch's x86_64/linux pin is the CUDA-12.6 local build (``torch==2.13.0+cu126``) for the Vertex T4
+# driver — that ``+cuXXX`` local version exists ONLY on the PyTorch index, never on PyPI. The
+# on-cluster runtime_env pip install must therefore add the SAME ``--extra-index-url`` the image
+# build uses (docker/Dockerfile), or the pin 404s ("No matching distribution for torch==…+cu126")
+# and the whole Ray job fails at env setup. ``--extra-index-url`` (not ``--index-url``) keeps PyPI
+# primary for every other package; pip honors the option line when it appears in the requirements
+# list Ray materializes. Source of truth for the URL is docker/Dockerfile — keep them in lockstep.
+_TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+
 # Ray-cluster infra env vars (beyond the SF_* identity Settings resolves). Kept together so the
 # docstring, resolve(), and any tooling agree. code_bucket + compute_sa are shared with the Spark
 # batch; network (optional) is a VPC for a private endpoint; container_image is optional.
@@ -253,10 +262,16 @@ def build_runtime_env() -> dict[str, Any]:
     image gains our deps, while Ray itself stays the image's version rather than being swapped by a
     conflicting pip pin. With a custom node image that already bundles them the pip step is a fast
     no-op, so it is always kept for safety.
+
+    The list leads with ``--extra-index-url`` for the PyTorch CUDA wheels
+    (:data:`_TORCH_CUDA_INDEX`, mirroring docker/Dockerfile): the x86_64/linux torch pin is a
+    ``+cu126`` local build that only resolves from that index, so without it the on-cluster pip
+    fails the whole job at env setup. pip reads the option line from the requirements file Ray
+    materializes; PyPI stays the primary index.
     """
     return {
         "working_dir": str(_SRC_DIR),
-        "pip": _requirements_packages(),
+        "pip": [f"--extra-index-url {_TORCH_CUDA_INDEX}", *_requirements_packages()],
     }
 
 

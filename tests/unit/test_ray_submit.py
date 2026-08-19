@@ -98,10 +98,14 @@ def test_build_runtime_env_ships_src_and_requirements() -> None:
     # we can drop cluster-provided packages from it.
     pip = env["pip"]
     assert isinstance(pip, list) and pip
-    assert all("==" in spec for spec in pip)
+    # The list LEADS with the PyTorch CUDA extra index (mirrors docker/Dockerfile) so the x86_64
+    # torch "+cu126" pin resolves on the cluster instead of 404-ing the whole job at env setup.
+    assert pip[0] == "--extra-index-url https://download.pytorch.org/whl/cu126"
+    specs = pip[1:]
+    assert specs and all("==" in spec for spec in specs)
     # neuralprophet (a real [models] dep) is shipped; Ray is NOT (the cluster image provides it, and
     # a pip pin could clash with the version Vertex booted).
-    names = {re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower() for spec in pip}
+    names = {re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower() for spec in specs}
     assert "neuralprophet" in names
     assert "ray" not in names
 
