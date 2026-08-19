@@ -67,4 +67,4 @@ code-delivery test exists precisely to catch that).
 - **One image, many code revisions.** The whole team shares one cached dependency image; each run
   carries whatever `src/` the submitter had. No per-experiment images pile up in Artifact Registry.
 - **Reproducibility stays intact.** The run config is staged verbatim to GCS (`--config-uri`) and
-  logged to the registry (G3), so *which config* ran is always recorded — independent of the image.
+  logged to the registry, so *which config* ran is always recorded — independent of the image.

@@ -48,7 +48,7 @@ share a Python **minor** version (3.11 ≠ 3.12 for pickle/`applyInPandas`/cloud
    version-skewed client doesn't error cleanly — the dashboard proxy **hangs** (→ HTTP 524). So the
    `[ray]` extra is capped and `ray_submit.py` defaults `ray_version=2.47`, `python_version=3.11`.
 
-4. **G1 (same code local ↔ Composer).** The `uv` project itself is `>=3.11,<3.12`, so a developer's
+4. **Same code locally and under Composer.** The `uv` project itself is `>=3.11,<3.12`, so a developer's
    local kernel, the CI kernel, and the Composer runner all resolve the same interpreter — the code
    that runs locally is byte-identical to what runs in the cloud.
 

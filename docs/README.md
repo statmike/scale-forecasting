@@ -1,6 +1,8 @@
 # Documentation
 
-The one-screen map. Find your task, follow the pointer.
+The one-screen map. Find your task, follow the pointer. These guides, the notebook tour, and the
+full **API reference** are also published as a searchable site — built from this repo on every push
+to `main`: **https://statmike.github.io/scale-forecasting/**.
 
 ## Deploy
 Stand the platform up in a Google Cloud project.
@@ -39,6 +41,13 @@ How it works and every knob.
 Use it from Python.
 - [using_the_sdk.md](./using_the_sdk.md) — the `Forecaster` easy path, and how to drive Spark/Ray
   directly (bypassing the SDK) while reusing the same model machinery.
+
+## API Reference
+Every public module, class, and function — generated directly from the source docstrings, so it
+always matches the code.
+- [API reference](https://statmike.github.io/scale-forecasting/api/) — browse the generated docs on
+  the site. Start at the [overview](https://statmike.github.io/scale-forecasting/api/) (the three
+  doors: the `Forecaster` easy path, the `run` orchestration entrypoint, and the direct cell path).
 
 ## Troubleshooting
 - [troubleshooting.md](./troubleshooting.md) — known issues, each symptom → cause → fix.

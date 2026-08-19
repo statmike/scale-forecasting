@@ -125,7 +125,7 @@ review, then rerun at `100000`. Select one format with `seed_variant = "iceberg"
 > [local quickstart](https://github.com/statmike/scale-forecasting/blob/main/README.md#quickstart). `playground.sample_data()` calls the identical
 > `generate_panel()` with the same master seed, just 3 series in-memory instead of 100k written to
 > BigQuery. So what you explore locally is a small slice of the same deterministic dataset the cloud
-> seed materializes (G1: same code path local and at scale).
+> seed materializes (same code path locally and at scale).
 
 ---
 

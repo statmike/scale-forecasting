@@ -7,19 +7,13 @@ Terraform ships.
 
 ## The one load-bearing fact: the project targets Python 3.11 everywhere
 
-`pyproject.toml` sets `requires-python = ">=3.11,<3.12"` — **3.11 is the single tested, supported
-version everywhere**. This is deliberate:
-
-- **Vertex Ray parity** — the client-side Ray must match the cluster's Ray version (2.47); on Python
-  3.11 the supported versions are 2.42 / 2.47. A mismatched client floats to an unsupported Ray and
-  the `JobSubmissionClient` handshake hangs (HTTP 524).
-- **Dataproc packed-venv** — the packed virtual-env shipped to Serverless is built against 3.11.
-
-So **3.11 is the version everywhere** — the `uv` project kernel, the runtime image, every cluster,
-and every Colab template. Even notebook 01's *interactive* Spark Connect path stays on 3.11: it runs
-on **Dataproc runtime 2.3** (the Spark Connect floor), whose workers are **also Python 3.11**, so the
-driver↔worker minor-version parity `applyInPandas` requires holds from the same `sf-main` template —
-no separate py3.12 template, no `PYTHON_VERSION_MISMATCH`.
+`pyproject.toml` pins `requires-python = ">=3.11,<3.12"` — **3.11 is the single tested, supported
+version on every surface**: the `uv` kernel, the runtime image, every cluster, and every Colab
+template. For *why* 3.11 (Vertex Ray client↔cluster parity and the Dataproc packed-venv), see
+[version_matrix.md](./version_matrix.md) — the single source of truth for the version of each
+surface. The two notebooks that touch a live client↔cluster boundary (`04_ray_on_vertex` and
+`01_spark_via_connect`) are where that pin earns its keep; the [per-notebook mapping](#per-notebook-mapping)
+below spells out each.
 
 ## Running locally
 
@@ -79,7 +73,7 @@ the result. The two that touch a live client↔cluster boundary both hold parity
   **container image** to `SF_CONTAINER_IMAGE` (the project image, which carries the deps), calls
   `spark.addArtifacts(zip, pyfile=True)` with the **same** package zip the batch delivers via
   `python_file_uris` (both built by `scale_forecasting.code_delivery`, so Connect and batch workers run
-  byte-identical source — G1), and runs the session runtime **as the compute SA** (`SF_COMPUTE_SA`,
+  byte-identical source), and runs the session runtime **as the compute SA** (`SF_COMPUTE_SA`,
   which carries `dataprocrm.nodes.mintOAuthToken` via `roles/dataproc.worker`; the runner impersonates
   it). The remote-batch fallback needs none of this wiring on the kernel — it runs on the custom
   container that already carries the deps, as the compute SA.
@@ -118,7 +112,7 @@ path is env-baked.
 Vertex AI `NotebookExecutionJob` API (serviceAccount mode — no browser consent), downloads each
 executed notebook from GCS, and asserts no cell errored. It's both the acceptance test for a fresh
 deploy and the regression guard when a notebook changes. Because the templates carry the same baked
-env, a headless run validates exactly what a human gets on open (G1).
+env, a headless run validates exactly what a human gets on open.
 
 Tiers escalate cost (each runs its tier plus the cheaper ones), gated like the other billed smokes:
 

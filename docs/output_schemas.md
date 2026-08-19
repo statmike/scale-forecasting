@@ -13,7 +13,7 @@ Two facts hold for all of them:
 - **Written via the Storage Write API.** Engines return data, not RPCs; results are streamed into
   these tables in bulk through the BigQuery **Storage Write API** for high-speed updates, so
   throughput is bounded by compute, not a tracking server's QPS. Writes are **append-only**, and the
-  views **dedupe on read** (idempotency, §3.4) — re-running the same `run_id` never corrupts a table,
+  views **dedupe on read** (idempotency) — re-running the same `run_id` never corrupts a table,
   it just appends rows the views collapse back to one.
 
 The schema below is rendered from a single source of truth,

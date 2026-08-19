@@ -2,7 +2,7 @@
 
 One run is **one JSON config**. It is validated into a frozen `RunConfig`
 (`src/scale_forecasting/config.py`), logged verbatim to the run registry, and *is* the experiment
-record (G2/G3) — behavior changes come from this file, not code edits. This page documents every
+record — behavior changes come from this file, not code edits. This page documents every
 field.
 
 Two invariants apply everywhere:
@@ -157,7 +157,7 @@ to beat a naïve baseline; `coverage`/`pinball` only when you care about the pre
 
 ## `hpo` — `HpoConfig`
 
-Optional Optuna tuning on the aligned backtest (C5). **Requires `backtest.enabled`.**
+Optional Optuna tuning on the aligned backtest. **Requires `backtest.enabled`.**
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|

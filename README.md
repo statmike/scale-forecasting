@@ -13,6 +13,9 @@ Airflow, with the *same* code. Deploy the whole thing into a fresh project with 
 > but the run DAG it would host is not shipped yet; today runs are driven ad-hoc from a notebook,
 > CLI, or local script (the *same* `main.run` code a DAG will call). See the
 > [Architecture](#architecture) diagram for how a config flows through the runtimes to the registry.
+>
+> 🛠️ **Developing this repo?** [`DEVELOPMENT.md`](./DEVELOPMENT.md) holds the decision log and the
+> outstanding/in-progress work items — a temporary working doc, removed before production.
 
 ---
 
@@ -99,7 +102,7 @@ flowchart TB
     entry -->|"python_runtime = ray"| ray
     entry -->|"native models, always parallel"| bq
 
-    cell["worker.run_cell(series, model, cfg)<br/>the ONE unit of work — identical local / Spark / Ray (G1)"]
+    cell["worker.run_cell(series, model, cfg)<br/>the ONE unit of work — identical local / Spark / Ray"]
     spark --> cell
     ray --> cell
 
@@ -149,7 +152,7 @@ flowchart TB
   runs locally, inside a Spark Pandas UDF, and inside a Ray task. Engines differ only in
   how they fan it out and collect results — that's what makes "same code everywhere" real.
 - **Ray vs Spark, for the PySpark crowd.** If you fan `(series, model)` work out today with
-  `applyInPandas` + pandas UDFs, Ray runs the **identical** `worker.run_cell` (G1) over the
+  `applyInPandas` + pandas UDFs, Ray runs the **identical** `worker.run_cell` over the
   **same** input table (Iceberg or native — read through the BigQuery Storage Read API), so
   the storage format is transparent to engine code. You get Ray ∥ BigQuery under one `run_id`
   with no Spark session to stand up or tune — and because the Ray ecosystem can also host
@@ -211,7 +214,7 @@ Finally, [`07_scale_review`](./notebooks/07_scale_review.ipynb) runs nothing —
 `run_id` per approach (e.g. the four `configs/*_100k.json` runs submitted via
 `python -m scale_forecasting.submit`) and it renders the **cross-approach comparison**: wall-clock
 and provisioning overhead from `v_run_summary`, and accuracy parity (same model, same answer across
-engines — G1) from `v_model_leaderboard`.
+engines) from `v_model_leaderboard`.
 
 Every notebook has a one-click **Run in Colab Enterprise** header — the Terraform-deployed runtime
 templates carry the `SF_*` run identity in their env, so it's open → pick a runtime → **Run all**,
@@ -237,64 +240,30 @@ Full map with one-line pointers: **[`docs/README.md`](./docs/README.md)**. The e
 
 ## Deploy on GCP
 
-The whole platform deploys into a Google Cloud project with Terraform, in **two stages**:
+Deploy the whole platform into a Google Cloud project with Terraform, in **two stages** — *bootstrap*
+(the project + the Terraform state bucket), then *main* (everything else: dataset, buckets, service
+accounts, network, connection, budget). The first apply also builds the shared Spark/Ray runtime
+image and seeds **100,000 example series**, so a fresh deploy is a working solution-in-a-box you can
+forecast against immediately.
 
-```bash
-# Stage 1 — bootstrap (run once): creates the project (optional) + the Terraform state bucket.
-cd terraform/bootstrap
-cp terraform.tfvars.example terraform.tfvars      # edit: project_id, billing_account, org_id
-terraform init && terraform apply
-terraform output backend_config                   # note the state bucket for stage 2
+- **Copy-paste runbook** — auth → clone → bootstrap → main → verify, plus the operator permissions
+  you need: [`terraform/README.md`](./terraform/README.md)
+- **Reviewer's guide** — what each module builds, which services it uses, why each IAM role is
+  granted and who uses it, and the greenfield-vs-brownfield toggles:
+  [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md)
+- **Demo it** — the guided workshop over a deployed platform:
+  [`docs/workshop.md`](./docs/workshop.md)
 
-# Stage 2 — main: everything else (dataset, buckets, SAs, network, connection, budget).
-cd ../main
-cp terraform.tfvars.example terraform.tfvars      # edit: project_id, billing_account
-terraform init -backend-config="bucket=<project_id>-tfstate"
-terraform plan                                    # review — nothing is created until apply
-terraform apply
-```
-
-That single first apply also **builds the shared Spark/Ray runtime image for you** (Cloud Build, a
-few minutes) and pushes it to Artifact Registry, so the seed job and every forecast engine have an
-image to run — no separate build step. It's content-addressed on `docker/`, so it rebuilds only when
-the Dockerfile or locked dependencies change, never on a code edit. Set `build_image = false` if you
-build and push the image yourself.
-
-The infrastructure is **effectively free at rest** — empty buckets, an empty dataset, service
-accounts, and network plumbing cost nothing until compute runs. Two things cost money:
-
-- **The example dataset is created on the first apply** (`run_seed = true`, **on by default**): a
-  one-time Dataproc Serverless batch generates **100,000 deterministic time series** and writes them
-  to **both** source tables — `source_series_iceberg` (managed Apache Iceberg) and
-  `source_series_native` (native BigQuery) — from a *single generated panel*, so the series are
-  identical across formats and you can benchmark storage on the same data. This is the
-  "solution-in-a-box" promise: a fresh deploy has data to forecast against immediately. It's cheap —
-  the 100k seed is measured at **~$0.15 and ~8.5 min of compute** — and content-addressed, so it runs
-  once and does **not** re-run on later applies unless you change the series count / label / seed
-  code. Set `run_seed = false` to skip it (bring your own source table), or `seed_num_series = 100`
-  to smoke-test first.
-- **Composer** (`create_composer`) is **off by default** — the only real at-rest cost
-  (~$300–400/mo). It provisions the Composer 3 environment; the scheduled run **DAG** that would
-  run on it is **in development / not shipped yet**, so leave it off unless you're developing that
-  orchestration.
+**Cost:** effectively free at rest — buckets, dataset, service accounts, and network plumbing cost
+nothing until compute runs. The 100k seed is a one-time **~$0.15 / ~8.5 min** batch (content-addressed,
+so it runs once; `run_seed = false` skips it, `seed_num_series = 100` smoke-tests first). **Composer**
+(the scheduled-DAG host, still in development) is the only real at-rest cost (~$300–400/mo) and is
+**off by default**.
 
 **Greenfield or brownfield.** Defaults create everything (the 5-minute path). For a locked-down org,
 flip `create_service_accounts` / `create_network` / `enable_apis` off and pass your existing SAs,
 subnet, and pre-enabled APIs in by variable — the modules then create nothing and thread your values
 through.
-
-**Reviewing the Terraform before you run it?** [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md)
-is a full walkthrough: what each module builds, which GCP services it uses and how, **why each
-permission is granted and who uses it** (including the three custom least-privilege IAM roles and the
-**human IAM roles** a job/notebook runner needs), and the greenfield-vs-brownfield toggles. The
-operator runbook — [`terraform/README.md`](./terraform/README.md) — has the **zero-to-deployed Cloud
-Shell walkthrough** (auth → clone → bootstrap → main → verify, copy-paste), the exact **org/project
-permissions the operator must hold**, and the cost notes.
-
-**Deployed and want to demo it?** [`docs/workshop.md`](./docs/workshop.md) is the guided workshop
-runbook: submit one run per approach at 100k (Cloud Shell), then walk the notebooks in order in Colab
-Enterprise, ending on the cross-approach comparison over those runs — with the human IAM roles a
-presenter and attendees need.
 
 ## License
 

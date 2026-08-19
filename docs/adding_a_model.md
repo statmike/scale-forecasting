@@ -31,7 +31,7 @@ A model is a `BaseModel` subclass (see `models/base_model.py`). The seams:
 | Piece | What it is |
 |-------|------------|
 | `name` | unique selector string |
-| `runtime` | `"python"` (runs in a Spark/Ray cell) or `"bigquery"` (SQL, Arc B) |
+| `runtime` | `"python"` (runs in a Spark/Ray cell) or `"bigquery"` (SQL) |
 | `family` | `"statistical"` \| `"ml"` \| `"deep_learning"` \| `"native"` (metadata only) |
 | `supports_exog` | `True` if `fit`/`predict` use the `X` frame |
 | `supports_native_intervals` | `True` if you produce your own prediction bounds |
@@ -46,7 +46,7 @@ transformed per the run config (e.g. `log1p`). `X` is the aligned feature/exog f
 `ModelError` on a genuinely unfittable series — the worker captures it into an *error cell*
 and the batch survives; it never propagates.
 
-**`predict(horizon, X, quantiles)`** — return the canonical prediction frame (CONTRACTS §2.1):
+**`predict(horizon, X, quantiles)`** — return the canonical prediction frame:
 columns `ds, yhat, yhat_lower, yhat_upper, quantiles`, in **original units**, with ordered
 bounds (`lower ≤ yhat ≤ upper`). The base class does the assembly for you:
 
@@ -65,7 +65,7 @@ bounds (`lower ≤ yhat ≤ upper`). The base class does the assembly for you:
 - **One model, one file.** No model imports another model. Shared machinery goes in a helper
   module (see `_lag_forecaster.py`, used by both tree models).
 - **Never read global config.** Everything a model needs arrives via `self.ctx` and
-  `self.params`. This is what lets the identical code run local, on Spark, and on Ray (G1).
+  `self.params`. This is what lets the identical code run local, on Spark, and on Ray.
 - **Never hard-code a seasonal period.** Use `seasonality.seasonal_period(self.ctx.freq)` —
   the one shared freq→period source. (pandas 3 spellings: `D`, `W`, `MS`, `ME`, `h`.)
 - **Original units out.** The frame `predict` returns must be in original units; invert any

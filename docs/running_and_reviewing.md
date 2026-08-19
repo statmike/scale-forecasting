@@ -9,7 +9,7 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
 
 - A deployed environment (see [deploying on GCP](./deploying_on_gcp.md)) — or point at any project
   where the registry tables exist.
-- The `SF_*` identity in your environment (the same identity every writer uses, G1):
+- The `SF_*` identity in your environment (the same identity every writer uses):
 
   | Variable | Required | Default | Meaning |
   |----------|----------|---------|---------|
@@ -66,15 +66,12 @@ Two notebooks need **no** cluster and run fully locally: `model_playground.ipynb
 `worker.run_cell`) and `07_scale_review.ipynb` (read-only over the registry views, needs the `SF_*`
 env + ADC). The rest submit to Dataproc / Ray / BigQuery.
 
-**Python-version note.** The project pins Python **3.11** everywhere — required for Vertex Ray
-client↔cluster parity, the Dataproc packed-venv, and notebook 01's interactive Spark Connect path,
-which runs on **Dataproc runtime 2.3** (the Connect floor; its workers are *also* Python 3.11, so the
-driver↔worker minor parity Connect enforces holds from the same 3.11 kernel — no separate kernel, no
-`PYTHON_VERSION_MISMATCH`). NB01 also documents a **remote-batch** escape hatch (`main.run(cfg)` with
-no injected session) — the *identical* engine on-cluster, same `run_id`, same results.
-
-For the full per-notebook Python-version mapping (local and on Colab Enterprise) and the runtime
-template Terraform ships, see [notebook_runtimes.md](./notebook_runtimes.md).
+**Python-version note.** The project pins Python **3.11** on every surface (why: Vertex Ray
+client↔cluster parity and the Dataproc packed-venv — see [version_matrix.md](./version_matrix.md)).
+Notebook 01's interactive Spark Connect path holds that parity too, and documents a **remote-batch**
+escape hatch (`main.run(cfg)` with no injected session) — the *identical* engine on-cluster, same
+`run_id`, same results. For the full per-notebook version mapping (local and on Colab Enterprise) and
+the runtime template Terraform ships, see [notebook_runtimes.md](./notebook_runtimes.md).
 
 ## 1. Check the config offline first
 
