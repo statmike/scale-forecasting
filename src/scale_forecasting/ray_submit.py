@@ -1,19 +1,20 @@
-"""Submit a forecast run to Ray on Vertex AI (BUILD B4) — the fixed-size-cluster launcher.
+"""Submit a forecast run to Ray on Vertex AI (BUILD B4) — the autoscaling-cluster launcher.
 
 The Ray analog of :mod:`~scale_forecasting.submit`: the ``[ray]``-extra, ADC-authenticated helper
-that turns a validated :class:`~scale_forecasting.config.RunConfig` into a run on a **fixed-size**
-Vertex Ray cluster (DESIGN §11.1 / D17 — deterministic sizing, *not* autoscaling). It owns the
-cluster lifecycle the way ``submit`` owns the Dataproc batch; the on-cluster compute is
+that turns a validated :class:`~scale_forecasting.config.RunConfig` into a run on an **autoscaling**
+Vertex Ray cluster (DESIGN §11.1 / D17 — reversed post-demo; ``ray_autoscale=False`` restores fixed
+sizing). It owns the cluster lifecycle the way ``submit`` owns the Dataproc batch; the on-cluster
+compute is
 :func:`~scale_forecasting.engines.ray_engine.run`, reached through the
 :mod:`~scale_forecasting.ray_entry` Jobs entrypoint.
 
 What :func:`submit_ray` does:
 
 1. **Size the cluster to the run's fan-out** — :func:`.ray_io.plan_cluster` turns the config into a
-   fixed ``RayClusterPlan`` (a GPU worker pool for NeuralProphet + a CPU worker pool for everything
-   else, each a fixed ``node_count``, no ``autoscaling_spec``). "Resize for a bigger/smaller scale"
-   is just a different ``series_limit`` yielding a different plan — the sizing decision is logged
-   and stamped to the run.
+   ``RayClusterPlan`` (a GPU worker pool for NeuralProphet + a CPU worker pool for everything else).
+   By default each pool carries a Vertex ``AutoscalingSpec(min, max)`` and scales with Ray's task
+   demand; ``ray_autoscale=False`` gives each pool a fixed ``node_count`` and no spec. Either way
+   the whole spec is a pure product of the config — logged and stamped to the run.
 2. **Stage the run config** — write the validated config to ``gs://<code>/runs/<run_id>.json`` and
    pass it as ``--config-uri`` (the lossless reproducibility record, G3 — same contract as Spark).
 3. **Provision (ephemeral default) or target (reuse opt-in) the cluster** — ephemeral:
@@ -271,7 +272,7 @@ def extract_ray_telemetry(
     """Flatten the plan + cluster into the JSON-able telemetry dict stamped on the header (pure).
 
     The Ray analog of :func:`~scale_forecasting.submit.extract_job_telemetry`, answering the same
-    operability questions for a *fixed-size* cluster — *how big was the pool, what did it cost in
+    operability questions — *how big was the pool (and its elastic bounds), what did it cost in
     wall-clock, and what sizing produced it* — so a Ray run is as auditable on ``v_run_summary`` as
     a Spark one. Reads only fields already on the ``plan`` and the ``cluster`` object; every cluster
     field is optional (a missing attr degrades to None, never a raise) so this is safe on any object
@@ -287,6 +288,14 @@ def extract_ray_telemetry(
         "cpu_node_count": plan.cpu_node_count,
         "gpu_node_count": plan.gpu_node_count,
         "total_worker_nodes": plan.total_worker_nodes,
+        # Elastic spec (D17 reversal): the flag + per-pool bounds the cluster was created with, so
+        # v_run_summary shows whether/how the pools autoscaled. node_count above is the derived
+        # fixed-size-equivalent (the reference size; under autoscaling the pool starts at min).
+        "autoscale": plan.autoscale,
+        "cpu_min_nodes": plan.cpu_min_nodes,
+        "cpu_max_nodes": plan.cpu_max_nodes,
+        "gpu_min_nodes": plan.gpu_min_nodes,
+        "gpu_max_nodes": plan.gpu_max_nodes,
         "head_machine_type": plan.head_machine_type,
         "cpu_machine_type": plan.cpu_machine_type,
         "gpu_machine_type": plan.gpu_machine_type,
@@ -328,17 +337,26 @@ def _stage_config(cfg: RunConfig, run_id: str, infra: RayInfra) -> str:
 
 
 def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]:
-    """Build the fixed-size worker ``Resources`` list — one entry per non-empty pool (D17).
+    """Build the worker ``Resources`` list — one entry per non-empty pool (D17, reversed post-demo).
 
-    A GPU pool (``accelerator_type``/``accelerator_count``, ``gpu_node_count`` nodes) for
-    NeuralProphet and a CPU pool (``cpu_node_count`` nodes) for everything else, each a fixed
-    ``node_count`` and **no** ``autoscaling_spec`` — the whole determinism guarantee. A pool with
-    zero planned nodes is omitted (Vertex rejects a zero-node worker type). The optional custom node
-    image is applied to every pool so the on-cluster code sees the bundled deps.
+    A GPU pool (``accelerator_type``/``accelerator_count``) for NeuralProphet and a CPU pool for
+    everything else. When ``plan.autoscale`` (the default) each pool carries a Vertex
+    ``AutoscalingSpec(min, max)`` from the plan's resolved per-pool bounds and Ray grows/shrinks it
+    with task demand — note the SDK ignores ``node_count`` here (the pool starts at ``min``), but we
+    still pass the derived count as the documented fixed-size-equivalent. When ``autoscale``
+    is False both pools are fixed at their derived ``node_count`` with **no** ``autoscaling_spec``
+    (the pre-reversal deterministic path). A pool with zero planned nodes is omitted (Vertex rejects
+    a zero-node worker type). The optional custom node image is applied to every pool so the
+    on-cluster code sees the bundled deps.
     """
     from google.cloud.aiplatform import vertex_ray
+    from google.cloud.aiplatform.vertex_ray.util.resources import AutoscalingSpec
 
     image = infra.container_image
+
+    def _spec(min_nodes: int, max_nodes: int) -> Any:
+        return AutoscalingSpec(min_replica_count=min_nodes, max_replica_count=max_nodes)
+
     workers: list[Any] = []
     if plan.cpu_node_count > 0:
         workers.append(
@@ -346,6 +364,9 @@ def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]
                 machine_type=plan.cpu_machine_type,
                 node_count=plan.cpu_node_count,
                 custom_image=image,
+                autoscaling_spec=(
+                    _spec(plan.cpu_min_nodes, plan.cpu_max_nodes) if plan.autoscale else None
+                ),
             )
         )
     if plan.gpu_node_count > 0:
@@ -356,6 +377,9 @@ def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]
                 accelerator_type=plan.accelerator_type,
                 accelerator_count=plan.accelerator_count,
                 custom_image=image,
+                autoscaling_spec=(
+                    _spec(plan.gpu_min_nodes, plan.gpu_max_nodes) if plan.autoscale else None
+                ),
             )
         )
     return workers
@@ -435,9 +459,10 @@ def _create_cluster(
 ) -> str:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
     """Create the fixed-size Vertex Ray cluster and return its ``cluster_resource_name``.
 
-    Head node is a single small CPU box (no accelerator); workers are the planned GPU/CPU pools
-    (:func:`_worker_resources`). No ``autoscaling_spec`` anywhere — a fixed pool is the honest model
-    for a fixed-scale batch (D17). Labels tag the run.
+    Head node is a single small CPU box (no accelerator, never autoscaled); workers are the planned
+    GPU/CPU pools (:func:`_worker_resources`), each with a Vertex ``AutoscalingSpec`` by default
+    (D17 reversed post-demo) or a fixed ``node_count`` when ``ray_autoscale=False``. Labels tag the
+    run.
 
     Connectivity follows :class:`RayInfra`'s three modes (first set wins): a PSC-I network
     attachment (``psc_interface_config`` — the supported private path, the only mode whose managed
@@ -468,8 +493,14 @@ def _create_cluster(
         endpoint = "public"
 
     _log.info(
-        "creating fixed-size Ray cluster %s: cpu_nodes=%d gpu_nodes=%d accel=%s x%d endpoint=%s",
+        "creating Ray cluster %s: autoscale=%s cpu[min=%d,max=%d] gpu[min=%d,max=%d] "
+        "cpu_nodes=%d gpu_nodes=%d accel=%s x%d endpoint=%s",
         name,
+        plan.autoscale,
+        plan.cpu_min_nodes,
+        plan.cpu_max_nodes,
+        plan.gpu_min_nodes,
+        plan.gpu_max_nodes,
         plan.cpu_node_count,
         plan.gpu_node_count,
         plan.accelerator_type,
@@ -810,9 +841,10 @@ def submit_ray(
     """Size, provision, run, and (ephemeral) tear down a Ray-on-Vertex forecast run; return job id.
 
     The Ray analog of :func:`~scale_forecasting.submit.submit_batch`. Resolves infra from the
-    environment when not passed (G1), sizes a **fixed** cluster to the run's fan-out
-    (:func:`.ray_io.plan_cluster` — no autoscaling, D17), stages the full config to GCS (so its
-    ``run_id`` matches :func:`main.run`'s), then runs the lifecycle:
+    environment when not passed (G1), sizes an **autoscaling** cluster to the run's fan-out
+    (:func:`.ray_io.plan_cluster` — D17 reversed post-demo; ``ray_autoscale=False`` for fixed),
+    stages the full config to GCS (so its ``run_id`` matches :func:`main.run`'s), then runs the
+    lifecycle:
 
     * **ephemeral (default):** create the planned cluster → submit the on-cluster driver as a Ray
       Job → (with ``wait``) poll to terminal + stamp telemetry → ``delete_ray_cluster`` in a

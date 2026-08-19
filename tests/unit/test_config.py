@@ -105,6 +105,36 @@ def test_gpu_fraction_float_in_range_ok() -> None:
     assert cfg.compute.gpu_fraction == 0.25
 
 
+# --- ray autoscaling bounds (D17 reversal) -------------------------------------
+
+
+def test_ray_autoscale_defaults_on() -> None:
+    cfg = RunConfig(**_minimal_dict(python_runtime="ray"))
+    assert cfg.compute.ray_autoscale is True
+    assert cfg.compute.ray_cpu_min_nodes == 1
+    assert cfg.compute.ray_gpu_min_nodes == 1
+    assert cfg.compute.ray_cpu_max_nodes is None  # defers to ray_max_nodes at plan time
+    assert cfg.compute.ray_gpu_max_nodes is None
+
+
+def test_ray_pool_min_above_explicit_max_rejected() -> None:
+    with pytest.raises(Exception) as exc:
+        RunConfig(**_minimal_dict(compute={"ray_cpu_min_nodes": 5, "ray_cpu_max_nodes": 4}))
+    assert "ray_cpu_min_nodes" in str(exc.value)
+
+
+def test_ray_pool_min_above_shared_max_rejected() -> None:
+    # An unset per-pool max defers to ray_max_nodes, which the min must still respect.
+    with pytest.raises(Exception) as exc:
+        RunConfig(**_minimal_dict(compute={"ray_gpu_min_nodes": 10, "ray_max_nodes": 4}))
+    assert "ray_gpu_min_nodes" in str(exc.value)
+
+
+def test_ray_pool_min_equal_max_ok() -> None:
+    cfg = RunConfig(**_minimal_dict(compute={"ray_cpu_min_nodes": 4, "ray_cpu_max_nodes": 4}))
+    assert cfg.compute.ray_cpu_min_nodes == 4
+
+
 # --- normalization -------------------------------------------------------------
 
 

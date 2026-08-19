@@ -227,6 +227,12 @@ def test_extract_ray_telemetry_flattens_plan_and_cluster() -> None:
     assert tel["gpu_node_count"] == plan.gpu_node_count
     assert tel["accelerator_type"] == "NVIDIA_TESLA_T4"
     assert tel["ray_version"] == "2.47"
+    # Elastic spec (D17 reversal) shows up for auditability on v_run_summary.
+    assert tel["autoscale"] is True
+    assert tel["cpu_min_nodes"] == plan.cpu_min_nodes
+    assert tel["cpu_max_nodes"] == plan.cpu_max_nodes
+    assert tel["gpu_min_nodes"] == plan.gpu_min_nodes
+    assert tel["gpu_max_nodes"] == plan.gpu_max_nodes
 
 
 def test_extract_ray_telemetry_is_json_serializable() -> None:
@@ -253,6 +259,68 @@ def test_extract_ray_telemetry_degrades_on_bare_cluster() -> None:
     assert tel["ray_version"] is None
     assert tel["dashboard_address"] is None
     assert tel["reuse"] is True
+
+
+# --- _worker_resources: the AutoscalingSpec wiring (D17 reversal) ----------------
+#
+# The pool builder imports vertex_ray lazily, so we inject fakes via sys.modules — this keeps the
+# test offline and independent of whether the [ray] extra is installed. The fakes record the kwargs
+# each Resources gets so we can assert whether an AutoscalingSpec was attached.
+
+
+@pytest.fixture
+def _fake_vertex_ray(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inject fake ``vertex_ray`` + ``AutoscalingSpec`` modules that record Resources kwargs."""
+    import sys
+    import types
+
+    class _FakeResources:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class _FakeAutoscalingSpec:
+        def __init__(self, *, min_replica_count: int, max_replica_count: int) -> None:
+            self.min_replica_count = min_replica_count
+            self.max_replica_count = max_replica_count
+
+    vr_mod = types.ModuleType("google.cloud.aiplatform.vertex_ray")
+    vr_mod.Resources = _FakeResources  # type: ignore[attr-defined]
+    res_mod = types.ModuleType("google.cloud.aiplatform.vertex_ray.util.resources")
+    res_mod.AutoscalingSpec = _FakeAutoscalingSpec  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "google.cloud.aiplatform.vertex_ray", vr_mod)
+    monkeypatch.setitem(
+        sys.modules, "google.cloud.aiplatform.vertex_ray.util.resources", res_mod
+    )
+
+
+def test_worker_resources_attaches_autoscaling_spec_per_pool(_fake_vertex_ray: None) -> None:
+    plan = ray_io.plan_cluster(
+        _cfg(compute={"use_gpu": True, "ray_cpu_max_nodes": 20, "ray_gpu_max_nodes": 4}),
+        run_id="rid",
+    )
+    workers = ray_submit._worker_resources(plan, _infra())
+    assert len(workers) == 2  # CPU + GPU pool
+    specs = {}
+    for w in workers:
+        spec = w.kwargs["autoscaling_spec"]
+        assert spec is not None
+        # Distinguish CPU vs GPU pool by the accelerator kwarg.
+        pool = "gpu" if w.kwargs.get("accelerator_count") else "cpu"
+        specs[pool] = (spec.min_replica_count, spec.max_replica_count)
+    assert specs["cpu"] == (plan.cpu_min_nodes, 20)
+    assert specs["gpu"] == (plan.gpu_min_nodes, 4)
+
+
+def test_worker_resources_omits_spec_when_autoscale_off(_fake_vertex_ray: None) -> None:
+    plan = ray_io.plan_cluster(
+        _cfg(compute={"use_gpu": True, "ray_autoscale": False}), run_id="rid"
+    )
+    workers = ray_submit._worker_resources(plan, _infra())
+    assert workers  # pools still built
+    for w in workers:
+        assert w.kwargs["autoscaling_spec"] is None
+        assert w.kwargs["node_count"] >= 1  # fixed path keeps the derived node count
 
 
 # --- submit_ray: the lifecycle (vertex_ray + JobSubmissionClient monkeypatched) --

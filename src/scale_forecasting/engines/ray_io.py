@@ -4,8 +4,8 @@ The Ray-on-Vertex analog of :mod:`spark_io`. Split along the same pure/I-O seam 
 the interesting logic is offline-testable without a cluster, a GPU, or BigQuery:
 
 * **Pure** (no Ray, no Vertex, no GPU): :func:`split_gpu_cpu_models` (which models want a GPU),
-  :func:`plan_cluster` (size a *fixed* — non-autoscaling — cluster to the run's fan-out, DESIGN
-  §11.1 / D17), :func:`calibrate_gpu_fraction` (profile-driven ``num_gpus`` per NeuralProphet task,
+  :func:`plan_cluster` (size an *autoscaling* cluster to the run's fan-out, DESIGN §11.1 / D17),
+  :func:`calibrate_gpu_fraction` (profile-driven ``num_gpus`` per NeuralProphet task,
   unit-tested with injected memory numbers), :func:`chunk_cells` (shuffle cells into task-sized
   pandas frames), :func:`make_chunk_runner` (the body one Ray task runs).
 * **Reuse, not re-implementation.** The executor-side work is the *exact* Spark core:
@@ -14,11 +14,17 @@ the interesting logic is offline-testable without a cluster, a GPU, or BigQuery:
   by another name — same pandas shape, same :func:`run_cell`. This module owns only what is
   genuinely Ray-specific: the deterministic sizing and the heterogeneous GPU/CPU split.
 
-**Why fixed-size, not autoscaling (D17).** A forecast run's fan-out is known before it starts
-(series × models), so the honest model for a batch job is a pool sized to that fan-out — not an
-autoscaler chasing a moving target. :func:`plan_cluster` is a pure function of the config, so
-"resize for a larger/smaller scale" is just a different ``series_limit`` yielding a different fixed
-plan. Vertex Ray gets a fixed ``node_count`` and **no** ``autoscaling_spec``.
+**Why autoscaling by default (D17, reversed post-demo).** The B4 design shipped a *fixed*-size pool
+on the reasoning that a run's fan-out is known up front. The overnight 100k run showed that is the
+wrong default for a bursty, embarrassingly-parallel fleet: a fixed pool can neither grow to chew a
+deep task queue nor shrink the expensive T4 pool when idle. So each pool is now created with a
+Vertex ``AutoscalingSpec(min, max)`` and scales with Ray's pending-task demand. Determinism is kept
+a better way — :func:`plan_cluster` stays a pure function of the config: the autoscale flag, the
+per-pool ``[min, max]``, and the fixed-size-equivalent node count the fan-out implies are all
+derived offline and snapshotted into ``run_id`` + ``job_telemetry``. ``ray_autoscale=False`` gives
+the fixed path (a fixed ``node_count`` and **no** ``autoscaling_spec``). NOTE: under autoscaling the
+Vertex SDK ignores ``node_count`` (the pool starts at ``min`` and scales to ``max``), so the derived
+count is the *initial* size only for the fixed path.
 
 **Why heterogeneous routing.** Only NeuralProphet (``family == "deep_learning"``) benefits from a
 GPU, and Spark can't share a GPU fractionally across tasks (DESIGN §11.2) — which is the whole
@@ -196,14 +202,20 @@ def _measure_np_peak_bytes(
 
 @dataclass(frozen=True)
 class RayClusterPlan:
-    """A fixed-size Vertex Ray cluster spec, sized to a run's fan-out (pure product of the config).
+    """An autoscaling Vertex Ray cluster spec, sized to a run's fan-out (pure product of config).
 
-    Non-autoscaling by design (D17): both worker pools have a fixed ``node_count`` and no
-    ``autoscaling_spec``. ``reuse=True`` means an existing cluster is targeted by name (skip create
-    + skip teardown); the sizing fields then describe what it *should* be (a mismatch is logged /
-    resized). ``sizing_gpu_fraction`` is the fraction used to size the GPU pool; the on-cluster
-    calibration may request a different actual ``num_gpus`` per task, but the node count is fixed
-    here. ``n_gpu_cells`` / ``n_cpu_cells`` are the per-pool task counts the sizing derived from.
+    Autoscaling by default (D17, reversed post-demo): when ``autoscale`` each worker pool is created
+    with a Vertex ``AutoscalingSpec`` bounded by its resolved ``[cpu|gpu]_min_nodes`` /
+    ``[cpu|gpu]_max_nodes`` and starts at its min; when ``autoscale`` is False both pools are fixed
+    at ``cpu_node_count`` / ``gpu_node_count`` (the pre-reversal path, no ``autoscaling_spec``).
+
+    ``cpu_node_count`` / ``gpu_node_count`` are the deterministic fixed-size-equivalent the fan-out
+    implies — the actual node count on the fixed path, and the initial/reference size on the
+    autoscaling path (where the SDK starts the pool at ``min`` instead). ``reuse=True`` means an
+    existing cluster is targeted by name (skip create + skip teardown); the sizing fields then
+    describe what it *should* be. ``sizing_gpu_fraction`` is the fraction used to size the GPU pool;
+    the on-cluster calibration may request a different actual ``num_gpus`` per task.
+    ``n_gpu_cells`` / ``n_cpu_cells`` are the per-pool task counts the sizing derived from.
     """
 
     cluster_name: str
@@ -218,10 +230,22 @@ class RayClusterPlan:
     sizing_gpu_fraction: float
     n_gpu_cells: int
     n_cpu_cells: int
+    # Autoscaling spec (D17 reversal). ``autoscale`` gates whether the pools carry an
+    # ``AutoscalingSpec``; the resolved per-pool ``[min, max]`` bounds it (max already defaulted
+    # from ``ray_max_nodes`` when unset). All pure products of the config → snapshotted for audit.
+    autoscale: bool
+    cpu_min_nodes: int
+    cpu_max_nodes: int
+    gpu_min_nodes: int
+    gpu_max_nodes: int
 
     @property
     def total_worker_nodes(self) -> int:
-        """Fixed worker count across both pools — the number that scales with the run."""
+        """Fixed-size-equivalent worker count across both pools — the number the fan-out implies.
+
+        On the fixed path this is the actual provisioned worker count; under autoscaling it is the
+        reference size (each pool actually starts at its min and scales toward its max).
+        """
         return self.cpu_node_count + self.gpu_node_count
 
 
@@ -284,19 +308,35 @@ def _pool_node_count(
     return max(1, min(math.ceil(n_cells / per_node), max_nodes))
 
 
+def _clamp_pool_nodes(nodes: int, min_nodes: int) -> int:
+    """Floor a used pool's derived node count at ``min_nodes``; leave an unused pool at 0 (pure).
+
+    A zero-cell pool is omitted at create (``nodes == 0`` stays 0), so the min floor applies only
+    when the pool is actually used. Keeps the fixed-path node count and the autoscaling reference
+    size consistent with the resolved ``[min, max]`` bounds. The max clamp already happened inside
+    :func:`_pool_node_count` (its ``max_nodes`` arg is the pool max).
+    """
+    return max(nodes, min_nodes) if nodes > 0 else 0
+
+
 def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str) -> RayClusterPlan:
-    """Size a fixed (non-autoscaling) Vertex Ray cluster to this run's fan-out (pure; D17).
+    """Size an autoscaling Vertex Ray cluster to this run's fan-out (pure; D17 reversed post-demo).
 
     Deterministic function of the config — no GCP, no GPU. Splits the executed models into GPU
     (NeuralProphet) and CPU pools, counts the cells each pool must run (``series × models``, using
-    ``max_parallelism`` as the basis when ``series_limit`` is unbounded), and sizes each pool's
-    fixed ``node_count`` from those cell counts (:func:`_pool_node_count`). Folds are *not* a factor
-    in the node count — a cell runs all its backtest folds internally in one :func:`run_cell`, so
-    folds add per-cell wall-clock, not more tasks.
+    ``max_parallelism`` as the basis when ``series_limit`` is unbounded), and derives each pool's
+    fixed-size-equivalent ``node_count`` from those cell counts (:func:`_pool_node_count`), clamped
+    into the pool's resolved ``[min, max]``. Folds are *not* a factor in the node count — a cell
+    runs all its backtest folds internally in one :func:`run_cell`, so folds add per-cell time, not
+    more tasks.
 
-    This is the "size for the scale of the run" contract: a bigger ``series_limit`` yields more
-    cells → more fixed nodes; a smaller one yields fewer. Re-run with a different ``series_limit``
-    to resize up or down — the plan is the whole sizing decision, logged and stamped to the run.
+    Per-pool autoscaling bounds are resolved here (min from config; max from the per-pool override,
+    else the shared ``ray_max_nodes``) and carried on the plan. When ``ray_autoscale`` (default) the
+    launcher gives each pool an ``AutoscalingSpec(min, max)`` and it starts at ``min`` and scales to
+    ``max`` with Ray's task demand; when False both pools are fixed at the derived ``node_count``.
+    Either way the whole spec is a pure product of the config — a bigger ``series_limit`` implies
+    more cells → a higher derived count (and, on the fixed path, more nodes); the plan is the whole
+    sizing decision, logged and stamped to the run for audit.
     """
     gpu_models, cpu_models = split_gpu_cpu_models(cfg, models)
 
@@ -309,21 +349,30 @@ def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str
     gpu_slots_per_node = cfg.compute.accelerator_count * gpu_slots_per_device(sizing_fraction)
     cpu_slots_per_node = _machine_cores(cfg.compute.ray_cpu_machine_type)
 
+    # Resolve per-pool autoscaling bounds (max defaults to the shared ray_max_nodes when unset).
+    cpu_max = cfg.compute.ray_cpu_max_nodes or cfg.compute.ray_max_nodes
+    gpu_max = cfg.compute.ray_gpu_max_nodes or cfg.compute.ray_max_nodes
+    cpu_min = cfg.compute.ray_cpu_min_nodes
+    gpu_min = cfg.compute.ray_gpu_min_nodes
+
+    # Derived fixed-size-equivalent node counts, each capped by its pool max and (when the pool is
+    # used) floored at its pool min so the fixed path and the autoscale reference size agree with
+    # the bounds. A pool with zero cells stays at 0 nodes (omitted at create), never bumped to min.
     gpu_nodes = (
-        _pool_node_count(
-            n_gpu_cells,
-            gpu_slots_per_node,
-            cfg.compute.ray_target_cells_per_slot,
-            cfg.compute.ray_max_nodes,
+        _clamp_pool_nodes(
+            _pool_node_count(
+                n_gpu_cells, gpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, gpu_max
+            ),
+            gpu_min,
         )
         if cfg.compute.use_gpu
         else 0
     )
-    cpu_nodes = _pool_node_count(
-        n_cpu_cells,
-        cpu_slots_per_node,
-        cfg.compute.ray_target_cells_per_slot,
-        cfg.compute.ray_max_nodes,
+    cpu_nodes = _clamp_pool_nodes(
+        _pool_node_count(
+            n_cpu_cells, cpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, cpu_max
+        ),
+        cpu_min,
     )
 
     return RayClusterPlan(
@@ -339,6 +388,11 @@ def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str
         sizing_gpu_fraction=sizing_fraction,
         n_gpu_cells=n_gpu_cells,
         n_cpu_cells=n_cpu_cells,
+        autoscale=cfg.compute.ray_autoscale,
+        cpu_min_nodes=cpu_min,
+        cpu_max_nodes=cpu_max,
+        gpu_min_nodes=gpu_min,
+        gpu_max_nodes=gpu_max,
     )
 
 

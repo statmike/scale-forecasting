@@ -6,7 +6,9 @@ real ``RunConfig`` objects. The live cluster + fractional-GPU path is the ``@gpu
 
 The two load-bearing properties for the user's "size to the run's scale, and show resizing" brief:
 :func:`plan_cluster` is a deterministic function of the config, and a larger ``series_limit`` yields
-a strictly larger fixed cluster (and vice-versa).
+a strictly larger fixed-size-equivalent (and vice-versa). Autoscaling (D17 reversed post-demo) is
+the default: the plan carries per-pool ``[min, max]`` bounds that the launcher turns into an
+``AutoscalingSpec``; ``ray_autoscale=False`` restores the fixed path.
 """
 
 from __future__ import annotations
@@ -125,12 +127,41 @@ def test_plan_is_deterministic() -> None:
     assert a == b
 
 
-def test_plan_no_autoscaling_fields() -> None:
-    # D17: the plan describes fixed node counts only — there is no min/max replica field to leak.
+def test_plan_autoscale_default_on_with_resolved_bounds() -> None:
+    # D17 reversed: autoscaling is the default, and each pool carries resolved [min, max] bounds.
     plan = ray_io.plan_cluster(_cfg(compute=_compute()), run_id="rid")
-    assert not any("replica" in f or "autoscal" in f for f in vars(plan))
-    assert isinstance(plan.gpu_node_count, int)
-    assert isinstance(plan.cpu_node_count, int)
+    assert plan.autoscale is True
+    assert plan.cpu_min_nodes == 1
+    assert plan.gpu_min_nodes == 1
+    # Per-pool max is unset in the config → falls back to the shared ray_max_nodes (default 16).
+    assert plan.cpu_max_nodes == 16
+    assert plan.gpu_max_nodes == 16
+
+
+def test_plan_per_pool_max_override_respected() -> None:
+    # A run can cap the (expensive) GPU pool independently of the (cheap) CPU pool.
+    plan = ray_io.plan_cluster(
+        _cfg(compute=_compute(ray_cpu_max_nodes=20, ray_gpu_max_nodes=4)), run_id="rid"
+    )
+    assert plan.cpu_max_nodes == 20
+    assert plan.gpu_max_nodes == 4
+
+
+def test_plan_per_pool_min_override_respected() -> None:
+    plan = ray_io.plan_cluster(
+        _cfg(compute=_compute(ray_cpu_min_nodes=2, ray_gpu_min_nodes=1)), run_id="rid"
+    )
+    assert plan.cpu_min_nodes == 2
+    # A used pool's derived node count is floored at its min.
+    assert plan.cpu_node_count >= 2
+
+
+def test_plan_autoscale_false_restores_fixed_plan() -> None:
+    plan = ray_io.plan_cluster(_cfg(compute=_compute(ray_autoscale=False)), run_id="rid")
+    assert plan.autoscale is False
+    # The bounds are still resolved (for telemetry) even though no AutoscalingSpec is attached.
+    assert isinstance(plan.cpu_max_nodes, int)
+    assert isinstance(plan.gpu_max_nodes, int)
 
 
 def test_plan_names_ephemeral_cluster_from_run_id() -> None:

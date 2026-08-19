@@ -21,6 +21,9 @@
     "gpu_type": "T4",
     "gpu_fraction": "auto",
     "accelerator_count": 1,
+    "ray_autoscale": true,
+    "ray_gpu_min_nodes": 1,
+    "ray_gpu_max_nodes": 2,
     "ray_regions": ["us-central1", "us-east1", "us-west1"]
   }
 }

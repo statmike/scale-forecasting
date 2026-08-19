@@ -1,22 +1,22 @@
 {
-  "run_name": "ray_100k",
+  "run_name": "ray_autoscale_demo",
   "python_runtime": "ray",
   "data": {
     "source_table": "source_series_iceberg",
     "horizon": 28,
-    "series_limit": 100000
+    "series_limit": 10000
   },
-  "models": ["theta", "holtwinters", "sarimax", "xgboost"],
+  "models": ["theta", "holtwinters", "sarimax"],
   "features": {
     "holidays": ["US"],
     "transform": "log1p"
   },
   "compute": {
     "use_gpu": false,
-    "ray_head_machine_type": "n1-highmem-32",
+    "ray_head_machine_type": "n1-standard-16",
     "ray_autoscale": true,
     "ray_cpu_min_nodes": 1,
-    "ray_cpu_max_nodes": 20,
+    "ray_cpu_max_nodes": 8,
     "ray_regions": ["us-central1", "us-east1", "us-west1"]
   }
 }

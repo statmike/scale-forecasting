@@ -165,10 +165,22 @@ class ComputeConfig(BaseModel):
     budget_usd: float = Field(default=50.0, ge=0.0)
 
     # --- Ray on Vertex (B4) ----------------------------------------------------
-    # The Ray runtime sizes a *fixed* (non-autoscaling) cluster to the run's fan-out and packs
-    # GPU-benefiting models (NeuralProphet) onto fractional T4 slots while stats/ML run on CPU
-    # (DESIGN §11.1, D17). These knobs feed engines/ray_io.plan_cluster + calibrate_gpu_fraction;
-    # they are inert unless python_runtime == "ray".
+    # The Ray runtime sizes an *autoscaling* cluster to the run's fan-out (default; D17 reversed
+    # post-demo — see below) and packs GPU-benefiting models (NeuralProphet) onto fractional T4
+    # slots while stats/ML run on CPU (DESIGN §11.1). These knobs feed engines/ray_io.plan_cluster +
+    # calibrate_gpu_fraction; they are inert unless python_runtime == "ray".
+    #
+    # Autoscaling (D17 reversal). The B4 design shipped a *fixed*-size cluster ("deterministic
+    # sizing, not autoscaling"). The overnight 100k run showed that is the wrong default for a
+    # bursty, embarrassingly-parallel fleet: a fixed pool can neither grow to chew a deep task queue
+    # nor shrink the expensive T4 pool when idle. So autoscaling is now the default (ray_autoscale):
+    # each pool scales in [min, max] driven by Ray's pending-task demand. Determinism is preserved a
+    # better way: the whole spec (the flag, the per-pool min/max, and the fixed-size-equivalent the
+    # fan-out implies) is a pure function of the config, snapshotted into run_id + job_telemetry.
+    # ray_autoscale=False restores the proven fixed-size path. NOTE: under autoscaling the Vertex
+    # SDK ignores a pool's node_count (it starts at min_replica_count and scales to max); the
+    # derived per-pool node count is therefore the *initial* size only for the fixed path, and
+    # telemetry otherwise.
     #
     # Reuse opt-in: target an existing cluster by name (skip create + skip teardown). None (default)
     # = ephemeral per-run cluster (create → submit → delete-in-finally).
@@ -198,6 +210,22 @@ class ComputeConfig(BaseModel):
     # unbounded cluster. n_gpu_nodes/n_cpu_nodes are derived, then clamped to [1, ray_max_nodes].
     ray_target_cells_per_slot: int = Field(default=8, gt=0)
     ray_max_nodes: int = Field(default=16, gt=0)
+    # Autoscaling (default-on; D17 reversal). When True each worker pool is created with a Vertex
+    # AutoscalingSpec(min, max) and grows/shrinks with Ray's task demand; when False both pools are
+    # fixed at their derived node_count (the pre-reversal behavior). The per-pool min/max are
+    # resolved offline in plan_cluster and snapshotted into run_id + job_telemetry, so an autoscaled
+    # run stays as reproducible/auditable as a fixed one.
+    ray_autoscale: bool = True
+    # Per-pool autoscaling floor. Vertex Ray keeps at least one node allocated per pool (an
+    # effective min of 0 is not honored), so the floor is 1; raise it to pre-warm a pool and skip
+    # the cold 1→N ramp. Inert when ray_autoscale is False.
+    ray_cpu_min_nodes: int = Field(default=1, gt=0)
+    ray_gpu_min_nodes: int = Field(default=1, gt=0)
+    # Per-pool autoscaling ceiling. None falls back to the shared ray_max_nodes, so a run can give
+    # the (cheap) CPU pool a high ceiling while capping the (expensive) T4 GPU pool independently.
+    # Inert when ray_autoscale is False (both pools are then fixed at their derived node_count).
+    ray_cpu_max_nodes: int | None = Field(default=None, gt=0)
+    ray_gpu_max_nodes: int | None = Field(default=None, gt=0)
     # Auto-fraction calibration (gpu_fraction == "auto"): how many series to profile and the
     # headroom multiplier applied to measured peak GPU memory before dividing by device memory.
     gpu_calibration_samples: int = Field(default=3, gt=0)
@@ -222,6 +250,19 @@ class ComputeConfig(BaseModel):
             raise ValueError(
                 f"accelerator_count for T4 must be 1, 2, or 4 (got {self.accelerator_count})"
             )
+        # Per-pool autoscaling bounds must be coherent: an explicit max cannot fall below its min
+        # (an unset max defers to ray_max_nodes, checked against the pool min too). Fail at load
+        # rather than at cluster-create, where a bad spec would waste a provision attempt.
+        for pool, min_nodes, max_nodes in (
+            ("cpu", self.ray_cpu_min_nodes, self.ray_cpu_max_nodes),
+            ("gpu", self.ray_gpu_min_nodes, self.ray_gpu_max_nodes),
+        ):
+            resolved_max = max_nodes if max_nodes is not None else self.ray_max_nodes
+            if min_nodes > resolved_max:
+                raise ValueError(
+                    f"ray_{pool}_min_nodes ({min_nodes}) exceeds the {pool} pool max "
+                    f"({resolved_max}); lower the min or raise ray_{pool}_max_nodes/ray_max_nodes"
+                )
         return self
 
 
