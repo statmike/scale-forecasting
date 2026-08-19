@@ -155,8 +155,8 @@ ORDER BY mean_wape;
 - `median_fit_seconds` — per-cell fit time (the straggler signal under `naive`).
 - `mean_wape` / `mean_mae` — the decision metrics, populated where a backtest ran.
 
-The demo notebooks ([`notebooks/`](../notebooks)) wrap these two queries in a small polling helper
-and a chart; [`07_scale_review`](../notebooks/07_scale_review.ipynb) compares several runs
+The demo notebooks ([`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks)) wrap these two queries in a small polling helper
+and a chart; [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) compares several runs
 side by side.
 
 Both views read from the underlying registry tables (`run_registry`, `forecast_metadata`,

@@ -1,6 +1,6 @@
 # Deploying on GCP — a reviewer's guide to the Terraform
 
-This is the deep-dive companion to the [README quickstart](../README.md#deploy-on-gcp). It exists so
+This is the deep-dive companion to the [README quickstart](https://github.com/statmike/scale-forecasting/blob/main/README.md#deploy-on-gcp). It exists so
 you can **read the Terraform before you run it**: what gets created, which GCP services it uses and
 how, why each permission is granted and who uses it, and how to fit the deployment into an existing
 locked-down project instead of a fresh one.
@@ -9,8 +9,8 @@ The Terraform itself is heavily commented — every module header explains its o
 This document is the map that ties them together. If a claim here and a module comment ever disagree,
 the module comment (next to the resource) wins.
 
-- **Terraform lives in** [`terraform/`](../terraform/); the operator runbook is
-  [`terraform/README.md`](../terraform/README.md).
+- **Terraform lives in** [`terraform/`](https://github.com/statmike/scale-forecasting/tree/main/terraform); the operator runbook is
+  [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md).
 - **One rule to keep in mind:** Terraform owns the *containers* (project, dataset, buckets,
   connection, network, service accounts, roles). The **application** owns the *tables* — the six
   registry/data tables are defined once in `src/scale_forecasting/registry/ddl.py` and created by
@@ -70,8 +70,8 @@ the **runtime-image build** and the **example-data seed** (both below), each a o
 
 `build_image` defaults to **true**, so the first `terraform apply` doesn't just create the empty
 Artifact Registry repo — it **fills it**. The `container` module runs `gcloud builds submit` against
-the repo's own [`docker/cloudbuild.yaml`](../docker/cloudbuild.yaml), building the shared Spark/Ray
-runtime image from [`docker/Dockerfile`](../docker/Dockerfile) and pushing it to the repo. This
+the repo's own [`docker/cloudbuild.yaml`](https://github.com/statmike/scale-forecasting/blob/main/docker/cloudbuild.yaml), building the shared Spark/Ray
+runtime image from [`docker/Dockerfile`](https://github.com/statmike/scale-forecasting/blob/main/docker/Dockerfile) and pushing it to the repo. This
 matters because *everything downstream pulls that image* — the seed batch below, and every forecast
 engine. Without it, a fresh deploy with `run_seed = true` would fail: the seed batch would try to
 pull an image that doesn't exist yet. One apply now does the whole chain: repo → image → seed.
@@ -122,7 +122,7 @@ review, then rerun at `100000`. Select one format with `seed_variant = "iceberg"
 (default `"both"`).
 
 > The **same generator** produces the local playground's sample panel — see the
-> [local quickstart](../README.md#quickstart). `playground.sample_data()` calls the identical
+> [local quickstart](https://github.com/statmike/scale-forecasting/blob/main/README.md#quickstart). `playground.sample_data()` calls the identical
 > `generate_panel()` with the same master seed, just 3 series in-memory instead of 100k written to
 > BigQuery. So what you explore locally is a small slice of the same deterministic dataset the cloud
 > seed materializes (G1: same code path local and at scale).
@@ -410,7 +410,7 @@ resolve; see the notebooks and `terraform/README.md` for the exact wiring.
 
 ## Before you run it
 
-- Read [`terraform/README.md`](../terraform/README.md) for the exact command sequence (bootstrap →
+- Read [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md) for the exact command sequence (bootstrap →
   main) and the cost note.
 - **`gcloud` CLI required** on the machine running Terraform (unless `build_image = false`) — the main
   stage shells out to `gcloud builds submit` to build the runtime image.

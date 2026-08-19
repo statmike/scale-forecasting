@@ -109,6 +109,16 @@ dev = [
     # the shipped forecasting runtime, so it doesn't belong in core deps.
     "nbformat>=5.10",
 ]
+# Documentation site (MkDocs Material + mkdocstrings). Builds the guides, the notebook tour, and an
+# API reference generated straight from the source docstrings. mkdocstrings-python uses griffe's
+# STATIC analysis (it reads src/, never imports the package), so the site builds without the heavy
+# compute backends (statsmodels/scipy/torch) or a resolved runtime — CI stays light.
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+    "mkdocs-jupyter>=0.25",
+]
 
 # --- torch CUDA build selection (Ray-on-Vertex T4 GPU path) --------------------------------------
 # torch defaults to a CUDA-13 wheel on PyPI, which won't initialize on the Vertex T4 host driver

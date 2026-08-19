@@ -1,6 +1,6 @@
 # Operations runbook — rework an already-deployed environment
 
-The [deploy](../terraform/README.md) and [demo](./workshop.md) runbooks assume a **fresh** setup.
+The [deploy](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md) and [demo](./workshop.md) runbooks assume a **fresh** setup.
 This doc is the **rework** path: you've already deployed, and now you need to **re-apply Terraform**
 (pick up a code/infra change), **reset the BigQuery output tables** (clean slate for a re-run), or
 **re-run** a config. Everything here runs from **[Cloud Shell](https://console.cloud.google.com/?cloudshell=true)** —
@@ -257,7 +257,7 @@ uv sync --extra submit
 > gcloud auth application-default login
 > ```
 >
-> Then follow [`terraform/README.md`](../terraform/README.md) for `init` / `plan` / `apply`. When the
+> Then follow [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md) for `init` / `plan` / `apply`. When the
 > apply is done, **revoke the human ADC** so subsequent runs on this VM revert to the runner SA:
 > `gcloud auth application-default revoke`.
 
@@ -337,7 +337,7 @@ gcloud compute instances delete sf-runner --project "$PROJECT" --zone "$ZONE" --
 
 ## See also
 
-- [`terraform/README.md`](../terraform/README.md) — the **fresh deploy** (zero to deployed).
+- [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md) — the **fresh deploy** (zero to deployed).
 - [`docs/workshop.md`](./workshop.md) — the **fresh demo** (populate runs → tour notebooks). The
   durable-VM path for long runs now lives here in [§4](#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell).
 - [`docs/running_and_reviewing.md`](./running_and_reviewing.md) — submit / watch / review mechanics and

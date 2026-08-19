@@ -6,7 +6,7 @@ The one-screen map. Find your task, follow the pointer.
 Stand the platform up in a Google Cloud project.
 - [deploying_on_gcp.md](./deploying_on_gcp.md) — a reviewer's guide to the Terraform: what gets
   created and why.
-- [`../terraform/README.md`](../terraform/README.md) — the two-stage apply runbook.
+- [terraform/README.md](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md) — the two-stage apply runbook.
 
 ## Operate
 Run forecasts, review results, and keep a deployment healthy.
@@ -26,7 +26,7 @@ How it works and every knob.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
 - [output_schemas.md](./output_schemas.md) — the output tables and the analyst views over them.
-- [adding_a_model.md](./adding_a_model.md) + [model_template.py](./model_template.py) — add a model
+- [adding_a_model.md](./adding_a_model.md) + [model_template.py](https://github.com/statmike/scale-forecasting/blob/main/docs/model_template.py) — add a model
   in one file.
 - [editing_code_without_rebuilding.md](./editing_code_without_rebuilding.md) — why a code edit ships
   on the next run with no image rebuild.

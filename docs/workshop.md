@@ -1,6 +1,6 @@
 # Workshop runbook — demo every runtime, then review at scale
 
-**You've deployed the platform** (see [`terraform/README.md`](../terraform/README.md)) and the smoke
+**You've deployed the platform** (see [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md)) and the smoke
 forecast came back `SUCCEEDED`. This is the guided path from there to a full demo: submit one run per
 approach at **100k series**, then walk the notebooks in **Colab Enterprise** — ending on
 `07_scale_review`, which renders the cross-approach comparison over the runs you just made.
@@ -297,14 +297,14 @@ Run them **in this order** — each builds on the story of the last:
 
 | # | Notebook | Template | What you show | Scale |
 |---|----------|----------|---------------|-------|
-| 1 | [`model_playground`](../notebooks/model_playground.ipynb) | `sf-main` | Pick any registered model, fit it on a small panel — the one unit of work, no cluster. | sample |
-| 2 | [`01_spark_via_connect`](../notebooks/01_spark_via_connect.ipynb) | `sf-main` | The Spark UDF fan-out (`applyInPandas`, one task per cell) over a live Dataproc Connect endpoint. | 100 |
-| 3 | [`02_bigquery_native`](../notebooks/02_bigquery_native.ipynb) | `sf-main` | The BigQuery-native track — `ARIMA_PLUS` + `TimesFM` as pure SQL, no cluster. | 100 |
-| 4 | [`03_combo_and_ensemble`](../notebooks/03_combo_and_ensemble.ipynb) | `sf-main` | One config mixing a Spark model **and** the BQ natives under one `run_id`, with ensembles on — **and the accuracy-parity leaderboard** (backtest is on here). | 10 |
-| 5 | [`04_ray_on_vertex`](../notebooks/04_ray_on_vertex.ipynb) | `sf-main` | The Python models on a Ray-on-Vertex cluster ∥ the BQ natives — job submission from any authenticated client via the PSC-I attachment. | demo |
-| 6 | [`05_spark_naive`](../notebooks/05_spark_naive.ipynb) | `sf-main` | The `naive` straggler anti-pattern made visible — a run drags on its slowest *series*. | 100 |
-| 7 | [`06_spark_multi`](../notebooks/06_spark_multi.ipynb) | `sf-main` | `multi` fanning one child `explode` batch per model family, all under one `run_id`. | 100 |
-| 8 | [`07_scale_review`](../notebooks/07_scale_review.ipynb) | `sf-main` | **The payoff** — the cross-approach comparison over your **Act 1** 100k runs. Runs nothing; reads the registry views. | reads 100k |
+| 1 | [`model_playground`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/model_playground.ipynb) | `sf-main` | Pick any registered model, fit it on a small panel — the one unit of work, no cluster. | sample |
+| 2 | [`01_spark_via_connect`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/01_spark_via_connect.ipynb) | `sf-main` | The Spark UDF fan-out (`applyInPandas`, one task per cell) over a live Dataproc Connect endpoint. | 100 |
+| 3 | [`02_bigquery_native`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_bigquery_native.ipynb) | `sf-main` | The BigQuery-native track — `ARIMA_PLUS` + `TimesFM` as pure SQL, no cluster. | 100 |
+| 4 | [`03_combo_and_ensemble`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_combo_and_ensemble.ipynb) | `sf-main` | One config mixing a Spark model **and** the BQ natives under one `run_id`, with ensembles on — **and the accuracy-parity leaderboard** (backtest is on here). | 10 |
+| 5 | [`04_ray_on_vertex`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex.ipynb) | `sf-main` | The Python models on a Ray-on-Vertex cluster ∥ the BQ natives — job submission from any authenticated client via the PSC-I attachment. | demo |
+| 6 | [`05_spark_naive`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/05_spark_naive.ipynb) | `sf-main` | The `naive` straggler anti-pattern made visible — a run drags on its slowest *series*. | 100 |
+| 7 | [`06_spark_multi`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/06_spark_multi.ipynb) | `sf-main` | `multi` fanning one child `explode` batch per model family, all under one `run_id`. | 100 |
+| 8 | [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) | `sf-main` | **The payoff** — the cross-approach comparison over your **Act 1** 100k runs. Runs nothing; reads the registry views. | reads 100k |
 
 **Notebook 07 is the one notebook you configure.** Its first code cell has an edit-me `RUN_IDS` block:
 
@@ -346,7 +346,7 @@ be sure.)
 
 ## See also
 
-- [`terraform/README.md`](../terraform/README.md) — deploy the platform (the step before this runbook).
+- [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md) — deploy the platform (the step before this runbook).
 - [`docs/running_and_reviewing.md`](./running_and_reviewing.md) — the submit/watch/review mechanics this
   runbook orchestrates, plus re-ensembling and teardown.
 - [`docs/notebook_runtimes.md`](./notebook_runtimes.md) — per-notebook template mapping, the one-click

@@ -17,8 +17,8 @@ Two facts hold for all of them:
   it just appends rows the views collapse back to one.
 
 The schema below is rendered from a single source of truth,
-[`src/scale_forecasting/registry/ddl.py`](../src/scale_forecasting/registry/ddl.py); the views from
-[`src/scale_forecasting/registry/views.py`](../src/scale_forecasting/registry/views.py).
+[`src/scale_forecasting/registry/ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py); the views from
+[`src/scale_forecasting/registry/views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py).
 `registry/bq.ensure_tables` / `ensure_views` execute exactly what those render.
 
 ## How the tiers link
@@ -143,5 +143,5 @@ so per-fold metrics don't double-count.
 
 See also: [configuration_reference.md](./configuration_reference.md) (the run *is* the config that
 lands in `raw_config`) · [running_and_reviewing.md](./running_and_reviewing.md) (submit, watch, and
-review through these views) · [`registry/ddl.py`](../src/scale_forecasting/registry/ddl.py) /
-[`registry/views.py`](../src/scale_forecasting/registry/views.py) (the source of truth).
+review through these views) · [`registry/ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py) /
+[`registry/views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) (the source of truth).

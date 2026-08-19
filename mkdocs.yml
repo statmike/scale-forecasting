@@ -1,0 +1,121 @@
+site_name: scale-forecasting
+site_description: >-
+  Massively-parallel time-series forecasting on Google Cloud — Spark, Ray, and
+  BigQuery, one config away.
+repo_url: https://github.com/statmike/scale-forecasting
+repo_name: statmike/scale-forecasting
+edit_uri: blob/main/docs/
+docs_dir: docs
+
+# model_template.py is a copy-me starting point, not a page — keep it in the repo (linked to GitHub)
+# but out of the built site so mkdocs-jupyter doesn't render it as a notebook.
+exclude_docs: |
+  model_template.py
+
+theme:
+  name: material
+  features:
+    - navigation.tracking
+    - navigation.top
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          # griffe reads the source statically from src/ — the package is never imported, so the
+          # site builds without the heavy compute backends and independent of the PEP 562 lazy root.
+          paths: [src]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            separate_signature: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+            show_source: true
+            filters: ["!^_"]
+  - mkdocs-jupyter:
+      include_source: true
+      execute: false
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - toc:
+      permalink: true
+      # Match GitHub's heading-anchor algorithm so cross-links resolve identically on GitHub and the
+      # rendered site (handles " — " → "--" and dropped punctuation the same way).
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+
+nav:
+  - Home: README.md
+  - Deploy:
+      - Deploying on GCP: deploying_on_gcp.md
+  - Operate:
+      - Running & reviewing: running_and_reviewing.md
+      - Operations runbook: operations.md
+  - Demo:
+      - Workshop: workshop.md
+      - Notebook tour:
+          - notebooks/01_spark_via_connect.ipynb
+          - notebooks/02_bigquery_native.ipynb
+          - notebooks/03_combo_and_ensemble.ipynb
+          - notebooks/04_ray_on_vertex.ipynb
+          - notebooks/05_spark_naive.ipynb
+          - notebooks/06_spark_multi.ipynb
+          - notebooks/07_scale_review.ipynb
+  - Reference:
+      - Architecture: architecture.md
+      - Configuration: configuration_reference.md
+      - Output schemas: output_schemas.md
+      - Adding a model: adding_a_model.md
+      - Editing code without rebuilding: editing_code_without_rebuilding.md
+      - Version matrix: version_matrix.md
+      - Notebook runtimes: notebook_runtimes.md
+  - SDK: using_the_sdk.md
+  - API Reference:
+      - Overview: api/index.md
+      - Forecaster (SDK): api/sdk.md
+      - run (orchestration): api/main.md
+      - run_cell (worker): api/worker.md
+      - Router: api/router.md
+      - Configuration: api/config.md
+      - Settings: api/settings.md
+      - Errors: api/errors.md
+      - Metrics: api/metrics.md
+      - Backtest: api/backtest.md
+      - Model factory: api/models.md
+      - BaseModel: api/models_base_model.md
+      - Spark core: api/engines_spark_io.md
+      - Ray core: api/engines_ray_io.md
+      - Registry views: api/registry_views.md
+  - Troubleshooting: troubleshooting.md

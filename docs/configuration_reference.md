@@ -49,7 +49,7 @@ BigQuery regardless of this choice):
 
 **`spark_method` — how Spark fans the work out** (all give the *same* forecasts; they differ in the
 unit of parallelism and thus speed). Engines in
-[`engines/`](../src/scale_forecasting/engines/):
+[`engines/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/engines):
 
 | Method | Fan-out unit | Best for | Watch out |
 |--------|-------------|----------|-----------|
@@ -80,7 +80,7 @@ unit of parallelism and thus speed). Engines in
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
 | `level_shift` | `bool` | `false` | *(Reserved — declared but not yet consumed.)* |
 
-**What each option produces** ([`features.py`](../src/scale_forecasting/features.py)):
+**What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py)):
 
 - **`transform`** — reshapes the target before fitting and inverts it on output:
   - `none` — identity (no constraint on `y`).
@@ -116,7 +116,7 @@ for HPO and learned ensembles.
 | `min_train` | `int` | `180` | `> 0` | Minimum training length. |
 | `decision_metric` | see below | `"wape"` | — | Metric folds are judged on. |
 
-**`scheme` — how the training window moves** ([`backtest.py`](../src/scale_forecasting/backtest.py)).
+**`scheme` — how the training window moves** ([`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py)).
 Folds are anchored from the **end** of each series: the latest fold validates on the final `horizon`
 points, and each earlier fold steps its validation window back by `step`. The two schemes differ only
 in where training *starts*:
@@ -134,7 +134,7 @@ sink the run). Features are built once and a **fresh** model is fit per fold, so
 folds and `train_end == val_start` always (no leakage).
 
 **`decision_metric` — what folds are judged on** (definitions in
-[`metrics.py`](../src/scale_forecasting/metrics.py); `err = yhat − y_true`). This single choice drives
+[`metrics.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics.py); `err = yhat − y_true`). This single choice drives
 fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold`.
 
 | Metric | Definition | Notes |
@@ -194,7 +194,7 @@ for `"strategies": ["nnls"]`. Run several at once — each produces its own `ens
 and earns a line on the leaderboard next to the base models.
 
 **What each strategy does** (implementation in
-[`ensembler.py`](../src/scale_forecasting/ensembler.py)):
+[`ensembler.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ensembler.py)):
 
 | Strategy | Kind | How the blend is formed | Needs |
 |----------|------|-------------------------|-------|
@@ -269,7 +269,7 @@ for the proven fixed-size path (no autoscaling spec). See the Ray runtime in
 ```
 
 `theta`/`holtwinters` run on Spark; `arima_plus` runs in BigQuery — both under one `run_id`, in
-parallel. See [`configs/`](../configs) for worked examples (demo and 100k),
+parallel. See [`configs/`](https://github.com/statmike/scale-forecasting/tree/main/configs) for worked examples (demo and 100k),
 [running_and_reviewing.md](./running_and_reviewing.md) to submit and review one, and
 [output_schemas.md](./output_schemas.md) for the tables the run writes to (the whole config lands
 verbatim in `run_registry.raw_config`).
