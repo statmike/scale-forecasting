@@ -5,7 +5,7 @@ This doc is the **rework** path: you've already deployed, and now you need to **
 (pick up a code/infra change), **reset the BigQuery output tables** (clean slate for a re-run), or
 **re-run** a config. Everything here runs from **[Cloud Shell](https://console.cloud.google.com/?cloudshell=true)** —
 short, interactive tasks that fit a thin client. Long, multi-hour runs belong on a persistent VM
-instead ([workshop.md Act 2](./workshop.md#act-2--the-long-ray-run-on-a-persistent-vm-when-the-run-outlasts-cloud-shell)).
+instead ([§4 — Long runs on a persistent VM](#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell)).
 
 ---
 
@@ -43,7 +43,7 @@ df -h $HOME                                     # confirm the space came back
 > **A multi-hour re-run? Don't do it in Cloud Shell.** Cloud Shell idles out (~20 min) and hard-caps
 > a session (~12 h); a dropped tab SIGHUPs the orchestrator that finalizes the run-registry header.
 > For anything long (e.g. the full-suite Ray run), use the persistent VM in
-> [workshop.md Act 2](./workshop.md#act-2--the-long-ray-run-on-a-persistent-vm-when-the-run-outlasts-cloud-shell).
+> [§4 below](#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell).
 
 ---
 
@@ -154,15 +154,192 @@ uv run python -m scale_forecasting.submit --config configs/explode_demo.json --e
 
 > **Long run?** Anything that runs for hours (the full 100k suite, GPU NeuralProphet) must go on the
 > persistent VM, not here — Cloud Shell will drop the orchestrator mid-run and strand the header.
-> See [workshop.md Act 2](./workshop.md#act-2--the-long-ray-run-on-a-persistent-vm-when-the-run-outlasts-cloud-shell).
+> See [§4 — Long runs on a persistent VM](#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell).
+
+---
+
+## 4. Long runs on a persistent VM (when a run outlasts Cloud Shell)
+
+Some runs are **too long to babysit from Cloud Shell** — the full-suite Ray config
+`configs/all_methods_100k_full.json` (100k series × 7 models, **backtest on**, `persist_models`,
+NeuralProphet on T4 GPUs) runs for **hours**. Cloud Shell isn't built for that: it idles out after
+~20 min of inactivity and hard-caps a session at ~12 h, and when the tab closes it SIGHUPs your
+process. The Ray *cluster* survives server-side, but the **orchestrator** (`main.py`) is what polls
+the jobs and **finalizes the run-registry header** (`COMPLETED`/`FAILED`) — kill it and the header is
+stranded `RUNNING` even though the work finished.
+
+The fix is a **persistent GCE VM** that owns the orchestrator process. You drive it entirely from
+Cloud Shell — create it, SSH into it, launch under `tmux`, and detach. The VM keeps running when Cloud
+Shell disconnects; reattach any time to watch. The VM is a thin **driver**, not compute — the fan-out
+happens on the Ray cluster — so a small `e2-standard-4` is plenty.
+
+> **Everything below runs in [Cloud Shell](https://console.cloud.google.com/?cloudshell=true).** Set
+> the same `PROJECT` / `REGION` you deployed with.
+
+**1. One-time: allow IAP to SSH the VM.** The deploy's VPC has **no external IPs** (Cloud NAT for
+egress only; many orgs deny external IPs by policy), so you reach the VM over
+[IAP TCP forwarding](https://cloud.google.com/iap/docs/using-tcp-forwarding), which tunnels SSH from
+IAP's range `35.235.240.0/20`. Add the firewall rule that permits it (idempotent — skip if it exists):
+
+```bash
+PROJECT=gcp-scale-forecasting   # ← your project_id
+REGION=us-central1              # your deploy region
+ZONE=$REGION-a
+
+gcloud compute firewall-rules create scale-forecasting-allow-iap-ssh \
+  --project "$PROJECT" --network scale-forecasting \
+  --direction INGRESS --action ALLOW --rules tcp:22 \
+  --source-ranges 35.235.240.0/20 2>/dev/null \
+  || echo "rule already exists — continuing"
+```
+
+You also need `roles/iap.tunnelResourceAccessor` on the project (the deploy grants the runner SA the
+data roles; this is a *human* role, like the submitter roles — see
+[Human users](./deploying_on_gcp.md#human-users-running-jobs--notebooks)).
+
+**2. Create the VM** — on the deploy's subnet, **no external IP**, running **as the runner SA** so its
+ADC already carries every data/compute permission a run needs (no keys). `cloud-platform` scope lets
+the SA's roles do the gating:
+
+```bash
+gcloud compute instances create sf-runner \
+  --project "$PROJECT" --zone "$ZONE" \
+  --machine-type e2-standard-4 \
+  --image-family debian-12 --image-project debian-cloud \
+  --boot-disk-size 50GB \
+  --network scale-forecasting --subnet scale-forecasting-compute \
+  --no-address \
+  --service-account "scale-forecasting-runner@$PROJECT.iam.gserviceaccount.com" \
+  --scopes cloud-platform
+```
+
+**3. SSH in from Cloud Shell** (the `--tunnel-through-iap` flag is what makes a no-external-IP VM
+reachable):
+
+```bash
+gcloud compute ssh sf-runner --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap
+```
+
+**4. On the VM: install `git` + `uv`, clone, sync.** (First login may prompt to generate an SSH key —
+accept.) The minimal Debian image ships **none of `git`, `tmux` (step 8 needs it), or `uv`**, and the
+`uv` installer drops its binary in `~/.local/bin` which isn't on `PATH` until you source its env — so
+install all three, put `uv` on `PATH`, then clone and sync:
+
+```bash
+# the minimal image ships neither git nor tmux (step 8 needs tmux) — install both:
+sudo apt-get update -qq && sudo apt-get install -y -qq git tmux
+
+# install uv and put it on PATH for THIS shell (its installer prints this same `source` line):
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv --version                    # confirm uv is on PATH
+
+# clone + sync the thin client (Dataproc + Ray submit clients, no pyspark):
+cd ~ && git clone https://github.com/statmike/scale-forecasting.git
+cd ~/scale-forecasting
+uv sync --extra submit
+```
+
+> **Want to run Terraform from this VM too** (e.g. to update the Colab runtime template)? Two extra
+> one-time steps, because the VM is authenticated as the *runner* SA, which has only data/compute
+> roles — **not** the admin permissions Terraform needs:
+>
+> ```bash
+> # a) install Terraform (not preinstalled on the VM):
+> sudo apt-get update -qq && sudo apt-get install -y -qq unzip
+> TF_VERSION=1.9.8; mkdir -p ~/bin && cd ~/bin
+> curl -fsSL -o tf.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+> unzip -o tf.zip && rm tf.zip
+> grep -qxF 'export PATH="$HOME/bin:$PATH"' ~/.bashrc || echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+> export PATH="$HOME/bin:$PATH"; cd ~/scale-forecasting
+>
+> # b) authenticate Terraform AS YOU (the provider reads ADC, not the attached SA):
+> gcloud auth application-default login
+> ```
+>
+> Then follow [`terraform/README.md`](../terraform/README.md) for `init` / `plan` / `apply`. When the
+> apply is done, **revoke the human ADC** so subsequent runs on this VM revert to the runner SA:
+> `gcloud auth application-default revoke`.
+
+**5. Wire the `SF_*` identity** — re-paste the deterministic block from
+[§3 above](#3-re-run-a-config-short-runs-only) (re-set `PROJECT`/`REGION` first — the VM is a new
+shell). The VM runs as the runner SA, so ADC is already in place; these vars just tell the
+orchestrator *what* to talk to.
+
+**6. Clear the OUTPUT tables only** (optional — do this to reset the registry before a clean run).
+The canonical reset — the output-only `TRUNCATE` that **keeps** the seeded source data
+(`source_series_iceberg`), so you don't pay to reseed 100k series — is
+[§2a above](#2a-output-only-reset-keep-the-seed--the-usual-rework).
+
+> This clears **all** runs — run it only for a clean slate; otherwise skip (the orchestrator
+> dedupes-on-read against the deterministic `run_id`, so re-running never double-counts). Do **not**
+> touch `source_series_iceberg`. To drop the seed too (schema change), see
+> [§2b above](#2b-full-reset-drop-everything-incl-the-seed--needs-a-reseed-after).
+
+**7. Preflight offline** (resolves the config + estimates the fan-out, touches no GCP):
+
+```bash
+uv run python -m scale_forecasting.main --config configs/all_methods_100k_full.json --dry-run
+```
+
+**8. Launch under `tmux` and detach.** `tmux` keeps the orchestrator alive on the VM when you close
+Cloud Shell — so it lives to poll the Ray jobs and **finalize the header**. `tee` mirrors the log to a
+file you can tail later:
+
+```bash
+tmux new -s ray100k \
+  'uv run python -m scale_forecasting.main --config configs/all_methods_100k_full.json 2>&1 | tee ~/ray100k.log'
+```
+
+Detach with **`Ctrl-b` then `d`** (two keystrokes: hold Ctrl + tap `b`, release both, then tap `d`) —
+the run keeps going. Now you can safely close Cloud Shell.
+
+**9. Check on it — WITHOUT `tmux attach`.** Prefer watching the **log file** or **BigQuery**, not the
+live tmux viewer. `tmux attach` opens a full-screen console that's easy to get stuck in (`Ctrl-b d` is
+the only clean exit, and stray keys like `:q`/`Ctrl-Z` just jam it) — and you never need it, because
+`tee` already mirrors everything to `~/ray100k.log`. SSH back in from any new Cloud Shell and tail the
+log (exit the tail with a plain **`Ctrl-C`** — it stops the *viewer*, not the run):
+
+```bash
+gcloud compute ssh sf-runner --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap
+tmux ls                          # confirm the ray100k session is still alive
+tail -f ~/ray100k.log            # follow progress; Ctrl-C to stop watching (run keeps going)
+```
+
+The best monitor needs no VM at all — **watch it from BigQuery in the browser** (the `forecast_metadata`
+row-count query from the demo runbook). Re-run it every 5–10 min; climbing counts = healthy (early
+zeros are normal — the Ray cluster is still provisioning, which is what the "uploading package" log
+line means):
+
+```sql
+-- swap gcp-scale-forecasting for your project_id; the run_id is the config's deterministic digest
+SELECT run_id, COUNT(*) AS cells_written, MAX(created_at) AS latest_write
+FROM `gcp-scale-forecasting.scale_forecasting.forecast_metadata`
+WHERE run_id = 'all-methods-100k-full-036327523e0a'
+GROUP BY run_id;
+```
+
+`v_run_summary` flips the header to `COMPLETED` when the orchestrator finalizes it. Because this config
+has **backtest on**, its accuracy columns (`mean_wape`, …) *are* populated.
+
+> **If the tmux viewer traps you** (you attached and can't get out): don't restart Cloud Shell — from
+> a **second** SSH session run `tmux detach-client -t ray100k` to free the stuck viewer from outside,
+> or just close the tab. The run is in tmux on the VM and survives disconnects, closed tabs, and Cloud
+> Shell restarts regardless — none of that can kill it.
+
+**10. Clean up the VM when the run lands** (it bills while it exists, ~cents/hr, but tidy is tidy):
+
+```bash
+gcloud compute instances delete sf-runner --project "$PROJECT" --zone "$ZONE" --quiet
+```
 
 ---
 
 ## See also
 
 - [`terraform/README.md`](../terraform/README.md) — the **fresh deploy** (zero to deployed).
-- [`docs/workshop.md`](./workshop.md) — the **fresh demo** (populate runs → tour notebooks); Act 2 is
-  the durable-VM path for long runs.
+- [`docs/workshop.md`](./workshop.md) — the **fresh demo** (populate runs → tour notebooks). The
+  durable-VM path for long runs now lives here in [§4](#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell).
 - [`docs/running_and_reviewing.md`](./running_and_reviewing.md) — submit / watch / review mechanics and
   the `SF_*` reference.
 - [`docs/deploying_on_gcp.md`](./deploying_on_gcp.md#human-users-running-jobs--notebooks) — the human

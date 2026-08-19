@@ -35,6 +35,15 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
   `code_bucket`, and (for the private path) `network_attachment_id` — `RayInfra.from_terraform_outputs()`
   reads them for you (see notebook 04).
 
+  > **No Terraform state handy?** These values are also **deterministic from your `project_id` +
+  > `region`** — the deployment names everything by convention — so a Cloud Shell session with neither
+  > the Terraform directory nor its state can still derive the full `SF_*` set (including the Ray
+  > extras) from those two variables. The copy-paste convention block lives in the runbooks that need
+  > it offline: [workshop.md Act 1](./workshop.md#act-1--populate-the-run-history-at-100k-cloud-shell-before-the-workshop)
+  > (demo) and [operations.md §3](./operations.md#3-re-run-a-config-short-runs-only) (rework). Only
+  > override defaults (dataset/bucket/connection/subnet names) break the convention — then read the
+  > exact `terraform output` values instead.
+
 - For submitting (not for reviewing), install the client deps. The lean, disk-light choice is the
   `[submit]` extra — `uv sync --extra submit` — the Dataproc **and** Ray submit clients with **no**
   pyspark, so it fits a thin client like Cloud Shell (pyspark's ~300MB of JARs are only needed for
