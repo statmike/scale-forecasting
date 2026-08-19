@@ -237,10 +237,23 @@ knobs only matter when `python_runtime="ray"`.
 | `ray_gpu_machine_type` | `str` | `"n1-standard-8"` | — | GPU worker-pool type (must be N1 for T4). |
 | `accelerator_count` | `int` | `1` | T4 ∈ `{1,2,4}` | GPUs per GPU worker node. |
 | `ray_target_cells_per_slot` | `int` | `8` | `> 0` | Cells one worker slot chews before a node is added. |
-| `ray_max_nodes` | `int` | `16` | `> 0` | Hard ceiling on cluster node count. |
+| `ray_max_nodes` | `int` | `16` | `> 0` | Shared per-pool ceiling; the fallback when a pool's own max is unset. |
+| `ray_autoscale` | `bool` | `true` | — | Autoscale each worker pool between its min/max (default). `false` restores fixed-size sizing (the derived `node_count`, no autoscaling spec). |
+| `ray_cpu_min_nodes` | `int` | `1` | `> 0` | CPU pool floor. Low = shrink when the queue drains. |
+| `ray_cpu_max_nodes` | `int` \| `null` | `null` | `> 0` | CPU pool ceiling; `null` falls back to `ray_max_nodes`. Raise to grow under load. |
+| `ray_gpu_min_nodes` | `int` | `1` | `> 0` | GPU pool floor. Low = shrink idle (expensive) T4s. |
+| `ray_gpu_max_nodes` | `int` \| `null` | `null` | `> 0` | GPU pool ceiling; `null` falls back to `ray_max_nodes`. Cap independently for cost. |
 | `gpu_calibration_samples` | `int` | `3` | `> 0` | Series to profile for auto `gpu_fraction`. |
 | `gpu_safety_margin` | `float` | `1.3` | `> 1.0` | Headroom multiplier on measured peak GPU memory. |
 | `ray_read_mode` | `"driver_collect"` \| `"ray_data"` | `"driver_collect"` | — | Ray source reader: the proven Storage Read client, or `ray.data.read_bigquery` (same Storage Read API, opt-in). |
+
+**Autoscaling (default):** each Ray worker pool scales between its own `[min, max]`; a `null` pool
+max resolves to `ray_max_nodes`. Config validation requires `min ≤ resolved max` per pool. The
+*initial* pool size stays a deterministic function of the config (fan-out ÷
+`ray_target_cells_per_slot`, clamped into the bounds), so the run remains reproducible — the whole
+spec is hashed into `run_id` and stamped to `run_registry.job_telemetry`. Set `ray_autoscale=false`
+for the proven fixed-size path (no autoscaling spec). See the Ray runtime in
+[architecture.md](./architecture.md).
 
 ## A minimal config
 

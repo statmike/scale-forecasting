@@ -56,7 +56,7 @@ There are three ways a run begins, all converging on the same engines.
 |-----------|------|------------|
 | `main.run(cfg)` | [`main.py`](../src/scale_forecasting/main.py) | **The spine.** In-process orchestrator — owns the `run_id` and the header, launches the Python runtime and BigQuery in parallel, runs ensembles at the end. |
 | `submit` / `submit_multi` | [`submit.py`](../src/scale_forecasting/submit.py) | Submit-side launcher for **Spark**: zip the code, stage the config to GCS, build + submit a Dataproc Serverless batch, stamp telemetry back. |
-| `ray_submit` | [`ray_submit.py`](../src/scale_forecasting/ray_submit.py) | Submit-side launcher for **Ray**: plan a fixed-size cluster, create it (with region fallback), submit the Ray job, poll, tear down. |
+| `ray_submit` | [`ray_submit.py`](../src/scale_forecasting/ray_submit.py) | Submit-side launcher for **Ray**: plan a per-pool autoscaling cluster, create it (with region fallback), submit the Ray job, poll, tear down. |
 | `playground` | [`playground.py`](../src/scale_forecasting/playground.py) | Local single-cell path — one `run_cell` on the driver, no cluster, no registry. The fastest way to see a model run. |
 
 `main.run` does the routing ([`main.py:173`](../src/scale_forecasting/main.py)):
@@ -129,9 +129,12 @@ fan-out mechanism differs. `run()` ([`ray_engine.py:223`](../src/scale_forecasti
 read the panel to the driver → split models into a **GPU pool** (NeuralProphet) and a **CPU pool**
 (everything else) → calibrate the T4 `gpu_fraction` → chunk cells → fan one `@ray.remote` task per
 chunk (`num_gpus=fraction` for GPU cells, `num_cpus=1` otherwise) → `ray.get` → aggregate → update
-header. The cluster is **fixed-size** (planned up front by
-[`ray_io.plan_cluster`](../src/scale_forecasting/engines/ray_io.py)), not autoscaling — a forecast's
-fan-out is known before it starts.
+header. Each worker pool **autoscales** by default between an independent `[min, max]`
+([`ray_io.plan_cluster`](../src/scale_forecasting/engines/ray_io.py) resolves the bounds;
+`ray_submit` attaches a Vertex `AutoscalingSpec` per pool) — so the CPU pool grows to work through
+the queue and the expensive T4 pool shrinks when idle. Determinism is preserved a level up: the
+*initial* size is a pure function of the fan-out (clamped into the bounds) and the whole spec is
+hashed into `run_id` and stamped to telemetry. `ray_autoscale=false` restores the fixed-size path.
 
 ### BigQuery-native — SQL only
 

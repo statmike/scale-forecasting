@@ -18,7 +18,7 @@ What :func:`submit_ray` does:
 2. **Stage the run config** — write the validated config to ``gs://<code>/runs/<run_id>.json`` and
    pass it as ``--config-uri`` (the lossless reproducibility record, G3 — same contract as Spark).
 3. **Provision (ephemeral default) or target (reuse opt-in) the cluster** — ephemeral:
-   ``create_ray_cluster`` at the planned fixed size, run, then ``delete_ray_cluster`` in a
+   ``create_ray_cluster`` from the planned spec, run, then ``delete_ray_cluster`` in a
    ``finally`` (teardown guaranteed even on failure); reuse: ``compute.ray_cluster_name`` /
    ``cluster_name=`` targets a standing cluster by name and skips both create and delete.
 4. **Submit the on-cluster driver** — a Ray Job via
@@ -457,7 +457,8 @@ def _resolve_regions(cfg: RunConfig, settings: Settings) -> list[str]:
 def _create_cluster(
     plan: ray_io.RayClusterPlan, infra: RayInfra, name: str
 ) -> str:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
-    """Create the fixed-size Vertex Ray cluster and return its ``cluster_resource_name``.
+    """Create the Vertex Ray cluster (autoscaling per pool by default) and return its
+    ``cluster_resource_name``.
 
     Head node is a single small CPU box (no accelerator, never autoscaled); workers are the planned
     GPU/CPU pools (:func:`_worker_resources`), each with a Vertex ``AutoscalingSpec`` by default
@@ -568,7 +569,7 @@ def _create_cluster_across_regions(
     settings: Settings,
     regions: list[str],
 ) -> tuple[str, str]:  # pragma: no cover - orchestrates live Vertex I/O; @gpu smoke exercises it
-    """Create the fixed-size cluster, walking ``regions`` in order until one has T4 capacity.
+    """Create the cluster, walking ``regions`` in order until one has T4 capacity.
 
     Returns ``(cluster_resource_name, region)`` for the region that succeeded. On a *regional
     capacity* failure (:func:`_is_capacity_error`) the stocked-out attempt's (deterministic)

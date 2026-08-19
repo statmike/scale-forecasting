@@ -180,8 +180,8 @@ The `apis` module enables exactly these, grouped by what they're for:
 **Python compute (one runtime per run)**
 - **Dataproc Serverless** (`dataproc.googleapis.com`) — the Spark engine and the seed batch. No
   cluster to manage; you submit a batch and it runs.
-- **Vertex AI** (`aiplatform.googleapis.com`) — Ray on Vertex. The runner SA creates a fixed-size Ray
-  cluster (a Vertex `PersistentResource`), runs the job, and tears it down.
+- **Vertex AI** (`aiplatform.googleapis.com`) — Ray on Vertex. The runner SA creates an autoscaling
+  Ray cluster (a Vertex `PersistentResource`), runs the job, and tears it down.
 
 **Networking for that compute**
 - **Compute Engine** (`compute.googleapis.com`) — the networking substrate: the VPC, subnet,
@@ -361,7 +361,7 @@ write access to the code bucket the submitter stages the package zip into:
 |------|-----------|-----|
 | `roles/dataproc.editor` | project | Submit Dataproc Serverless batches (`submit.py`, all three Spark methods). |
 | `roles/aiplatform.user` | project | Submit Ray-on-Vertex jobs (`ray_submit.py`). |
-| **`sfRayClusterManager`** | project | Create + delete the fixed-size Ray cluster `ray_submit` stands up (the same custom role the runner uses). Ray only. |
+| **`sfRayClusterManager`** | project | Create + delete the autoscaling Ray cluster `ray_submit` stands up (the same custom role the runner uses). Ray only. |
 | `roles/iam.serviceAccountUser` | the **compute** SA | The batch/cluster runs **as** the compute SA; submitting a job that impersonates it requires this. |
 | `roles/storage.objectAdmin` | the **code** bucket | The submitter stages the code zip + launcher to `gs://<project>-code/` before submitting. Bucket-scoped, not project-wide. |
 | `roles/bigquery.jobUser` + `roles/bigquery.dataViewer` | project | Resolve the config and review results (`v_run_summary` / `v_model_leaderboard`) after the run lands. |

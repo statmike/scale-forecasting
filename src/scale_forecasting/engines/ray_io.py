@@ -197,7 +197,7 @@ def _measure_np_peak_bytes(
         return 0
 
 
-# --- pure: deterministic (fixed-size) cluster sizing (D17) ---------------------
+# --- pure: deterministic per-pool autoscaling cluster sizing (D17) -------------
 
 
 @dataclass(frozen=True)

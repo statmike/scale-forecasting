@@ -198,7 +198,7 @@ Dataproc **Spark Connect** endpoint; [`02_bigquery_native`](./notebooks/02_bigqu
 runs the BigQuery-native models; [`03_combo_and_ensemble`](./notebooks/03_combo_and_ensemble.ipynb)
 runs Spark ∥ BigQuery under one `run_id` with ensembles, then reviews base + ensemble models side by
 side on `v_model_leaderboard`; [`04_ray_on_vertex`](./notebooks/04_ray_on_vertex.ipynb) runs the
-Python-runtime models on a fixed-size Ray-on-Vertex cluster ∥ the BigQuery natives (job submission
+Python-runtime models on an autoscaling Ray-on-Vertex cluster ∥ the BigQuery natives (job submission
 works from any authenticated client — local or in-GCP — because the cluster is provisioned on a
 PSC-I network attachment with a dashboard-capable head node, wired by the Terraform network module).
 
@@ -222,30 +222,18 @@ verified against. See [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md)
 
 ## Documentation
 
-- [`docs/architecture.md`](./docs/architecture.md) — how the system works: the module-calling-module
-  call tree from entrypoints down to the one unit of work, how a model file registers and is
-  discovered, and how each runtime (Spark explode/multi/naive, Ray, BigQuery-native) fans the work
-  out — with links into the code throughout. Start here to read the codebase.
-- [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md) — submit a run (Spark / Ray /
-  BigQuery), watch it land, review the leaderboard, and re-ensemble a completed run — the full
-  operator loop with every entrypoint and its flags.
-- [`docs/configuration_reference.md`](./docs/configuration_reference.md) — every config field, its
-  type, default, and constraint, section by section (the run *is* the config).
-- [`docs/output_schemas.md`](./docs/output_schemas.md) — the output tables' layout: every column of
-  `run_registry` / `forecast_metadata` / `forecast_predictions` / `backtest_oof`, what it collects,
-  and the two analyst views over them.
-- [`docs/version_matrix.md`](./docs/version_matrix.md) — the Python / Spark / Ray version of every
-  surface (batch, Spark Connect, Ray, container, Colab) and **why the whole system is pinned to Python
-  3.11**; the runtime 2.3-vs-3.0 Spark Connect decision.
-- [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md) — which Python version each notebook
-  needs and how it behaves, locally (ADC) and on Colab Enterprise, plus the single runtime template
-  Terraform ships, the one-click open path, and the headless acceptance harness.
-- [`docs/editing_code_without_rebuilding.md`](./docs/editing_code_without_rebuilding.md) — why a code
-  edit ships on the next run with **no** image rebuild, and the loop you actually use.
-- [`docs/adding_a_model.md`](./docs/adding_a_model.md) — add a model in one file.
-- [`docs/using_the_sdk.md`](./docs/using_the_sdk.md) — the Python SDK: the `Forecaster` easy path,
-  and how to drive Spark/Ray directly (bypassing the SDK) while reusing the same model machinery.
-- [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) — a reviewer's guide to the Terraform.
+Full map with one-line pointers: **[`docs/README.md`](./docs/README.md)**. The essentials:
+
+- **Read the codebase** → [`docs/architecture.md`](./docs/architecture.md) — the
+  module-calling-module call tree, from entrypoints to the one unit of work.
+- **Run and review** → [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md) — submit
+  (Spark / Ray / BigQuery), watch it land, review the leaderboard, re-ensemble.
+- **Use it from Python** → [`docs/using_the_sdk.md`](./docs/using_the_sdk.md) — the `Forecaster`
+  easy path and the direct Spark/Ray path.
+- **Every config knob** → [`docs/configuration_reference.md`](./docs/configuration_reference.md).
+- **Deploy** → [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) +
+  [`terraform/README.md`](./terraform/README.md).
+- **When something breaks** → [`docs/troubleshooting.md`](./docs/troubleshooting.md).
 
 ## Deploy on GCP
 

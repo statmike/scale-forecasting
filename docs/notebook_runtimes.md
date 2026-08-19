@@ -38,17 +38,11 @@ per-notebook mapping.
 
 ### The `SF_*` identity (read by `Settings.resolve()`)
 
-Source of truth: [`src/scale_forecasting/settings.py`](../src/scale_forecasting/settings.py). Every
-value comes straight from `terraform output` (see
-[running_and_reviewing.md](./running_and_reviewing.md#prerequisites)).
-
-| Variable | Required | Default |
-|----------|----------|---------|
-| `SF_PROJECT_ID` | yes | — |
-| `SF_CONNECTION` | yes | — |
-| `SF_WAREHOUSE_URI` | yes | — |
-| `SF_DATASET_ID` | no | `scale_forecasting` |
-| `SF_REGION` | no | `us-central1` |
+The five `SF_*` variables (and how to populate them from `terraform output`) are documented once, in
+[running_and_reviewing.md](./running_and_reviewing.md#prerequisites). Notebooks read the identical
+identity via `Settings.resolve()` — either export them before launching, or set them in a first cell.
+Colab Enterprise templates can bake them in, so no environment cell is needed (see
+[One-click open](#one-click-open--run-no-environment-cell) below).
 
 ## Per-notebook mapping
 

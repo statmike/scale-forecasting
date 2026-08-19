@@ -301,22 +301,9 @@ uv sync --extra submit
 > apply is done, **revoke the human ADC** so subsequent runs on this VM revert to the runner SA:
 > `gcloud auth application-default revoke`.
 
-**5. Wire the `SF_*` identity** — the same deterministic block as Act 1 (the VM runs as the runner SA,
-so ADC is already in place; these vars just tell the orchestrator *what* to talk to):
-
-```bash
-PROJECT=gcp-scale-forecasting   # ← your project_id (re-set on the VM — a new shell)
-REGION=us-central1
-export SF_PROJECT_ID="$PROJECT"
-export SF_REGION="$REGION"
-export SF_DATASET_ID="scale_forecasting"
-export SF_CONNECTION="$PROJECT.$REGION.sf-iceberg"
-export SF_WAREHOUSE_URI="gs://$PROJECT-warehouse/warehouse"
-export SF_CODE_BUCKET="$PROJECT-code"
-export SF_COMPUTE_SA="scale-forecasting-compute@$PROJECT.iam.gserviceaccount.com"
-export SF_CONTAINER_IMAGE="$REGION-docker.pkg.dev/$PROJECT/scale-forecasting/spark-runtime:latest"
-export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJECT/regions/$REGION/subnetworks/scale-forecasting-compute"
-```
+**5. Wire the `SF_*` identity** — re-paste the exact same deterministic block from Act 1 above
+(re-set `PROJECT`/`REGION` first — the VM is a new shell). The VM runs as the runner SA, so ADC is
+already in place; these vars just tell the orchestrator *what* to talk to.
 
 **6. Clear the OUTPUT tables only** (optional — do this to reset the registry before a clean run).
 The canonical reset — the output-only `TRUNCATE` that **keeps** the seeded source data
@@ -519,7 +506,7 @@ be sure.)
 ## Cost + timing at a glance
 
 - **Act 1 (four 100k runs):** each Spark method is a Dataproc Serverless batch (single-digit dollars,
-  minutes); the Ray run stands up and tears down a fixed-size cluster. Run once before the workshop and
+  minutes); the Ray run stands up and tears down an autoscaling cluster. Run once before the workshop and
   the results persist in the registry — Act 4 just reads them.
 - **Act 4 (notebooks):** the demo-scale notebooks (100 series or fewer) are cents. `07_scale_review`
   runs no compute — it only queries views.

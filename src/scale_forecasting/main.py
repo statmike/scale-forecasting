@@ -32,7 +32,7 @@ cells errored) to the orchestrator, so a SUCCEEDED batch is reported COMPLETED; 
 stays visible on ``v_model_leaderboard`` (a failed model → NULL metric AVGs).
 
 Both Python runtimes are supported and dispatched by ``cfg.python_runtime``: ``"spark"`` launches a
-Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`), ``"ray"`` a fixed-size
+Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`), ``"ray"`` an autoscaling
 Vertex Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`) — either way on the worker
 thread, in contributor mode, in parallel with the in-process BigQuery engine under one run_id.
 
@@ -120,7 +120,7 @@ def _launch_python_runtime(
     """Run the Python-runtime models on the runtime ``cfg.python_runtime`` picks (contributor mode).
 
     The one dispatch point between the two Python runtimes, called on :func:`run`'s worker thread:
-    ``"ray"`` → a fixed-size Vertex Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`);
+    ``"ray"`` → an autoscaling Ray cluster (:func:`~scale_forecasting.ray_submit.submit_ray`);
     otherwise → a Dataproc Serverless batch (:func:`~scale_forecasting.submit.submit_batch`) as the
     ``plan.spark_method`` engine. Both run ``plan.python_models`` with ``manage_header=False`` (this
     orchestrator owns the single shared header) and block until terminal, so the caller joins one

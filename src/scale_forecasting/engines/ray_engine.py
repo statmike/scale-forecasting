@@ -11,8 +11,8 @@ the per-cell work (:func:`~scale_forecasting.engines.spark_io.run_group`), the e
 into a GPU pool (NeuralProphet — ``family == "deep_learning"``) and a CPU pool (everything else).
 GPU cells run in ``@ray.remote(num_gpus=<fraction>)`` tasks that *pack several onto one T4* — the
 fractional-GPU sharing Spark can't do — while CPU cells run in ``@ray.remote(num_cpus=1)`` tasks.
-Both pools run the exact same chunk runner. The fixed (non-autoscaling) cluster they land on is
-sized at submit time by :func:`.ray_io.plan_cluster` (D17); this driver just fans work across
+Both pools run the exact same chunk runner. The cluster they land on autoscales per pool by default
+(D17), planned at submit time by :func:`.ray_io.plan_cluster`; this driver just fans work across
 whatever the cluster is.
 
 Runs on the Ray cluster head via :mod:`~scale_forecasting.ray_entry` (the Jobs API entrypoint).
