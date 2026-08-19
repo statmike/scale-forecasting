@@ -170,7 +170,13 @@ def _launch_python_runtime(
         )
 
 
-def run(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None) -> str:
+def run(
+    cfg: RunConfig,
+    *,
+    dry_run: bool = False,
+    spark: object | None = None,
+    settings: Settings | None = None,
+) -> str:
     """Execute one run: Spark + BigQuery-native in parallel under one run_id; return that run_id.
 
     Resolves the plan (:func:`_plan`, which rejects Spark ``multi``), then:
@@ -193,6 +199,11 @@ def run(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None) -
     demo path — using the identical engine code (the injectable-session seam, G1). The default
     (``None``) keeps the remote-batch behavior every CLI/Composer caller relies on. The BigQuery
     engine still runs in parallel on the main thread under the one shared run_id.
+
+    ``settings`` optionally injects a resolved :class:`Settings` (the GCP infra identity); the
+    default (``None``) resolves it from the ``SF_*`` environment exactly as before, so every
+    existing caller is unchanged. The SDK ``Forecaster`` uses this to thread an explicit identity
+    instead of relying on process env.
 
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows (§3.4).
@@ -219,7 +230,7 @@ def run(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None) -
         )
         return run_id
 
-    settings = Settings.resolve()
+    settings = settings or Settings.resolve()
     _log.info(
         "run %s start: python=%s (%s) bq=%s",
         run_id,
@@ -240,7 +251,7 @@ def run(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None) -
 
     # Launch the remote Python-runtime job on a worker thread (it blocks until terminal + stamps
     # telemetry in-thread), and run the in-process BigQuery engine on the main thread so the two
-    # overlap. The runtime — Spark batch or fixed-size Vertex Ray cluster — is chosen by
+    # overlap. The runtime — Spark batch or autoscaling Vertex Ray cluster — is chosen by
     # cfg.python_runtime; both take the same contributor-mode contract (models subset + shared
     # header owned here), so Ray ∥ BigQuery works under one run_id exactly like Spark ∥ BigQuery.
     with ThreadPoolExecutor(max_workers=1) as pool:

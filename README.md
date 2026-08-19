@@ -243,6 +243,8 @@ verified against. See [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md)
 - [`docs/editing_code_without_rebuilding.md`](./docs/editing_code_without_rebuilding.md) — why a code
   edit ships on the next run with **no** image rebuild, and the loop you actually use.
 - [`docs/adding_a_model.md`](./docs/adding_a_model.md) — add a model in one file.
+- [`docs/using_the_sdk.md`](./docs/using_the_sdk.md) — the Python SDK: the `Forecaster` easy path,
+  and how to drive Spark/Ray directly (bypassing the SDK) while reusing the same model machinery.
 - [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) — a reviewer's guide to the Terraform.
 
 ## Deploy on GCP
