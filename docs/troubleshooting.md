@@ -21,6 +21,18 @@ issue, not the client's location.
 **Fix:** ensure the Terraform network attachment is applied and `compute.ray_head_machine_type` is
 `n1-standard-16` or larger. See [deploying_on_gcp.md](./deploying_on_gcp.md).
 
+### Ray job fails at env setup — `No matching distribution for torch==…+cu126`
+**Symptom:** the cluster comes up and the job is submitted, but it goes straight to `FAILED` with
+`runtime_env setup failed` and, in the job logs, `ERROR: No matching distribution found for
+torch==2.13.0+cu126`. No cells are written.
+**Cause:** the x86_64/linux `torch` pin is a CUDA local build (`+cu126`) that exists **only** on the
+PyTorch wheel index, not PyPI. The Ray `runtime_env` pip install needs the same `--extra-index-url`
+the container image build uses; without it, pip can't resolve the pinned wheel and the whole job
+dies before any work runs.
+**Fix:** handled — `build_runtime_env()` leads the pip list with
+`--extra-index-url https://download.pytorch.org/whl/cu126` (kept in lockstep with `docker/Dockerfile`,
+with PyPI still primary). If you re-pin torch to a different CUDA minor, update the URL in both places.
+
 ### Ray driver OOM — no traceback, killed at "uploading package"
 **Symptom:** the run dies with no Python traceback, often right after logging the package upload.
 **Cause:** the driver/orchestrator RSS outgrew a small VM. An OOM-kill leaves no traceback.
