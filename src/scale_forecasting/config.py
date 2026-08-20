@@ -37,6 +37,16 @@ CALCULATED_STRATEGIES = frozenset({"mean", "median", "inverse_error"})
 LEARNED_STRATEGIES = frozenset({"nnls", "ridge", "xgb"})
 Strategy = Literal["mean", "median", "inverse_error", "nnls", "ridge", "xgb"]
 
+# Per-family compute vocabulary (kept as Literals to match python_runtime/spark_deps idiom).
+# ``ComputeFamily`` mirrors ``models.base_model.Family`` *minus* "native": native models always run
+# in BigQuery (their natural engine), so they are never given a per-family runtime choice.
+ComputeFamily = Literal["statistical", "ml", "deep_learning"]
+Runtime = Literal["spark", "ray"]
+SparkMode = Literal["serverless", "cluster"]
+Hardware = Literal["cpu", "gpu"]
+GpuType = Literal["T4", "L4"]
+EnsembleMode = Literal["barrier", "microbatch"]
+
 
 # --- nested config blocks ------------------------------------------------------
 
@@ -140,6 +150,82 @@ class EnsembleConfig(BaseModel):
         return data
 
 
+class FamilyCompute(BaseModel):
+    """A sparse per-family compute override, layered over the flat `ComputeConfig` defaults.
+
+    Every field is optional: an unset field inherits the run-level default (``python_runtime``,
+    Spark ``serverless``, CPU, the flat ``gpu_type``), so a config sets only what a family needs to
+    differ on. There is no ``native`` family here — native models always run in BigQuery. See
+    `RunConfig.resolve_family_compute` for how these layer onto the defaults; the block is inert
+    until the DAG orchestrator consumes it.
+
+    Hardware constraints (validated): only the ``deep_learning`` family may request a GPU (enforced
+    where the family key is known, in `ComputeConfig`); Dataproc Serverless offers **L4 only** (no
+    T4 — use ``spark_mode="cluster"`` or ``runtime="ray"`` for T4); Spark-only fields
+    (``spark_mode``/``spark_cluster_name``) are rejected on ``runtime="ray"``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    runtime: Runtime | None = None
+    spark_mode: SparkMode | None = None
+    # Reuse an existing Dataproc cluster by name (requires spark_mode="cluster"). None = ephemeral
+    # per-run cluster (create → submit → delete), mirroring the Ray cluster lifecycle.
+    spark_cluster_name: str | None = None
+    hardware: Hardware | None = None
+    gpu_type: GpuType | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> FamilyCompute:
+        if self.runtime == "ray" and (
+            self.spark_mode is not None or self.spark_cluster_name is not None
+        ):
+            raise ValueError(
+                "spark_mode/spark_cluster_name are only valid when runtime is 'spark'"
+            )
+        if self.spark_cluster_name is not None and self.spark_mode not in (None, "cluster"):
+            raise ValueError("spark_cluster_name requires spark_mode='cluster'")
+        if self.spark_mode == "serverless" and self.gpu_type == "T4":
+            raise ValueError(
+                "Dataproc Serverless supports L4 only, not T4; "
+                "use spark_mode='cluster' or runtime='ray' for T4"
+            )
+        if self.hardware == "cpu" and self.gpu_type is not None:
+            raise ValueError(
+                "gpu_type is set but hardware='cpu'; drop gpu_type or set hardware='gpu'"
+            )
+        return self
+
+
+class EnsembleCompute(BaseModel):
+    """Compute for the ensemble DAG node — its own runtime and trigger mode.
+
+    Distinct from `EnsembleConfig` (which selects the ensemble *strategies*): this picks *where* and
+    *when* the ensemble runs. ``mode="barrier"`` ensembles once after every base model finishes;
+    ``mode="microbatch"`` ensembles each series as soon as its upstream base models complete. Inert
+    until the DAG orchestrator consumes it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    runtime: Runtime = "spark"
+    mode: EnsembleMode = "barrier"
+    spark_mode: SparkMode | None = None
+    spark_cluster_name: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> EnsembleCompute:
+        if self.runtime == "ray" and (
+            self.spark_mode is not None or self.spark_cluster_name is not None
+        ):
+            raise ValueError(
+                "spark_mode/spark_cluster_name are only valid when runtime is 'spark'"
+            )
+        if self.spark_cluster_name is not None and self.spark_mode not in (None, "cluster"):
+            raise ValueError("spark_cluster_name requires spark_mode='cluster'")
+        return self
+
+
 class ComputeConfig(BaseModel):
     """Runtime scale, dependency delivery, and cost guardrails."""
 
@@ -240,6 +326,28 @@ class ComputeConfig(BaseModel):
     #                              known-good reader stays the default until a live Ray run vets it.
     ray_read_mode: Literal["driver_collect", "ray_data"] = "driver_collect"
 
+    # --- per-family compute (the multi-runtime job DAG) ------------------------
+    # Sparse overrides layered over the flat defaults above: each family (statistical/ml/
+    # deep_learning) may pick its own runtime + hardware; an unset family inherits the run-level
+    # python_runtime / Spark-serverless / CPU defaults. Native models are never here — they always
+    # run in BigQuery. ``ensemble`` runs the ensemble DAG node on its own runtime with a
+    # barrier|microbatch trigger. Both are inert until the DAG orchestrator consumes them; a config
+    # that omits them behaves exactly as before. See RunConfig.resolve_family_compute.
+    families: dict[ComputeFamily, FamilyCompute] = Field(default_factory=dict)
+    ensemble: EnsembleCompute = Field(default_factory=EnsembleCompute)
+
+    @model_validator(mode="after")
+    def _check_families(self) -> ComputeConfig:
+        # GPU is a deep_learning-only capability; statistical/ml are CPU work. The family key is
+        # known here (unlike inside FamilyCompute), so this is where that constraint is enforced.
+        for fam, fc in self.families.items():
+            if fam != "deep_learning" and (fc.hardware == "gpu" or fc.gpu_type is not None):
+                raise ValueError(
+                    f"family '{fam}' cannot use a GPU (hardware='gpu'/gpu_type set); "
+                    "only the deep_learning family supports GPU"
+                )
+        return self
+
     @model_validator(mode="after")
     def _check_gpu_fraction(self) -> ComputeConfig:
         if isinstance(self.gpu_fraction, float) and not (0.0 < self.gpu_fraction <= 1.0):
@@ -263,6 +371,27 @@ class ComputeConfig(BaseModel):
                     f"({resolved_max}); lower the min or raise ray_{pool}_max_nodes/ray_max_nodes"
                 )
         return self
+
+
+# --- resolved per-family compute ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class ResolvedFamilyCompute:
+    """One family's effective compute after layering its override on the flat defaults (pure).
+
+    The fully-resolved plan the DAG orchestrator acts on: ``runtime`` is where the family's job
+    runs; ``spark_mode``/``spark_cluster_name`` are ``None`` unless ``runtime == "spark"``;
+    ``gpu_type`` is ``None`` unless ``hardware == "gpu"``. Produced by
+    `RunConfig.resolve_family_compute`.
+    """
+
+    family: str
+    runtime: str
+    spark_mode: str | None
+    spark_cluster_name: str | None
+    hardware: str
+    gpu_type: str | None
 
 
 # --- top-level config ----------------------------------------------------------
@@ -334,7 +463,72 @@ class RunConfig(BaseModel):
                     self, "ensemble", self.ensemble.model_copy(update={"strategies": kept})
                 )
 
+        # 4. Harden every per-family compute override by resolving it now, so an incoherent
+        #    combination the per-block validator can't see (e.g. a T4 GPU inherited onto Dataproc
+        #    Serverless) fails at load rather than at submit. Resolution is pure; the DAG
+        #    orchestrator reuses the same resolver, so a validated config needs no re-check.
+        for fam in self.compute.families:
+            self.resolve_family_compute(fam)
+
         return self
+
+    def resolve_family_compute(self, family: str) -> ResolvedFamilyCompute:
+        """Resolve one family's effective compute by layering its override on the flat defaults.
+
+        Pure and deterministic — the single resolver the DAG orchestrator also uses, so a config
+        validated at load needs no re-check at submit. ``family`` is a compute family
+        (``statistical``/``ml``/``deep_learning``); ``native`` has no compute choice (it always runs
+        in BigQuery) and raises. Resolution rules for unset override fields:
+
+        * ``runtime`` → ``python_runtime``.
+        * ``hardware`` → ``gpu`` only for ``deep_learning`` (when ``compute.use_gpu`` or an explicit
+          override); every other family is ``cpu``.
+        * Spark: ``spark_mode`` → ``serverless``; ``spark_cluster_name`` applies only under
+          ``cluster``. On ``ray`` both are ``None``.
+        * ``gpu_type`` (when ``hardware == "gpu"``) → the flat ``compute.gpu_type``, but **forced to
+          L4** on Dataproc Serverless (no T4 there). A T4 inherited onto Serverless raises.
+        """
+        if family == "native":
+            raise ValueError(
+                "native models always run in BigQuery; they have no per-family compute"
+            )
+        ov = self.compute.families.get(family) or FamilyCompute()
+        runtime = ov.runtime or self.python_runtime
+
+        if family == "deep_learning":
+            hardware = ov.hardware or ("gpu" if self.compute.use_gpu else "cpu")
+        else:
+            hardware = "cpu"
+
+        if runtime == "spark":
+            spark_mode = ov.spark_mode or "serverless"
+            spark_cluster_name = ov.spark_cluster_name if spark_mode == "cluster" else None
+        else:
+            spark_mode = None
+            spark_cluster_name = None
+
+        gpu_type: str | None
+        if hardware == "gpu":
+            if runtime == "spark" and spark_mode == "serverless":
+                if ov.gpu_type == "T4":
+                    raise ValueError(
+                        f"family '{family}': Dataproc Serverless supports L4 only, not T4; "
+                        "use spark_mode='cluster' or runtime='ray' for T4"
+                    )
+                gpu_type = "L4"
+            else:
+                gpu_type = ov.gpu_type or self.compute.gpu_type
+        else:
+            gpu_type = None
+
+        return ResolvedFamilyCompute(
+            family=family,
+            runtime=runtime,
+            spark_mode=spark_mode,
+            spark_cluster_name=spark_cluster_name,
+            hardware=hardware,
+            gpu_type=gpu_type,
+        )
 
     def with_series_limit(self, n_series: int | None) -> RunConfig:
         """Return a copy with ``data.series_limit`` overridden (``self`` if ``n_series`` is None).
