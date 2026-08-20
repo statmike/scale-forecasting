@@ -17,8 +17,8 @@ from the real submission. The native command references the staged GCS artifacts
 byte-faithful to the exact batch; the universal command reproduces the config-driven run with the
 launcher's current code.
 
-Public surface: ``LaunchCommands``, ``build_driver_args``, ``build_spark_commands``,
-``build_ray_commands``, ``shell_join``.
+Public surface: ``LaunchCommands``, ``build_driver_args``, ``build_main_command``,
+``build_spark_commands``, ``build_ray_commands``, ``shell_join``.
 """
 
 from __future__ import annotations
@@ -132,6 +132,19 @@ def build_spark_commands(
         universal=shell_join(universal_argv),
         native=shell_join(gcloud),
     )
+
+
+def build_main_command(config_uri: str) -> LaunchCommands:
+    """The orchestrator command that reproduces a full run from its staged config (universal-only).
+
+    ``python -m scale_forecasting.main --config-uri gs://…/<run_id>.json`` runs the whole config —
+    the Python-runtime engine (Spark or Ray) in parallel with the BigQuery-native engine under one
+    ``run_id`` — so it is the faithful "run this config" form for a *mixed* run, where a single
+    per-runtime command would cover only one engine. There is no ``gcloud`` verb that orchestrates
+    both engines, so ``native`` is ``None``.
+    """
+    argv = ["python", "-m", "scale_forecasting.main", "--config-uri", config_uri]
+    return LaunchCommands(runtime="main", universal=shell_join(argv), native=None)
 
 
 def build_ray_commands(

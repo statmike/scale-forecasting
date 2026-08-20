@@ -123,6 +123,75 @@ def test_dry_run_returns_run_id_and_estimates_fanout(monkeypatch: pytest.MonkeyP
     assert called["cfg"] is cfg
 
 
+def test_plan_run_without_env_returns_plan_but_no_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No SF_* identity → command emission is skipped, but the id/fanout/split still resolve offline.
+    import scale_forecasting.settings as settings_mod
+
+    def _no_env() -> Settings:
+        raise ConfigError("no SF_* env")
+
+    monkeypatch.setattr(settings_mod.Settings, "resolve", staticmethod(_no_env))
+
+    result = main.plan_run(_cfg())
+    assert result.run_id == make_run_id(_cfg())
+    assert result.staged is False
+    assert result.commands is None
+    assert result.config_uri is None
+    assert result.fanout.n_cells > 0
+
+
+def _batch_infra() -> Any:
+    from scale_forecasting.submit import BatchInfra
+
+    return BatchInfra(
+        code_bucket="bkt-code",
+        container_image="us-docker.pkg.dev/proj-x/sf/runtime:tag",
+        compute_sa="sf-compute@proj-x.iam.gserviceaccount.com",
+        subnetwork_uri="projects/proj-x/regions/us-central1/subnetworks/sf",
+    )
+
+
+def test_plan_run_spark_emits_main_and_spark_command_templates() -> None:
+    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert result.commands is not None
+    assert set(result.commands) == {"main", "spark"}
+    config_uri = f"gs://bkt-code/runs/{result.run_id}.json"
+    assert result.config_uri == config_uri
+    # main = the orchestrator command; spark = native gcloud + universal, both referencing the URI.
+    assert result.commands["main"].universal.endswith(config_uri)
+    assert result.commands["main"].native is None
+    spark = result.commands["spark"]
+    assert spark.native is not None and "gcloud" in spark.native and config_uri in spark.native
+    # A Python-only config emits no --models (the standalone batch runs the whole config).
+    assert "--models" not in spark.native
+
+
+def test_plan_run_mixed_spark_restricts_the_spark_subset() -> None:
+    result = main.plan_run(
+        _cfg(models=[_SPARK, *_NATIVE]), settings=_SETTINGS, infra=_batch_infra()
+    )
+    assert result.commands is not None
+    spark = result.commands["spark"]
+    # A mixed run restricts the Spark batch to just its Python model(s) via --models.
+    assert spark.native is not None and "--models" in spark.native and _SPARK in spark.native
+
+
+def test_plan_run_ray_emits_universal_only_ray_command() -> None:
+    from scale_forecasting.ray_submit import RayInfra
+
+    infra = RayInfra(compute_sa="sf-compute@proj-x.iam", code_bucket="bkt-code")
+    result = main.plan_run(
+        _cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"), settings=_SETTINGS, infra=infra
+    )
+    assert result.commands is not None
+    assert set(result.commands) == {"main", "ray"}
+    ray = result.commands["ray"]
+    assert ray.native is None  # no gcloud verb submits a Ray job
+    assert "ray_submit" in ray.universal and result.run_id in ray.universal
+
+
 def test_dry_run_still_rejects_multi() -> None:
     # The plan (and its rejection) runs before the dry_run short-circuit, so bad shapes fail fast.
     with pytest.raises(ConfigError, match="submit --engine multi"):

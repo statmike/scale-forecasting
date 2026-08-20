@@ -42,7 +42,8 @@ orchestrator (`submit_multi`): use ``python -m
 scale_forecasting.submit --engine multi``. ``multi`` is a Spark-only method, so the guard only
 applies when ``python_runtime="spark"``.
 
-Public surface: ``run(cfg, *, dry_run=False) -> run_id`` and
+Public surface: ``run(cfg, *, dry_run=False) -> run_id``, the offline ``plan_run(cfg) ->
+LaunchPlan`` (id + fanout + launch-command templates), and
 ``python -m scale_forecasting.main --config ... [--dry-run]``.
 """
 
@@ -56,10 +57,33 @@ from .registry.ids import make_run_id
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
-    from .config import RunConfig
+    from .commands import LaunchCommands
+    from .config import Fanout, RunConfig
     from .settings import Settings
 
 _log = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class LaunchPlan:
+    """A run resolved to launch-ready form: id, runtime split, fanout, and the launch commands.
+
+    Produced offline by `plan_run` (``staged=False`` — URIs are the *templates* where artifacts will
+    land; no GCS is touched) or by `stage_run` (``staged=True`` — artifacts uploaded, URIs real and
+    the commands runnable). ``commands`` maps a tier name (``"main"``/``"spark"``/``"ray"``) to its
+    `LaunchCommands`; it is ``None`` only when the GCP infra identity can't be resolved offline (no
+    ``SF_*`` env), in which case the run_id + fanout + runtime split are still returned.
+    """
+
+    run_id: str
+    python_runtime: str
+    python_models: list[str]
+    bq_models: list[str]
+    spark_method: str | None
+    fanout: Fanout
+    staged: bool
+    config_uri: str | None
+    commands: dict[str, LaunchCommands] | None
 
 
 @dataclass(frozen=True)
@@ -154,8 +178,9 @@ def run(
 
     Resolves the plan (`_plan`, which rejects Spark ``multi``), then:
 
-    * ``dry_run=True`` → log the run_id + `estimate_fanout` and
-      return, touching no GCP. The offline "what would this schedule" path.
+    * ``dry_run=True`` → delegate to `plan_run` (the offline "what would this schedule" path):
+      resolve the run_id + `estimate_fanout` + emit the launch-command templates, touching no GCP,
+      and return the run_id.
     * otherwise → resolve `Settings`, ``ensure_tables`` + ``write_header`` (RUNNING, the one
       shared header), launch the remote Spark batch on a worker thread and run the BigQuery engine
       inline (both in contributor mode), join, then — when both engines succeeded and
@@ -183,24 +208,17 @@ def run(
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from .config import estimate_fanout
     from .engines import bigquery_engine
     from .registry import bq
     from .settings import Settings
 
+    if dry_run:
+        # Single-source the offline plan: plan_run resolves the id + fanout + runtime split and
+        # emits the launch-command templates. It returns the run_id so this contract is unchanged.
+        return plan_run(cfg, settings=settings).run_id
+
     plan = _plan(cfg)
     run_id = plan.run_id
-
-    if dry_run:
-        fanout = estimate_fanout(cfg)
-        _log.info(
-            "dry-run %s: python=%s bq=%s fanout=%s",
-            run_id,
-            plan.python_models,
-            plan.bq_models,
-            fanout,
-        )
-        return run_id
 
     settings = settings or Settings.resolve()
     _log.info(
@@ -304,6 +322,176 @@ def _combined_status(
     if engine_status == "COMPLETED" and ensemble_error is not None:
         return "FAILED"
     return engine_status
+
+
+def _resolve_infra(cfg: RunConfig, infra: object | None) -> object:
+    """The runtime's infra identity: the injected ``infra``, else resolved from the ``SF_*`` env.
+
+    Spark resolves a `BatchInfra`, Ray a `RayInfra`; both carry the ``code_bucket`` the config
+    stages to. Raises `ConfigError` (from ``resolve``) when the env is unset — plan emission is
+    best-effort, so `plan_run` catches that and returns a plan without commands.
+    """
+    if infra is not None:
+        return infra
+    if cfg.python_runtime == "ray":
+        from .ray_submit import RayInfra
+
+        return RayInfra.resolve()
+    from .submit import BatchInfra
+
+    return BatchInfra.resolve()
+
+
+def _template_uris(
+    cfg: RunConfig, plan: _RunPlan, code_bucket: str
+) -> tuple[str, str | None, str | None]:
+    """The ``gs://`` URIs a run's artifacts *will* land at (pure — mirrors the staging scheme).
+
+    Returns ``(config_uri, package_uri, launcher_uri)``. The config URI always exists; the Spark
+    package/launcher URIs are set only for a Spark run with Python models (Ray delivers code via its
+    ``runtime_env`` working dir, not a staged zip). The package name carries the code hash from
+    `code_delivery.build_package_zip` — a deterministic local build, no network — so the template is
+    byte-faithful to what `submit._stage_code` would upload.
+    """
+    config_uri = f"gs://{code_bucket}/runs/{plan.run_id}.json"
+    if cfg.python_runtime == "ray" or not plan.python_models:
+        return config_uri, None, None
+    from .code_delivery import build_package_zip
+
+    _, code_hash = build_package_zip()
+    package_uri = f"gs://{code_bucket}/runs/scale_forecasting-{code_hash}.zip"
+    launcher_uri = f"gs://{code_bucket}/runs/spark_main.py"
+    return config_uri, package_uri, launcher_uri
+
+
+def _assemble_commands(
+    cfg: RunConfig,
+    plan: _RunPlan,
+    settings: Settings,
+    infra: object,
+    *,
+    config_uri: str,
+    package_uri: str | None,
+    launcher_uri: str | None,
+) -> dict[str, LaunchCommands]:
+    """Build the launch commands for a run, keyed by tier (pure — assembles strings only).
+
+    Always emits ``"main"`` — ``python -m scale_forecasting.main --config-uri …``, the orchestrator
+    that reproduces the *full* run (both engines under one run_id). When there are Python-runtime
+    models it adds the per-runtime tier: ``"ray"`` (universal only) or ``"spark"`` (native
+    ``gcloud`` + universal). The Spark tier restricts to ``--models`` **only** for a mixed run (so
+    the batch runs just its subset while BigQuery runs the rest); a Python-only config emits no
+    ``--models`` so the standalone batch runs the whole config under its own header.
+    """
+    from .commands import build_main_command, build_ray_commands, build_spark_commands
+
+    commands: dict[str, LaunchCommands] = {"main": build_main_command(config_uri)}
+    if not plan.python_models:
+        return commands
+    if cfg.python_runtime == "ray":
+        commands["ray"] = build_ray_commands(
+            config_uri=config_uri, cluster_name=cfg.compute.ray_cluster_name
+        )
+        return commands
+
+    from .submit import BatchInfra, _batch_id
+
+    assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
+    engine = plan.spark_method or "explode"
+    models_arg = plan.python_models if plan.bq_models else None
+    commands["spark"] = build_spark_commands(
+        settings=settings,
+        infra=infra,
+        engine=engine,
+        batch_id=_batch_id(plan.run_id, engine),
+        package_uri=package_uri or "",
+        launcher_uri=launcher_uri or "",
+        config_uri=config_uri,
+        models=models_arg,
+        manage_header=True,
+    )
+    return commands
+
+
+def _emit_plan(result: LaunchPlan) -> None:
+    """Log the resolved plan + each launch-command tier (the dry-run/stage-only emission)."""
+    verb = "stage" if result.staged else "dry-run"
+    _log.info(
+        "%s %s: runtime=%s python=%s bq=%s fanout=%s",
+        verb,
+        result.run_id,
+        result.python_runtime,
+        result.python_models,
+        result.bq_models,
+        result.fanout,
+    )
+    if result.commands is None:
+        _log.info(
+            "%s %s: infra unresolved (no SF_* env) — commands not emitted", verb, result.run_id
+        )
+        return
+    for name, lc in result.commands.items():
+        _log.info("  [%s] %s", name, lc.universal)
+        if lc.native is not None:
+            _log.info("  [%s:native] %s", name, lc.native)
+
+
+def plan_run(
+    cfg: RunConfig, *, settings: Settings | None = None, infra: object | None = None
+) -> LaunchPlan:
+    """Resolve a run offline to its id, fanout, runtime split, and launch-command *templates*.
+
+    The "plan" verb: pure and GCP-free. Computes `_plan` (rejecting Spark ``multi`` up front, so a
+    bad shape fails fast even in a dry run) and `estimate_fanout`, then — best-effort — resolves the
+    infra identity and builds the two-tier launch commands with the URIs the artifacts *will* land
+    at (nothing is uploaded). When the infra can't be resolved offline (no ``SF_*`` env), the
+    commands are omitted (``commands=None``) but the id/fanout/split are still returned, so a plain
+    ``--dry-run`` works with no environment. Emits the plan to the log and returns it.
+    """
+    from .config import estimate_fanout
+
+    plan = _plan(cfg)
+    fanout = estimate_fanout(cfg)
+    config_uri: str | None = None
+    commands: dict[str, LaunchCommands] | None = None
+    try:
+        settings = settings or _resolve_settings()
+        resolved_infra = _resolve_infra(cfg, infra)
+        code_bucket = resolved_infra.code_bucket  # type: ignore[attr-defined]
+        config_uri, package_uri, launcher_uri = _template_uris(cfg, plan, code_bucket)
+        commands = _assemble_commands(
+            cfg,
+            plan,
+            settings,
+            resolved_infra,
+            config_uri=config_uri,
+            package_uri=package_uri,
+            launcher_uri=launcher_uri,
+        )
+    except ConfigError:
+        # No SF_* env (or no injected settings/infra): return the plan without commands.
+        config_uri = None
+        commands = None
+    result = LaunchPlan(
+        run_id=plan.run_id,
+        python_runtime=cfg.python_runtime,
+        python_models=plan.python_models,
+        bq_models=plan.bq_models,
+        spark_method=plan.spark_method,
+        fanout=fanout,
+        staged=False,
+        config_uri=config_uri,
+        commands=commands,
+    )
+    _emit_plan(result)
+    return result
+
+
+def _resolve_settings() -> Settings:
+    """Resolve `Settings` from the ``SF_*`` env (raises `ConfigError` when unset)."""
+    from .settings import Settings
+
+    return Settings.resolve()
 
 
 def _main(argv: list[str] | None = None) -> None:
