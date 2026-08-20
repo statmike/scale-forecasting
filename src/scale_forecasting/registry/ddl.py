@@ -1,8 +1,8 @@
 """CREATE TABLE DDL for the registry + example data.
 
-Six tables are the source of truth for the whole system. Storage format is split by role:
+Seven tables are the source of truth for the whole system. Storage format is split by role:
 
-- The four **run-collection** tables (``run_registry``, ``forecast_metadata``,
+- The five **run-collection** tables (``run_registry``, ``run_jobs``, ``forecast_metadata``,
   ``forecast_predictions``, ``backtest_oof``) are always **native BigQuery**. Native gives us
   the real ``JSON`` column type (``raw_config`` / ``job_telemetry`` / ``quantiles`` /
   ``best_params``) and ``WRITE_TRUNCATE`` reseed, and needs no BigLake connection.
@@ -56,6 +56,24 @@ CREATE TABLE IF NOT EXISTS `{d}.run_registry` (
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id""",
+    "run_jobs": """\
+CREATE TABLE IF NOT EXISTS `{d}.run_jobs` (
+  job_id           STRING NOT NULL,
+  run_id           STRING NOT NULL,
+  family           STRING NOT NULL,
+  attempt          INT64 NOT NULL,
+  runtime          STRING,
+  spark_mode       STRING,
+  hardware         STRING,
+  gpu_type         STRING,
+  system_job_id    STRING,
+  status           STRING,
+  created_at       TIMESTAMP NOT NULL,
+  runtime_seconds  FLOAT64,
+  job_telemetry    JSON
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY run_id, family""",
     "forecast_metadata": """\
 CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   run_id         STRING NOT NULL,
@@ -104,7 +122,7 @@ PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",
 }
 
-# The four collection tables above are the run registry. They are ALWAYS native BigQuery:
+# The five collection tables above are the run registry. They are ALWAYS native BigQuery:
 # native supports the JSON column type (so raw_config/job_telemetry/quantiles/best_params
 # are real JSON, not STRING) and WRITE_TRUNCATE (so a reseed is a clean truncate, not a
 # streaming-buffer-bounded DELETE). No BigLake connection or warehouse bucket is needed for them.
@@ -202,7 +220,7 @@ def render_create_tables(
     warehouse_uri: str | None = None,
     iceberg: bool = True,
 ) -> dict[str, str]:
-    """Render ``{table_name: CREATE TABLE statement}`` for all five tables.
+    """Render ``{table_name: CREATE TABLE statement}`` for all tables.
 
     Args:
         dataset: dataset ref, ``project.dataset`` or ``dataset``.
@@ -251,7 +269,7 @@ def render_deployment_ddl(
 
     The storage policy is fixed here so callers don't juggle a per-table flag:
 
-    - the four **registry** tables are always **native** BigQuery (native ``JSON`` columns +
+    - the five **registry** tables are always **native** BigQuery (native ``JSON`` columns +
       ``WRITE_TRUNCATE`` reseed; no BigLake connection needed);
     - ``source_series_iceberg`` is a managed-Iceberg table (needs ``connection`` +
       ``warehouse_uri``);
@@ -268,7 +286,7 @@ def render_deployment_ddl(
 
 
 def render_drop_tables(dataset: str) -> dict[str, str]:
-    """Render ``{table_name: DROP TABLE IF EXISTS ...;}`` for all six tables (reset path).
+    """Render ``{table_name: DROP TABLE IF EXISTS ...;}`` for all seven tables (reset path).
 
     Pure string op (snapshot-testable); the destructive execution lives in ``bq.drop_all``. Used
     to tear a deployment down to bare metal before a clean ``ensure_tables`` recreates it in the

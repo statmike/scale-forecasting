@@ -27,8 +27,14 @@ DROP_SNAPSHOT = Path(__file__).parent / "snapshots" / "ddl_drop.sql"
 
 _KW = {"connection": "proj.us-central1.sf-conn", "warehouse_uri": "gs://proj-wh/warehouse"}
 
-# The four run-collection tables are always native; the source table ships in both formats.
-_REGISTRY_TABLES = ("run_registry", "forecast_metadata", "forecast_predictions", "backtest_oof")
+# The five run-collection tables are always native; the source table ships in both formats.
+_REGISTRY_TABLES = (
+    "run_registry",
+    "run_jobs",
+    "forecast_metadata",
+    "forecast_predictions",
+    "backtest_oof",
+)
 
 
 def _render_all() -> str:
@@ -36,11 +42,11 @@ def _render_all() -> str:
     return "\n\n".join(stmts[name] for name in TABLE_NAMES)
 
 
-def test_all_six_tables_rendered() -> None:
+def test_all_tables_rendered() -> None:
     stmts = render_deployment_ddl("proj.scale_forecasting", **_KW)
     assert set(stmts) == set(TABLE_NAMES)
-    assert len(TABLE_NAMES) == 6
-    # four registry + two source variants
+    assert len(TABLE_NAMES) == 7
+    # five registry + two source variants
     assert set(TABLE_NAMES) == {*_REGISTRY_TABLES, SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE}
 
 
@@ -65,6 +71,21 @@ def test_registry_json_columns_use_native_json_type() -> None:
     assert "job_telemetry     JSON" in stmts["run_registry"]
     assert "best_params    JSON" in stmts["forecast_metadata"]
     assert "quantiles     JSON" in stmts["forecast_predictions"]
+
+
+def test_run_jobs_is_native_with_job_identity_columns() -> None:
+    stmts = render_deployment_ddl("d", **_KW)
+    job = stmts["run_jobs"]
+    # native (no Iceberg wrapping) so it carries the native JSON telemetry column
+    assert "ICEBERG" not in job
+    assert "WITH CONNECTION" not in job
+    # the identity + resolved-compute columns the trace and re-run policy key on
+    assert "job_id           STRING NOT NULL" in job
+    assert "run_id           STRING NOT NULL" in job
+    assert "family           STRING NOT NULL" in job
+    assert "attempt          INT64 NOT NULL" in job
+    assert "job_telemetry    JSON" in job
+    assert "CLUSTER BY run_id, family" in job
 
 
 def test_source_iceberg_variant_is_iceberg_wrapped() -> None:
@@ -112,7 +133,7 @@ def test_iceberg_requires_connection_and_warehouse() -> None:
 # --- drop tables (reset path) --------------------------------------------------
 
 
-def test_render_drop_tables_covers_all_six() -> None:
+def test_render_drop_tables_covers_all_tables() -> None:
     drops = render_drop_tables("proj.ds")
     assert set(drops) == set(TABLE_NAMES)
     for name, stmt in drops.items():
@@ -158,7 +179,7 @@ def test_render_migrations_adds_job_telemetry_idempotently() -> None:
 
 def test_render_migrations_covers_every_table_with_nullable_columns() -> None:
     migrations = render_migrations("d")
-    # all six tables have at least one nullable column, so each gets a migration statement.
+    # every table has at least one nullable column, so each gets a migration statement.
     assert set(migrations) == set(TABLE_NAMES)
 
 

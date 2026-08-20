@@ -257,6 +257,56 @@ def test_header_ensemble_strategies_listed_when_enabled() -> None:
     assert row["ensemble_strategies"] == ["mean", "median"]
 
 
+# --- run_jobs row assembly -----------------------------------------------------
+
+
+def test_job_row_derives_id_and_maps_resolved_compute() -> None:
+    row = bq.assemble_job_row(
+        "my-run-abc123def456",
+        "deep_learning",
+        1,
+        _CREATED,
+        runtime="spark",
+        spark_mode="cluster",
+        hardware="gpu",
+        gpu_type="T4",
+        system_job_id="dp-batch-xyz",
+    )
+    assert row["job_id"] == "sf-my-run-abc123def456-deep_learning-a1"
+    assert row["run_id"] == "my-run-abc123def456"
+    assert row["family"] == "deep_learning"
+    assert row["attempt"] == 1
+    assert (row["runtime"], row["spark_mode"], row["hardware"], row["gpu_type"]) == (
+        "spark",
+        "cluster",
+        "gpu",
+        "T4",
+    )
+    assert row["system_job_id"] == "dp-batch-xyz"
+    assert row["status"] == "RUNNING"  # default: RUNNING until the job finishes
+    assert row["runtime_seconds"] is None and row["job_telemetry"] is None
+    assert row["created_at"] is _CREATED
+
+
+def test_job_row_defaults_are_null_for_unset_compute() -> None:
+    row = bq.assemble_job_row("rid-0123456789ab", "native", 1, _CREATED)
+    assert row["job_id"] == "sf-rid-0123456789ab-native-a1"
+    for col in ("runtime", "spark_mode", "hardware", "gpu_type", "system_job_id"):
+        assert row[col] is None, col
+
+
+def test_job_row_id_reflects_attempt() -> None:
+    row = bq.assemble_job_row("rid-0123456789ab", "ml", 3, _CREATED)
+    assert row["job_id"].endswith("-ml-a3")
+    assert row["attempt"] == 3
+
+
+def test_job_row_columns_match_param_types() -> None:
+    # The assembled row's keys are exactly the columns write_job/update_job know how to bind.
+    row = bq.assemble_job_row("rid-0123456789ab", "statistical", 1, _CREATED)
+    assert set(row) == set(bq._JOB_PARAM_TYPES)
+
+
 # --- artifact uri --------------------------------------------------------------
 
 

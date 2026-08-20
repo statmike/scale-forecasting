@@ -19,6 +19,24 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.run_registry` (
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id;
 
+CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.run_jobs` (
+  job_id           STRING NOT NULL,
+  run_id           STRING NOT NULL,
+  family           STRING NOT NULL,
+  attempt          INT64 NOT NULL,
+  runtime          STRING,
+  spark_mode       STRING,
+  hardware         STRING,
+  gpu_type         STRING,
+  system_job_id    STRING,
+  status           STRING,
+  created_at       TIMESTAMP NOT NULL,
+  runtime_seconds  FLOAT64,
+  job_telemetry    JSON
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY run_id, family;
+
 CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   run_id         STRING NOT NULL,
   ts_id          STRING NOT NULL,

@@ -41,6 +41,11 @@ Strategy = Literal["mean", "median", "inverse_error", "nnls", "ridge", "xgb"]
 # ``ComputeFamily`` mirrors ``models.base_model.Family`` *minus* "native": native models always run
 # in BigQuery (their natural engine), so they are never given a per-family runtime choice.
 ComputeFamily = Literal["statistical", "ml", "deep_learning"]
+# ``JobFamily`` is the identity vocabulary of a *job* in the run DAG: every model family that can
+# launch a job (``ComputeFamily`` + "native", which runs in BigQuery) plus the downstream "ensemble"
+# node. It is the ``family`` component of a job's deterministic id (see ``registry.ids``), one step
+# broader than ``ComputeFamily`` since native and ensemble produce jobs but take no runtime choice.
+JobFamily = Literal["statistical", "ml", "deep_learning", "native", "ensemble"]
 Runtime = Literal["spark", "ray"]
 SparkMode = Literal["serverless", "cluster"]
 Hardware = Literal["cpu", "gpu"]

@@ -24,6 +24,27 @@ SELECT
 FROM `proj.scale_forecasting.run_registry`
 QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1;
 
+CREATE OR REPLACE VIEW `proj.scale_forecasting.v_run_jobs` AS
+SELECT
+  run_id,
+  family,
+  job_id,
+  attempt,
+  runtime,
+  spark_mode,
+  hardware,
+  gpu_type,
+  system_job_id,
+  status,
+  created_at,
+  runtime_seconds,
+  CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
+  CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds
+FROM `proj.scale_forecasting.run_jobs`
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC
+) = 1;
+
 CREATE OR REPLACE VIEW `proj.scale_forecasting.v_model_leaderboard` AS
 SELECT
   run_id,

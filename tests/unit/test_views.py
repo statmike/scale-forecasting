@@ -19,10 +19,10 @@ def _render_all() -> str:
     return "\n\n".join(stmts[name] for name in VIEW_NAMES)
 
 
-def test_both_views_rendered() -> None:
+def test_all_views_rendered() -> None:
     stmts = render_create_views("proj.scale_forecasting")
     assert set(stmts) == set(VIEW_NAMES)
-    assert set(VIEW_NAMES) == {"v_run_summary", "v_model_leaderboard"}
+    assert set(VIEW_NAMES) == {"v_run_summary", "v_run_jobs", "v_model_leaderboard"}
 
 
 def test_every_statement_is_replace_and_terminated() -> None:
@@ -60,6 +60,17 @@ def test_leaderboard_is_per_run_model_full_fit_only() -> None:
     assert "fold_id IS NULL" in stmt
     # a model that failed every cell surfaces as a high no-artifact rate
     assert "no_artifact_rate" in stmt
+
+
+def test_run_jobs_view_keeps_current_attempt_per_family() -> None:
+    stmt = render_create_views("d")["v_run_jobs"]
+    # one row per (run_id, family) = the current job; a forced re-run's higher attempt wins
+    assert "QUALIFY ROW_NUMBER() OVER (" in stmt
+    assert "PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC" in stmt
+    # surfaces the deterministic job id + the resolved runtime/hardware for the trace
+    assert "job_id" in stmt
+    assert "runtime" in stmt and "hardware" in stmt and "gpu_type" in stmt
+    assert "FROM `d.run_jobs`" in stmt
 
 
 def test_views_snapshot() -> None:

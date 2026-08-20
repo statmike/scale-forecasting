@@ -21,9 +21,10 @@ resolves from ``SF_*`` env vars. GCP client libraries are imported lazily inside
 the pure layer (and its offline tests) never need them installed.
 
 Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_header``,
-``run_header`` (the header-lifecycle context manager), ``write_cells``, the read surface
-(``header_status``, ``read_run_summary``, ``read_leaderboard``), plus the pure assemblers used by
-the writers and the tests.
+``run_header`` (the header-lifecycle context manager), ``write_cells``, the ``run_jobs`` per-job
+writers/readers (``write_job``, ``update_job``, ``latest_job_attempt``, ``next_job_attempt``,
+``read_run_jobs``), the read surface (``header_status``, ``read_run_summary``,
+``read_leaderboard``), plus the pure assemblers used by the writers and the tests.
 """
 
 from __future__ import annotations
@@ -170,6 +171,48 @@ def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> di
         # update_header) as a **dict** (the JSON query param serializes it). NULL here at RUNNING
         # and for any run whose telemetry couldn't be read (best-effort — never blocks a run).
         # See the run_registry DDL.
+        "job_telemetry": None,
+    }
+
+
+def assemble_job_row(
+    run_id: str,
+    family: str,
+    attempt: int,
+    created_at: datetime,
+    *,
+    runtime: str | None = None,
+    spark_mode: str | None = None,
+    hardware: str | None = None,
+    gpu_type: str | None = None,
+    system_job_id: str | None = None,
+    status: str = "RUNNING",
+) -> dict[str, Any]:
+    """Build a ``run_jobs`` row for one family's job under a run.
+
+    The ``job_id`` is derived here (`registry.ids.make_job_key`) from ``(run_id, family, attempt)``
+    so the row's identity always matches the id a submitter hands the platform — the two can't
+    drift. The resolved compute fields (``runtime``/``spark_mode``/``hardware``/``gpu_type``) are
+    passed in, not re-derived, so this stays a pure mapping: the orchestrator resolves them
+    (`config.RunConfig.resolve_family_compute` for a model family, the ensemble node's own config
+    for ``ensemble``) and hands them over. ``status`` starts RUNNING; ``runtime_seconds`` and
+    ``job_telemetry`` are NULL until the job finishes and the submitter updates the row.
+    """
+    from .ids import make_job_key
+
+    return {
+        "job_id": make_job_key(run_id, family, attempt),
+        "run_id": run_id,
+        "family": family,
+        "attempt": attempt,
+        "runtime": runtime,
+        "spark_mode": spark_mode,
+        "hardware": hardware,
+        "gpu_type": gpu_type,
+        "system_job_id": system_job_id,
+        "status": status,
+        "created_at": created_at,
+        "runtime_seconds": None,
         "job_telemetry": None,
     }
 
@@ -780,6 +823,165 @@ def read_leaderboard(
         )
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"read_leaderboard failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+# --- I/O: run_jobs (per-job identity + trace) ----------------------------------
+
+# run_jobs columns that may be set by write_job / update_job, with their BQ types.
+_JOB_PARAM_TYPES: dict[str, str] = {
+    "job_id": "STRING",
+    "run_id": "STRING",
+    "family": "STRING",
+    "attempt": "INT64",
+    "runtime": "STRING",
+    "spark_mode": "STRING",
+    "hardware": "STRING",
+    "gpu_type": "STRING",
+    "system_job_id": "STRING",
+    "status": "STRING",
+    "created_at": "TIMESTAMP",
+    "runtime_seconds": "FLOAT64",
+    "job_telemetry": "JSON",
+}
+
+
+def _job_param(name: str, value: Any) -> Any:
+    """Build a scalar query parameter for a run_jobs column."""
+    from google.cloud import bigquery
+
+    return bigquery.ScalarQueryParameter(name, _JOB_PARAM_TYPES[name], value)
+
+
+def write_job(
+    row: dict[str, Any], *, settings: Settings | None = None
+) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Insert one ``run_jobs`` row (a job at RUNNING) via a parameterized single-row INSERT.
+
+    Takes an assembled row (`assemble_job_row`), mirroring `write_header`. Raises `RegistryError`
+    on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    columns = list(row)
+    placeholders = ", ".join(f"@{col}" for col in columns)
+    sql = (
+        f"INSERT INTO `{resolved.table_ref('run_jobs')}` "
+        f"({', '.join(columns)}) VALUES ({placeholders})"
+    )
+    params = [_job_param(col, row[col]) for col in columns]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"write_job failed for job {row.get('job_id')}: {exc}") from exc
+
+
+def update_job(
+    job_id: str, *, settings: Settings | None = None, **fields: Any
+) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Update named columns on a job's ``run_jobs`` row, e.g. status/runtime_seconds/telemetry.
+
+    ``update_job(job_id, status="COMPLETED", runtime_seconds=42.0)`` → a parameterized
+    ``UPDATE … WHERE job_id=@job_id``. The ``job_id`` is 1:1 with a row, so exactly one row is
+    touched. Unknown column names raise `RegistryError`; a no-op call (no fields) returns without
+    touching BigQuery.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    if not fields:
+        return
+    unknown = set(fields) - set(_JOB_PARAM_TYPES)
+    if unknown:
+        raise RegistryError(f"update_job: unknown run_jobs column(s): {sorted(unknown)}")
+
+    resolved = _resolve_settings(settings)
+    set_clause = ", ".join(f"{col} = @{col}" for col in fields)
+    sql = f"UPDATE `{resolved.table_ref('run_jobs')}` SET {set_clause} WHERE job_id=@job_id"
+    params = [_job_param(col, value) for col, value in fields.items()]
+    params.append(_job_param("job_id", job_id))
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"update_job failed for job {job_id}: {exc}") from exc
+
+
+def latest_job_attempt(
+    run_id: str, family: str, *, settings: Settings | None = None
+) -> int | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the highest ``attempt`` recorded for ``(run_id, family)``, or ``None`` if no job.
+
+    The registry read that feeds the re-run policy (`registry.ids.decide_attempt`): a non-``None``
+    result means this family has already run under this run, so an unforced re-run reuses that job
+    and a forced one takes ``max + 1``. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT MAX(attempt) AS max_attempt FROM `{resolved.table_ref('run_jobs')}` "
+        "WHERE run_id=@run_id AND family=@family"
+    )
+    params = [_job_param("run_id", run_id), _job_param("family", family)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"latest_job_attempt failed for {run_id}/{family}: {exc}") from exc
+    return rows[0]["max_attempt"] if rows and rows[0]["max_attempt"] is not None else None
+
+
+def next_job_attempt(
+    run_id: str, family: str, *, force: bool = False, settings: Settings | None = None
+) -> tuple[int, bool]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Resolve the ``(attempt, is_new_job)`` a submission should use for ``(run_id, family)``.
+
+    Reads the current max attempt (`latest_job_attempt`) and applies the pure policy
+    (`registry.ids.decide_attempt`): first run → ``(1, True)``; unforced re-run of an existing job →
+    ``(max, False)`` (reuse, no new job); ``force`` → ``(max + 1, True)`` (a distinct new attempt).
+    """
+    from .ids import decide_attempt
+
+    current_max = latest_job_attempt(run_id, family, settings=settings)
+    return decide_attempt(current_max, force=force)
+
+
+def read_run_jobs(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the current job per family for ``run_id`` from ``v_run_jobs`` — the forward trace.
+
+    The view already keeps one row per ``(run_id, family)`` (highest attempt wins), so this is the
+    run's DAG as executed: which families ran, on what runtime/hardware, with what status. Ordered
+    by ``family`` for stable output. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT * FROM `{resolved.table_ref('v_run_jobs')}` "
+        "WHERE run_id=@run_id ORDER BY family"
+    )
+    params = [_job_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_run_jobs failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
 
