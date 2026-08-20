@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 from ._infra_args import infra_args_from
 from .engines import ray_io
 from .errors import ConfigError, EngineError, get_logger
+from .staging import stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -330,23 +331,13 @@ def extract_ray_telemetry(
 
 
 def _stage_config(cfg: RunConfig, run_id: str, infra: RayInfra) -> str:
-    """Write the validated config to ``gs://<code>/runs/<run_id>.json`` and return the URI.
+    """Stage the run config to GCS and return its URI (see `staging.stage_config`).
 
-    Byte-for-byte the Spark staging contract (`_stage_config`) so a
-    mixed run stages one config the same way regardless of runtime — the JSON *is* the shared
-    reproducibility record, and its digest is the shared ``run_id``.
+    Shares the one staging helper with the Spark path, so a mixed run stages one config the same
+    way regardless of runtime — the JSON *is* the shared reproducibility record, and its digest is
+    the shared ``run_id``.
     """
-    import json
-
-    from google.cloud import storage
-
-    client = storage.Client()
-    payload = json.dumps(cfg.model_dump(mode="json"), sort_keys=True, indent=2)
-    name = f"runs/{run_id}.json"
-    storage.Client.bucket(client, infra.code_bucket).blob(name).upload_from_string(
-        payload, content_type="application/json"
-    )
-    return f"gs://{infra.code_bucket}/{name}"
+    return stage_config(cfg, run_id, infra.code_bucket)
 
 
 # --- I/O: Vertex Ray cluster lifecycle -----------------------------------------
@@ -884,10 +875,7 @@ def submit_ray(
 
     settings = settings or Settings.resolve()
     infra = infra or RayInfra.resolve()
-    if n_series is not None:
-        cfg = cfg.model_copy(
-            update={"data": cfg.data.model_copy(update={"series_limit": n_series})}
-        )
+    cfg = cfg.with_series_limit(n_series)
     run_id = make_run_id(cfg)
     plan = ray_io.plan_cluster(cfg, models, run_id=run_id)
 

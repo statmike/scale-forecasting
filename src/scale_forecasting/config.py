@@ -336,6 +336,19 @@ class RunConfig(BaseModel):
 
         return self
 
+    def with_series_limit(self, n_series: int | None) -> RunConfig:
+        """Return a copy with ``data.series_limit`` overridden (``self`` if ``n_series`` is None).
+
+        The scale knob every submit path shares (the 10 → 100 → 1k → 100k story). Because it
+        changes the config, the copy yields a distinct ``run_id``, so each scale is its own
+        queryable run.
+        """
+        if n_series is None:
+            return self
+        return self.model_copy(
+            update={"data": self.data.model_copy(update={"series_limit": n_series})}
+        )
+
 
 # --- fanout estimate -----------------------------------------------------------
 

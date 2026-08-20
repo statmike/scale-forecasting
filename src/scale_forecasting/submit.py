@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._infra_args import infra_args_from
 from .errors import ConfigError, EngineError, get_logger
+from .staging import stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -334,18 +335,8 @@ def _stage_code(infra: BatchInfra) -> tuple[str, str]:
 
 
 def _stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
-    """Write the validated config to ``gs://<code>/runs/<run_id>.json`` and return the URI."""
-    import json
-
-    from google.cloud import storage
-
-    client = storage.Client()
-    payload = json.dumps(cfg.model_dump(mode="json"), sort_keys=True, indent=2)
-    name = f"runs/{run_id}.json"
-    storage.Client.bucket(client, infra.code_bucket).blob(name).upload_from_string(
-        payload, content_type="application/json"
-    )
-    return f"gs://{infra.code_bucket}/{name}"
+    """Stage the run config to GCS and return its URI (see `staging.stage_config`)."""
+    return stage_config(cfg, run_id, infra.code_bucket)
 
 
 def _batch_client(region: str) -> object:
@@ -399,10 +390,7 @@ def submit_batch(
 
     settings = settings or Settings.resolve()
     infra = infra or BatchInfra.resolve()
-    if n_series is not None:
-        cfg = cfg.model_copy(
-            update={"data": cfg.data.model_copy(update={"series_limit": n_series})}
-        )
+    cfg = cfg.with_series_limit(n_series)
     run_id = make_run_id(cfg)
     batch_id = batch_id or _batch_id(run_id, engine)
 
@@ -513,10 +501,7 @@ def submit_multi(
 
     # One run_id for the whole multi run: apply the scale override first (so it's part of the hashed
     # cfg), then hash the full cfg once. Every child stages this same cfg → same run_id.
-    if n_series is not None:
-        cfg = cfg.model_copy(
-            update={"data": cfg.data.model_copy(update={"series_limit": n_series})}
-        )
+    cfg = cfg.with_series_limit(n_series)
     run_id = make_run_id(cfg)
 
     families = split_models_by_family(cfg)
