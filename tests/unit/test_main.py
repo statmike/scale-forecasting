@@ -42,6 +42,15 @@ def _cfg(**over: Any) -> RunConfig:
     return RunConfig(**base)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_header_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The exists-vs-new verdict queries the registry; default it to "new run" so offline plan/stage
+    # tests never touch BigQuery. The idempotency tests below override this explicitly.
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
+
+
 # --- _plan: run_id parity + the per-runtime split ------------------------------
 
 
@@ -192,6 +201,72 @@ def test_plan_run_ray_emits_universal_only_ray_command() -> None:
     assert "ray_submit" in ray.universal and result.run_id in ray.universal
 
 
+def test_plan_run_reports_new_run_when_config_never_ran() -> None:
+    # The autouse fixture makes header_status return None → the config has not run before.
+    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert result.idempotency.checked is True
+    assert result.idempotency.exists is False
+    assert result.idempotency.prior_status is None
+
+
+def test_plan_run_reports_existing_run_when_config_already_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert result.idempotency.checked is True
+    assert result.idempotency.exists is True
+    assert result.idempotency.prior_status == "COMPLETED"
+
+
+def test_plan_run_verdict_unknown_when_registry_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A registry read failure (no table yet / unreachable) degrades to an unknown verdict, never
+    # fatal — the plan still returns.
+    from scale_forecasting.errors import RegistryError
+    from scale_forecasting.registry import bq
+
+    def _boom(*a: Any, **k: Any) -> str:
+        raise RegistryError("no such table")
+
+    monkeypatch.setattr(bq, "header_status", _boom)
+    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert result.idempotency.checked is False
+    assert result.idempotency.exists is False
+
+
+def test_plan_run_without_env_leaves_verdict_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No SF_* env → settings never resolve, so the registry is never consulted: verdict unknown.
+    import scale_forecasting.settings as settings_mod
+
+    def _no_env() -> Settings:
+        raise ConfigError("no SF_* env")
+
+    monkeypatch.setattr(settings_mod.Settings, "resolve", staticmethod(_no_env))
+    result = main.plan_run(_cfg())
+    assert result.idempotency.checked is False
+
+
+def test_emit_idempotency_warns_on_existing_and_notes_force(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+
+    with caplog.at_level("WARNING"):
+        main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert any("already ran" in r.message and "--force" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True)
+    assert any("re-run (--force)" in r.message for r in caplog.records)
+
+
 def test_stage_run_spark_uploads_and_builds_runnable_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,6 +305,10 @@ def test_stage_run_spark_uploads_and_builds_runnable_commands(
     assert set(manifest["commands"]) == {"main", "spark"}
     assert manifest["fanout"]["n_cells"] == result.fanout.n_cells
     assert "created_at" in manifest  # caller-stamped timestamp
+    # The manifest records the re-run intent and the exists-vs-new verdict it was staged under.
+    assert manifest["force"] is False
+    assert manifest["idempotency"]["checked"] is True
+    assert manifest["idempotency"]["exists"] is False
 
 
 def test_stage_run_requires_infra(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,8 +329,9 @@ def test_cli_dispatches_stage_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatc
 
     seen: dict[str, Any] = {}
 
-    def _fake_stage(cfg: RunConfig) -> Any:
+    def _fake_stage(cfg: RunConfig, *, force: bool = False) -> Any:
         seen["run_name"] = cfg.run_name
+        seen["force"] = force
         return SimpleNamespace(run_id="rid-staged")
 
     monkeypatch.setattr(main, "stage_run", _fake_stage)
@@ -267,7 +347,7 @@ def test_cli_dispatches_stage_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatc
         )
     )
     main._main(["--config", str(path), "--stage-only"])
-    assert seen == {"run_name": "cli stage test"}
+    assert seen == {"run_name": "cli stage test", "force": False}
 
 
 def test_dry_run_still_rejects_multi() -> None:
@@ -464,8 +544,9 @@ def test_cli_dispatches_dry_run(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) 
 
     seen: dict[str, Any] = {}
 
-    def _fake_run(cfg: RunConfig, *, dry_run: bool = False) -> str:
+    def _fake_run(cfg: RunConfig, *, dry_run: bool = False, force: bool = False) -> str:
         seen["dry_run"] = dry_run
+        seen["force"] = force
         seen["run_name"] = cfg.run_name
         return "rid-123"
 
@@ -482,4 +563,29 @@ def test_cli_dispatches_dry_run(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) 
         )
     )
     main._main(["--config", str(path), "--dry-run"])
-    assert seen == {"dry_run": True, "run_name": "cli main test"}
+    assert seen == {"dry_run": True, "force": False, "run_name": "cli main test"}
+
+
+def test_cli_force_flag_threads_through(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    seen: dict[str, Any] = {}
+
+    def _fake_run(cfg: RunConfig, *, dry_run: bool = False, force: bool = False) -> str:
+        seen["force"] = force
+        return "rid-123"
+
+    monkeypatch.setattr(main, "run", _fake_run)
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli force test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    main._main(["--config", str(path), "--dry-run", "--force"])
+    assert seen["force"] is True

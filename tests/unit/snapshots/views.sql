@@ -21,7 +21,8 @@ SELECT
   CAST(JSON_VALUE(job_telemetry, '$.max_executors') AS INT64) AS max_executors,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
   JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version
-FROM `proj.scale_forecasting.run_registry`;
+FROM `proj.scale_forecasting.run_registry`
+QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1;
 
 CREATE OR REPLACE VIEW `proj.scale_forecasting.v_model_leaderboard` AS
 SELECT

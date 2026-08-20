@@ -46,6 +46,13 @@ def test_run_summary_unpacks_telemetry_and_derives_overhead() -> None:
     assert "overhead_fraction" in stmt
 
 
+def test_run_summary_keeps_one_row_per_run_after_a_forced_rerun() -> None:
+    stmt = render_create_views("d")["v_run_summary"]
+    # A forced re-run appends a second header under the same run_id; keep only the latest so one
+    # run is always one row.
+    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1" in stmt
+
+
 def test_leaderboard_is_per_run_model_full_fit_only() -> None:
     stmt = render_create_views("d")["v_model_leaderboard"]
     assert "GROUP BY run_id, model_type" in stmt

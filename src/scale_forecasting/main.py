@@ -66,6 +66,22 @@ _log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
+class Idempotency:
+    """Whether a run's config has already been submitted (the pre-submit existence check).
+
+    ``run_id`` is a pure digest of the config, so an unchanged config re-derives the same id — this
+    verdict says whether that id already has a header in the registry. ``checked`` is ``False`` when
+    the registry couldn't be consulted (no ``SF_*`` env, or no reachable registry): the verdict is
+    simply *unknown*, not "new". ``prior_status`` is the existing run's status when ``exists`` (e.g.
+    ``COMPLETED``), else ``None``.
+    """
+
+    checked: bool
+    exists: bool
+    prior_status: str | None
+
+
+@dataclass(frozen=True)
 class LaunchPlan:
     """A run resolved to launch-ready form: id, runtime split, fanout, and the launch commands.
 
@@ -74,6 +90,10 @@ class LaunchPlan:
     the commands runnable). ``commands`` maps a tier name (``"main"``/``"spark"``/``"ray"``) to its
     `LaunchCommands`; it is ``None`` only when the GCP infra identity can't be resolved offline (no
     ``SF_*`` env), in which case the run_id + fanout + runtime split are still returned.
+
+    ``idempotency`` is the exists-vs-new verdict for this config's id; ``force`` records that the
+    caller intends to re-run an already-run config (it only shapes the emitted guidance — a re-run
+    is idempotent regardless, via dedupe-on-read under the shared ``run_id``).
     """
 
     run_id: str
@@ -85,6 +105,8 @@ class LaunchPlan:
     staged: bool
     config_uri: str | None
     commands: dict[str, LaunchCommands] | None
+    idempotency: Idempotency
+    force: bool
 
 
 @dataclass(frozen=True)
@@ -174,6 +196,7 @@ def run(
     dry_run: bool = False,
     spark: object | None = None,
     settings: Settings | None = None,
+    force: bool = False,
 ) -> str:
     """Execute one run: Spark + BigQuery-native in parallel under one run_id; return that run_id.
 
@@ -204,6 +227,9 @@ def run(
     existing caller is unchanged. The SDK ``Forecaster`` uses this to thread an explicit identity
     instead of relying on process env.
 
+    ``force`` acknowledges re-running an already-run config; it shapes only the ``dry_run`` plan's
+    re-run guidance (a submit is idempotent regardless — see below).
+
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows.
     """
@@ -214,9 +240,10 @@ def run(
     from .settings import Settings
 
     if dry_run:
-        # Single-source the offline plan: plan_run resolves the id + fanout + runtime split and
-        # emits the launch-command templates. It returns the run_id so this contract is unchanged.
-        return plan_run(cfg, settings=settings).run_id
+        # Single-source the offline plan: plan_run resolves the id + fanout + runtime split, reports
+        # the exists-vs-new verdict, and emits the launch-command templates. It returns the run_id,
+        # so this contract is unchanged.
+        return plan_run(cfg, settings=settings, force=force).run_id
 
     plan = _plan(cfg)
     run_id = plan.run_id
@@ -325,6 +352,23 @@ def _combined_status(
     return engine_status
 
 
+def _check_idempotency(run_id: str, settings: Settings) -> Idempotency:
+    """Best-effort pre-submit existence check: has this exact config already run?
+
+    Queries the registry for ``run_id`` (`registry.bq.header_status`). Any failure — no registry
+    table yet, no reachable BigQuery — degrades to ``checked=False`` (unknown), so a plain offline
+    dry-run still returns a plan. The check is advisory: it warns before an accidental duplicate run
+    but never blocks one (a re-run is idempotent via dedupe-on-read).
+    """
+    from .registry import bq
+
+    try:
+        status = bq.header_status(run_id, settings=settings)
+    except Exception:  # noqa: BLE001 - advisory check; unknown on any failure, never fatal
+        return Idempotency(checked=False, exists=False, prior_status=None)
+    return Idempotency(checked=True, exists=status is not None, prior_status=status)
+
+
 def _resolve_infra(cfg: RunConfig, infra: object | None) -> object:
     """The runtime's infra identity: the injected ``infra``, else resolved from the ``SF_*`` env.
 
@@ -414,6 +458,28 @@ def _assemble_commands(
     return commands
 
 
+def _emit_idempotency(result: LaunchPlan) -> None:
+    """Log the exists-vs-new verdict and, when re-running, the ``--force`` guidance."""
+    idem = result.idempotency
+    if not idem.checked:
+        return  # registry not consulted (offline / unreachable) — verdict unknown, say nothing
+    if not idem.exists:
+        _log.info("  new run — this config has not run before")
+        return
+    if result.force:
+        _log.info(
+            "  re-run (--force): this config already ran (%s); it appends to the same run_id "
+            "(idempotent, dedupe-on-read)",
+            idem.prior_status,
+        )
+    else:
+        _log.warning(
+            "  already ran: this config ran before (%s). A re-run is idempotent (dedupe-on-read "
+            "under the same run_id); pass --force to acknowledge re-running it.",
+            idem.prior_status,
+        )
+
+
 def _emit_plan(result: LaunchPlan) -> None:
     """Log the resolved plan + each launch-command tier (the dry-run/stage-only emission)."""
     verb = "stage" if result.staged else "dry-run"
@@ -426,6 +492,7 @@ def _emit_plan(result: LaunchPlan) -> None:
         result.bq_models,
         result.fanout,
     )
+    _emit_idempotency(result)
     if result.commands is None:
         _log.info(
             "%s %s: infra unresolved (no SF_* env) — commands not emitted", verb, result.run_id
@@ -438,16 +505,22 @@ def _emit_plan(result: LaunchPlan) -> None:
 
 
 def plan_run(
-    cfg: RunConfig, *, settings: Settings | None = None, infra: object | None = None
+    cfg: RunConfig,
+    *,
+    settings: Settings | None = None,
+    infra: object | None = None,
+    force: bool = False,
 ) -> LaunchPlan:
     """Resolve a run offline to its id, fanout, runtime split, and launch-command *templates*.
 
     The "plan" verb: pure and GCP-free. Computes `_plan` (rejecting Spark ``multi`` up front, so a
     bad shape fails fast even in a dry run) and `estimate_fanout`, then — best-effort — resolves the
-    infra identity and builds the two-tier launch commands with the URIs the artifacts *will* land
-    at (nothing is uploaded). When the infra can't be resolved offline (no ``SF_*`` env), the
-    commands are omitted (``commands=None``) but the id/fanout/split are still returned, so a plain
-    ``--dry-run`` works with no environment. Emits the plan to the log and returns it.
+    infra identity, consults the registry for the exists-vs-new verdict (`_check_idempotency`), and
+    builds the two-tier launch commands with the URIs the artifacts *will* land at (nothing is
+    uploaded). When the infra can't be resolved offline (no ``SF_*`` env), the commands are omitted
+    (``commands=None``) and the verdict is *unknown*, but the id/fanout/split are still returned, so
+    a plain ``--dry-run`` works with no environment. ``force`` shapes only the emitted re-run
+    guidance. Emits the plan to the log and returns it.
     """
     from .config import estimate_fanout
 
@@ -455,8 +528,10 @@ def plan_run(
     fanout = estimate_fanout(cfg)
     config_uri: str | None = None
     commands: dict[str, LaunchCommands] | None = None
+    idempotency = Idempotency(checked=False, exists=False, prior_status=None)
     try:
         settings = settings or _resolve_settings()
+        idempotency = _check_idempotency(plan.run_id, settings)
         resolved_infra = _resolve_infra(cfg, infra)
         code_bucket = resolved_infra.code_bucket  # type: ignore[attr-defined]
         config_uri, package_uri, launcher_uri = _template_uris(cfg, plan, code_bucket)
@@ -483,6 +558,8 @@ def plan_run(
         staged=False,
         config_uri=config_uri,
         commands=commands,
+        idempotency=idempotency,
+        force=force,
     )
     _emit_plan(result)
     return result
@@ -514,11 +591,21 @@ def _manifest_dict(result: LaunchPlan, *, created_at: str) -> dict[str, object]:
         },
         "config_uri": result.config_uri,
         "commands": commands,
+        "force": result.force,
+        "idempotency": {
+            "checked": result.idempotency.checked,
+            "exists": result.idempotency.exists,
+            "prior_status": result.idempotency.prior_status,
+        },
     }
 
 
 def stage_run(
-    cfg: RunConfig, *, settings: Settings | None = None, infra: object | None = None
+    cfg: RunConfig,
+    *,
+    settings: Settings | None = None,
+    infra: object | None = None,
+    force: bool = False,
 ) -> LaunchPlan:
     """Stage a run's artifacts to GCS and return the *runnable* launch commands — no submit.
 
@@ -526,7 +613,9 @@ def stage_run(
     bucket, builds the launch commands against those **real** URIs (so they run as-is from any ADC
     box), and writes the reproducibility manifest ``runs/<run_id>.plan.json`` next to the config.
     Unlike `plan_run`, the infra identity is required — staging touches GCS — so a missing ``SF_*``
-    env raises rather than degrading. Returns the `LaunchPlan` with ``staged=True``.
+    env raises rather than degrading; the exists-vs-new verdict (`_check_idempotency`) is therefore
+    always resolved. ``force`` shapes only the emitted re-run guidance. Returns the `LaunchPlan`
+    with ``staged=True``.
     """
     from datetime import UTC, datetime
 
@@ -536,6 +625,7 @@ def stage_run(
     plan = _plan(cfg)
     fanout = estimate_fanout(cfg)
     settings = settings or _resolve_settings()
+    idempotency = _check_idempotency(plan.run_id, settings)
     resolved_infra = _resolve_infra(cfg, infra)
     code_bucket: str = resolved_infra.code_bucket  # type: ignore[attr-defined]
 
@@ -567,6 +657,8 @@ def stage_run(
         staged=True,
         config_uri=config_uri,
         commands=commands,
+        idempotency=idempotency,
+        force=force,
     )
     manifest_uri = stage_manifest(
         _manifest_dict(result, created_at=datetime.now(UTC).isoformat()), plan.run_id, code_bucket
@@ -600,14 +692,19 @@ def _main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="stage artifacts to GCS + emit the runnable command + manifest; do not submit",
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="acknowledge re-running an already-run config (shapes the exists-vs-new guidance)",
+    )
     ns = p.parse_args(argv)
 
     cfg = load_config(ns.config)
     if ns.stage_only:
-        result = stage_run(cfg)
+        result = stage_run(cfg, force=ns.force)
         _log.info("staged: %s", result.run_id)
         return
-    run_id = run(cfg, dry_run=ns.dry_run)
+    run_id = run(cfg, dry_run=ns.dry_run, force=ns.force)
     _log.info("%s: %s", "planned" if ns.dry_run else "submitted", run_id)
 
 

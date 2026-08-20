@@ -697,6 +697,37 @@ def update_header(
         raise RegistryError(f"update_header failed for run {run_id}: {exc}") from exc
 
 
+def header_status(
+    run_id: str, *, settings: Settings | None = None
+) -> str | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the status of a run's ``run_registry`` header, or ``None`` if it has never run.
+
+    Reads the most recent header row for ``run_id`` (a forced re-run of the same config appends
+    another row under the same id; the latest ``created_at`` wins, matching the read-side dedupe in
+    ``v_run_summary``). Because ``run_id`` is a pure digest of the config, this is the pre-submit
+    existence check: a non-``None`` status means this exact config has already run. Raises
+    `RegistryError` on failure (including when the registry table does not exist yet).
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT status FROM `{resolved.table_ref('run_registry')}` "
+        "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"header_status failed for run {run_id}: {exc}") from exc
+    return rows[0]["status"] if rows else None
+
+
 class HeaderFinalizer:
     """Mutable finalize state a `run_header` body fills in before a clean exit.
 

@@ -14,6 +14,9 @@ Two views, matched to the two questions a run prompts:
   provisioning overhead (``total_wall_s − runtime_seconds``) and its share, cluster sizing, and DCU
   usage. This is the scaling-and-efficiency story as one ``SELECT * ORDER BY spark_method,
   n_series`` — explode's flat curve vs. naive's straggler, with overhead that amortizes at scale.
+  A forced re-run of an unchanged config appends a second header row under the same ``run_id``;
+  the view keeps only the latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one
+  run is always one row.
 
 - ``v_model_leaderboard`` — *which model won, per run?* One row per ``(run_id, model_type,
   ensemble_id)``: cell counts, the error rate (a model failing every cell — the libgomp/lightgbm
@@ -60,7 +63,8 @@ SELECT
   CAST(JSON_VALUE(job_telemetry, '$.max_executors') AS INT64) AS max_executors,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
   JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version
-FROM `{d}.run_registry`""",
+FROM `{d}.run_registry`
+QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1""",
     "v_model_leaderboard": """\
 CREATE OR REPLACE VIEW `{d}.v_model_leaderboard` AS
 SELECT
