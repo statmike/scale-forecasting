@@ -97,10 +97,13 @@ def test_run_delegates_to_main_run_and_wraps_result(monkeypatch: pytest.MonkeyPa
     calls: dict[str, Any] = {}
 
     def _spy(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None,
-             settings: Settings | None = None) -> str:
+             settings: Settings | None = None, n_series: int | None = None,
+             max_executors: int | None = None) -> str:
         calls["cfg"] = cfg
         calls["spark"] = spark
         calls["settings"] = settings
+        calls["n_series"] = n_series
+        calls["max_executors"] = max_executors
         return make_run_id(cfg)
 
     monkeypatch.setattr(main, "run", _spy)
@@ -114,6 +117,24 @@ def test_run_delegates_to_main_run_and_wraps_result(monkeypatch: pytest.MonkeyPa
     assert result.run_id == f.run_id
     assert result.dataset_ref == _SETTINGS.dataset_ref
     assert result.views == VIEW_NAMES
+
+
+def test_run_threads_scale_knobs_to_main_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting import main
+
+    calls: dict[str, Any] = {}
+
+    def _spy(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None,
+             settings: Settings | None = None, n_series: int | None = None,
+             max_executors: int | None = None) -> str:
+        calls["n_series"] = n_series
+        calls["max_executors"] = max_executors
+        return make_run_id(cfg)
+
+    monkeypatch.setattr(main, "run", _spy)
+    sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).run(n_series=1000, max_executors=8)
+    assert calls["n_series"] == 1000
+    assert calls["max_executors"] == 8
 
 
 # --- review: offline pointer ---------------------------------------------------

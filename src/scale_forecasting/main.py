@@ -161,7 +161,12 @@ def _plan(cfg: RunConfig) -> _RunPlan:
 
 
 def _launch_python_runtime(
-    cfg: RunConfig, plan: _RunPlan, settings: Settings, spark: object | None = None
+    cfg: RunConfig,
+    plan: _RunPlan,
+    settings: Settings,
+    spark: object | None = None,
+    *,
+    max_executors: int | None = None,
 ) -> None:
     """Run the Python-runtime models on the runtime ``cfg.python_runtime`` picks (contributor mode).
 
@@ -177,7 +182,8 @@ def _launch_python_runtime(
     ``spark`` is an optional injected `SparkSession`, passed through to the submitter. The Spark
     submitter, given one, runs **in-process against that session** (the same engine code the batch
     runs — the injectable-session seam) instead of submitting a remote Dataproc batch; other
-    runtimes ignore it.
+    runtimes ignore it. ``max_executors`` caps the remote Spark batch's dynamic-allocation ceiling
+    (ignored by the in-process and Ray paths).
     """
     from .submitters import get_submitter
 
@@ -187,6 +193,7 @@ def _launch_python_runtime(
         manage_header=False,
         settings=settings,
         spark=spark,
+        max_executors=max_executors,
     )
 
 
@@ -197,6 +204,8 @@ def run(
     spark: object | None = None,
     settings: Settings | None = None,
     force: bool = False,
+    n_series: int | None = None,
+    max_executors: int | None = None,
 ) -> str:
     """Execute one run: Spark + BigQuery-native in parallel under one run_id; return that run_id.
 
@@ -230,6 +239,10 @@ def run(
     ``force`` acknowledges re-running an already-run config; it shapes only the ``dry_run`` plan's
     re-run guidance (a submit is idempotent regardless — see below).
 
+    ``n_series`` overrides ``data.series_limit`` (the 10→100→1k→100k scale knob) before anything
+    else, so it changes the ``run_id`` and both engines see the same limit. ``max_executors`` caps
+    the remote Spark batch's dynamic-allocation ceiling (ignored by the in-process/Ray paths).
+
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows.
     """
@@ -238,6 +251,10 @@ def run(
     from .engines import bigquery_engine
     from .registry import bq
     from .settings import Settings
+
+    # The series-limit override is applied first so it flows into the run_id and both engines — a
+    # different scale is a distinct, independently-queryable run.
+    cfg = cfg.with_series_limit(n_series)
 
     if dry_run:
         # Single-source the offline plan: plan_run resolves the id + fanout + runtime split, reports
@@ -275,7 +292,14 @@ def run(
         with ThreadPoolExecutor(max_workers=1) as pool:
             python_future = None
             if plan.python_models:
-                python_future = pool.submit(_launch_python_runtime, cfg, plan, settings, spark)
+                python_future = pool.submit(
+                    _launch_python_runtime,
+                    cfg,
+                    plan,
+                    settings,
+                    spark,
+                    max_executors=max_executors,
+                )
             if plan.bq_models:
                 try:
                     bq_outcome = bigquery_engine.run(

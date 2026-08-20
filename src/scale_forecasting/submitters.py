@@ -38,12 +38,15 @@ class RuntimeSubmitter(Protocol):
         settings: Settings,
         spark: object | None = None,
         wait: bool = True,
+        max_executors: int | None = None,
     ) -> None:
         """Run ``models`` on this runtime, blocking until terminal when ``wait``.
 
         ``manage_header`` threads the header-ownership contract (``False`` = contributor mode, the
         caller owns the shared header). ``spark`` is an optional injected `SparkSession`, honored
         only by the runtimes that can run in-process against one (Spark); others ignore it.
+        ``max_executors`` caps the remote Spark batch's dynamic-allocation ceiling; runtimes that
+        autoscale on their own (Ray) or run in-process (an injected session) ignore it.
         """
         ...
 
@@ -62,10 +65,12 @@ class SparkSubmitter:
         settings: Settings,
         spark: object | None = None,
         wait: bool = True,
+        max_executors: int | None = None,
     ) -> None:
         if spark is not None:
             # In-process Spark over an injected (Connect or local) session — no remote batch submit.
             # multi never reaches here (rejected by main._plan under one run_id): naive xor explode.
+            # max_executors is a remote-batch dynamic-allocation cap; an injected session skips it.
             from .engines import spark_explode, spark_naive
 
             engine = spark_naive if cfg.spark_method == "naive" else spark_explode
@@ -82,6 +87,7 @@ class SparkSubmitter:
             manage_header=manage_header,
             settings=settings,
             wait=wait,
+            max_executors=max_executors,
         )
 
 
@@ -99,8 +105,10 @@ class RaySubmitter:
         settings: Settings,
         spark: object | None = None,
         wait: bool = True,
+        max_executors: int | None = None,
     ) -> None:
-        # spark is ignored — there is no in-process Ray path from the orchestrator.
+        # spark and max_executors are ignored — there is no in-process Ray path from the
+        # orchestrator, and the Ray cluster autoscales on its own (no fixed executor cap).
         from .ray_submit import submit_ray
 
         submit_ray(

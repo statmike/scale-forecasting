@@ -385,6 +385,34 @@ def test_launch_python_runtime_dispatches_spark(monkeypatch: pytest.MonkeyPatch)
     assert seen["manage_header"] is False
 
 
+def test_run_n_series_override_changes_run_id() -> None:
+    # n_series overrides series_limit before planning, so the dry-run id matches the adjusted cfg.
+    from scale_forecasting.registry.ids import make_run_id as _mri
+
+    base = _cfg(models=[_SPARK])
+    overridden = base.with_series_limit(1000)
+    run_id = main.run(base, dry_run=True, n_series=1000)
+    assert run_id == _mri(overridden)
+    assert run_id != _mri(base)
+
+
+def test_launch_python_runtime_threads_max_executors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.submit as submit_mod
+
+    seen: dict[str, Any] = {}
+
+    def _fake_submit_batch(cfg: RunConfig, **kw: Any) -> str:
+        seen.update(kw)
+        return "batch-1"
+
+    monkeypatch.setattr(submit_mod, "submit_batch", _fake_submit_batch)
+
+    cfg = _cfg(models=[_SPARK], python_runtime="spark")
+    plan = main._plan(cfg)
+    main._launch_python_runtime(cfg, plan, _SETTINGS, max_executors=8)
+    assert seen["max_executors"] == 8
+
+
 def test_launch_python_runtime_dispatches_ray(monkeypatch: pytest.MonkeyPatch) -> None:
     import scale_forecasting.ray_submit as ray_submit_mod
 

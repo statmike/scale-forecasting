@@ -148,17 +148,34 @@ class Forecaster:
             bq_models=bq_models,
         )
 
-    def run(self, *, spark: object | None = None) -> RunResult:
+    def run(
+        self,
+        *,
+        spark: object | None = None,
+        n_series: int | None = None,
+        max_executors: int | None = None,
+    ) -> RunResult:
         """Execute the run (Spark/Ray ∥ BigQuery under one run_id) and return where to query it.
 
         Delegates to `main.run`, threading this forecaster's ``settings`` (so an injected
         identity is honored). ``spark`` optionally injects a `SparkSession` /
-        ``DataprocSparkSession`` for the in-process Spark path (notebook / Connect demo). Returns a
-        `RunResult` pointing at the registry views under the resolved dataset.
+        ``DataprocSparkSession`` for the in-process Spark path (notebook / Connect demo).
+        ``n_series`` overrides ``data.series_limit`` (the scale knob — it changes the ``run_id``, so
+        each scale is its own run); ``max_executors`` caps the remote Spark batch's executor
+        ceiling. Returns a `RunResult` pointing at the registry views under the resolved dataset.
+
+        Note the returned ``run_id`` reflects any ``n_series`` override, so it may differ from this
+        forecaster's base `run_id`; use it (or `status`/`results` with it) to track this run.
         """
         from . import main
 
-        run_id = main.run(self._config, spark=spark, settings=self._settings)
+        run_id = main.run(
+            self._config,
+            spark=spark,
+            settings=self._settings,
+            n_series=n_series,
+            max_executors=max_executors,
+        )
         return RunResult(run_id=run_id, dataset_ref=self._resolved_dataset_ref(), views=VIEW_NAMES)
 
     def review(self) -> RunResult:
