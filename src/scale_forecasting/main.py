@@ -118,55 +118,29 @@ def _launch_python_runtime(
 ) -> None:
     """Run the Python-runtime models on the runtime ``cfg.python_runtime`` picks (contributor mode).
 
-    The one dispatch point between the two Python runtimes, called on `run`'s worker thread:
-    ``"ray"`` → an autoscaling Ray cluster (`submit_ray`);
-    otherwise → a Dataproc Serverless batch (`submit_batch`) as the
-    ``plan.spark_method`` engine. Both run ``plan.python_models`` with ``manage_header=False`` (this
-    orchestrator owns the single shared header) and block until terminal, so the caller joins one
-    future regardless of runtime. Kept a plain module function (not a lambda) so the worker thread's
-    traceback names it and the import stays lazy (Ray/Spark extras load only for the chosen path).
+    The one dispatch point between the two Python runtimes, called on `run`'s worker thread: it
+    looks up the `RuntimeSubmitter` registered for ``cfg.python_runtime`` (`get_submitter`) and
+    hands it ``plan.python_models`` with ``manage_header=False`` (this orchestrator owns the single
+    shared header). The submitter blocks until terminal, so the caller joins one future regardless
+    of runtime — Ray submits to an autoscaling cluster, Spark runs in-process against an injected
+    session or submits a Dataproc batch. Kept a plain module function (not a lambda) so the worker
+    thread's traceback names it, and the submitter's imports stay lazy (Ray/Spark extras load only
+    for the chosen path).
 
-    ``spark`` is an optional injected `SparkSession`. When it is supplied **and**
-    ``python_runtime == "spark"``, the Spark engine runs **in-process against that session**
-    (``spark_explode``/``spark_naive`` with ``spark=…``) instead of submitting a remote Dataproc
-    batch — the notebook / Spark Connect path. This is the same engine code the batch runs (the
-    injectable-session seam), so no logic forks per environment. ``spark`` is ignored for the
-    Ray runtime and for a remote batch (the default when no session is passed).
+    ``spark`` is an optional injected `SparkSession`, passed through to the submitter. The Spark
+    submitter, given one, runs **in-process against that session** (the same engine code the batch
+    runs — the injectable-session seam) instead of submitting a remote Dataproc batch; other
+    runtimes ignore it.
     """
-    if cfg.python_runtime == "ray":
-        from .ray_submit import submit_ray
+    from .submitters import get_submitter
 
-        submit_ray(
-            cfg,
-            models=plan.python_models,
-            manage_header=False,
-            settings=settings,
-            wait=True,
-        )
-    elif spark is not None:
-        # In-process Spark over an injected (Connect or local) session — no remote batch submit.
-        # multi never reaches here (rejected by _plan under one run_id), so it's naive xor explode.
-        from .engines import spark_explode, spark_naive
-
-        engine = spark_naive if plan.spark_method == "naive" else spark_explode
-        engine.run(
-            cfg,
-            models=plan.python_models,
-            manage_header=False,
-            settings=settings,
-            spark=spark,
-        )
-    else:
-        from .submit import submit_batch
-
-        submit_batch(
-            cfg,
-            engine=plan.spark_method or "explode",
-            models=plan.python_models,
-            manage_header=False,
-            settings=settings,
-            wait=True,
-        )
+    get_submitter(cfg.python_runtime).launch(
+        cfg,
+        models=plan.python_models,
+        manage_header=False,
+        settings=settings,
+        spark=spark,
+    )
 
 
 def run(
