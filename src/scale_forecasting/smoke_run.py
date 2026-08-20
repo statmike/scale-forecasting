@@ -38,7 +38,6 @@ import argparse
 
 from ._infra_args import add_infra_args, export_infra_env
 from .errors import get_logger
-from .spark_entry import _load_uri
 
 _log = get_logger(__name__)
 
@@ -60,25 +59,16 @@ def main(argv: list[str] | None = None) -> None:
     one ``run_id`` — with no remote-batch submit and no ``[spark]`` extra (the injectable-session
     seam).
     """
-    import json
-    import tempfile
-    from pathlib import Path
-
     from pyspark.sql import SparkSession
 
-    from .config import load_config
+    from .config import load_config_uri
     from .main import run
 
     ns = _parse_args(argv)
     _log.info("smoke_run: config_uri=%s", ns.config_uri)
 
-    # load_config takes a path; materialize a gs:// config to a temp file (local path unchanged).
-    raw = _load_uri(ns.config_uri)
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg_path = Path(tmp) / "run_config.json"
-        cfg_path.write_text(raw)
-        json.loads(raw)  # fail fast on malformed JSON with a clear message before load
-        cfg = load_config(cfg_path)
+    # load_config_uri reads a gs:// URI directly (or a local path), returning a validated RunConfig.
+    cfg = load_config_uri(ns.config_uri)
 
     spark = SparkSession.builder.appName("scale-forecasting-smoke").getOrCreate()
     try:

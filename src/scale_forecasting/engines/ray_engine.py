@@ -220,7 +220,13 @@ def _chunk_count(n_cells: int, target_cells: int) -> int:
     return max(1, math.ceil(n_cells / target_cells))
 
 
-def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool = True) -> None:
+def run(
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    manage_header: bool = True,
+    settings: Settings | None = None,
+) -> None:
     """Execute a Ray run end-to-end: header → route + fan chunks across the cluster → close header.
 
     Driver-side lifecycle, the structural twin of `spark_explode.run`:
@@ -243,7 +249,9 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     `main.run` passes only the Python-runtime models of a mixed config so the BigQuery-native
     ones run in BigQuery, not as Ray tasks. ``manage_header=False`` is contributor mode — the engine
     skips the header lifecycle because `main.run` owns the single shared header (parity with
-    the Spark contributor mode). Idempotent by construction: the config-derived ``run_id`` + append/
+    the Spark contributor mode). ``settings`` may pass an already-resolved `Settings` (the infra
+    identity) to reuse a caller's; ``None`` resolves it from the environment — parity with the Spark
+    engines' contract. Idempotent by construction: the config-derived ``run_id`` + append/
     dedupe-on-read writes mean a re-run of the same config lands byte-identical rows.
 
     Assumes Ray is reachable: connects with a plain ``ray.init()`` only if not already connected
@@ -260,7 +268,7 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
     from ..registry.ids import make_run_id
     from ..settings import Settings
 
-    settings = Settings.resolve()
+    settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
     executed = models if models is not None else cfg.models
     gpu_models, cpu_models = ray_io.split_gpu_cpu_models(cfg, executed)
