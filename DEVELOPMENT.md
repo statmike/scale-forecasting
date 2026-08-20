@@ -50,8 +50,6 @@ Plain-language rationale for the choices that aren't obvious from the code alone
 ## Work items
 
 ### In progress
-- [ ] Documentation & repo refactor: MkDocs Material site + auto-generated API reference, slim
-      README, single-sourced guides, dev-notes corralled here.
 - [ ] SDK runner refinement — tighten both the high-level `Forecaster` path and the lower-level
       direct job runners (the effort this cleanup unblocks).
 
@@ -70,6 +68,8 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- Documentation & repo refactor: MkDocs Material site + auto-generated API reference published to
+  GitHub Pages, slim README, single-sourced guides, all internal tokens/dev-notes corralled here.
 - Ray-on-Vertex autoscaling.
 - Python SDK (`Forecaster`).
 - Config-level rerun guard (same config → same `run_id`, the dedupe key for idempotent re-runs).
