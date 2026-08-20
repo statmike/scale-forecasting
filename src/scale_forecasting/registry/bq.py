@@ -21,7 +21,8 @@ resolves from ``SF_*`` env vars. GCP client libraries are imported lazily inside
 the pure layer (and its offline tests) never need them installed.
 
 Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_header``,
-``write_cells``, plus the pure assemblers used by the writers and the tests.
+``run_header`` (the header-lifecycle context manager), ``write_cells``, plus the pure assemblers
+used by the writers and the tests.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, get_args
 
 from ..config import DecisionMetric
@@ -37,6 +39,7 @@ from ..errors import get_logger
 _log = get_logger(__name__)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from datetime import datetime
 
     from ..config import RunConfig
@@ -692,6 +695,71 @@ def update_header(
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"update_header failed for run {run_id}: {exc}") from exc
+
+
+class HeaderFinalizer:
+    """Mutable finalize state a `run_header` body fills in before a clean exit.
+
+    A run's terminal ``status`` (default ``COMPLETED``) plus any extra header columns to stamp on
+    success (``n_series``, ``n_models``, ``bq_models``, …). Left untouched, the block finalizes a
+    plain ``COMPLETED`` with only the wall-clock ``runtime_seconds`` `run_header` measures.
+    """
+
+    def __init__(self) -> None:
+        self.status: str = "COMPLETED"
+        self.extra: dict[str, Any] = {}
+
+    def finalize(self, *, status: str | None = None, **fields: Any) -> None:
+        """Set the terminal ``status`` (if given) and merge extra columns for the success write."""
+        if status is not None:
+            self.status = status
+        self.extra.update(fields)
+
+
+@contextmanager
+def run_header(
+    cfg: RunConfig,
+    run_id: str,
+    *,
+    settings: Settings | None = None,
+    manage: bool = True,
+) -> Iterator[HeaderFinalizer]:
+    """Own a run's ``run_registry`` header for the duration of a block (the one lifecycle seam).
+
+    In **owner mode** (``manage=True``): on entry ``ensure_tables`` + ``write_header`` (RUNNING);
+    on a clean exit ``update_header`` with the finalizer's ``status`` (default COMPLETED), the
+    measured wall-clock ``runtime_seconds``, and any extra columns the body set via
+    `HeaderFinalizer.finalize`; on an exception ``update_header(status=FAILED, runtime_seconds=…)``
+    then re-raise, so a crashed run records a terminal status instead of stranding at RUNNING.
+
+    In **contributor mode** (``manage=False``): touches no header at all — `main.run` /
+    `submit_multi` own the single shared row — so this only yields the finalizer for uniform call
+    shape. The body may still populate it; nothing is written.
+    """
+    fin = HeaderFinalizer()
+    if manage:
+        ensure_tables(cfg, settings=settings)
+        write_header(cfg, run_id, settings=settings)
+    started = time.perf_counter()
+    try:
+        yield fin
+    except BaseException:
+        if manage:
+            update_header(
+                run_id,
+                settings=settings,
+                status="FAILED",
+                runtime_seconds=time.perf_counter() - started,
+            )
+        raise
+    if manage:
+        update_header(
+            run_id,
+            settings=settings,
+            status=fin.status,
+            runtime_seconds=time.perf_counter() - started,
+            **fin.extra,
+        )
 
 
 def write_cells(

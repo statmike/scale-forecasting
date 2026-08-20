@@ -207,7 +207,6 @@ def run(
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows.
     """
-    import time
     from concurrent.futures import ThreadPoolExecutor
 
     from .config import estimate_fanout
@@ -238,69 +237,99 @@ def run(
         plan.bq_models,
     )
 
-    # One header owner: write RUNNING once, then finalize after both engines join. Both engines run
-    # with manage_header=False so nothing else touches this row.
-    bq.ensure_tables(cfg, settings=settings)
-    bq.write_header(cfg, run_id, settings=settings)
-
-    started = time.perf_counter()
     bq_outcome = None
     spark_error: BaseException | None = None
     bq_error: BaseException | None = None
-
-    # Launch the remote Python-runtime job on a worker thread (it blocks until terminal + stamps
-    # telemetry in-thread), and run the in-process BigQuery engine on the main thread so the two
-    # overlap. The runtime — Spark batch or autoscaling Vertex Ray cluster — is chosen by
-    # cfg.python_runtime; both take the same contributor-mode contract (models subset + shared
-    # header owned here), so Ray ∥ BigQuery works under one run_id exactly like Spark ∥ BigQuery.
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        python_future = None
-        if plan.python_models:
-            python_future = pool.submit(_launch_python_runtime, cfg, plan, settings, spark)
-        if plan.bq_models:
-            try:
-                bq_outcome = bigquery_engine.run(
-                    cfg, plan.bq_models, manage_header=False, settings=settings
-                )
-            except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
-                bq_error = exc
-        if python_future is not None:
-            try:
-                python_future.result()
-            except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
-                spark_error = exc
-
-    # Ensembles run only once both engines have produced their base predictions under this run_id
-    # (they read forecast_predictions / backtest_oof), so this is sequenced strictly after the join
-    # and skipped when an engine failed. A failure here is captured like an engine error and flips
-    # the shared header FAILED — the ensembles are part of the run's success contract.
     ensemble_error: BaseException | None = None
-    if spark_error is None and bq_error is None and cfg.ensemble.enabled:
-        from .ensemble_run import run_ensembles
 
-        try:
-            run_ensembles(cfg, run_id, settings=settings)
-        except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
-            ensemble_error = exc
+    # One header owner: run_header writes RUNNING on entry and finalizes once, after both engines
+    # join, with the combined status computed below. Both engines run with manage_header=False so
+    # nothing else touches this row. Track errors are captured (not raised through the block) so the
+    # finalize records the right status; the first one is re-raised after, for a non-zero exit.
+    with bq.run_header(cfg, run_id, settings=settings, manage=True) as hdr:
+        # Launch the remote Python-runtime job on a worker thread (it blocks until terminal + stamps
+        # telemetry in-thread), and run the in-process BigQuery engine on the main thread so the two
+        # overlap. The runtime — Spark batch or autoscaling Vertex Ray cluster — is chosen by
+        # cfg.python_runtime; both take the same contributor-mode contract (models subset + shared
+        # header owned here), so Ray ∥ BigQuery works under one run_id like Spark ∥ BigQuery.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            python_future = None
+            if plan.python_models:
+                python_future = pool.submit(_launch_python_runtime, cfg, plan, settings, spark)
+            if plan.bq_models:
+                try:
+                    bq_outcome = bigquery_engine.run(
+                        cfg, plan.bq_models, manage_header=False, settings=settings
+                    )
+                except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
+                    bq_error = exc
+            if python_future is not None:
+                try:
+                    python_future.result()
+                except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
+                    spark_error = exc
 
-    runtime_seconds = time.perf_counter() - started
-    ok = spark_error is None and bq_error is None and ensemble_error is None
-    status = "COMPLETED" if ok else "FAILED"
+        # Ensembles run only once both engines have produced their base predictions under this
+        # run_id (they read forecast_predictions / backtest_oof), so this is sequenced strictly
+        # after the join and skipped when an engine failed. A failure here is captured like an
+        # engine error — the ensembles are part of the run's success contract.
+        if spark_error is None and bq_error is None and cfg.ensemble.enabled:
+            from .ensemble_run import run_ensembles
 
-    fields: dict[str, object] = {
-        "status": status,
-        "runtime_seconds": runtime_seconds,
-        "bq_models": plan.bq_models,
-    }
-    if bq_outcome is not None:
-        fields["n_series"] = bq_outcome.n_series
-    bq.update_header(run_id, settings=settings, **fields)
+            try:
+                run_ensembles(cfg, run_id, settings=settings)
+            except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
+                ensemble_error = exc
 
-    if not ok:
-        # Re-raise the first failure so the CLI exits non-zero; the header already records FAILED.
-        raise spark_error or bq_error or ensemble_error  # type: ignore[misc]
-    _log.info("run %s done: status=%s runtime=%.1fs", run_id, status, runtime_seconds)
+        # Combined status across the engine tracks that ran: COMPLETED iff all succeeded, FAILED iff
+        # all failed, PARTIAL when some but not all did (a mixed BigQuery ∥ Spark/Ray outcome — the
+        # base forecasts of the surviving engine are still usable). An ensemble failure on top of
+        # green engines fails the run: it didn't deliver the full requested output.
+        status = _combined_status(plan, spark_error, bq_error, ensemble_error)
+        fields: dict[str, object] = {"bq_models": plan.bq_models}
+        if bq_outcome is not None:
+            fields["n_series"] = bq_outcome.n_series
+        hdr.finalize(status=status, **fields)
+
+    first_error = spark_error or bq_error or ensemble_error
+    if first_error is not None:
+        # Re-raise the first failure so the CLI exits non-zero; the header already records the
+        # combined status (FAILED or PARTIAL).
+        raise first_error
+    _log.info("run %s done: status=%s", run_id, status)
     return run_id
+
+
+def _combined_status(
+    plan: _RunPlan,
+    spark_error: BaseException | None,
+    bq_error: BaseException | None,
+    ensemble_error: BaseException | None,
+) -> str:
+    """Roll the per-track outcomes into one run status (pure).
+
+    Over the engine tracks that actually ran (Python-runtime and/or BigQuery-native): every track
+    green → ``COMPLETED``; every track failed → ``FAILED``; a mix → ``PARTIAL``. An ensemble
+    failure downgrades an otherwise-``COMPLETED`` run to ``FAILED`` (the requested output is
+    incomplete); it never masks an engine ``PARTIAL``/``FAILED``.
+    """
+    track_ok: list[bool] = []
+    if plan.python_models:
+        track_ok.append(spark_error is None)
+    if plan.bq_models:
+        track_ok.append(bq_error is None)
+
+    n_ok = sum(track_ok)
+    if not track_ok or n_ok == len(track_ok):
+        engine_status = "COMPLETED"
+    elif n_ok == 0:
+        engine_status = "FAILED"
+    else:
+        engine_status = "PARTIAL"
+
+    if engine_status == "COMPLETED" and ensemble_error is not None:
+        return "FAILED"
+    return engine_status
 
 
 def _main(argv: list[str] | None = None) -> None:

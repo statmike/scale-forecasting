@@ -243,14 +243,15 @@ def test_run_skips_ensembles_when_disabled(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_run_skips_ensembles_when_engine_failed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A BigQuery engine failure must skip ensembles (they'd read incomplete predictions) and the
-    # header finalizes FAILED.
+    # A BigQuery engine failure must skip ensembles (they'd read incomplete predictions). Here the
+    # Python track succeeded and BigQuery failed — a mixed outcome — so the shared header finalizes
+    # PARTIAL, and the first failure is still re-raised for a non-zero exit.
     seen = _patch_run_seams(monkeypatch, bq_error=RuntimeError("bq boom"))
     cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
     with pytest.raises(RuntimeError, match="bq boom"):
         main.run(cfg)
     assert seen["ensemble_called"] is False
-    assert seen["status"] == "FAILED"
+    assert seen["status"] == "PARTIAL"
 
 
 def test_run_ensemble_failure_finalizes_header_failed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -268,6 +269,44 @@ def test_run_ensemble_failure_finalizes_header_failed(monkeypatch: pytest.Monkey
         main.run(cfg)
     assert seen["ensemble_called"] is True
     assert seen["status"] == "FAILED"
+
+
+# --- _combined_status: the multi-engine roll-up (pure) -------------------------
+
+
+def _boom() -> RuntimeError:
+    return RuntimeError("x")
+
+
+def test_combined_status_all_engines_green_is_completed() -> None:
+    plan = main._plan(_cfg())  # both python + bq tracks
+    assert main._combined_status(plan, None, None, None) == "COMPLETED"
+
+
+def test_combined_status_mixed_is_partial() -> None:
+    plan = main._plan(_cfg())
+    # python green, bq failed → some but not all → PARTIAL (and the mirror case).
+    assert main._combined_status(plan, None, _boom(), None) == "PARTIAL"
+    assert main._combined_status(plan, _boom(), None, None) == "PARTIAL"
+
+
+def test_combined_status_all_engines_failed_is_failed() -> None:
+    plan = main._plan(_cfg())
+    assert main._combined_status(plan, _boom(), _boom(), None) == "FAILED"
+
+
+def test_combined_status_single_engine_has_no_partial() -> None:
+    bq_only = main._plan(_cfg(models=_NATIVE))
+    assert main._combined_status(bq_only, None, None, None) == "COMPLETED"
+    assert main._combined_status(bq_only, None, _boom(), None) == "FAILED"
+
+
+def test_combined_status_ensemble_failure_fails_a_green_run() -> None:
+    plan = main._plan(_cfg())
+    # engines green but the ensemble step failed → the run didn't deliver full output → FAILED.
+    assert main._combined_status(plan, None, None, _boom()) == "FAILED"
+    # an ensemble error never masks an engine PARTIAL/FAILED (engine status already non-COMPLETED).
+    assert main._combined_status(plan, None, _boom(), _boom()) == "PARTIAL"
 
 
 # --- CLI: dispatches dry_run ---------------------------------------------------
