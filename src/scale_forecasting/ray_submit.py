@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ._infra_args import infra_args_from
+from .commands import build_driver_args
 from .engines import ray_io
 from .errors import ConfigError, EngineError, get_logger
 from .staging import stage_config
@@ -217,12 +217,8 @@ def build_entrypoint(
     false`` (contributor mode; `main.run` owns the shared header). Defaults omit these
     flags so a standalone submit builds the plain command.
     """
-    parts = ["python", "-m", "scale_forecasting.ray_entry", "--config-uri", config_uri]
-    parts += infra_args_from(settings)
-    if models is not None:
-        parts += ["--models", ",".join(models)]
-    if not manage_header:
-        parts += ["--manage-header", "false"]
+    parts = ["python", "-m", "scale_forecasting.ray_entry"]
+    parts += build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
     return " ".join(parts)
 
 
@@ -959,12 +955,14 @@ def _resource_name(settings: Settings, name: str, region: str | None = None) -> 
 
 def main(argv: list[str] | None = None) -> None:
     """CLI: ``python -m scale_forecasting.ray_submit --config run.json [--cluster-name ...]``."""
-    from .config import load_config
+    from .config import load_config_uri
 
     p = argparse.ArgumentParser(
         prog="ray_submit", description="Submit a forecast run to Vertex Ray."
     )
-    p.add_argument("--config", required=True, help="path to the run config JSON")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--config", help="path to the run config JSON")
+    src.add_argument("--config-uri", help="gs:// URI of a staged config (portable source)")
     p.add_argument("--n-series", type=int, default=None, help="override series_limit (scale knob)")
     p.add_argument(
         "--cluster-name",
@@ -974,7 +972,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--no-wait", action="store_true", help="return once submitted (don't block)")
     ns = p.parse_args(argv)
 
-    cfg = load_config(ns.config)
+    cfg = load_config_uri(ns.config or ns.config_uri)
     job_id = submit_ray(
         cfg, cluster_name=ns.cluster_name, n_series=ns.n_series, wait=not ns.no_wait
     )

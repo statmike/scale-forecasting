@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ._infra_args import infra_args_from
+from .commands import build_driver_args
 from .errors import ConfigError, EngineError, get_logger
 from .staging import stage_config
 
@@ -263,11 +263,9 @@ def build_batch(
 
     from google.cloud import dataproc_v1 as dataproc
 
-    args = ["--engine", engine, "--config-uri", config_uri, *infra_args_from(settings)]
-    if models is not None:
-        args += ["--models", ",".join(models)]
-    if not manage_header:
-        args += ["--manage-header", "false"]
+    args = build_driver_args(
+        config_uri, settings, engine=engine, models=models, manage_header=manage_header
+    )
     properties = {}
     if max_executors is not None:
         properties["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
@@ -569,10 +567,12 @@ def split_models_by_family(cfg: RunConfig) -> dict[str, list[str]]:
 
 def main(argv: list[str] | None = None) -> None:
     """CLI: ``python -m scale_forecasting.submit --config run.json [--engine ...]``."""
-    from .config import load_config
+    from .config import load_config_uri
 
     p = argparse.ArgumentParser(prog="submit", description="Submit a forecast run to Dataproc.")
-    p.add_argument("--config", required=True, help="path to the run config JSON")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--config", help="path to the run config JSON")
+    src.add_argument("--config-uri", help="gs:// URI of a staged config (portable source)")
     p.add_argument("--engine", default="explode", choices=("explode", "naive", "multi"))
     p.add_argument("--n-series", type=int, default=None, help="override series_limit (scale knob)")
     p.add_argument(
@@ -595,7 +595,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     ns = p.parse_args(argv)
 
-    cfg = load_config(ns.config)
+    cfg = load_config_uri(ns.config or ns.config_uri)
     # Build infra once so --ttl overrides the default cap on every (child) batch this run submits.
     infra = BatchInfra.resolve()
     if ns.ttl != _DEFAULT_TTL_SECONDS:

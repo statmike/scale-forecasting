@@ -399,3 +399,31 @@ def load_config(path: str | Path) -> RunConfig:
         return RunConfig(**data)
     except ValidationError as e:
         raise ConfigError(f"invalid config '{p}':\n{e}") from e
+
+
+def load_config_uri(uri: str) -> RunConfig:
+    """Load a validated config from a local path **or** a ``gs://`` URI (the portable source).
+
+    A ``gs://`` URI is the staged config an emitted launch command references, so any
+    ADC-authenticated machine can re-run from it without a local file. Anything else is treated as a
+    filesystem path (delegates to `load_config`). Failure modes surface as a single ``ConfigError``.
+    """
+    if not uri.startswith("gs://"):
+        return load_config(uri)
+    bucket, _, blob = uri[len("gs://") :].partition("/")
+    if not bucket or not blob:
+        raise ConfigError(f"malformed config URI '{uri}' (expected gs://bucket/path.json)")
+    from google.cloud import storage
+
+    try:
+        raw = storage.Client().bucket(bucket).blob(blob).download_as_text()
+    except Exception as e:  # noqa: BLE001 - surface any fetch failure as one ConfigError
+        raise ConfigError(f"cannot read config URI '{uri}': {e}") from e
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"config URI '{uri}' is not valid JSON: {e}") from e
+    try:
+        return RunConfig(**data)
+    except ValidationError as e:
+        raise ConfigError(f"invalid config '{uri}':\n{e}") from e
