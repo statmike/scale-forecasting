@@ -72,5 +72,5 @@ Plain-language rationale for the choices that aren't obvious from the code alone
 ### Recently done
 - Ray-on-Vertex autoscaling.
 - Python SDK (`Forecaster`).
-- Config-level rerun guard (same config → same `run_id`, with a `--force` override).
+- Config-level rerun guard (same config → same `run_id`, the dedupe key for idempotent re-runs).
 - Cross-run ensembling (best model per engine across a group of runs).
