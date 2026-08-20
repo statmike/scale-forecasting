@@ -21,8 +21,9 @@ resolves from ``SF_*`` env vars. GCP client libraries are imported lazily inside
 the pure layer (and its offline tests) never need them installed.
 
 Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_header``,
-``run_header`` (the header-lifecycle context manager), ``write_cells``, plus the pure assemblers
-used by the writers and the tests.
+``run_header`` (the header-lifecycle context manager), ``write_cells``, the read surface
+(``header_status``, ``read_run_summary``, ``read_leaderboard``), plus the pure assemblers used by
+the writers and the tests.
 """
 
 from __future__ import annotations
@@ -726,6 +727,60 @@ def header_status(
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"header_status failed for run {run_id}: {exc}") from exc
     return rows[0]["status"] if rows else None
+
+
+def read_run_summary(
+    run_id: str, *, settings: Settings | None = None
+) -> dict[str, Any] | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the ``v_run_summary`` row for ``run_id`` (status + scaling/efficiency), or ``None``.
+
+    The view already keeps one row per run (latest header wins), so this is a single-row lookup —
+    the run-level answer to "how did this run go, and how efficiently?". Raises `RegistryError` on
+    failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = f"SELECT * FROM `{resolved.table_ref('v_run_summary')}` WHERE run_id=@run_id"
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_run_summary failed for run {run_id}: {exc}") from exc
+    return dict(rows[0]) if rows else None
+
+
+def read_leaderboard(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the ``v_model_leaderboard`` rows for ``run_id`` — one per (model, ensemble).
+
+    Ordered by the mean decision-metric error (WAPE) ascending so the best model is first; a model
+    with no scored metric (NULL) sorts last. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT * FROM `{resolved.table_ref('v_model_leaderboard')}` "
+        "WHERE run_id=@run_id ORDER BY mean_wape ASC NULLS LAST"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_leaderboard failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
 
 
 class HeaderFinalizer:

@@ -137,6 +137,127 @@ def test_review_is_graceful_when_identity_unresolved(monkeypatch: pytest.MonkeyP
     assert rr.views == VIEW_NAMES
 
 
+# --- status / wait / results: the closed lifecycle -----------------------------
+
+
+def test_status_reads_header_for_this_configs_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    seen: dict[str, Any] = {}
+
+    def _fake_status(run_id: str, *, settings: Any = None) -> str:
+        seen["run_id"] = run_id
+        seen["settings"] = settings
+        return "COMPLETED"
+
+    monkeypatch.setattr(bq, "header_status", _fake_status)
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    assert f.status() == "COMPLETED"
+    assert seen["run_id"] == f.run_id  # defaults to this config's id
+    assert seen["settings"] is _SETTINGS
+
+
+def test_status_is_none_when_never_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
+    assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).status() is None
+
+
+def test_wait_returns_terminal_status_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    assert f.wait(timeout=1.0, poll_seconds=0.0) == "COMPLETED"
+
+
+def test_wait_polls_until_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.sdk as sdk_mod
+    from scale_forecasting.registry import bq
+
+    statuses = iter(["RUNNING", "RUNNING", "PARTIAL"])
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: next(statuses))
+    slept: list[float] = []
+    monkeypatch.setattr(sdk_mod.time, "sleep", lambda s: slept.append(s))
+
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    assert f.wait(timeout=100.0, poll_seconds=5.0) == "PARTIAL"
+    assert slept == [5.0, 5.0]  # slept once per non-terminal poll
+
+
+def test_wait_raises_when_run_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    with pytest.raises(ConfigError, match="no run found"):
+        f.wait(timeout=1.0, poll_seconds=0.0)
+
+
+def test_wait_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.sdk as sdk_mod
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "RUNNING")
+    monkeypatch.setattr(sdk_mod.time, "sleep", lambda s: None)
+    # monotonic jumps past the deadline on the second read so the loop exits deterministically.
+    clock = iter([0.0, 100.0, 200.0, 300.0])
+    monkeypatch.setattr(sdk_mod.time, "monotonic", lambda: next(clock))
+
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    with pytest.raises(TimeoutError):
+        f.wait(timeout=10.0, poll_seconds=1.0)
+
+
+def test_results_maps_leaderboard_rows_to_model_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    seen: dict[str, Any] = {}
+
+    def _fake_leaderboard(run_id: str, *, settings: Any = None) -> list[dict[str, Any]]:
+        seen["run_id"] = run_id
+        return [
+            {
+                "model_type": "theta",
+                "ensemble_id": None,
+                "compute_engine": "spark",
+                "n_cells": 5,
+                "no_artifact_rate": 0.0,
+                "median_fit_seconds": 0.2,
+                "mean_wape": 0.11,
+                "mean_mae": 3.4,
+            },
+            {
+                "model_type": "arima_plus",
+                "ensemble_id": None,
+                "compute_engine": "bigquery",
+                "n_cells": 5,
+                "no_artifact_rate": 1.0,
+                "median_fit_seconds": None,
+                "mean_wape": None,
+                "mean_mae": None,
+            },
+        ]
+
+    monkeypatch.setattr(bq, "read_leaderboard", _fake_leaderboard)
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    results = f.results()
+
+    assert seen["run_id"] == f.run_id
+    assert [r.model_type for r in results] == ["theta", "arima_plus"]
+    assert results[0].mean_wape == 0.11
+    assert results[1].mean_wape is None and results[1].no_artifact_rate == 1.0
+    assert isinstance(results[0], sf.ModelResult)
+
+
+def test_results_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "read_leaderboard", lambda *a, **k: [])
+    assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).results() == []
+
+
 # --- public surface + import-cost contract -------------------------------------
 
 

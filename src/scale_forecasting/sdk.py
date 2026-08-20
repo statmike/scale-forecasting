@@ -16,6 +16,7 @@ near-instant ``import scale_forecasting`` contract enforced by ``test_sdk.py``.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +30,10 @@ if TYPE_CHECKING:
 
     from .settings import Settings
 
-__all__ = ["Forecaster", "DryRunResult", "RunResult"]
+__all__ = ["Forecaster", "DryRunResult", "RunResult", "ModelResult"]
+
+# Registry statuses that mean a run has stopped changing — what `Forecaster.wait` blocks for.
+_TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "PARTIAL"})
 
 
 @dataclass(frozen=True)
@@ -60,13 +64,38 @@ class RunResult:
     views: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ModelResult:
+    """One model's outcome on a run, read from ``v_model_leaderboard``.
+
+    ``ensemble_id`` is ``None`` for a base model and the ensemble-config digest for an ensemble
+    pseudo-model. ``mean_wape`` / ``mean_mae`` are the mean decision metrics where a backtest scored
+    them (``None`` otherwise); ``no_artifact_rate`` near ``1.0`` flags a model that failed most
+    cells. Rows come back best-first (lowest ``mean_wape``).
+    """
+
+    model_type: str
+    ensemble_id: str | None
+    compute_engine: str | None
+    n_cells: int
+    no_artifact_rate: float | None
+    median_fit_seconds: float | None
+    mean_wape: float | None
+    mean_mae: float | None
+
+
 class Forecaster:
-    """The easy path: point it at a config, then `dry_run`, `run`, or `review`.
+    """The easy path: point it at a config, then `dry_run`, `run`, `status`, `wait`, or `results`.
 
     A run driven here is identical to the CLI/Composer run — this class only wraps
     `scale_forecasting.main.run`. Construct from an in-memory `RunConfig`, or use
     `from_file` / `from_dict`. An optional ``settings`` injects the GCP infra identity;
     ``None`` resolves it from the ``SF_*`` environment at run time (the default deployments use).
+
+    The lifecycle closes the loop from one object: `dry_run` (offline plan), `run` (execute),
+    `status`/`wait` (track a submission), and `results` (read the per-model leaderboard) — all keyed
+    by the config's deterministic ``run_id``, so `status`/`results` work as a reattach path even in
+    a fresh process.
     """
 
     def __init__(self, config: RunConfig, *, settings: Settings | None = None) -> None:
@@ -143,6 +172,66 @@ class Forecaster:
         return RunResult(
             run_id=self.run_id, dataset_ref=self._resolved_dataset_ref(), views=VIEW_NAMES
         )
+
+    def status(self, run_id: str | None = None) -> str | None:
+        """The current registry status of a run (``RUNNING``/``COMPLETED``/``FAILED``/``PARTIAL``).
+
+        Reads the run's header (`registry.bq.header_status`); returns ``None`` when this config has
+        never run. ``run_id`` defaults to this config's deterministic id, so ``forecaster.status()``
+        answers "did my config's run finish?" — the reattach path for a ``wait=False`` submit.
+        """
+        from .registry import bq
+
+        return bq.header_status(run_id or self.run_id, settings=self._settings)
+
+    def wait(
+        self, run_id: str | None = None, *, timeout: float = 3600.0, poll_seconds: float = 15.0
+    ) -> str:
+        """Block until a run reaches a terminal status and return it; raise on timeout/not-found.
+
+        Polls `status` every ``poll_seconds`` until the status is terminal
+        (``COMPLETED``/``FAILED``/``PARTIAL``). Raises `TimeoutError` if ``timeout`` elapses first,
+        or `ConfigError` if the run has no header yet (never submitted). Each poll re-reads the
+        header through a fresh client, so a long wait re-authenticates rather than reusing a stale
+        token.
+        """
+        from .errors import ConfigError
+
+        rid = run_id or self.run_id
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.status(rid)
+            if status is None:
+                raise ConfigError(f"no run found for run_id {rid}: nothing to wait on")
+            if status in _TERMINAL_STATUSES:
+                return status
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"run {rid} still {status} after {timeout:.0f}s")
+            time.sleep(poll_seconds)
+
+    def results(self, run_id: str | None = None) -> list[ModelResult]:
+        """The per-model leaderboard for a run — one `ModelResult` each, best (lowest WAPE) first.
+
+        Reads ``v_model_leaderboard`` (`registry.bq.read_leaderboard`) for ``run_id`` (default: this
+        config's id). Returns ``[]`` when the run has produced no scored rows yet. This is the
+        first-class "which model won?" read that `RunResult` only pointed at before.
+        """
+        from .registry import bq
+
+        rows = bq.read_leaderboard(run_id or self.run_id, settings=self._settings)
+        return [
+            ModelResult(
+                model_type=r["model_type"],
+                ensemble_id=r.get("ensemble_id"),
+                compute_engine=r.get("compute_engine"),
+                n_cells=r["n_cells"],
+                no_artifact_rate=r.get("no_artifact_rate"),
+                median_fit_seconds=r.get("median_fit_seconds"),
+                mean_wape=r.get("mean_wape"),
+                mean_mae=r.get("mean_mae"),
+            )
+            for r in rows
+        ]
 
     def _resolved_dataset_ref(self) -> str | None:
         """``project.dataset`` from the injected/resolved `Settings`, or ``None`` if
