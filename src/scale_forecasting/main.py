@@ -43,8 +43,9 @@ scale_forecasting.submit --engine multi``. ``multi`` is a Spark-only method, so 
 applies when ``python_runtime="spark"``.
 
 Public surface: ``run(cfg, *, dry_run=False) -> run_id``, the offline ``plan_run(cfg) ->
-LaunchPlan`` (id + fanout + launch-command templates), and
-``python -m scale_forecasting.main --config ... [--dry-run]``.
+LaunchPlan`` (id + fanout + launch-command templates), ``stage_run(cfg) -> LaunchPlan`` (upload
+artifacts + runnable commands + reproducibility manifest, no submit), and
+``python -m scale_forecasting.main --config ... [--dry-run | --stage-only]``.
 """
 
 from __future__ import annotations
@@ -487,6 +488,94 @@ def plan_run(
     return result
 
 
+def _manifest_dict(result: LaunchPlan, *, created_at: str) -> dict[str, object]:
+    """The reproducibility-manifest payload for a staged run (pure — ``created_at`` is caller-set).
+
+    Records the config digest, fan-out, runtime split, both command tiers, and the staged config
+    URI — everything needed to answer "what command produced run X?". The timestamp is passed in
+    (not read here) so this stays a pure function with no wall-clock.
+    """
+    commands = {
+        name: {"runtime": lc.runtime, "universal": lc.universal, "native": lc.native}
+        for name, lc in (result.commands or {}).items()
+    }
+    return {
+        "run_id": result.run_id,
+        "created_at": created_at,
+        "python_runtime": result.python_runtime,
+        "spark_method": result.spark_method,
+        "python_models": result.python_models,
+        "bq_models": result.bq_models,
+        "fanout": {
+            "n_series": result.fanout.n_series,
+            "n_models": result.fanout.n_models,
+            "n_folds": result.fanout.n_folds,
+            "n_cells": result.fanout.n_cells,
+        },
+        "config_uri": result.config_uri,
+        "commands": commands,
+    }
+
+
+def stage_run(
+    cfg: RunConfig, *, settings: Settings | None = None, infra: object | None = None
+) -> LaunchPlan:
+    """Stage a run's artifacts to GCS and return the *runnable* launch commands — no submit.
+
+    The "stage" verb: uploads the config (and, for Spark, the code zip + launcher shim) to the code
+    bucket, builds the launch commands against those **real** URIs (so they run as-is from any ADC
+    box), and writes the reproducibility manifest ``runs/<run_id>.plan.json`` next to the config.
+    Unlike `plan_run`, the infra identity is required — staging touches GCS — so a missing ``SF_*``
+    env raises rather than degrading. Returns the `LaunchPlan` with ``staged=True``.
+    """
+    from datetime import UTC, datetime
+
+    from .config import estimate_fanout
+    from .staging import stage_config, stage_manifest
+
+    plan = _plan(cfg)
+    fanout = estimate_fanout(cfg)
+    settings = settings or _resolve_settings()
+    resolved_infra = _resolve_infra(cfg, infra)
+    code_bucket: str = resolved_infra.code_bucket  # type: ignore[attr-defined]
+
+    config_uri = stage_config(cfg, plan.run_id, code_bucket)
+    package_uri: str | None = None
+    launcher_uri: str | None = None
+    if cfg.python_runtime != "ray" and plan.python_models:
+        from .submit import BatchInfra, _stage_code
+
+        assert isinstance(resolved_infra, BatchInfra)  # spark runtime → BatchInfra
+        package_uri, launcher_uri = _stage_code(resolved_infra)
+
+    commands = _assemble_commands(
+        cfg,
+        plan,
+        settings,
+        resolved_infra,
+        config_uri=config_uri,
+        package_uri=package_uri,
+        launcher_uri=launcher_uri,
+    )
+    result = LaunchPlan(
+        run_id=plan.run_id,
+        python_runtime=cfg.python_runtime,
+        python_models=plan.python_models,
+        bq_models=plan.bq_models,
+        spark_method=plan.spark_method,
+        fanout=fanout,
+        staged=True,
+        config_uri=config_uri,
+        commands=commands,
+    )
+    manifest_uri = stage_manifest(
+        _manifest_dict(result, created_at=datetime.now(UTC).isoformat()), plan.run_id, code_bucket
+    )
+    _log.info("wrote run manifest: %s", manifest_uri)
+    _emit_plan(result)
+    return result
+
+
 def _resolve_settings() -> Settings:
     """Resolve `Settings` from the ``SF_*`` env (raises `ConfigError` when unset)."""
     from .settings import Settings
@@ -495,19 +584,29 @@ def _resolve_settings() -> Settings:
 
 
 def _main(argv: list[str] | None = None) -> None:
-    """CLI: ``python -m scale_forecasting.main --config run.json [--dry-run]``."""
+    """CLI: ``python -m scale_forecasting.main --config run.json [--dry-run | --stage-only]``."""
     import argparse
 
     from .config import load_config
 
     p = argparse.ArgumentParser(prog="main", description="Run a forecast (Spark + BigQuery).")
     p.add_argument("--config", required=True, help="path to the run config JSON")
-    p.add_argument(
+    verbs = p.add_mutually_exclusive_group()
+    verbs.add_argument(
         "--dry-run", action="store_true", help="resolve + estimate fanout offline; touch no GCP"
+    )
+    verbs.add_argument(
+        "--stage-only",
+        action="store_true",
+        help="stage artifacts to GCS + emit the runnable command + manifest; do not submit",
     )
     ns = p.parse_args(argv)
 
     cfg = load_config(ns.config)
+    if ns.stage_only:
+        result = stage_run(cfg)
+        _log.info("staged: %s", result.run_id)
+        return
     run_id = run(cfg, dry_run=ns.dry_run)
     _log.info("%s: %s", "planned" if ns.dry_run else "submitted", run_id)
 

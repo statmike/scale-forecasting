@@ -192,6 +192,84 @@ def test_plan_run_ray_emits_universal_only_ray_command() -> None:
     assert "ray_submit" in ray.universal and result.run_id in ray.universal
 
 
+def test_stage_run_spark_uploads_and_builds_runnable_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting.staging as staging_mod
+    import scale_forecasting.submit as submit_mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        staging_mod, "stage_config", lambda cfg, rid, bkt: f"gs://{bkt}/runs/{rid}.json"
+    )
+    monkeypatch.setattr(
+        submit_mod,
+        "_stage_code",
+        lambda infra: (
+            f"gs://{infra.code_bucket}/runs/pkg.zip",
+            f"gs://{infra.code_bucket}/runs/spark_main.py",
+        ),
+    )
+
+    def _fake_manifest(manifest: dict[str, Any], rid: str, bkt: str) -> str:
+        captured["manifest"] = manifest
+        return f"gs://{bkt}/runs/{rid}.plan.json"
+
+    monkeypatch.setattr(staging_mod, "stage_manifest", _fake_manifest)
+
+    result = main.stage_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert result.staged is True
+    assert result.config_uri == f"gs://bkt-code/runs/{result.run_id}.json"
+    assert result.commands is not None
+    spark = result.commands["spark"]
+    assert spark.native is not None and "gs://bkt-code/runs/pkg.zip" in spark.native
+
+    manifest = captured["manifest"]
+    assert manifest["run_id"] == result.run_id
+    assert manifest["config_uri"] == result.config_uri
+    assert set(manifest["commands"]) == {"main", "spark"}
+    assert manifest["fanout"]["n_cells"] == result.fanout.n_cells
+    assert "created_at" in manifest  # caller-stamped timestamp
+
+
+def test_stage_run_requires_infra(monkeypatch: pytest.MonkeyPatch) -> None:
+    # stage_run touches GCS, so a missing SF_* identity raises rather than degrading (unlike plan).
+    import scale_forecasting.settings as settings_mod
+
+    def _no_env() -> Settings:
+        raise ConfigError("no SF_* env")
+
+    monkeypatch.setattr(settings_mod.Settings, "resolve", staticmethod(_no_env))
+    with pytest.raises(ConfigError):
+        main.stage_run(_cfg())
+
+
+def test_cli_dispatches_stage_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    from types import SimpleNamespace
+
+    seen: dict[str, Any] = {}
+
+    def _fake_stage(cfg: RunConfig) -> Any:
+        seen["run_name"] = cfg.run_name
+        return SimpleNamespace(run_id="rid-staged")
+
+    monkeypatch.setattr(main, "stage_run", _fake_stage)
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli stage test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    main._main(["--config", str(path), "--stage-only"])
+    assert seen == {"run_name": "cli stage test"}
+
+
 def test_dry_run_still_rejects_multi() -> None:
     # The plan (and its rejection) runs before the dry_run short-circuit, so bad shapes fail fast.
     with pytest.raises(ConfigError, match="submit --engine multi"):
