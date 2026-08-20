@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1  # this action publishes no floating major tag; pin exact
         with:
           python-version: "3.11"
       # mkdocstrings reads src/ statically (griffe), so the docs build needs no compute backends.
