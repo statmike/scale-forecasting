@@ -1,4 +1,4 @@
-# smoke — submit a tiny, DEFAULT-ON, NON-BLOCKING smoke forecast after the data is seeded (Arc B).
+# smoke — submit a tiny, DEFAULT-ON, NON-BLOCKING smoke forecast after the data is seeded.
 #
 # The first `terraform apply` builds the runtime image (module.container) and seeds the example
 # dataset (module.seed); this module adds the natural next proof: that the platform *forecasts*. It
@@ -208,7 +208,7 @@ resource "null_resource" "smoke" {
       "gcloud dataproc batches submit pyspark",
       "gs://${var.code_bucket}/${google_storage_bucket_object.launcher[0].name}",
       "--py-files=gs://${var.code_bucket}/${google_storage_bucket_object.package[0].name}",
-      "--project=${var.project_id}", # explicit — never the ambient ADC project (DESIGN §13.0)
+      "--project=${var.project_id}", # explicit — never the ambient ADC project
       "--region=${var.region}",
       "--batch=${local.batch_id}",
       "--version=${var.runtime_version}",

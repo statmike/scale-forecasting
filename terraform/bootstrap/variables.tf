@@ -33,7 +33,7 @@ variable "region" {
 
 variable "create_project" {
   description = <<-EOT
-    Greenfield toggle (DESIGN §13.0 BYO posture). true (default) = Terraform creates the
+    Greenfield toggle (BYO posture). true (default) = Terraform creates the
     project. false = you already have the project (pass its id in project_id) and Terraform
     only creates the state bucket inside it. A locked-down org whose admins pre-create
     projects sets this false.

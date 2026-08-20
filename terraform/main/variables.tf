@@ -1,4 +1,4 @@
-# Main-stage inputs. Grouped: identity, region, the BYO toggles (DESIGN §13.0), and the
+# Main-stage inputs. Grouped: identity, region, the BYO toggles, and the
 # names Terraform assigns to what it creates. Sensible defaults everywhere except project_id.
 
 # --- identity & location -------------------------------------------------------
@@ -14,7 +14,7 @@ variable "region" {
   default     = "us-central1"
 }
 
-# --- greenfield / BYO toggles (DESIGN §13.0) -----------------------------------
+# --- greenfield / BYO toggles -----------------------------------
 # Default true = Terraform owns everything (the 5-minute quickstart). A locked-down org
 # flips off what its admins already manage and passes existing resources by variable.
 
@@ -100,7 +100,7 @@ variable "colab_main_release_name" {
 # --- naming (what Terraform creates) -------------------------------------------
 
 variable "dataset_id" {
-  description = "BigQuery dataset for the registry + example data (DESIGN §8.1)."
+  description = "BigQuery dataset for the registry + example data."
   type        = string
   default     = "scale_forecasting"
 }
@@ -117,7 +117,7 @@ variable "compute_sa_email" {
   default     = null
 }
 
-# --- seed job (BUILD B0.4) -----------------------------------------------------
+# --- seed job -----------------------------------------------------
 # The Dataproc Serverless batch that materializes the example dataset. ON by default (run_seed =
 # true) so a fresh deploy ships with data; real (small) cloud spend — 100k measured at ~$0.11-0.15,
 # ~8.5 min compute. Content-addressed, so it runs once, not per-apply. See modules/seed for the
@@ -146,7 +146,7 @@ variable "seed_num_series" {
 }
 
 variable "seed_master_seed" {
-  description = "Master RNG seed — identical shipped data on every deploy (DESIGN §13.1)."
+  description = "Master RNG seed — identical shipped data on every deploy."
   type        = number
   default     = 20260726
 }
@@ -164,7 +164,7 @@ variable "seed_run_label" {
 }
 
 variable "seed_variant" {
-  description = "Source storage format(s) to seed: iceberg, native, or both (one panel, D19)."
+  description = "Source storage format(s) to seed: iceberg, native, or both (one panel)."
   type        = string
   default     = "both"
 }

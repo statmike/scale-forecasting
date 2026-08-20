@@ -294,7 +294,7 @@ resource "google_colab_runtime_template" "main" {
 # (#25217). Mirrors modules/smoke's null_resource: on_failure = continue so a transient PATCH error
 # never fails the apply (the template just stays on Latest until the next apply / a manual patch);
 # triggers content-addressed on release_name + the template id so it re-patches only when either
-# changes; --project explicit, never the ambient ADC project (DESIGN §13.0). Pinned to py311 to match
+# changes; --project explicit, never the ambient ADC project. Pinned to py311 to match
 # the project pin. Delete this block once the provider adds the image field and set the release_name
 # inline on the google_colab_runtime_template.
 resource "null_resource" "pin_main_python" {

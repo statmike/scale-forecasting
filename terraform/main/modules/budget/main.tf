@@ -1,4 +1,4 @@
-# budget — a monthly cost budget with alert thresholds (DESIGN §13.0 precondition).
+# budget — a monthly cost budget with alert thresholds (a billing precondition).
 #
 # A budget does not cap spend; it emails the billing admins when actual cost crosses each
 # threshold. This is the safety net the runbook requires before any cloud run. Scoped to the

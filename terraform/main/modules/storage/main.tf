@@ -1,4 +1,4 @@
-# storage — the three GCS buckets the platform uses (DESIGN §13.0).
+# storage — the three GCS buckets the platform uses.
 #
 #   warehouse — the open-format data lake: managed-Iceberg table files live here.
 #   artifacts — serialized fitted models (ObjectRef lineage from the registry).

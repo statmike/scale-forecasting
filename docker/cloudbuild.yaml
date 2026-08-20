@@ -11,7 +11,7 @@
 # `docker build` produces the right architecture (no buildx/QEMU needed).
 #
 # A git-push-triggered rebuild (Cloud Build trigger) is deferred until the GitHub repo connection
-# exists (§A-PUSH); until then this is the explicit, cost-reviewed build step.
+# exists; until then this is the explicit, cost-reviewed build step.
 
 substitutions:
   _REGION: us-central1

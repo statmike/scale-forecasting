@@ -122,7 +122,7 @@ resource "null_resource" "build" {
       "gcloud builds submit",
       "--config docker/cloudbuild.yaml",
       "--substitutions=_REGION=${var.region},_REPO=${var.repository_id},_IMAGE=${var.image_name},_TAG=${var.image_tag}",
-      "--project ${var.project_id}", # explicit — never the ambient ADC project (DESIGN §13.0)
+      "--project ${var.project_id}", # explicit — never the ambient ADC project
       ".",
     ])
   }

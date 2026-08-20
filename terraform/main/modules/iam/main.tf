@@ -1,4 +1,4 @@
-# iam — the two service accounts and their least-privilege roles (DESIGN §12).
+# iam — the two service accounts and their least-privilege roles.
 #
 # No keys, ever. These SAs are used via ADC + impersonation:
 #   scale-forecasting-runner  — orchestration: read/write BQ, GCS, submit Dataproc/Ray jobs.

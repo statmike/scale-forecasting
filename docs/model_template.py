@@ -31,7 +31,7 @@ class TemplateModel(BaseModel):
 
     # --- registration metadata (read by the factory) --------------------------
     name = "template"  # unique, lowercase, snake_case — this is how users select it
-    runtime = "python"  # "python" runs in a Spark/Ray cell; "bigquery" is SQL (Arc B)
+    runtime = "python"  # "python" runs in a Spark/Ray cell; "bigquery" is SQL
     family = "statistical"  # "statistical" | "ml" | "deep_learning" | "native"
     supports_exog = False  # True if fit/predict use the X (exogenous) frame
     supports_native_intervals = False  # True if you produce your own prediction bounds
@@ -68,7 +68,7 @@ class TemplateModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        """Return the canonical prediction frame (CONTRACTS §2.1) in ORIGINAL units.
+        """Return the canonical prediction frame in ORIGINAL units.
 
         Build the point forecast, turn it into a ``{quantile: array}`` map, invert the
         transform so values are in original units, and hand it to ``_assemble_frame`` which
@@ -81,7 +81,7 @@ class TemplateModel(BaseModel):
         # native bounds, build the quantile map directly instead of calling this.
         qmap_transformed = self.residual_intervals(mean, quantiles)
 
-        # Invert the target transform so the frame is in original units (§2.1). Pass both the
+        # Invert the target transform so the frame is in original units. Pass both the
         # transform name and the cell's fitted λ (None for none/log1p; set for boxcox) — the
         # worker fits λ once per cell and hands it to you on ctx, so predict never refits it.
         t, lam = self.ctx.transform, self.ctx.transform_lambda

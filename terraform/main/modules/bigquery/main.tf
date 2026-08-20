@@ -6,7 +6,7 @@
 # in HCL — two copies of the DDL would drift. Terraform owns the *containers* (dataset,
 # connection, bucket grant); the app owns the *tables* — one source of truth for the DDL, no HCL/Python drift.
 #
-# Storage split (D19): the four run-collection tables (run_registry, forecast_metadata,
+# Storage split: the four run-collection tables (run_registry, forecast_metadata,
 # forecast_predictions, backtest_oof) are always NATIVE BigQuery — they carry native JSON
 # columns and reseed with WRITE_TRUNCATE, needing no connection. The example input ships in
 # BOTH formats — source_series_iceberg (managed Iceberg, uses the connection below) and
@@ -63,7 +63,7 @@ resource "time_sleep" "wait_for_connection_agent" {
 # Storage Write API streaming path (the route the workers use to write per-series results)
 # checks BOTH object access AND `storage.buckets.get` on the bucket — and no single predefined
 # role covers both without over-granting (only storage.admin does, which also adds bucket
-# delete + setIamPolicy). Verified empirically in the B0.3 spike: with object access alone,
+# delete + setIamPolicy). In practice, with object access alone,
 # append_rows failed 403 "connection does not have permissions storage.buckets.get".
 #   1. objectUser        — read/write/delete the Iceberg data files (storage.objects.*).
 #   2. legacyBucketReader — the single bucket-metadata read (storage.buckets.get) the Write

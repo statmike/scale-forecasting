@@ -1,7 +1,7 @@
-# Custom container for Dataproc Serverless Spark (Arc B) — the shared runtime image.
+# Custom container for Dataproc Serverless Spark — the shared runtime image.
 #
-# This one image is the DEPENDENCY-delivery mechanism for every compute path: the seed job (B0.4),
-# the `explode`/`multi` forecast engines (B2), and Ray on Vertex (B4). It carries the full locked
+# This one image is the DEPENDENCY-delivery mechanism for every compute path: the seed job,
+# the `explode`/`multi` forecast engines, and Ray on Vertex. It carries the full locked
 # dependency set (core + [models] + [ray]) from docker/requirements.txt — but NOT the
 # `scale_forecasting` package itself.
 #

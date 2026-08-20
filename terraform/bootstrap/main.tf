@@ -12,7 +12,7 @@ locals {
 
 # The provider here is intentionally project-less for the create-project call: creating a
 # project is an org/folder-level operation. Once the project exists, the bucket resource
-# targets it explicitly. We never mutate the caller's gcloud/ADC default project (DESIGN §13.0).
+# targets it explicitly. We never mutate the caller's gcloud/ADC default project.
 provider "google" {
   region = var.region
 }

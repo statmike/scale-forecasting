@@ -65,7 +65,7 @@ resource "google_composer_environment" "this" {
       image_version = var.image_version
     }
 
-    # Smallest env (DESIGN §13.0 / D5): the platform's compute lives in Dataproc/Ray, not in
+    # Smallest env: the platform's compute lives in Dataproc/Ray, not in
     # Airflow — Composer only schedules and fans out, so minimal workers are correct.
     environment_size = "ENVIRONMENT_SIZE_SMALL"
 

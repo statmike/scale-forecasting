@@ -1,4 +1,4 @@
-# seed — submit the Dataproc Serverless Spark batch that seeds the source_series_* tables (B0.4).
+# seed — submit the Dataproc Serverless Spark batch that seeds the source_series_* tables.
 #
 # This runs the platform's own core pattern (parallel Spark generation + high-throughput BigQuery
 # write) to materialize the shipped example dataset, and doubles as the first Spark scale smoke.
@@ -17,9 +17,9 @@
 # apply ever errors AFTER the batch was submitted, the batch state in GCP is the source of truth:
 # `gcloud dataproc batches describe <id>` to check, then `terraform import
 # module.seed.google_dataproc_batch.seed[0] projects/<proj>/locations/<region>/batches/<id>` to
-# reconcile state. (Benign perpetual diffs on budget + terraform_labels are cosmetic — see NOTES.)
+# reconcile state. (Benign perpetual diffs on budget + terraform_labels are cosmetic.)
 #
-# ─── LIFECYCLE: smoke → review → full (real cloud spend; BUILD gate) ───────────────────────
+# ─── LIFECYCLE: smoke → review → full (real cloud spend) ───────────────────────
 #
 #   SMOKE  (cents, minutes — verifies schema/dtypes/count/determinism AND surfaces real cost):
 #     run_seed = true, seed_num_series = 100, seed_run_label = "smoke", then `terraform apply`.
@@ -27,7 +27,7 @@
 #   REVIEW:
 #     inspect the batch's real cost + runtime and query the source_series_* tables before scaling up.
 #
-#   FULL   (the 100k dataset — the B0.4 deliverable):
+#   FULL   (the 100k dataset):
 #     seed_num_series = 100000, seed_run_label = "full", then `terraform apply`. The batch_id
 #     embeds the label + series count, so this is a DISTINCT immutable batch (Terraform creates
 #     the new one; batches are immutable and are not updated in place).
@@ -63,7 +63,7 @@ variable "num_series" {
 }
 
 variable "master_seed" {
-  description = "Master RNG seed — identical data on every deploy (DESIGN §13.1 reproducibility)."
+  description = "Master RNG seed — identical data on every deploy (reproducibility)."
   type        = number
   default     = 20260726
 }
@@ -225,7 +225,7 @@ resource "google_dataproc_batch" "seed" {
 
   # The provider's default create-wait is 10m; a large batch (100k took ~11m wall) blows past it and
   # errors the apply even though the batch succeeds — leaving the resource out of state. 60m covers
-  # the 100k seed and future B2 runs with headroom.
+  # the 100k seed and future forecast runs with headroom.
   timeouts {
     create = "60m"
   }
