@@ -88,51 +88,42 @@ def run(
         manage_header,
     )
 
-    # 1. Header first, so a run is visible in the registry even if the Spark job dies mid-flight.
-    #    In contributor mode main.run already wrote the shared header — skip both.
-    if manage_header:
-        bq.ensure_tables(cfg, settings=settings)
-        bq.write_header(cfg, run_id, settings=settings)
+    # 1. Header first (run_header): write RUNNING on entry so a run is visible even if the Spark job
+    #    dies mid-flight, and finalize the collected status on a clean exit. Contributor mode
+    #    (main.run owns the shared header) is a no-op wrapper. A crash inside records FAILED first.
+    with bq.run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
+        # An injected session (notebook / Spark Connect) is caller-owned — use it, don't stop it.
+        # Only a self-created session (the Dataproc batch path) is stopped here.
+        owns_session = spark is None
+        if spark is None:
+            spark = SparkSession.builder.appName(f"scale-forecasting-naive-{run_id}").getOrCreate()
+        started = time.perf_counter()
+        try:
+            # 2. Fan whole series across the cluster — NO cross-join, so each task runs all models
+            #    for its series sequentially. The frozen Settings is captured directly in the group
+            #    runner's closure (no sparkContext.broadcast — Connect has no such API);
+            #    applyInPandas cloudpickles it to every executor so write_cells resolves the infra.
+            source = spark_io.read_source_series(spark, cfg, settings)
 
-    # An injected session (notebook / Spark Connect) is caller-owned — use it, don't stop it. Only a
-    # self-created session (the Dataproc batch path) is stopped here.
-    owns_session = spark is None
-    if spark is None:
-        spark = SparkSession.builder.appName(f"scale-forecasting-naive-{run_id}").getOrCreate()
-    started = time.perf_counter()
-    try:
-        # 2. Fan whole series across the cluster — NO cross-join, so each task runs all models for
-        #    its series sequentially. The frozen Settings is captured directly in the group runner's
-        #    closure (no sparkContext.broadcast — Connect has no such API); applyInPandas
-        #    cloudpickles it to every executor so write_cells resolves the same infra.
-        source = spark_io.read_source_series(spark, cfg, settings)
+            # Fleetwide HPO resolves once on the driver over a small sample, before fan-out (see
+            # spark_explode / spark_io.resolve_fleetwide_hpo). None unless enabled at that grain.
+            params_by_model = spark_io.resolve_fleetwide_hpo(source, cfg, executed)
 
-        # Fleetwide HPO resolves once on the driver over a small sample, before fan-out (see
-        # spark_explode / spark_io.resolve_fleetwide_hpo). None unless enabled at that granularity.
-        params_by_model = spark_io.resolve_fleetwide_hpo(source, cfg, executed)
+            cells = spark_io.add_bucket(source, cfg, n_buckets)
 
-        cells = spark_io.add_bucket(source, cfg, n_buckets)
+            runner = spark_io.make_group_runner(cfg, settings, executed, params_by_model)
+            status_sdf = cells.groupBy(spark_io._BUCKET_COL).applyInPandas(
+                runner, schema=spark_io.status_schema()
+            )
+            status_pdf = status_sdf.toPandas()  # compact: 4 cols × n_cells, no forecast payload
+        finally:
+            if owns_session:
+                spark.stop()
 
-        runner = spark_io.make_group_runner(cfg, settings, executed, params_by_model)
-        status_sdf = cells.groupBy(spark_io._BUCKET_COL).applyInPandas(
-            runner, schema=spark_io.status_schema()
-        )
-        status_pdf = status_sdf.toPandas()  # compact: 4 cols × n_cells, no forecast payload
-    finally:
-        if owns_session:
-            spark.stop()
-
-    # 3. Close the header from the collected statuses (owner mode only; main.run finalizes else).
-    outcome = spark_io.aggregate_status(status_pdf)
-    runtime_seconds = time.perf_counter() - started
-    if manage_header:
-        bq.update_header(
-            run_id,
-            settings=settings,
-            status=outcome.status,
-            runtime_seconds=runtime_seconds,
-            n_series=outcome.n_series,
-        )
+        # Close the header from the collected statuses (owner mode; contributor → main.run).
+        outcome = spark_io.aggregate_status(status_pdf)
+        runtime_seconds = time.perf_counter() - started
+        hdr.finalize(status=outcome.status, n_series=outcome.n_series)
     _log.info(
         "naive run done: run_id=%s status=%s cells=%d ok=%d error=%d runtime=%.1fs",
         run_id,

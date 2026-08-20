@@ -590,114 +590,107 @@ def run(
         )
         return client.query(sql, job_config=job_config).result()
 
-    if manage_header:
-        bq.ensure_tables(cfg, settings=settings)
-        bq.write_header(cfg, run_id, settings=settings)
-
-    started = time.perf_counter()
-    created_at = datetime.now(UTC)
-    status = "COMPLETED"
-    nan_panel = {name: float("nan") for name in METRIC_NAMES}
-    series_ids = [str(r.ts_id) for r in _query(build_series_ids_query(cfg, dataset))]
-    n_series = len(series_ids)
-    try:
-        # --- Phase 1: final true-future forecast → forecast_predictions (always) --------------
-        for model_name in models:
-            for stmt in build_setup_statements(cfg, model_name, dataset):
-                _query(stmt)
-
-        # --- Phase 2: scored evaluation --------------------------------------------------------
-        oof_rows: list[dict[str, Any]] = []
-        meta_rows: list[dict[str, Any]] = []
-
-        if cfg.backtest.enabled:
-            history = _query(build_history_query(cfg, dataset)).to_dataframe()
-            hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
-            plan = fold_plan(cfg)
+    # Header first (run_header): RUNNING on entry, finalized on a clean exit; a crash records FAILED
+    # on the owned header before re-raising. Contributor mode (main.run owns the shared header) is a
+    # no-op wrapper, so main.run's finalize sees the raised RegistryError and records the status.
+    with bq.run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
+        started = time.perf_counter()
+        created_at = datetime.now(UTC)
+        status = "COMPLETED"
+        nan_panel = {name: float("nan") for name in METRIC_NAMES}
+        series_ids = [str(r.ts_id) for r in _query(build_series_ids_query(cfg, dataset))]
+        n_series = len(series_ids)
+        try:
+            # --- Phase 1: final true-future forecast → forecast_predictions (always) ----------
             for model_name in models:
-                best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
-                panels_by_ts: dict[str, list[dict[str, float]]] = {}
-                for fold_id, back_steps in plan:
-                    for stmt in build_fold_create_statements(
-                        cfg, model_name, dataset, fold_id, back_steps
-                    ):
-                        _query(stmt)
-                    eval_df = _query(
-                        build_eval_query(
-                            cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id
-                        )
-                    ).to_dataframe()
-                    # The fold model has served its forecast — drop it so backtest runs don't
-                    # leave orphaned sf_model_*_f{k} objects behind. Best-effort: a failed cleanup
-                    # must not sink an otherwise-good run (results are already read back above).
-                    for stmt in build_fold_drop_statements(cfg, model_name, dataset, fold_id):
-                        try:
+                for stmt in build_setup_statements(cfg, model_name, dataset):
+                    _query(stmt)
+
+            # --- Phase 2: scored evaluation ---------------------------------------------------
+            oof_rows: list[dict[str, Any]] = []
+            meta_rows: list[dict[str, Any]] = []
+
+            if cfg.backtest.enabled:
+                history = _query(build_history_query(cfg, dataset)).to_dataframe()
+                hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
+                plan = fold_plan(cfg)
+                for model_name in models:
+                    best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
+                    panels_by_ts: dict[str, list[dict[str, float]]] = {}
+                    for fold_id, back_steps in plan:
+                        for stmt in build_fold_create_statements(
+                            cfg, model_name, dataset, fold_id, back_steps
+                        ):
                             _query(stmt)
-                        except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
-                            log.warning(
-                                "fold model cleanup failed (%s f%d): %s", model_name, fold_id, exc
+                        eval_df = _query(
+                            build_eval_query(
+                                cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id
                             )
-                    for ts_id, g in eval_df.groupby("ts_id"):
-                        g = g.sort_values("forecast_date")
-                        for _, r in g.iterrows():
-                            oof_rows.append(
-                                {
-                                    "run_id": run_id,
-                                    "ts_id": ts_id,
-                                    "model_type": model_name,
-                                    "fold_id": fold_id,
-                                    "forecast_date": r["forecast_date"],
-                                    "y_true": r["y_true"],
-                                    "yhat": r["yhat"],
-                                }
+                        ).to_dataframe()
+                        # The fold model has served its forecast — drop it so backtest runs don't
+                        # leave orphaned sf_model_*_f{k} objects behind. Best-effort: a failed
+                        # cleanup must not sink an otherwise-good run (results already read above).
+                        for stmt in build_fold_drop_statements(cfg, model_name, dataset, fold_id):
+                            try:
+                                _query(stmt)
+                            except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                                log.warning(
+                                    "fold model cleanup failed (%s f%d): %s",
+                                    model_name,
+                                    fold_id,
+                                    exc,
+                                )
+                        for ts_id, g in eval_df.groupby("ts_id"):
+                            g = g.sort_values("forecast_date")
+                            for _, r in g.iterrows():
+                                oof_rows.append(
+                                    {
+                                        "run_id": run_id,
+                                        "ts_id": ts_id,
+                                        "model_type": model_name,
+                                        "fold_id": fold_id,
+                                        "forecast_date": r["forecast_date"],
+                                        "y_true": r["y_true"],
+                                        "yhat": r["yhat"],
+                                    }
+                                )
+                            panel = compute_metrics(
+                                g["y_true"].to_numpy(),
+                                g["yhat"].to_numpy(),
+                                y_train=hist_by_id.get(ts_id),
+                                lower=g["yhat_lower"].to_numpy(),
+                                upper=g["yhat_upper"].to_numpy(),
                             )
-                        panel = compute_metrics(
-                            g["y_true"].to_numpy(),
-                            g["yhat"].to_numpy(),
-                            y_train=hist_by_id.get(ts_id),
-                            lower=g["yhat_lower"].to_numpy(),
-                            upper=g["yhat_upper"].to_numpy(),
+                            panels_by_ts.setdefault(str(ts_id), []).append(panel)
+                    for ts_id, panels in panels_by_ts.items():
+                        rolled = _rollup_metrics(panels)
+                        meta_rows.append(
+                            _meta_row(
+                                run_id, ts_id, model_name, rolled, best_params, created_at, cfg
+                            )
                         )
-                        panels_by_ts.setdefault(str(ts_id), []).append(panel)
-                for ts_id, panels in panels_by_ts.items():
-                    rolled = _rollup_metrics(panels)
-                    meta_rows.append(
-                        _meta_row(run_id, ts_id, model_name, rolled, best_params, created_at, cfg)
-                    )
-        else:
-            # Backtest off: one unscored fold_id=NULL metadata row per (series, model) — parity
-            # with the Python worker, which also emits an unscored metadata row when backtest off.
-            for model_name in models:
-                best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
-                for ts_id in series_ids:
-                    meta_rows.append(
-                        _meta_row(
-                            run_id, ts_id, model_name, nan_panel, best_params, created_at, cfg
+            else:
+                # Backtest off: one unscored fold_id=NULL metadata row per (series, model) — parity
+                # with the Python worker, which also emits an unscored metadata row when off.
+                for model_name in models:
+                    best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
+                    for ts_id in series_ids:
+                        meta_rows.append(
+                            _meta_row(
+                                run_id, ts_id, model_name, nan_panel, best_params, created_at, cfg
+                            )
                         )
-                    )
 
-        _append_rows(settings, "backtest_oof", bq._OOF_SPEC, oof_rows)
-        _append_rows(settings, "forecast_metadata", bq._META_SPEC, meta_rows)
-    except Exception as exc:  # noqa: BLE001 - header must record the failure before re-raising
-        status = "FAILED"
-        # Owner mode records the failure on its own header before re-raising; contributor mode
-        # leaves the shared header to main.run's finalize (which sees the raised RegistryError).
-        if manage_header:
-            bq.update_header(
-                run_id,
-                settings=settings,
-                status=status,
-                runtime_seconds=time.perf_counter() - started,
-            )
-        raise RegistryError(f"bigquery run failed for {run_id}: {exc}") from exc
+            _append_rows(settings, "backtest_oof", bq._OOF_SPEC, oof_rows)
+            _append_rows(settings, "forecast_metadata", bq._META_SPEC, meta_rows)
+        except Exception as exc:  # noqa: BLE001 - run_header records FAILED as this propagates
+            # Wrap the cause so the failure reads clearly; run_header (owner mode) or main.run's
+            # finalize (contributor mode) records the FAILED/PARTIAL header status.
+            raise RegistryError(f"bigquery run failed for {run_id}: {exc}") from exc
 
-    runtime_seconds = time.perf_counter() - started
-    if manage_header:
-        bq.update_header(
-            run_id,
-            settings=settings,
+        runtime_seconds = time.perf_counter() - started
+        hdr.finalize(
             status=status,
-            runtime_seconds=runtime_seconds,
             n_series=n_series,
             n_models=len(models),
             bq_models=list(models),

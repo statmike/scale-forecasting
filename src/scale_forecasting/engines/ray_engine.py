@@ -273,79 +273,70 @@ def run(cfg: RunConfig, models: list[str] | None = None, *, manage_header: bool 
         manage_header,
     )
 
-    # 1. Header first, so a run is visible even if the cluster dies mid-flight. Contributor mode
-    #    contributor mode skips it — main.run already wrote the shared header.
-    if manage_header:
-        bq.ensure_tables(cfg, settings=settings)
-        bq.write_header(cfg, run_id, settings=settings)
-
-    owns_ray = not ray.is_initialized()
-    if owns_ray:
-        ray.init()
-    started = time.perf_counter()
-    try:
-        source = _read_source_series(cfg, settings)
-
-        # Fleetwide HPO resolves once on the driver over a small sample, before fan-out — the
-        # Ray twin of spark_io.resolve_fleetwide_hpo, over the already-collected pandas panel. None
-        # unless HPO is enabled at fleetwide granularity. Tuned params flow through the chunk-runner
-        # closure to every task (not cfg → run_id stable).
-        params_by_model = _resolve_fleetwide_hpo(source, cfg, executed)
-        runner = ray_io.make_chunk_runner(cfg, settings, executed, params_by_model)
-
-        # The per-task GPU fraction: fixed float passthrough, or live NeuralProphet profiling when
-        # "auto". Sample series only when auto (profiling costs) and only when a GPU is present.
-        sample = (
-            _sample_series(source, cfg)
-            if (gpu_models and cfg.compute.use_gpu and cfg.compute.gpu_fraction == "auto")
-            else None
-        )
-        gpu_fraction = ray_io.calibrate_gpu_fraction(cfg, sample_series=sample)
-
-        # Chunk counts come from the true cell counts (series in the panel × models in the pool).
-        target = cfg.compute.bucket_target_cells
-        gpu_chunks = ray_io.chunk_cells(
-            source, cfg, gpu_models, _chunk_count(_pool_cells(source, cfg, gpu_models), target)
-        )
-        cpu_chunks = ray_io.chunk_cells(
-            source, cfg, cpu_models, _chunk_count(_pool_cells(source, cfg, cpu_models), target)
-        )
-
-        # One Ray task per chunk. The remote closes over the picklable runner (cloudpickle handles
-        # the cfg/settings closure — the single local/cloud seam, no second env path). GPU tasks
-        # request a fraction of a T4 so several pack onto one device; when no GPU is provisioned,
-        # NeuralProphet cells fall back to CPU inside the task, so route them as CPU work too (see
-        # _task_options).
-        @ray.remote
-        def _task(chunk: pd.DataFrame) -> pd.DataFrame:
-            return runner(chunk)
-
-        cpu_opts = _task_options(cfg, gpu_fraction, gpu=False)
-        gpu_opts = _task_options(cfg, gpu_fraction, gpu=True)
-        futures = [_task.options(**cpu_opts).remote(c) for c in cpu_chunks]
-        futures += [_task.options(**gpu_opts).remote(c) for c in gpu_chunks]
-
-        status_frames = ray.get(futures) if futures else []
-        status_pdf = (
-            pd.concat(status_frames, ignore_index=True)
-            if status_frames
-            else pd.DataFrame(columns=list(STATUS_COLUMNS))
-        )
-    finally:
+    # 1. Header first (run_header): RUNNING on entry so a run is visible even if the cluster dies
+    #    mid-flight, finalized on a clean exit; a crash records FAILED first. Contributor mode
+    #    (main.run owns the shared header) is a no-op wrapper.
+    with bq.run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
+        owns_ray = not ray.is_initialized()
         if owns_ray:
-            ray.shutdown()
+            ray.init()
+        started = time.perf_counter()
+        try:
+            source = _read_source_series(cfg, settings)
 
-    # 3. Close the header from the collected statuses (owner mode only; main.run finalizes else).
-    outcome = ray_io.aggregate_status(status_pdf)
-    runtime_seconds = time.perf_counter() - started
-    if manage_header:
-        bq.update_header(
-            run_id,
-            settings=settings,
-            status=outcome.status,
-            runtime_seconds=runtime_seconds,
-            n_series=outcome.n_series,
-        )
+            # Fleetwide HPO resolves once on the driver over a small sample, before fan-out — the
+            # Ray twin of spark_io.resolve_fleetwide_hpo, over the already-collected pandas panel.
+            # None unless HPO is enabled at fleetwide granularity. Tuned params flow through the
+            # chunk-runner closure to every task (not cfg → run_id stable).
+            params_by_model = _resolve_fleetwide_hpo(source, cfg, executed)
+            runner = ray_io.make_chunk_runner(cfg, settings, executed, params_by_model)
+
+            # The per-task GPU fraction: fixed float passthrough, or live NeuralProphet profiling
+            # when "auto". Sample series only when auto (profiling costs) and a GPU is present.
+            sample = (
+                _sample_series(source, cfg)
+                if (gpu_models and cfg.compute.use_gpu and cfg.compute.gpu_fraction == "auto")
+                else None
+            )
+            gpu_fraction = ray_io.calibrate_gpu_fraction(cfg, sample_series=sample)
+
+            # Chunk counts come from the true cell counts (series in the panel × pool models).
+            target = cfg.compute.bucket_target_cells
+            gpu_chunks = ray_io.chunk_cells(
+                source, cfg, gpu_models, _chunk_count(_pool_cells(source, cfg, gpu_models), target)
+            )
+            cpu_chunks = ray_io.chunk_cells(
+                source, cfg, cpu_models, _chunk_count(_pool_cells(source, cfg, cpu_models), target)
+            )
+
+            # One Ray task per chunk. The remote closes over the picklable runner (cloudpickle
+            # handles the cfg/settings closure — the single local/cloud seam, no second env path).
+            # GPU tasks request a fraction of a T4 so several pack onto one device; when no GPU is
+            # provisioned, NeuralProphet cells fall back to CPU inside the task, so route them as
+            # CPU work too (see _task_options).
+            @ray.remote
+            def _task(chunk: pd.DataFrame) -> pd.DataFrame:
+                return runner(chunk)
+
+            cpu_opts = _task_options(cfg, gpu_fraction, gpu=False)
+            gpu_opts = _task_options(cfg, gpu_fraction, gpu=True)
+            futures = [_task.options(**cpu_opts).remote(c) for c in cpu_chunks]
+            futures += [_task.options(**gpu_opts).remote(c) for c in gpu_chunks]
+
+            status_frames = ray.get(futures) if futures else []
+            status_pdf = (
+                pd.concat(status_frames, ignore_index=True)
+                if status_frames
+                else pd.DataFrame(columns=list(STATUS_COLUMNS))
+            )
+        finally:
+            if owns_ray:
+                ray.shutdown()
+
+        # Close the header from the collected statuses (owner mode; contributor → main.run).
+        outcome = ray_io.aggregate_status(status_pdf)
+        runtime_seconds = time.perf_counter() - started
+        hdr.finalize(status=outcome.status, n_series=outcome.n_series)
     _log.info(
         "ray run done: run_id=%s status=%s cells=%d ok=%d error=%d gpu_fraction=%s runtime=%.1fs",
         run_id,

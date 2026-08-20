@@ -485,11 +485,10 @@ def submit_multi(
     Orchestrated here rather than on-cluster because ``google-cloud-dataproc`` isn't in the runtime
     container. Blocks per child when ``wait`` (families run sequentially — keeping the submit path
     simple; each child's own batch still autoscales independently). The shared header is finalized
-    COMPLETED iff every child succeeded, else FAILED (finalized before re-raising the first failure,
-    so the run stays queryable and the CLI exits non-zero). Returns the child batch ids.
+    with the rolled status — COMPLETED iff every child succeeded, FAILED iff every child failed,
+    PARTIAL when some but not all did — before re-raising the first failure, so the run stays
+    queryable and the CLI exits non-zero. Returns the child batch ids.
     """
-    import time
-
     from .registry import bq
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -510,41 +509,44 @@ def submit_multi(
         run_id,
     )
 
-    # One header owner (mirrors main.run): write RUNNING once, finalize after all children join.
-    bq.ensure_tables(cfg, settings=settings)
-    bq.write_header(cfg, run_id, settings=settings)
-
-    started = time.perf_counter()
+    # One header owner (mirrors main.run): run_header writes RUNNING on entry and finalizes once,
+    # after every child joins, with the rolled multi status. Per-family failures are captured (not
+    # raised through the block) so the finalize records the right status; the first is re-raised
+    # after, for a non-zero exit. An unexpected crash finalizes FAILED via run_header.
     batch_ids: list[str] = []
     first_error: BaseException | None = None
-    for family, models in families.items():
-        try:
-            batch_ids.append(
-                submit_batch(
-                    cfg,  # full cfg → shared run_id; models= restricts the on-cluster subset
-                    engine="explode",
-                    settings=settings,
-                    infra=infra,
-                    models=models,
-                    manage_header=False,  # contributor mode: this function owns the shared header
-                    batch_id=_batch_id(f"{family}-{run_id}", "multi"),
-                    wait=wait,
-                    wait_timeout=wait_timeout,
+    with bq.run_header(cfg, run_id, settings=settings, manage=True) as hdr:
+        for family, models in families.items():
+            try:
+                batch_ids.append(
+                    submit_batch(
+                        cfg,  # full cfg → shared run_id; models= restricts the on-cluster subset
+                        engine="explode",
+                        settings=settings,
+                        infra=infra,
+                        models=models,
+                        manage_header=False,  # contributor mode: this fn owns the shared header
+                        batch_id=_batch_id(f"{family}-{run_id}", "multi"),
+                        wait=wait,
+                        wait_timeout=wait_timeout,
+                    )
                 )
-            )
-            _log.info("multi: submitted family=%s models=%s", family, models)
-        except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
-            first_error = first_error or exc
-            _log.warning("multi: family=%s failed: %r", family, exc)
+                _log.info("multi: submitted family=%s models=%s", family, models)
+            except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
+                first_error = first_error or exc
+                _log.warning("multi: family=%s failed: %r", family, exc)
 
-    runtime_seconds = time.perf_counter() - started
-    bq.update_header(
-        run_id,
-        settings=settings,
-        status="COMPLETED" if first_error is None else "FAILED",
-        runtime_seconds=runtime_seconds,
-        n_series=cfg.data.series_limit,
-    )
+        # Roll the per-family batch outcomes into one status, matching main.run's multi-engine
+        # roll-up: every family green → COMPLETED, none → FAILED, some but not all → PARTIAL.
+        n_ok = len(batch_ids)
+        if n_ok == len(families):
+            status = "COMPLETED"
+        elif n_ok == 0:
+            status = "FAILED"
+        else:
+            status = "PARTIAL"
+        hdr.finalize(status=status, n_series=cfg.data.series_limit)
+
     if first_error is not None:
         raise first_error
     return batch_ids
