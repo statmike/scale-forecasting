@@ -21,7 +21,9 @@ resolves from ``SF_*`` env vars. GCP client libraries are imported lazily inside
 the pure layer (and its offline tests) never need them installed.
 
 Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_header``,
-``run_header`` (the header-lifecycle context manager), ``write_cells``, the ``run_jobs`` per-job
+``run_header`` (the header-lifecycle context manager), ``resolve_snapshot_millis`` /
+``snapshot_millis_for`` (the run's input-data snapshot: resolve once, look up per job),
+``write_cells``, the ``run_jobs`` per-job
 writers/readers (``write_job``, ``update_job``, ``latest_job_attempt``, ``next_job_attempt``,
 ``read_run_jobs``) and ``run_job`` (the per-job lifecycle context manager), the read surface
 (``header_status``, ``read_run_summary``, ``read_leaderboard``), plus the pure assemblers used by
@@ -142,7 +144,9 @@ def assemble_metadata_row(
     return row
 
 
-def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> dict[str, Any]:
+def assemble_header_row(
+    cfg: RunConfig, run_id: str, created_at: datetime, *, snapshot_millis: int | None = None
+) -> dict[str, Any]:
     """Build the ``run_registry`` header row from a config.
 
     ``raw_config`` is the validated config as a **dict** — the config *is* the record.
@@ -150,10 +154,18 @@ def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> di
     parameter serializes the value itself (``json.dumps``), so the row must carry the dict, not
     a pre-serialized string (a string would be double-encoded). ``bq_models`` is left empty here
     and filled by the router once model runtimes are known; status starts RUNNING.
+
+    ``snapshot_millis`` is the input-data snapshot the run pins every read to (epoch millis on the
+    BigQuery clock, resolved once by `resolve_snapshot_millis`): stored on the header so every
+    family job — whichever runtime — can look it up by ``run_id`` (`snapshot_millis_for`) and read
+    the *identical* source state. It is deliberately **not** part of the config (it would perturb
+    the config-derived ``run_id``), so it is passed in here, not derived. ``None`` leaves it NULL —
+    the reads fall back to unpinned (the pre-snapshot behavior).
     """
     return {
         "run_id": run_id,
         "created_at": created_at,
+        "snapshot_millis": snapshot_millis,
         "user_id": None,
         "git_sha": None,
         "python_runtime": cfg.python_runtime,
@@ -651,6 +663,7 @@ def drop_all(
 _HEADER_PARAM_TYPES: dict[str, str] = {
     "run_id": "STRING",
     "created_at": "TIMESTAMP",
+    "snapshot_millis": "INT64",
     "user_id": "STRING",
     "git_sha": "STRING",
     "python_runtime": "STRING",
@@ -678,14 +691,84 @@ def _header_param(name: str, value: Any) -> Any:
     return bigquery.ScalarQueryParameter(name, bq_type, value)
 
 
+# Pull the pinned snapshot a hair behind the BigQuery clock so the instant every reader
+# time-travels to is unambiguously in the committed past (not a moment BigQuery is still
+# stamping), avoiding any read-your-writes edge on a source table touched right before a run.
+_SNAPSHOT_SAFETY_MARGIN_MS = 2000
+
+
+def resolve_snapshot_millis(
+    *, settings: Settings | None = None
+) -> int | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Resolve the input-data snapshot for a run — one instant every job pins its source read to.
+
+    Queries the **BigQuery clock** (``SELECT UNIX_MILLIS(CURRENT_TIMESTAMP())``) so the snapshot is
+    a single authoritative epoch-millis value independent of any driver's local clock, then steps it
+    back a small `_SNAPSHOT_SAFETY_MARGIN_MS` margin. Called once per run when the header is written
+    (`write_header`); the value is stored on ``run_registry.snapshot_millis`` and read back by every
+    family job via `snapshot_millis_for`, so a Spark batch, a Ray job, and the BigQuery-native
+    models all read the *identical* source state — the "every job in a run sees the same input"
+    guarantee, uniform across native and managed-Iceberg tables (both are read through BigQuery).
+
+    Best-effort: on any failure it logs and returns ``None`` (the reads fall back to unpinned rather
+    than failing the run). Kept out of the config so it never perturbs the config-derived run_id.
+    """
+    from google.cloud import bigquery
+
+    resolved = _resolve_settings(settings)
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(client.query("SELECT UNIX_MILLIS(CURRENT_TIMESTAMP()) AS ms").result())
+        return int(rows[0]["ms"]) - _SNAPSHOT_SAFETY_MARGIN_MS
+    except Exception as exc:  # noqa: BLE001 - best-effort; unpinned read is the safe fallback
+        _log.warning("resolve_snapshot_millis failed; run will read unpinned: %s", exc)
+        return None
+
+
+def snapshot_millis_for(
+    run_id: str, *, settings: Settings | None = None
+) -> int | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the pinned input-data snapshot for ``run_id`` from its header, or ``None``.
+
+    The reader-side counterpart to `resolve_snapshot_millis`: each family job derives its ``run_id``
+    from its own config (`registry.ids.make_run_id`, a pure function) and calls this to fetch the
+    one snapshot the run recorded, so it time-travels its source read to the exact instant every
+    other job in the run does — without the value ever being threaded through submitters or args.
+    Reads the latest header row for the id (a ``--force`` re-run appends a fresh header with its own
+    snapshot; latest ``created_at`` wins, matching the rest of the read-side dedupe).
+
+    Best-effort: returns ``None`` (→ unpinned read) if no header, a NULL snapshot, or a query
+    error — so a missing snapshot degrades gracefully to the pre-snapshot behavior rather than
+    crashing a read. The owner path always writes a snapshot, so ``None`` means an old run.
+    """
+    from google.cloud import bigquery
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT snapshot_millis FROM `{resolved.table_ref('run_registry')}` "
+        "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort; unpinned read is the safe fallback
+        _log.warning("snapshot_millis_for(%s) failed; reading unpinned: %s", run_id, exc)
+        return None
+    return rows[0]["snapshot_millis"] if rows and rows[0]["snapshot_millis"] is not None else None
+
+
 def write_header(
     cfg: RunConfig, run_id: str, *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Insert the run's ``run_registry`` header row (status RUNNING) from its config.
 
     A single-row parameterized INSERT (not the Write API — no benefit for one row, and the
-    header is updated in place later by `update_header`). Raises `RegistryError`
-    on failure.
+    header is updated in place later by `update_header`). Resolves the run's input-data snapshot
+    once here (`resolve_snapshot_millis`) and stamps it on the header so every family job pins the
+    same source state (`snapshot_millis_for`). Raises `RegistryError` on failure.
     """
     from datetime import UTC, datetime
 
@@ -694,7 +777,8 @@ def write_header(
     from ..errors import RegistryError
 
     resolved = _resolve_settings(settings)
-    row = assemble_header_row(cfg, run_id, datetime.now(UTC))
+    snapshot_millis = resolve_snapshot_millis(settings=resolved)
+    row = assemble_header_row(cfg, run_id, datetime.now(UTC), snapshot_millis=snapshot_millis)
     columns = list(row)
     placeholders = ", ".join(f"@{col}" for col in columns)
     sql = (

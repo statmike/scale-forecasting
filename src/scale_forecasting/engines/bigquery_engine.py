@@ -130,6 +130,20 @@ def _source_ref(cfg: RunConfig, dataset: str) -> str:
     return src if "." in src else f"{dataset}.{src}"
 
 
+def _snapshot_clause(snapshot_millis: int | None) -> str:
+    """The ``FOR SYSTEM_TIME AS OF`` clause pinning a source read to the run's snapshot (else "").
+
+    Appended immediately *after* each backtick-quoted source-table reference so every native SQL
+    statement time-travels to the identical instant every other job in the run reads — the same
+    snapshot the Spark and Ray readers pin to (`registry.bq.snapshot_millis_for`). ``None`` renders
+    nothing, so an un-pinned run's SQL is byte-identical to the pre-snapshot behavior (and only the
+    source tables carry it — model objects and the registry tables are never time-travelled).
+    """
+    if snapshot_millis is None:
+        return ""
+    return f" FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({snapshot_millis})"
+
+
 def _model_ref(cfg: RunConfig, model_name: str, dataset: str, *, fold_id: int | None = None) -> str:
     """The backtick-quoted BQML model object path for one ``(model, run[, fold])`` (persisted).
 
@@ -145,22 +159,29 @@ def _model_ref(cfg: RunConfig, model_name: str, dataset: str, *, fold_id: int | 
     return f"`{dataset}.sf_model_{model_name}_{_sanitize_identifier(run_id)}{suffix}`"
 
 
-def _series_filter(cfg: RunConfig, source: str, id_expr: str) -> str:
+def _series_filter(
+    cfg: RunConfig, source: str, id_expr: str, *, snapshot_millis: int | None = None
+) -> str:
     """A ``ts_id IN (...)`` fragment for the deterministic ``series_limit`` subset (``""`` if none).
 
     Same rule as ``spark_io._limit_series``: distinct ids → ordered → first N. ``id_expr`` is the
-    column reference to constrain (bare ``ts_id`` in a scan, ``s.ts_id`` under a join alias).
+    column reference to constrain (bare ``ts_id`` in a scan, ``s.ts_id`` under a join alias). The
+    subquery reads the source, so it carries the run's snapshot pin too (`_snapshot_clause`).
     """
     limit = cfg.data.series_limit
     if limit is None:
         return ""
     idc = cfg.data.ts_id_col
+    snap = _snapshot_clause(snapshot_millis)
     return (
-        f"{id_expr} IN (SELECT {idc} FROM `{source}` GROUP BY {idc} ORDER BY {idc} LIMIT {limit})"
+        f"{id_expr} IN (SELECT {idc} FROM `{source}`{snap} "
+        f"GROUP BY {idc} ORDER BY {idc} LIMIT {limit})"
     )
 
 
-def _cutoff_expr(cfg: RunConfig, source: str, back_steps: int) -> str:
+def _cutoff_expr(
+    cfg: RunConfig, source: str, back_steps: int, *, snapshot_millis: int | None = None
+) -> str:
     """Scalar subquery for a training cutoff date: ``MAX(ds) - back_steps`` over the source.
 
     ``back_steps`` is the number of cadence units to step back from the last observed date, so the
@@ -169,8 +190,10 @@ def _cutoff_expr(cfg: RunConfig, source: str, back_steps: int) -> str:
     one date span, so this is exact; note it if your series end on different dates.
     """
     _, unit = _freq(cfg)
+    snap = _snapshot_clause(snapshot_millis)
     return (
-        f"(SELECT DATE_SUB(MAX({cfg.data.date_col}), INTERVAL {back_steps} {unit}) FROM `{source}`)"
+        f"(SELECT DATE_SUB(MAX({cfg.data.date_col}), INTERVAL {back_steps} {unit}) "
+        f"FROM `{source}`{snap})"
     )
 
 
@@ -261,7 +284,9 @@ def build_custom_holiday_cte(cfg: RunConfig) -> str:
     return "custom_holiday AS (\n  SELECT * FROM UNNEST([\n" + ",\n".join(rows) + "\n  ])\n)"
 
 
-def _train_window_where(cfg: RunConfig, source: str, back_steps: int | None) -> list[str]:
+def _train_window_where(
+    cfg: RunConfig, source: str, back_steps: int | None, *, snapshot_millis: int | None = None
+) -> list[str]:
     """The training-window date predicates for a model fit (``[]`` = train on all history).
 
     ``back_steps=None`` is the **final, true-future** fit: no date bound, train on everything.
@@ -272,26 +297,35 @@ def _train_window_where(cfg: RunConfig, source: str, back_steps: int | None) -> 
     if back_steps is None:
         return []
     datec = cfg.data.date_col
-    conds = [f"{datec} <= {_cutoff_expr(cfg, source, back_steps)}"]
+    conds = [f"{datec} <= {_cutoff_expr(cfg, source, back_steps, snapshot_millis=snapshot_millis)}"]
     if cfg.backtest.scheme == "sliding":
-        lower = _cutoff_expr(cfg, source, back_steps + cfg.backtest.min_train)
+        lower = _cutoff_expr(
+            cfg, source, back_steps + cfg.backtest.min_train, snapshot_millis=snapshot_millis
+        )
         conds.append(f"{datec} > {lower}")
     return conds
 
 
-def _training_select(cfg: RunConfig, source: str, *, back_steps: int | None = None) -> str:
+def _training_select(
+    cfg: RunConfig,
+    source: str,
+    *,
+    back_steps: int | None = None,
+    snapshot_millis: int | None = None,
+) -> str:
     """The ``training_data`` SELECT: id/timestamp/target over the fit's training window.
 
     ``back_steps=None`` trains on **all** history (the final true-future fit); an int restricts to a
     backtest fold's window (see `_train_window_where`).
     """
     cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col]
-    where = _train_window_where(cfg, source, back_steps)
-    sfilter = _series_filter(cfg, source, cfg.data.ts_id_col)
+    where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
+    sfilter = _series_filter(cfg, source, cfg.data.ts_id_col, snapshot_millis=snapshot_millis)
     if sfilter:
         where.append(sfilter)
     clause = f"\n  WHERE {' AND '.join(where)}" if where else ""
-    return f"SELECT {', '.join(cols)}\n  FROM `{source}`{clause}"
+    snap = _snapshot_clause(snapshot_millis)
+    return f"SELECT {', '.join(cols)}\n  FROM `{source}`{snap}{clause}"
 
 
 def build_create_model_sql(
@@ -301,6 +335,7 @@ def build_create_model_sql(
     *,
     back_steps: int | None = None,
     fold_id: int | None = None,
+    snapshot_millis: int | None = None,
 ) -> str:
     """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS native model.
 
@@ -315,7 +350,9 @@ def build_create_model_sql(
     ref = _model_ref(cfg, model_name, dataset, fold_id=fold_id)
     source = _source_ref(cfg, dataset)
     options = _render_options(bqml_options(cfg, model_name))
-    training = _training_select(cfg, source, back_steps=back_steps)
+    training = _training_select(
+        cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis
+    )
     holiday_cte = build_custom_holiday_cte(cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
@@ -333,6 +370,7 @@ def _forecast_source(
     back_steps: int | None = None,
     fold_id: int | None = None,
     horizon: int | None = None,
+    snapshot_millis: int | None = None,
 ) -> str:
     """The ``ML.FORECAST`` / ``AI.FORECAST`` table expression producing a forecast.
 
@@ -351,12 +389,13 @@ def _forecast_source(
     )
 
     if model_name == "timesfm":
-        where = _train_window_where(cfg, source, back_steps)
-        sfilter = _series_filter(cfg, source, idc)
+        where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
+        sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
         if sfilter:
             where.append(sfilter)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
-        inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{clause}"
+        snap = _snapshot_clause(snapshot_millis)
+        inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap}{clause}"
         return (
             "AI.FORECAST(\n"
             f"    ({inner}),\n"
@@ -379,7 +418,13 @@ _PRED_COLS = (
 )
 
 
-def build_forecast_insert_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
+def build_forecast_insert_sql(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    snapshot_millis: int | None = None,
+) -> str:
     """``INSERT INTO forecast_predictions`` the **true beyond-data** forecast for one native model.
 
     The showpiece statement: one query forecasts every series' next ``data.horizon`` steps from a
@@ -390,7 +435,7 @@ def build_forecast_insert_sql(cfg: RunConfig, model_name: str, dataset: str = "{
     ``quantiles`` is NULL (native models emit an interval, not an arbitrary quantile set).
     """
     dataset_q = f"`{dataset}.forecast_predictions`"
-    forecast = _forecast_source(cfg, model_name, dataset)
+    forecast = _forecast_source(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
     return (
         f"INSERT INTO {dataset_q}\n"
         f"  ({_PRED_COLS})\n"
@@ -409,6 +454,7 @@ def build_eval_query(
     *,
     back_steps: int,
     fold_id: int,
+    snapshot_millis: int | None = None,
 ) -> str:
     """A read-back ``SELECT`` of a **backtest fold's** forecast joined to actuals (OOF + metrics).
 
@@ -420,7 +466,11 @@ def build_eval_query(
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
-    forecast = _forecast_source(cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id)
+    forecast = _forecast_source(
+        cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id,
+        snapshot_millis=snapshot_millis,
+    )
+    snap = _snapshot_clause(snapshot_millis)
     return (
         f"SELECT\n"
         f"  f.{idc} AS ts_id, DATE(f.forecast_timestamp) AS forecast_date,\n"
@@ -428,13 +478,15 @@ def build_eval_query(
         f"  f.prediction_interval_lower_bound AS yhat_lower,\n"
         f"  f.prediction_interval_upper_bound AS yhat_upper\n"
         f"FROM {forecast} f\n"
-        f"JOIN `{source}` s\n"
+        f"JOIN `{source}`{snap} s\n"
         f"  ON s.{idc} = f.{idc} AND s.{datec} = DATE(f.forecast_timestamp)\n"
         f"ORDER BY ts_id, forecast_date;"
     )
 
 
-def build_history_query(cfg: RunConfig, dataset: str = "{dataset}") -> str:
+def build_history_query(
+    cfg: RunConfig, dataset: str = "{dataset}", *, snapshot_millis: int | None = None
+) -> str:
     """A ``SELECT`` of **all** training history ``(ts_id, ds, y)`` (for MASE/RMSSE scale).
 
     The scale-free metrics need each series' training actuals as ``y_train``; the engine loads this
@@ -444,16 +496,19 @@ def build_history_query(cfg: RunConfig, dataset: str = "{dataset}") -> str:
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
-    sfilter = _series_filter(cfg, source, idc)
+    sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
     clause = f"\nWHERE {sfilter}" if sfilter else ""
+    snap = _snapshot_clause(snapshot_millis)
     return (
         f"SELECT {idc} AS ts_id, {datec} AS ds, {targetc} AS y\n"
-        f"FROM `{source}`{clause}\n"
+        f"FROM `{source}`{snap}{clause}\n"
         f"ORDER BY ts_id, ds;"
     )
 
 
-def build_series_ids_query(cfg: RunConfig, dataset: str = "{dataset}") -> str:
+def build_series_ids_query(
+    cfg: RunConfig, dataset: str = "{dataset}", *, snapshot_millis: int | None = None
+) -> str:
     """A ``SELECT DISTINCT ts_id`` over the source subset — the run's series list (engine-agnostic).
 
     Feeds the ``n_series`` count and, when backtesting is off, the one unscored ``fold_id=NULL``
@@ -462,13 +517,18 @@ def build_series_ids_query(cfg: RunConfig, dataset: str = "{dataset}") -> str:
     """
     source = _source_ref(cfg, dataset)
     idc = cfg.data.ts_id_col
-    sfilter = _series_filter(cfg, source, idc)
+    sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
     clause = f"\nWHERE {sfilter}" if sfilter else ""
-    return f"SELECT DISTINCT {idc} AS ts_id\nFROM `{source}`{clause}\nORDER BY ts_id;"
+    snap = _snapshot_clause(snapshot_millis)
+    return f"SELECT DISTINCT {idc} AS ts_id\nFROM `{source}`{snap}{clause}\nORDER BY ts_id;"
 
 
 def build_setup_statements(
-    cfg: RunConfig, model_name: str, dataset: str = "{dataset}"
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    snapshot_millis: int | None = None,
 ) -> list[str]:
     """The mutating statements for one native model's **final true-future forecast**, in order.
 
@@ -479,13 +539,23 @@ def build_setup_statements(
     """
     statements: list[str] = []
     if model_name in _MODEL_TYPE:
-        statements.append(build_create_model_sql(cfg, model_name, dataset))
-    statements.append(build_forecast_insert_sql(cfg, model_name, dataset))
+        statements.append(
+            build_create_model_sql(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
+        )
+    statements.append(
+        build_forecast_insert_sql(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
+    )
     return statements
 
 
 def build_fold_create_statements(
-    cfg: RunConfig, model_name: str, dataset: str, fold_id: int, back_steps: int
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str,
+    fold_id: int,
+    back_steps: int,
+    *,
+    snapshot_millis: int | None = None,
 ) -> list[str]:
     """The training statements for one backtest fold (``[CREATE MODEL]`` for ARIMA, ``[]`` else).
 
@@ -494,7 +564,10 @@ def build_fold_create_statements(
     """
     if model_name in _MODEL_TYPE:
         return [
-            build_create_model_sql(cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id)
+            build_create_model_sql(
+                cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id,
+                snapshot_millis=snapshot_millis,
+            )
         ]
     return []
 
@@ -517,9 +590,17 @@ def build_fold_drop_statements(
     return []
 
 
-def render_setup_sql(cfg: RunConfig, model_name: str, dataset: str = "{dataset}") -> str:
+def render_setup_sql(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    snapshot_millis: int | None = None,
+) -> str:
     """All of a model's true-future setup statements joined into one script (snapshot + reading)."""
-    return "\n\n".join(build_setup_statements(cfg, model_name, dataset))
+    return "\n\n".join(
+        build_setup_statements(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
+    )
 
 
 # --- engine --------------------------------------------------------------------
@@ -598,12 +679,22 @@ def run(
         created_at = datetime.now(UTC)
         status = "COMPLETED"
         nan_panel = {name: float("nan") for name in METRIC_NAMES}
-        series_ids = [str(r.ts_id) for r in _query(build_series_ids_query(cfg, dataset))]
+        # Pin every source read in this run to the snapshot the header recorded (owner mode wrote it
+        # on entry above; contributor mode's shared header was written by main.run before launch),
+        # so the native models time-travel to the identical input state the Spark/Ray jobs do. None
+        # (an old run or a transient) → un-pinned live reads, the pre-snapshot behavior.
+        snapshot_millis = bq.snapshot_millis_for(run_id, settings=settings)
+        series_ids = [
+            str(r.ts_id)
+            for r in _query(build_series_ids_query(cfg, dataset, snapshot_millis=snapshot_millis))
+        ]
         n_series = len(series_ids)
         try:
             # --- Phase 1: final true-future forecast → forecast_predictions (always) ----------
             for model_name in models:
-                for stmt in build_setup_statements(cfg, model_name, dataset):
+                for stmt in build_setup_statements(
+                    cfg, model_name, dataset, snapshot_millis=snapshot_millis
+                ):
                     _query(stmt)
 
             # --- Phase 2: scored evaluation ---------------------------------------------------
@@ -611,7 +702,9 @@ def run(
             meta_rows: list[dict[str, Any]] = []
 
             if cfg.backtest.enabled:
-                history = _query(build_history_query(cfg, dataset)).to_dataframe()
+                history = _query(
+                    build_history_query(cfg, dataset, snapshot_millis=snapshot_millis)
+                ).to_dataframe()
                 hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
                 plan = fold_plan(cfg)
                 for model_name in models:
@@ -619,12 +712,14 @@ def run(
                     panels_by_ts: dict[str, list[dict[str, float]]] = {}
                     for fold_id, back_steps in plan:
                         for stmt in build_fold_create_statements(
-                            cfg, model_name, dataset, fold_id, back_steps
+                            cfg, model_name, dataset, fold_id, back_steps,
+                            snapshot_millis=snapshot_millis,
                         ):
                             _query(stmt)
                         eval_df = _query(
                             build_eval_query(
-                                cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id
+                                cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id,
+                                snapshot_millis=snapshot_millis,
                             )
                         ).to_dataframe()
                         # The fold model has served its forecast — drop it so backtest runs don't

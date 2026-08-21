@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 from ..errors import get_logger
 from . import ray_io
-from .spark_io import STATUS_COLUMNS, _needed_columns, _resolve_source_table
+from .spark_io import STATUS_COLUMNS, _needed_columns, _resolve_source_table, _snapshot_millis
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -105,6 +105,11 @@ def _read_driver_collect(
     streams Arrow straight to the driver (matching Spark). The read is column-projected
     to only what a cell needs (`_needed_columns` → ``selected_fields``). Returns the raw
     panel; the caller (`_read_source_series`) applies the ``series_limit`` subset.
+
+    Pinned to the run's input snapshot (`_snapshot_millis`) via the read session's
+    ``table_modifiers.snapshot_time`` — the Storage Read API's native time-travel field, so the
+    read consumes no query slots yet still sees the identical source state every other job in the
+    run does. Unset snapshot → an un-pinned live read (the pre-snapshot behavior).
     """
     # Runtime import: pandas is TYPE_CHECKING-only at module scope (offline import parity), so every
     # function that touches pandas at runtime must import it locally.
@@ -117,6 +122,15 @@ def _read_driver_collect(
         data_format=types.DataFormat.ARROW,
         read_options=types.ReadSession.TableReadOptions(selected_fields=_needed_columns(cfg)),
     )
+    ms = _snapshot_millis(cfg, settings)
+    if ms is not None:
+        # proto-plus surfaces the Timestamp field as a datetime, so set the whole modifiers
+        # sub-message from a UTC datetime rather than mutating a Timestamp in place.
+        from datetime import UTC, datetime
+
+        requested.table_modifiers = types.ReadSession.TableModifiers(
+            snapshot_time=datetime.fromtimestamp(ms / 1000, tz=UTC)
+        )
     session = read_client.create_read_session(
         parent=f"projects/{settings.project_id}",
         read_session=requested,
@@ -143,6 +157,11 @@ def _read_ray_data(
     fan-out is identical to the default path. Column projection is applied in pandas after the read
     (the reader takes no ``selected_fields``), keeping the two readers' outputs the same shape.
 
+    When the run pins an input snapshot (`_snapshot_millis`) we instead pass ``query=`` with a
+    ``FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS(...)`` clause — the reader's ``dataset=`` table-scan
+    form has no snapshot-time knob, and a time-travel read must go through a query. That trades a
+    pure scan for query slots on the pinned path only; the un-pinned default stays a slot-free scan.
+
     Kept off by default (``ray_read_mode == "driver_collect"``): this is the Ray-native ingest path,
     the same Storage Read API as the proven reader, but a live Ray run should vet it before it
     becomes the default. Distributing the panel as ``ray.data`` blocks straight into the fan-out
@@ -150,8 +169,15 @@ def _read_ray_data(
     """
     import ray
 
-    dataset_ref = _storage_dataset_path(cfg, settings)
-    ds = ray.data.read_bigquery(project_id=settings.project_id, dataset=dataset_ref)
+    ms = _snapshot_millis(cfg, settings)
+    if ms is not None:
+        cols = ", ".join(_needed_columns(cfg))
+        table = _resolve_source_table(cfg, settings)
+        query = f"SELECT {cols} FROM `{table}` FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({ms})"
+        ds = ray.data.read_bigquery(project_id=settings.project_id, query=query)
+    else:
+        dataset_ref = _storage_dataset_path(cfg, settings)
+        ds = ray.data.read_bigquery(project_id=settings.project_id, dataset=dataset_ref)
     frame = ds.to_pandas()
     needed = _needed_columns(cfg)
     # The reader has no server-side column projection, so project in pandas to match the default

@@ -204,6 +204,20 @@ def _resolve_source_table(cfg: RunConfig, settings: Settings) -> str:
     return src if "." in src else settings.table_ref(src)
 
 
+def _snapshot_millis(cfg: RunConfig, settings: Settings) -> int | None:
+    """The input-data snapshot this run pins its source read to, or ``None`` (unpinned).
+
+    Shared by every reader (this Spark path and the Ray engine's): derive the ``run_id`` from the
+    config (`registry.ids.make_run_id`, pure) and fetch the snapshot the run recorded on its header
+    (`registry.bq.snapshot_millis_for`), so all family jobs time-travel to the identical instant.
+    Best-effort — a missing/NULL snapshot returns ``None`` and the read stays unpinned.
+    """
+    from ..registry import bq
+    from ..registry.ids import make_run_id
+
+    return bq.snapshot_millis_for(make_run_id(cfg), settings=settings)
+
+
 def _needed_columns(cfg: RunConfig) -> list[str]:
     """Project the read to only what a cell needs — ts_id, date, target, and configured exog.
 
@@ -226,9 +240,19 @@ def read_source_series(spark: SparkSession, cfg: RunConfig, settings: Settings) 
     Applies ``data.series_limit`` deterministically (distinct ts_ids → ordered → first N →
     semi-join) so every scale in the demo runs the *same* series — the property that
     makes "10 vs 100 vs 100k" a clean apples-to-apples runtime comparison.
+
+    Pins the read to the run's input snapshot (`_snapshot_millis`) when one is recorded, so all of
+    a run's family jobs read byte-identical source data even if the table is written to mid-run.
     """
     table = _resolve_source_table(cfg, settings)
-    df = spark.read.format("bigquery").option("table", table).load().select(*_needed_columns(cfg))
+    reader = spark.read.format("bigquery").option("table", table)
+    ms = _snapshot_millis(cfg, settings)
+    if ms is not None:
+        # Pin the connector read to the run's snapshot so every family job time-travels to the
+        # identical input instant. ``snapshotTimeMillis`` is the connector's BigQuery time-travel
+        # option (native + managed-Iceberg both read through the same table interface).
+        reader = reader.option("snapshotTimeMillis", str(ms))
+    df = reader.load().select(*_needed_columns(cfg))
     return _limit_series(df, cfg)
 
 

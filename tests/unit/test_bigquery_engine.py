@@ -292,3 +292,86 @@ def test_setup_sql_snapshot() -> None:
         SNAPSHOT.write_text(rendered)
     assert SNAPSHOT.exists(), "snapshot missing; run with SF_UPDATE_SNAPSHOTS=1 to create"
     assert rendered == SNAPSHOT.read_text()
+
+
+# --- snapshot pinning (FOR SYSTEM_TIME AS OF) ----------------------------------
+#
+# Every source-table read in a run must time-travel to the one snapshot the run recorded, so all
+# jobs read byte-identical input. The clause attaches OUTSIDE the backticks, once per source read;
+# model objects and the registry tables are never time-travelled. Default (no snapshot) → no clause.
+
+_SNAP_MS = 1_724_000_000_000
+# Leading space + attached right after the source's closing backtick.
+_SNAP = f"` FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({_SNAP_MS})"
+_SRC = "proj.scale_forecasting.source_series_native"
+
+
+def test_snapshot_clause_absent_by_default() -> None:
+    # No snapshot passed → SQL is byte-identical to the pre-snapshot behavior (no time-travel).
+    cfg = _cfg(["arima_plus", "timesfm"], series_limit=100)
+    for sql in (
+        be.build_series_ids_query(cfg, _DS),
+        be.build_history_query(cfg, _DS),
+        be.build_create_model_sql(cfg, "arima_plus", _DS),
+        be.build_forecast_insert_sql(cfg, "timesfm", _DS),
+        be.build_eval_query(cfg, "arima_plus", _DS, back_steps=28, fold_id=0),
+    ):
+        assert "FOR SYSTEM_TIME AS OF" not in sql
+
+
+def test_snapshot_clause_pins_series_ids_and_history_reads() -> None:
+    cfg = _cfg(["arima_plus"], series_limit=100)
+    # Both builders read the source twice with a limit (outer scan + the series-filter subquery).
+    ids = be.build_series_ids_query(cfg, _DS, snapshot_millis=_SNAP_MS)
+    hist = be.build_history_query(cfg, _DS, snapshot_millis=_SNAP_MS)
+    assert ids.count(f"`{_SRC}{_SNAP}") == 2
+    assert hist.count(f"`{_SRC}{_SNAP}") == 2
+
+
+def test_snapshot_clause_pins_create_model_but_not_the_model_object() -> None:
+    cfg = _cfg(["arima_plus"], series_limit=100)
+    sql = be.build_create_model_sql(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
+    # Training scan + series-filter subquery both time-travel the source...
+    assert sql.count(f"`{_SRC}{_SNAP}") == 2
+    # ...and nothing else does: exactly those two source reads carry the clause, so the persisted
+    # model object (sf_model_arima_plus_...) is never time-travelled.
+    assert "sf_model_arima_plus" in sql
+    assert sql.count("FOR SYSTEM_TIME AS OF") == 2
+
+
+def test_snapshot_clause_pins_timesfm_forecast_source() -> None:
+    # TimesFM reads history at forecast time (no CREATE MODEL), so its insert pins the source.
+    cfg = _cfg(["timesfm"], series_limit=100)
+    sql = be.build_forecast_insert_sql(cfg, "timesfm", _DS, snapshot_millis=_SNAP_MS)
+    assert sql.count(f"`{_SRC}{_SNAP}") == 2  # inner history SELECT + series-filter subquery
+    # The registry output table is never time-travelled — the clause follows the source only.
+    assert "`proj.scale_forecasting.forecast_predictions` FOR SYSTEM_TIME" not in sql
+
+
+def test_snapshot_clause_pins_arima_insert_reads_via_model_only() -> None:
+    # ARIMA's final forecast reads from the (already-snapshotted) model object, not the source, so
+    # its insert has no source read to pin — parity with the pre-snapshot SQL.
+    cfg = _cfg(["arima_plus"], series_limit=100)
+    sql = be.build_forecast_insert_sql(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
+    assert "FOR SYSTEM_TIME AS OF" not in sql
+
+
+def test_snapshot_clause_pins_eval_join_actuals() -> None:
+    cfg = _cfg(["arima_plus"], series_limit=100)
+    sql = be.build_eval_query(
+        cfg, "arima_plus", _DS, back_steps=28, fold_id=0, snapshot_millis=_SNAP_MS
+    )
+    # The actuals join reads the source and must time-travel with the rest of the run.
+    assert f"`{_SRC}{_SNAP}" in sql
+    # ML.FORECAST(MODEL ...) reads the fold model object, which is not time-travelled.
+    assert sql.count("FOR SYSTEM_TIME AS OF") == 1
+
+
+def test_snapshot_clause_threads_through_setup_and_fold_builders() -> None:
+    cfg = _cfg(["arima_plus"], series_limit=100)
+    setup = be.build_setup_statements(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
+    fold = be.build_fold_create_statements(
+        cfg, "arima_plus", _DS, 0, 28, snapshot_millis=_SNAP_MS
+    )
+    assert any("FOR SYSTEM_TIME AS OF" in s for s in setup)
+    assert any(f"`{_SRC}{_SNAP}" in s for s in fold)

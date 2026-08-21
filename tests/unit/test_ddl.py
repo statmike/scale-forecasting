@@ -162,6 +162,8 @@ def test_additive_columns_excludes_not_null_keys() -> None:
     assert cols["status"] == "STRING"
     assert cols["n_series"] == "INT64"
     assert cols["job_telemetry"] == "JSON"
+    # snapshot_millis is nullable, so it auto-migrates onto an older run_registry.
+    assert cols["snapshot_millis"] == "INT64"
 
 
 def test_additive_columns_parse_array_type() -> None:

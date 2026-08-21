@@ -238,11 +238,19 @@ def test_header_row_snapshots_config() -> None:
     assert row["n_series"] == 5
     assert row["backtest_on"] is False
     assert row["created_at"] is _CREATED
+    # Snapshot is out-of-band from the config (it must never enter the run_id hash), so it defaults
+    # to None when the assembler is called without one.
+    assert row["snapshot_millis"] is None
     # raw_config is the verbatim validated config as a dict (the native JSON column's query
     # parameter serializes it; a pre-serialized string would double-encode).
     assert isinstance(row["raw_config"], dict)
     assert row["raw_config"]["run_name"] == "my run"
     assert row["raw_config"]["models"] == ["theta", "sarimax"]
+
+
+def test_header_row_carries_snapshot_millis_when_given() -> None:
+    row = bq.assemble_header_row(_cfg(), "rid", _CREATED, snapshot_millis=1_724_000_000_000)
+    assert row["snapshot_millis"] == 1_724_000_000_000
 
 
 def test_header_ensemble_strategies_empty_when_disabled() -> None:
@@ -254,6 +262,13 @@ def test_header_ensemble_strategies_listed_when_enabled() -> None:
     cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean", "median"]})
     row = bq.assemble_header_row(cfg, "rid", _CREATED)
     assert row["ensemble_strategies"] == ["mean", "median"]
+
+
+def test_header_row_columns_match_param_types() -> None:
+    # The assembled header's keys are exactly the columns write_header knows how to bind — so a new
+    # column (e.g. snapshot_millis) can't be added to one side without the other.
+    row = bq.assemble_header_row(_cfg(), "rid", _CREATED, snapshot_millis=1)
+    assert set(row) == set(bq._HEADER_PARAM_TYPES)
 
 
 # --- run_jobs row assembly -----------------------------------------------------

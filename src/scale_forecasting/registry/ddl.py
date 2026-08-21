@@ -39,6 +39,7 @@ _TABLE_BODIES: dict[str, str] = {
 CREATE TABLE IF NOT EXISTS `{d}.run_registry` (
   run_id            STRING NOT NULL,
   created_at        TIMESTAMP NOT NULL,
+  snapshot_millis   INT64,
   user_id           STRING,
   git_sha           STRING,
   python_runtime    STRING,
