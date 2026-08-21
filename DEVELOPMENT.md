@@ -68,6 +68,11 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- Family→runtime DAG: one run plans one job per model family (statistical / ml / deep_learning /
+  native), each on its own resolved runtime, all in parallel under a shared `run_id` plus a
+  downstream ensemble node. Traceable via the `v_run_jobs` view and the SDK's `Forecaster.dag()` /
+  `Forecaster.jobs()`. The retired `spark_method` config knob and the `multi`/`naive` Spark methods
+  are gone — `explode` is the sole Spark engine.
 - Documentation & repo refactor: MkDocs Material site + auto-generated API reference published to
   GitHub Pages, slim README, single-sourced guides, all internal tokens/dev-notes corralled here.
 - Ray-on-Vertex autoscaling.
