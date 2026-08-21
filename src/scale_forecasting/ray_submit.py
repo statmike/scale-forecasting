@@ -848,6 +848,8 @@ def submit_ray(
     n_series: int | None = None,
     wait: bool = True,
     submission_id: str | None = None,
+    use_gpu: bool | None = None,
+    gpu_type: str | None = None,
 ) -> str:
     """Size, provision, run, and (ephemeral) tear down a Ray-on-Vertex forecast run; return job id.
 
@@ -877,6 +879,11 @@ def submit_ray(
     `registry.ids.ray_submission_id`), becomes the Ray job's own id — so families sharing a
     ``run_id`` get distinct, directly-queryable Ray jobs instead of random auto-assigned ids. When
     ``None`` Ray assigns one (the standalone path).
+
+    ``use_gpu``/``gpu_type`` override the flat ``compute`` GPU defaults for this family's job (the
+    DAG orchestrator passes the family's resolved hardware — e.g. the deep-learning family gets a
+    GPU pool even when the flat default is CPU). They size the cluster only; they're kept out of
+    ``cfg`` so the staged config's ``run_id`` stays identical across every family in the run.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -885,7 +892,7 @@ def submit_ray(
     infra = infra or RayInfra.resolve()
     cfg = cfg.with_series_limit(n_series)
     run_id = make_run_id(cfg)
-    plan = ray_io.plan_cluster(cfg, models, run_id=run_id)
+    plan = ray_io.plan_cluster(cfg, models, run_id=run_id, use_gpu=use_gpu, gpu_type=gpu_type)
 
     # Reuse when the config names a standing cluster or the caller overrides the name; else create.
     reuse = plan.reuse or cluster_name is not None

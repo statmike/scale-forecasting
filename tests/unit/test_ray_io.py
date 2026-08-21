@@ -197,6 +197,35 @@ def test_plan_accelerator_type_mapped_to_vertex_enum() -> None:
     assert plan.accelerator_type == "NVIDIA_TESLA_T4"
 
 
+def test_plan_l4_maps_to_vertex_enum_on_g2_machine() -> None:
+    plan = ray_io.plan_cluster(
+        _cfg(compute=_compute(gpu_type="L4", ray_gpu_machine_type="g2-standard-8")), run_id="rid"
+    )
+    assert plan.accelerator_type == "NVIDIA_L4"
+
+
+def test_plan_l4_on_n1_machine_raises() -> None:
+    # L4 attaches only to G2; the default n1 gpu machine is rejected at plan time, not at create.
+    with pytest.raises(ValueError, match="requires a 'g2-' machine"):
+        ray_io.plan_cluster(_cfg(compute=_compute(gpu_type="L4")), run_id="rid")
+
+
+def test_plan_use_gpu_override_forces_pool_without_touching_run_id() -> None:
+    # The per-family GPU decision flows as an argument, not a cfg change: the flat default is CPU,
+    # but the override provisions the GPU pool while the run_id (a cfg digest) stays identical.
+    cfg = _cfg(compute=_compute(use_gpu=False))
+    off = ray_io.plan_cluster(cfg, run_id="rid")
+    on = ray_io.plan_cluster(cfg, run_id="rid", use_gpu=True)
+    assert off.gpu_node_count == 0
+    assert on.gpu_node_count >= 1
+
+
+def test_plan_gpu_type_override_maps_without_touching_run_id() -> None:
+    cfg = _cfg(compute=_compute(ray_gpu_machine_type="g2-standard-8"))
+    plan = ray_io.plan_cluster(cfg, run_id="rid", gpu_type="L4")
+    assert plan.accelerator_type == "NVIDIA_L4"
+
+
 def test_plan_larger_scale_yields_larger_cluster() -> None:
     # The core "resize for the scale of the run" property: 10× the series ⇒ strictly more nodes.
     small = ray_io.plan_cluster(

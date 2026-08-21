@@ -71,7 +71,13 @@ _GPU_FAMILY = "deep_learning"
 _T4_MEMORY_BYTES = 16 * 1024**3
 
 # Accelerator type strings Vertex expects, keyed by the config's short ``gpu_type``.
-_ACCELERATOR_TYPES = {"T4": "NVIDIA_TESLA_T4"}
+_ACCELERATOR_TYPES = {"T4": "NVIDIA_TESLA_T4", "L4": "NVIDIA_L4"}
+
+# Each accelerator attaches to one machine family: a T4 is an add-on card on an N1 VM, while an L4
+# is only offered on G2 VMs (the card is bundled into the machine type). Sizing/creation must pair
+# the two correctly, so the gpu machine type is validated against the chosen ``gpu_type`` — a T4 on
+# a g2 machine (or an L4 on an n1) is a create-time error, caught here at plan time instead.
+_GPU_MACHINE_PREFIX = {"T4": "n1-", "L4": "g2-"}
 
 # When ``gpu_fraction == "auto"`` we can't run the live calibration at *submit* time (no cluster
 # yet) to size the pool, so sizing uses this nominal fraction (→ 2 NeuralProphet slots per T4). The
@@ -258,13 +264,27 @@ def _machine_cores(machine_type: str) -> int:
 
 
 def _accelerator_type(gpu_type: str) -> str:
-    """Map the config's short ``gpu_type`` (``T4``) to the Vertex accelerator enum (pure)."""
+    """Map the config's short ``gpu_type`` (``T4``/``L4``) to the Vertex accelerator enum (pure)."""
     try:
         return _ACCELERATOR_TYPES[gpu_type]
     except KeyError:
         raise ValueError(
             f"unsupported gpu_type '{gpu_type}'; supported: {sorted(_ACCELERATOR_TYPES)}"
         ) from None
+
+
+def _check_gpu_machine(gpu_type: str, gpu_machine_type: str) -> None:
+    """Fail if the gpu machine type doesn't match the accelerator's required family (pure).
+
+    A T4 is an N1 add-on card; an L4 is only offered on G2 machines. Pairing them wrong is rejected
+    at create by Vertex, so it's caught here at plan time with an actionable message.
+    """
+    prefix = _GPU_MACHINE_PREFIX.get(gpu_type)
+    if prefix is not None and not gpu_machine_type.startswith(prefix):
+        raise ValueError(
+            f"gpu_type '{gpu_type}' requires a '{prefix}' machine type, "
+            f"but ray_gpu_machine_type is '{gpu_machine_type}'"
+        )
 
 
 def _cluster_name(cfg: RunConfig, run_id: str) -> str:
@@ -317,8 +337,21 @@ def _clamp_pool_nodes(nodes: int, min_nodes: int) -> int:
     return max(nodes, min_nodes) if nodes > 0 else 0
 
 
-def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str) -> RayClusterPlan:
+def plan_cluster(
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    run_id: str,
+    use_gpu: bool | None = None,
+    gpu_type: str | None = None,
+) -> RayClusterPlan:
     """Size an autoscaling Vertex Ray cluster to this run's fan-out (pure).
+
+    ``use_gpu``/``gpu_type`` override the flat ``compute`` defaults for one family's job (the DAG
+    orchestrator passes the family's resolved hardware). They're kept **out of** ``cfg`` on purpose:
+    the ``run_id`` is a digest of ``cfg`` and must stay identical across every family under one run,
+    so a per-family GPU decision flows as an argument, not a config mutation. ``None`` falls back to
+    ``compute.use_gpu`` / ``compute.gpu_type``.
 
     Deterministic function of the config — no GCP, no GPU. Splits the executed models into GPU
     (NeuralProphet) and CPU pools, counts the cells each pool must run (``series × models``, using
@@ -337,6 +370,12 @@ def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str
     sizing decision, logged and stamped to the run for audit.
     """
     gpu_models, cpu_models = split_gpu_cpu_models(cfg, models)
+
+    # Per-family overrides fall back to the flat compute defaults (kept out of cfg to hold run_id).
+    effective_use_gpu = cfg.compute.use_gpu if use_gpu is None else use_gpu
+    effective_gpu_type = gpu_type or cfg.compute.gpu_type
+    if effective_use_gpu:
+        _check_gpu_machine(effective_gpu_type, cfg.compute.ray_gpu_machine_type)
 
     n_series = cfg.data.series_limit
     basis = n_series if n_series is not None else cfg.compute.max_parallelism
@@ -363,7 +402,7 @@ def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str
             ),
             gpu_min,
         )
-        if cfg.compute.use_gpu
+        if effective_use_gpu
         else 0
     )
     cpu_nodes = _clamp_pool_nodes(
@@ -381,7 +420,7 @@ def plan_cluster(cfg: RunConfig, models: list[str] | None = None, *, run_id: str
         cpu_node_count=cpu_nodes,
         gpu_machine_type=cfg.compute.ray_gpu_machine_type,
         gpu_node_count=gpu_nodes,
-        accelerator_type=_accelerator_type(cfg.compute.gpu_type),
+        accelerator_type=_accelerator_type(effective_gpu_type),
         accelerator_count=cfg.compute.accelerator_count,
         sizing_gpu_fraction=sizing_fraction,
         n_gpu_cells=n_gpu_cells,

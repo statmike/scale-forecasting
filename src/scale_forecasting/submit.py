@@ -54,6 +54,12 @@ _ENV_SUBNETWORK = "SF_SUBNETWORK_URI"
 
 _DEFAULT_RUNTIME_VERSION = "2.2"
 
+# Dataproc Serverless offers L4 only (no T4 on serverless — the config resolver forces L4 there and
+# rejects a T4). A single accelerator per executor is attached; the deep-learning fit runs inside
+# the pandas UDF (torch/NeuralProphet), so the GPU just needs to be visible to the executor's Python
+# worker — we don't enable the RAPIDS SQL plugin (our SQL isn't the GPU workload).
+_SERVERLESS_GPU_TYPE = "L4"
+
 # Batch max-runtime cap (``ExecutionConfig.ttl``). Dataproc Serverless applies a DEFAULT ttl of 4h
 # when none is set — which silently CANCELS a longer-running batch mid-flight (a full 100k explode
 # run can exceed 4h, and the cancel kills it before it writes its run_registry summary row, so the
@@ -229,6 +235,32 @@ def _batch_id(run_id: str, engine: str) -> str:
     return raw[:63].rstrip("-")
 
 
+def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
+    """Dataproc Serverless runtime properties that attach an L4 to each executor (pure).
+
+    Enables the premium executor tier (required for accelerators on serverless) and requests one L4
+    per executor with a GPU discovery script, so the executor's Python worker sees a GPU for the
+    torch/NeuralProphet fit inside the pandas UDF. ``spark.task.resource.gpu.amount`` is fractional
+    so several UDF tasks share one device (matching the Ray path's fractional packing). The exact
+    property set is validated against a live serverless GPU batch (deferred); the shape is pinned
+    here so the batch message and its snapshot are deterministic.
+    """
+    if gpu_type != _SERVERLESS_GPU_TYPE:
+        raise ConfigError(
+            f"Dataproc Serverless supports {_SERVERLESS_GPU_TYPE} only, not {gpu_type!r}; "
+            "use spark_mode='cluster' or runtime='ray' for other accelerators"
+        )
+    return {
+        "spark.dataproc.executor.compute.tier": "premium",
+        "spark.dataproc.executor.resource.accelerator.type": gpu_type.lower(),
+        "spark.executor.resource.gpu.amount": "1",
+        "spark.executor.resource.gpu.discoveryScript": (
+            "/usr/lib/spark/scripts/gpu/getGpusResources.sh"
+        ),
+        "spark.task.resource.gpu.amount": "0.5",
+    }
+
+
 def build_batch(
     *,
     infra: BatchInfra,
@@ -240,6 +272,8 @@ def build_batch(
     max_executors: int | None = None,
     models: list[str] | None = None,
     manage_header: bool = True,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Batch`` for one forecast run (pure — builds the message only).
 
@@ -252,6 +286,11 @@ def build_batch(
     false`` puts the on-cluster engine in contributor mode (``main.run`` owns the shared header).
     Both are appended to ``args`` **only when non-default**, so a standalone submit builds the exact
     same arg list as before (existing batches / snapshot tests unchanged).
+
+    ``hardware="gpu"`` attaches an L4 per executor (`_serverless_gpu_properties`) — the
+    deep-learning family's serverless job. ``gpu_type`` names the accelerator (serverless is
+    L4-only; the resolver already forces this). A CPU batch adds no accelerator properties, so its
+    message is unchanged.
     """
     from datetime import timedelta
 
@@ -263,6 +302,8 @@ def build_batch(
     properties = {}
     if max_executors is not None:
         properties["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
+    if hardware == "gpu":
+        properties.update(_serverless_gpu_properties(gpu_type or _SERVERLESS_GPU_TYPE))
 
     return dataproc.Batch(
         pyspark_batch=dataproc.PySparkBatch(
@@ -352,6 +393,8 @@ def submit_batch(
     models: list[str] | None = None,
     manage_header: bool = True,
     batch_id: str | None = None,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
     wait: bool = True,
     wait_timeout: float = _WAIT_TIMEOUT_SECONDS,
 ) -> str:
@@ -374,6 +417,10 @@ def submit_batch(
     ``batch_id`` overrides the derived ``sf-<engine>-<run_id>`` id. A caller that fans out several
     batches under **one** shared ``run_id`` (each staging the same full cfg) supplies a distinct
     per-batch id, since the derived id would otherwise collide. When ``None`` the id is derived.
+
+    ``hardware="gpu"`` attaches an L4 per executor (the deep-learning family's serverless job);
+    ``gpu_type`` names the accelerator (serverless is L4-only). Both default to the CPU batch, so an
+    existing caller submits exactly as before.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -396,6 +443,8 @@ def submit_batch(
         max_executors=max_executors,
         models=models,
         manage_header=manage_header,
+        hardware=hardware,
+        gpu_type=gpu_type,
     )
 
     client = _batch_client(settings.region)

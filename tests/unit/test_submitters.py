@@ -90,6 +90,24 @@ def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.Monk
     assert seen["batch_id"] == "sf-run-abc-statistical-a1"
 
 
+def test_spark_launch_threads_gpu_to_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.submit as submit_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(submit_mod, "submit_batch", lambda cfg, **kw: seen.update(kw) or "b")
+
+    SparkSubmitter().launch(
+        _cfg(),
+        models=[_SPARK],
+        manage_header=False,
+        settings=_SETTINGS,
+        hardware="gpu",
+        gpu_type="L4",
+    )
+    assert seen["hardware"] == "gpu"
+    assert seen["gpu_type"] == "L4"
+
+
 def test_spark_launch_with_session_ignores_system_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
     # An in-process session submits no remote batch, so the batch id has nowhere to go.
     from scale_forecasting.engines import spark_explode
@@ -125,6 +143,24 @@ def test_ray_launch_threads_system_job_id_as_submission_id(
         system_job_id="sf-run-abc-ml-a1",
     )
     assert seen["submission_id"] == "sf-run-abc-ml-a1"
+
+
+def test_ray_launch_maps_hardware_to_use_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.ray_submit as ray_submit_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or "j")
+
+    RaySubmitter().launch(
+        _cfg(python_runtime="ray"),
+        models=[_SPARK],
+        manage_header=False,
+        settings=_SETTINGS,
+        hardware="gpu",
+        gpu_type="L4",
+    )
+    assert seen["use_gpu"] is True
+    assert seen["gpu_type"] == "L4"
 
 
 def test_spark_launch_with_session_runs_in_process(monkeypatch: pytest.MonkeyPatch) -> None:

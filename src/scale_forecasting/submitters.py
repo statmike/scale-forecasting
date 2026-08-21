@@ -40,6 +40,8 @@ class RuntimeSubmitter(Protocol):
         wait: bool = True,
         max_executors: int | None = None,
         system_job_id: str | None = None,
+        hardware: str = "cpu",
+        gpu_type: str | None = None,
     ) -> None:
         """Run ``models`` on this runtime, blocking until terminal when ``wait``.
 
@@ -55,6 +57,10 @@ class RuntimeSubmitter(Protocol):
         ``submission_id`` — so several families under one shared ``run_id`` get distinct, traceable
         jobs instead of colliding on a run-derived id. When ``None`` the platform assigns/derives an
         id (the standalone path).
+
+        ``hardware``/``gpu_type`` carry the family's resolved accelerator (`ResolvedFamilyCompute`):
+        ``hardware="gpu"`` provisions the runtime's GPU (a Serverless L4 executor, a Ray GPU pool);
+        ``gpu_type`` names it. They default to CPU, so a CPU family launches exactly as before.
         """
         ...
 
@@ -75,11 +81,14 @@ class SparkSubmitter:
         wait: bool = True,
         max_executors: int | None = None,
         system_job_id: str | None = None,
+        hardware: str = "cpu",
+        gpu_type: str | None = None,
     ) -> None:
         if spark is not None:
             # In-process Spark over an injected (Connect or local) session — no remote batch submit.
             # max_executors is a remote-batch dynamic-allocation cap; an injected session skips it.
             # system_job_id names a remote batch; an in-process session submits none, so unused.
+            # hardware/gpu_type shape a remote batch's executors; an injected session is CPU-only.
             from .engines import spark_explode
 
             spark_explode.run(
@@ -97,6 +106,8 @@ class SparkSubmitter:
             wait=wait,
             max_executors=max_executors,
             batch_id=system_job_id,
+            hardware=hardware,
+            gpu_type=gpu_type,
         )
 
 
@@ -116,10 +127,13 @@ class RaySubmitter:
         wait: bool = True,
         max_executors: int | None = None,
         system_job_id: str | None = None,
+        hardware: str = "cpu",
+        gpu_type: str | None = None,
     ) -> None:
         # spark and max_executors are ignored — there is no in-process Ray path from the
         # orchestrator, and the Ray cluster autoscales on its own (no fixed executor cap).
         # system_job_id becomes the Ray submission_id so the job's own id is deterministic.
+        # hardware="gpu" provisions the Ray GPU pool for this family (kept out of cfg for run_id).
         from .ray_submit import submit_ray
 
         submit_ray(
@@ -129,6 +143,8 @@ class RaySubmitter:
             settings=settings,
             wait=wait,
             submission_id=system_job_id,
+            use_gpu=(hardware == "gpu"),
+            gpu_type=gpu_type,
         )
 
 

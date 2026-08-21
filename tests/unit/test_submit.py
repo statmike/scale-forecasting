@@ -188,6 +188,50 @@ def test_build_batch_max_executors_caps_dynamic_allocation() -> None:
     assert dict(batch.runtime_config.properties)["spark.dynamicAllocation.maxExecutors"] == "2"
 
 
+def test_build_batch_cpu_default_adds_no_accelerator_properties() -> None:
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        engine="explode",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+    )
+    props = dict(batch.runtime_config.properties)
+    assert not any(k.startswith("spark.dataproc.executor.resource.accelerator") for k in props)
+
+
+def test_build_batch_gpu_attaches_l4_executor() -> None:
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        engine="explode",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="gpu",
+        gpu_type="L4",
+    )
+    props = dict(batch.runtime_config.properties)
+    assert props["spark.dataproc.executor.resource.accelerator.type"] == "l4"
+    assert props["spark.dataproc.executor.compute.tier"] == "premium"
+    assert props["spark.executor.resource.gpu.amount"] == "1"
+
+
+def test_build_batch_gpu_rejects_non_l4_on_serverless() -> None:
+    with pytest.raises(ConfigError, match="Serverless supports L4 only"):
+        build_batch(
+            infra=_infra(),
+            settings=_settings(),
+            engine="explode",
+            package_uri="gs://c/p.zip",
+            launcher_uri="gs://c/e.py",
+            config_uri="gs://c/r.json",
+            hardware="gpu",
+            gpu_type="T4",
+        )
+
+
 # --- BatchInfra resolution -----------------------------------------------------
 
 
