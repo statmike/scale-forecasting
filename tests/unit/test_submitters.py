@@ -188,6 +188,25 @@ def test_ray_launch_maps_hardware_to_use_gpu(monkeypatch: pytest.MonkeyPatch) ->
     assert seen["gpu_type"] == "L4"
 
 
+def test_ray_launch_threads_shared_cluster_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A shared ephemeral cluster's (name, region) are passed through as the reuse target.
+    import scale_forecasting.ray_submit as ray_submit_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or "j")
+
+    RaySubmitter().launch(
+        _cfg(python_runtime="ray"),
+        models=[_SPARK],
+        manage_header=False,
+        settings=_SETTINGS,
+        ray_cluster_name="sf-ray-shared",
+        ray_cluster_region="us-west1",
+    )
+    assert seen["cluster_name"] == "sf-ray-shared"
+    assert seen["cluster_region"] == "us-west1"
+
+
 def test_spark_launch_with_session_runs_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
     # An injected session picks the in-process engine (explode by default) — no remote batch submit.
     from scale_forecasting.engines import spark_explode

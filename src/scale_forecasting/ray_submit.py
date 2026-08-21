@@ -837,6 +837,63 @@ def _stamp_ray_telemetry(telemetry: dict[str, Any], run_id: str, settings: Setti
         _log.warning("Ray telemetry capture failed (non-fatal): %r", exc)
 
 
+def provision_shared_cluster(
+    cfg: RunConfig,
+    *,
+    models: list[str],
+    run_id: str,
+    use_gpu: bool,
+    gpu_type: str | None = None,
+    settings: Settings | None = None,
+    infra: RayInfra | None = None,
+) -> tuple[str, str]:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
+    """Create one shared ephemeral Ray cluster for a run's Ray families; return ``(name, region)``.
+
+    The multi-family analog of `submit_ray`'s create step. When a run has more than one ephemeral
+    Ray family the DAG orchestrator provisions **one** cluster here rather than letting each family
+    create its own (which would collide on the run-derived ``sf-ray-<run_id>`` name and waste a
+    second cluster). The cluster is sized for the **union** of those families' ``models`` (its CPU
+    pool covers every Ray CPU-family model; it gets a GPU pool when ``use_gpu`` — any Ray family
+    needs one) at the run's scale; autoscaling (the default) then absorbs the combined demand.
+
+    Returns the cluster's display name and the region it actually landed in (a capacity hop may move
+    it off the data-plane region). The caller threads both into every Ray family's `submit_ray`
+    (``cluster_name`` + ``cluster_region`` → the reuse path, so each family submits its own
+    failure-isolated Ray job to the shared cluster) and tears it down once via
+    `teardown_shared_cluster` after all families join.
+    """
+    from .settings import Settings
+
+    settings = settings or Settings.resolve()
+    infra = infra or RayInfra.resolve()
+    plan = ray_io.plan_cluster(cfg, models, run_id=run_id, use_gpu=use_gpu, gpu_type=gpu_type)
+    regions = _resolve_regions(cfg, settings)
+    _log.info(
+        "provisioning shared Ray cluster %s: %d union models use_gpu=%s cpu_nodes=%d gpu_nodes=%d",
+        plan.cluster_name,
+        len(models),
+        use_gpu,
+        plan.cpu_node_count,
+        plan.gpu_node_count,
+    )
+    _resource, region = _create_cluster_across_regions(
+        plan, infra, plan.cluster_name, settings, regions
+    )
+    return plan.cluster_name, region
+
+
+def teardown_shared_cluster(
+    name: str, region: str, settings: Settings
+) -> None:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
+    """Tear down the run's shared ephemeral Ray cluster (best-effort, like `submit_ray`'s teardown).
+
+    Deletes by the deterministic resource path in the region the cluster landed in
+    (`provision_shared_cluster` returns it). `_delete_cluster` swallows any error, so a cluster that
+    never fully materialized is a harmless no-op.
+    """
+    _delete_cluster(_resource_name(settings, name, region))
+
+
 def submit_ray(
     cfg: RunConfig,
     *,
@@ -850,6 +907,7 @@ def submit_ray(
     submission_id: str | None = None,
     use_gpu: bool | None = None,
     gpu_type: str | None = None,
+    cluster_region: str | None = None,
 ) -> str:
     """Size, provision, run, and (ephemeral) tear down a Ray-on-Vertex forecast run; return job id.
 
@@ -884,6 +942,11 @@ def submit_ray(
     DAG orchestrator passes the family's resolved hardware — e.g. the deep-learning family gets a
     GPU pool even when the flat default is CPU). They size the cluster only; they're kept out of
     ``cfg`` so the staged config's ``run_id`` stays identical across every family in the run.
+
+    ``cluster_region`` pins where a *reused* cluster is targeted (SDK init + resource path). It
+    defaults to ``settings.region`` — the standing-cluster case — but the DAG orchestrator passes
+    the region a shared ephemeral cluster landed in (which may differ after a capacity hop), so
+    every Ray family's job finds the one shared cluster by name in the right region.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -920,9 +983,12 @@ def submit_ray(
     teardown_target: str | None = None
     try:
         if reuse:
-            # A standing cluster lives in the data-plane region; pin the SDK there and target it.
-            _init_vertex(settings, settings.region)
-            cluster_resource_name = _resource_name(settings, name)
+            # A reused cluster (a standing one, or the run's shared ephemeral one) lives in a known
+            # region — the data-plane region by default, or the region a shared cluster landed in
+            # after a capacity hop (passed as cluster_region). Pin the SDK there and target it.
+            region = cluster_region or settings.region
+            _init_vertex(settings, region)
+            cluster_resource_name = _resource_name(settings, name, region)
         else:
             cluster_resource_name, cluster_region = _create_cluster_across_regions(
                 plan, infra, name, settings, regions

@@ -44,6 +44,8 @@ class RuntimeSubmitter(Protocol):
         gpu_type: str | None = None,
         spark_mode: str | None = None,
         spark_cluster_name: str | None = None,
+        ray_cluster_name: str | None = None,
+        ray_cluster_region: str | None = None,
     ) -> None:
         """Run ``models`` on this runtime, blocking until terminal when ``wait``.
 
@@ -67,6 +69,11 @@ class RuntimeSubmitter(Protocol):
         ``spark_mode``/``spark_cluster_name`` select the Spark sub-runtime (``serverless`` batch xor
         a Dataproc ``cluster`` job, the latter reusing a standing cluster by name when given); other
         runtimes ignore them.
+
+        ``ray_cluster_name``/``ray_cluster_region`` target one shared ephemeral Ray cluster the
+        orchestrator provisioned for a run with several Ray families: the Ray submitter reuses it
+        (submits its own failure-isolated job) instead of creating its own; other runtimes ignore
+        them, and when unset a Ray family self-provisions as before.
         """
         ...
 
@@ -92,7 +99,10 @@ class SparkSubmitter:
         gpu_type: str | None = None,
         spark_mode: str | None = None,
         spark_cluster_name: str | None = None,
+        ray_cluster_name: str | None = None,
+        ray_cluster_region: str | None = None,
     ) -> None:
+        # ray_cluster_name/ray_cluster_region are Ray-only (a shared cluster); Spark ignores them.
         if spark is not None:
             # In-process Spark over an injected (Connect or local) session — no remote submit.
             # max_executors is a remote-batch dynamic-allocation cap; an injected session skips it.
@@ -157,12 +167,15 @@ class RaySubmitter:
         gpu_type: str | None = None,
         spark_mode: str | None = None,
         spark_cluster_name: str | None = None,
+        ray_cluster_name: str | None = None,
+        ray_cluster_region: str | None = None,
     ) -> None:
         # spark, max_executors, and the spark_* args are ignored — there is no in-process Ray path
         # from the orchestrator, the Ray cluster autoscales on its own (no fixed executor cap), and
         # spark_mode/spark_cluster_name are Spark-only. system_job_id becomes the Ray submission_id
         # so the job's own id is deterministic; hardware="gpu" provisions the Ray GPU pool for this
-        # family (kept out of cfg for run_id).
+        # family (kept out of cfg for run_id). ray_cluster_name/region, when set, target the run's
+        # shared ephemeral cluster (reuse path — submit this family's own job to it, no create).
         from .ray_submit import submit_ray
 
         submit_ray(
@@ -174,6 +187,8 @@ class RaySubmitter:
             submission_id=system_job_id,
             use_gpu=(hardware == "gpu"),
             gpu_type=gpu_type,
+            cluster_name=ray_cluster_name,
+            cluster_region=ray_cluster_region,
         )
 
 

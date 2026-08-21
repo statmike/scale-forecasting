@@ -43,6 +43,7 @@ artifacts + runnable commands + reproducibility manifest, no submit), and
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -51,6 +52,8 @@ from .registry.ids import make_run_id
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
     from .dag import FamilyJob, RunDag
@@ -149,6 +152,60 @@ def _system_job_id(job_key: str, runtime: str) -> str:
     return bigquery_job_id(job_key)
 
 
+def _shared_ray_inputs(python_jobs: list[FamilyJob]) -> tuple[list[str], bool, str | None] | None:
+    """The union sizing inputs for a run's ephemeral Ray families, or ``None`` if fewer than two.
+
+    Sharing one cluster only matters when **more than one** family resolves to Ray — that's the case
+    that would otherwise collide on the run-derived ``sf-ray-<run_id>`` name (and waste a second
+    cluster). Returns the union of those families' models, whether **any** needs a GPU pool, and the
+    GPU type to size it (the first GPU family's) — the inputs to one shared cluster. A single Ray
+    family (or none) returns ``None`` and keeps the proven self-provisioning path.
+    """
+    ray_jobs = [j for j in python_jobs if j.runtime == "ray"]
+    if len(ray_jobs) < 2:
+        return None
+    models: list[str] = []
+    any_gpu = False
+    gpu_type: str | None = None
+    for j in ray_jobs:
+        assert j.compute is not None  # a Python family always resolves compute
+        models.extend(j.models)
+        if j.compute.hardware == "gpu":
+            any_gpu = True
+            gpu_type = gpu_type or j.compute.gpu_type
+    return models, any_gpu, gpu_type
+
+
+@contextmanager
+def _shared_ray_cluster(
+    cfg: RunConfig, run_dag: RunDag, run_id: str, settings: Settings
+) -> Iterator[tuple[str, str] | None]:
+    """Provision one shared ephemeral Ray cluster when a run has several ephemeral Ray families.
+
+    Yields ``(cluster_name, cluster_region)`` to thread into each Ray family's job as a reuse target
+    (so each submits its own failure-isolated Ray job to the one cluster), or ``None`` when sharing
+    doesn't apply — a single Ray family, no Ray family, or a config already reusing a standing
+    cluster (``compute.ray_cluster_name`` set: every family targets it, no orchestrator create). The
+    cluster is torn down once in a ``finally`` so a family failure never leaks it.
+    """
+    inputs = None
+    if cfg.compute.ray_cluster_name is None:
+        inputs = _shared_ray_inputs(run_dag.python_jobs)
+    if inputs is None:
+        yield None
+        return
+    from . import ray_submit
+
+    models, any_gpu, gpu_type = inputs
+    name, region = ray_submit.provision_shared_cluster(
+        cfg, models=models, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
+    )
+    try:
+        yield (name, region)
+    finally:
+        ray_submit.teardown_shared_cluster(name, region, settings)
+
+
 def _launch_family_job(
     cfg: RunConfig,
     job: FamilyJob,
@@ -158,6 +215,7 @@ def _launch_family_job(
     *,
     force: bool = False,
     max_executors: int | None = None,
+    ray_cluster: tuple[str, str] | None = None,
 ) -> None:
     """Run one Python family's job on its resolved runtime, wrapped in its ``run_jobs`` row.
 
@@ -181,6 +239,10 @@ def _launch_family_job(
     platform-legal id (`_system_job_id`) and threaded both onto the ``run_jobs`` row and into the
     submitter — so several families under one shared ``run_id`` submit distinct, traceable platform
     jobs (a Dataproc ``batch_id`` / Ray ``submission_id``) instead of colliding on a run-derived id.
+
+    ``ray_cluster``, when set, is the run's shared ephemeral Ray cluster ``(name, region)``
+    (`_shared_ray_cluster`): a Ray family reuses it instead of self-provisioning; every other
+    runtime ignores it.
     """
     from .registry import bq
     from .registry.ids import make_job_key
@@ -190,6 +252,10 @@ def _launch_family_job(
     assert compute is not None  # a Python family always resolves compute (native is handled inline)
     attempt, _ = bq.next_job_attempt(run_id, job.family, force=force, settings=settings)
     system_job_id = _system_job_id(make_job_key(run_id, job.family, attempt), compute.runtime)
+    # A shared Ray cluster (provisioned by the orchestrator for a multi-Ray-family run) is targeted
+    # only by Ray families; every other runtime ignores it.
+    ray_cluster_name = ray_cluster[0] if ray_cluster and compute.runtime == "ray" else None
+    ray_cluster_region = ray_cluster[1] if ray_cluster and compute.runtime == "ray" else None
     with bq.run_job(
         run_id,
         job.family,
@@ -213,6 +279,8 @@ def _launch_family_job(
             gpu_type=compute.gpu_type,
             spark_mode=compute.spark_mode,
             spark_cluster_name=compute.spark_cluster_name,
+            ray_cluster_name=ray_cluster_name,
+            ray_cluster_region=ray_cluster_region,
         )
 
 
@@ -344,7 +412,13 @@ def run(
         # inline on the main thread, so all families overlap. Each family carries the same
         # contributor-mode contract (its model subset + shared header owned here) and its own
         # run_jobs row, so N heterogeneous families run under one run_id.
-        with ThreadPoolExecutor(max_workers=max(1, len(python_jobs))) as pool:
+        # When the run has several ephemeral Ray families, provision one shared Ray cluster for the
+        # duration of the launch block (they submit their own jobs to it, and it's torn down once on
+        # exit); otherwise this yields None and each family self-provisions as before.
+        with (
+            _shared_ray_cluster(cfg, run_dag, run_id, settings) as ray_cluster,
+            ThreadPoolExecutor(max_workers=max(1, len(python_jobs))) as pool,
+        ):
             futures = {
                 pool.submit(
                     _launch_family_job,
@@ -355,6 +429,7 @@ def run(
                     spark,
                     force=force,
                     max_executors=max_executors,
+                    ray_cluster=ray_cluster,
                 ): job
                 for job in python_jobs
             }
