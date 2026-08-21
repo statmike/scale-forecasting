@@ -125,7 +125,9 @@ def assemble_metadata_row(
     """One full-fit ``forecast_metadata`` row: metrics panel + artifact link.
 
     ``fold_id`` is None (this is the full-fit summary row). ``model_artifact`` is the
-    ObjectRef/URI filled in by the writer after the artifact upload.
+    ObjectRef/URI filled in by the writer after the artifact upload. ``worker_id`` and the
+    ``cell_started_at``/``cell_ended_at`` wall-clock bracket come off the cell (the Python worker
+    stamps them); they are None for cells produced outside `run_cell` (native SQL / ensemble).
     """
     row: dict[str, Any] = {
         "run_id": result.run_id,
@@ -138,6 +140,9 @@ def assemble_metadata_row(
         "best_params": _as_json(result.best_params),
         "model_artifact": model_artifact,
         "created_at": created_at,
+        "worker_id": result.worker_id,
+        "cell_started_at": result.cell_started_at,
+        "cell_ended_at": result.cell_ended_at,
     }
     for name in METRIC_COLUMNS:
         row[name] = _as_float(result.metrics.get(name))
@@ -199,6 +204,7 @@ def assemble_job_row(
     gpu_type: str | None = None,
     system_job_id: str | None = None,
     status: str = "RUNNING",
+    started_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a ``run_jobs`` row for one family's job under a run.
 
@@ -209,6 +215,10 @@ def assemble_job_row(
     (`config.RunConfig.resolve_family_compute` for a model family, the ensemble node's own config
     for ``ensemble``) and hands them over. ``status`` starts RUNNING; ``runtime_seconds`` and
     ``job_telemetry`` are NULL until the job finishes and the submitter updates the row.
+
+    ``started_at`` is the job's execution start (defaults to ``created_at`` when not given); the
+    matching ``ended_at`` is NULL here and stamped by `run_job` at exit — together they give the
+    trace an absolute wall-clock lane per job, alongside the measured ``runtime_seconds``.
     """
     from .ids import make_job_key
 
@@ -224,6 +234,8 @@ def assemble_job_row(
         "system_job_id": system_job_id,
         "status": status,
         "created_at": created_at,
+        "started_at": started_at if started_at is not None else created_at,
+        "ended_at": None,
         "runtime_seconds": None,
         "job_telemetry": None,
     }
@@ -332,6 +344,11 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("best_params", "S"),
     ("model_artifact", "S"),
     ("created_at", "S"),
+    # Per-cell wall-clock lane + worker identity for the run trace (SDK trace()). None on rows the
+    # native/ensemble engines emit (no per-cell worker); those families trace at the run_jobs grain.
+    ("worker_id", "S"),
+    ("cell_started_at", "S"),
+    ("cell_ended_at", "S"),
 )
 
 # Which assembler feeds which table, and its column spec. Driven in this one place so
@@ -924,6 +941,8 @@ _JOB_PARAM_TYPES: dict[str, str] = {
     "system_job_id": "STRING",
     "status": "STRING",
     "created_at": "TIMESTAMP",
+    "started_at": "TIMESTAMP",
+    "ended_at": "TIMESTAMP",
     "runtime_seconds": "FLOAT64",
     "job_telemetry": "JSON",
 }
@@ -1209,6 +1228,7 @@ def run_job(
                 settings=settings,
                 status="FAILED",
                 runtime_seconds=time.perf_counter() - started,
+                ended_at=datetime.now(UTC),
             )
         raise
     if manage:
@@ -1217,6 +1237,7 @@ def run_job(
             settings=settings,
             status=fin.status,
             runtime_seconds=time.perf_counter() - started,
+            ended_at=datetime.now(UTC),
             **fin.extra,
         )
 

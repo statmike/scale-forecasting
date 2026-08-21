@@ -179,6 +179,23 @@ def test_metadata_row_has_full_metric_panel() -> None:
     assert row["model_hash"] == "f" * 64
 
 
+def test_metadata_row_carries_cell_timing_and_worker() -> None:
+    # The per-cell wall-clock bracket + worker identity flow off the cell onto the row (the trace
+    # lane). A cell without them (native/ensemble) leaves the three columns NULL.
+    started = datetime(2026, 1, 2, 3, 4, 0, tzinfo=UTC)
+    ended = datetime(2026, 1, 2, 3, 4, 2, tzinfo=UTC)
+    row = bq.assemble_metadata_row(
+        _result(worker_id="host-9:4242", cell_started_at=started, cell_ended_at=ended), _CREATED
+    )
+    assert row["worker_id"] == "host-9:4242"
+    assert row["cell_started_at"] is started
+    assert row["cell_ended_at"] is ended
+
+    bare = bq.assemble_metadata_row(_result(), _CREATED)
+    assert bare["worker_id"] is None
+    assert bare["cell_started_at"] is None and bare["cell_ended_at"] is None
+
+
 def test_metadata_row_carries_artifact_link() -> None:
     row = bq.assemble_metadata_row(_result(), _CREATED, model_artifact="gs://wh/artifacts/x/m.pkl")
     assert row["model_artifact"] == "gs://wh/artifacts/x/m.pkl"
@@ -300,6 +317,9 @@ def test_job_row_derives_id_and_maps_resolved_compute() -> None:
     assert row["status"] == "RUNNING"  # default: RUNNING until the job finishes
     assert row["runtime_seconds"] is None and row["job_telemetry"] is None
     assert row["created_at"] is _CREATED
+    # started_at defaults to created_at; ended_at is stamped later (by run_job at exit).
+    assert row["started_at"] is _CREATED
+    assert row["ended_at"] is None
 
 
 def test_job_row_defaults_are_null_for_unset_compute() -> None:
@@ -363,6 +383,7 @@ def test_run_job_writes_running_then_completes(monkeypatch: Any) -> None:
     assert job_id == "sf-my-run-0123456789ab-deep_learning-a1"
     assert fields["status"] == "COMPLETED"
     assert "runtime_seconds" in fields
+    assert fields["ended_at"] is not None  # wall-clock end stamped at exit
     assert fields["system_job_id"] == "dp-batch-xyz"
     assert fields["job_telemetry"] == {"total_wall_s": 12.0}
 
@@ -379,6 +400,14 @@ def test_run_job_records_failed_and_reraises(monkeypatch: Any) -> None:
     assert job_id == "sf-rid-0123456789ab-ml-a2"  # attempt reflected in the id
     assert fields["status"] == "FAILED"
     assert "runtime_seconds" in fields
+    assert fields["ended_at"] is not None  # a crashed job still records its wall-clock end
+
+
+def test_job_row_started_at_overrides_created_at() -> None:
+    started = datetime(2026, 1, 2, 3, 5, 0, tzinfo=UTC)
+    row = bq.assemble_job_row("rid-0123456789ab", "ml", 1, _CREATED, started_at=started)
+    assert row["started_at"] is started
+    assert row["created_at"] is _CREATED
 
 
 def test_run_job_contributor_mode_touches_nothing(monkeypatch: Any) -> None:

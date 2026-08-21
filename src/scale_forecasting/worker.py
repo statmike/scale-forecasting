@@ -12,8 +12,11 @@ behavior, so it is the clean seam between compute and lineage.
 
 from __future__ import annotations
 
+import os
+import socket
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -54,11 +57,27 @@ class CellResult:
     metrics: dict[str, float]  # full-fit metrics
     best_params: dict[str, Any] = field(default_factory=dict)
     fit_seconds: float = 0.0
+    # Per-cell wall-clock bracket + worker identity for the run trace (SDK trace()). fit_seconds is
+    # the precise (monotonic) fit duration; these are absolute wall-clock stamps that position the
+    # cell on a Gantt/waterfall lane, and worker_id (hostname:pid) attributes it to a worker.
+    worker_id: str | None = None
+    cell_started_at: datetime | None = None
+    cell_ended_at: datetime | None = None
     # Serialized fitted model (from BaseModel.serialize), or None when persistence is off / the
     # model opts out. Carried as bytes rather than a temp-file path so it crosses the executor
     # boundary as plain data with no local-fs lifecycle; the registry writer uploads it to GCS and
     # stamps the ObjectRef onto forecast_metadata.model_artifact for model-artifact lineage.
     artifact_bytes: bytes | None = None
+
+
+def _worker_id() -> str:
+    """A runtime-agnostic worker identity (``hostname:pid``).
+
+    The same call on the driver, a Spark executor, or a Ray worker, so the trace attributes each
+    cell to the physical worker that ran it without any engine-specific API — keeping ``run_cell``
+    identical everywhere.
+    """
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 def _compute_engine(model_cls: type[BaseModel], cfg: RunConfig) -> str:
@@ -152,6 +171,9 @@ def run_cell(
     ts_id = _ts_id(series, cfg)
     run_id = make_run_id(cfg)
     model_hash = make_model_hash(run_id, ts_id, model_name, cfg)
+    # Wall-clock lane + worker identity for the trace, captured for every return path (ok or error).
+    cell_started_at = datetime.now(UTC)
+    worker_id = _worker_id()
 
     def _error(msg: str, engine: str) -> CellResult:
         return CellResult(
@@ -165,6 +187,9 @@ def run_cell(
             predictions=_empty_predictions(),
             oof=None,
             metrics={name: float("nan") for name in METRIC_NAMES},
+            worker_id=worker_id,
+            cell_started_at=cell_started_at,
+            cell_ended_at=datetime.now(UTC),
         )
 
     try:
@@ -223,6 +248,9 @@ def run_cell(
             metrics=metrics,
             best_params=model.get_params(),
             fit_seconds=time.perf_counter() - started,
+            worker_id=worker_id,
+            cell_started_at=cell_started_at,
+            cell_ended_at=datetime.now(UTC),
             artifact_bytes=artifact_bytes,
         )
     except Exception as e:  # any failure → error cell, batch survives

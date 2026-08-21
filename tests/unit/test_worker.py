@@ -65,6 +65,21 @@ def test_ok_cell_predictions_are_canonical() -> None:
     assert (df["yhat"] <= df["yhat_upper"] + 1e-6).all()
 
 
+def test_ok_cell_stamps_trace_timing_and_worker() -> None:
+    # The cell carries a wall-clock bracket + worker identity for the run trace.
+    res = run_cell(_series(), "theta", _cfg())
+    assert res.worker_id and ":" in res.worker_id  # hostname:pid
+    assert res.cell_started_at is not None and res.cell_ended_at is not None
+    assert res.cell_ended_at >= res.cell_started_at
+
+
+def test_error_cell_also_stamps_trace_timing() -> None:
+    # An error cell still gets timed + attributed, so failures show on the trace too.
+    res = run_cell(_series(), "nope", _cfg(models=["theta"]))
+    assert res.status == "error"
+    assert res.worker_id and res.cell_started_at is not None and res.cell_ended_at is not None
+
+
 def test_run_id_deterministic_for_same_config() -> None:
     a = run_cell(_series(), "theta", _cfg())
     b = run_cell(_series(), "theta", _cfg())

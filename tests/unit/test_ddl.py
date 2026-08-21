@@ -166,6 +166,17 @@ def test_additive_columns_excludes_not_null_keys() -> None:
     assert cols["snapshot_millis"] == "INT64"
 
 
+def test_additive_columns_include_trace_timing_columns() -> None:
+    # The trace timing columns are nullable, so they auto-migrate onto older tables.
+    jobs = dict(additive_columns("run_jobs"))
+    assert jobs["started_at"] == "TIMESTAMP"
+    assert jobs["ended_at"] == "TIMESTAMP"
+    meta = dict(additive_columns("forecast_metadata"))
+    assert meta["worker_id"] == "STRING"
+    assert meta["cell_started_at"] == "TIMESTAMP"
+    assert meta["cell_ended_at"] == "TIMESTAMP"
+
+
 def test_additive_columns_parse_array_type() -> None:
     # a comma-free composite type (ARRAY<STRING>) survives the comma-split of the column block.
     cols = dict(additive_columns("run_registry"))

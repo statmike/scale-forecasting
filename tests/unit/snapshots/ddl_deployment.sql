@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.run_jobs` (
   system_job_id    STRING,
   status           STRING,
   created_at       TIMESTAMP NOT NULL,
+  started_at       TIMESTAMP,
+  ended_at         TIMESTAMP,
   runtime_seconds  FLOAT64,
   job_telemetry    JSON
 )
@@ -51,7 +53,10 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   fit_seconds    FLOAT64,
   best_params    JSON,
   model_artifact STRING,
-  created_at     TIMESTAMP NOT NULL
+  created_at     TIMESTAMP NOT NULL,
+  worker_id      STRING,
+  cell_started_at TIMESTAMP,
+  cell_ended_at  TIMESTAMP
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id, model_type;
