@@ -520,6 +520,18 @@ def _patch_run_seams(
         main, "_launch_family_job", lambda *a, **k: seen.__setitem__("spark_ran", True)
     )
 
+    # The ensemble DAG node opens its own run_jobs row before running the consensus; fake that
+    # per-job lifecycle so _launch_ensemble_job runs for real down to the run_ensembles call.
+    import contextlib
+
+    monkeypatch.setattr(bq, "next_job_attempt", lambda *a, **k: (1, None))
+
+    @contextlib.contextmanager
+    def _fake_run_job(*a: Any, **k: Any) -> Any:
+        yield None
+
+    monkeypatch.setattr(bq, "run_job", _fake_run_job)
+
     def _fake_ensembles(cfg: RunConfig, run_id: str, *, settings: Any) -> None:
         seen["ensemble_called"] = True
         seen["ensemble_run_id"] = run_id
@@ -842,3 +854,53 @@ def test_launch_family_job_ignores_shared_cluster_for_spark(
     )
     assert sub.kwargs["ray_cluster_name"] is None
     assert sub.kwargs["ray_cluster_region"] is None
+
+
+# --- ensemble DAG node: identity + mode dispatch -------------------------------
+
+
+def _patch_ensemble_seams(monkeypatch: pytest.MonkeyPatch, calls: dict[str, Any]) -> None:
+    import contextlib
+
+    from scale_forecasting import ensemble_run
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "next_job_attempt", lambda *a, **k: (1, None))
+
+    @contextlib.contextmanager
+    def _fake_run_job(run_id: str, family: str, attempt: int, **k: Any) -> Any:
+        calls["run_job"] = {"family": family, "runtime": k.get("runtime")}
+        yield None
+
+    monkeypatch.setattr(bq, "run_job", _fake_run_job)
+    monkeypatch.setattr(
+        ensemble_run, "run_ensembles", lambda *a, **k: calls.__setitem__("barrier", True)
+    )
+    monkeypatch.setattr(
+        ensemble_run,
+        "run_ensembles_microbatch",
+        lambda *a, **k: calls.__setitem__("microbatch", True),
+    )
+
+
+def test_launch_ensemble_job_barrier_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_ensemble_seams(monkeypatch, calls)
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    main._launch_ensemble_job(cfg, "run-abc", _SETTINGS)
+    assert calls.get("barrier") is True
+    assert "microbatch" not in calls
+    # It opens its own run_jobs row as the "ensemble" family, executed on the driver (bigquery).
+    assert calls["run_job"] == {"family": "ensemble", "runtime": "bigquery"}
+
+
+def test_launch_ensemble_job_microbatch_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_ensemble_seams(monkeypatch, calls)
+    cfg = _cfg(
+        ensemble={"enabled": True, "strategies": ["mean"]},
+        compute={"ensemble": {"runtime": "spark", "mode": "microbatch"}},
+    )
+    main._launch_ensemble_job(cfg, "run-abc", _SETTINGS)
+    assert calls.get("microbatch") is True
+    assert "barrier" not in calls

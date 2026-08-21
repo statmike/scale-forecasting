@@ -324,3 +324,91 @@ def test_override_ensemble_rebuilds_and_enables() -> None:
     assert out.ensemble.prune_threshold == 0.3  # preserved from the original block
     # a distinct override yields a distinct ensemble_id under the same run_id.
     assert make_ensemble_id(out.ensemble) != make_ensemble_id(cfg.ensemble)
+
+
+# --- _drain_ready: the microbatch loop driver (pure; I/O injected) -------------
+
+
+def test_drain_ready_processes_all_ready_in_one_pass_when_done() -> None:
+    from scale_forecasting.ensemble_run import _drain_ready
+
+    processed_batches: list[list[str]] = []
+    out = _drain_ready(
+        ready_fn=lambda: {"s1", "s2", "s3"},
+        process_fn=processed_batches.append,
+        done_fn=lambda: True,  # post-join trigger: upstream already finished
+        sleep_fn=lambda: (_ for _ in ()).throw(AssertionError("must not sleep when done")),
+        max_polls=10,
+    )
+    assert out == {"s1", "s2", "s3"}
+    # One batch, series sorted deterministically; then a poll finds nothing new and exits.
+    assert processed_batches == [["s1", "s2", "s3"]]
+
+
+def test_drain_ready_only_processes_newly_ready_series() -> None:
+    from scale_forecasting.ensemble_run import _drain_ready
+
+    # Series arrive over three polls; each already-processed series is never re-handed.
+    waves = iter([{"s1"}, {"s1", "s2"}, {"s1", "s2", "s3"}])
+    ready: set[str] = set()
+
+    def _ready() -> set[str]:
+        nonlocal ready
+        ready = ready | next(waves, ready)
+        return ready
+
+    batches: list[list[str]] = []
+
+    def _done() -> bool:
+        # Upstream reports done only after the third wave has surfaced.
+        return len(ready) == 3
+
+    _drain_ready(
+        ready_fn=_ready,
+        process_fn=batches.append,
+        done_fn=_done,
+        sleep_fn=lambda: None,
+        max_polls=20,
+    )
+    assert batches == [["s1"], ["s2"], ["s3"]]  # each series handed exactly once
+
+
+def test_drain_ready_waits_when_nothing_ready_but_upstream_running() -> None:
+    from scale_forecasting.ensemble_run import _drain_ready
+
+    sleeps = {"n": 0}
+    polls = {"n": 0}
+
+    def _ready() -> set[str]:
+        polls["n"] += 1
+        return {"s1"} if polls["n"] >= 3 else set()  # nothing ready for the first two polls
+
+    def _done() -> bool:
+        return polls["n"] >= 3  # upstream finishes as the first series lands
+
+    def _sleep() -> None:
+        sleeps["n"] += 1
+
+    out = _drain_ready(
+        ready_fn=_ready,
+        process_fn=lambda _b: None,
+        done_fn=_done,
+        sleep_fn=_sleep,
+        max_polls=20,
+    )
+    assert out == {"s1"}
+    assert sleeps["n"] == 2  # waited across the two empty-but-not-done polls
+
+
+def test_drain_ready_bounded_by_max_polls() -> None:
+    from scale_forecasting.ensemble_run import _drain_ready
+
+    # Upstream never finishes and never produces a series: the loop must still terminate.
+    out = _drain_ready(
+        ready_fn=lambda: set(),
+        process_fn=lambda _b: None,
+        done_fn=lambda: False,
+        sleep_fn=lambda: None,
+        max_polls=5,
+    )
+    assert out == set()

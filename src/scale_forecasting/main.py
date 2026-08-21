@@ -320,6 +320,48 @@ def _launch_native_job(
         )
 
 
+def _launch_ensemble_job(
+    cfg: RunConfig,
+    run_id: str,
+    settings: Settings,
+    *,
+    force: bool = False,
+) -> None:
+    """Run the ensemble DAG node inline (driver), wrapped in its own ``run_jobs`` row.
+
+    The ensemble is the run's final DAG node: it blends every family's base predictions into the
+    consensus pseudo-models and scores them onto the leaderboard (`ensemble_run`). Like the family
+    jobs it gets a deterministic identity — ``job_key`` (`registry.ids.make_job_key` on the
+    ``"ensemble"`` family) mapped to its BigQuery job id (`_system_job_id`) — and its own
+    ``run_jobs`` row (`registry.bq.run_job`, ``runtime="bigquery"``: the node reads/writes BigQuery
+    and blends in driver pandas, taking no Spark/Ray cluster), so a run's cross-system trace shows
+    the ensemble beside the base jobs under the shared ``run_id``.
+
+    ``cfg.compute.ensemble.mode`` selects *when* the consensus is computed: ``"barrier"`` (default)
+    blends once over every base prediction; ``"microbatch"`` drains series incrementally as each
+    one's full base set lands (`ensemble_run.run_ensembles_microbatch`). Both execute on the driver
+    and land the same rows; only the batching differs.
+    """
+    from .ensemble_run import run_ensembles, run_ensembles_microbatch
+    from .registry import bq
+    from .registry.ids import make_job_key
+
+    attempt, _ = bq.next_job_attempt(run_id, "ensemble", force=force, settings=settings)
+    system_job_id = _system_job_id(make_job_key(run_id, "ensemble", attempt), "bigquery")
+    with bq.run_job(
+        run_id,
+        "ensemble",
+        attempt,
+        runtime="bigquery",
+        system_job_id=system_job_id,
+        settings=settings,
+    ):
+        if cfg.compute.ensemble.mode == "microbatch":
+            run_ensembles_microbatch(cfg, run_id, settings=settings)
+        else:
+            run_ensembles(cfg, run_id, settings=settings)
+
+
 def run(
     cfg: RunConfig,
     *,
@@ -343,9 +385,10 @@ def run(
       header), launch each Python family's job on its own worker thread (`_launch_family_job`) and
       run the BigQuery-native family inline (`_launch_native_job`) so they all overlap — each in
       contributor mode with its own ``run_jobs`` row. Once every family job joins and *all* of them
-      succeeded, and ``cfg.ensemble.enabled``, run the ensembles (`ensemble_run.run_ensembles`,
+      succeeded, and ``cfg.ensemble.enabled``, run the ensemble DAG node (`_launch_ensemble_job`,
       which reads the just-written base predictions/OOF and scores each consensus onto the
-      leaderboard), then finalize the header with the combined status + wall-clock
+      leaderboard under its own ``run_jobs`` row), then finalize the header with the combined status
+      + wall-clock
       ``runtime_seconds`` + ``bq_models`` (+ the native engine's observed ``n_series`` when it ran).
       On any family *or* ensemble failure the header is finalized FAILED/PARTIAL before the first
       error re-raises, so the run stays queryable and the CLI exits non-zero.
@@ -449,10 +492,8 @@ def run(
         # join and skipped when any family failed. A failure here is captured like a family error —
         # the ensembles are part of the run's success contract.
         if not job_errors and run_dag.ensemble_enabled:
-            from .ensemble_run import run_ensembles
-
             try:
-                run_ensembles(cfg, run_id, settings=settings)
+                _launch_ensemble_job(cfg, run_id, settings, force=force)
             except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
                 ensemble_error = exc
 

@@ -69,6 +69,8 @@ import pandas as pd
 from .ensembler import combine_calculated, fit_learned
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .config import RunConfig
     from .settings import Settings
 
@@ -76,7 +78,7 @@ if TYPE_CHECKING:
 def run_ensembles(
     cfg: RunConfig, run_id: str, *, settings: Settings
 ) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
-    """Execute + score every requested ensemble for ``run_id`` into the shared registry.
+    """Execute + score every requested ensemble for ``run_id`` into the shared registry (barrier).
 
     A no-op when ``cfg.ensemble.enabled`` is false. Otherwise blends the calculated + learned
     consensuses in pandas, appends their ``ensemble_<s>`` prediction rows via the Storage Write API,
@@ -85,40 +87,215 @@ def run_ensembles(
     coexist under one ``run_id``. Raises on any failure so `main.run` can finalize the shared
     header FAILED — mirroring how an engine error is surfaced. ``settings`` is the orchestrator's
     already-resolved infra (never re-resolved here, so one identity governs the whole run).
+
+    This is the **barrier** trigger: it blends every series in one pass, after all base jobs have
+    joined. The **microbatch** counterpart (`run_ensembles_microbatch`) drains series incrementally
+    as each one's base set completes; both call the shared per-batch core (`_ensemble_batch`) and
+    land identical rows.
     """
-    import json
     from datetime import UTC, datetime
 
     from google.cloud import bigquery
 
-    from .engines import bigquery_engine
-    from .ensembler import combine_oof
     from .errors import get_logger
-    from .metrics import METRIC_NAMES, compute_metrics
-    from .registry import bq
-    from .registry.artifacts import upload_artifact_bytes
-    from .registry.ids import make_ensemble_id, make_model_hash
-    from .worker import _rollup_metrics
+    from .registry.ids import make_ensemble_id
 
     if not cfg.ensemble.enabled:
         return
 
     log = get_logger(__name__)
-    dataset = settings.dataset_ref
     ensemble_id = make_ensemble_id(cfg.ensemble)
     client = bigquery.Client(project=settings.project_id)
     created_at = datetime.now(UTC)
     log.info(
-        "ensemble run start: run_id=%s ensemble_id=%s strategies=%s",
+        "ensemble run start (barrier): run_id=%s ensemble_id=%s strategies=%s",
+        run_id,
+        ensemble_id,
+        cfg.ensemble.strategies,
+    )
+    _ensemble_batch(
+        cfg,
+        run_id,
+        settings=settings,
+        client=client,
+        ensemble_id=ensemble_id,
+        created_at=created_at,
+        log=log,
+        ts_ids=None,
+    )
+
+
+def run_ensembles_microbatch(
+    cfg: RunConfig, run_id: str, *, settings: Settings, poll_interval_s: float = 15.0,
+    max_polls: int = 960, upstream_done: Callable[[], bool] | None = None,
+) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
+    """Execute + score ensembles for ``run_id`` **incrementally, per series as it completes**.
+
+    The microbatch trigger: rather than waiting for every base model on every series (the
+    `run_ensembles` barrier), this drains series in ready-batches — a series is *ready* once all
+    ``cfg.models`` base models have landed a prediction row for it (`_ready_series`), and each
+    ready-batch is blended + scored by the same core as the barrier (`_ensemble_batch` over that
+    ts_id subset), so partial consensus output lands progressively and one slow family never blocks
+    the series that are already complete. The loop (`_drain_ready`) polls every ``poll_interval_s``
+    seconds until ``upstream_done`` reports the base jobs finished *and* no ready series remain
+    unprocessed (bounded by ``max_polls`` as a safety stop).
+
+    v1 default: the orchestrator calls this **after** the family join, so ``upstream_done`` defaults
+    to "always done" and the loop drains every ready series in a single pass — the streaming
+    *semantics* (per-series readiness, incremental writes) with a post-join trigger. Passing an
+    ``upstream_done`` that tracks live base-job completion turns it into a consumer that overlaps
+    base computation (the concurrent-trigger extension). Raises on any batch failure so `main.run`
+    finalizes the header FAILED.
+    """
+    import time
+    from datetime import UTC, datetime
+
+    from google.cloud import bigquery
+
+    from .errors import get_logger
+    from .registry.ids import make_ensemble_id
+
+    if not cfg.ensemble.enabled:
+        return
+
+    log = get_logger(__name__)
+    ensemble_id = make_ensemble_id(cfg.ensemble)
+    client = bigquery.Client(project=settings.project_id)
+    created_at = datetime.now(UTC)
+    done = upstream_done or (lambda: True)
+    log.info(
+        "ensemble run start (microbatch): run_id=%s ensemble_id=%s strategies=%s",
         run_id,
         ensemble_id,
         cfg.ensemble.strategies,
     )
 
-    def _query(sql: str) -> Any:
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
+    def _process(ts_ids: list[str]) -> None:
+        _ensemble_batch(
+            cfg,
+            run_id,
+            settings=settings,
+            client=client,
+            ensemble_id=ensemble_id,
+            created_at=created_at,
+            log=log,
+            ts_ids=ts_ids,
         )
+
+    processed = _drain_ready(
+        ready_fn=lambda: _ready_series(cfg, run_id, settings=settings, client=client),
+        process_fn=_process,
+        done_fn=done,
+        sleep_fn=lambda: time.sleep(poll_interval_s),
+        max_polls=max_polls,
+    )
+    log.info(
+        "ensemble run done (microbatch): run_id=%s ensemble_id=%s series_drained=%d",
+        run_id,
+        ensemble_id,
+        len(processed),
+    )
+
+
+def _drain_ready(
+    *,
+    ready_fn: Callable[[], set[str]],
+    process_fn: Callable[[list[str]], None],
+    done_fn: Callable[[], bool],
+    sleep_fn: Callable[[], None],
+    max_polls: int,
+) -> set[str]:
+    """Drive incremental per-series draining until upstream is done and nothing new is ready (pure).
+
+    Each poll takes the currently-ready series (`ready_fn`) minus those already processed; if any
+    are new, they're handed to ``process_fn`` (in sorted order, for determinism) and marked done. If
+    none are new *and* ``done_fn`` reports upstream finished, the drain is complete; if none are new
+    but upstream is still running, it waits (``sleep_fn``) and polls again. ``max_polls`` bounds the
+    loop so a stuck upstream can't spin forever. All I/O is injected, so this is unit-testable with
+    plain callables. Returns the set of series processed.
+    """
+    processed: set[str] = set()
+    for _ in range(max_polls):
+        pending = sorted(ready_fn() - processed)
+        if pending:
+            process_fn(pending)
+            processed.update(pending)
+        elif done_fn():
+            break
+        else:
+            sleep_fn()
+    return processed
+
+
+def _ready_series(
+    cfg: RunConfig, run_id: str, *, settings: Settings, client: Any
+) -> set[str]:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
+    """The ``ts_id``s whose full base-model set has landed a prediction for ``run_id``.
+
+    A series is ready to ensemble once every ``cfg.models`` base model has appended at least one
+    ``forecast_predictions`` row for it — counted with ``COUNT(DISTINCT model_type)`` against the
+    configured model count. This is the microbatch readiness signal (the registry is the completion
+    source of truth; no separate event bus).
+    """
+    from google.cloud import bigquery
+
+    dataset = settings.dataset_ref
+    models = list(cfg.models)
+    model_list = ", ".join(f"'{m}'" for m in models)
+    sql = (
+        "SELECT ts_id\n"
+        f"FROM `{dataset}.forecast_predictions`\n"
+        f"WHERE run_id = @run_id AND model_type IN ({model_list})\n"
+        "GROUP BY ts_id\n"
+        f"HAVING COUNT(DISTINCT model_type) = {len(models)}"
+    )
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
+    )
+    rows = client.query(sql, job_config=job_config).result()
+    return {str(r["ts_id"]) for r in rows}
+
+
+def _ensemble_batch(
+    cfg: RunConfig,
+    run_id: str,
+    *,
+    settings: Settings,
+    client: Any,
+    ensemble_id: str,
+    created_at: Any,
+    log: Any,
+    ts_ids: list[str] | None,
+) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
+    """Blend + score the ensembles for one batch of series (``ts_ids=None`` = every series).
+
+    The shared core behind both triggers: reads the batch's base predictions / OOF / decision-metric
+    rows (filtered to ``ts_ids`` when given), blends the calculated + learned consensuses in pandas,
+    appends the ``ensemble_<s>`` prediction rows via the Storage Write API, and scores each
+    pseudo-model into ``forecast_metadata`` — identical logic and rows whether the caller passes one
+    ready series (microbatch) or all of them (barrier).
+    """
+    import json
+
+    from google.cloud import bigquery
+
+    from .engines import bigquery_engine
+    from .ensembler import combine_oof
+    from .metrics import METRIC_NAMES, compute_metrics
+    from .registry import bq
+    from .registry.artifacts import upload_artifact_bytes
+    from .registry.ids import make_model_hash
+    from .worker import _rollup_metrics
+
+    dataset = settings.dataset_ref
+
+    ts_filter = "" if ts_ids is None else " AND ts_id IN UNNEST(@ts_ids)"
+
+    def _query(sql: str) -> Any:
+        params: list[Any] = [bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
+        if ts_ids is not None:
+            params.append(bigquery.ArrayQueryParameter("ts_ids", "STRING", ts_ids))
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
         return client.query(sql, job_config=job_config).result()
 
     models = list(cfg.models)
@@ -126,18 +303,18 @@ def run_ensembles(
     base_pred_sql = (
         "SELECT ts_id, model_type, forecast_date, yhat, yhat_lower, yhat_upper\n"
         f"FROM `{dataset}.forecast_predictions`\n"
-        f"WHERE run_id = @run_id AND model_type IN ({model_list})"
+        f"WHERE run_id = @run_id AND model_type IN ({model_list}){ts_filter}"
     )
     oof_sql = (
         "SELECT ts_id, model_type, fold_id, forecast_date, y_true, yhat\n"
         f"FROM `{dataset}.backtest_oof`\n"
-        "WHERE run_id = @run_id"
+        f"WHERE run_id = @run_id{ts_filter}"
     )
     metric = cfg.backtest.decision_metric
     metric_sql = (
         f"SELECT ts_id, model_type, {metric}\n"
         f"FROM `{dataset}.forecast_metadata`\n"
-        f"WHERE run_id = @run_id AND fold_id IS NULL AND model_type IN ({model_list})"
+        f"WHERE run_id = @run_id AND fold_id IS NULL AND model_type IN ({model_list}){ts_filter}"
     )
     base_df = _query(base_pred_sql).to_dataframe()
     oof_df = _query(oof_sql).to_dataframe()
