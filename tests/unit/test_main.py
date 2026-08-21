@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import main
+from scale_forecasting import dag, main
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.registry.ids import make_run_id
@@ -362,29 +362,6 @@ def test_dry_run_allows_ray() -> None:
     assert run_id == make_run_id(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"))
 
 
-# --- _launch_python_runtime: dispatch by python_runtime ------------------------
-
-
-def test_launch_python_runtime_dispatches_spark(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.submit as submit_mod
-
-    seen: dict[str, Any] = {}
-
-    def _fake_submit_batch(cfg: RunConfig, **kw: Any) -> str:
-        seen.update(kw)
-        seen["cfg"] = cfg
-        return "batch-1"
-
-    monkeypatch.setattr(submit_mod, "submit_batch", _fake_submit_batch)
-
-    cfg = _cfg(models=[_SPARK], python_runtime="spark")
-    plan = main._plan(cfg)
-    main._launch_python_runtime(cfg, plan, _SETTINGS)
-    assert seen["engine"] == "explode"
-    assert seen["models"] == [_SPARK]
-    assert seen["manage_header"] is False
-
-
 def test_run_n_series_override_changes_run_id() -> None:
     # n_series overrides series_limit before planning, so the dry-run id matches the adjusted cfg.
     from scale_forecasting.registry.ids import make_run_id as _mri
@@ -396,41 +373,117 @@ def test_run_n_series_override_changes_run_id() -> None:
     assert run_id != _mri(base)
 
 
-def test_launch_python_runtime_threads_max_executors(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.submit as submit_mod
+# --- _launch_family_job / _launch_native_job: per-job lifecycle + dispatch ------
+
+
+def _fake_job_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Fake the run_jobs attempt+lifecycle seams so a family launch runs offline.
+
+    Records the ``run_job`` call args under ``"job"`` and yields a real `JobFinalizer` so the body
+    can finalize normally. ``next_job_attempt`` is pinned to ``(1, True)`` (first attempt, new job).
+    """
+    from contextlib import contextmanager
+
+    from scale_forecasting.registry import bq
 
     seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bq, "next_job_attempt", lambda run_id, family, *, force=False, settings=None: (1, True)
+    )
 
-    def _fake_submit_batch(cfg: RunConfig, **kw: Any) -> str:
-        seen.update(kw)
-        return "batch-1"
+    @contextmanager
+    def _fake_run_job(run_id: str, family: str, attempt: int, **kw: Any) -> Any:
+        seen["job"] = {"run_id": run_id, "family": family, "attempt": attempt, **kw}
+        yield bq.JobFinalizer()
 
-    monkeypatch.setattr(submit_mod, "submit_batch", _fake_submit_batch)
-
-    cfg = _cfg(models=[_SPARK], python_runtime="spark")
-    plan = main._plan(cfg)
-    main._launch_python_runtime(cfg, plan, _SETTINGS, max_executors=8)
-    assert seen["max_executors"] == 8
+    monkeypatch.setattr(bq, "run_job", _fake_run_job)
+    return seen
 
 
-def test_launch_python_runtime_dispatches_ray(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.ray_submit as ray_submit_mod
+def test_launch_family_job_dispatches_to_resolved_submitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting.submitters as submitters_mod
 
-    seen: dict[str, Any] = {}
+    seen = _fake_job_lifecycle(monkeypatch)
+    captured: dict[str, Any] = {}
 
-    def _fake_submit_ray(cfg: RunConfig, **kw: Any) -> str:
-        seen.update(kw)
-        seen["cfg"] = cfg
-        return "job-1"
+    class _FakeSubmitter:
+        def launch(self, cfg: RunConfig, **kw: Any) -> None:
+            captured.update(kw)
+            captured["cfg"] = cfg
 
-    monkeypatch.setattr(ray_submit_mod, "submit_ray", _fake_submit_ray)
+    def _fake_get(runtime: str) -> Any:
+        captured["runtime"] = runtime
+        return _FakeSubmitter()
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", _fake_get)
+
+    cfg = _cfg(models=[_SPARK])
+    job = dag.plan_dag(cfg).python_jobs[0]  # the statistical family, on the default Spark runtime
+    main._launch_family_job(cfg, job, "rid-0", _SETTINGS, max_executors=8)
+
+    # Dispatch is by the family's *resolved* runtime, in contributor mode, with its model subset.
+    assert captured["runtime"] == "spark"
+    assert captured["models"] == [_SPARK]
+    assert captured["manage_header"] is False
+    assert captured["max_executors"] == 8
+    # The per-job row is opened for this family's resolved compute + attempt.
+    assert seen["job"]["family"] == "statistical"
+    assert seen["job"]["attempt"] == 1
+    assert seen["job"]["runtime"] == "spark"
+
+
+def test_launch_family_job_dispatches_ray_for_ray_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting.submitters as submitters_mod
+
+    _fake_job_lifecycle(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    class _FakeSubmitter:
+        def launch(self, cfg: RunConfig, **kw: Any) -> None:
+            captured.update(kw)
+
+    monkeypatch.setattr(
+        submitters_mod,
+        "get_submitter",
+        lambda runtime: captured.__setitem__("runtime", runtime) or _FakeSubmitter(),
+    )
 
     cfg = _cfg(models=[_SPARK], python_runtime="ray")
-    plan = main._plan(cfg)
-    main._launch_python_runtime(cfg, plan, _SETTINGS)
-    assert "engine" not in seen  # ray takes no spark engine arg
-    assert seen["models"] == [_SPARK]
-    assert seen["manage_header"] is False
+    job = dag.plan_dag(cfg).python_jobs[0]
+    main._launch_family_job(cfg, job, "rid-0", _SETTINGS)
+    assert captured["runtime"] == "ray"
+
+
+def test_launch_native_job_runs_bigquery_engine_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.engines import bigquery_engine
+
+    seen = _fake_job_lifecycle(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def _fake_bq_run(cfg: RunConfig, models: list[str], **kw: Any) -> Any:
+        captured["models"] = models
+        captured["manage_header"] = kw.get("manage_header")
+        return bigquery_engine.BqOutcome(status="COMPLETED", n_series=3, models=models)
+
+    monkeypatch.setattr(bigquery_engine, "run", _fake_bq_run)
+
+    cfg = _cfg()
+    native = dag.plan_dag(cfg).native_job
+    assert native is not None
+    outcome = main._launch_native_job(cfg, native, "rid-0", _SETTINGS)
+
+    assert captured["models"] == _NATIVE
+    assert captured["manage_header"] is False
+    assert outcome.n_series == 3
+    # The native family's row is opened with the BigQuery runtime.
+    assert seen["job"]["family"] == "native"
+    assert seen["job"]["runtime"] == "bigquery"
 
 
 # --- run(): ensemble orchestration after the engine join -----------------------
@@ -441,9 +494,11 @@ def _patch_run_seams(
 ) -> dict[str, Any]:
     """Fake every GCP seam main.run touches so the ensemble gating is exercised offline.
 
-    Records what happened in the returned dict: header status finalized, whether the BigQuery engine
-    and the Spark launch ran. The Python-runtime launch is faked to a no-op success. ``bq_error``
-    makes the BigQuery engine raise, to prove ensembles are skipped when an engine fails.
+    Records what happened in the returned dict: the header status finalized, whether the native
+    (BigQuery) family and the Python family jobs ran. Each family launch is faked at the
+    `main._launch_family_job` / `main._launch_native_job` seam to a no-op success (so the per-job
+    run_jobs lifecycle and submitters are never reached offline). ``bq_error`` makes the native job
+    raise, to prove ensembles are skipped when a family fails.
     """
     import scale_forecasting.ensemble_run as ensemble_mod
     from scale_forecasting.engines import bigquery_engine
@@ -460,15 +515,15 @@ def _patch_run_seams(
 
     monkeypatch.setattr(bq, "update_header", _fake_update)
 
-    def _fake_bq_run(cfg: RunConfig, models: list[str], **kw: Any) -> Any:
+    def _fake_native(cfg: RunConfig, job: Any, run_id: str, settings: Any, *, force: bool = False):
         seen["bq_ran"] = True
         if bq_error is not None:
             raise bq_error
-        return bigquery_engine.BqOutcome(status="COMPLETED", n_series=3, models=models)
+        return bigquery_engine.BqOutcome(status="COMPLETED", n_series=3, models=list(job.models))
 
-    monkeypatch.setattr(bigquery_engine, "run", _fake_bq_run)
+    monkeypatch.setattr(main, "_launch_native_job", _fake_native)
     monkeypatch.setattr(
-        main, "_launch_python_runtime", lambda *a, **k: seen.__setitem__("spark_ran", True)
+        main, "_launch_family_job", lambda *a, **k: seen.__setitem__("spark_ran", True)
     )
 
     def _fake_ensembles(cfg: RunConfig, run_id: str, *, settings: Any) -> None:
@@ -526,42 +581,42 @@ def test_run_ensemble_failure_finalizes_header_failed(monkeypatch: pytest.Monkey
     assert seen["status"] == "FAILED"
 
 
-# --- _combined_status: the multi-engine roll-up (pure) -------------------------
+# --- _combined_status: the per-family roll-up (pure) ---------------------------
 
 
 def _boom() -> RuntimeError:
     return RuntimeError("x")
 
 
-def test_combined_status_all_engines_green_is_completed() -> None:
-    plan = main._plan(_cfg())  # both python + bq tracks
-    assert main._combined_status(plan, None, None, None) == "COMPLETED"
+def test_combined_status_all_jobs_green_is_completed() -> None:
+    d = dag.plan_dag(_cfg())  # statistical + native jobs
+    assert main._combined_status(d, {}, None) == "COMPLETED"
 
 
 def test_combined_status_mixed_is_partial() -> None:
-    plan = main._plan(_cfg())
-    # python green, bq failed → some but not all → PARTIAL (and the mirror case).
-    assert main._combined_status(plan, None, _boom(), None) == "PARTIAL"
-    assert main._combined_status(plan, _boom(), None, None) == "PARTIAL"
+    d = dag.plan_dag(_cfg())
+    # one family failed, the other green → some but not all → PARTIAL (and the mirror case).
+    assert main._combined_status(d, {"native": _boom()}, None) == "PARTIAL"
+    assert main._combined_status(d, {"statistical": _boom()}, None) == "PARTIAL"
 
 
-def test_combined_status_all_engines_failed_is_failed() -> None:
-    plan = main._plan(_cfg())
-    assert main._combined_status(plan, _boom(), _boom(), None) == "FAILED"
+def test_combined_status_all_jobs_failed_is_failed() -> None:
+    d = dag.plan_dag(_cfg())
+    assert main._combined_status(d, {"statistical": _boom(), "native": _boom()}, None) == "FAILED"
 
 
-def test_combined_status_single_engine_has_no_partial() -> None:
-    bq_only = main._plan(_cfg(models=_NATIVE))
-    assert main._combined_status(bq_only, None, None, None) == "COMPLETED"
-    assert main._combined_status(bq_only, None, _boom(), None) == "FAILED"
+def test_combined_status_single_job_has_no_partial() -> None:
+    bq_only = dag.plan_dag(_cfg(models=_NATIVE))  # native family only
+    assert main._combined_status(bq_only, {}, None) == "COMPLETED"
+    assert main._combined_status(bq_only, {"native": _boom()}, None) == "FAILED"
 
 
 def test_combined_status_ensemble_failure_fails_a_green_run() -> None:
-    plan = main._plan(_cfg())
-    # engines green but the ensemble step failed → the run didn't deliver full output → FAILED.
-    assert main._combined_status(plan, None, None, _boom()) == "FAILED"
-    # an ensemble error never masks an engine PARTIAL/FAILED (engine status already non-COMPLETED).
-    assert main._combined_status(plan, None, _boom(), _boom()) == "PARTIAL"
+    d = dag.plan_dag(_cfg())
+    # families green but the ensemble step failed → the run didn't deliver full output → FAILED.
+    assert main._combined_status(d, {}, _boom()) == "FAILED"
+    # an ensemble error never masks a family PARTIAL/FAILED (status already non-COMPLETED).
+    assert main._combined_status(d, {"native": _boom()}, _boom()) == "PARTIAL"
 
 
 # --- CLI: dispatches dry_run ---------------------------------------------------

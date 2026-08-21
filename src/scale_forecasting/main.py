@@ -60,6 +60,7 @@ from .router import split_by_runtime
 if TYPE_CHECKING:
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
+    from .dag import FamilyJob, RunDag
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -160,41 +161,84 @@ def _plan(cfg: RunConfig) -> _RunPlan:
     )
 
 
-def _launch_python_runtime(
+def _launch_family_job(
     cfg: RunConfig,
-    plan: _RunPlan,
+    job: FamilyJob,
+    run_id: str,
     settings: Settings,
     spark: object | None = None,
     *,
+    force: bool = False,
     max_executors: int | None = None,
 ) -> None:
-    """Run the Python-runtime models on the runtime ``cfg.python_runtime`` picks (contributor mode).
+    """Run one Python family's job on its resolved runtime, wrapped in its ``run_jobs`` row.
 
-    The one dispatch point between the two Python runtimes, called on `run`'s worker thread: it
-    looks up the `RuntimeSubmitter` registered for ``cfg.python_runtime`` (`get_submitter`) and
-    hands it ``plan.python_models`` with ``manage_header=False`` (this orchestrator owns the single
-    shared header). The submitter blocks until terminal, so the caller joins one future regardless
-    of runtime — Ray submits to an autoscaling cluster, Spark runs in-process against an injected
-    session or submits a Dataproc batch. Kept a plain module function (not a lambda) so the worker
-    thread's traceback names it, and the submitter's imports stay lazy (Ray/Spark extras load only
-    for the chosen path).
+    Called on a worker thread — one per Python family (statistical / ml / deep_learning), so the
+    families run in parallel under one shared header. Resolves this family's attempt
+    (`registry.bq.next_job_attempt`, bumped by ``--force``), opens the per-job lifecycle
+    (`registry.bq.run_job`, which writes the row RUNNING and finalizes its terminal status +
+    wall-clock), then dispatches to the `RuntimeSubmitter` for the family's **resolved** runtime
+    (`get_submitter` on ``job.compute.runtime`` — Spark *xor* Ray, chosen per family, not per run)
+    with ``manage_header=False`` (this orchestrator owns the single shared header). The submitter
+    blocks until terminal, so the caller joins one future per family.
 
-    ``spark`` is an optional injected `SparkSession`, passed through to the submitter. The Spark
-    submitter, given one, runs **in-process against that session** (the same engine code the batch
-    runs — the injectable-session seam) instead of submitting a remote Dataproc batch; other
-    runtimes ignore it. ``max_executors`` caps the remote Spark batch's dynamic-allocation ceiling
-    (ignored by the in-process and Ray paths).
+    ``spark`` is an optional injected `SparkSession`, passed through to the submitter: the Spark
+    submitter, given one, runs **in-process against that session** (the injectable-session seam)
+    instead of submitting a remote batch; other runtimes ignore it. ``max_executors`` caps the
+    remote Spark batch's dynamic-allocation ceiling (ignored by the in-process and Ray paths). Kept
+    a plain module function (not a lambda) so a worker thread's traceback names it, and the
+    submitter's imports stay lazy (Ray/Spark extras load only for the chosen path).
     """
+    from .registry import bq
     from .submitters import get_submitter
 
-    get_submitter(cfg.python_runtime).launch(
-        cfg,
-        models=plan.python_models,
-        manage_header=False,
+    compute = job.compute
+    assert compute is not None  # a Python family always resolves compute (native is handled inline)
+    attempt, _ = bq.next_job_attempt(run_id, job.family, force=force, settings=settings)
+    with bq.run_job(
+        run_id,
+        job.family,
+        attempt,
+        runtime=compute.runtime,
+        spark_mode=compute.spark_mode,
+        hardware=compute.hardware,
+        gpu_type=compute.gpu_type,
         settings=settings,
-        spark=spark,
-        max_executors=max_executors,
-    )
+    ):
+        get_submitter(compute.runtime).launch(
+            cfg,
+            models=list(job.models),
+            manage_header=False,
+            settings=settings,
+            spark=spark,
+            max_executors=max_executors,
+        )
+
+
+def _launch_native_job(
+    cfg: RunConfig,
+    job: FamilyJob,
+    run_id: str,
+    settings: Settings,
+    *,
+    force: bool = False,
+) -> object:
+    """Run the BigQuery-native family inline (main thread), wrapped in its ``run_jobs`` row.
+
+    Native models execute as SQL in BigQuery — no Python runtime, no worker thread — so this runs on
+    `run`'s main thread, overlapping the Python family jobs. Like `_launch_family_job` it resolves
+    the ``native`` attempt and opens the per-job lifecycle (`registry.bq.run_job`, ``runtime`` fixed
+    to ``"bigquery"``), then runs the engine in contributor mode. Returns the engine's `BqOutcome`
+    so the caller can stamp the observed ``n_series`` onto the header.
+    """
+    from .engines import bigquery_engine
+    from .registry import bq
+
+    attempt, _ = bq.next_job_attempt(run_id, "native", force=force, settings=settings)
+    with bq.run_job(run_id, "native", attempt, runtime="bigquery", settings=settings):
+        return bigquery_engine.run(
+            cfg, list(job.models), manage_header=False, settings=settings
+        )
 
 
 def run(
@@ -207,52 +251,52 @@ def run(
     n_series: int | None = None,
     max_executors: int | None = None,
 ) -> str:
-    """Execute one run: Spark + BigQuery-native in parallel under one run_id; return that run_id.
+    """Execute one run as a DAG: every model family in parallel under one run_id; return that id.
 
-    Resolves the plan (`_plan`, which rejects Spark ``multi``), then:
+    Plans the run's DAG (`dag.plan_dag`) — one job per model family present in the config
+    (statistical / ml / deep_learning each on its resolved runtime, native in BigQuery) plus the
+    downstream ensemble node — then:
 
     * ``dry_run=True`` → delegate to `plan_run` (the offline "what would this schedule" path):
       resolve the run_id + `estimate_fanout` + emit the launch-command templates, touching no GCP,
       and return the run_id.
-    * otherwise → resolve `Settings`, ``ensure_tables`` + ``write_header`` (RUNNING, the one
-      shared header), launch the remote Spark batch on a worker thread and run the BigQuery engine
-      inline (both in contributor mode), join, then — when both engines succeeded and
-      ``cfg.ensemble.enabled`` — run the ensembles (`ensemble_run.run_ensembles`, which reads
-      the just-written base predictions/OOF and scores each consensus onto the leaderboard), and
-      finalize the header with the combined status + wall-clock ``runtime_seconds`` + ``bq_models``
-      (+ the BQ engine's observed ``n_series`` when it ran). On any engine *or* ensemble failure the
-      header is finalized FAILED before the error re-raises, so the run stays queryable and the CLI
-      exits non-zero.
+    * otherwise → resolve `Settings`, ``ensure_tables`` + ``write_header`` (RUNNING, the one shared
+      header), launch each Python family's job on its own worker thread (`_launch_family_job`) and
+      run the BigQuery-native family inline (`_launch_native_job`) so they all overlap — each in
+      contributor mode with its own ``run_jobs`` row. Once every family job joins and *all* of them
+      succeeded, and ``cfg.ensemble.enabled``, run the ensembles (`ensemble_run.run_ensembles`,
+      which reads the just-written base predictions/OOF and scores each consensus onto the
+      leaderboard), then finalize the header with the combined status + wall-clock
+      ``runtime_seconds`` + ``bq_models`` (+ the native engine's observed ``n_series`` when it ran).
+      On any family *or* ensemble failure the header is finalized FAILED/PARTIAL before the first
+      error re-raises, so the run stays queryable and the CLI exits non-zero.
 
     ``spark`` is an optional injected `SparkSession` (incl. a Spark Connect
-    ``DataprocSparkSession``). When supplied and ``python_runtime == "spark"``, the Spark models run
-    **in-process against that session** instead of a remote Dataproc batch — the notebook / Connect
-    demo path — using the identical engine code (the injectable-session seam). The default
-    (``None``) keeps the remote-batch behavior every CLI/Composer caller relies on. The BigQuery
-    engine still runs in parallel on the main thread under the one shared run_id.
+    ``DataprocSparkSession``). When supplied, a Spark-runtime family runs **in-process against that
+    session** instead of a remote Dataproc batch — the notebook / Connect demo path — using the
+    identical engine code (the injectable-session seam). The default (``None``) keeps the
+    remote-batch behavior every CLI/Composer caller relies on.
 
-    ``settings`` optionally injects a resolved `Settings` (the GCP infra identity); the
-    default (``None``) resolves it from the ``SF_*`` environment exactly as before, so every
-    existing caller is unchanged. The SDK ``Forecaster`` uses this to thread an explicit identity
-    instead of relying on process env.
-
-    ``force`` acknowledges re-running an already-run config; it shapes only the ``dry_run`` plan's
-    re-run guidance (a submit is idempotent regardless — see below).
+    ``settings`` optionally injects a resolved `Settings` (the GCP infra identity); the default
+    (``None``) resolves it from the ``SF_*`` environment. The SDK ``Forecaster`` uses this to thread
+    an explicit identity instead of relying on process env. ``force`` bumps each family's
+    ``run_jobs`` attempt (a fresh, distinctly-keyed job under the same run_id) and shapes the
+    ``dry_run`` plan's re-run guidance.
 
     ``n_series`` overrides ``data.series_limit`` (the 10→100→1k→100k scale knob) before anything
-    else, so it changes the ``run_id`` and both engines see the same limit. ``max_executors`` caps
-    the remote Spark batch's dynamic-allocation ceiling (ignored by the in-process/Ray paths).
+    else, so it changes the ``run_id`` and every family sees the same limit. ``max_executors`` caps
+    a remote Spark batch's dynamic-allocation ceiling (ignored by the in-process/Ray paths).
 
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows.
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from .engines import bigquery_engine
+    from .dag import plan_dag
     from .registry import bq
     from .settings import Settings
 
-    # The series-limit override is applied first so it flows into the run_id and both engines — a
+    # The series-limit override is applied first so it flows into the run_id and every family — a
     # different scale is a distinct, independently-queryable run.
     cfg = cfg.with_series_limit(n_series)
 
@@ -262,62 +306,63 @@ def run(
         # so this contract is unchanged.
         return plan_run(cfg, settings=settings, force=force).run_id
 
-    plan = _plan(cfg)
-    run_id = plan.run_id
+    run_dag = plan_dag(cfg)
+    run_id = run_dag.run_id
 
     settings = settings or Settings.resolve()
     _log.info(
-        "run %s start: python=%s (%s) bq=%s",
+        "run %s start: families=%s ensemble=%s",
         run_id,
-        plan.python_models,
-        plan.spark_method,
-        plan.bq_models,
+        run_dag.families,
+        run_dag.ensemble_enabled,
     )
 
     bq_outcome = None
-    spark_error: BaseException | None = None
-    bq_error: BaseException | None = None
+    # One error slot per family job (keyed by family name), plus the ensemble node's.
+    job_errors: dict[str, BaseException] = {}
     ensemble_error: BaseException | None = None
+    native = run_dag.native_job
+    python_jobs = run_dag.python_jobs
 
-    # One header owner: run_header writes RUNNING on entry and finalizes once, after both engines
-    # join, with the combined status computed below. Both engines run with manage_header=False so
-    # nothing else touches this row. Track errors are captured (not raised through the block) so the
-    # finalize records the right status; the first one is re-raised after, for a non-zero exit.
+    # One header owner: run_header writes RUNNING on entry and finalizes once, after every family
+    # job joins, with the combined status computed below. Every job runs with manage_header=False so
+    # nothing else touches this row. Per-family errors are captured (not raised through the block)
+    # so the finalize records the right status; the first is re-raised after, for a non-zero exit.
     with bq.run_header(cfg, run_id, settings=settings, manage=True) as hdr:
-        # Launch the remote Python-runtime job on a worker thread (it blocks until terminal + stamps
-        # telemetry in-thread), and run the in-process BigQuery engine on the main thread so the two
-        # overlap. The runtime — Spark batch or autoscaling Vertex Ray cluster — is chosen by
-        # cfg.python_runtime; both take the same contributor-mode contract (models subset + shared
-        # header owned here), so Ray ∥ BigQuery works under one run_id like Spark ∥ BigQuery.
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            python_future = None
-            if plan.python_models:
-                python_future = pool.submit(
-                    _launch_python_runtime,
+        # Launch each Python family on its own worker thread, and run the BigQuery-native family
+        # inline on the main thread, so all families overlap. Each family carries the same
+        # contributor-mode contract (its model subset + shared header owned here) and its own
+        # run_jobs row, so N heterogeneous families run under one run_id.
+        with ThreadPoolExecutor(max_workers=max(1, len(python_jobs))) as pool:
+            futures = {
+                pool.submit(
+                    _launch_family_job,
                     cfg,
-                    plan,
+                    job,
+                    run_id,
                     settings,
                     spark,
+                    force=force,
                     max_executors=max_executors,
-                )
-            if plan.bq_models:
+                ): job
+                for job in python_jobs
+            }
+            if native is not None:
                 try:
-                    bq_outcome = bigquery_engine.run(
-                        cfg, plan.bq_models, manage_header=False, settings=settings
-                    )
+                    bq_outcome = _launch_native_job(cfg, native, run_id, settings, force=force)
                 except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
-                    bq_error = exc
-            if python_future is not None:
+                    job_errors["native"] = exc
+            for future, job in futures.items():
                 try:
-                    python_future.result()
+                    future.result()
                 except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
-                    spark_error = exc
+                    job_errors[job.family] = exc
 
-        # Ensembles run only once both engines have produced their base predictions under this
-        # run_id (they read forecast_predictions / backtest_oof), so this is sequenced strictly
-        # after the join and skipped when an engine failed. A failure here is captured like an
-        # engine error — the ensembles are part of the run's success contract.
-        if spark_error is None and bq_error is None and cfg.ensemble.enabled:
+        # Ensembles run only once every family has produced its base predictions under this run_id
+        # (they read forecast_predictions / backtest_oof), so this is sequenced strictly after the
+        # join and skipped when any family failed. A failure here is captured like a family error —
+        # the ensembles are part of the run's success contract.
+        if not job_errors and run_dag.ensemble_enabled:
             from .ensemble_run import run_ensembles
 
             try:
@@ -325,17 +370,16 @@ def run(
             except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
                 ensemble_error = exc
 
-        # Combined status across the engine tracks that ran: COMPLETED iff all succeeded, FAILED iff
-        # all failed, PARTIAL when some but not all did (a mixed BigQuery ∥ Spark/Ray outcome — the
-        # base forecasts of the surviving engine are still usable). An ensemble failure on top of
-        # green engines fails the run: it didn't deliver the full requested output.
-        status = _combined_status(plan, spark_error, bq_error, ensemble_error)
-        fields: dict[str, object] = {"bq_models": plan.bq_models}
+        # Combined status across the family jobs that ran: all green → COMPLETED, all failed →
+        # FAILED, some but not all → PARTIAL (surviving families' forecasts stay usable). An
+        # ensemble failure on top of all-green families fails the run: full output undelivered.
+        status = _combined_status(run_dag, job_errors, ensemble_error)
+        fields: dict[str, object] = {"bq_models": list(native.models) if native else []}
         if bq_outcome is not None:
             fields["n_series"] = bq_outcome.n_series
         hdr.finalize(status=status, **fields)
 
-    first_error = spark_error or bq_error or ensemble_error
+    first_error = next(iter(job_errors.values()), None) or ensemble_error
     if first_error is not None:
         # Re-raise the first failure so the CLI exits non-zero; the header already records the
         # combined status (FAILED or PARTIAL).
@@ -345,28 +389,22 @@ def run(
 
 
 def _combined_status(
-    plan: _RunPlan,
-    spark_error: BaseException | None,
-    bq_error: BaseException | None,
+    run_dag: RunDag,
+    job_errors: dict[str, BaseException],
     ensemble_error: BaseException | None,
 ) -> str:
-    """Roll the per-track outcomes into one run status (pure).
+    """Roll the per-family job outcomes into one run status (pure).
 
-    Over the engine tracks that actually ran (Python-runtime and/or BigQuery-native): every track
-    green → ``COMPLETED``; every track failed → ``FAILED``; a mix → ``PARTIAL``. An ensemble
-    failure downgrades an otherwise-``COMPLETED`` run to ``FAILED`` (the requested output is
-    incomplete); it never masks an engine ``PARTIAL``/``FAILED``.
+    Over the family jobs that ran (one per family in the DAG): every job green → ``COMPLETED``;
+    every job failed → ``FAILED``; a mix → ``PARTIAL``. An ensemble failure downgrades an
+    otherwise-``COMPLETED`` run to ``FAILED`` (the requested output is incomplete); it never masks a
+    family ``PARTIAL``/``FAILED``.
     """
-    track_ok: list[bool] = []
-    if plan.python_models:
-        track_ok.append(spark_error is None)
-    if plan.bq_models:
-        track_ok.append(bq_error is None)
-
-    n_ok = sum(track_ok)
-    if not track_ok or n_ok == len(track_ok):
+    n_jobs = len(run_dag.jobs)
+    n_failed = len(job_errors)
+    if n_failed == 0:
         engine_status = "COMPLETED"
-    elif n_ok == 0:
+    elif n_failed == n_jobs:
         engine_status = "FAILED"
     else:
         engine_status = "PARTIAL"
