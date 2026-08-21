@@ -14,7 +14,7 @@
 #   RUN (design intent, once the DAG ships):
 #     the environment hosts an Airflow DAG that orchestrates prep → fan-out (Spark|Ray + BQ)
 #     → fan-in → ensemble → finalize. Git-Sync pulls the DAG from the repo. The SAME run_cell
-#     code runs there as locally (G1) — Composer only schedules and fans out.
+#     code runs there as locally — Composer only schedules and fans out.
 #
 #   STOP  (turn the meter off):
 #     set create_composer = false, then `terraform apply`. Terraform destroys just this

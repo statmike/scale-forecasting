@@ -317,15 +317,15 @@ project *as themselves*:
 - **The BigLake connection's service agent** gets `storage.objectUser` **and**
   `storage.legacyBucketReader` on the warehouse bucket. It needs *both* because the Storage Write API
   streaming path checks object access **and** `storage.buckets.get`, and no single predefined role
-  carries both without over-granting (only `storage.admin` does). This was verified empirically —
-  with object access alone, `append_rows` failed 403 on `storage.buckets.get`.
+  carries both without over-granting (only `storage.admin` does). With object access alone,
+  `append_rows` fails 403 on `storage.buckets.get`.
 - **The Vertex AI service agent** gets `roles/compute.networkUser` **plus** the custom
   `sfNetworkAttachmentConsumer` role, so the managed Vertex tenant can reach back through the PSC-I
   attachment into your VPC. This is the single-project topology, where Google's docs prescribe the
-  broader `compute.networkAdmin`; we take the *leaner* `networkUser` (for the `compute.subnetworks.use`
-  that interface-IP allocation needs) plus the four exact attachment verbs in the custom role. A
-  further trim to a subnet-scoped custom role is possible but deferred until a greenfield Ray run
-  confirms the working permission floor (over-tightening here silently 403s cluster creation).
+  broader `compute.networkAdmin`; this deployment takes the *leaner* `networkUser` (for the
+  `compute.subnetworks.use` that interface-IP allocation needs) plus the four exact attachment verbs
+  in the custom role. A further trim to a subnet-scoped custom role is possible but not applied here
+  (over-tightening the interface-IP grant silently 403s cluster creation).
 - **The Cloud Build SA** (the project's Compute Engine default SA) gets `cloudbuild.builds.builder` +
   `artifactregistry.writer`, scoped to exactly the build-and-push path, so `gcloud builds submit` can
   build the runtime image and push it to Artifact Registry.

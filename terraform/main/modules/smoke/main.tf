@@ -142,7 +142,7 @@ locals {
 
   # Infra identity passed as JOB ARGS, not Spark env properties (Dataproc rejects driver-env);
   # smoke_run.main() exports these --sf-* args into os.environ so env-based Settings stays the one
-  # G1 seam (parity with the seed).
+  # identity seam (parity with the seed).
   infra_args = [
     "--sf-project-id=${var.project_id}",
     "--sf-connection=${var.connection}",

@@ -17,7 +17,7 @@
 #   * artifacts vs code have OPPOSITE retention postures, and the settings are bucket-wide:
 #       - code is a derivable deploy artifact (source of truth is GitHub); it WANTS
 #         force_destroy = true in dev and would tolerate an aggressive lifecycle/TTL.
-#       - artifacts carry G3 lineage (a forecast row points back to the exact fitted model);
+#       - artifacts carry run lineage (a forecast row points back to the exact fitted model);
 #         they must NEVER be force_destroyed, and a code-oriented TTL would silently delete
 #         reproducibility. One bucket can't hold both stances at once.
 #
@@ -74,7 +74,7 @@ resource "google_storage_bucket" "b" {
   # Versioning keeps every overwrite forever, which quietly grows cost on the one bucket that gets
   # rewritten each deploy — `code` (the packaged src/ + seed_spark.py; its source of truth is
   # GitHub, so old versions are pure waste). Prune noncurrent versions there after 30 days / beyond
-  # the 3 most recent. warehouse + artifacts are deliberately EXCLUDED: artifacts carry G3 lineage
+  # the 3 most recent. warehouse + artifacts are deliberately EXCLUDED: artifacts carry run lineage
   # (a forecast row points back to the exact fitted model) and must never be auto-deleted, and the
   # warehouse is the data lake — retention there is the operator's call, not a default TTL.
   dynamic "lifecycle_rule" {

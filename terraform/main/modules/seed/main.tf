@@ -154,7 +154,7 @@ locals {
   # allowlists Spark property prefixes and rejects driver-env (spark.kubernetes.driverEnv.* →
   # "unsupported properties"), so args are the reliable delivery path to the driver — which is
   # where Settings.resolve() + ensure_tables + the write all run. seed_spark.main() exports these
-  # --sf-* args into the environment so env-based resolution stays the single G1 seam.
+  # --sf-* args into the environment so env-based resolution stays the single identity seam.
   infra_args = [
     "--sf-project-id", var.project_id,
     "--sf-connection", var.connection,

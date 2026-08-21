@@ -1,6 +1,6 @@
 # Troubleshooting
 
-The single home for known issues — what we hit building and running this at scale, each as
+The single home for known issues seen building and running this at scale, each as
 **symptom → cause → fix / where it's handled**. Most are already handled in code or config; this
 doc explains *why* the handling exists so you recognize the symptom fast.
 

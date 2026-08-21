@@ -157,11 +157,10 @@ resource "google_project_iam_member" "grant" {
 # but is NOT redundant with the custom role: subnetworks.use ships only in networkUser/networkAdmin,
 # so dropping it would 403 the interface-IP allocation.
 #
-# DEFERRED least-privilege trim: to replace networkUser entirely, add compute.subnetworks.use to a
-# custom role scoped to the compute subnet (a subnet-level IAM binding, not project-wide). Not done
-# pre-first-greenfield-apply on purpose — networkUser is the documented-adjacent, known-good grant,
-# and narrowing subnet IP allocation is the exact change that risks a silent 403 on cluster create.
-# Trim it in a follow-up once a greenfield Ray run has confirmed the working permission floor.
+# Further least-privilege trim (not applied here): to replace networkUser entirely, add
+# compute.subnetworks.use to a custom role scoped to the compute subnet (a subnet-level IAM binding,
+# not project-wide). networkUser is the documented-adjacent, known-good grant, and narrowing subnet
+# IP allocation is the exact change that risks a silent 403 on cluster create.
 data "google_project" "this" {
   project_id = var.project_id
 }
