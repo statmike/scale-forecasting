@@ -29,6 +29,8 @@ How it works and every knob.
   constraint.
 - [reading_source_data.md](./reading_source_data.md) — how each runtime reads the source panel
   (Storage Read API + Arrow, snapshot pinning, the `read_max_streams` parallelism cap).
+- [writing_results.md](./writing_results.md) — the single Storage Write API path for both table
+  formats, append-only + dedupe-on-read, and why the framework-native sinks are avoided.
 - [output_schemas.md](./output_schemas.md) — the output tables and the analyst views over them.
 - [adding_a_model.md](./adding_a_model.md) + [model_template.py](https://github.com/statmike/scale-forecasting/blob/main/docs/model_template.py) — add a model
   in one file.

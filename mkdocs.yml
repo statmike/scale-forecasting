@@ -96,6 +96,7 @@ nav:
       - Architecture: architecture.md
       - Configuration: configuration_reference.md
       - Reading source data: reading_source_data.md
+      - Writing results: writing_results.md
       - Output schemas: output_schemas.md
       - Adding a model: adding_a_model.md
       - Editing code without rebuilding: editing_code_without_rebuilding.md
