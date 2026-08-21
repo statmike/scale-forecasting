@@ -738,19 +738,25 @@ def _submit_and_poll(
     runtime_env: dict[str, Any],
     *,
     wait: bool,
+    submission_id: str | None = None,
 ) -> tuple[str, str, str]:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
     """Submit the on-cluster driver as a Ray Job and (when ``wait``) poll to a terminal state.
 
     Connects the Jobs client to the cluster by resource name (``vertex_ray://<resource_name>``,
     retrying past the dashboard warm-up race), submits ``entrypoint`` with ``runtime_env`` (current
-    ``src/`` + requirements), and returns ``(job_id, status, detail)``. ``detail`` is empty except
+    ``src/`` + requirements), and returns ``(job_id, status, detail)``. ``submission_id``, when set,
+    is passed to ``submit_job`` so the Ray job's own id is the deterministic ``job_key`` rather than
+    a random auto-assigned one; the returned ``job_id`` then equals it. ``detail`` is empty except
     on a ``FAILED`` terminal state, where it carries the driver's error message + log tail
     (`_fetch_job_failure_detail`) captured at the moment of failure — so the cause is recorded
     even after the ``ml_job`` log stream ages out. Without ``wait`` the status is the immediate
     post-submit state (the caller skips telemetry + the terminal-state check).
     """
     client = _connect_job_client(cluster_resource_name)
-    job_id = client.submit_job(entrypoint=entrypoint, runtime_env=runtime_env)
+    submit_kwargs: dict[str, Any] = {"entrypoint": entrypoint, "runtime_env": runtime_env}
+    if submission_id is not None:
+        submit_kwargs["submission_id"] = submission_id
+    job_id = client.submit_job(**submit_kwargs)
     _log.info("submitted Ray job %s", job_id)
 
     def _status() -> str:
@@ -841,6 +847,7 @@ def submit_ray(
     cluster_name: str | None = None,
     n_series: int | None = None,
     wait: bool = True,
+    submission_id: str | None = None,
 ) -> str:
     """Size, provision, run, and (ephemeral) tear down a Ray-on-Vertex forecast run; return job id.
 
@@ -865,6 +872,11 @@ def submit_ray(
     contributor mode (`main.run` owns the shared header). With ``wait`` a non-SUCCEEDED
     terminal state raises so a failed run never exits 0; the telemetry stamp precedes the raise so a
     failed run still records its sizing.
+
+    ``submission_id``, when set (the orchestrator passes the family's deterministic ``job_key`` via
+    `registry.ids.ray_submission_id`), becomes the Ray job's own id — so families sharing a
+    ``run_id`` get distinct, directly-queryable Ray jobs instead of random auto-assigned ids. When
+    ``None`` Ray assigns one (the standalone path).
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -913,7 +925,7 @@ def submit_ray(
         cluster = _get_cluster(cluster_resource_name)
         started = time.perf_counter()
         job_id, status, detail = _submit_and_poll(
-            cluster_resource_name, entrypoint, runtime_env, wait=wait
+            cluster_resource_name, entrypoint, runtime_env, wait=wait, submission_id=submission_id
         )
         wall_s = round(time.perf_counter() - started, 1) if wait else None
 

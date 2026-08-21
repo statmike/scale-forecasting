@@ -365,7 +365,12 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls.setdefault("delete_names", []).append(resource_name)
 
     def _fake_submit(
-        cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
+        cluster_resource_name: str,
+        entrypoint: str,
+        runtime_env: dict,
+        *,
+        wait: bool,
+        submission_id: str | None = None,
     ) -> tuple[str, str]:
         calls["submitted"] += 1
         calls["order"].append("submit")
@@ -373,6 +378,7 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls["entrypoint"] = entrypoint
         calls["runtime_env"] = runtime_env
         calls["wait"] = wait
+        calls["submission_id"] = submission_id
         return "job-xyz", "SUCCEEDED", ""
 
     def _fake_stamp(telemetry: dict, run_id: str, settings: Settings) -> None:
@@ -401,7 +407,9 @@ def test_submit_ray_ephemeral_creates_submits_and_deletes(
     _stubbed_lifecycle: dict[str, Any],
 ) -> None:
     calls = _stubbed_lifecycle
-    job_id = ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), wait=True)
+    job_id = ray_submit.submit_ray(
+        _cfg(), settings=_settings(), infra=_infra(), wait=True, submission_id="sf-rid-ml-a1"
+    )
     assert job_id == "job-xyz"
     assert calls["created"] == 1
     assert calls["submitted"] == 1
@@ -410,6 +418,8 @@ def test_submit_ray_ephemeral_creates_submits_and_deletes(
     assert calls["telemetry"]["cluster_name"].startswith("sf-ray-")
     # Vertex SDK is pinned to the configured project (never the ambient GOOGLE_CLOUD_PROJECT).
     assert calls["init_project"] == "proj-x"
+    # The caller-supplied id is threaded to the Ray job so its own submission id is deterministic.
+    assert calls["submission_id"] == "sf-rid-ml-a1"
 
 
 def test_submit_ray_deletes_even_when_job_raises(
@@ -420,7 +430,12 @@ def test_submit_ray_deletes_even_when_job_raises(
     calls = _stubbed_lifecycle
 
     def _failing_submit(
-        cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
+        cluster_resource_name: str,
+        entrypoint: str,
+        runtime_env: dict,
+        *,
+        wait: bool,
+        submission_id: str | None = None,
     ) -> tuple[str, str, str]:
         calls["order"].append("submit")
         detail = "message: boom\ndriver log tail:\nTraceback ... RuntimeError: boom"
@@ -505,7 +520,12 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
     calls = _stubbed_lifecycle
 
     def _immediate_submit(
-        cluster_resource_name: str, entrypoint: str, runtime_env: dict, *, wait: bool
+        cluster_resource_name: str,
+        entrypoint: str,
+        runtime_env: dict,
+        *,
+        wait: bool,
+        submission_id: str | None = None,
     ) -> tuple[str, str, str]:
         calls["order"].append("submit")
         calls["wait"] = wait

@@ -69,6 +69,62 @@ def test_spark_launch_no_session_submits_batch(monkeypatch: pytest.MonkeyPatch) 
     assert seen["engine"] == "explode"
     assert seen["models"] == [_SPARK]
     assert seen["manage_header"] is False
+    assert seen["batch_id"] is None  # standalone: no per-family id → submit derives one from run_id
+
+
+def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The orchestrator's deterministic per-family id becomes the Dataproc batch_id, so families
+    # sharing one run_id submit distinct batches instead of colliding on a run-derived id.
+    import scale_forecasting.submit as submit_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(submit_mod, "submit_batch", lambda cfg, **kw: seen.update(kw) or "b")
+
+    SparkSubmitter().launch(
+        _cfg(),
+        models=[_SPARK],
+        manage_header=False,
+        settings=_SETTINGS,
+        system_job_id="sf-run-abc-statistical-a1",
+    )
+    assert seen["batch_id"] == "sf-run-abc-statistical-a1"
+
+
+def test_spark_launch_with_session_ignores_system_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An in-process session submits no remote batch, so the batch id has nowhere to go.
+    from scale_forecasting.engines import spark_explode
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(spark_explode, "run", lambda cfg, **kw: seen.update(kw))
+
+    SparkSubmitter().launch(
+        _cfg(),
+        models=[_SPARK],
+        manage_header=False,
+        settings=_SETTINGS,
+        spark=object(),
+        system_job_id="sf-run-abc-statistical-a1",
+    )
+    assert "batch_id" not in seen
+    assert "system_job_id" not in seen
+
+
+def test_ray_launch_threads_system_job_id_as_submission_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting.ray_submit as ray_submit_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or "j")
+
+    RaySubmitter().launch(
+        _cfg(python_runtime="ray"),
+        models=[_SPARK],
+        manage_header=False,
+        settings=_SETTINGS,
+        system_job_id="sf-run-abc-ml-a1",
+    )
+    assert seen["submission_id"] == "sf-run-abc-ml-a1"
 
 
 def test_spark_launch_with_session_runs_in_process(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -39,6 +39,7 @@ class RuntimeSubmitter(Protocol):
         spark: object | None = None,
         wait: bool = True,
         max_executors: int | None = None,
+        system_job_id: str | None = None,
     ) -> None:
         """Run ``models`` on this runtime, blocking until terminal when ``wait``.
 
@@ -47,6 +48,13 @@ class RuntimeSubmitter(Protocol):
         only by the runtimes that can run in-process against one (Spark); others ignore it.
         ``max_executors`` caps the remote Spark batch's dynamic-allocation ceiling; runtimes that
         autoscale on their own (Ray) or run in-process (an injected session) ignore it.
+
+        ``system_job_id`` is the deterministic platform id the orchestrator derived for this
+        family's job (`registry.ids.dataproc_job_id` / `ray_submission_id`). When set, the submitter
+        hands it to the platform as the job's own id — a Dataproc ``batch_id`` or a Ray
+        ``submission_id`` — so several families under one shared ``run_id`` get distinct, traceable
+        jobs instead of colliding on a run-derived id. When ``None`` the platform assigns/derives an
+        id (the standalone path).
         """
         ...
 
@@ -66,10 +74,12 @@ class SparkSubmitter:
         spark: object | None = None,
         wait: bool = True,
         max_executors: int | None = None,
+        system_job_id: str | None = None,
     ) -> None:
         if spark is not None:
             # In-process Spark over an injected (Connect or local) session — no remote batch submit.
             # max_executors is a remote-batch dynamic-allocation cap; an injected session skips it.
+            # system_job_id names a remote batch; an in-process session submits none, so unused.
             from .engines import spark_explode
 
             spark_explode.run(
@@ -86,6 +96,7 @@ class SparkSubmitter:
             settings=settings,
             wait=wait,
             max_executors=max_executors,
+            batch_id=system_job_id,
         )
 
 
@@ -104,13 +115,20 @@ class RaySubmitter:
         spark: object | None = None,
         wait: bool = True,
         max_executors: int | None = None,
+        system_job_id: str | None = None,
     ) -> None:
         # spark and max_executors are ignored — there is no in-process Ray path from the
         # orchestrator, and the Ray cluster autoscales on its own (no fixed executor cap).
+        # system_job_id becomes the Ray submission_id so the job's own id is deterministic.
         from .ray_submit import submit_ray
 
         submit_ray(
-            cfg, models=models, manage_header=manage_header, settings=settings, wait=wait
+            cfg,
+            models=models,
+            manage_header=manage_header,
+            settings=settings,
+            wait=wait,
+            submission_id=system_job_id,
         )
 
 

@@ -412,6 +412,13 @@ def test_launch_family_job_dispatches_to_resolved_submitter(
     assert seen["job"]["family"] == "statistical"
     assert seen["job"]["attempt"] == 1
     assert seen["job"]["runtime"] == "spark"
+    # The deterministic per-family platform id is threaded onto both the row and the submitter,
+    # so a Spark family under a shared run_id gets its own batch id.
+    from scale_forecasting.registry.ids import dataproc_job_id, make_job_key
+
+    expected_id = dataproc_job_id(make_job_key("rid-0", "statistical", 1))
+    assert seen["job"]["system_job_id"] == expected_id
+    assert captured["system_job_id"] == expected_id
 
 
 def test_launch_family_job_dispatches_ray_for_ray_family(
@@ -436,6 +443,10 @@ def test_launch_family_job_dispatches_ray_for_ray_family(
     job = dag.plan_dag(cfg).python_jobs[0]
     main._launch_family_job(cfg, job, "rid-0", _SETTINGS)
     assert captured["runtime"] == "ray"
+    # Ray keeps the canonical key verbatim as its submission id.
+    from scale_forecasting.registry.ids import make_job_key, ray_submission_id
+
+    assert captured["system_job_id"] == ray_submission_id(make_job_key("rid-0", "statistical", 1))
 
 
 def test_launch_native_job_runs_bigquery_engine_inline(
@@ -464,6 +475,9 @@ def test_launch_native_job_runs_bigquery_engine_inline(
     # The native family's row is opened with the BigQuery runtime.
     assert seen["job"]["family"] == "native"
     assert seen["job"]["runtime"] == "bigquery"
+    from scale_forecasting.registry.ids import bigquery_job_id, make_job_key
+
+    assert seen["job"]["system_job_id"] == bigquery_job_id(make_job_key("rid-0", "native", 1))
 
 
 # --- run(): ensemble orchestration after the engine join -----------------------

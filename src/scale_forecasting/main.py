@@ -130,6 +130,25 @@ def _plan(cfg: RunConfig) -> _RunPlan:
     )
 
 
+def _system_job_id(job_key: str, runtime: str) -> str:
+    """Map a family's canonical ``job_key`` to its runtime's platform-legal job id (pure).
+
+    Each platform stamps the ``job_key`` as its *own* job id so the platform job and the
+    ``run_jobs`` row share an identity, but platforms differ on the legal charset/length — so the
+    key is mapped to a legal form per runtime (`registry.ids`): a Dataproc batch/job id for
+    ``spark``, a Ray ``submission_id`` for ``ray``, a BigQuery parent job id for ``bigquery``. The
+    canonical key stays in ``run_jobs.job_id`` (this mapped id lands in ``system_job_id``), so a
+    trace never reverses a lossy mapping.
+    """
+    from .registry.ids import bigquery_job_id, dataproc_job_id, ray_submission_id
+
+    if runtime == "spark":
+        return dataproc_job_id(job_key)
+    if runtime == "ray":
+        return ray_submission_id(job_key)
+    return bigquery_job_id(job_key)
+
+
 def _launch_family_job(
     cfg: RunConfig,
     job: FamilyJob,
@@ -157,13 +176,20 @@ def _launch_family_job(
     remote Spark batch's dynamic-allocation ceiling (ignored by the in-process and Ray paths). Kept
     a plain module function (not a lambda) so a worker thread's traceback names it, and the
     submitter's imports stay lazy (Ray/Spark extras load only for the chosen path).
+
+    The family's deterministic ``job_key`` (`registry.ids.make_job_key`) is mapped to its runtime's
+    platform-legal id (`_system_job_id`) and threaded both onto the ``run_jobs`` row and into the
+    submitter — so several families under one shared ``run_id`` submit distinct, traceable platform
+    jobs (a Dataproc ``batch_id`` / Ray ``submission_id``) instead of colliding on a run-derived id.
     """
     from .registry import bq
+    from .registry.ids import make_job_key
     from .submitters import get_submitter
 
     compute = job.compute
     assert compute is not None  # a Python family always resolves compute (native is handled inline)
     attempt, _ = bq.next_job_attempt(run_id, job.family, force=force, settings=settings)
+    system_job_id = _system_job_id(make_job_key(run_id, job.family, attempt), compute.runtime)
     with bq.run_job(
         run_id,
         job.family,
@@ -172,6 +198,7 @@ def _launch_family_job(
         spark_mode=compute.spark_mode,
         hardware=compute.hardware,
         gpu_type=compute.gpu_type,
+        system_job_id=system_job_id,
         settings=settings,
     ):
         get_submitter(compute.runtime).launch(
@@ -181,6 +208,7 @@ def _launch_family_job(
             settings=settings,
             spark=spark,
             max_executors=max_executors,
+            system_job_id=system_job_id,
         )
 
 
@@ -196,15 +224,25 @@ def _launch_native_job(
 
     Native models execute as SQL in BigQuery — no Python runtime, no worker thread — so this runs on
     `run`'s main thread, overlapping the Python family jobs. Like `_launch_family_job` it resolves
-    the ``native`` attempt and opens the per-job lifecycle (`registry.bq.run_job`, ``runtime`` fixed
-    to ``"bigquery"``), then runs the engine in contributor mode. Returns the engine's `BqOutcome`
-    so the caller can stamp the observed ``n_series`` onto the header.
+    the ``native`` attempt, maps the deterministic ``job_key`` to the BigQuery job id
+    (`_system_job_id`), and opens the per-job lifecycle (`registry.bq.run_job`, ``runtime`` fixed to
+    ``"bigquery"``, carrying that id), then runs the engine in contributor mode. Returns the
+    engine's `BqOutcome` so the caller can stamp the observed ``n_series`` onto the header.
     """
     from .engines import bigquery_engine
     from .registry import bq
+    from .registry.ids import make_job_key
 
     attempt, _ = bq.next_job_attempt(run_id, "native", force=force, settings=settings)
-    with bq.run_job(run_id, "native", attempt, runtime="bigquery", settings=settings):
+    system_job_id = _system_job_id(make_job_key(run_id, "native", attempt), "bigquery")
+    with bq.run_job(
+        run_id,
+        "native",
+        attempt,
+        runtime="bigquery",
+        system_job_id=system_job_id,
+        settings=settings,
+    ):
         return bigquery_engine.run(
             cfg, list(job.models), manage_header=False, settings=settings
         )
