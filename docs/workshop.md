@@ -1,9 +1,10 @@
-# Workshop runbook — demo every runtime, then review at scale
+# Workshop runbook — demo the runtimes and the family DAG, then review at scale
 
 **You've deployed the platform** (see [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md)) and the smoke
-forecast came back `SUCCEEDED`. This is the guided path from there to a full demo: submit one run per
-approach at **100k series**, then walk the notebooks in **Colab Enterprise** — ending on
-`07_scale_review`, which renders the cross-approach comparison over the runs you just made.
+forecast came back `SUCCEEDED`. This is the guided path from there to a full demo: submit a few runs at
+**100k series** — one per Python runtime, plus the all-families run — then walk the notebooks in
+**Colab Enterprise**, ending on `07_scale_review`, which renders the cross-run comparison over the runs
+you just made.
 
 Everything here runs **in the browser** — [Cloud Shell](https://console.cloud.google.com/?cloudshell=true)
 for the Act 1 submits, [Colab Enterprise](https://console.cloud.google.com/vertex-ai/colab) for the
@@ -31,16 +32,25 @@ person. Do this before the session so nobody is blocked at the console.
 
 ## Act 1 — Populate the run history at 100k (Cloud Shell, before the workshop)
 
-The four `configs/*_100k.json` files are the full-dataset runs — each forecasts **100,000 series** with
-the same models (`theta`, `holtwinters`, `sarimax`, `xgboost`), differing only in **how** the work
-fans out. Submitting all four gives `07_scale_review` one run per approach to compare.
+Three `configs/*_100k.json` files give `07_scale_review` a clean cross-run comparison — the same work on
+two runtimes, plus the all-families DAG:
+
+| Config | Runtime(s) | What it demonstrates |
+|--------|-----------|----------------------|
+| `explode_100k.json` | Spark | The 100k CPU workhorse — `theta`, `holtwinters`, `sarimax`, `xgboost` (statistical + ml families) on Dataproc Serverless, one Spark task per `(series, model)` cell. |
+| `ray_100k.json` | Ray | **The same four models, on Ray** — the runtime-parity comparison. Same unit of work, same answers, different engine; the wall-clock/overhead difference is the story. |
+| `all_families_100k.json` | Ray ∥ BigQuery | **The family DAG.** One config, seven models across **all four families** (statistical / ml / deep-learning / native) — each family runs as its own parallel job under one `run_id`, deep-learning packing NeuralProphet onto fractional T4s and the native models running in BigQuery. |
+
+`explode_100k` and `ray_100k` are the *same models on different runtimes*; `all_families_100k` is *one
+config fanned into a job per family*. Together they give notebook 07 both stories: runtime parity and the
+per-family placement.
 
 Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true), then:
 
 ```bash
 # Clone (skip if you still have the deploy clone) and install with uv — the repo is uv-managed
 # (pyproject.toml + uv.lock). The `submit` extra is the thin client set: it pulls the Dataproc +
-# Ray submit clients (both fan-out paths) but NOT pyspark — batch submission never imports it, and
+# Ray submit clients (both runtimes) but NOT pyspark — batch submission never imports it, and
 # pyspark's ~300MB of JARs overflow Cloud Shell's home quota. (pyspark is only for notebook 01's
 # interactive Spark Connect path, which runs in Colab Enterprise — Act 3 — not here.)
 cd ~ && git clone https://github.com/statmike/scale-forecasting.git 2>/dev/null; cd ~/scale-forecasting
@@ -95,21 +105,22 @@ export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJEC
 uv run python -m scale_forecasting.main --config configs/explode_100k.json --dry-run
 ```
 
-**Submit all four** — three Spark methods + Ray. Each command **blocks until its batch finishes**
-(that's how it stamps the wall-clock / DCU telemetry `07_scale_review` charts), so the four run
-**one after another** — budget for the sum, not the max.
+**Submit the three.** `main.run` is the one entrypoint that runs a whole config — it plans the DAG (one
+job per model family) and launches every family in parallel under one `run_id`, each on its resolved
+runtime. Each command **blocks until its run finishes** (that's how it stamps the wall-clock / DCU
+telemetry `07_scale_review` charts), so they run **one after another** — budget for the sum, not the max.
 
 > **Run them under `tmux` so a lost tab doesn't sever the wait.** Cloud Shell disconnects if the
 > browser tab sleeps or the network blips, which SIGHUPs a foreground process — killing the current
-> `wait` and every command queued behind it in the line. `tmux` keeps the session alive server-side
+> wait and every command queued behind it in the line. `tmux` keeps the session alive server-side
 > so you can reattach:
 >
 > ```bash
 > tmux new -s runs        # start (reattach later with: tmux attach -t runs)
 > ```
 >
-> Then, inside tmux, submit the four. The Dataproc batches themselves run server-side and survive a
-> disconnect regardless — but only a live `wait` stamps their telemetry, so `tmux` is what protects
+> Then, inside tmux, submit the three. The Dataproc/Ray jobs themselves run server-side and survive a
+> disconnect regardless — but only a live wait stamps their telemetry, so `tmux` is what protects
 > the `07` charts.
 >
 > **A new tmux session is a new shell** — it does *not* inherit the `SF_*` exports from the tab you
@@ -119,27 +130,19 @@ uv run python -m scale_forecasting.main --config configs/explode_100k.json --dry
 > you're in.)
 
 ```bash
-uv run python -m scale_forecasting.submit     --config configs/explode_100k.json --engine explode
-uv run python -m scale_forecasting.submit     --config configs/multi_100k.json   --engine multi
-uv run python -m scale_forecasting.submit     --config configs/naive_100k.json   --engine naive
-uv run python -m scale_forecasting.ray_submit --config configs/ray_100k.json
+uv run python -m scale_forecasting.main --config configs/explode_100k.json        # Spark
+uv run python -m scale_forecasting.main --config configs/ray_100k.json            # Ray
+uv run python -m scale_forecasting.main --config configs/all_families_100k.json   # every family
 ```
 
-> **On the wait timeout.** A 100k batch runs longer than the client's old 15-minute default wait, so
+> **On the wait timeout.** A 100k run runs longer than the client's old 15-minute default wait, so
 > the submitter now blocks up to **2 h** (`--wait-timeout <seconds>` to change it). If you ever *do*
-> see a client-side `TimeoutError`, the **batch is unaffected** — it keeps running server-side; only
-> the local wait gave up. Check its true state with
+> see a client-side `TimeoutError`, the **jobs are unaffected** — they keep running server-side; only
+> the local wait gave up. Check true state with
 > `gcloud dataproc batches list --project $PROJECT --region $REGION` or the `v_run_summary` query
 > below, and re-submit only what didn't land.
 
-| Config | Runtime | What it demonstrates |
-|--------|---------|----------------------|
-| `explode_100k.json` | Spark (`explode`) | Max parallelism — one task per `(series, model)` cell. The 100k workhorse. |
-| `multi_100k.json` | Spark (`multi`) | One child `explode` batch per model family under one `run_id`. |
-| `naive_100k.json` | Spark (`naive`) | The straggler anti-pattern — one task per series, models run sequentially. |
-| `ray_100k.json` | Ray on Vertex | The Python-runtime path on a Ray cluster (CPU here; GPU is the NeuralProphet demo). |
-
-**Watch them make progress (healthy vs. stuck).** A 100k batch runs for 1–2 h, so "is it working or
+**Watch them make progress (healthy vs. stuck).** A 100k run runs for 1–2 h, so "is it working or
 hung?" is the natural question. The runs write forecast rows to `forecast_metadata` **as they go**, so
 the real health signal is simply: *are rows accumulating?* Run this in
 [BigQuery Studio](https://console.cloud.google.com/bigquery), then **run it again in ~5 min** — if the
@@ -154,17 +157,20 @@ GROUP BY run_id
 ORDER BY latest_write DESC;
 ```
 
-Each run's target is **`n_series` × `n_models` cells** — the 100k configs are 100,000 × 4 models =
-**~400,000 cells** — so `cells_written / 400000` is a rough % complete. Reading the numbers:
+Each run's target is **`n_series` × `n_models` cells** — `explode_100k` / `ray_100k` are 100,000 × 4
+models = **~400,000 cells**, and `all_families_100k` is 100,000 × 7 models = **~700,000 cells** — so
+`cells_written / target` is a rough % complete. Reading the numbers:
 
-- **Counts climbing between two checks = healthy.** Leave the batches alone; they're serverless and
-  finish server-side regardless of your shell. **Don't kill them to "restart"** — you'd discard the
+- **Counts climbing between two checks = healthy.** Leave the jobs alone; they're serverless/autoscaling
+  and finish server-side regardless of your shell. **Don't kill them to "restart"** — you'd discard the
   cells already written and pay to recompute (re-submitting the same config reuses the same
   deterministic `run_id` and dedupes-on-read, so nothing already done is wasted).
-- **`naive` fills slowest and unevenly** — that's its anti-pattern signature (one task per *series*,
-  models run sequentially, so it drags on the slowest series). Expected, not a problem.
-- **Genuinely stuck** looks like: count **flat** across several minutes **and** the batch's Spark UI
-  (batch detail page → *View Spark UI*) shows no task progress. Only then investigate.
+- **Each family fills independently** in `all_families_100k` — the deep-learning family (NeuralProphet on
+  T4s) is the slowest, so its cells trail the statistical/ml ones. Expected: a run's wall-clock is its
+  *slowest* family, and the others finish and wait.
+- **Genuinely stuck** looks like: count **flat** across several minutes **and** the job's UI (the
+  Dataproc batch detail page → *View Spark UI*, or the Ray dashboard) shows no task progress. Only then
+  investigate.
 
 > **The metric columns (`mae`/`rmse`/`wape`/…) are NULL — by design.** Accuracy metrics need a
 > held-out actual to score against, which only exists when **backtest is on**. The 100k configs run
@@ -180,23 +186,32 @@ than assume. In [BigQuery Studio](https://console.cloud.google.com/bigquery) (or
 
 ```sql
 -- swap gcp-scale-forecasting for your project_id if you deployed elsewhere
-SELECT run_id, created_at, status, spark_method, python_runtime, n_series, n_models
+SELECT run_id, created_at, status, python_runtime, n_series, n_models
 FROM `gcp-scale-forecasting.scale_forecasting.v_run_summary`
 ORDER BY created_at DESC
 LIMIT 25;
 ```
 
-You want four `SUCCEEDED` rows — one `explode-100k-…`, one `multi-100k-…`, one `naive-100k-…`, one
-`ray-100k-…`. Copy those four `run_id`s; Act 3's notebook 07 reads them.
+You want three `SUCCEEDED` rows — one `explode-100k-…`, one `ray-100k-…`, one `all-families-100k-…`.
+Copy those three `run_id`s; Act 3's notebook 07 reads them. For the **per-family** breakdown of any run
+— which family ran on which runtime/hardware, its platform job id, and per-job wall-clock — query
+`v_run_jobs` (one row per `(run_id, family)`, plus the ensemble node):
+
+```sql
+SELECT run_id, family, runtime, hardware, status, runtime_seconds
+FROM `gcp-scale-forecasting.scale_forecasting.v_run_jobs`
+WHERE run_id LIKE 'all-families-100k-%'
+ORDER BY runtime_seconds DESC;
+```
 
 > **Expectation-setter for the accuracy chart.** The 100k configs run with **backtest off** (that's
 > the fleet-scale default), so `07_scale_review`'s accuracy-parity panel (`mean_wape`) is **all-NULL**
 > for these runs — the notebook says so explicitly. **The scaling / efficiency panels are the 100k
-> showpiece** (wall-clock, provisioning overhead, DCU). Accuracy parity across engines is demonstrated
-> at small scale in notebook **03** (where backtest is on). Say this out loud before opening 07 and
-> it's a feature, not a surprise.
+> showpiece** (wall-clock, provisioning overhead, DCU) and the **per-family placement** (`v_run_jobs`).
+> Accuracy parity across engines is demonstrated at small scale in notebook **03** (where backtest is
+> on). Say this out loud before opening 07 and it's a feature, not a surprise.
 
-> **Runs that outlast Cloud Shell?** The full-suite Ray config `configs/all_methods_100k_full.json`
+> **Runs that outlast Cloud Shell?** The full-suite run `configs/all_families_100k_full.json`
 > (100k × 7 models, backtest on, NeuralProphet on T4s) runs for **hours** — longer than Cloud Shell
 > will hold the orchestrator that finalizes the run header. Drive it from a **persistent VM** instead:
 > ➡️ [operations.md §4 — Long runs on a persistent
@@ -207,10 +222,10 @@ You want four `SUCCEEDED` rows — one `explode-100k-…`, one `multi-100k-…`,
 ## Act 2 — Pre-render the notebook tour (optional, the night before)
 
 Act 3 is a **live** tour — but the expensive notebooks (`04_ray_on_vertex` stands up a Ray cluster;
-`05`/`06` submit Dataproc batches) take too long to run in front of an audience. This step
+`01`/`03` submit Dataproc batches) take too long to run in front of an audience. This step
 **pre-executes every notebook headless** so tomorrow you walk **already-rendered** notebooks (outputs
 baked in) from the Colab Enterprise **Executions** menu — and run only the cheap, fast ones (`07`,
-`01`, `02`, `03`, playground) live if you want.
+`02`, playground) live if you want.
 
 It reuses the same Vertex `NotebookExecutionJob` machinery as the acceptance harness, but in
 **fire-and-forget** mode (`--no-wait`): it submits all the notebooks back-to-back (each submit
@@ -268,20 +283,21 @@ the jobs appear with live state, and where a finished one **opens as the execute
 rendered outputs**. That menu is your tour surface tomorrow.
 
 > **`--tier` picks how much to pre-render** (same cost tiers as the acceptance harness):
-> `smoke` = the 4 BQ/local notebooks (cheap); `batch` = those + the 3 Dataproc ones (`01`,`05`,`06`);
-> `full` = **all 8**, adding `04_ray_on_vertex`. `full` fires the whole tour at once — that's the
-> **same total spend as one full acceptance run** (8 Colab runtimes + the Dataproc batches + a live
-> Ray cluster), just concurrent. Pre-workshop prep, not free — but it's what pre-renders everything.
+> `smoke` = the 3 BQ/local notebooks (`model_playground`, `02`, `07` — cheap); `batch` = those + the 2
+> Dataproc ones (`01`, `03`); `full` = **all 6**, adding `04_ray_on_vertex`. `full` fires the whole tour
+> at once — that's the **same total spend as one full acceptance run** (6 Colab runtimes + the Dataproc
+> batches + a live Ray cluster), just concurrent. Pre-workshop prep, not free — but it's what
+> pre-renders everything.
 
-> **Run this *after* Act 1's four 100k runs land.** `07_scale_review` reads those runs, so pre-render
+> **Run this *after* Act 1's three 100k runs land.** `07_scale_review` reads those runs, so pre-render
 > it only once they're `SUCCEEDED` — otherwise its rendered output shows missing data. (`07` reads
 > its `RUN_IDS` from the shipped deterministic defaults, which match the unchanged configs — if you
 > overrode a config, edit `07`'s `RUN_IDS` cell before this step or run `07` live instead.)
 
 **Tomorrow:** open the [Executions menu](https://console.cloud.google.com/vertex-ai/colab/execution-jobs),
-find each `sf-demo-…` job, and click into the pre-rendered notebook. Run `07` and `01` (and any other
+find each `sf-demo-…` job, and click into the pre-rendered notebook. Run `07` and `02` (and any other
 cheap one) **live** in the console on `sf-main` (every notebook uses that one template — see the Act 3
-table) for the interactive moments, and lean on the pre-rendered set for the expensive `04`/`05`/`06`.
+table) for the interactive moments, and lean on the pre-rendered set for the expensive `01`/`03`/`04`.
 
 ---
 
@@ -299,31 +315,28 @@ Run them **in this order** — each builds on the story of the last:
 |---|----------|----------|---------------|-------|
 | 1 | [`model_playground`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/model_playground.ipynb) | `sf-main` | Pick any registered model, fit it on a small panel — the one unit of work, no cluster. | sample |
 | 2 | [`01_spark_via_connect`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/01_spark_via_connect.ipynb) | `sf-main` | The Spark UDF fan-out (`applyInPandas`, one task per cell) over a live Dataproc Connect endpoint. | 100 |
-| 3 | [`02_bigquery_native`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_bigquery_native.ipynb) | `sf-main` | The BigQuery-native track — `ARIMA_PLUS` + `TimesFM` as pure SQL, no cluster. | 100 |
+| 3 | [`02_bigquery_native`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_bigquery_native.ipynb) | `sf-main` | The BigQuery-native family — `ARIMA_PLUS` + `TimesFM` as pure SQL, no cluster. | 100 |
 | 4 | [`03_combo_and_ensemble`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_combo_and_ensemble.ipynb) | `sf-main` | One config mixing a Spark model **and** the BQ natives under one `run_id`, with ensembles on — **and the accuracy-parity leaderboard** (backtest is on here). | 10 |
 | 5 | [`04_ray_on_vertex`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex.ipynb) | `sf-main` | The Python models on a Ray-on-Vertex cluster ∥ the BQ natives — job submission from any authenticated client via the PSC-I attachment. | demo |
-| 6 | [`05_spark_naive`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/05_spark_naive.ipynb) | `sf-main` | The `naive` straggler anti-pattern made visible — a run drags on its slowest *series*. | 100 |
-| 7 | [`06_spark_multi`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/06_spark_multi.ipynb) | `sf-main` | `multi` fanning one child `explode` batch per model family, all under one `run_id`. | 100 |
-| 8 | [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) | `sf-main` | **The payoff** — the cross-approach comparison over your **Act 1** 100k runs. Runs nothing; reads the registry views. | reads 100k |
+| 6 | [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) | `sf-main` | **The payoff** — the cross-run comparison over your **Act 1** 100k runs: runtime parity (Spark vs Ray) and the per-family placement (`v_run_jobs`). Runs nothing; reads the registry views. | reads 100k |
 
 **Notebook 07 is the one notebook you configure.** Its first code cell has an edit-me `RUN_IDS` block:
 
 ```python
 # === Parameters — edit me ===============================================
 RUN_IDS = {
-    "spark-explode": "explode-100k-…",   # ← paste your four Act 1 run_ids
-    "spark-multi":   "multi-100k-…",
-    "spark-naive":   "naive-100k-…",
-    "ray":           "ray-100k-…",
+    "spark":        "explode-100k-…",       # ← paste your Act 1 run_ids
+    "ray":          "ray-100k-…",           #    (same models as spark, Ray runtime)
+    "all-families": "all-families-100k-…",  #    (every family, one run_id)
 }
 # ========================================================================
 ```
 
-Paste the four `run_id`s you captured in Act 1 (set any you skipped to `None`), then **Run all**. It
-renders wall-clock + provisioning overhead from `v_run_summary` and the per-model panel from
-`v_model_leaderboard`, side by side across the four approaches. (Because the configs are shipped
-unchanged, the deterministic default ids in the cell often already match your runs — but paste yours to
-be sure.)
+Paste the three `run_id`s you captured in Act 1 (set any you skipped to `None`), then **Run all**. It
+renders wall-clock + provisioning overhead from `v_run_summary`, the per-family-job placement from
+`v_run_jobs`, and the per-model panel from `v_model_leaderboard`, side by side across the runs. (Because
+the configs are shipped unchanged, the deterministic default ids in the cell often already match your
+runs — but paste yours to be sure.)
 
 > **Runtime note for notebook 01.** It runs interactively on `sf-main` like every other notebook: the
 > Spark Connect session pins **Dataproc runtime 2.3** (the Connect floor; py3.11 workers, matching the
@@ -335,8 +348,8 @@ be sure.)
 
 ## Cost + timing at a glance
 
-- **Act 1 (four 100k runs):** each Spark method is a Dataproc Serverless batch (single-digit dollars,
-  minutes); the Ray run stands up and tears down an autoscaling cluster. Run once before the workshop and
+- **Act 1 (three 100k runs):** the Spark run is a Dataproc Serverless batch (single-digit dollars,
+  minutes); the Ray runs stand up and tear down an autoscaling cluster. Run once before the workshop and
   the results persist in the registry — Act 3 just reads them.
 - **Act 3 (notebooks):** the demo-scale notebooks (100 series or fewer) are cents. `07_scale_review`
   runs no compute — it only queries views.
@@ -356,3 +369,5 @@ be sure.)
   for runs that outlast Cloud Shell.
 - [`docs/deploying_on_gcp.md`](./deploying_on_gcp.md#human-users-running-jobs--notebooks) — the human
   IAM roles for running jobs and notebooks.
+</content>
+</invoke>

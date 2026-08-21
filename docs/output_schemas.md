@@ -1,12 +1,12 @@
 # Output schemas — the registry tables
 
-Every run writes to the same **three-tier registry** plus a backtest table, and reads back through
-two curated views. This page documents the layout of each — what every column collects and how the
+Every run writes to the same **registry tables** plus a backtest table, and reads back through
+three curated views. This page documents the layout of each — what every column collects and how the
 tiers link — so you can query the results directly, not just through the notebooks.
 
 Two facts hold for all of them:
 
-- **Always native BigQuery.** The four run-collection tables are native (never Iceberg), so
+- **Always native BigQuery.** The five run-collection tables are native (never Iceberg), so
   `raw_config` / `job_telemetry` / `quantiles` / `best_params` are the real `JSON` column type and a
   reseed is a clean `WRITE_TRUNCATE`. (The *input* table is the one that ships in both Iceberg and
   native — see [configuration_reference.md](./configuration_reference.md).)
@@ -26,6 +26,7 @@ The schema below is rendered from a single source of truth,
 ```
 run_registry            (1 row  per run)          ── the config + run-level telemetry
    │  run_id
+   ├── run_jobs          (1 row  per run × family) ── per-family-job runtime/hardware + telemetry
    ├── forecast_metadata (1 row  per run × series × model)  ── per-cell metrics + artifact link
    ├── forecast_predictions (N rows per run × series × model) ── the forecast values (one per date)
    └── backtest_oof      (rows   per run × series × model × fold) ── out-of-fold truth vs prediction
@@ -48,8 +49,7 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 | `created_at` | `TIMESTAMP` | When the header row was written. |
 | `user_id` | `STRING` | Who/what launched the run (identity of the writer). |
 | `git_sha` | `STRING` | The code revision that produced the run (lineage). |
-| `python_runtime` | `STRING` | `spark` or `ray` — which runtime ran the Python models. |
-| `spark_method` | `STRING` | `explode` / `multi` / `naive` fan-out (NULL when `python_runtime=ray`). |
+| `python_runtime` | `STRING` | `spark` or `ray` — the run-level default runtime for the Python model families (a family can override it). |
 | `bq_models` | `ARRAY<STRING>` | Which BigQuery-native models ran in parallel (e.g. `arima_plus`). |
 | `backtest_on` | `BOOL` | Whether backtesting was enabled for the run. |
 | `decision_metric` | `STRING` | The metric folds were judged on (when backtesting). |
@@ -60,6 +60,30 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 | `n_models` | `INT64` | Model count actually run. |
 | `runtime_seconds` | `FLOAT64` | The engine's own compute time (excludes cluster stand-up). |
 | `job_telemetry` | `JSON` | Dataproc/Ray overlay: `total_wall_s`, executor sizing, `dcu_milli_seconds`, `runtime_version`. Unpacked by `v_run_summary`. |
+
+## `run_jobs` — one row per family job
+
+A run resolves into one job per model family (`statistical` / `ml` / `deep_learning` / `native`),
+plus the downstream `ensemble` node — each launched in parallel under the shared `run_id`. This tier
+records what each of those jobs actually ran on and how it fared, so a run's DAG is queryable as
+executed. A `--force` re-run appends a higher-`attempt` job under the same `(run_id, family)`.
+Partitioned by `DATE(created_at)`, clustered by `run_id, family`.
+
+| Column | Type | Collects |
+|--------|------|----------|
+| `job_id` | `STRING` | The canonical per-family job key (`make_job_key`) — `sf-<run_id>-<family>-a<attempt>`. |
+| `run_id` | `STRING` | Joins to `run_registry`. |
+| `family` | `STRING` | The model family this job ran (`statistical` / `ml` / `deep_learning` / `native`, or `ensemble`). |
+| `attempt` | `INT64` | Attempt number — a `--force` re-run bumps it so re-runs are distinctly keyed under one `run_id`. |
+| `runtime` | `STRING` | The resolved runtime for this family (`spark` / `ray` / `bigquery`). |
+| `spark_mode` | `STRING` | The resolved Spark launch mode when `runtime=spark` (else NULL). |
+| `hardware` | `STRING` | The resolved hardware profile for this family (else NULL). |
+| `gpu_type` | `STRING` | The GPU type when the family ran on GPUs (e.g. Ray deep-learning), else NULL. |
+| `system_job_id` | `STRING` | The platform's own job id (`dataproc_job_id` / `ray_submission_id` / `bigquery_job_id`) — jump straight to the platform console. |
+| `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED` for this job. |
+| `created_at` | `TIMESTAMP` | When the job row was written. |
+| `runtime_seconds` | `FLOAT64` | The job's own compute time (excludes cluster stand-up). |
+| `job_telemetry` | `JSON` | Per-job overlay: `total_wall_s`, `dcu_milli_seconds`, and sizing. Unpacked by `v_run_jobs`. |
 
 ## `forecast_metadata` — one row per (run, series, model) cell
 
@@ -76,7 +100,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `ensemble_id` | `STRING` | NULL for base models; the `EnsembleConfig` digest for ensemble pseudo-models (so two ensemble configs under one `run_id` stay distinct). |
 | `fold_id` | `INT64` | NULL for the final (full-fit) row; set for a backtest fold's metrics. |
 | `mae`, `rmse`, `mse`, `mape`, `smape`, `wape`, `mase`, `rmsse`, `bias`, `coverage`, `pinball` | `FLOAT64` | The metric panel. Populated only when a backtest produced out-of-fold predictions to score; otherwise NULL. |
-| `fit_seconds` | `FLOAT64` | Wall-clock to fit this cell (surfaces the straggler under `naive`). |
+| `fit_seconds` | `FLOAT64` | Wall-clock to fit this cell (per-cell fit time — surfaces the straggler cells). |
 | `best_params` | `JSON` | Winning hyperparameters when HPO ran (else NULL). |
 | `model_artifact` | `STRING` | GCS ObjectRef to the persisted model (`persist_models=true`), else NULL. `no_artifact_rate=1.0` in the leaderboard = no cell produced an artifact. |
 | `created_at` | `TIMESTAMP` | When the row was written. |
@@ -117,19 +141,30 @@ clustered by `run_id, ts_id`.
 
 ---
 
-## The read surface — two views
+## The read surface — three views
 
-You rarely query the raw tables. Two `CREATE OR REPLACE VIEW`s are the curated read surface (and they
+You rarely query the raw tables. Three `CREATE OR REPLACE VIEW`s are the curated read surface (and they
 apply the dedupe-on-read). Full operator loop in
 [running_and_reviewing.md](./running_and_reviewing.md).
 
 ### `v_run_summary` — how did each run go, and how efficiently?
 
-One row per run: the scaling knobs (`spark_method`, `n_series`, `n_models`) plus the `job_telemetry`
+One row per run: the scaling knobs (`n_series`, `n_models`, `python_runtime`) plus the `job_telemetry`
 JSON unpacked into scalars — `total_wall_s`, `overhead_seconds` (`total_wall_s − runtime_seconds`),
 `overhead_fraction`, `executor_instances` / `executor_cores` / `max_executors`, `dcu_milli_seconds`,
-`runtime_version`. This is the scaling-and-efficiency story: explode's flat curve vs. naive's
-straggler, with provisioning overhead that amortizes at scale.
+`runtime_version`. This is the run-level scaling-and-efficiency story: how wall-clock and overhead move
+with the series and model counts and the chosen runtime, with provisioning overhead that amortizes at
+scale. The per-family runtime/hardware breakdown that composes each run lives in `v_run_jobs`.
+
+### `v_run_jobs` — what jobs ran, on what runtime/hardware, and how did each fare?
+
+One row per `(run_id, family)` = the run's DAG as executed: the deterministic `job_id`, the
+`attempt`, the resolved `runtime` / `spark_mode` / `hardware` / `gpu_type`, the platform's own
+`system_job_id`, the per-job `status` / `created_at` / `runtime_seconds`, and the per-job
+`job_telemetry` unpacked into `total_wall_s` and `dcu_milli_seconds`. A `--force` re-run appends a
+higher-`attempt` job under the same `(run_id, family)`; the view keeps only the current one
+(`QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1`), so the `run_id → current job` map is one row
+per family.
 
 ### `v_model_leaderboard` — which model won, per run?
 

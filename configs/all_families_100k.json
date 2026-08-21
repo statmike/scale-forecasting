@@ -1,5 +1,5 @@
 {
-  "run_name": "all_methods_100k",
+  "run_name": "all_families_100k",
   "python_runtime": "ray",
   "data": {
     "source_table": "source_series_iceberg",

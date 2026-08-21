@@ -1,0 +1,22 @@
+{
+  "run_name": "per_family_runtimes_demo",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 50
+  },
+  "models": ["theta", "holtwinters", "xgboost", "neuralprophet", "arima_plus"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "runtime": "ray",
+        "hardware": "gpu"
+      }
+    }
+  }
+}

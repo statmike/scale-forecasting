@@ -22,8 +22,7 @@ schema) surfaces as a single `ConfigError`.
 |-------|------|---------|---------|
 | `run_name` | `str` | *required* | Human name for the run. |
 | `data` | `DataConfig` | *required* | Where the series come from and their shape. |
-| `python_runtime` | `"spark"` \| `"ray"` | `"spark"` | Which Python runtime runs the Python models (see below). |
-| `spark_method` | `"explode"` \| `"multi"` \| `"naive"` \| `null` | `null` | Spark fan-out strategy; only meaningful when `python_runtime="spark"` (see below). |
+| `python_runtime` | `"spark"` \| `"ray"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
 | `models` | `list[str]` | *required* (≥1) | Model names to run (see `playground --list`). |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
 | `backtest` | `BacktestConfig` | `{}` | Time-series cross-validation. |
@@ -33,29 +32,25 @@ schema) surfaces as a single `ConfigError`.
 
 **Cross-field rules** (enforced after parsing):
 
-- `python_runtime="spark"` with no `spark_method` → defaults to `"explode"`. `python_runtime="ray"`
-  with *any* `spark_method` set → error (Ray has no fan-out method).
 - Duplicate entries in `models` → error.
 - `hpo.enabled` requires `backtest.enabled` → error otherwise (HPO tunes on folds).
 - `ensemble.enabled` without `backtest.enabled` → the **learned** strategies (`nnls`/`ridge`/`xgb`)
   are dropped with a warning (they need OOF); calculated strategies remain. Not an error.
 
-**`python_runtime` — where the Python models run** (BigQuery-native models always run in parallel in
-BigQuery regardless of this choice):
+**`python_runtime` — the run-level default runtime for the Python model families** (the native family
+always runs in parallel in BigQuery, regardless of this choice):
 
-- `spark` (default) — Dataproc Serverless. The **100k CPU workhorse**; pick a `spark_method` below.
+- `spark` (default) — Dataproc Serverless. The **100k CPU workhorse**; it fans out one task per
+  `(series, model)` cell (series cross-joined with the family's models), so a family's job finishes in
+  ~its slowest cell.
 - `ray` — Ray on Vertex AI. Its reason to exist is **fractional-GPU packing** for NeuralProphet (many
   series share one T4); the Ray `compute` knobs apply.
 
-**`spark_method` — how Spark fans the work out** (all give the *same* forecasts; they differ in the
-unit of parallelism and thus speed). Engines in
-[`engines/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/engines):
-
-| Method | Fan-out unit | Best for | Watch out |
-|--------|-------------|----------|-----------|
-| `explode` (default) | one task per **`(series, model)` cell** (series cross-joined with models) | max parallelism at scale — a run finishes in ~its slowest *cell* | many small tasks |
-| `multi` | one child `explode` **batch per model family** (statistical / ml / deep-learning), all under one `run_id` | isolating a heavy model family into its own batch | more orchestration; submit-side only |
-| `naive` | one task per **whole series** (its models run sequentially inside the task) | tiny runs / a baseline to beat | drags on its slowest *series* — the deliberate straggler anti-pattern |
+A run resolves its models into **one job per family** (`statistical` / `ml` / `deep_learning`, plus
+`native` in BigQuery), all running in parallel under one `run_id`. Each Python family runs on
+`python_runtime` unless it is overridden **per family** via `compute.families` (below) — so one run
+can put its statistical family on Spark and its deep-learning family on Ray. See the DAG model in
+[architecture.md](./architecture.md).
 
 ## `data` — `DataConfig`
 
@@ -217,10 +212,11 @@ fleet-wide before combining. `0.0` (default) prunes nothing.
 ## `compute` — `ComputeConfig`
 
 Runtime scale, dependency delivery, and cost guardrails. Defaults are tuned for a first run; the Ray
-knobs only matter when `python_runtime="ray"`.
+knobs only matter for a family that runs on Ray.
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
+| `families` | `dict[family → FamilyCompute]` | `{}` | keys ∈ `statistical`/`ml`/`deep_learning` | Per-family runtime/hardware overrides (see below). |
 | `max_parallelism` | `int` | `1000` | `> 0` | Max parallel tasks. |
 | `bucket_target_cells` | `int` | `8` | `> 0` | Target cells per Spark bucket (shuffle-partition sizing). |
 | `machine_family` | `str` | `"auto"` | — | *(Reserved — declared, not yet consumed.)* |
@@ -255,13 +251,49 @@ spec is hashed into `run_id` and stamped to `run_registry.job_telemetry`. Set `r
 for the proven fixed-size path (no autoscaling spec). See the Ray runtime in
 [architecture.md](./architecture.md).
 
+### `compute.families` — per-family runtime & hardware
+
+By default every Python family runs on the run-level `python_runtime` on CPU. `compute.families` maps
+a family name to a `FamilyCompute` that overrides that placement for **that family only** — the lever
+behind "one run, a job per family, each on its own runtime". Every `FamilyCompute` field is optional;
+an unset field inherits the run-level default. The `native` family is never listed here (it always
+runs in BigQuery).
+
+| Field | Type | Options | Purpose |
+|-------|------|---------|---------|
+| `runtime` | `str` | `"spark"` \| `"ray"` | Runtime for this family (overrides `python_runtime`). |
+| `spark_mode` | `str` | `"serverless"` \| `"cluster"` | Spark launch mode (Spark only). `"cluster"` runs on a Dataproc cluster — needed for a T4 GPU on Spark. |
+| `spark_cluster_name` | `str` | — | Reuse an existing Dataproc cluster by name (requires `spark_mode="cluster"`). |
+| `hardware` | `str` | `"cpu"` \| `"gpu"` | Hardware profile for this family (GPU only for `deep_learning`). |
+| `gpu_type` | `str` | `"T4"` \| `"L4"` | GPU type when `hardware="gpu"`. |
+
+**Cross-field rules** (enforced at config-load):
+
+- `spark_mode` / `spark_cluster_name` are valid only when `runtime="spark"`; `spark_cluster_name`
+  requires `spark_mode="cluster"`.
+- A GPU (`hardware="gpu"` or `gpu_type` set) is allowed **only** for the `deep_learning` family.
+- A T4 on Spark requires `spark_mode="cluster"` (Serverless can't attach a T4) — or route the family
+  to `runtime="ray"`.
+- `hardware="cpu"` with a `gpu_type` set → error (drop `gpu_type` or set `hardware="gpu"`).
+
+```json
+"compute": {
+  "families": {
+    "deep_learning": { "runtime": "ray", "hardware": "gpu", "gpu_type": "T4" }
+  }
+}
+```
+
+That routes the deep-learning family (e.g. `neuralprophet`) to Ray-on-GPU while the statistical and ml
+families stay on the default Spark runtime and the native family runs in BigQuery — four families,
+three runtimes, one `run_id`. See [`configs/per_family_runtimes_demo.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/per_family_runtimes_demo.json).
+
 ## A minimal config
 
 ```json
 {
   "run_name": "my first run",
   "python_runtime": "spark",
-  "spark_method": "explode",
   "data": { "source_table": "source_series_iceberg", "horizon": 28, "series_limit": 100 },
   "models": ["theta", "holtwinters", "arima_plus"],
   "features": { "holidays": ["US"] }

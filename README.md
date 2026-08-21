@@ -32,10 +32,12 @@ can open any file, understand it in one read, and fork it to their needs.
 parallel, with backtesting, custom holidays, and ensembling built in. One JSON config describes the
 whole run.
 
-- **Three runtimes, your pick.** Two **Python** runtimes — Dataproc Serverless (**Spark**) and
-  **Ray** on Vertex AI — run the identical per-series unit of work (pick one per run); **BigQuery**
-  runs its SQL-only native models **in parallel** with either, no Python compute. See
-  [Methods](#methods) and [The three runtimes](#the-three-runtimes).
+- **One run, a job per model family.** A config's models are grouped into families
+  (statistical / ml / deep-learning / native) and each family runs as its **own parallel job** under
+  one `run_id`. Two **Python** runtimes — Dataproc Serverless (**Spark**) and **Ray** on Vertex AI —
+  run the identical per-series unit of work, chosen **per family**; **BigQuery** runs its SQL-only
+  native models **in parallel**, no Python compute. See [Methods](#methods) and
+  [The three runtimes](#the-three-runtimes).
 - **Ray packs fractional GPUs.** Ray's reason to exist here is **NeuralProphet on fractional GPUs** —
   many series share one T4 (auto-profiled `gpu_fraction`), so a deep-learning model scales without a
   GPU per series. See [The three runtimes](#the-three-runtimes).
@@ -80,27 +82,28 @@ Plus **ensembles** across the base models (calculated: `mean`/`median`/`inverse_
 
 ## Architecture
 
-A run is one validated JSON config. It selects the data, the model list, one Python
-runtime, backtest and ensemble settings — and is persisted verbatim into the run
-registry, so the config *is* the experiment record.
+A run is one validated JSON config. It selects the data, the model list, the per-family runtimes,
+backtest and ensemble settings — and is persisted verbatim into the run registry, so the config *is*
+the experiment record. `main.run` resolves it into an **execution DAG**: one job per model family, all
+in parallel under one `run_id`, plus a downstream ensemble node.
 
 ```mermaid
 flowchart TB
-    cfg["RunConfig (one JSON)<br/>data · models · runtime · backtest · ensemble"]
-    entry["main.run(cfg)<br/>route by python_runtime + split BQ-native models"]
+    cfg["RunConfig (one JSON)<br/>data · models · per-family compute · backtest · ensemble"]
+    entry["main.run(cfg)<br/>plan_dag: group models by family → one job each"]
     cfg --> entry
 
-    subgraph py["Python model suite — one runtime per run (Spark XOR Ray)"]
+    subgraph py["Python families — each on its resolved runtime (Spark or Ray, per family)"]
         direction LR
-        spark["Spark engine<br/>Dataproc Serverless<br/>explode · multi · naive<br/>(100k CPU workhorse)"]
-        ray["Ray engine<br/>Ray on Vertex AI<br/>fractional-GPU packing (T4)<br/>CPU + GPU pools"]
+        spark["Spark job<br/>Dataproc Serverless<br/>one task per (series, model) cell<br/>(100k CPU workhorse)"]
+        ray["Ray job<br/>Ray on Vertex AI<br/>fractional-GPU packing (T4)<br/>CPU + GPU pools"]
     end
 
-    bq["BigQuery-native models<br/>arima_plus · timesfm<br/>SQL only — runs in parallel"]
+    bq["native family<br/>arima_plus · arima_plus_xreg · timesfm<br/>SQL only in BigQuery"]
 
-    entry -->|"python_runtime = spark"| spark
-    entry -->|"python_runtime = ray"| ray
-    entry -->|"native models, always parallel"| bq
+    entry -->|"statistical / ml family"| spark
+    entry -->|"deep-learning family (or any family, per config)"| ray
+    entry -->|"native family, always parallel"| bq
 
     cell["worker.run_cell(series, model, cfg)<br/>the ONE unit of work — identical local / Spark / Ray"]
     spark --> cell
@@ -111,16 +114,20 @@ flowchart TB
     data -.->|reads| ray
     data -.->|reads| bq
 
-    subgraph reg["Run registry — native-BigQuery tiers (Storage Write API)"]
+    subgraph reg["Run registry — native-BigQuery tables (Storage Write API)"]
         direction LR
-        r1["run_registry<br/>config + telemetry"]
+        r0["run_registry<br/>config + telemetry"]
+        r5["run_jobs<br/>per-family-job trace"]
         r2["forecast_metadata<br/>metrics + GCS artifact links"]
         r3["forecast_predictions<br/>forecast values"]
         r4["backtest_oof<br/>OOF rows for learned ensembling"]
     end
 
+    ens["ensemble node<br/>blends every family's base forecasts<br/>(after all family jobs land)"]
     cell -->|write_cells| reg
     bq -->|ML.FORECAST| reg
+    reg --> ens
+    ens --> reg
     art[("GCS artifacts<br/>fitted-model ObjectRefs")]
     cell -.->|persist_models| art
     art -.->|lineage| r2
@@ -128,25 +135,20 @@ flowchart TB
 
 <a name="the-three-runtimes"></a>
 
-- **The three runtimes.** The Python model suite runs on **Spark _xor_ Ray** (one per run).
-  BigQuery-native models are additive and run **in parallel** with either. So a run is
-  "Spark + optional BQ models" or "Ray + optional BQ models" — never Spark + Ray.
-  - **Spark** (Dataproc Serverless) is the 100k CPU workhorse, with three fan-out **methods** you
-    pick by config — same answers, different speed:
-
-    | `spark_method` | Fans out by | Best for | Watch out |
-    |----------------|-------------|----------|-----------|
-    | `explode` (default) | one task per `(series, model)` cell | max parallelism at scale — finishes in ~its slowest *cell* | many small tasks |
-    | `multi` | one child `explode` batch per model family | isolating a heavy model family | more orchestration |
-    | `naive` | one task per series (its models run sequentially) | tiny runs / a baseline to beat | drags on its slowest *series* — the straggler anti-pattern |
-
-    Notebooks [05](./notebooks/05_spark_naive.ipynb)/[06](./notebooks/06_spark_multi.ipynb) isolate
-    `naive`/`multi`; [07](./notebooks/07_scale_review.ipynb) compares all three at 100k.
+- **The three runtimes, chosen per family.** Each Python model family runs on **Spark _or_ Ray**,
+  chosen per family (`compute.families.<family>.runtime`, defaulting to the run-level
+  `python_runtime`); the native family always runs in BigQuery. So one run can put its statistical
+  family on Spark, its deep-learning family on Ray, and its native family in BigQuery — all in
+  parallel under one `run_id`, and a run's wall-clock is the *slowest* family, not the sum.
+  - **Spark** (Dataproc Serverless) is the 100k CPU workhorse: it fans out **one task per
+    `(series, model)` cell** (series cross-joined with the family's models), so a job finishes in
+    ~its slowest cell. See [07](./notebooks/07_scale_review.ipynb) for the 100k scale review.
   - **Ray** (on Vertex AI) is for **fractional-GPU packing**: NeuralProphet's per-series fit is small,
-    so many series share one T4 via an auto-profiled `gpu_fraction` — a deep-learning model at fleet
+    so many series share one T4 via an auto-profiled `gpu_fraction` — a deep-learning family at fleet
     scale without a GPU per series. (For CPU-only work at 100k, Spark is the workhorse; Ray earns its
     place on the GPU path.)
-  - **BigQuery** runs `arima_plus` / `timesfm` in SQL, in parallel, under the same `run_id`.
+  - **BigQuery** runs `arima_plus` / `arima_plus_xreg` / `timesfm` in SQL, in parallel, under the
+    same `run_id`.
 - **The one unit of work.** `worker.run_cell(series, model, cfg) -> CellResult` fits,
   (optionally) backtests, and predicts one `(series, model)` cell. The *same* function
   runs locally, inside a Spark Pandas UDF, and inside a Ray task. Engines differ only in
@@ -166,12 +168,13 @@ flowchart TB
 - **Scale without a bottleneck.** Workers return data, not RPCs; results are written to
   BigQuery in bulk (Storage Write API). Parallelism is bounded by compute, not a tracking
   server's QPS.
-- **Lineage.** Three native-BigQuery tiers — `run_registry` (config) →
-  `forecast_metadata` (metrics + GCS artifact links) → `forecast_predictions` (values),
-  plus `backtest_oof` for learned ensembling. These run-collection tables are always native
-  (native `JSON` columns, `WRITE_TRUNCATE` reseed) and are written via the **Storage Write API**;
-  the *input* table ships in both Iceberg and native so you can compare storage formats on the same
-  run shape. Full column-by-column layout: [output_schemas.md](./docs/output_schemas.md).
+- **Lineage.** Native-BigQuery tables — `run_registry` (config) → `forecast_metadata` (metrics + GCS
+  artifact links) → `forecast_predictions` (values), plus `backtest_oof` for learned ensembling and
+  `run_jobs`, which records one row per family job (its runtime, hardware, and platform job id) so a
+  run's cross-system trace is queryable. These run-collection tables are always native (native `JSON`
+  columns, `WRITE_TRUNCATE` reseed) and are written via the **Storage Write API**; the *input* table
+  ships in both Iceberg and native so you can compare storage formats on the same run shape. Full
+  column-by-column layout: [output_schemas.md](./docs/output_schemas.md).
 
 Read `src/scale_forecasting/config.py` (the run contract) and
 `src/scale_forecasting/worker.py` (the unit of work) to see the whole shape.
@@ -205,16 +208,11 @@ Python-runtime models on an autoscaling Ray-on-Vertex cluster ∥ the BigQuery n
 works from any authenticated client — local or in-GCP — because the cluster is provisioned on a
 PSC-I network attachment with a dashboard-capable head node, wired by the Terraform network module).
 
-The last two run notebooks isolate the remaining Spark fan-out **methods** on the same 100 series:
-[`05_spark_naive`](./notebooks/05_spark_naive.ipynb) shows the `naive` straggler anti-pattern (a
-series' models run sequentially in one task), and [`06_spark_multi`](./notebooks/06_spark_multi.ipynb)
-shows `multi` fanning out one child `explode` batch per model family — all under **one** `run_id`.
-
 Finally, [`07_scale_review`](./notebooks/07_scale_review.ipynb) runs nothing — point it at one
-`run_id` per approach (e.g. the four `configs/*_100k.json` runs submitted via
-`python -m scale_forecasting.submit`) and it renders the **cross-approach comparison**: wall-clock
-and provisioning overhead from `v_run_summary`, and accuracy parity (same model, same answer across
-engines) from `v_model_leaderboard`.
+`run_id` per approach (e.g. the `configs/*_100k.json` runs) and it renders the **cross-approach
+comparison**: wall-clock and provisioning overhead from `v_run_summary`, the per-family-job placement
+from `v_run_jobs`, and accuracy parity (same model, same answer across runtimes) from
+`v_model_leaderboard`.
 
 Every notebook has a one-click **Run in Colab Enterprise** header — the Terraform-deployed runtime
 templates carry the `SF_*` run identity in their env, so it's open → pick a runtime → **Run all**,

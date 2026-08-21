@@ -1,7 +1,6 @@
 {
   "run_name": "explode_demo",
   "python_runtime": "spark",
-  "spark_method": "explode",
   "data": {
     "source_table": "source_series_iceberg",
     "horizon": 28,

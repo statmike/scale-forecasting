@@ -161,7 +161,7 @@ uv run python -m scale_forecasting.submit --config configs/explode_demo.json --e
 ## 4. Long runs on a persistent VM (when a run outlasts Cloud Shell)
 
 Some runs are **too long to babysit from Cloud Shell** — the full-suite Ray config
-`configs/all_methods_100k_full.json` (100k series × 7 models, **backtest on**, `persist_models`,
+`configs/all_families_100k_full.json` (100k series × 7 models, **backtest on**, `persist_models`,
 NeuralProphet on T4 GPUs) runs for **hours**. Cloud Shell isn't built for that: it idles out after
 ~20 min of inactivity and hard-caps a session at ~12 h, and when the tab closes it SIGHUPs your
 process. The Ray *cluster* survives server-side, but the **orchestrator** (`main.py`) is what polls
@@ -279,7 +279,7 @@ The canonical reset — the output-only `TRUNCATE` that **keeps** the seeded sou
 **7. Preflight offline** (resolves the config + estimates the fan-out, touches no GCP):
 
 ```bash
-uv run python -m scale_forecasting.main --config configs/all_methods_100k_full.json --dry-run
+uv run python -m scale_forecasting.main --config configs/all_families_100k_full.json --dry-run
 ```
 
 **8. Launch under `tmux` and detach.** `tmux` keeps the orchestrator alive on the VM when you close
@@ -288,7 +288,7 @@ file you can tail later:
 
 ```bash
 tmux new -s ray100k \
-  'uv run python -m scale_forecasting.main --config configs/all_methods_100k_full.json 2>&1 | tee ~/ray100k.log'
+  'uv run python -m scale_forecasting.main --config configs/all_families_100k_full.json 2>&1 | tee ~/ray100k.log'
 ```
 
 Detach with **`Ctrl-b` then `d`** (two keystrokes: hold Ctrl + tap `b`, release both, then tap `d`) —

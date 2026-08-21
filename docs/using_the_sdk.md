@@ -39,7 +39,7 @@ print(plan.bq_models)       # models routed to BigQuery-native
 # Run it. Spark/Ray and BigQuery-native run in parallel under one run_id.
 result = forecaster.run()
 print(result.run_id, result.dataset_ref)
-print(result.views)         # v_run_summary, v_model_leaderboard — query these, filtered by run_id
+print(result.views)         # v_run_summary, v_run_jobs, v_model_leaderboard — query by run_id
 ```
 
 `Forecaster` construction:
@@ -54,8 +54,14 @@ Useful methods and properties:
 
 - `.run_id` — the deterministic run_id for this config (pure hash; no GCP call).
 - `.dry_run() -> DryRunResult` — validate + report the planned fan-out and runtime split, offline.
+- `.dag() -> tuple[DagNode, ...]` — the planned execution DAG, offline: one node per model family
+  plus the ensemble, each with its deterministic `job_key`, resolved runtime/hardware, and upstream
+  deps (see [Plan the DAG and trace the jobs](#plan-the-dag-and-trace-the-jobs)).
 - `.run(*, spark=None) -> RunResult` — execute; pass a `SparkSession` (incl. a Spark Connect
   `DataprocSparkSession`) to run the Spark models in-process instead of as a remote batch.
+- `.jobs(run_id=None) -> list[JobTrace]` — the per-family cross-system trace of a run (from
+  `v_run_jobs`): where each family actually ran and its platform job id (see below). `[]` if the run
+  has no jobs yet.
 - `.review() -> RunResult` — a pointer to where a *past* run's results live, computed offline from
   the deterministic run_id. `dataset_ref` is `None` if the GCP identity can't be resolved.
 
@@ -69,6 +75,32 @@ settings = sf.Settings.from_terraform_outputs(tf_outputs)   # or sf.Settings.res
 forecaster = sf.Forecaster.from_file("configs/explode_demo.json", settings=settings)
 result = forecaster.run()
 ```
+
+### Plan the DAG and trace the jobs
+
+A run is a DAG of **one job per model family** (statistical / ml / deep-learning / native), each on
+its resolved runtime, plus a downstream ensemble node. Two methods expose that DAG — one offline
+(what *will* run) and one live (what *did*), lined up by the same deterministic `job_key`:
+
+```python
+forecaster = sf.Forecaster.from_file("configs/all_families_100k.json")
+
+# Offline — the planned DAG, no GCP. One DagNode per family + the ensemble.
+for node in forecaster.dag():
+    print(node.job_key, node.family, node.runtime, node.hardware, "→ deps:", node.depends_on)
+
+# Live — after (or during) a run, the per-family cross-system trace from v_run_jobs.
+for job in forecaster.jobs():        # defaults to this config's run_id
+    print(job.family, job.runtime, job.status, job.system_job_id, job.runtime_seconds)
+```
+
+- `dag()` returns `DagNode`s (`job_key`, `family`, `runtime`, `models`, `hardware`, `gpu_type`,
+  `spark_mode`, `depends_on`) — pure and offline, so you get every job's identity *before* the run.
+- `jobs()` returns `JobTrace`s (`family`, `job_key`, `system_job_id`, `runtime`, `status`,
+  `attempt`, `hardware`, `gpu_type`, `spark_mode`, `runtime_seconds`). `system_job_id` is the
+  platform's own id (a Dataproc batch/job id, a Ray `submission_id`, or a BigQuery job id), so you
+  can jump straight to that platform's console. Because it reads by `run_id`, it's a reattach path
+  from a fresh process.
 
 ---
 

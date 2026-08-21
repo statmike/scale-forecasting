@@ -18,7 +18,7 @@ surface.
 |---------|---------------|-----------------|---------------------|----------------------|-------------|-------------------|
 | **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11** | — | `pyproject.toml` `requires-python = ">=3.11,<3.12"`; Colab template PATCHed to `py311` |
 | **Custom container** | attached to batch + Spark Connect | — | — | **3.11** | Spark 3.5.x (from base) | `docker/Dockerfile` — `python3.11` venv on `debian:12-slim` |
-| **Dataproc batch** (`explode` / `multi`) | Serverless | **2.2** (default) | 3.12 | **3.11** ← *container wins* | Spark 3.5.3 | container image attached on **every** submit (`submit.py`), overriding base |
+| **Dataproc batch** (`explode`) | Serverless | **2.2** (default) | 3.12 | **3.11** ← *container wins* | Spark 3.5.3 | container image attached on **every** submit (`submit.py`), overriding base |
 | **Spark Connect** (nb01, interactive) | Serverless session | **2.3** | 3.11 | **3.11** | Spark 3.5.3 | runtime 2.3 base is already 3.11 **and** container attached |
 | **Ray on Vertex** (nb04) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 | `ray_submit.py` pins `python_version="3.11"`, `ray_version="2.47"` |
 | **BigQuery-native** (nb02: ARIMA_PLUS, TimesFM) | BigQuery engine | — | — | n/a (SQL) | — | no client Python on the compute path |

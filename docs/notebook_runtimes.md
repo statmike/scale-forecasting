@@ -45,9 +45,7 @@ Colab Enterprise templates can bake them in, so no environment cell is needed (s
 | `model_playground` | none (fully local) | 3.11 | pure local, no cloud | none | `sf-main` |
 | `02_bigquery_native` | BigQuery | 3.11 | orchestration only | none | `sf-main` |
 | `03_combo_and_ensemble` | Dataproc (submit) + BigQuery | 3.11 | submits a Spark batch ∥ BQ, runs on-cluster | none | `sf-main` |
-| `05_spark_naive` | Dataproc (submit) | 3.11 | submits a batch, runs on-cluster | none | `sf-main` |
 | `07_scale_review` | BigQuery (read-only) | 3.11 | reads the registry views | none | `sf-main` |
-| `06_spark_multi` | Dataproc (submit) | 3.11 | client submits, cluster runs | `[spark]` | `sf-main` |
 | `04_ray_on_vertex` | Ray on Vertex | 3.11 | client↔cluster Ray parity (2.47); an unsupported client Ray → HTTP 524 | `[ray]` | `sf-main` |
 | `01_spark_via_connect` | Dataproc Spark Connect | 3.11 | interactive Connect on runtime **2.3** (py3.11 workers); remote-batch fallback available | `[spark]` | `sf-main` |
 
@@ -119,7 +117,7 @@ Tiers escalate cost (each runs its tier plus the cheaper ones), gated like the o
 | Tier | Adds | Gate |
 |------|------|------|
 | `smoke` (default) | `02`, `07`, `model_playground` (BQ-only / local) | `@gcp` (`SF_PROJECT_ID` + ADC) |
-| `batch` | `01`, `03`, `05`, `06` (submit a Dataproc batch) | `SF_ENABLE_NB_BATCH` |
+| `batch` | `01`, `03` (submit a Dataproc batch) | `SF_ENABLE_NB_BATCH` |
 | `full` | `04_ray_on_vertex` (live Ray cluster) | `SF_ENABLE_NB_FULL` |
 
 ```bash

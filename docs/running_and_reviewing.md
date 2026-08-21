@@ -84,28 +84,27 @@ python -m scale_forecasting.main --config configs/explode_demo.json --dry-run
 
 ## 2. Submit the run
 
-Pick the entrypoint by runtime. Every one takes `--config` and stages your current `src/` + the
-config JSON to GCS, then submits.
-
-**Spark (Dataproc):** `--engine` selects the fan-out method.
+The one entrypoint that runs the **whole config** is `main.run` — it plans the DAG (one job per model
+family) and launches every family in parallel under one `run_id`, each on its resolved runtime, then
+the ensemble node:
 
 ```bash
-# explode — the hero path: one task per (series, model) cell
-python -m scale_forecasting.submit --config configs/explode_demo.json --engine explode
-
-# naive — bucket on series (models run sequentially per series; the straggler anti-pattern)
-python -m scale_forecasting.submit --config configs/naive_demo.json  --engine naive
-
-# multi — one child explode batch per model family, all under ONE run_id
-python -m scale_forecasting.submit --config configs/multi_demo.json  --engine multi
+python -m scale_forecasting.main --config configs/explode_demo.json
 ```
 
 Useful flags: `--n-series N` overrides `series_limit` (scale the same config up or down without
-editing it), `--max-executors N` caps executors, `--no-wait` returns as soon as it's submitted.
+editing it), `--max-executors N` caps a Spark batch's executors, `--force` re-runs (a fresh attempt
+under the same `run_id`).
 
-**Ray (Vertex):**
+Under the hood `main.run` launches each family through its runtime's submit-side entrypoint — you can
+also drive those directly for a single-runtime job. Both stage your current `src/` + the config JSON
+to GCS, then submit:
 
 ```bash
+# Spark family → Dataproc (explode fan-out: one task per (series, model) cell)
+python -m scale_forecasting.submit --config configs/explode_demo.json --engine explode
+
+# Ray family → Vertex
 python -m scale_forecasting.ray_submit --config configs/ray_cpu_demo.json
 ```
 
@@ -113,11 +112,11 @@ Ray flags: `--n-series N`, `--cluster-name NAME` (reuse a standing cluster, skip
 create/teardown), `--no-wait`.
 
 **BigQuery-native models** need no separate submit — list them in `models` (e.g. `arima_plus`,
-`timesfm`) and they run **in parallel** with the Spark/Ray track under the same `run_id`. `main.run`
-orchestrates both.
+`timesfm`) and they run **in parallel** with the Python families under the same `run_id`; `main.run`
+orchestrates all of them.
 
-> **Scale knob.** The four `configs/*_100k.json` files are the demo configs at `series_limit=100000`
-> — the same four approaches, at scale. Submit them the same way (review spend first).
+> **Scale knob.** The `configs/*_100k.json` files are demo configs at `series_limit=100000` — the same
+> shapes, at scale. Submit them the same way (review spend first).
 
 ## 3. Watch it land
 
@@ -128,10 +127,19 @@ after the engine finishes, so poll briefly. The run header:
 SELECT * FROM `PROJECT.DATASET.v_run_summary` WHERE run_id = 'YOUR_RUN_ID';
 ```
 
-`v_run_summary` is one row per run: `status`, `spark_method`/`python_runtime`, `n_series`/`n_models`,
+`v_run_summary` is one row per run: `status`, `python_runtime`, `n_series`/`n_models`,
 the engine's `runtime_seconds`, plus the Dataproc telemetry overlay — `total_wall_s`,
 `overhead_seconds` and `overhead_fraction` (provisioning tax, which amortizes as series grow), and
 `dcu_milli_seconds` (the cost proxy).
+
+For the **per-family** breakdown — which family ran on which runtime/hardware, its platform job id,
+status, and per-job wall-clock — query `v_run_jobs` (one row per `(run_id, family)`, plus the
+ensemble node):
+
+```sql
+SELECT family, runtime, hardware, system_job_id, status, runtime_seconds
+FROM `PROJECT.DATASET.v_run_jobs` WHERE run_id = 'YOUR_RUN_ID';
+```
 
 ## 4. Review — which model won
 
@@ -149,14 +157,14 @@ ORDER BY mean_wape;
   are distinguishable on one board.
 - `n_cells` / `no_artifact_rate` — coverage and failure signal (a model failing every cell —
   e.g. a missing native lib — shows as `no_artifact_rate = 1.0`).
-- `median_fit_seconds` — per-cell fit time (the straggler signal under `naive`).
+- `median_fit_seconds` — per-cell fit time (the per-model straggler signal).
 - `mean_wape` / `mean_mae` — the decision metrics, populated where a backtest ran.
 
 The demo notebooks ([`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks)) wrap these two queries in a small polling helper
 and a chart; [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) compares several runs
 side by side.
 
-Both views read from the underlying registry tables (`run_registry`, `forecast_metadata`,
+These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or
 per-fold OOF truth — see [output_schemas.md](./output_schemas.md) for every column and how the tiers
 join.
@@ -198,8 +206,8 @@ python -m scale_forecasting.reset --yes      # actually drops
 
 | Command | Purpose |
 |---------|---------|
-| `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run (Spark/Ray ∥ BigQuery). Rejects `multi` — use `submit`. |
-| `python -m scale_forecasting.submit --config C --engine {explode,naive,multi}` | Submit a Spark run to Dataproc. |
+| `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run — a job per family in parallel (Spark/Ray ∥ BigQuery) under one `run_id`. |
+| `python -m scale_forecasting.submit --config C --engine explode` | Submit a single Spark family job to Dataproc. |
 | `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
