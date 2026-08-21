@@ -10,7 +10,7 @@ Serverless PySpark batch — the same code-delivery pattern as the seed (``pytho
 ``src/``, launched by a thin ``gs://`` shim). It calls `scale_forecasting.main.run` with the
 batch's own `SparkSession` **injected**: on that path (``main.run(cfg, spark=session)`` with
 ``python_runtime="spark"``) the Spark engine runs **in-process against the injected session**
-(``spark_explode``/``spark_naive``) and the BigQuery engine runs inline on the main thread — both
+(``spark_explode``) and the BigQuery engine runs inline on the main thread — both
 under one header. Critically, that branch imports **neither** ``.submit`` nor ``google-cloud-
 dataproc`` (the ``[spark]`` extra that is *not* in the runtime image), and the BigQuery client *is*
 in the image (the seed uses it). So the smoke needs no extra deps and no second batch.

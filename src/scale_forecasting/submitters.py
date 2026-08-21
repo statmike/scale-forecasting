@@ -69,12 +69,10 @@ class SparkSubmitter:
     ) -> None:
         if spark is not None:
             # In-process Spark over an injected (Connect or local) session — no remote batch submit.
-            # multi never reaches here (rejected by main._plan under one run_id): naive xor explode.
             # max_executors is a remote-batch dynamic-allocation cap; an injected session skips it.
-            from .engines import spark_explode, spark_naive
+            from .engines import spark_explode
 
-            engine = spark_naive if cfg.spark_method == "naive" else spark_explode
-            engine.run(
+            spark_explode.run(
                 cfg, models=models, manage_header=manage_header, settings=settings, spark=spark
             )
             return
@@ -82,7 +80,7 @@ class SparkSubmitter:
 
         submit_batch(
             cfg,
-            engine=cfg.spark_method or "explode",
+            engine="explode",
             models=models,
             manage_header=manage_header,
             settings=settings,

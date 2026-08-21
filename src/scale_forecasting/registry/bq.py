@@ -157,7 +157,6 @@ def assemble_header_row(cfg: RunConfig, run_id: str, created_at: datetime) -> di
         "user_id": None,
         "git_sha": None,
         "python_runtime": cfg.python_runtime,
-        "spark_method": cfg.spark_method,
         "bq_models": [],
         "backtest_on": cfg.backtest.enabled,
         "decision_metric": cfg.backtest.decision_metric,
@@ -655,7 +654,6 @@ _HEADER_PARAM_TYPES: dict[str, str] = {
     "user_id": "STRING",
     "git_sha": "STRING",
     "python_runtime": "STRING",
-    "spark_method": "STRING",
     "bq_models": "ARRAY<STRING>",
     "backtest_on": "BOOL",
     "decision_metric": "STRING",
@@ -1021,9 +1019,9 @@ def run_header(
     `HeaderFinalizer.finalize`; on an exception ``update_header(status=FAILED, runtime_seconds=…)``
     then re-raise, so a crashed run records a terminal status instead of stranding at RUNNING.
 
-    In **contributor mode** (``manage=False``): touches no header at all — `main.run` /
-    `submit_multi` own the single shared row — so this only yields the finalizer for uniform call
-    shape. The body may still populate it; nothing is written.
+    In **contributor mode** (``manage=False``): touches no header at all — `main.run` owns the
+    single shared row — so this only yields the finalizer for uniform call shape. The body may
+    still populate it; nothing is written.
     """
     fin = HeaderFinalizer()
     if manage:

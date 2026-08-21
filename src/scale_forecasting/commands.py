@@ -123,7 +123,6 @@ def build_spark_commands(
     gcloud += ["--", *driver]
 
     universal_argv = ["python", "-m", "scale_forecasting.submit", "--config-uri", config_uri]
-    universal_argv += ["--engine", engine]
     if max_executors is not None:
         universal_argv += ["--max-executors", str(max_executors)]
 

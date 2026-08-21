@@ -35,13 +35,6 @@ Dataproc Serverless batch (`submit_batch`), ``"ray"`` an autoscaling
 Vertex Ray cluster (`submit_ray`) — either way on the worker
 thread, in contributor mode, in parallel with the in-process BigQuery engine under one run_id.
 
-Out of scope here (rejected with a clear pointer): ``spark_method="multi"``. multi fans out *N*
-family batches, but `run`'s parallelism drives exactly one Python-runtime future alongside the
-in-process BigQuery engine — it can't own multi's N-batch fan-out. multi has its own single-run_id
-orchestrator (`submit_multi`): use ``python -m
-scale_forecasting.submit --engine multi``. ``multi`` is a Spark-only method, so the guard only
-applies when ``python_runtime="spark"``.
-
 Public surface: ``run(cfg, *, dry_run=False) -> run_id``, the offline ``plan_run(cfg) ->
 LaunchPlan`` (id + fanout + launch-command templates), ``stage_run(cfg) -> LaunchPlan`` (upload
 artifacts + runnable commands + reproducibility manifest, no submit), and
@@ -101,7 +94,6 @@ class LaunchPlan:
     python_runtime: str
     python_models: list[str]
     bq_models: list[str]
-    spark_method: str | None
     fanout: Fanout
     staged: bool
     config_uri: str | None
@@ -114,50 +106,27 @@ class LaunchPlan:
 class _RunPlan:
     """The offline-resolvable shape of a run: its id and the per-runtime executed subsets.
 
-    Pure product of the config (`_plan`) — no GCP. ``spark_method`` is the engine the Spark
-    batch runs as (``None`` when there are no Python models to run).
+    Pure product of the config (`_plan`) — no GCP.
     """
 
     run_id: str
     python_models: list[str]
     bq_models: list[str]
-    spark_method: str | None
 
 
 def _plan(cfg: RunConfig) -> _RunPlan:
-    """Resolve the run_id + per-runtime model split, rejecting shapes this orchestrator can't run.
+    """Resolve the run_id + per-runtime model split (pure and offline).
 
-    Pure and offline: computes ``make_run_id(cfg)`` and `router.split_by_runtime`, then guards
-    the one out-of-scope shape — but only when it would actually bite, i.e. when there *are*
-    Python-runtime models to run on the Spark runtime:
-
-    * ``python_runtime="spark"`` + ``spark_method="multi"`` → `ConfigError` pointing at
-      ``submit --engine multi`` (multi fans out one batch *per family*; this orchestrator drives a
-      single Python-runtime future, not multi's N-batch fan-out — multi shares one run_id via its
-      own orchestrator, `submit.submit_multi`). ``multi`` is Spark-only, so the Ray runtime
-      never trips it.
-
-    Both ``python_runtime="spark"`` and ``python_runtime="ray"`` are supported (dispatched in
-    `run`). An all-BigQuery config is unaffected by the guard (the Python runtime is never
-    used), so it plans and runs regardless of ``python_runtime`` / ``spark_method``.
+    Computes ``make_run_id(cfg)`` and `router.split_by_runtime`. Both ``python_runtime="spark"``
+    and ``python_runtime="ray"`` are supported (dispatched in `run`); an all-BigQuery config plans
+    and runs regardless of ``python_runtime``.
     """
     run_id = make_run_id(cfg)
     python_models, bq_models = split_by_runtime(cfg)
-
-    if python_models and cfg.python_runtime == "spark" and cfg.spark_method == "multi":
-        raise ConfigError(
-            "main.run cannot run spark_method='multi': multi fans out one batch per model "
-            "family, but this orchestrator drives a single Python-runtime future in parallel "
-            "with BigQuery, not multi's N-batch fan-out. Run it with its own single-run_id "
-            "orchestrator, `python -m scale_forecasting.submit --engine multi`, or choose "
-            "spark_method='explode'/'naive' to orchestrate it in parallel with BigQuery here."
-        )
-
     return _RunPlan(
         run_id=run_id,
         python_models=python_models,
         bq_models=bq_models,
-        spark_method=cfg.spark_method,
     )
 
 
@@ -504,7 +473,7 @@ def _assemble_commands(
     from .submit import BatchInfra, _batch_id
 
     assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
-    engine = plan.spark_method or "explode"
+    engine = "explode"
     models_arg = plan.python_models if plan.bq_models else None
     commands["spark"] = build_spark_commands(
         settings=settings,
@@ -575,9 +544,9 @@ def plan_run(
 ) -> LaunchPlan:
     """Resolve a run offline to its id, fanout, runtime split, and launch-command *templates*.
 
-    The "plan" verb: pure and GCP-free. Computes `_plan` (rejecting Spark ``multi`` up front, so a
-    bad shape fails fast even in a dry run) and `estimate_fanout`, then — best-effort — resolves the
-    infra identity, consults the registry for the exists-vs-new verdict (`_check_idempotency`), and
+    The "plan" verb: pure and GCP-free. Computes `_plan` and `estimate_fanout`, then — best-effort —
+    resolves the infra identity, consults the registry for the exists-vs-new verdict
+    (`_check_idempotency`), and
     builds the two-tier launch commands with the URIs the artifacts *will* land at (nothing is
     uploaded). When the infra can't be resolved offline (no ``SF_*`` env), the commands are omitted
     (``commands=None``) and the verdict is *unknown*, but the id/fanout/split are still returned, so
@@ -615,7 +584,6 @@ def plan_run(
         python_runtime=cfg.python_runtime,
         python_models=plan.python_models,
         bq_models=plan.bq_models,
-        spark_method=plan.spark_method,
         fanout=fanout,
         staged=False,
         config_uri=config_uri,
@@ -642,7 +610,6 @@ def _manifest_dict(result: LaunchPlan, *, created_at: str) -> dict[str, object]:
         "run_id": result.run_id,
         "created_at": created_at,
         "python_runtime": result.python_runtime,
-        "spark_method": result.spark_method,
         "python_models": result.python_models,
         "bq_models": result.bq_models,
         "fanout": {
@@ -714,7 +681,6 @@ def stage_run(
         python_runtime=cfg.python_runtime,
         python_models=plan.python_models,
         bq_models=plan.bq_models,
-        spark_method=plan.spark_method,
         fanout=fanout,
         staged=True,
         config_uri=config_uri,

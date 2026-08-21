@@ -1,4 +1,4 @@
-"""Shared Spark-engine plumbing — the pieces ``spark_explode`` and ``spark_naive`` both need.
+"""Shared Spark-engine plumbing — the pieces the ``spark_explode`` engine is built from.
 
 Split along the pure/I-O seam so the interesting logic is offline-testable:
 
@@ -10,17 +10,12 @@ Split along the pure/I-O seam so the interesting logic is offline-testable:
   `read_source_series` (connector read + deterministic ``series_limit`` subset),
   `add_bucket`, `cross_join_models`, `status_schema`, `make_group_runner`.
 
-**Fan-out mechanics.** Both engines shuffle cells into *buckets* and run one Spark task per bucket
-(``groupBy(bucket).applyInPandas``). The bucket key is the natural unit of independence for the
-method (`bucket_key_cols`):
-
-* ``explode`` buckets on ``(ts_id, model_type)`` — the whole *cell*. A slow ``(series, deep-model)``
-  cell lands in its own bucket while that same series' fast cells sit in *other* buckets and run
-  concurrently, so the scheduler spreads cells and autoscales. Every history row of a given cell
-  shares both keys, so a cell's full series stays intact in one bucket.
-* ``naive`` buckets on ``ts_id`` alone — all of a series' models land together and run sequentially
-  in one task (the loop in `run_group`). One slow model holds an executor for the whole
-  series → the straggler anti-pattern the demo exists to show.
+**Fan-out mechanics.** The engine shuffles cells into *buckets* and runs one Spark task per bucket
+(``groupBy(bucket).applyInPandas``). The bucket key is the natural unit of independence
+(`bucket_key_cols`): a cell — ``(ts_id, model_type)``. A slow ``(series, deep-model)`` cell lands in
+its own bucket while that same series' fast cells sit in *other* buckets and run concurrently, so
+the scheduler spreads cells and autoscales. Every history row of a given cell shares both keys, so a
+cell's full series stays intact in one bucket.
 
 **Writes are executor-side, once per bucket.** `make_group_runner` wraps `run_group`
 and calls `write_cells` on each bucket's
@@ -65,17 +60,12 @@ STATUS_COLUMNS: tuple[str, ...] = ("ts_id", "model_type", "status", "fit_seconds
 
 
 def bucket_key_cols(cfg: RunConfig) -> list[str]:
-    """The columns whose hash defines a bucket — the method's unit of independence.
+    """The columns whose hash defines a bucket — the engine's unit of independence.
 
-    ``naive`` → ``[ts_id]`` (a whole series per task, models run sequentially → stragglers).
-    ``explode``/``multi`` → ``[ts_id, model_type]`` (a whole cell per bucket, cells spread so a
-    slow cell can't block fast ones). See the module docstring for why this is the crux of the
-    scaling demo.
+    ``[ts_id, model_type]`` — a whole cell per bucket, so cells spread across tasks and a slow cell
+    can't block fast ones. See the module docstring for why this is the crux of the scaling story.
     """
-    id_col = cfg.data.ts_id_col
-    if cfg.spark_method == "naive":
-        return [id_col]
-    return [id_col, _MODEL_COL]
+    return [cfg.data.ts_id_col, _MODEL_COL]
 
 
 def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int:
@@ -89,17 +79,17 @@ def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int
     of the old ``min(cells, max_parallelism)`` which silently fattened frames past the executor
     memory budget once ``cells`` outgrew the cap (the 100k OOM). Clamped to ``[1, _MAX_BUCKETS]``.
 
-    With ``series_limit`` set the cell count is known offline (series × models for explode, series
-    for naive); an unbounded run falls back to ``max_parallelism`` buckets (best guess without a
-    known cell count). ``models`` is the executed subset; ``None`` means ``cfg.models`` — so
-    a standalone run and a subset run size buckets to the work they actually fan out.
+    With ``series_limit`` set the cell count is known offline (series × models); an unbounded run
+    falls back to ``max_parallelism`` buckets (best guess without a known cell count). ``models`` is
+    the executed subset; ``None`` means ``cfg.models`` — so a standalone run and a subset run size
+    buckets to the work they actually fan out.
     """
     executed = models if models is not None else cfg.models
     target = cfg.compute.bucket_target_cells
     limit = cfg.data.series_limit
     if limit is None:
         return max(1, min(cfg.compute.max_parallelism, _MAX_BUCKETS))
-    cells = limit if cfg.spark_method == "naive" else limit * len(executed)
+    cells = limit * len(executed)
     return max(1, min(math.ceil(cells / target), _MAX_BUCKETS))
 
 
@@ -114,20 +104,20 @@ def run_group(
 ) -> tuple[list[CellResult], pd.DataFrame]:
     """Run every cell in one group's pandas frame; pure — no Spark, no BigQuery.
 
-    The frame is one bucket's rows. If it carries the internal model column (explode/multi: the
-    series were cross-joined with the model list), each ``(ts_id, model_type)`` sub-frame is one
-    cell. Otherwise (naive) every model in the executed list is run for each ``ts_id`` in a
-    sequential loop. Helper columns are dropped so each sub-frame is a clean series frame for
-    `run_cell` (which derives the run_id from ``cfg`` itself, so no
+    The frame is one bucket's rows. If it carries the internal model column (the series were
+    cross-joined with the model list, as the Spark/Ray fan-out does), each ``(ts_id, model_type)``
+    sub-frame is one cell. Otherwise — an untagged frame, e.g. direct SDK use — every model in the
+    executed list is run for each ``ts_id`` in a loop. Helper columns are dropped so each sub-frame
+    is a clean series frame for `run_cell` (which derives the run_id from ``cfg`` itself, so no
     id needs threading here). Returns the `CellResult` list (for the writer) and the compact
     `STATUS_COLUMNS` frame (for the driver's header roll-up). Never raises per cell —
     ``run_cell`` maps a failure to a ``status="error"`` result.
 
     ``models`` is the executed subset: under `main.run` a mixed config routes only its
-    Python-runtime models here while the BigQuery-native models run elsewhere, so the naive loop
-    must iterate the subset, not the full ``cfg.models`` (which would feed a native model into
-    ``run_cell`` → ``NotImplementedError``). ``None`` means ``cfg.models`` (standalone). The explode
-    path takes its models from the cross-join column, so the subset only affects the naive loop.
+    Python-runtime models here while the BigQuery-native models run elsewhere, so the untagged-frame
+    loop must iterate the subset, not the full ``cfg.models`` (which would feed a native model into
+    ``run_cell`` → ``NotImplementedError``). ``None`` means ``cfg.models`` (standalone). A tagged
+    frame takes its models from the cross-join column, so the subset only affects the untagged loop.
 
     ``params_by_model`` is the fleetwide-HPO resolution: ``{model: tuned params}`` computed
     once on the driver and passed to every cell of that model, so the tuned params apply fleet-wide
@@ -145,12 +135,12 @@ def run_group(
 
     results: list[CellResult] = []
     if _MODEL_COL in pdf.columns:
-        # explode/multi: the cross-join tagged each row with its model; one cell per (ts_id, model).
+        # tagged frame: the cross-join tagged each row with its model; one cell per (ts_id, model).
         for (_ts_id, model_name), sub in pdf.groupby([id_col, _MODEL_COL], sort=False):
             series = sub.drop(columns=helper_cols)
             results.append(run_cell(series, str(model_name), cfg, by_model.get(str(model_name))))
     else:
-        # naive: one task per series, all models sequentially — the deliberate anti-pattern.
+        # untagged frame: one group per series, every executed model run for it in a loop.
         for _ts_id, sub in pdf.groupby(id_col, sort=False):
             series = sub.drop(columns=helper_cols)
             for model_name in executed:
@@ -277,8 +267,8 @@ def resolve_fleetwide_hpo(
     is enabled at ``fleetwide`` granularity. When it is, collects ``hpo.sample_size`` series to the
     driver (`sample_series_to_driver`) and tunes the executed model subset on them
     (`resolve_fleetwide`), scoping the tuning to the models that will
-    actually run. Kept in ``spark_io`` so all Spark engines (explode/naive) share one
-    pre-pass; the Ray engine has its own analog over its already-collected pandas source.
+    actually run. Kept in ``spark_io`` as shared engine plumbing (one pre-pass); the Ray engine has
+    its own analog over its already-collected pandas source.
     """
     if not (cfg.hpo.enabled and cfg.hpo.granularity == "fleetwide"):
         return None
@@ -360,7 +350,7 @@ def make_group_runner(
     (`write_cells`, executor-side, once per bucket), and
     returns only the compact status frame — so no forecast payload ever crosses back to the driver.
 
-    ``models`` is the executed subset, forwarded to `run_group` so the naive loop runs
+    ``models`` is the executed subset, forwarded to `run_group` so the untagged-frame loop runs
     only the Python-runtime models under a mixed `main.run` config. ``None`` → ``cfg.models``.
 
     ``params_by_model`` is the fleetwide-HPO resolution, captured in the closure exactly like

@@ -155,8 +155,8 @@ def test_spark_max_executors_sets_native_property_and_universal_flag() -> None:
     cmds = build_spark_commands(
         settings=_settings(),
         infra=_infra(),
-        engine="naive",
-        batch_id="sf-naive-x",
+        engine="explode",
+        batch_id="sf-explode-x",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -168,8 +168,6 @@ def test_spark_max_executors_sets_native_property_and_universal_flag() -> None:
     assert universal[3:] == [
         "--config-uri",
         "gs://c/r.json",
-        "--engine",
-        "naive",
         "--max-executors",
         "4",
     ]
@@ -192,8 +190,6 @@ def test_spark_universal_omits_max_executors_when_unset() -> None:
         "scale_forecasting.submit",
         "--config-uri",
         "gs://c/r.json",
-        "--engine",
-        "explode",
     ]
 
 

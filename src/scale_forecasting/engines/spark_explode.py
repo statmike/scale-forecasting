@@ -1,11 +1,11 @@
-"""Spark method A — cross-join series × model, grouped Pandas UDF.
+"""The Spark engine — cross-join series × model, grouped Pandas UDF.
 
-The hero fan-out. Each ``(ts_id, model_type)`` cell is an independent unit of work: the source
+The per-cell fan-out. Each ``(ts_id, model_type)`` cell is an independent unit of work: the source
 series are cross-joined with the (small) model list, hashed into per-cell buckets, and run one
 Spark task per bucket via ``groupBy(bucket).applyInPandas``. A slow ``(series, deep-model)`` cell
 occupies its own bucket while that series' fast cells run concurrently in other buckets, so the
-autoscaler spreads work and no single cell blocks the batch — the property ``spark_naive``
-deliberately lacks. This is the method that carries the 10 → 100 → 1k → 100k scale-up.
+autoscaler spreads work and no single cell blocks the batch. This is what carries the
+10 → 100 → 1k → 100k scale-up.
 
 Runs on the Dataproc Serverless driver via ``spark_entry`` (the ``gs://`` launcher). All the
 reusable mechanics — connector read + deterministic ``series_limit`` subset, cross-join, bucketing,

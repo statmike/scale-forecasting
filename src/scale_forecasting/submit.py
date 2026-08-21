@@ -18,15 +18,9 @@ What `submit_batch` does:
    from `Settings` via `infra_args_from`.
 4. **Submit** through `BatchControllerClient` (regional endpoint),
    optionally capping executors (``--max-executors`` → ``spark.dynamicAllocation.maxExecutors``, how
-   the naive demo is throttled), and return the batch id.
+   a run is throttled), and return the batch id.
 
-``multi`` is orchestrated here too (`submit_multi`): it fans out one child ``explode`` batch
-per model family — all under **one** shared ``run_id`` and one ``run_registry`` header, the
-same contributor-mode contract `main.run` uses. Family-splitting happens submit-side (not
-on-cluster) because ``google-cloud-dataproc`` lives in the ``[spark]`` extra and is absent from the
-runtime container.
-
-Public surface: ``BatchInfra``, ``submit_batch``, ``submit_multi``, ``main``.
+Public surface: ``BatchInfra``, ``submit_batch``, ``main``.
 """
 
 from __future__ import annotations
@@ -83,7 +77,7 @@ class BatchInfra:
     """Dataproc-batch infra identity — what submitting a batch needs beyond `Settings`.
 
     Resolved from ``SF_*`` env (parity with ``Settings``) or ``terraform output``. Frozen and
-    passed down so a run's every child batch (multi) targets the same infra.
+    passed down so a run's batch targets the resolved infra.
     """
 
     code_bucket: str  # bucket the package zip + launcher + config JSON are staged to
@@ -173,7 +167,7 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
     - ``dcu_milli_seconds`` / ``shuffle_storage_gb_seconds`` — approximate usage (billing proxy +
       shuffle pressure).
     - ``driver_cores`` / ``executor_cores`` / ``executor_instances`` / ``max_executors`` — the
-      resolved cluster sizing and the autoscaling cap (our naive throttle shows up here).
+      resolved cluster sizing and the autoscaling cap (the executor throttle shows up here).
     - ``runtime_version`` / ``container_image`` — what actually ran (reproducibility).
     - ``service_account`` / ``subnetwork_uri`` — the identity + network the batch had access to.
 
@@ -251,7 +245,7 @@ def build_batch(
 
     Mirrors the Terraform seed batch: runtime container + package zip on ``python_file_uris``, the
     ``spark_main`` shim as the ``gs://`` main file, ``--engine``/``--config-uri`` + the ``--sf-*``
-    infra args. ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (naive throttle).
+    infra args. ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (executor throttle).
 
     ``models`` / ``manage_header`` carry the on-cluster contract: ``--models m1,m2`` restricts
     the executed subset (run_id still derives from the full staged config) and ``--manage-header
@@ -363,8 +357,8 @@ def submit_batch(
 ) -> str:
     """Stage code + config and submit one Dataproc Serverless forecast batch; return its batch id.
 
-    Resolves infra from the environment when not passed. ``engine`` is the Spark method
-    (``explode``/``naive``); ``multi`` fans out via `submit_multi`. ``n_series`` overrides
+    Resolves infra from the environment when not passed. ``engine`` names the Spark engine
+    (``explode``). ``n_series`` overrides
     ``data.series_limit`` at submit time — the scale knob for the 10 → 100 → 1k → 100k story;
     because it changes the config it yields a distinct ``run_id``/header per scale (each scale is
     its own queryable run). With ``wait`` the call blocks until the batch is terminal (parity with
@@ -377,11 +371,9 @@ def submit_batch(
     (``main.run`` owns the shared header). Both default to standalone behavior, so every existing
     caller stages and submits exactly as before.
 
-    ``batch_id`` overrides the derived ``sf-<engine>-<run_id>`` id. It exists for
-    `submit_multi`, where every family child stages the **same** full cfg (one shared
-    ``run_id``) as ``explode`` — so the derived id would collide across families; the caller
-    supplies a per-family id instead. When ``None`` (every standalone caller) the id is derived as
-    before.
+    ``batch_id`` overrides the derived ``sf-<engine>-<run_id>`` id. A caller that fans out several
+    batches under **one** shared ``run_id`` (each staging the same full cfg) supplies a distinct
+    per-batch id, since the derived id would otherwise collide. When ``None`` the id is derived.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -454,128 +446,14 @@ def _stamp_job_telemetry(
         _log.warning("batch %s telemetry capture failed (non-fatal): %r", batch_id, exc)
 
 
-def submit_multi(
-    cfg: RunConfig,
-    *,
-    n_series: int | None = None,
-    settings: Settings | None = None,
-    infra: BatchInfra | None = None,
-    wait: bool = True,
-    wait_timeout: float = _WAIT_TIMEOUT_SECONDS,
-) -> list[str]:
-    """Fan a run out into one child ``explode`` batch per family — under **one** shared run_id.
-
-    Splits ``cfg.models`` by each model's ``family`` (statistical / ml / deep_learning / native) and
-    submits an independent explode batch per family — separate autoscaling + failure domains — but
-    all under a **single** ``run_id`` and a **single** ``run_registry`` header. This is the
-    contributor-mode contract `main.run` already uses:
-
-    1. **One run_id from the full cfg.** ``run_id = make_run_id(cfg)`` is computed once over the
-       whole config (``n_series`` applied first so a scale override still yields one id); every
-       child stages that same full cfg, so all children derive the identical id — the leaderboard
-       shows the whole multi run as one ``run_id`` with every family under it, not one per family.
-    2. **One header owner.** `submit_multi` writes the shared header (RUNNING) up front and
-       finalizes it after every child joins; each child runs the engine with ``manage_header=False``
-       (contributor mode), so no child touches the header and there is no UPDATE race.
-    3. **Per-family executed subset + batch id.** Each child gets ``models=<family>`` (restricting
-       what it runs on-cluster while the full cfg stays staged) and an explicit per-family
-       ``batch_id`` (``sf-multi-<family>-<run_id>``), because the derived ``sf-explode-<run_id>`` id
-       would be identical across families (same run_id) and collide in Dataproc.
-
-    Orchestrated here rather than on-cluster because ``google-cloud-dataproc`` isn't in the runtime
-    container. Blocks per child when ``wait`` (families run sequentially — keeping the submit path
-    simple; each child's own batch still autoscales independently). The shared header is finalized
-    with the rolled status — COMPLETED iff every child succeeded, FAILED iff every child failed,
-    PARTIAL when some but not all did — before re-raising the first failure, so the run stays
-    queryable and the CLI exits non-zero. Returns the child batch ids.
-    """
-    from .registry import bq
-    from .registry.ids import make_run_id
-    from .settings import Settings
-
-    settings = settings or Settings.resolve()
-    infra = infra or BatchInfra.resolve()
-
-    # One run_id for the whole multi run: apply the scale override first (so it's part of the hashed
-    # cfg), then hash the full cfg once. Every child stages this same cfg → same run_id.
-    cfg = cfg.with_series_limit(n_series)
-    run_id = make_run_id(cfg)
-
-    families = split_models_by_family(cfg)
-    _log.info(
-        "multi: %d family batches for run '%s' under one run_id=%s",
-        len(families),
-        cfg.run_name,
-        run_id,
-    )
-
-    # One header owner (mirrors main.run): run_header writes RUNNING on entry and finalizes once,
-    # after every child joins, with the rolled multi status. Per-family failures are captured (not
-    # raised through the block) so the finalize records the right status; the first is re-raised
-    # after, for a non-zero exit. An unexpected crash finalizes FAILED via run_header.
-    batch_ids: list[str] = []
-    first_error: BaseException | None = None
-    with bq.run_header(cfg, run_id, settings=settings, manage=True) as hdr:
-        for family, models in families.items():
-            try:
-                batch_ids.append(
-                    submit_batch(
-                        cfg,  # full cfg → shared run_id; models= restricts the on-cluster subset
-                        engine="explode",
-                        settings=settings,
-                        infra=infra,
-                        models=models,
-                        manage_header=False,  # contributor mode: this fn owns the shared header
-                        batch_id=_batch_id(f"{family}-{run_id}", "multi"),
-                        wait=wait,
-                        wait_timeout=wait_timeout,
-                    )
-                )
-                _log.info("multi: submitted family=%s models=%s", family, models)
-            except Exception as exc:  # noqa: BLE001 - captured, header finalized below, re-raised
-                first_error = first_error or exc
-                _log.warning("multi: family=%s failed: %r", family, exc)
-
-        # Roll the per-family batch outcomes into one status, matching main.run's multi-engine
-        # roll-up: every family green → COMPLETED, none → FAILED, some but not all → PARTIAL.
-        n_ok = len(batch_ids)
-        if n_ok == len(families):
-            status = "COMPLETED"
-        elif n_ok == 0:
-            status = "FAILED"
-        else:
-            status = "PARTIAL"
-        hdr.finalize(status=status, n_series=cfg.data.series_limit)
-
-    if first_error is not None:
-        raise first_error
-    return batch_ids
-
-
-def split_models_by_family(cfg: RunConfig) -> dict[str, list[str]]:
-    """Group ``cfg.models`` by each model's registered ``family`` (pure; order-preserving).
-
-    The grouping ``multi`` fans out on. Unknown model names surface as a `ModelError` from
-    the factory rather than being silently dropped.
-    """
-    from .models import get_model
-
-    families: dict[str, list[str]] = {}
-    for name in cfg.models:
-        family = get_model(name).family
-        families.setdefault(family, []).append(name)
-    return families
-
-
 def main(argv: list[str] | None = None) -> None:
-    """CLI: ``python -m scale_forecasting.submit --config run.json [--engine ...]``."""
+    """CLI: ``python -m scale_forecasting.submit --config run.json``."""
     from .config import load_config_uri
 
     p = argparse.ArgumentParser(prog="submit", description="Submit a forecast run to Dataproc.")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--config", help="path to the run config JSON")
     src.add_argument("--config-uri", help="gs:// URI of a staged config (portable source)")
-    p.add_argument("--engine", default="explode", choices=("explode", "naive", "multi"))
     p.add_argument("--n-series", type=int, default=None, help="override series_limit (scale knob)")
     p.add_argument(
         "--max-executors", type=int, default=None, help="cap dynamicAllocation executors"
@@ -604,26 +482,15 @@ def main(argv: list[str] | None = None) -> None:
         from dataclasses import replace
 
         infra = replace(infra, ttl_seconds=ns.ttl)
-    if ns.engine == "multi":
-        ids = submit_multi(
-            cfg,
-            n_series=ns.n_series,
-            infra=infra,
-            wait=not ns.no_wait,
-            wait_timeout=ns.wait_timeout,
-        )
-        _log.info("multi submitted: %s", ids)
-    else:
-        batch_id = submit_batch(
-            cfg,
-            engine=ns.engine,
-            n_series=ns.n_series,
-            infra=infra,
-            max_executors=ns.max_executors,
-            wait=not ns.no_wait,
-            wait_timeout=ns.wait_timeout,
-        )
-        _log.info("submitted: %s", batch_id)
+    batch_id = submit_batch(
+        cfg,
+        n_series=ns.n_series,
+        infra=infra,
+        max_executors=ns.max_executors,
+        wait=not ns.no_wait,
+        wait_timeout=ns.wait_timeout,
+    )
+    _log.info("submitted: %s", batch_id)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint

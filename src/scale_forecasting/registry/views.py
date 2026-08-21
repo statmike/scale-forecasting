@@ -9,14 +9,15 @@ strings (no client), so they render + snapshot-test offline exactly like the tab
 Three views, matched to the questions a run prompts:
 
 - ``v_run_summary`` — *how did each run go, and how efficiently?* One row per run: the scaling
-  knobs (``spark_method``, ``n_series``, ``n_models``), the engine's own ``runtime_seconds``, and
-  the Dataproc ``job_telemetry`` overlay unpacked from its JSON column — total wall-clock, the
-  provisioning overhead (``total_wall_s − runtime_seconds``) and its share, cluster sizing, and DCU
-  usage. This is the scaling-and-efficiency story as one ``SELECT * ORDER BY spark_method,
-  n_series`` — explode's flat curve vs. naive's straggler, with overhead that amortizes at scale.
-  A forced re-run of an unchanged config appends a second header row under the same ``run_id``;
-  the view keeps only the latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one
-  run is always one row.
+  knobs (``n_series``, ``n_models``), the engine's own ``runtime_seconds``, and the Dataproc
+  ``job_telemetry`` overlay unpacked from its JSON column — total wall-clock, the provisioning
+  overhead (``total_wall_s − runtime_seconds``) and its share, cluster sizing, and DCU usage. This
+  is the run-level scaling-and-efficiency story as one ``SELECT * ORDER BY n_series`` — how
+  wall-clock and overhead move with scale (overhead amortizes as the series count grows); the
+  per-family runtime/hardware breakdown that composes each run lives in ``v_run_jobs``. A forced
+  re-run of an unchanged config appends a second header row under the same ``run_id``; the view
+  keeps only the latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one run is
+  always one row.
 
 - ``v_run_jobs`` — *what jobs ran for this run, on what runtime/hardware, and how did each fare?*
   One row per ``(run_id, family)`` = the run's DAG as executed: the deterministic ``job_id``, the
@@ -53,7 +54,6 @@ SELECT
   run_id,
   created_at,
   status,
-  spark_method,
   python_runtime,
   n_series,
   n_models,

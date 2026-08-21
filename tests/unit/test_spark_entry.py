@@ -16,13 +16,12 @@ from typing import Any
 import pytest
 
 from scale_forecasting import spark_entry
-from scale_forecasting.engines import spark_explode, spark_naive
+from scale_forecasting.engines import spark_explode
 
 _CONFIG: dict[str, Any] = {
     "run_name": "spark entry test",
     "data": {"source_table": "source_series_native", "horizon": 7},
     "models": ["theta", "holtwinters"],
-    "spark_method": "explode",
 }
 
 
@@ -100,15 +99,3 @@ def test_main_forwards_oncluster_contributor_flags(
 
     assert captured["models"] == ["theta", "holtwinters"]
     assert captured["manage_header"] is False
-
-
-def test_main_dispatches_to_selected_engine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # --engine naive must reach spark_naive.run, not spark_explode.run.
-    seen: dict[str, Any] = {}
-    monkeypatch.setattr(spark_naive, "run", lambda *a, **k: seen.setdefault("naive", True))
-    monkeypatch.setattr(spark_explode, "run", lambda *a, **k: seen.setdefault("explode", True))
-    spark_entry.main(["--engine", "naive", "--config-uri", _write_config(tmp_path)])
-
-    assert seen == {"naive": True}

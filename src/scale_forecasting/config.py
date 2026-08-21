@@ -410,12 +410,6 @@ class RunConfig(BaseModel):
     run_name: str
     data: DataConfig
     python_runtime: Literal["spark", "ray"] = "spark"
-    # explode | multi | naive — meaningful only when python_runtime == "spark".
-    #   explode : cross-join series × model, key = (ts_id, model_type); independent cells (hero).
-    #   multi   : one serverless batch per model family (submitted by the CLI submit helper).
-    #   naive   : group by ts_id only, sequential model loop — the straggler anti-pattern, for
-    #             demonstrating why explode's per-cell fan-out matters. Small scales.
-    spark_method: Literal["explode", "multi", "naive"] | None = None
     models: list[str] = Field(min_length=1)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
@@ -428,23 +422,12 @@ class RunConfig(BaseModel):
         # A frozen model is mutated in place here via object.__setattr__ (the supported
         # pydantic-v2 pattern) so the validator returns `self`, not a copy.
 
-        # 1. Reconcile spark_method with the chosen Python runtime.
-        if self.python_runtime == "spark":
-            if self.spark_method is None:
-                object.__setattr__(self, "spark_method", "explode")  # sensible default
-        else:  # ray
-            if self.spark_method is not None:
-                raise ValueError(
-                    "spark_method is only valid when python_runtime is 'spark' "
-                    f"(got python_runtime='ray', spark_method='{self.spark_method}')"
-                )
-
-        # 2. Duplicate models are almost certainly a mistake — fail clearly.
+        # 1. Duplicate models are almost certainly a mistake — fail clearly.
         if len(set(self.models)) != len(self.models):
             raise ValueError(f"models contains duplicates: {self.models}")
 
-        # 2b. HPO tunes on the backtest folds (decision_metric), so it needs backtesting ON.
-        #     Fail fast at load rather than deep in an engine (a run with nothing to optimize).
+        # 2. HPO tunes on the backtest folds (decision_metric), so it needs backtesting ON.
+        #    Fail fast at load rather than deep in an engine (a run with nothing to optimize).
         if self.hpo.enabled and not self.backtest.enabled:
             raise ValueError(
                 "hpo.enabled requires backtest.enabled: HPO optimizes the backtest "

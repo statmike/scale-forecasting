@@ -4,7 +4,7 @@ The promise: a user who wants to drive Spark or Ray themselves imports the pure 
 (:func:`run_group`), the writer-attached runners (:func:`make_group_runner` /
 :func:`make_chunk_runner`), the cell-tagging helper (:func:`chunk_cells`), and the unit of work
 (:func:`run_cell`) straight from ``scale_forecasting`` and gets the *same* model machinery the SDK
-and CLI use. These tests exercise both embedding modes (naive whole-series and explode/cell-tagged)
+and CLI use. These tests exercise both embedding modes (untagged whole-series and cell-tagged)
 and prove the runner writer-seam calls ``write_cells`` exactly once per group — all via
 ``from scale_forecasting import ...``, never a private module path.
 """
@@ -56,10 +56,10 @@ def _source(*ts_ids: str) -> pd.DataFrame:
     return pd.concat([_series(t) for t in ts_ids], ignore_index=True)
 
 
-# --- run_group: naive whole-series embedding -----------------------------------
+# --- run_group: untagged whole-series embedding --------------------------------
 
 
-def test_run_group_naive_runs_every_model_per_series() -> None:
+def test_run_group_untagged_runs_every_model_per_series() -> None:
     # No _sf_model column → run_group loops all models per series: 2 series × 2 models = 4 cells.
     pdf = _source("series-a", "series-b")
     results, status = run_group(pdf, _cfg(), models=_MODELS)
@@ -73,10 +73,10 @@ def test_run_group_naive_runs_every_model_per_series() -> None:
     assert len(status) == 4
 
 
-# --- run_group: explode/cell-tagged embedding via chunk_cells -------------------
+# --- run_group: cell-tagged embedding via chunk_cells --------------------------
 
 
-def test_run_group_explode_via_chunk_cells() -> None:
+def test_run_group_tagged_via_chunk_cells() -> None:
     cfg = _cfg()
     chunks = chunk_cells(_source("series-a", "series-b"), cfg, _MODELS, n_chunks=1)
     assert len(chunks) == 1  # one chunk holds all 4 cells

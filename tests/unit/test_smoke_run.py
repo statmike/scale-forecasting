@@ -22,7 +22,6 @@ from scale_forecasting._infra_args import INFRA_ARG_ENV
 _CONFIG: dict[str, Any] = {
     "run_name": "smoke run test",
     "python_runtime": "spark",
-    "spark_method": "explode",
     "data": {"source_table": "source_series_native", "horizon": 14, "series_limit": 20},
     "models": ["theta", "holtwinters", "arima_plus"],
     "features": {"holidays": ["US"]},

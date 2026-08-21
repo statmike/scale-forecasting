@@ -73,7 +73,7 @@ class NotebookSpec:
 #   * batch  — notebooks that submit a Dataproc Serverless batch (real, small spend). 01 is here
 #              too: its interactive Spark Connect path runs on Dataproc runtime 2.3 and submits real
 #              cluster work. 03 is here because its combo run is python_runtime="spark" → main.run
-#              launches a Dataproc batch (not BQ-only): same Spark spend as 05/06, outlasts smoke.
+#              launches a Dataproc batch (not BQ-only): real Spark spend, so it outlasts smoke.
 #   * full   — 04_ray_on_vertex provisions a live Vertex Ray cluster (biggest cost + wall-clock).
 # Routing: every notebook runs on the single sf-main template (py311, matches the pin).
 REGISTRY: dict[str, NotebookSpec] = {
@@ -84,11 +84,6 @@ REGISTRY: dict[str, NotebookSpec] = {
         NotebookSpec("07_scale_review", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("01_spark_via_connect", TEMPLATE_MAIN, TIER_BATCH, 1800),
         NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 1800),
-        NotebookSpec("05_spark_naive", TEMPLATE_MAIN, TIER_BATCH, 1800),
-        # 06's "multi" method fans out one child explode-batch per model family, so its wall-clock
-        # is the sum of the slowest cell across families — it ran ~34 min live, past the 1800s
-        # sibling budget. 3600s gives headroom without masking a genuine hang (natives < 20 min).
-        NotebookSpec("06_spark_multi", TEMPLATE_MAIN, TIER_BATCH, 3600),
         NotebookSpec("04_ray_on_vertex", TEMPLATE_MAIN, TIER_FULL, 5400),
     )
 }
@@ -97,8 +92,8 @@ REGISTRY: dict[str, NotebookSpec] = {
 def notebooks_for_tier(tier: str) -> list[NotebookSpec]:
     """Every notebook at ``tier`` or a cheaper one (cumulative), in registry order.
 
-    ``smoke`` → the 3 BQ/local notebooks; ``batch`` → those + the 4 Dataproc ones; ``full`` →
-    all 8 (adds Ray). Raises `EngineError` on an unknown tier so a CLI typo fails clearly.
+    ``smoke`` → the 3 BQ/local notebooks; ``batch`` → those + the 2 Dataproc ones; ``full`` →
+    all 6 (adds Ray). Raises `EngineError` on an unknown tier so a CLI typo fails clearly.
     """
     if tier not in _TIER_ORDER:
         raise EngineError(f"unknown tier {tier!r}; choose one of {', '.join(_TIER_ORDER)}")

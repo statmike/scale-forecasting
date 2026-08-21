@@ -20,11 +20,8 @@ import argparse
 from ._entry import parse_models, run_entry
 
 # The Spark-side engines this launcher can dispatch to (module under engines/, exposing run(cfg)).
-# 'multi' is intentionally absent: it is orchestrated from the submit helper (which fans out child
-# 'explode' batches), not run on-cluster — google-cloud-dataproc isn't in the runtime container.
 _ENGINES: dict[str, str] = {
     "explode": "spark_explode",
-    "naive": "spark_naive",
 }
 
 # Re-exported so the CSV subset parser is exercised directly as the pure unit it is (tests).

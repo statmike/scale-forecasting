@@ -4,7 +4,6 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.run_registry` (
   user_id           STRING,
   git_sha           STRING,
   python_runtime    STRING,
-  spark_method      STRING,
   bq_models         ARRAY<STRING>,
   backtest_on       BOOL,
   decision_metric   STRING,

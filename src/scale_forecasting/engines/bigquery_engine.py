@@ -13,7 +13,7 @@ This module has two halves:
   bound as a **query parameter**, and identifiers (dataset, columns, model names) interpolated.
   Snapshot-tested offline, no GCP.
 * **The engine** (`run`) — resolves `Settings`, owns the
-  ``run_registry`` header lifecycle exactly like `spark_naive.run`, executes the builders'
+  ``run_registry`` header lifecycle exactly like `spark_explode.run`, executes the builders'
   SQL via ``bigquery.Client``, reads the fold forecasts back, computes the metric panel through
   the shared `compute_metrics` (no formula drift), and writes all
   three cell tables via the registry's Storage Write API row-dict path.
@@ -532,7 +532,7 @@ def run(
     manage_header: bool = True,
     settings: Settings | None = None,
 ) -> BqOutcome:  # pragma: no cover - GCP I/O, @gcp smoke
-    """Execute the BigQuery-native subset end-to-end, mirroring `spark_naive.run`.
+    """Execute the BigQuery-native subset end-to-end, mirroring `spark_explode.run`.
 
     Header lifecycle: resolve `Settings`, derive the config-pinned
     ``run_id``, ``ensure_tables`` → ``write_header`` (RUNNING), run the SQL, then ``update_header``

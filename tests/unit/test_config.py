@@ -52,7 +52,6 @@ def test_full_config_round_trips_from_design_example() -> None:
                 "series_limit": 1000,
             },
             python_runtime="spark",
-            spark_method="explode",
             models=["sarimax", "theta", "prophet", "xgboost", "arima_plus", "timesfm"],
             features={"holidays": ["US"], "transform": "log1p"},
             backtest={"enabled": True, "n_folds": 3, "decision_metric": "wape"},
@@ -75,7 +74,6 @@ def test_full_config_round_trips_from_design_example() -> None:
         ({"data": {"source_table": "t", "horizon": 0}}, "horizon"),  # non-positive horizon
         ({"data": {"source_table": "t", "series_limit": 0}}, "series_limit"),  # non-positive limit
         ({"python_runtime": "dask"}, "python_runtime"),  # unknown runtime
-        ({"models": ["theta"], "spark_method": "turbo"}, "spark_method"),  # unknown method
         ({"models": ["a", "a"]}, "duplicate"),  # duplicate models
         ({"backtest": {"decision_metric": "r2"}}, "decision_metric"),  # unknown metric
         ({"features": {"transform": "sqrt"}}, "transform"),  # unknown transform
@@ -86,12 +84,6 @@ def test_invalid_config_raises(over: dict[str, Any], needle: str) -> None:
     with pytest.raises(Exception) as exc:
         RunConfig(**_minimal_dict(**over))
     assert needle.lower() in str(exc.value).lower()
-
-
-def test_ray_with_spark_method_rejected() -> None:
-    with pytest.raises(Exception) as exc:
-        RunConfig(**_minimal_dict(python_runtime="ray", spark_method="explode"))
-    assert "spark_method" in str(exc.value)
 
 
 def test_gpu_fraction_out_of_range_rejected() -> None:
@@ -136,22 +128,6 @@ def test_ray_pool_min_equal_max_ok() -> None:
 
 
 # --- normalization -------------------------------------------------------------
-
-
-def test_spark_method_defaults_to_explode() -> None:
-    cfg = RunConfig(**_minimal_dict(python_runtime="spark"))
-    assert cfg.spark_method == "explode"
-
-
-def test_ray_leaves_spark_method_none() -> None:
-    cfg = RunConfig(**_minimal_dict(python_runtime="ray"))
-    assert cfg.spark_method is None
-
-
-def test_naive_spark_method_accepted() -> None:
-    # naive is a first-class Spark method (the straggler-demo anti-pattern).
-    cfg = RunConfig(**_minimal_dict(python_runtime="spark", spark_method="naive"))
-    assert cfg.spark_method == "naive"
 
 
 def test_singular_strategy_shorthand_becomes_list() -> None:

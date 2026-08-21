@@ -2,7 +2,7 @@
 
 Everything here runs without Spark or BigQuery — it exercises the grouped-UDF body
 (:func:`run_group`), the run-level status roll-up (:func:`aggregate_status`), and the bucketing
-policy that is the crux of the explode-vs-naive scaling story. The Spark shell (connector read,
+policy that is the crux of the per-cell scaling story. The Spark shell (connector read,
 cross-join, applyInPandas) is covered by the ``@spark``/``@gcp`` gates.
 """
 
@@ -48,45 +48,31 @@ def _cfg(**over: Any) -> RunConfig:
     return RunConfig(**base)
 
 
-# --- bucket_key_cols: the explode-vs-naive crux --------------------------------
+# --- bucket_key_cols: the per-cell crux ----------------------------------------
 
 
-def test_explode_buckets_on_cell_naive_on_series() -> None:
-    explode = _cfg(spark_method="explode", models=["theta", "holtwinters"])
-    naive = _cfg(spark_method="naive", models=["theta", "holtwinters"])
-    # explode isolates each (series, model) cell; naive keeps a whole series in one task.
-    assert bucket_key_cols(explode) == ["ts_id", spark_io._MODEL_COL]
-    assert bucket_key_cols(naive) == ["ts_id"]
+def test_buckets_on_cell() -> None:
+    cfg = _cfg(models=["theta", "holtwinters"])
+    # The engine isolates each (series, model) cell so a slow cell can't block fast ones.
+    assert bucket_key_cols(cfg) == ["ts_id", spark_io._MODEL_COL]
 
 
 def test_bucket_key_honors_custom_ts_id_col() -> None:
-    cfg = _cfg(data={"source_table": "t", "ts_id_col": "series_key"}, spark_method="naive")
-    assert bucket_key_cols(cfg) == ["series_key"]
+    cfg = _cfg(data={"source_table": "t", "ts_id_col": "series_key"})
+    assert bucket_key_cols(cfg) == ["series_key", spark_io._MODEL_COL]
 
 
 # --- default_bucket_count ------------------------------------------------------
 
 
-def test_bucket_count_targets_cells_per_bucket_for_explode() -> None:
+def test_bucket_count_targets_cells_per_bucket() -> None:
     cfg = _cfg(
-        spark_method="explode",
         models=["theta", "holtwinters", "sarimax"],
         data={"source_table": "t", "series_limit": 100},
         compute={"bucket_target_cells": 8},
     )
-    # explode: 100 series × 3 models = 300 cells → ceil(300 / 8) = 38 buckets (~8 cells each).
+    # 100 series × 3 models = 300 cells → ceil(300 / 8) = 38 buckets (~8 cells each).
     assert default_bucket_count(cfg) == 38
-
-
-def test_bucket_count_targets_cells_per_bucket_for_naive() -> None:
-    cfg = _cfg(
-        spark_method="naive",
-        models=["theta", "holtwinters"],
-        data={"source_table": "t", "series_limit": 100},
-        compute={"bucket_target_cells": 8},
-    )
-    # naive: cell count = series (models run sequentially in the task) → ceil(100 / 8) = 13.
-    assert default_bucket_count(cfg) == 13
 
 
 def test_bucket_count_scales_with_work_not_max_parallelism() -> None:
@@ -94,7 +80,6 @@ def test_bucket_count_scales_with_work_not_max_parallelism() -> None:
     # knob), so a huge run makes many small buckets instead of few giant frames. 100k × 4 = 400k
     # cells → ceil(400k / 8) = 50k buckets, regardless of a small max_parallelism.
     cfg = _cfg(
-        spark_method="explode",
         models=["theta", "holtwinters", "sarimax", "xgboost"],
         data={"source_table": "t", "series_limit": 100_000},
         compute={"max_parallelism": 50, "bucket_target_cells": 8},
@@ -106,7 +91,6 @@ def test_bucket_count_respects_max_buckets_ceiling() -> None:
     # Pathological config: tiny target on a huge run would shatter into too many partitions; the
     # _MAX_BUCKETS safety ceiling caps it.
     cfg = _cfg(
-        spark_method="explode",
         models=["theta", "holtwinters", "sarimax", "xgboost"],
         data={"source_table": "t", "series_limit": 1_000_000},
         compute={"bucket_target_cells": 1},
@@ -115,12 +99,12 @@ def test_bucket_count_respects_max_buckets_ceiling() -> None:
 
 
 def test_bucket_count_defaults_to_cap_when_unlimited() -> None:
-    cfg = _cfg(spark_method="explode", compute={"max_parallelism": 123})
+    cfg = _cfg(compute={"max_parallelism": 123})
     # series_limit unset → cell count unknown offline → fall back to the parallelism cap.
     assert default_bucket_count(cfg) == 123
 
 
-# --- run_group: explode path (cross-joined, model column present) ---------------
+# --- run_group: tagged frame (cross-joined, model column present) ---------------
 
 
 def _with_model_col(panel: pd.DataFrame, models: list[str]) -> pd.DataFrame:
@@ -129,8 +113,8 @@ def _with_model_col(panel: pd.DataFrame, models: list[str]) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
-def test_run_group_explode_one_result_per_cell() -> None:
-    cfg = _cfg(spark_method="explode", models=["theta", "holtwinters"])
+def test_run_group_tagged_one_result_per_cell() -> None:
+    cfg = _cfg(models=["theta", "holtwinters"])
     pdf = _with_model_col(_panel(["s0", "s1"]), ["theta", "holtwinters"])
     results, status = run_group(pdf, cfg)
 
@@ -148,12 +132,12 @@ def test_run_group_explode_one_result_per_cell() -> None:
     assert len(status) == 4
 
 
-def test_run_group_naive_loops_models_per_series() -> None:
-    cfg = _cfg(spark_method="naive", models=["theta", "holtwinters"])
-    pdf = _panel(["s0", "s1"])  # no model column — naive groups by ts_id only
+def test_run_group_untagged_loops_models_per_series() -> None:
+    cfg = _cfg(models=["theta", "holtwinters"])
+    pdf = _panel(["s0", "s1"])  # no model column — an untagged frame groups by ts_id only
     results, status = run_group(pdf, cfg)
 
-    assert len(results) == 4  # 2 series × 2 models, run sequentially
+    assert len(results) == 4  # 2 series × 2 models, run per series in a loop
     assert {(r.ts_id, r.model_type) for r in results} == {
         ("s0", "theta"),
         ("s0", "holtwinters"),
@@ -164,7 +148,7 @@ def test_run_group_naive_loops_models_per_series() -> None:
 
 
 def test_run_group_error_cell_becomes_status_row() -> None:
-    cfg = _cfg(spark_method="explode", models=["nonexistent_model"])
+    cfg = _cfg(models=["nonexistent_model"])
     pdf = _with_model_col(_panel(["s0"]), ["nonexistent_model"])
     results, status = run_group(pdf, cfg)
 
@@ -176,7 +160,7 @@ def test_run_group_error_cell_becomes_status_row() -> None:
 
 
 def test_run_group_status_frame_has_fit_seconds() -> None:
-    cfg = _cfg(spark_method="explode", models=["theta"])
+    cfg = _cfg(models=["theta"])
     pdf = _with_model_col(_panel(["s0"]), ["theta"])
     _results, status = run_group(pdf, cfg)
     assert status["fit_seconds"].dtype == np.float64
@@ -186,7 +170,7 @@ def test_run_group_status_frame_has_fit_seconds() -> None:
 def test_run_group_threads_fleetwide_params_to_each_cell() -> None:
     # params_by_model (the driver's fleetwide resolution) reaches every cell of that model, so
     # best_params reflects the tuned params — the seam that carries HPO across the fan-out.
-    cfg = _cfg(spark_method="explode", models=["xgboost", "theta"])
+    cfg = _cfg(models=["xgboost", "theta"])
     pdf = _with_model_col(_panel(["s0", "s1"]), ["xgboost", "theta"])
     params = {"xgboost": {"n_estimators": 111, "max_depth": 3, "learning_rate": 0.09}}
     results, _status = run_group(pdf, cfg, params_by_model=params)
@@ -199,7 +183,7 @@ def test_run_group_threads_fleetwide_params_to_each_cell() -> None:
 
 def test_run_group_without_params_is_unchanged_default() -> None:
     # No params_by_model → today's behavior: every cell runs with {} (additive-by-default).
-    cfg = _cfg(spark_method="explode", models=["xgboost"])
+    cfg = _cfg(models=["xgboost"])
     pdf = _with_model_col(_panel(["s0"]), ["xgboost"])
     results, _status = run_group(pdf, cfg)
     assert all(r.best_params == {} for r in results)
@@ -240,7 +224,7 @@ def test_make_group_runner_passes_captured_settings_to_write_cells(
 
     monkeypatch.setattr(bq, "write_cells", _fake_write_cells)
 
-    cfg = _cfg(spark_method="explode", models=["theta"])
+    cfg = _cfg(models=["theta"])
     settings = _settings()
     runner = spark_io.make_group_runner(cfg, settings, ["theta"])
 
@@ -261,7 +245,7 @@ def test_make_group_runner_skips_write_when_no_results(monkeypatch: Any) -> None
     called = {"n": 0}
     monkeypatch.setattr(bq, "write_cells", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
 
-    cfg = _cfg(spark_method="explode", models=["theta"])
+    cfg = _cfg(models=["theta"])
     runner = spark_io.make_group_runner(cfg, _settings(), ["theta"])
 
     empty = _with_model_col(_panel(["s0"]), ["theta"]).iloc[0:0]

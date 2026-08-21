@@ -3,7 +3,6 @@ SELECT
   run_id,
   created_at,
   status,
-  spark_method,
   python_runtime,
   n_series,
   n_models,

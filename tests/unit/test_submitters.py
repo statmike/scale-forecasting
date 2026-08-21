@@ -61,12 +61,12 @@ def test_spark_launch_no_session_submits_batch(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(submit_mod, "submit_batch", _fake_submit_batch)
 
     SparkSubmitter().launch(
-        _cfg(spark_method="naive"),
+        _cfg(),
         models=[_SPARK],
         manage_header=False,
         settings=_SETTINGS,
     )
-    assert seen["engine"] == "naive"  # reads cfg.spark_method, not the explode default
+    assert seen["engine"] == "explode"
     assert seen["models"] == [_SPARK]
     assert seen["manage_header"] is False
 

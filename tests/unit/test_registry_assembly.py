@@ -234,7 +234,6 @@ def test_header_row_snapshots_config() -> None:
     assert row["run_id"] == "my-run-abc123def456"
     assert row["status"] == "RUNNING"
     assert row["python_runtime"] == "spark"
-    assert row["spark_method"] == "explode"  # normalized default
     assert row["n_models"] == 2
     assert row["n_series"] == 5
     assert row["backtest_on"] is False

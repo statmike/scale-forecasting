@@ -86,16 +86,14 @@ def _capturing_runner(cfg: RunConfig, settings: Any, sink_dir: str) -> Any:
 
 def _run_engine_locally(
     engine_module: Any,
-    method: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Drive one engine's ``run(cfg)`` on local Spark; return (written cell rows, closed header).
+    """Drive the engine's ``run(cfg)`` on local Spark; return (written cell rows, closed header).
 
-    Both engines share this harness — they differ only in fan-out shape (explode cross-joins to a
-    cell per (series, model); naive keeps a series whole and loops models), which is exactly what
-    the caller asserts on. The connector read, the executor-side write, and the header writes are
-    swapped as described in the module docstring.
+    The fan-out cross-joins to a cell per (series, model), which is exactly what the caller asserts
+    on. The connector read, the executor-side write, and the header writes are swapped as described
+    in the module docstring.
     """
     import json
 
@@ -131,9 +129,8 @@ def _run_engine_locally(
     monkeypatch.setattr(Settings, "resolve", staticmethod(_settings))
 
     cfg = RunConfig(
-        run_name=f"local spark {method}",
+        run_name="local spark explode",
         data={"source_table": "source_series", "horizon": 7, "series_limit": n_series},
-        spark_method=method,
         models=models,
     )
     engine_module.run(cfg)
@@ -148,7 +145,7 @@ def _run_engine_locally(
 def test_explode_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     from scale_forecasting.engines import spark_explode
 
-    written, header = _run_engine_locally(spark_explode, "explode", monkeypatch, tmp_path)
+    written, header = _run_engine_locally(spark_explode, monkeypatch, tmp_path)
 
     # One row per (series, model) cell — the explode cross-join, through applyInPandas and back
     # across the process boundary.
@@ -209,7 +206,6 @@ def test_injected_session_is_used_but_not_stopped(
         cfg = RunConfig(
             run_name="injected spark explode",
             data={"source_table": "source_series", "horizon": 7, "series_limit": n_series},
-            spark_method="explode",
             models=models,
         )
         # Injected session + resolved settings — the notebook/Connect call shape.
@@ -226,21 +222,3 @@ def test_injected_session_is_used_but_not_stopped(
         assert header["status"] in {"COMPLETED", "PARTIAL"}
     finally:
         session.stop()
-
-
-def test_naive_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
-    from scale_forecasting.engines import spark_naive
-
-    written, header = _run_engine_locally(spark_naive, "naive", monkeypatch, tmp_path)
-
-    # naive has no cross-join, yet the sequential per-series model loop still produces the same
-    # (series, model) cells — one task ran all models for its series (the straggler shape).
-    n_series, models = 4, {"theta", "holtwinters"}
-    assert len(written) == n_series * len(models)
-    cells = {(r["ts_id"], r["model_type"]) for r in written}
-    assert len(cells) == n_series * len(models)
-    assert {m for _, m in cells} == models
-
-    assert header["status"] in {"COMPLETED", "PARTIAL"}
-    assert header["n_series"] == n_series
-    assert header["runtime_seconds"] > 0

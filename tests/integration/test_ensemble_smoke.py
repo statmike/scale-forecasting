@@ -106,7 +106,6 @@ def _cfg(source_table: str) -> RunConfig:
     return RunConfig(
         run_name=f"b5 ensemble smoke {int(time.time())}",
         python_runtime="spark",
-        spark_method="explode",
         data={"source_table": source_table, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_BASE_MODELS,
         features={"holidays": ["US"]},

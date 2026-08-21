@@ -1,10 +1,10 @@
 """Offline tests for the run orchestrator (``scale_forecasting.main``).
 
-No GCP: the pure plan (:func:`main._plan`) — run_id parity, the per-runtime model split, and the
-ray/multi rejections — plus the ``dry_run`` path and the CLI's dispatch of it. The live parallel
+No GCP: the pure plan (:func:`main._plan`) — run_id parity and the per-runtime model split — plus
+the ``dry_run`` path and the CLI's dispatch of it. The live parallel
 launch (Spark batch + BigQuery engine under one run_id) is the ``@gcp`` smoke in
 ``tests/integration/test_main_orchestration_smoke.py``; here the GCP seams are never reached because
-``dry_run`` returns before them and the rejection tests raise first.
+``dry_run`` returns before them.
 """
 
 from __future__ import annotations
@@ -65,7 +65,6 @@ def test_plan_splits_models_by_runtime() -> None:
     plan = main._plan(_cfg())
     assert plan.python_models == [_SPARK]
     assert plan.bq_models == _NATIVE
-    assert plan.spark_method == "explode"  # normalized default
 
 
 def test_plan_all_bigquery_has_no_python_models() -> None:
@@ -80,7 +79,7 @@ def test_plan_all_python_has_no_bq_models() -> None:
     assert plan.bq_models == []
 
 
-# --- _plan: ray is accepted; the out-of-scope multi shape is rejected ----------
+# --- _plan: ray is accepted ----------------------------------------------------
 
 
 def test_plan_accepts_ray_when_python_models_present() -> None:
@@ -88,19 +87,6 @@ def test_plan_accepts_ray_when_python_models_present() -> None:
     plan = main._plan(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"))
     assert plan.python_models == [_SPARK]
     assert plan.bq_models == _NATIVE
-
-
-def test_plan_rejects_multi_when_python_models_present() -> None:
-    with pytest.raises(ConfigError, match="submit --engine multi"):
-        main._plan(_cfg(models=[_SPARK, *_NATIVE], spark_method="multi"))
-
-
-def test_ray_runtime_cannot_carry_spark_method() -> None:
-    # multi is a Spark-only method, so main._plan's multi guard is gated on python_runtime="spark".
-    # It never has to fire for a ray config because the config layer forbids ray + any spark_method
-    # outright — so a ray config that names one fails to construct, well before _plan sees it.
-    with pytest.raises(ValueError, match="spark_method is only valid"):
-        _cfg(models=[_SPARK], python_runtime="ray", spark_method="multi")
 
 
 def test_plan_allows_ray_config_when_only_bigquery_models() -> None:
@@ -348,12 +334,6 @@ def test_cli_dispatches_stage_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatc
     )
     main._main(["--config", str(path), "--stage-only"])
     assert seen == {"run_name": "cli stage test", "force": False}
-
-
-def test_dry_run_still_rejects_multi() -> None:
-    # The plan (and its rejection) runs before the dry_run short-circuit, so bad shapes fail fast.
-    with pytest.raises(ConfigError, match="submit --engine multi"):
-        main.run(_cfg(models=[_SPARK, *_NATIVE], spark_method="multi"), dry_run=True)
 
 
 def test_dry_run_allows_ray() -> None:

@@ -181,7 +181,6 @@ def test_spark_connect_explode_smoke(settings: Settings, scratch_source: str) ->
     cfg = RunConfig(
         run_name=f"b5 connect smoke {int(time.time())}",
         python_runtime="spark",
-        spark_method="explode",
         data={"source_table": scratch_source, "horizon": _HORIZON, "series_limit": _SERIES_LIMIT},
         models=_MODELS,
         features={"holidays": ["US"]},
