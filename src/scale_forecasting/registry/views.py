@@ -34,6 +34,11 @@ Three views, matched to the questions a run prompts:
   ensembling. ``ensemble_id`` is NULL for base models (so they group exactly as before) and the
   ``EnsembleConfig`` digest for ensemble pseudo-models — so two ensemble configs scored under one
   ``run_id`` keep their ``ensemble_<strategy>`` rows distinct instead of collapsing into one.
+  Result writes are append-only and at-least-once (a task retry or a ``--force`` re-run can
+  re-append a cell), so — like the two views above — the leaderboard first collapses to one row
+  per cell (``ROW_NUMBER() … PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id ORDER BY
+  created_at DESC = 1``, latest write wins) before aggregating; otherwise a duplicated cell would
+  double-count and skew ``mean_wape`` / ``mean_mae`` / ``n_cells``.
 
 ``JSON_VALUE`` reads scalars straight out of the native ``JSON`` ``job_telemetry`` column (the
 registry is native BigQuery, so the column is the real ``JSON`` type — ``JSON_VALUE`` works on it
@@ -96,6 +101,14 @@ QUALIFY ROW_NUMBER() OVER (
 ) = 1""",
     "v_model_leaderboard": """\
 CREATE OR REPLACE VIEW `{d}.v_model_leaderboard` AS
+WITH deduped AS (
+  SELECT *
+  FROM `{d}.forecast_metadata`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+    ORDER BY created_at DESC
+  ) = 1
+)
 SELECT
   run_id,
   model_type,
@@ -107,7 +120,7 @@ SELECT
   APPROX_QUANTILES(fit_seconds, 2)[OFFSET(1)] AS median_fit_seconds,
   AVG(wape) AS mean_wape,
   AVG(mae) AS mean_mae
-FROM `{d}.forecast_metadata`
+FROM deduped
 WHERE fold_id IS NULL
 GROUP BY run_id, model_type, ensemble_id""",
 }

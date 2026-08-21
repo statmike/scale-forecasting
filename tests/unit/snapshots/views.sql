@@ -45,6 +45,14 @@ QUALIFY ROW_NUMBER() OVER (
 ) = 1;
 
 CREATE OR REPLACE VIEW `proj.scale_forecasting.v_model_leaderboard` AS
+WITH deduped AS (
+  SELECT *
+  FROM `proj.scale_forecasting.forecast_metadata`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+    ORDER BY created_at DESC
+  ) = 1
+)
 SELECT
   run_id,
   model_type,
@@ -56,6 +64,6 @@ SELECT
   APPROX_QUANTILES(fit_seconds, 2)[OFFSET(1)] AS median_fit_seconds,
   AVG(wape) AS mean_wape,
   AVG(mae) AS mean_mae
-FROM `proj.scale_forecasting.forecast_metadata`
+FROM deduped
 WHERE fold_id IS NULL
 GROUP BY run_id, model_type, ensemble_id;

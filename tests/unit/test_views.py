@@ -62,6 +62,26 @@ def test_leaderboard_is_per_run_model_full_fit_only() -> None:
     assert "no_artifact_rate" in stmt
 
 
+def test_leaderboard_dedupes_cells_before_aggregating() -> None:
+    stmt = render_create_views("d")["v_model_leaderboard"]
+    # Writes are append-only + at-least-once, so a task retry or a --force re-run can re-append a
+    # cell. Like the two views above, the leaderboard collapses to one row per cell (latest write
+    # wins) BEFORE the roll-up, or a duplicated cell would double-count into mean_wape/mean_mae.
+    assert "ROW_NUMBER() OVER (" in stmt
+    assert "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id" in stmt
+    assert "ORDER BY created_at DESC" in stmt
+    # dedup happens in a CTE that the aggregate reads from — so it precedes GROUP BY, not after it.
+    assert "WITH deduped AS (" in stmt
+    dedup_at = stmt.index("QUALIFY ROW_NUMBER()")
+    group_at = stmt.index("GROUP BY run_id, model_type, ensemble_id")
+    assert dedup_at < group_at
+    assert "FROM deduped" in stmt
+    # ensemble_id + fold_id are in the grain: base vs ensemble rows, and final vs per-fold rows,
+    # must not collapse into each other.
+    assert "ensemble_id" in stmt.split("PARTITION BY")[1].split("\n")[0]
+    assert "fold_id" in stmt.split("PARTITION BY")[1].split("\n")[0]
+
+
 def test_run_jobs_view_keeps_current_attempt_per_family() -> None:
     stmt = render_create_views("d")["v_run_jobs"]
     # one row per (run_id, family) = the current job; a forced re-run's higher attempt wins
