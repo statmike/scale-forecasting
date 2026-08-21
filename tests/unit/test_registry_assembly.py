@@ -307,6 +307,74 @@ def test_job_row_columns_match_param_types() -> None:
     assert set(row) == set(bq._JOB_PARAM_TYPES)
 
 
+# --- run_job lifecycle (context manager) ---------------------------------------
+#
+# run_job wraps the per-job row's RUNNING → terminal transition around a block. The write/update
+# I/O is exercised against captured calls (monkeypatched write_job/update_job) so the lifecycle
+# logic is covered offline; the real BigQuery writes are covered by the @gcp round-trip test.
+
+
+def _capture_job_io(monkeypatch: Any) -> dict[str, Any]:
+    """Redirect bq.write_job / bq.update_job to capture their calls; return the capture dict."""
+    cap: dict[str, Any] = {"written": None, "updates": []}
+
+    def _write(row: dict[str, Any], *, settings: Any = None) -> None:
+        cap["written"] = row
+
+    def _update(job_id: str, *, settings: Any = None, **fields: Any) -> None:
+        cap["updates"].append((job_id, fields))
+
+    monkeypatch.setattr(bq, "write_job", _write)
+    monkeypatch.setattr(bq, "update_job", _update)
+    return cap
+
+
+def test_run_job_writes_running_then_completes(monkeypatch: Any) -> None:
+    cap = _capture_job_io(monkeypatch)
+    with bq.run_job(
+        "my-run-0123456789ab", "deep_learning", 1, runtime="spark", spark_mode="cluster",
+        hardware="gpu", gpu_type="T4",
+    ) as job:
+        job.finalize(system_job_id="dp-batch-xyz", job_telemetry={"total_wall_s": 12.0})
+
+    row = cap["written"]
+    assert row["job_id"] == "sf-my-run-0123456789ab-deep_learning-a1"
+    assert row["status"] == "RUNNING"
+    assert (row["runtime"], row["spark_mode"], row["hardware"], row["gpu_type"]) == (
+        "spark", "cluster", "gpu", "T4",
+    )
+    # one terminal update: COMPLETED + measured runtime + the finalizer's extras
+    assert len(cap["updates"]) == 1
+    job_id, fields = cap["updates"][0]
+    assert job_id == "sf-my-run-0123456789ab-deep_learning-a1"
+    assert fields["status"] == "COMPLETED"
+    assert "runtime_seconds" in fields
+    assert fields["system_job_id"] == "dp-batch-xyz"
+    assert fields["job_telemetry"] == {"total_wall_s": 12.0}
+
+
+def test_run_job_records_failed_and_reraises(monkeypatch: Any) -> None:
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(ValueError, match="boom"):
+        with bq.run_job("rid-0123456789ab", "ml", 2):
+            raise ValueError("boom")
+
+    assert cap["written"]["status"] == "RUNNING"
+    assert len(cap["updates"]) == 1
+    job_id, fields = cap["updates"][0]
+    assert job_id == "sf-rid-0123456789ab-ml-a2"  # attempt reflected in the id
+    assert fields["status"] == "FAILED"
+    assert "runtime_seconds" in fields
+
+
+def test_run_job_contributor_mode_touches_nothing(monkeypatch: Any) -> None:
+    cap = _capture_job_io(monkeypatch)
+    with bq.run_job("rid-0123456789ab", "statistical", 1, manage=False) as job:
+        job.finalize(status="COMPLETED")
+    assert cap["written"] is None
+    assert cap["updates"] == []
+
+
 # --- artifact uri --------------------------------------------------------------
 
 

@@ -6,9 +6,12 @@ import pytest
 
 from scale_forecasting.registry.ids import (
     JOB_FAMILIES,
+    bigquery_job_id,
+    dataproc_job_id,
     decide_attempt,
     make_job_key,
     parse_job_key,
+    ray_submission_id,
 )
 
 RUN_ID = "my-run-0123456789ab"
@@ -72,6 +75,40 @@ def test_parse_rejects_malformed() -> None:
     for bad in ("not-a-job", f"sf-{RUN_ID}-statistical", f"sf-{RUN_ID}-bogus-a1", "statistical-a1"):
         with pytest.raises(ValueError, match="malformed job id"):
             parse_job_key(bad)
+
+
+# --- per-system platform ids ---------------------------------------------------
+
+
+def test_dataproc_id_maps_underscore_and_stays_legal() -> None:
+    dp = dataproc_job_id(make_job_key(RUN_ID, "deep_learning", 1))
+    assert dp == "sf-my-run-0123456789ab-deep-learning-a1"  # underscore → hyphen
+    assert dp[:1].isalpha() and not dp.endswith("-")
+    assert all(c.isalnum() or c == "-" for c in dp) and dp.islower()
+
+
+def test_dataproc_id_preserves_unique_tail_when_truncated() -> None:
+    long_run = "a-very-long-descriptive-run-name-that-keeps-going-0123456789ab"
+    dp = dataproc_job_id(make_job_key(long_run, "deep_learning", 2))
+    assert len(dp) <= 63
+    assert dp[:1].isalpha() and not dp.endswith("-")
+    # the tail (digest + family + attempt = the unique part) survives truncation
+    assert dp.endswith("0123456789ab-deep-learning-a2")
+
+
+def test_dataproc_ids_distinct_across_attempts_and_families() -> None:
+    ids = {
+        dataproc_job_id(make_job_key(RUN_ID, "statistical", 1)),
+        dataproc_job_id(make_job_key(RUN_ID, "ml", 1)),
+        dataproc_job_id(make_job_key(RUN_ID, "statistical", 2)),
+    }
+    assert len(ids) == 3
+
+
+def test_ray_and_bigquery_ids_are_the_canonical_key() -> None:
+    key = make_job_key(RUN_ID, "deep_learning", 3)
+    assert ray_submission_id(key) == key  # Ray accepts the key unchanged (closes the auto-id gap)
+    assert bigquery_job_id(key) == key  # BQ accepts underscores/hyphens up to 1024 chars
 
 
 # --- decide_attempt (re-run policy) --------------------------------------------

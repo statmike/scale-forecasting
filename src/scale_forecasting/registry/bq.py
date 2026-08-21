@@ -23,8 +23,9 @@ the pure layer (and its offline tests) never need them installed.
 Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_header``,
 ``run_header`` (the header-lifecycle context manager), ``write_cells``, the ``run_jobs`` per-job
 writers/readers (``write_job``, ``update_job``, ``latest_job_attempt``, ``next_job_attempt``,
-``read_run_jobs``), the read surface (``header_status``, ``read_run_summary``,
-``read_leaderboard``), plus the pure assemblers used by the writers and the tests.
+``read_run_jobs``) and ``run_job`` (the per-job lifecycle context manager), the read surface
+(``header_status``, ``read_run_summary``, ``read_leaderboard``), plus the pure assemblers used by
+the writers and the tests.
 """
 
 from __future__ import annotations
@@ -1043,6 +1044,94 @@ def run_header(
     if manage:
         update_header(
             run_id,
+            settings=settings,
+            status=fin.status,
+            runtime_seconds=time.perf_counter() - started,
+            **fin.extra,
+        )
+
+
+class JobFinalizer:
+    """Mutable finalize state a `run_job` body fills in before a clean exit.
+
+    A job's terminal ``status`` (default ``COMPLETED``) plus any extra ``run_jobs`` columns to stamp
+    on success — notably ``system_job_id`` (once the platform assigns/accepts it) and
+    ``job_telemetry`` (the per-job sizing/wall/DCU overlay). Left untouched, the block finalizes a
+    plain ``COMPLETED`` with only the wall-clock ``runtime_seconds`` `run_job` measures.
+    """
+
+    def __init__(self) -> None:
+        self.status: str = "COMPLETED"
+        self.extra: dict[str, Any] = {}
+
+    def finalize(self, *, status: str | None = None, **fields: Any) -> None:
+        """Set the terminal ``status`` (if given) and merge extra columns for the success write."""
+        if status is not None:
+            self.status = status
+        self.extra.update(fields)
+
+
+@contextmanager
+def run_job(
+    run_id: str,
+    family: str,
+    attempt: int,
+    *,
+    runtime: str | None = None,
+    spark_mode: str | None = None,
+    hardware: str | None = None,
+    gpu_type: str | None = None,
+    system_job_id: str | None = None,
+    settings: Settings | None = None,
+    manage: bool = True,
+) -> Iterator[JobFinalizer]:
+    """Own one family's ``run_jobs`` row for the duration of a block (the per-job lifecycle seam).
+
+    The `run_header` analog for the per-job tier: on entry write the job row (RUNNING) with its
+    deterministic id (`assemble_job_row` → `registry.ids.make_job_key`) and resolved compute; on a
+    clean exit ``update_job`` with the finalizer's ``status`` (default COMPLETED), the measured
+    wall-clock ``runtime_seconds``, and any extra columns set via `JobFinalizer.finalize` (e.g. the
+    platform ``system_job_id`` and ``job_telemetry``); on an exception ``update_job(status=FAILED,
+    runtime_seconds=…)`` then re-raise, so a crashed job records a terminal status instead of
+    stranding at RUNNING. The run header is owned separately by `run_header`; a job row sits *under*
+    it. ``manage=False`` yields the finalizer without touching ``run_jobs`` (uniform call shape for
+    a caller that records the job elsewhere). Assumes the tables exist (the header owner ran
+    `ensure_tables`), so it does not re-create them.
+    """
+    from .ids import make_job_key
+
+    fin = JobFinalizer()
+    job_id = make_job_key(run_id, family, attempt)
+    if manage:
+        from datetime import UTC, datetime
+
+        row = assemble_job_row(
+            run_id,
+            family,
+            attempt,
+            datetime.now(UTC),
+            runtime=runtime,
+            spark_mode=spark_mode,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            system_job_id=system_job_id,
+        )
+        write_job(row, settings=settings)
+    started = time.perf_counter()
+    try:
+        yield fin
+    except BaseException:
+        if manage:
+            update_job(
+                job_id,
+                settings=settings,
+                status="FAILED",
+                runtime_seconds=time.perf_counter() - started,
+            )
+        raise
+    if manage:
+        update_job(
+            job_id,
             settings=settings,
             status=fin.status,
             runtime_seconds=time.perf_counter() - started,

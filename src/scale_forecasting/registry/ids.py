@@ -135,6 +135,55 @@ def parse_job_key(job_id: str) -> tuple[str, str, int]:
     return match["run_id"], match["family"], int(match["attempt"])
 
 
+# --- per-system platform ids ---------------------------------------------------
+#
+# A job's canonical id is its ``job_key`` (``sf-<run_id>-<family>-a<n>``). Each compute platform
+# stamps that key as its *own* job id so the platform job and the registry row share an identity —
+# but platforms differ on what characters/length an id may carry, so the key is mapped to a
+# platform-legal form here. The mapped id is stored as ``run_jobs.system_job_id`` (the canonical
+# ``job_key`` stays in ``run_jobs.job_id``), so a trace never has to reverse a lossy mapping.
+
+_DATAPROC_ID_MAX = 63
+_DATAPROC_BAD = re.compile(r"[^a-z0-9-]")
+
+
+def dataproc_job_id(job_key: str) -> str:
+    """Map a ``job_key`` to a Dataproc-legal batch/job id (Serverless batch or cluster job).
+
+    Dataproc ids are 4-63 chars, ``[a-z0-9-]``, must start with a letter, and can't end with a
+    hyphen. The key is lowercased with illegal chars (e.g. the ``_`` in ``deep_learning``) mapped to
+    hyphens; if it exceeds 63 chars only the **tail** is kept (it carries the run_id digest + family
+    + attempt — the unique part) behind an ``sf-`` prefix, so distinct jobs never collide.
+    """
+    s = _DATAPROC_BAD.sub("-", job_key.lower()).strip("-")
+    if len(s) > _DATAPROC_ID_MAX:
+        tail = s[-(_DATAPROC_ID_MAX - 3) :].lstrip("-")
+        s = f"sf-{tail}"
+    if not s[:1].isalpha():  # a Dataproc id must start with a letter
+        s = f"j-{s}"[:_DATAPROC_ID_MAX]
+    return s.rstrip("-")
+
+
+def ray_submission_id(job_key: str) -> str:
+    """Map a ``job_key`` to a Ray ``submission_id``.
+
+    Ray submission ids accept ``[A-Za-z0-9_-]`` and are generously long, so the canonical key
+    qualifies unchanged — closing the gap where Ray otherwise auto-assigns a random id. Passing this
+    to ``JobSubmissionClient.submit_job(submission_id=…)`` makes the Ray job's own id deterministic.
+    """
+    return job_key
+
+
+def bigquery_job_id(job_key: str) -> str:
+    """Map a ``job_key`` to a BigQuery job id (the parent id of the run's multi-statement script).
+
+    BigQuery job ids accept letters/digits/underscores/hyphens up to 1024 chars, so the key
+    qualifies unchanged. Set as the parent job's id (not a prefix — a prefix would multi-match on
+    lookup); child statements get their own ids under it, all traceable to this one parent.
+    """
+    return job_key
+
+
 def decide_attempt(current_max: int | None, *, force: bool) -> tuple[int, bool]:
     """Resolve which ``attempt`` a submission should use, given the run/family's current max.
 
