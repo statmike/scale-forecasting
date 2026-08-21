@@ -242,6 +242,7 @@ knobs only matter for a family that runs on Ray.
 | `gpu_calibration_samples` | `int` | `3` | `> 0` | Series to profile for auto `gpu_fraction`. |
 | `gpu_safety_margin` | `float` | `1.3` | `> 1.0` | Headroom multiplier on measured peak GPU memory. |
 | `ray_read_mode` | `"driver_collect"` \| `"ray_data"` | `"driver_collect"` | — | Ray source reader: the proven Storage Read client, or `ray.data.read_bigquery` (same Storage Read API, opt-in). |
+| `read_max_streams` | `int` | `0` | `≥ 0` | Max Storage Read streams for the source read, shared by the Spark connector (`maxParallelism`) and Ray's `driver_collect` reader (`max_stream_count`). `0` lets the server size it from the table; a positive value caps read parallelism (e.g. to fit a slot/quota budget). Inert for the `ray_data` path and BigQuery-native models. See [reading_source_data.md](./reading_source_data.md). |
 
 **Autoscaling (default):** each Ray worker pool scales between its own `[min, max]`; a `null` pool
 max resolves to `ray_max_nodes`. Config validation requires `min ≤ resolved max` per pool. The

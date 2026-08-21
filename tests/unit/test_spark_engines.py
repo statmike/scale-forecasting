@@ -290,3 +290,57 @@ def test_aggregate_empty_is_failed() -> None:
     assert out.status == "FAILED"
     assert out.n_cells == 0
     assert out.n_series == 0
+
+
+# --- read_source_series: connector option wiring (no Spark) ---------------------
+
+
+class _FakeReader:
+    """A chainable stand-in for Spark's DataFrameReader that records every ``.option`` call."""
+
+    def __init__(self) -> None:
+        self.opts: dict[str, str] = {}
+
+    def format(self, fmt: str) -> _FakeReader:
+        self.opts["format"] = fmt
+        return self
+
+    def option(self, key: str, value: str) -> _FakeReader:
+        self.opts[key] = value
+        return self
+
+    def load(self) -> _FakeDF:
+        return _FakeDF()
+
+
+class _FakeDF:
+    def select(self, *_cols: Any) -> _FakeDF:
+        return self
+
+
+class _FakeSpark:
+    def __init__(self) -> None:
+        self.read = _FakeReader()
+
+
+def test_read_source_series_sets_arrow_explicitly(monkeypatch: Any) -> None:
+    # ARROW is set explicitly (not left to the connector default); snapshot pinning is stubbed off
+    # here so the test isolates the format/parallelism wiring.
+    monkeypatch.setattr(spark_io, "_snapshot_millis", lambda cfg, settings: None)
+    spark = _FakeSpark()
+    cfg = _cfg(data={"source_table": "source_series_native", "freq": "D", "horizon": HORIZON})
+    spark_io.read_source_series(spark, cfg, _settings())
+    assert spark.read.opts["format"] == "bigquery"
+    assert spark.read.opts["readDataFormat"] == "ARROW"
+    assert "maxParallelism" not in spark.read.opts  # unset knob → server chooses
+
+
+def test_read_source_series_caps_streams_when_read_max_streams_set(monkeypatch: Any) -> None:
+    monkeypatch.setattr(spark_io, "_snapshot_millis", lambda cfg, settings: None)
+    spark = _FakeSpark()
+    cfg = _cfg(
+        compute={"read_max_streams": 3},
+        data={"source_table": "source_series_native", "freq": "D", "horizon": HORIZON},
+    )
+    spark_io.read_source_series(spark, cfg, _settings())
+    assert spark.read.opts["maxParallelism"] == "3"

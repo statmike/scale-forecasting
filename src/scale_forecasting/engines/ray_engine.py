@@ -134,7 +134,9 @@ def _read_driver_collect(
     session = read_client.create_read_session(
         parent=f"projects/{settings.project_id}",
         read_session=requested,
-        max_stream_count=0,  # let the server choose the parallelism
+        # 0 (default) lets the server pick the stream count from the table size;
+        # compute.read_max_streams caps it to bound read parallelism (shared with the Spark reader).
+        max_stream_count=cfg.compute.read_max_streams,
     )
 
     frames = [

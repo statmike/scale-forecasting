@@ -176,7 +176,9 @@ def test_limit_series_matches_spark_ordered_subset() -> None:
 
 
 def _install_fake_read_client(
-    monkeypatch: pytest.MonkeyPatch, per_stream_frames: list[pd.DataFrame]
+    monkeypatch: pytest.MonkeyPatch,
+    per_stream_frames: list[pd.DataFrame],
+    captured: dict[str, Any] | None = None,
 ) -> None:
     """Stub ``google.cloud.bigquery_storage_v1`` so ``_read_source_series`` runs offline.
 
@@ -210,6 +212,9 @@ def _install_fake_read_client(
         def create_read_session(
             self, *, parent: str, read_session: Any, max_stream_count: int
         ) -> Any:
+            if captured is not None:
+                captured["max_stream_count"] = max_stream_count
+                captured["data_format"] = read_session.data_format
             return _Session(len(per_stream_frames))
 
         def read_rows(self, name: str) -> _Reader:
@@ -239,6 +244,32 @@ def test_read_source_series_concats_multiple_streams(monkeypatch: pytest.MonkeyP
     out = ray_engine._read_source_series(cfg, _settings())
     assert len(out) == len(s0) + len(s1)  # both streams present
     assert sorted(out["ts_id"].unique()) == ["s0", "s1", "t0", "t1"]
+
+
+def test_read_driver_collect_requests_arrow_and_honors_read_max_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The read session pins ARROW explicitly, and compute.read_max_streams flows through to the
+    # server-side stream cap (0 = let the server choose, the default).
+    captured: dict[str, Any] = {}
+    _install_fake_read_client(monkeypatch, [_panel(1)], captured=captured)
+    cfg = _cfg(
+        compute=_compute(read_max_streams=4),
+        data={"source_table": "source_series_native", "horizon": 7},
+    )
+    ray_engine._read_source_series(cfg, _settings())
+    assert captured["max_stream_count"] == 4
+    assert captured["data_format"] == "ARROW"
+
+
+def test_read_driver_collect_defaults_to_server_chosen_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_fake_read_client(monkeypatch, [_panel(1)], captured=captured)
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7})  # no read_max_streams
+    ray_engine._read_source_series(cfg, _settings())
+    assert captured["max_stream_count"] == 0  # server chooses
 
 
 def test_read_source_series_single_stream_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:

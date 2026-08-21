@@ -243,9 +243,20 @@ def read_source_series(spark: SparkSession, cfg: RunConfig, settings: Settings) 
 
     Pins the read to the run's input snapshot (`_snapshot_millis`) when one is recorded, so all of
     a run's family jobs read byte-identical source data even if the table is written to mid-run.
+
+    Reads through the BigQuery Storage Read API in **Arrow** format (``readDataFormat=ARROW``, set
+    explicitly rather than relying on the connector default) — the columnar, zero-copy path into the
+    executor-side pandas frames the cells consume. ``compute.read_max_streams`` (when > 0) caps the
+    number of Storage Read streams via the connector's ``maxParallelism`` option; 0 lets the server
+    size it from the table.
     """
     table = _resolve_source_table(cfg, settings)
     reader = spark.read.format("bigquery").option("table", table)
+    # Arrow is the columnar Storage Read path; set it explicitly so the format never silently
+    # depends on a connector default.
+    reader = reader.option("readDataFormat", "ARROW")
+    if cfg.compute.read_max_streams > 0:
+        reader = reader.option("maxParallelism", str(cfg.compute.read_max_streams))
     ms = _snapshot_millis(cfg, settings)
     if ms is not None:
         # Pin the connector read to the run's snapshot so every family job time-travels to the

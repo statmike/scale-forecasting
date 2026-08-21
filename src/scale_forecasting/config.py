@@ -331,6 +331,16 @@ class ComputeConfig(BaseModel):
     #                              known-good reader stays the default until a live Ray run vets it.
     ray_read_mode: Literal["driver_collect", "ray_data"] = "driver_collect"
 
+    # Storage Read API parallelism: the max number of read streams to request when collecting the
+    # source panel. Shared across engines that read through the Storage Read API — the Spark
+    # connector (its ``maxParallelism`` option) and Ray's driver_collect reader (the
+    # ``create_read_session`` ``max_stream_count``). 0 (default) lets the server pick the stream
+    # count from the table size — the known-good default; set a positive cap to bound read
+    # parallelism (e.g. to stay inside a slot/quota budget). Inert for the ray_data path (Ray sizes
+    # its own blocks) and for BigQuery-native models (they read via the query API, not the Storage
+    # Read API). Part of the config, so changing it yields a new run_id.
+    read_max_streams: int = Field(default=0, ge=0)
+
     # --- per-family compute (the multi-runtime job DAG) ------------------------
     # Sparse overrides layered over the flat defaults above: each family (statistical/ml/
     # deep_learning) may pick its own runtime + hardware; an unset family inherits the run-level
