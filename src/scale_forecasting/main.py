@@ -244,6 +244,8 @@ def _launch_family_job(
     platform-legal id (`_system_job_id`) and threaded both onto the ``run_jobs`` row and into the
     submitter — so several families under one shared ``run_id`` submit distinct, traceable platform
     jobs (a Dataproc ``batch_id`` / Ray ``submission_id``) instead of colliding on a run-derived id.
+    A Dataproc *cluster* job id is server-assigned rather than accepted from us, so when the
+    submitter returns the real id it is stamped back onto the row (`JobFinalizer`) for the trace.
 
     ``ray_cluster``, when set, is the run's shared ephemeral Ray cluster ``(name, region)``
     (`_shared_ray_cluster`): a Ray family reuses it instead of self-provisioning; every other
@@ -271,8 +273,8 @@ def _launch_family_job(
         gpu_type=compute.gpu_type,
         system_job_id=system_job_id,
         settings=settings,
-    ):
-        get_submitter(compute.runtime).launch(
+    ) as fin:
+        real_job_id = get_submitter(compute.runtime).launch(
             cfg,
             models=list(job.models),
             manage_header=False,
@@ -287,6 +289,10 @@ def _launch_family_job(
             ray_cluster_name=ray_cluster_name,
             ray_cluster_region=ray_cluster_region,
         )
+        # A cluster job's id is server-assigned; stamp the real one back for reverse-trace. The
+        # Serverless/Ray submitters return None (their id == system_job_id, already on the row).
+        if real_job_id and real_job_id != system_job_id:
+            fin.finalize(system_job_id=real_job_id)
 
 
 def _launch_native_job(
@@ -320,8 +326,14 @@ def _launch_native_job(
         system_job_id=system_job_id,
         settings=settings,
     ):
+        # Prefix the family's BigQuery jobs with its deterministic id so they resolve in the console
+        # under system_job_id (reverse-trace); a BQ job id is server-assigned, not client-set.
         return bigquery_engine.run(
-            cfg, list(job.models), manage_header=False, settings=settings
+            cfg,
+            list(job.models),
+            manage_header=False,
+            settings=settings,
+            job_id_prefix=f"{system_job_id}-",
         )
 
 
@@ -361,10 +373,13 @@ def _launch_ensemble_job(
         system_job_id=system_job_id,
         settings=settings,
     ):
+        # Prefix the ensemble's BigQuery jobs with its deterministic id so they resolve in the
+        # console under system_job_id (reverse-trace), mirroring the native family.
+        prefix = f"{system_job_id}-"
         if cfg.compute.ensemble.mode == "microbatch":
-            run_ensembles_microbatch(cfg, run_id, settings=settings)
+            run_ensembles_microbatch(cfg, run_id, settings=settings, job_id_prefix=prefix)
         else:
-            run_ensembles(cfg, run_id, settings=settings)
+            run_ensembles(cfg, run_id, settings=settings, job_id_prefix=prefix)
 
 
 def run(

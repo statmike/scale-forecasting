@@ -80,7 +80,7 @@ def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.Monk
     seen: dict[str, Any] = {}
     monkeypatch.setattr(submit_mod, "submit_batch", lambda cfg, **kw: seen.update(kw) or "b")
 
-    SparkSubmitter().launch(
+    real_id = SparkSubmitter().launch(
         _cfg(),
         models=[_SPARK],
         manage_header=False,
@@ -88,6 +88,8 @@ def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.Monk
         system_job_id="sf-run-abc-statistical-a1",
     )
     assert seen["batch_id"] == "sf-run-abc-statistical-a1"
+    # Serverless batch id == system_job_id (we set it), so nothing to stamp back.
+    assert real_id is None
 
 
 def test_spark_launch_threads_gpu_to_batch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,9 +116,14 @@ def test_spark_launch_cluster_mode_submits_cluster_job(monkeypatch: pytest.Monke
     import scale_forecasting.dataproc_cluster as cluster_mod
 
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(cluster_mod, "submit_cluster_job", lambda cfg, **kw: seen.update(kw) or "j")
+    # The fake returns Dataproc's server-assigned id, distinct from the deterministic one passed in.
+    monkeypatch.setattr(
+        cluster_mod,
+        "submit_cluster_job",
+        lambda cfg, **kw: seen.update(kw) or "real-dataproc-job-id",
+    )
 
-    SparkSubmitter().launch(
+    real_id = SparkSubmitter().launch(
         _cfg(),
         models=[_SPARK],
         manage_header=False,
@@ -131,6 +138,8 @@ def test_spark_launch_cluster_mode_submits_cluster_job(monkeypatch: pytest.Monke
     assert seen["hardware"] == "gpu"
     assert seen["gpu_type"] == "T4"
     assert seen["spark_cluster_name"] == "warm-cluster"
+    # The cluster path returns the real server-assigned id so the orchestrator can stamp it back.
+    assert real_id == "real-dataproc-job-id"
 
 
 def test_spark_launch_with_session_ignores_system_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,7 +169,7 @@ def test_ray_launch_threads_system_job_id_as_submission_id(
     seen: dict[str, Any] = {}
     monkeypatch.setattr(ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or "j")
 
-    RaySubmitter().launch(
+    real_id = RaySubmitter().launch(
         _cfg(python_runtime="ray"),
         models=[_SPARK],
         manage_header=False,
@@ -168,6 +177,8 @@ def test_ray_launch_threads_system_job_id_as_submission_id(
         system_job_id="sf-run-abc-ml-a1",
     )
     assert seen["submission_id"] == "sf-run-abc-ml-a1"
+    # Ray submission_id == system_job_id (we set it), so nothing to stamp back.
+    assert real_id is None
 
 
 def test_ray_launch_maps_hardware_to_use_gpu(monkeypatch: pytest.MonkeyPatch) -> None:

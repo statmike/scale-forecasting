@@ -612,6 +612,7 @@ def run(
     *,
     manage_header: bool = True,
     settings: Settings | None = None,
+    job_id_prefix: str | None = None,
 ) -> BqOutcome:  # pragma: no cover - GCP I/O, @gcp smoke
     """Execute the BigQuery-native subset end-to-end, mirroring `spark_explode.run`.
 
@@ -639,6 +640,10 @@ def run(
 
     Idempotent: ``run_id`` is a pure function of the config and every write is append-only /
     dedupe-on-read, so a re-run of the same config lands byte-identical rows.
+
+    ``job_id_prefix`` (the orchestrator's deterministic ``system_job_id`` for the native family)
+    prefixes every BigQuery job this run submits, so the family's jobs are console-resolvable under
+    that id — the reverse-trace hook. ``None`` (the standalone default) lets BigQuery auto-name it.
     """
     import time
     from datetime import UTC, datetime
@@ -669,7 +674,7 @@ def run(
         job_config = bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
         )
-        return client.query(sql, job_config=job_config).result()
+        return client.query(sql, job_config=job_config, job_id_prefix=job_id_prefix).result()
 
     # Header first (run_header): RUNNING on entry, finalized on a clean exit; a crash records FAILED
     # on the owned header before re-raising. Contributor mode (main.run owns the shared header) is a

@@ -76,7 +76,7 @@ if TYPE_CHECKING:
 
 
 def run_ensembles(
-    cfg: RunConfig, run_id: str, *, settings: Settings
+    cfg: RunConfig, run_id: str, *, settings: Settings, job_id_prefix: str | None = None
 ) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
     """Execute + score every requested ensemble for ``run_id`` into the shared registry (barrier).
 
@@ -122,12 +122,14 @@ def run_ensembles(
         created_at=created_at,
         log=log,
         ts_ids=None,
+        job_id_prefix=job_id_prefix,
     )
 
 
 def run_ensembles_microbatch(
     cfg: RunConfig, run_id: str, *, settings: Settings, poll_interval_s: float = 15.0,
     max_polls: int = 960, upstream_done: Callable[[], bool] | None = None,
+    job_id_prefix: str | None = None,
 ) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
     """Execute + score ensembles for ``run_id`` **incrementally, per series as it completes**.
 
@@ -180,10 +182,13 @@ def run_ensembles_microbatch(
             created_at=created_at,
             log=log,
             ts_ids=ts_ids,
+            job_id_prefix=job_id_prefix,
         )
 
     processed = _drain_ready(
-        ready_fn=lambda: _ready_series(cfg, run_id, settings=settings, client=client),
+        ready_fn=lambda: _ready_series(
+            cfg, run_id, settings=settings, client=client, job_id_prefix=job_id_prefix
+        ),
         process_fn=_process,
         done_fn=done,
         sleep_fn=lambda: time.sleep(poll_interval_s),
@@ -228,7 +233,12 @@ def _drain_ready(
 
 
 def _ready_series(
-    cfg: RunConfig, run_id: str, *, settings: Settings, client: Any
+    cfg: RunConfig,
+    run_id: str,
+    *,
+    settings: Settings,
+    client: Any,
+    job_id_prefix: str | None = None,
 ) -> set[str]:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
     """The ``ts_id``s whose full base-model set has landed a prediction for ``run_id``.
 
@@ -252,7 +262,7 @@ def _ready_series(
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
     )
-    rows = client.query(sql, job_config=job_config).result()
+    rows = client.query(sql, job_config=job_config, job_id_prefix=job_id_prefix).result()
     return {str(r["ts_id"]) for r in rows}
 
 
@@ -266,6 +276,7 @@ def _ensemble_batch(
     created_at: Any,
     log: Any,
     ts_ids: list[str] | None,
+    job_id_prefix: str | None = None,
 ) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
     """Blend + score the ensembles for one batch of series (``ts_ids=None`` = every series).
 
@@ -296,7 +307,7 @@ def _ensemble_batch(
         if ts_ids is not None:
             params.append(bigquery.ArrayQueryParameter("ts_ids", "STRING", ts_ids))
         job_config = bigquery.QueryJobConfig(query_parameters=params)
-        return client.query(sql, job_config=job_config).result()
+        return client.query(sql, job_config=job_config, job_id_prefix=job_id_prefix).result()
 
     models = list(cfg.models)
     model_list = ", ".join(f"'{m}'" for m in models)

@@ -46,7 +46,7 @@ class RuntimeSubmitter(Protocol):
         spark_cluster_name: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Run ``models`` on this runtime, blocking until terminal when ``wait``.
 
         ``manage_header`` threads the header-ownership contract (``False`` = contributor mode, the
@@ -74,6 +74,12 @@ class RuntimeSubmitter(Protocol):
         orchestrator provisioned for a run with several Ray families: the Ray submitter reuses it
         (submits its own failure-isolated job) instead of creating its own; other runtimes ignore
         them, and when unset a Ray family self-provisions as before.
+
+        Returns the platform's **real** job id when it differs from ``system_job_id`` — i.e. when
+        the platform assigns its own id rather than accepting the one we hand it (a Dataproc
+        *cluster* job). The caller stamps it back onto the ``run_jobs`` row for reverse-trace.
+        Returns ``None`` when the stored ``system_job_id`` is already the real id (a Serverless
+        batch or Ray job, whose id we set) or when nothing was submitted (an in-process session).
         """
         ...
 
@@ -101,7 +107,7 @@ class SparkSubmitter:
         spark_cluster_name: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
-    ) -> None:
+    ) -> str | None:
         # ray_cluster_name/ray_cluster_region are Ray-only (a shared cluster); Spark ignores them.
         if spark is not None:
             # In-process Spark over an injected (Connect or local) session — no remote submit.
@@ -113,12 +119,13 @@ class SparkSubmitter:
             spark_explode.run(
                 cfg, models=models, manage_header=manage_header, settings=settings, spark=spark
             )
-            return
+            return None  # in-process: nothing submitted, no platform id
         if spark_mode == "cluster":
-            # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named).
+            # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named). Its
+            # id is server-assigned, so return the real id for the caller to record (reverse-trace).
             from .dataproc_cluster import submit_cluster_job
 
-            submit_cluster_job(
+            return submit_cluster_job(
                 cfg,
                 engine="explode",
                 models=models,
@@ -130,7 +137,6 @@ class SparkSubmitter:
                 spark_cluster_name=spark_cluster_name,
                 job_id=system_job_id,
             )
-            return
         from .submit import submit_batch
 
         submit_batch(
@@ -145,6 +151,7 @@ class SparkSubmitter:
             hardware=hardware,
             gpu_type=gpu_type,
         )
+        return None  # Serverless batch id == system_job_id (we set it); nothing to stamp back
 
 
 class RaySubmitter:
@@ -169,7 +176,7 @@ class RaySubmitter:
         spark_cluster_name: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
-    ) -> None:
+    ) -> str | None:
         # spark, max_executors, and the spark_* args are ignored — there is no in-process Ray path
         # from the orchestrator, the Ray cluster autoscales on its own (no fixed executor cap), and
         # spark_mode/spark_cluster_name are Spark-only. system_job_id becomes the Ray submission_id
@@ -190,6 +197,7 @@ class RaySubmitter:
             cluster_name=ray_cluster_name,
             cluster_region=ray_cluster_region,
         )
+        return None  # Ray submission_id == system_job_id (we set it); nothing to stamp back
 
 
 # Registered by cfg.python_runtime. A new runtime = one class + one entry here.

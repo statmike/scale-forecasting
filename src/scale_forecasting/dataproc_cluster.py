@@ -282,8 +282,9 @@ def submit_cluster_job(
 
     ``models``/``manage_header`` carry the on-cluster contract; ``hardware``/``gpu_type`` size the
     workers' accelerator (a cluster is the T4 Spark path). ``job_id`` is the deterministic
-    per-family id (the orchestrator's `registry.ids.dataproc_job_id`); with ``wait`` a non-DONE
-    terminal state raises so a failed job never exits 0.
+    per-family id (the orchestrator's `registry.ids.dataproc_job_id`), used only as a fallback: the
+    returned id is Dataproc's own server-assigned ``reference.job_id`` (the console-resolvable one)
+    when we waited. With ``wait`` a non-DONE terminal state raises so a failed job never exits 0.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -336,9 +337,10 @@ def submit_cluster_job(
         submitted_id, state_name, detail = _submit_job_and_wait(
             job_client, project_id, region, job, wait=wait
         )
-        # Prefer the deterministic per-family id for the caller's records; Dataproc's own id is what
-        # the platform actually assigned (a cluster job id is server-assigned, not client-set).
-        final_id = job_id or submitted_id
+        # A cluster job id is server-assigned (not client-set), so return the *real* id Dataproc
+        # assigned (``reference.job_id``) — that's what resolves in the console for reverse-trace.
+        # Fall back to the deterministic per-family id only when we didn't wait and no id came back.
+        final_id = submitted_id or job_id or ""
         if wait and state_name != "DONE":
             raise EngineError(
                 f"cluster job {final_id} terminal state {state_name}: {detail or '(no detail)'}"

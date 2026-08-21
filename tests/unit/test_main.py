@@ -400,7 +400,9 @@ def _fake_job_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     @contextmanager
     def _fake_run_job(run_id: str, family: str, attempt: int, **kw: Any) -> Any:
         seen["job"] = {"run_id": run_id, "family": family, "attempt": attempt, **kw}
-        yield bq.JobFinalizer()
+        fin = bq.JobFinalizer()
+        seen["fin"] = fin  # expose it so tests can assert what the body finalized
+        yield fin
 
     monkeypatch.setattr(bq, "run_job", _fake_run_job)
     return seen
@@ -445,6 +447,30 @@ def test_launch_family_job_dispatches_to_resolved_submitter(
     expected_id = dataproc_job_id(make_job_key("rid-0", "statistical", 1))
     assert seen["job"]["system_job_id"] == expected_id
     assert captured["system_job_id"] == expected_id
+    # The default fake submitter returns None (its id == system_job_id), so nothing is stamped back.
+    assert "system_job_id" not in seen["fin"].extra
+
+
+def test_launch_family_job_stamps_real_id_when_submitter_returns_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cluster submitter returns a server-assigned id → it's finalized onto the row."""
+    import scale_forecasting.submitters as submitters_mod
+
+    seen = _fake_job_lifecycle(monkeypatch)
+
+    class _ClusterSubmitter:
+        def launch(self, cfg: RunConfig, **kw: Any) -> str:
+            return "real-dataproc-job-id"  # differs from the deterministic system_job_id
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _ClusterSubmitter())
+
+    cfg = _cfg(models=[_SPARK])
+    job = dag.plan_dag(cfg).python_jobs[0]
+    main._launch_family_job(cfg, job, "rid-0", _SETTINGS)
+
+    # The real (server-assigned) id is stamped back onto the run_jobs row for reverse-trace.
+    assert seen["fin"].extra["system_job_id"] == "real-dataproc-job-id"
 
 
 def test_launch_family_job_dispatches_ray_for_ray_family(
@@ -558,7 +584,7 @@ def _patch_run_seams(
 
     monkeypatch.setattr(bq, "run_job", _fake_run_job)
 
-    def _fake_ensembles(cfg: RunConfig, run_id: str, *, settings: Any) -> None:
+    def _fake_ensembles(cfg: RunConfig, run_id: str, *, settings: Any, **_: Any) -> None:
         seen["ensemble_called"] = True
         seen["ensemble_run_id"] = run_id
 
@@ -601,7 +627,7 @@ def test_run_ensemble_failure_finalizes_header_failed(monkeypatch: pytest.Monkey
 
     seen = _patch_run_seams(monkeypatch)
 
-    def _boom(cfg: RunConfig, run_id: str, *, settings: Any) -> None:
+    def _boom(cfg: RunConfig, run_id: str, *, settings: Any, **_: Any) -> None:
         seen["ensemble_called"] = True
         raise RuntimeError("ensemble boom")
 
