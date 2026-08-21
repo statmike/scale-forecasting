@@ -295,6 +295,32 @@ def test_stage_run_spark_uploads_and_builds_runnable_commands(
     assert manifest["force"] is False
     assert manifest["idempotency"]["checked"] is True
     assert manifest["idempotency"]["exists"] is False
+    # The manifest is a DAG manifest: one node per family job carrying its deterministic job_key.
+    dag = manifest["dag"]
+    assert [n["family"] for n in dag] == ["statistical"]  # a pure-Spark config → one family
+    assert dag[0]["runtime"] == "spark"
+    assert dag[0]["job_key"].endswith("-statistical-a1")
+    assert dag[0]["depends_on"] == []
+
+
+def test_plan_run_resolves_dag_nodes_offline() -> None:
+    # A mixed config plans one node per family + the ensemble node depending on them all.
+    from scale_forecasting.registry.ids import make_job_key
+
+    result = main.plan_run(
+        _cfg(
+            models=[_SPARK, "arima_plus"],
+            backtest={"enabled": True},
+            ensemble={"enabled": True, "strategies": ["mean", "median"]},
+        ),
+        settings=_SETTINGS,
+        infra=_batch_infra(),
+    )
+    families = [n.family for n in result.nodes]
+    assert families == ["statistical", "native", "ensemble"]
+    ensemble = result.nodes[-1]
+    assert ensemble.job_key == make_job_key(result.run_id, "ensemble", 1)
+    assert set(ensemble.depends_on) == {n.job_key for n in result.nodes if n.family != "ensemble"}
 
 
 def test_stage_run_requires_infra(monkeypatch: pytest.MonkeyPatch) -> None:

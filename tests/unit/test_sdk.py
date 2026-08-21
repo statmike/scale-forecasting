@@ -279,6 +279,79 @@ def test_results_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).results() == []
 
 
+# --- dag: the offline planned per-job DAG --------------------------------------
+
+
+def test_dag_returns_planned_nodes_offline() -> None:
+    from scale_forecasting.registry.ids import make_job_key
+
+    f = sf.Forecaster.from_dict(_cfg_dict(models=["theta", "arima_plus"]), settings=_SETTINGS)
+    nodes = f.dag()
+    assert [n.family for n in nodes] == ["statistical", "native"]
+    for n in nodes:
+        assert n.job_key == make_job_key(f.run_id, n.family, 1)
+    assert all(isinstance(n, sf.DagNode) for n in nodes)
+
+
+# --- jobs: the per-job cross-system trace --------------------------------------
+
+
+def test_jobs_maps_run_jobs_rows_to_job_traces(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    seen: dict[str, Any] = {}
+
+    def _fake_run_jobs(run_id: str, *, settings: Any = None) -> list[dict[str, Any]]:
+        seen["run_id"] = run_id
+        seen["settings"] = settings
+        return [
+            {
+                "family": "statistical",
+                "job_id": "sf-abc-statistical-a1",
+                "system_job_id": "sf-abc-statistical-a1",
+                "runtime": "spark",
+                "spark_mode": "serverless",
+                "hardware": "cpu",
+                "gpu_type": None,
+                "status": "COMPLETED",
+                "attempt": 1,
+                "runtime_seconds": 42.0,
+            },
+            {
+                "family": "native",
+                "job_id": "sf-abc-native-a1",
+                "system_job_id": "sf-abc-native-a1",
+                "runtime": "bigquery",
+                "spark_mode": None,
+                "hardware": None,
+                "gpu_type": None,
+                "status": "RUNNING",
+                "attempt": 1,
+                "runtime_seconds": None,
+            },
+        ]
+
+    monkeypatch.setattr(bq, "read_run_jobs", _fake_run_jobs)
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    traces = f.jobs()
+
+    assert seen["run_id"] == f.run_id
+    assert seen["settings"] is _SETTINGS
+    assert [t.family for t in traces] == ["statistical", "native"]
+    assert traces[0].job_key == "sf-abc-statistical-a1"  # job_id is the canonical key
+    assert traces[0].system_job_id == "sf-abc-statistical-a1"
+    assert traces[0].runtime == "spark" and traces[0].status == "COMPLETED"
+    assert traces[1].runtime == "bigquery" and traces[1].runtime_seconds is None
+    assert isinstance(traces[0], sf.JobTrace)
+
+
+def test_jobs_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    monkeypatch.setattr(bq, "read_run_jobs", lambda *a, **k: [])
+    assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).jobs() == []
+
+
 # --- public surface + import-cost contract -------------------------------------
 
 

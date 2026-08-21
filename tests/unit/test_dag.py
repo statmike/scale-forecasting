@@ -112,3 +112,70 @@ def test_plan_dag_ensemble_flag_tracks_config() -> None:
 def test_plan_dag_is_deterministic() -> None:
     cfg = _cfg()
     assert dag.plan_dag(cfg) == dag.plan_dag(cfg)
+
+
+# --- dag_nodes: the offline per-node identity + dependency surface --------------
+
+
+def test_dag_nodes_one_per_family_with_deterministic_job_keys() -> None:
+    from scale_forecasting.registry.ids import make_job_key
+
+    cfg = _cfg(models=[_STAT, _ML, _NATIVE])  # ensemble off by default
+    run_dag = dag.plan_dag(cfg)
+    nodes = dag.dag_nodes(run_dag)
+    assert [n.family for n in nodes] == ["statistical", "ml", "native"]
+    # each node carries the deterministic attempt-1 job_key for its family under the shared run_id
+    for n in nodes:
+        assert n.job_key == make_job_key(run_dag.run_id, n.family, 1)
+    # family jobs have no upstream dependency (no ensemble here)
+    assert all(n.depends_on == () for n in nodes)
+
+
+def test_dag_nodes_carry_resolved_runtime_and_hardware() -> None:
+    cfg = _cfg(
+        models=[_STAT, _DL],
+        compute={"families": {"deep_learning": {"runtime": "ray", "hardware": "gpu"}}},
+    )
+    nodes = {n.family: n for n in dag.dag_nodes(dag.plan_dag(cfg))}
+    assert nodes["statistical"].runtime == "spark"
+    assert nodes["deep_learning"].runtime == "ray"
+    assert nodes["deep_learning"].hardware == "gpu"
+    assert nodes["deep_learning"].gpu_type is not None
+
+
+def test_dag_nodes_native_node_has_no_compute() -> None:
+    nodes = {n.family: n for n in dag.dag_nodes(dag.plan_dag(_cfg(models=[_NATIVE])))}
+    native = nodes["native"]
+    assert native.runtime == "bigquery"
+    assert native.hardware is None
+    assert native.gpu_type is None
+    assert native.spark_mode is None
+
+
+def test_dag_nodes_ensemble_node_depends_on_all_family_jobs() -> None:
+    from scale_forecasting.registry.ids import make_job_key
+
+    cfg = _cfg(
+        models=[_STAT, _ML, _NATIVE],
+        backtest={"enabled": True},
+        ensemble={"enabled": True, "strategies": ["mean", "median"]},
+    )
+    run_dag = dag.plan_dag(cfg)
+    nodes = dag.dag_nodes(run_dag)
+    ensemble = nodes[-1]
+    assert ensemble.family == "ensemble"
+    assert ensemble.runtime == "bigquery"
+    assert ensemble.models == ()
+    assert ensemble.job_key == make_job_key(run_dag.run_id, "ensemble", 1)
+    # it waits on every base family job's job_key
+    assert set(ensemble.depends_on) == {n.job_key for n in nodes if n.family != "ensemble"}
+
+
+def test_dag_nodes_no_ensemble_node_when_disabled() -> None:
+    nodes = dag.dag_nodes(dag.plan_dag(_cfg(models=[_STAT, _ML])))
+    assert all(n.family != "ensemble" for n in nodes)
+
+
+def test_dag_nodes_is_pure_and_deterministic() -> None:
+    cfg = _cfg()
+    assert dag.dag_nodes(dag.plan_dag(cfg)) == dag.dag_nodes(dag.plan_dag(cfg))

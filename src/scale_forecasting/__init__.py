@@ -49,6 +49,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "DryRunResult": (".sdk", "DryRunResult"),
     "RunResult": (".sdk", "RunResult"),
     "ModelResult": (".sdk", "ModelResult"),
+    "JobTrace": (".sdk", "JobTrace"),
+    "DagNode": (".dag", "DagNode"),
     # Orchestration.
     "run": (".main", "run"),
     # Direct path — pure core + writer-attached runners + unit of work.
@@ -85,6 +87,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports (re-exported below)
+    from .dag import DagNode  # noqa: F401
     from .engines.ray_io import chunk_cells, make_chunk_runner  # noqa: F401
     from .engines.spark_io import (  # noqa: F401
         RunOutcome,
@@ -95,7 +98,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .main import run  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
     from .router import split_by_runtime  # noqa: F401
-    from .sdk import DryRunResult, Forecaster, ModelResult, RunResult  # noqa: F401
+    from .sdk import DryRunResult, Forecaster, JobTrace, ModelResult, RunResult  # noqa: F401
     from .worker import CellResult, run_cell  # noqa: F401
 
 

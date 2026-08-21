@@ -76,6 +76,71 @@ class RunDag:
         return next((job for job in self.jobs if job.family == "native"), None)
 
 
+@dataclass(frozen=True)
+class DagNode:
+    """One node in a run's execution DAG — a family job or the ensemble — with its identity,
+    resolved placement, and upstream dependencies.
+
+    ``job_key`` is the node's canonical cross-system id (`registry.ids.make_job_key`, attempt 1 —
+    the *planned* identity): the one name the platform stamps as its own job id and a trace keys on.
+    ``runtime`` is where it runs (``spark`` / ``ray`` / ``bigquery``); ``hardware`` / ``gpu_type`` /
+    ``spark_mode`` are the resolved compute, ``None`` for the ``native`` and ``ensemble`` nodes
+    (both run in BigQuery, taking no runtime choice). ``depends_on`` lists the ``job_key`` of every
+    node that must finish first: the ensemble depends on all family jobs; a family job depends on
+    nothing.
+    """
+
+    job_key: str
+    family: str
+    runtime: str
+    models: tuple[str, ...]
+    hardware: str | None
+    gpu_type: str | None
+    spark_mode: str | None
+    depends_on: tuple[str, ...]
+
+
+def dag_nodes(run_dag: RunDag) -> tuple[DagNode, ...]:
+    """Resolve a run's DAG into its nodes with deterministic ids and dependencies (pure, offline).
+
+    One node per family job (`RunDag.jobs`) carrying its resolved runtime/hardware and its planned
+    ``job_key`` (`registry.ids.make_job_key`, attempt 1), plus — when ensembling is enabled — a
+    downstream ensemble node that depends on every family job. This is the offline "given a config,
+    which jobs will run and under what ids" surface: the same ``job_key``\\ s the executor stamps
+    onto each platform job and its ``run_jobs`` row, so a run's cross-system trace can be derived
+    from the config alone, before anything runs.
+    """
+    from .registry.ids import make_job_key
+
+    nodes = [
+        DagNode(
+            job_key=make_job_key(run_dag.run_id, job.family, 1),
+            family=job.family,
+            runtime=job.runtime,
+            models=job.models,
+            hardware=None if job.compute is None else job.compute.hardware,
+            gpu_type=None if job.compute is None else job.compute.gpu_type,
+            spark_mode=None if job.compute is None else job.compute.spark_mode,
+            depends_on=(),
+        )
+        for job in run_dag.jobs
+    ]
+    if run_dag.ensemble_enabled:
+        nodes.append(
+            DagNode(
+                job_key=make_job_key(run_dag.run_id, "ensemble", 1),
+                family="ensemble",
+                runtime="bigquery",
+                models=(),
+                hardware=None,
+                gpu_type=None,
+                spark_mode=None,
+                depends_on=tuple(n.job_key for n in nodes),
+            )
+        )
+    return tuple(nodes)
+
+
 def group_models_by_family(cfg: RunConfig) -> dict[str, list[str]]:
     """Group ``cfg.models`` by each model's registered ``family`` (pure; deterministic order).
 

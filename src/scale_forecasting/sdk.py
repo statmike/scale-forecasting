@@ -28,9 +28,10 @@ from .router import split_by_runtime
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from .dag import DagNode
     from .settings import Settings
 
-__all__ = ["Forecaster", "DryRunResult", "RunResult", "ModelResult"]
+__all__ = ["Forecaster", "DryRunResult", "RunResult", "ModelResult", "JobTrace"]
 
 # Registry statuses that mean a run has stopped changing — what `Forecaster.wait` blocks for.
 _TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "PARTIAL"})
@@ -84,6 +85,31 @@ class ModelResult:
     mean_mae: float | None
 
 
+@dataclass(frozen=True)
+class JobTrace:
+    """One family's job on a run, read from ``v_run_jobs`` — the cross-system trace row.
+
+    ``job_key`` is the job's canonical id (``run_jobs.job_id``); ``system_job_id`` is the platform's
+    own id for the same job (a Dataproc batch/job id, a Ray ``submission_id``, or a BigQuery parent
+    job id), so a status query can go straight to that platform. ``runtime`` says which platform to
+    query (``spark`` / ``ray`` / ``bigquery``); ``hardware`` / ``gpu_type`` / ``spark_mode`` record
+    the resolved placement. ``status`` is the job's registry/terminal status and ``runtime_seconds``
+    its wall-clock; ``attempt`` distinguishes a forced re-run's job from the original under one
+    ``run_id``.
+    """
+
+    family: str
+    job_key: str
+    system_job_id: str | None
+    runtime: str
+    status: str | None
+    attempt: int | None
+    hardware: str | None
+    gpu_type: str | None
+    spark_mode: str | None
+    runtime_seconds: float | None
+
+
 class Forecaster:
     """The easy path: point it at a config, then `dry_run`, `run`, `status`, `wait`, or `results`.
 
@@ -92,10 +118,11 @@ class Forecaster:
     `from_file` / `from_dict`. An optional ``settings`` injects the GCP infra identity;
     ``None`` resolves it from the ``SF_*`` environment at run time (the default deployments use).
 
-    The lifecycle closes the loop from one object: `dry_run` (offline plan), `run` (execute),
-    `status`/`wait` (track a submission), and `results` (read the per-model leaderboard) — all keyed
-    by the config's deterministic ``run_id``, so `status`/`results` work as a reattach path even in
-    a fresh process.
+    The lifecycle closes the loop from one object: `dry_run` (offline plan), `dag` (the planned
+    per-job DAG), `run` (execute), `status`/`wait` (track a submission), `results` (read the
+    per-model leaderboard), and `jobs` (the per-job cross-system trace) — all keyed by the config's
+    deterministic ``run_id``, so `status`/`results`/`jobs` work as a reattach path even in a fresh
+    process.
     """
 
     def __init__(self, config: RunConfig, *, settings: Settings | None = None) -> None:
@@ -246,6 +273,47 @@ class Forecaster:
                 median_fit_seconds=r.get("median_fit_seconds"),
                 mean_wape=r.get("mean_wape"),
                 mean_mae=r.get("mean_mae"),
+            )
+            for r in rows
+        ]
+
+    def dag(self) -> tuple[DagNode, ...]:
+        """The planned execution DAG for this config — pure, offline, no GCP.
+
+        Resolves the config into its nodes (`dag.dag_nodes`): one per model family plus the ensemble
+        (when enabled), each with the deterministic ``job_key`` it will run under, its resolved
+        runtime/hardware, and its upstream dependencies. Because ``job_key``\\ s are derived from
+        the config alone, this gives every job's identity *before* the run — the offline counterpart
+        to `jobs`, so a caller can line up planned nodes against executed rows by ``job_key``.
+        """
+        from .dag import dag_nodes, plan_dag
+
+        return dag_nodes(plan_dag(self._config))
+
+    def jobs(self, run_id: str | None = None) -> list[JobTrace]:
+        """The per-job cross-system trace for a run — one `JobTrace` per family, plus the ensemble.
+
+        Reads ``v_run_jobs`` (`registry.bq.read_run_jobs`) for ``run_id`` (default: this config's
+        id): the authoritative map from each family's canonical ``job_key`` to the platform job that
+        actually ran it (its ``system_job_id`` on Spark/Ray/BigQuery) and how it fared. Returns
+        ``[]`` when the run has no jobs yet. This is the "where did each family run, and can I go
+        look at that platform's job?" read — the executed counterpart to the offline `dag`.
+        """
+        from .registry import bq
+
+        rows = bq.read_run_jobs(run_id or self.run_id, settings=self._settings)
+        return [
+            JobTrace(
+                family=r["family"],
+                job_key=r["job_id"],
+                system_job_id=r.get("system_job_id"),
+                runtime=r["runtime"],
+                status=r.get("status"),
+                attempt=r.get("attempt"),
+                hardware=r.get("hardware"),
+                gpu_type=r.get("gpu_type"),
+                spark_mode=r.get("spark_mode"),
+                runtime_seconds=r.get("runtime_seconds"),
             )
             for r in rows
         ]

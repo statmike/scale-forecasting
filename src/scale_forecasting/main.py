@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
-    from .dag import FamilyJob, RunDag
+    from .dag import DagNode, FamilyJob, RunDag
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -91,6 +91,10 @@ class LaunchPlan:
     ``idempotency`` is the exists-vs-new verdict for this config's id; ``force`` records that the
     caller intends to re-run an already-run config (it only shapes the emitted guidance — a re-run
     is idempotent regardless, via dedupe-on-read under the shared ``run_id``).
+
+    ``nodes`` is the run's execution DAG resolved offline (`dag.dag_nodes`): one node per family job
+    plus the ensemble, each with its deterministic ``job_key`` and upstream dependencies — the
+    plan's cross-system identity map, before anything runs.
     """
 
     run_id: str
@@ -103,6 +107,7 @@ class LaunchPlan:
     commands: dict[str, LaunchCommands] | None
     idempotency: Idempotency
     force: bool
+    nodes: tuple[DagNode, ...]
 
 
 @dataclass(frozen=True)
@@ -670,7 +675,7 @@ def _emit_idempotency(result: LaunchPlan) -> None:
 
 
 def _emit_plan(result: LaunchPlan) -> None:
-    """Log the resolved plan + each launch-command tier (the dry-run/stage-only emission)."""
+    """Log the resolved plan, its DAG nodes, and each launch-command tier (dry-run/stage emit)."""
     verb = "stage" if result.staged else "dry-run"
     _log.info(
         "%s %s: runtime=%s python=%s bq=%s fanout=%s",
@@ -682,6 +687,9 @@ def _emit_plan(result: LaunchPlan) -> None:
         result.fanout,
     )
     _emit_idempotency(result)
+    for node in result.nodes:
+        after = f" after [{', '.join(node.depends_on)}]" if node.depends_on else ""
+        _log.info("  node %s: %s on %s%s", node.family, node.job_key, node.runtime, after)
     if result.commands is None:
         _log.info(
             "%s %s: infra unresolved (no SF_* env) — commands not emitted", verb, result.run_id
@@ -712,9 +720,11 @@ def plan_run(
     guidance. Emits the plan to the log and returns it.
     """
     from .config import estimate_fanout
+    from .dag import dag_nodes, plan_dag
 
     plan = _plan(cfg)
     fanout = estimate_fanout(cfg)
+    nodes = dag_nodes(plan_dag(cfg))
     config_uri: str | None = None
     commands: dict[str, LaunchCommands] | None = None
     idempotency = Idempotency(checked=False, exists=False, prior_status=None)
@@ -748,6 +758,7 @@ def plan_run(
         commands=commands,
         idempotency=idempotency,
         force=force,
+        nodes=nodes,
     )
     _emit_plan(result)
     return result
@@ -756,17 +767,33 @@ def plan_run(
 def _manifest_dict(result: LaunchPlan, *, created_at: str) -> dict[str, object]:
     """The reproducibility-manifest payload for a staged run (pure — ``created_at`` is caller-set).
 
-    Records the config digest, fan-out, runtime split, both command tiers, and the staged config
-    URI — everything needed to answer "what command produced run X?". The timestamp is passed in
-    (not read here) so this stays a pure function with no wall-clock.
+    Records the config digest, fan-out, runtime split, both command tiers, the staged config URI,
+    and the execution ``dag`` (one entry per family job + the ensemble, each with its deterministic
+    ``job_key`` and ``depends_on``) — everything needed to answer "what command produced run X, and
+    which jobs did it schedule under what ids?". The timestamp is passed in (not read here) so this
+    stays a pure function with no wall-clock.
     """
     commands = {
         name: {"runtime": lc.runtime, "universal": lc.universal, "native": lc.native}
         for name, lc in (result.commands or {}).items()
     }
+    dag = [
+        {
+            "job_key": n.job_key,
+            "family": n.family,
+            "runtime": n.runtime,
+            "models": list(n.models),
+            "hardware": n.hardware,
+            "gpu_type": n.gpu_type,
+            "spark_mode": n.spark_mode,
+            "depends_on": list(n.depends_on),
+        }
+        for n in result.nodes
+    ]
     return {
         "run_id": result.run_id,
         "created_at": created_at,
+        "dag": dag,
         "python_runtime": result.python_runtime,
         "python_models": result.python_models,
         "bq_models": result.bq_models,
@@ -807,10 +834,12 @@ def stage_run(
     from datetime import UTC, datetime
 
     from .config import estimate_fanout
+    from .dag import dag_nodes, plan_dag
     from .staging import stage_config, stage_manifest
 
     plan = _plan(cfg)
     fanout = estimate_fanout(cfg)
+    nodes = dag_nodes(plan_dag(cfg))
     settings = settings or _resolve_settings()
     idempotency = _check_idempotency(plan.run_id, settings)
     resolved_infra = _resolve_infra(cfg, infra)
@@ -845,6 +874,7 @@ def stage_run(
         commands=commands,
         idempotency=idempotency,
         force=force,
+        nodes=nodes,
     )
     manifest_uri = stage_manifest(
         _manifest_dict(result, created_at=datetime.now(UTC).isoformat()), plan.run_id, code_bucket
