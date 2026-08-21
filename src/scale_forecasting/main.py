@@ -211,6 +211,8 @@ def _launch_family_job(
             system_job_id=system_job_id,
             hardware=compute.hardware,
             gpu_type=compute.gpu_type,
+            spark_mode=compute.spark_mode,
+            spark_cluster_name=compute.spark_cluster_name,
         )
 
 

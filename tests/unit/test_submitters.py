@@ -108,6 +108,31 @@ def test_spark_launch_threads_gpu_to_batch(monkeypatch: pytest.MonkeyPatch) -> N
     assert seen["gpu_type"] == "L4"
 
 
+def test_spark_launch_cluster_mode_submits_cluster_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    # spark_mode="cluster" routes to the Dataproc cluster submitter (not the Serverless batch),
+    # threading the per-family id, the GPU sizing, and the reuse target through.
+    import scale_forecasting.dataproc_cluster as cluster_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(cluster_mod, "submit_cluster_job", lambda cfg, **kw: seen.update(kw) or "j")
+
+    SparkSubmitter().launch(
+        _cfg(),
+        models=[_SPARK],
+        manage_header=False,
+        settings=_SETTINGS,
+        system_job_id="sf-run-abc-statistical-a1",
+        hardware="gpu",
+        gpu_type="T4",
+        spark_mode="cluster",
+        spark_cluster_name="warm-cluster",
+    )
+    assert seen["job_id"] == "sf-run-abc-statistical-a1"
+    assert seen["hardware"] == "gpu"
+    assert seen["gpu_type"] == "T4"
+    assert seen["spark_cluster_name"] == "warm-cluster"
+
+
 def test_spark_launch_with_session_ignores_system_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
     # An in-process session submits no remote batch, so the batch id has nowhere to go.
     from scale_forecasting.engines import spark_explode

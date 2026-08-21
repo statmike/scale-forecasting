@@ -42,6 +42,8 @@ class RuntimeSubmitter(Protocol):
         system_job_id: str | None = None,
         hardware: str = "cpu",
         gpu_type: str | None = None,
+        spark_mode: str | None = None,
+        spark_cluster_name: str | None = None,
     ) -> None:
         """Run ``models`` on this runtime, blocking until terminal when ``wait``.
 
@@ -61,12 +63,17 @@ class RuntimeSubmitter(Protocol):
         ``hardware``/``gpu_type`` carry the family's resolved accelerator (`ResolvedFamilyCompute`):
         ``hardware="gpu"`` provisions the runtime's GPU (a Serverless L4 executor, a Ray GPU pool);
         ``gpu_type`` names it. They default to CPU, so a CPU family launches exactly as before.
+
+        ``spark_mode``/``spark_cluster_name`` select the Spark sub-runtime (``serverless`` batch xor
+        a Dataproc ``cluster`` job, the latter reusing a standing cluster by name when given); other
+        runtimes ignore them.
         """
         ...
 
 
 class SparkSubmitter:
-    """Dataproc Serverless Spark: a remote batch, or in-process over an injected session."""
+    """Dataproc Spark: a Serverless batch xor a cluster job, or in-process over an injected
+    session."""
 
     name = "spark"
 
@@ -83,16 +90,35 @@ class SparkSubmitter:
         system_job_id: str | None = None,
         hardware: str = "cpu",
         gpu_type: str | None = None,
+        spark_mode: str | None = None,
+        spark_cluster_name: str | None = None,
     ) -> None:
         if spark is not None:
-            # In-process Spark over an injected (Connect or local) session — no remote batch submit.
+            # In-process Spark over an injected (Connect or local) session — no remote submit.
             # max_executors is a remote-batch dynamic-allocation cap; an injected session skips it.
-            # system_job_id names a remote batch; an in-process session submits none, so unused.
-            # hardware/gpu_type shape a remote batch's executors; an injected session is CPU-only.
+            # system_job_id names a remote job; an in-process session submits none, so unused.
+            # hardware/gpu_type/spark_mode shape a remote job's compute; a session runs local.
             from .engines import spark_explode
 
             spark_explode.run(
                 cfg, models=models, manage_header=manage_header, settings=settings, spark=spark
+            )
+            return
+        if spark_mode == "cluster":
+            # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named).
+            from .dataproc_cluster import submit_cluster_job
+
+            submit_cluster_job(
+                cfg,
+                engine="explode",
+                models=models,
+                manage_header=manage_header,
+                settings=settings,
+                wait=wait,
+                hardware=hardware,
+                gpu_type=gpu_type,
+                spark_cluster_name=spark_cluster_name,
+                job_id=system_job_id,
             )
             return
         from .submit import submit_batch
@@ -129,11 +155,14 @@ class RaySubmitter:
         system_job_id: str | None = None,
         hardware: str = "cpu",
         gpu_type: str | None = None,
+        spark_mode: str | None = None,
+        spark_cluster_name: str | None = None,
     ) -> None:
-        # spark and max_executors are ignored — there is no in-process Ray path from the
-        # orchestrator, and the Ray cluster autoscales on its own (no fixed executor cap).
-        # system_job_id becomes the Ray submission_id so the job's own id is deterministic.
-        # hardware="gpu" provisions the Ray GPU pool for this family (kept out of cfg for run_id).
+        # spark, max_executors, and the spark_* args are ignored — there is no in-process Ray path
+        # from the orchestrator, the Ray cluster autoscales on its own (no fixed executor cap), and
+        # spark_mode/spark_cluster_name are Spark-only. system_job_id becomes the Ray submission_id
+        # so the job's own id is deterministic; hardware="gpu" provisions the Ray GPU pool for this
+        # family (kept out of cfg for run_id).
         from .ray_submit import submit_ray
 
         submit_ray(
