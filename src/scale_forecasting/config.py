@@ -217,6 +217,9 @@ class EnsembleCompute(BaseModel):
     mode: EnsembleMode = "barrier"
     spark_mode: SparkMode | None = None
     spark_cluster_name: str | None = None
+    # Seconds between readiness polls in ``mode="microbatch"`` (how often the ensemble drains the
+    # series whose base models have all landed). Inert in ``barrier`` mode. Part of the run_id.
+    microbatch_interval_s: float = Field(default=60.0, gt=0)
 
     @model_validator(mode="after")
     def _check(self) -> EnsembleCompute:

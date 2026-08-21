@@ -587,8 +587,20 @@ def _patch_run_seams(
     def _fake_ensembles(cfg: RunConfig, run_id: str, *, settings: Any, **_: Any) -> None:
         seen["ensemble_called"] = True
         seen["ensemble_run_id"] = run_id
+        seen["ensemble_mode"] = "barrier"
 
     monkeypatch.setattr(ensemble_mod, "run_ensembles", _fake_ensembles)
+
+    def _fake_microbatch(cfg: RunConfig, run_id: str, *, settings: Any, **kw: Any) -> None:
+        seen["ensemble_called"] = True
+        seen["ensemble_run_id"] = run_id
+        seen["ensemble_mode"] = "microbatch"
+        seen["poll_interval_s"] = kw.get("poll_interval_s")
+        # The concurrent trigger passes a live upstream_done predicate. By the time main.run
+        # joins this future the base jobs have finished, so it must report done.
+        seen["upstream_done_at_join"] = bool(kw.get("upstream_done") and kw["upstream_done"]())
+
+    monkeypatch.setattr(ensemble_mod, "run_ensembles_microbatch", _fake_microbatch)
     return seen
 
 
@@ -601,6 +613,53 @@ def test_run_invokes_ensembles_when_enabled_and_engines_ok(
     assert seen["ensemble_called"] is True
     assert seen["ensemble_run_id"] == run_id
     assert seen["status"] == "COMPLETED"
+
+
+def test_run_microbatch_ensemble_runs_concurrently_with_configured_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # mode="microbatch" routes to run_ensembles_microbatch (not the barrier run_ensembles),
+    # threads the config's poll interval, and hands it a live upstream_done predicate that reads
+    # done once the base jobs have joined.
+    seen = _patch_run_seams(monkeypatch)
+    cfg = _cfg(
+        ensemble={"enabled": True, "strategies": ["mean"]},
+        compute={"ensemble": {"mode": "microbatch", "microbatch_interval_s": 12.5}},
+    )
+    run_id = main.run(cfg)
+    assert seen["ensemble_called"] is True
+    assert seen["ensemble_run_id"] == run_id
+    assert seen["ensemble_mode"] == "microbatch"
+    assert seen["poll_interval_s"] == 12.5
+    assert seen["upstream_done_at_join"] is True
+    assert seen["status"] == "COMPLETED"
+
+
+def test_run_barrier_ensemble_uses_barrier_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The default (mode="barrier") stays the post-join single-pass run_ensembles call.
+    seen = _patch_run_seams(monkeypatch)
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    main.run(cfg)
+    assert seen["ensemble_mode"] == "barrier"
+
+
+def test_run_microbatch_ensemble_still_launches_when_a_family_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Unlike the barrier's up-front skip, the concurrent microbatch node is already running when a
+    # base family fails; it stays launched but (live) drains nothing because the failed family's
+    # models never satisfy the full-base-set readiness bar. The run still finalizes PARTIAL and
+    # re-raises the family error.
+    seen = _patch_run_seams(monkeypatch, bq_error=RuntimeError("bq boom"))
+    cfg = _cfg(
+        ensemble={"enabled": True, "strategies": ["mean"]},
+        compute={"ensemble": {"mode": "microbatch"}},
+    )
+    with pytest.raises(RuntimeError, match="bq boom"):
+        main.run(cfg)
+    assert seen["ensemble_called"] is True
+    assert seen["ensemble_mode"] == "microbatch"
+    assert seen["status"] == "PARTIAL"
 
 
 def test_run_skips_ensembles_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

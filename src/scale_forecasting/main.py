@@ -52,7 +52,7 @@ from .registry.ids import make_run_id
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
@@ -343,6 +343,7 @@ def _launch_ensemble_job(
     settings: Settings,
     *,
     force: bool = False,
+    upstream_done: Callable[[], bool] | None = None,
 ) -> None:
     """Run the ensemble DAG node inline (driver), wrapped in its own ``run_jobs`` row.
 
@@ -356,8 +357,16 @@ def _launch_ensemble_job(
 
     ``cfg.compute.ensemble.mode`` selects *when* the consensus is computed: ``"barrier"`` (default)
     blends once over every base prediction; ``"microbatch"`` drains series incrementally as each
-    one's full base set lands (`ensemble_run.run_ensembles_microbatch`). Both execute on the driver
-    and land the same rows; only the batching differs.
+    one's full base set lands (`ensemble_run.run_ensembles_microbatch`), polling every
+    ``cfg.compute.ensemble.microbatch_interval_s``. Both execute on the driver and land the same
+    rows; only the batching differs.
+
+    ``upstream_done`` (microbatch only) lets the caller run this node **concurrently** with the base
+    jobs: the drain loop keeps polling for ready series until ``upstream_done()`` reports the base
+    jobs finished *and* no ready series remain. ``None`` (the default) means "already done" — the
+    post-join trigger, draining every ready series in a single pass. A series is *ready* only once
+    **every** configured base model has landed for it, so a failed family leaves no series ready and
+    the concurrent node produces nothing — preserving the "no ensembles for a failed run" contract.
     """
     from .ensemble_run import run_ensembles, run_ensembles_microbatch
     from .registry import bq
@@ -377,7 +386,14 @@ def _launch_ensemble_job(
         # console under system_job_id (reverse-trace), mirroring the native family.
         prefix = f"{system_job_id}-"
         if cfg.compute.ensemble.mode == "microbatch":
-            run_ensembles_microbatch(cfg, run_id, settings=settings, job_id_prefix=prefix)
+            run_ensembles_microbatch(
+                cfg,
+                run_id,
+                settings=settings,
+                poll_interval_s=cfg.compute.ensemble.microbatch_interval_s,
+                upstream_done=upstream_done,
+                job_id_prefix=prefix,
+            )
         else:
             run_ensembles(cfg, run_id, settings=settings, job_id_prefix=prefix)
 
@@ -432,6 +448,7 @@ def run(
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows.
     """
+    import threading
     from concurrent.futures import ThreadPoolExecutor
 
     from .dag import plan_dag
@@ -466,6 +483,16 @@ def run(
     native = run_dag.native_job
     python_jobs = run_dag.python_jobs
 
+    # Microbatch ensemble overlaps the base jobs: it drains series as each one's full base set lands
+    # (rather than waiting for the join like the barrier), so it runs as a concurrent pool task with
+    # an ``upstream_done`` predicate the join flips. ``base_done`` is set once every family (Python
+    # + native) has joined, telling the drain loop no further base predictions will land. A family
+    # that fails leaves its models absent, so no series ever reaches the full-base-set readiness bar
+    # and the concurrent node drains nothing — same "no ensembles when a base family failed" outcome
+    # as the barrier's post-join skip, just reached by readiness rather than an up-front gate.
+    ensemble_concurrent = run_dag.ensemble_enabled and cfg.compute.ensemble.mode == "microbatch"
+    base_done = threading.Event()
+
     # One header owner: run_header writes RUNNING on entry and finalizes once, after every family
     # job joins, with the combined status computed below. Every job runs with manage_header=False so
     # nothing else touches this row. Per-family errors are captured (not raised through the block)
@@ -478,9 +505,12 @@ def run(
         # When the run has several ephemeral Ray families, provision one shared Ray cluster for the
         # duration of the launch block (they submit their own jobs to it, and it's torn down once on
         # exit); otherwise this yields None and each family self-provisions as before.
+        # +1 pool worker for the concurrent microbatch ensemble so it never contends with a family
+        # for a thread; barrier mode keeps the exact family-only pool it always had.
+        max_workers = max(1, len(python_jobs)) + (1 if ensemble_concurrent else 0)
         with (
             _shared_ray_cluster(cfg, run_dag, run_id, settings) as ray_cluster,
-            ThreadPoolExecutor(max_workers=max(1, len(python_jobs))) as pool,
+            ThreadPoolExecutor(max_workers=max_workers) as pool,
         ):
             futures = {
                 pool.submit(
@@ -496,6 +526,20 @@ def run(
                 ): job
                 for job in python_jobs
             }
+            # Microbatch: fire the ensemble now, concurrently with the base jobs, draining ready
+            # series until the join flips base_done. Barrier: it stays a post-join step (below).
+            ensemble_future = (
+                pool.submit(
+                    _launch_ensemble_job,
+                    cfg,
+                    run_id,
+                    settings,
+                    force=force,
+                    upstream_done=base_done.is_set,
+                )
+                if ensemble_concurrent
+                else None
+            )
             if native is not None:
                 try:
                     bq_outcome = _launch_native_job(cfg, native, run_id, settings, force=force)
@@ -506,12 +550,20 @@ def run(
                     future.result()
                 except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
                     job_errors[job.family] = exc
+            # Every base family has joined: no more base predictions will land, so the concurrent
+            # drain loop can stop after its final ready-series pass. Set before the ensemble join.
+            base_done.set()
+            if ensemble_future is not None:
+                try:
+                    ensemble_future.result()
+                except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
+                    ensemble_error = exc
 
-        # Ensembles run only once every family has produced its base predictions under this run_id
-        # (they read forecast_predictions / backtest_oof), so this is sequenced strictly after the
-        # join and skipped when any family failed. A failure here is captured like a family error —
-        # the ensembles are part of the run's success contract.
-        if not job_errors and run_dag.ensemble_enabled:
+        # Barrier ensemble: it reads every family's base predictions / backtest_oof, so it runs
+        # strictly after the join and only when every family succeeded. (Microbatch already ran
+        # concurrently above.) A failure here is captured like a family error — the ensembles are
+        # part of the run's success contract.
+        if not ensemble_concurrent and not job_errors and run_dag.ensemble_enabled:
             try:
                 _launch_ensemble_job(cfg, run_id, settings, force=force)
             except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
