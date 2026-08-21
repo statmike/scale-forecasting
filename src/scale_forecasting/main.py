@@ -38,7 +38,7 @@ thread, in contributor mode, in parallel with the in-process BigQuery engine und
 Public surface: ``run(cfg, *, dry_run=False) -> run_id``, the offline ``plan_run(cfg) ->
 LaunchPlan`` (id + fanout + launch-command templates), ``stage_run(cfg) -> LaunchPlan`` (upload
 artifacts + runnable commands + reproducibility manifest, no submit), and
-``python -m scale_forecasting.main --config ... [--dry-run | --stage-only]``.
+``python -m scale_forecasting.main (--config … | --config-uri gs://…) [--dry-run | --stage-only]``.
 """
 
 from __future__ import annotations
@@ -892,13 +892,18 @@ def _resolve_settings() -> Settings:
 
 
 def _main(argv: list[str] | None = None) -> None:
-    """CLI: ``python -m scale_forecasting.main --config run.json [--dry-run | --stage-only]``."""
+    """CLI: ``main (--config run.json | --config-uri gs://…) [--dry-run | --stage-only]``."""
     import argparse
 
-    from .config import load_config
+    from .config import load_config_uri
 
     p = argparse.ArgumentParser(prog="main", description="Run a forecast (Spark + BigQuery).")
-    p.add_argument("--config", required=True, help="path to the run config JSON")
+    # Accept either a local path (--config, the interactive UX) or a gs:// URI (--config-uri, what
+    # the emitted portable "main" command references — the staged config, digest == run_id). Exactly
+    # one is required; load_config_uri resolves both forms.
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--config", help="path to the run config JSON")
+    src.add_argument("--config-uri", help="gs:// (or local) URI of a staged run config JSON")
     verbs = p.add_mutually_exclusive_group()
     verbs.add_argument(
         "--dry-run", action="store_true", help="resolve + estimate fanout offline; touch no GCP"
@@ -915,7 +920,7 @@ def _main(argv: list[str] | None = None) -> None:
     )
     ns = p.parse_args(argv)
 
-    cfg = load_config(ns.config)
+    cfg = load_config_uri(ns.config or ns.config_uri)
     if ns.stage_only:
         result = stage_run(cfg, force=ns.force)
         _log.info("staged: %s", result.run_id)

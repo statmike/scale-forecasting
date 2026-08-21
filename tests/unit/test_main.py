@@ -706,6 +706,44 @@ def test_cli_force_flag_threads_through(tmp_path: Any, monkeypatch: pytest.Monke
     assert seen["force"] is True
 
 
+def test_cli_accepts_config_uri(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--config-uri`` (what the emitted portable "main" command uses) loads a config too.
+
+    ``load_config_uri`` treats a non-``gs://`` value as a local path, so this exercises the flag
+    wiring offline without touching GCS.
+    """
+    import json
+
+    seen: dict[str, Any] = {}
+
+    def _fake_run(cfg: RunConfig, *, dry_run: bool = False, force: bool = False) -> str:
+        seen["run_name"] = cfg.run_name
+        return "rid-123"
+
+    monkeypatch.setattr(main, "run", _fake_run)
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli config-uri test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    main._main(["--config-uri", str(path), "--dry-run"])
+    assert seen["run_name"] == "cli config-uri test"
+
+
+def test_cli_requires_exactly_one_config_source() -> None:
+    """Exactly one of ``--config`` / ``--config-uri`` is required (neither, or both, exits)."""
+    with pytest.raises(SystemExit):
+        main._main(["--dry-run"])  # neither source
+    with pytest.raises(SystemExit):
+        main._main(["--config", "a.json", "--config-uri", "gs://b/c.json"])  # both sources
+
+
 # --- shared ephemeral Ray cluster across families ------------------------------
 # A run with two or more ephemeral Ray families shares ONE cluster: the orchestrator provisions it,
 # each family submits its own failure-isolated job to it, and it's torn down once. These tests cover
