@@ -93,6 +93,13 @@ def test_run_jobs_view_keeps_current_attempt_per_family() -> None:
     assert "FROM `d.run_jobs`" in stmt
 
 
+def test_run_jobs_view_exposes_job_timing_for_the_trace() -> None:
+    stmt = render_create_views("d")["v_run_jobs"]
+    # the wall-clock bracket the SDK trace() reads to place each job on a timeline
+    assert "started_at" in stmt
+    assert "ended_at" in stmt
+
+
 def test_views_snapshot() -> None:
     rendered = _render_all()
     if os.environ.get("SF_UPDATE_SNAPSHOTS") == "1":

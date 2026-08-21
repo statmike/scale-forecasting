@@ -352,6 +352,126 @@ def test_jobs_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).jobs() == []
 
 
+# --- trace: the per-job + per-cell execution timeline --------------------------
+
+
+def _dt(second: int) -> Any:
+    from datetime import UTC, datetime
+
+    return datetime(2026, 1, 1, 0, 0, second, tzinfo=UTC)
+
+
+def _job_row(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "family": "statistical",
+        "job_id": "sf-abc-statistical-a1",
+        "runtime": "spark",
+        "status": "COMPLETED",
+        "started_at": _dt(0),
+        "ended_at": _dt(40),
+        "runtime_seconds": 40.0,
+    }
+    base.update(over)
+    return base
+
+
+def _cell_row(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "ts_id": "series-a",
+        "model_type": "theta",
+        "compute_engine": "spark",
+        "worker_id": "host-1:123",
+        "cell_started_at": _dt(2),
+        "cell_ended_at": _dt(5),
+    }
+    base.update(over)
+    return base
+
+
+def test_build_trace_frame_stacks_jobs_and_cells() -> None:
+    frame = sf.build_trace_frame([_job_row()], [_cell_row()])
+    assert list(frame.columns) == [
+        "kind", "lane", "label", "start", "end",
+        "duration_s", "status", "runtime", "model_type", "ts_id",
+    ]
+    job = frame[frame["kind"] == "job"].iloc[0]
+    assert job["lane"] == "statistical" and job["label"] == "statistical"
+    assert job["duration_s"] == 40.0 and job["runtime"] == "spark"
+    assert job["model_type"] is None and job["ts_id"] is None
+    cell = frame[frame["kind"] == "cell"].iloc[0]
+    assert cell["lane"] == "host-1:123" and cell["label"] == "theta:series-a"
+    assert cell["duration_s"] == 3.0 and cell["runtime"] == "spark"
+    assert cell["model_type"] == "theta" and cell["ts_id"] == "series-a"
+    assert cell["status"] is None
+
+
+def test_build_trace_frame_drops_rows_without_start_and_zero_widths_open_spans() -> None:
+    # A job with no started_at can't be placed → dropped; a started-but-not-ended job → zero-width.
+    rows = [
+        _job_row(family="never-started", started_at=None, ended_at=None),
+        _job_row(family="still-running", ended_at=None, runtime_seconds=None),
+    ]
+    frame = sf.build_trace_frame(rows, [])
+    assert list(frame["lane"]) == ["still-running"]  # the un-started job is gone
+    open_span = frame.iloc[0]
+    assert open_span["start"] == open_span["end"]  # end defaults to start (zero-width marker)
+    assert open_span["duration_s"] is None  # no end + no runtime_seconds → not derivable
+
+
+def test_build_trace_frame_empty_inputs_keep_columns() -> None:
+    frame = sf.build_trace_frame([], [])
+    assert frame.empty
+    assert list(frame.columns)[:2] == ["kind", "lane"]
+
+
+def test_trace_reads_both_sources_and_builds_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scale_forecasting.registry import bq
+
+    seen: dict[str, Any] = {}
+
+    def _fake_jobs(run_id: str, *, settings: Any = None) -> list[dict[str, Any]]:
+        seen["jobs_run_id"] = run_id
+        seen["jobs_settings"] = settings
+        return [_job_row()]
+
+    def _fake_cells(
+        run_id: str, *, limit: int = 5000, settings: Any = None
+    ) -> list[dict[str, Any]]:
+        seen["cells_run_id"] = run_id
+        seen["limit"] = limit
+        return [_cell_row(), _cell_row(ts_id="series-b")]
+
+    monkeypatch.setattr(bq, "read_run_jobs", _fake_jobs)
+    monkeypatch.setattr(bq, "read_cell_timing", _fake_cells)
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    frame = f.trace(cell_limit=100)
+
+    assert seen["jobs_run_id"] == f.run_id and seen["cells_run_id"] == f.run_id
+    assert seen["jobs_settings"] is _SETTINGS
+    assert seen["limit"] == 100  # cell_limit threads through to the reader
+    assert (frame["kind"] == "job").sum() == 1
+    assert (frame["kind"] == "cell").sum() == 2
+
+
+def test_plot_trace_renders_a_lane_per_track() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless: no display needed for the smoke check
+    frame = sf.build_trace_frame([_job_row()], [_cell_row(), _cell_row(worker_id="host-2:9")])
+    ax = sf.plot_trace(frame, title="my run")
+    # one y-tick per (kind, lane): 1 job track + 2 distinct worker tracks
+    assert len(ax.get_yticklabels()) == 3
+    assert ax.get_title() == "my run"
+
+
+def test_plot_trace_handles_empty_frame() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    ax = sf.plot_trace(sf.build_trace_frame([], []))
+    assert "no timed rows" in ax.get_title()
+
+
 # --- public surface + import-cost contract -------------------------------------
 
 

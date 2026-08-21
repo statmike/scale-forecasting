@@ -1087,6 +1087,49 @@ def read_run_jobs(
     return [dict(r) for r in rows]
 
 
+def read_cell_timing(
+    run_id: str, *, limit: int = 5000, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return per-cell wall-clock brackets for ``run_id`` — the fine grain under the per-job trace.
+
+    Reads ``forecast_metadata`` directly (no view — this is a fine-grained, bounded read, not a
+    curated roll-up): one row per full-fit cell (``fold_id IS NULL``) that recorded a wall-clock
+    bracket (``cell_started_at IS NOT NULL`` — older rows predate the trace columns, so skipped),
+    carrying ``ts_id`` / ``model_type`` / ``compute_engine`` / ``worker_id`` and the
+    ``cell_started_at`` / ``cell_ended_at`` stamps. Writes are append-only + at-least-once, so it
+    collapses to one row per cell (latest write wins) with the same grain as ``v_model_leaderboard``
+    before returning. Ordered by ``cell_started_at`` and capped at ``limit`` rows (a 100k-cell run
+    would swamp a trace plot; the cap keeps the read bounded — the per-job trace stays the
+    whole-run view). Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        "SELECT ts_id, model_type, compute_engine, worker_id, cell_started_at, cell_ended_at "
+        f"FROM `{resolved.table_ref('forecast_metadata')}` "
+        "WHERE run_id=@run_id AND fold_id IS NULL AND cell_started_at IS NOT NULL "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
+        "ORDER BY created_at DESC) = 1 "
+        "ORDER BY cell_started_at LIMIT @limit"
+    )
+    params = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_cell_timing failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
 class HeaderFinalizer:
     """Mutable finalize state a `run_header` body fills in before a clean exit.
 

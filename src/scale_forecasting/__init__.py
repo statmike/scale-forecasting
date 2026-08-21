@@ -50,6 +50,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "RunResult": (".sdk", "RunResult"),
     "ModelResult": (".sdk", "ModelResult"),
     "JobTrace": (".sdk", "JobTrace"),
+    "build_trace_frame": (".sdk", "build_trace_frame"),
+    "plot_trace": (".sdk", "plot_trace"),
     "DagNode": (".dag", "DagNode"),
     # Orchestration.
     "run": (".main", "run"),
@@ -98,7 +100,15 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .main import run  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
     from .router import split_by_runtime  # noqa: F401
-    from .sdk import DryRunResult, Forecaster, JobTrace, ModelResult, RunResult  # noqa: F401
+    from .sdk import (  # noqa: F401
+        DryRunResult,
+        Forecaster,
+        JobTrace,
+        ModelResult,
+        RunResult,
+        build_trace_frame,
+        plot_trace,
+    )
     from .worker import CellResult, run_cell  # noqa: F401
 
 

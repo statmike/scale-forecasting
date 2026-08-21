@@ -92,6 +92,8 @@ SELECT
   system_job_id,
   status,
   created_at,
+  started_at,
+  ended_at,
   runtime_seconds,
   CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds

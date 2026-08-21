@@ -28,10 +28,35 @@ from .router import split_by_runtime
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pandas as pd
+
     from .dag import DagNode
     from .settings import Settings
 
-__all__ = ["Forecaster", "DryRunResult", "RunResult", "ModelResult", "JobTrace"]
+__all__ = [
+    "Forecaster",
+    "DryRunResult",
+    "RunResult",
+    "ModelResult",
+    "JobTrace",
+    "build_trace_frame",
+    "plot_trace",
+]
+
+# Columns of the long-form trace frame `build_trace_frame` returns — one row per timed span (a job
+# or a cell), stacked so a single frame drives both the per-job overview and the per-cell detail.
+_TRACE_COLUMNS: tuple[str, ...] = (
+    "kind",  # "job" | "cell"
+    "lane",  # the y-axis track: family (job) or worker_id (cell)
+    "label",  # human label for the span
+    "start",  # absolute wall-clock start
+    "end",  # absolute wall-clock end
+    "duration_s",  # span length in seconds (None when it can't be derived)
+    "status",  # job status ("COMPLETED"/…); None for cells
+    "runtime",  # job runtime ("spark"/…) or cell compute_engine
+    "model_type",  # cell only; None for jobs
+    "ts_id",  # cell only; None for jobs
+)
 
 # Registry statuses that mean a run has stopped changing — what `Forecaster.wait` blocks for.
 _TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "PARTIAL"})
@@ -120,9 +145,9 @@ class Forecaster:
 
     The lifecycle closes the loop from one object: `dry_run` (offline plan), `dag` (the planned
     per-job DAG), `run` (execute), `status`/`wait` (track a submission), `results` (read the
-    per-model leaderboard), and `jobs` (the per-job cross-system trace) — all keyed by the config's
-    deterministic ``run_id``, so `status`/`results`/`jobs` work as a reattach path even in a fresh
-    process.
+    per-model leaderboard), `jobs` (the per-job cross-system trace), and `trace` (the per-job +
+    per-cell execution timeline) — all keyed by the config's deterministic ``run_id``, so
+    `status`/`results`/`jobs`/`trace` work as a reattach path even in a fresh process.
     """
 
     def __init__(self, config: RunConfig, *, settings: Settings | None = None) -> None:
@@ -318,6 +343,26 @@ class Forecaster:
             for r in rows
         ]
 
+    def trace(self, run_id: str | None = None, *, cell_limit: int = 5000) -> pd.DataFrame:
+        """The run's execution timeline as a long-form frame — per-job spans + per-cell spans.
+
+        Reads the per-job trace (``v_run_jobs`` via `jobs`' reader) and the per-cell wall-clock
+        brackets (``forecast_metadata`` via `registry.bq.read_cell_timing`, capped at
+        ``cell_limit``) for ``run_id`` (default: this config's id), then stacks them into one frame
+        (columns ``kind``/``lane``/``label``/``start``/``end``/``duration_s``/``status``/
+        ``runtime``/``model_type``/``ts_id``) via `build_trace_frame`. Feed it to `plot_trace` for a
+        Gantt/waterfall, or slice it directly (``frame[frame.kind == "cell"]``). Returns an empty
+        frame (with the columns) when the run has no timed rows — e.g. an older run written before
+        the trace columns existed. This is the "how did this run unfold over wall-clock time, and
+        which worker ran what?" read that sits under the per-job `jobs` summary.
+        """
+        from .registry import bq
+
+        rid = run_id or self.run_id
+        job_rows = bq.read_run_jobs(rid, settings=self._settings)
+        cell_rows = bq.read_cell_timing(rid, limit=cell_limit, settings=self._settings)
+        return build_trace_frame(job_rows, cell_rows)
+
     def _resolved_dataset_ref(self) -> str | None:
         """``project.dataset`` from the injected/resolved `Settings`, or ``None`` if
         unresolvable (missing ``SF_*`` env) — keeps `review` graceful offline."""
@@ -331,3 +376,105 @@ class Forecaster:
             except ConfigError:
                 return None
         return settings.dataset_ref
+
+
+def _duration_s(start: Any, end: Any, fallback: Any) -> float | None:
+    """Seconds between two timestamps, or ``fallback`` when the pair can't yield a span."""
+    if start is not None and end is not None:
+        return (end - start).total_seconds()
+    return float(fallback) if fallback is not None else None
+
+
+def build_trace_frame(
+    job_rows: list[dict[str, Any]], cell_rows: list[dict[str, Any]]
+) -> pd.DataFrame:
+    """Stack per-job and per-cell timing rows into one long-form trace frame — pure, no I/O.
+
+    ``job_rows`` are ``v_run_jobs`` rows (see `registry.bq.read_run_jobs`) and ``cell_rows`` are
+    per-cell timing rows (see `registry.bq.read_cell_timing`); this is the pure assembly step
+    `Forecaster.trace` calls after reading them, split out so it unit-tests without GCP. Each input
+    row becomes one span record with the shared `_TRACE_COLUMNS` schema: a job lands on its
+    ``family`` lane, a cell on its ``worker_id`` lane, so a plot can show the DAG over the workers
+    that ran it. Rows without a start stamp are dropped (nothing to place on a timeline); a row with
+    a start but no end (a job that never recorded completion) keeps a zero-width span at its start.
+    Returns an empty frame carrying the columns when both inputs are empty.
+    """
+    import pandas as pd
+
+    records: list[dict[str, Any]] = []
+    for r in job_rows:
+        start = r.get("started_at")
+        if start is None:
+            continue
+        end = r.get("ended_at")
+        records.append(
+            {
+                "kind": "job",
+                "lane": r.get("family") or "",
+                "label": r.get("family") or r.get("job_id") or "",
+                "start": start,
+                "end": end if end is not None else start,
+                "duration_s": _duration_s(start, end, r.get("runtime_seconds")),
+                "status": r.get("status"),
+                "runtime": r.get("runtime"),
+                "model_type": None,
+                "ts_id": None,
+            }
+        )
+    for r in cell_rows:
+        start = r.get("cell_started_at")
+        if start is None:
+            continue
+        end = r.get("cell_ended_at")
+        model_type = r.get("model_type")
+        ts_id = r.get("ts_id")
+        records.append(
+            {
+                "kind": "cell",
+                "lane": r.get("worker_id") or "",
+                "label": f"{model_type}:{ts_id}",
+                "start": start,
+                "end": end if end is not None else start,
+                "duration_s": _duration_s(start, end, None),
+                "status": None,
+                "runtime": r.get("compute_engine"),
+                "model_type": model_type,
+                "ts_id": ts_id,
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=list(_TRACE_COLUMNS))
+
+
+def plot_trace(frame: pd.DataFrame, *, ax: Any = None, title: str = "run trace") -> Any:
+    """Render a `build_trace_frame` frame as a Gantt/waterfall and return the matplotlib ``Axes``.
+
+    A convenience over the frame (the frame is the real deliverable): one horizontal bar per span,
+    lanes stacked on the y-axis (jobs and cells kept apart so a ``family`` job and a ``worker_id``
+    cell never share a track), colored by ``kind`` (job vs cell). Pass an existing ``ax`` to compose
+    into a larger figure, or let it create one. matplotlib imports lazily here so it never touches
+    the near-instant ``import scale_forecasting`` path. An empty frame renders an empty titled axes
+    rather than raising.
+    """
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(11, 6))
+    ax.set_title(title if not frame.empty else f"{title} (no timed rows)")
+    if frame.empty:
+        return ax
+
+    lane_keys = list(dict.fromkeys(zip(frame["kind"], frame["lane"], strict=True)))
+    colors = {"job": "#4C72B0", "cell": "#DD8452"}
+    for y, (kind, lane) in enumerate(lane_keys):
+        grp = frame[(frame["kind"] == kind) & (frame["lane"] == lane)]
+        spans = [
+            (mdates.date2num(row.start), mdates.date2num(row.end) - mdates.date2num(row.start))
+            for row in grp.itertuples(index=False)
+        ]
+        ax.broken_barh(spans, (y - 0.4, 0.8), facecolors=colors.get(kind, "#999999"))
+    ax.set_yticks(range(len(lane_keys)))
+    ax.set_yticklabels([f"{kind}:{lane}" for kind, lane in lane_keys])
+    ax.xaxis_date()
+    ax.set_xlabel("wall-clock time")
+    return ax
