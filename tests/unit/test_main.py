@@ -555,6 +555,9 @@ def _patch_run_seams(
     monkeypatch.setattr(Settings, "resolve", classmethod(lambda cls: _SETTINGS))
     monkeypatch.setattr(bq, "ensure_tables", lambda *a, **k: None)
     monkeypatch.setattr(bq, "write_header", lambda *a, **k: None)
+    # Default: this config has not run before, so the idempotency guard falls through to launch.
+    # A test overrides this to "COMPLETED" to exercise the no-op re-run guard.
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
 
     def _fake_update(run_id: str, *, settings: Any = None, **fields: Any) -> None:
         seen["status"] = fields.get("status")
@@ -660,6 +663,46 @@ def test_run_microbatch_ensemble_still_launches_when_a_family_fails(
     assert seen["ensemble_called"] is True
     assert seen["ensemble_mode"] == "microbatch"
     assert seen["status"] == "PARTIAL"
+
+
+def test_run_noops_when_config_already_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A plain re-run of an already-COMPLETED config is a no-op: it must NOT relaunch any family
+    # (relaunching resubmits the deterministic per-family job id and collides), and returns the
+    # config-pinned run_id unchanged.
+    from scale_forecasting.registry import bq
+
+    seen = _patch_run_seams(monkeypatch)
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    run_id = main.run(cfg)
+    assert run_id == dag.plan_dag(cfg).run_id
+    assert "spark_ran" not in seen
+    assert "bq_ran" not in seen
+    assert seen["ensemble_called"] is False
+    assert "status" not in seen  # header never re-finalized
+
+
+def test_run_force_reexecutes_even_when_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # force=True re-executes a COMPLETED config (a fresh, distinctly-keyed attempt) — the guard
+    # applies only to unforced re-runs.
+    from scale_forecasting.registry import bq
+
+    seen = _patch_run_seams(monkeypatch)
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    main.run(_cfg(), force=True)
+    assert seen.get("spark_ran") is True
+    assert seen["status"] == "COMPLETED"
+
+
+def test_run_reexecutes_when_prior_run_not_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A prior FAILED run is not COMPLETED, so an unforced re-run falls through and launches (a retry
+    # path), rather than no-op'ing.
+    from scale_forecasting.registry import bq
+
+    seen = _patch_run_seams(monkeypatch)
+    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "FAILED")
+    main.run(_cfg())
+    assert seen.get("spark_ran") is True
 
 
 def test_run_skips_ensembles_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

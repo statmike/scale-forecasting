@@ -469,6 +469,17 @@ def run(
     run_id = run_dag.run_id
 
     settings = settings or Settings.resolve()
+
+    # Idempotency guard: the run_id is config-pinned, so re-running the same config is a no-op once
+    # it has COMPLETED — return without relaunching. Relaunching would resubmit each family's
+    # deterministic platform job id (a Dataproc batch_id / Ray submission_id) and collide
+    # (AlreadyExists), and the reused-attempt terminal write would clobber the completed run's job
+    # rows. ``force`` re-executes as a fresh attempt (distinct job ids); a run that never completed
+    # (never ran, or a prior FAILED/PARTIAL) falls through and runs.
+    if not force and bq.header_status(run_id, settings=settings) == "COMPLETED":
+        _log.info("run %s already COMPLETED; skipping relaunch (pass force=True to re-run)", run_id)
+        return run_id
+
     _log.info(
         "run %s start: families=%s ensemble=%s",
         run_id,
