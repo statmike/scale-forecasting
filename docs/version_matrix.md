@@ -12,12 +12,18 @@ and every Colab template. This is not a coincidence to preserve casually: it's t
 keeps four independent driver↔worker boundaries in parity. Deviating on any one of them breaks that
 surface.
 
+The pin is enforced at the **patch** level, not just the minor: `.python-version` names the exact
+interpreter (**3.11.15**) and `uv` installs *that* build for local dev, CI, the runtime container, and
+the Dataproc-cluster packed-venv — so the interpreter is byte-identical everywhere `uv` controls it.
+(Colab and the Dataproc base runtimes provide their own 3.11 patch; parity is a minor-version property,
+so that's fine — the patch pin is about reproducibility where we build the environment ourselves.)
+
 ## The matrix
 
 | Surface | Where it runs | Runtime version | Base runtime Python | **Effective Python** | Spark / Ray | How Python is set |
 |---------|---------------|-----------------|---------------------|----------------------|-------------|-------------------|
-| **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11** | — | `pyproject.toml` `requires-python = ">=3.11,<3.12"`; Colab template PATCHed to `py311` |
-| **Custom container** | attached to batch + Spark Connect | — | — | **3.11** | Spark 3.5.x (from base) | `docker/Dockerfile` — `python3.11` venv on `debian:12-slim` |
+| **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11.15** | — | `.python-version` (3.11.15) + `pyproject.toml` `requires-python = ">=3.11,<3.12"`; Colab template PATCHed to `py311` |
+| **Custom container** | attached to batch + Spark Connect | — | — | **3.11.15** | Spark 3.5.x (from base) | `docker/Dockerfile` — `uv` installs 3.11.15 (from `.python-version`) into `/opt/venv` on `debian:12-slim` |
 | **Dataproc batch** (`explode`) | Serverless | **2.2** (default) | 3.12 | **3.11** ← *container wins* | Spark 3.5.3 | container image attached on **every** submit (`submit.py`), overriding base |
 | **Spark Connect** (nb01, interactive) | Serverless session | **2.3** | 3.11 | **3.11** | Spark 3.5.3 | runtime 2.3 base is already 3.11 **and** container attached |
 | **Ray on Vertex** (nb04) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 | `ray_submit.py` pins `python_version="3.11"`, `ray_version="2.47"` |
@@ -79,7 +85,8 @@ Revisit only if Vertex Ray ships a Python 3.12 cluster image; until then 3.11 is
 | Value | File |
 |-------|------|
 | `requires-python = ">=3.11,<3.12"` | `pyproject.toml` |
-| `python3.11` venv, `debian:12-slim` | `docker/Dockerfile` |
+| exact interpreter `3.11.15` (uv installs it) | `.python-version` |
+| `uv`-installed 3.11.15 into `/opt/venv`, `debian:12-slim` | `docker/Dockerfile` |
 | Batch default runtime `"2.2"`; container attached on submit | `src/scale_forecasting/submit.py` |
 | Spark Connect session `version = "2.3"` + container | `notebooks/01_spark_via_connect.ipynb` (session cell) |
 | Ray `python_version="3.11"`, `ray_version="2.47"` | `src/scale_forecasting/ray_submit.py` |

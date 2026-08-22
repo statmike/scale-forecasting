@@ -134,11 +134,15 @@ uv run --active python -m scale_forecasting.notebook_acceptance --tier smoke \
   --gcs-output "gs://$(terraform -chdir=terraform/main output -raw code_bucket)"
 ```
 
-**Packages.** By default each notebook's **bootstrap cell** (`git clone` + `pip install -e .[extra]`)
-installs the package on first cell-run — correct, just a little slower on a cold runtime. To
-pre-install at runtime-creation time instead (faster cold start), set `install_via_post_startup =
-true` on the module (off by default: the post-startup-script field is deprecated and some orgs block
-it on new templates).
+**Packages.** By default each notebook's **bootstrap cell** installs the package on first cell-run —
+correct, just a little slower on a cold runtime. The install goes through **`uv` against the checked-in
+`uv.lock`** (Colab Enterprise ships `uv`; the cell installs it if missing): it exports the frozen lock
+to a requirements file and installs *exactly* those versions, then editable-installs the package with
+`--no-deps`. That's the same locked set the runtime container and the Dataproc packed-venv are built
+from, so a notebook kernel runs byte-identical dependencies to the cluster — no fresh resolve, no
+drift. To pre-install at runtime-creation time instead (faster cold start), set
+`install_via_post_startup = true` on the module (off by default: the post-startup-script field is
+deprecated and some orgs block it on new templates); it runs the same `uv`-from-lock install.
 
 **Network.** Templates attach the project VPC by default (`colab_attach_network = true`): the
 greenfield stack builds a *custom* VPC and has no `default` network, so a public runtime would 404

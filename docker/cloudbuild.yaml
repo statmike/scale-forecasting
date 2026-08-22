@@ -13,9 +13,12 @@
 #
 # WHY the packed-venv step: Dataproc Serverless + Ray-on-Vertex both consume this container directly,
 # but a Dataproc *cluster* can't use a custom container — so the cluster path ships the exact same
-# locked env as a venv-pack archive attached to the job (--archives=…#env). We build that archive
-# FROM this image's /opt/venv (one source of truth for deps, no drift) and upload it to the code
-# bucket at envs/<hash>.tar.gz. Skipped when _CODE_BUCKET is empty (image-only manual builds).
+# locked env as an archive attached to the job (--archives=…#env). The image's /opt/venv is built
+# fully SELF-CONTAINED (its uv/python-build-standalone interpreter is bundled in-tree — see
+# docker/Dockerfile), so the archive is just a plain tar of that tree: it unpacks to ./env and
+# ./env/bin/python runs on a bare cluster node with no Python of its own. We build it FROM this
+# image's /opt/venv (one source of truth for deps, no drift) and upload it to the code bucket at
+# envs/<hash>.tar.gz. Skipped when _CODE_BUCKET is empty (image-only manual builds).
 #
 # A git-push-triggered rebuild (Cloud Build trigger) is deferred until the GitHub repo connection
 # exists; until then this is the explicit, cost-reviewed build step.
@@ -42,9 +45,12 @@ steps:
       - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}"
       - .
 
-  # Pack the image's locked /opt/venv into a relocatable archive (venv-pack rewrites paths so
-  # ./env/bin/python works after Dataproc unpacks the #env fragment). Run as root to write into the
-  # root-owned venv; the just-built tag is present in the local daemon, so no pull is needed.
+  # Pack the image's self-contained /opt/venv into an archive. /opt/venv already bundles its own
+  # interpreter and is relocatable (see docker/Dockerfile), so a plain tar of the tree is all that's
+  # needed — no venv-pack (the image is intentionally pip-less). Tar the venv's CONTENTS (-C /opt/venv
+  # .) so Dataproc's --archives=…#env fragment unpacks to ./env/{bin,lib,_python,…} and
+  # ./env/bin/python resolves via the in-tree relative symlink. Run as root (the venv is root-owned);
+  # the just-built tag is present in the local daemon, so no pull is needed.
   - id: pack-venv
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
@@ -58,7 +64,7 @@ steps:
         fi
         docker run --rm --user root -v /workspace:/workspace \
           "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}" \
-          bash -c "pip install --quiet venv-pack && venv-pack -p /opt/venv -o /workspace/env.tar.gz"
+          bash -c "tar czf /workspace/env.tar.gz -C /opt/venv ."
 
   # Upload to the code bucket at the content-addressed path the app resolves (SF_VENV_ARCHIVE /
   # terraform venv_archive_uri output). Bucket versioning keeps prior archives recoverable.

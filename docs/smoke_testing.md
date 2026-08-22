@@ -70,9 +70,9 @@ proof; together they validate both source formats.
 - **GPU smokes (03, 06, 08, 09, 10, 14)** — GPU quota in the run's region: L4 for Serverless
   (03, 14), T4 for cluster/Ray (06, 08, 09, 10).
 - **Cluster smokes (04, 05, 06)** — a Dataproc **cluster** can't use the custom container, so it
-  gets its dependencies from the **packed-venv archive** instead. `SF_VENV_ARCHIVE` must point at it
-  (the `venv_archive_uri` Terraform output, wired above); the deploy's Cloud Build packs + uploads it
-  alongside the image. See [runtime_dependencies.md](./runtime_dependencies.md#dataproc-cluster--packed-venv-archive).
+  gets its dependencies from the **self-contained venv archive** instead. `SF_VENV_ARCHIVE` must point
+  at it (the `venv_archive_uri` Terraform output, wired above); the deploy's Cloud Build packs + uploads
+  it alongside the image. See [runtime_dependencies.md](./runtime_dependencies.md#dataproc-cluster--self-contained-venv-archive).
 - **Cluster-reuse smoke (05)** — a standing Dataproc cluster named `sf-smoke-cluster` must already
   exist; the run submits to it rather than creating one. Delete it when the campaign is done.
 

@@ -1,0 +1,50 @@
+name: ci
+
+# Two guarantees on every push / PR:
+#   1. lock-check — the dependency stack never drifts. uv.lock must be in sync with pyproject.toml,
+#      and docker/requirements.txt (the derived export the container + packed-venv build from) must
+#      equal what the lock produces. This is the automated half of the "one source of truth" design:
+#      a hand-edited requirements.txt, or a pyproject change that wasn't re-locked, fails here.
+#   2. offline — the code gate that needs no cloud: ruff + the offline test suite. Interpreter and
+#      every dependency come from the same uv.lock + .python-version the runtime image is built from,
+#      so a green CI run reflects the exact versions production runs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lock-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1  # this action publishes no floating major tag; pin exact
+      # The lock must already satisfy pyproject.toml (no re-resolve needed).
+      - name: uv.lock is in sync with pyproject.toml
+        run: uv lock --check
+      # Regenerate the derived requirements export and fail if the committed file differs. Keep these
+      # flags identical to the Makefile `lock` target and docker/requirements.txt's header.
+      - name: docker/requirements.txt matches the lock
+        run: |
+          uv export --frozen --no-emit-project --no-dev --no-hashes \
+            --extra models --extra ray --format requirements-txt -o docker/requirements.txt
+          git diff --exit-code docker/requirements.txt \
+            || { echo "::error::docker/requirements.txt is stale — run 'make lock' and commit."; exit 1; }
+
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      # Install the interpreter (.python-version → 3.11.15) + all extras + dev group from the lock.
+      - run: uv sync --frozen --all-extras
+      - name: ruff
+        run: uv run ruff check src tests
+      - name: offline test gate
+        run: uv run pytest -m "not gcp and not spark and not ray" -q

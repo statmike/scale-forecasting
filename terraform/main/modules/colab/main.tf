@@ -25,10 +25,12 @@
 # the provider adds the image field, delete the null_resource and set release_name inline.
 #
 # PACKAGES ──────────────────────────────────────────────────────────────────────────────────
-# By default the notebooks' own bootstrap cell installs the repo + extra on first cell-run (a bit
-# slower on cold start, always correct). Flip install_via_post_startup = true to pre-install via a
-# post-startup script staged to code_bucket (faster cold start; the field is deprecated and some
-# orgs block it on new templates, hence off by default).
+# By default the notebooks' own bootstrap cell installs the repo on first cell-run (a bit slower on
+# cold start, always correct). Either way the install goes through uv against the checked-in uv.lock
+# — the SAME locked versions the runtime container and the packed-venv are built from — so a notebook
+# kernel runs byte-identical dependencies to the cluster. Flip install_via_post_startup = true to
+# pre-install via a post-startup script staged to code_bucket (faster cold start; the field is
+# deprecated and some orgs block it on new templates, hence off by default).
 #
 # NETWORK (attach_network) ───────────────────────────────────────────────────────────────────
 #   * attach_network = true (default): attach this project's VPC + subnet; the VM gets egress with
@@ -169,11 +171,26 @@ locals {
   # region-scoped aiplatform endpoint the runtime-template REST API lives behind.
   api_host = "https://${var.region}-aiplatform.googleapis.com/v1"
 
+  # main_extra ("ray,spark") → "--extra ray --extra spark" for the uv export below.
+  main_extra_flags = join(" ", [for e in split(",", var.main_extra) : "--extra ${e}" if e != ""])
+
   # Post-startup install scripts (only staged/attached when install_via_post_startup = true). Each
-  # clones the repo and editable-installs the package with its extra — the same thing the notebooks'
-  # bootstrap cell does, just at runtime-creation time so the notebook's install cell is a fast no-op.
+  # installs the repo the SAME way the notebooks' bootstrap cell does — via uv against the checked-in
+  # uv.lock (not a fresh pip resolve), so the runtime gets the exact locked versions — just at
+  # runtime-creation time so the notebook's install cell is a fast no-op. Colab Enterprise ships uv;
+  # the curl fallback covers a runtime that doesn't. `--system` targets the runtime's own Python
+  # (the kernel), and `--no-deps` installs just our package on top of the already-locked deps.
   post_startup = {
-    main = "#!/bin/bash\nset -e\ngit clone --depth 1 ${var.repo_url} /opt/scale-forecasting || true\npip install -e '/opt/scale-forecasting[${var.main_extra}]'\n"
+    main = <<-EOT
+      #!/bin/bash
+      set -e
+      git clone --depth 1 ${var.repo_url} /opt/scale-forecasting || true
+      cd /opt/scale-forecasting
+      command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }
+      uv export --frozen --no-emit-project --no-hashes --no-dev ${local.main_extra_flags} -o /tmp/colab-requirements.txt
+      uv pip install --system -r /tmp/colab-requirements.txt
+      uv pip install --system -e . --no-deps
+    EOT
   }
   gate = var.create && var.install_via_post_startup
 

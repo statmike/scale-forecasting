@@ -5,7 +5,8 @@ never baked into the container image — so a data scientist edits ``src/`` and 
 *existing* slow-moving image, with no rebuild and no stale code hiding in the container. These tests
 lock that property at every seam:
 
-* the **image** carries dependencies only (no ``COPY src``, no ``pip install`` of the package);
+* the **image** carries dependencies only (no ``COPY src``, and ``uv sync --no-install-project`` keeps
+  the package out);
 * the **Cloud Build** step and the **Dockerfile** together never add the package to the image;
 * every **submit path** delivers the package externally — ``python_file_uris`` (Spark batch / seed /
   smoke) or ``runtime_env.working_dir`` (Ray on Vertex).
@@ -39,14 +40,22 @@ def _dockerfile_directives() -> list[str]:
     return [ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
 
 
+_LOCKFILES = (".python-version", "pyproject.toml", "uv.lock", "requirements.txt")
+
+
 def test_dockerfile_never_copies_source() -> None:
     # No ``COPY src`` / ``COPY . ...`` / ``ADD src`` — the package must not enter the build context.
+    # The only copies permitted are build tooling from ANOTHER image (``COPY --from=...``, e.g. the uv
+    # binary) and the lockfiles (.python-version / pyproject.toml / uv.lock / requirements.txt) — never
+    # anything under src/.
     for directive in _dockerfile_directives():
         upper = directive.upper()
-        if upper.startswith(("COPY ", "ADD ")):
-            # The only COPY we permit is requirements.txt (the locked dep set), nothing under src/.
-            assert "requirements.txt" in directive, f"image bakes source via: {directive}"
-            assert " src" not in f" {directive}", f"image bakes src/ via: {directive}"
+        if not upper.startswith(("COPY ", "ADD ")):
+            continue
+        if upper.startswith("COPY --FROM="):
+            continue  # copied from another image stage/tool, not the build context — carries no source
+        assert any(lf in directive for lf in _LOCKFILES), f"image bakes source via: {directive}"
+        assert " src" not in f" {directive}", f"image bakes src/ via: {directive}"
 
 
 def test_dockerfile_never_installs_the_package() -> None:
@@ -59,11 +68,18 @@ def test_dockerfile_never_installs_the_package() -> None:
     )
 
 
-def test_dockerfile_only_installs_locked_requirements() -> None:
-    # The one install path is ``-r requirements.txt`` (the exported lock, package excluded).
-    installs = [d for d in _dockerfile_directives() if "pip install" in d and "-r" in d]
-    assert installs, "expected a `pip install -r requirements.txt` layer"
-    assert all("requirements.txt" in d for d in installs)
+def test_dockerfile_installs_only_the_locked_deps_not_the_package() -> None:
+    # The one dependency-install path is ``uv sync --frozen ... --no-install-project``: --frozen pins to
+    # uv.lock verbatim (no re-resolve, no drift), and --no-install-project keeps the package OUT of the
+    # image (code ships at runtime via python_file_uris). Guards against dropping either flag — a
+    # re-resolve would drift from the lock, and installing the project would bake stale code in.
+    syncs = [d for d in _dockerfile_directives() if "uv sync" in d]
+    assert syncs, "expected a `uv sync --frozen ... --no-install-project` layer"
+    for d in syncs:
+        assert "--frozen" in d, f"uv sync must be --frozen (pin to uv.lock): {d}"
+        assert "--no-install-project" in d, (
+            f"uv sync must be --no-install-project (package ships at runtime, not baked in): {d}"
+        )
 
 
 def test_requirements_lock_does_not_install_the_package() -> None:
