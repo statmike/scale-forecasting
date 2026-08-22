@@ -238,12 +238,12 @@ def _batch_id(run_id: str, engine: str) -> str:
 def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
     """Dataproc Serverless runtime properties that attach an L4 to each executor (pure).
 
-    Enables the premium executor tier (required for accelerators on serverless) and requests one L4
-    per executor with a GPU discovery script, so the executor's Python worker sees a GPU for the
-    torch/NeuralProphet fit inside the pandas UDF. ``spark.task.resource.gpu.amount`` is fractional
-    so several UDF tasks share one device (matching the Ray path's fractional packing). The exact
-    property set is validated against a live serverless GPU batch (deferred); the shape is pinned
-    here so the batch message and its snapshot are deterministic.
+    Serverless manages GPU attachment itself: naming the accelerator type and selecting the premium
+    compute *and* disk tiers is sufficient for the executor VM to carry an L4 that the
+    torch/NeuralProphet fit inside the pandas UDF can use. Serverless rejects the Spark-level GPU
+    resource-scheduling properties (``spark.executor.resource.gpu.*``,
+    ``spark.task.resource.gpu.amount``) — those are for classic Spark on Dataproc clusters — so they
+    are intentionally omitted; the premium disk tier is mandatory whenever an L4 is requested.
     """
     if gpu_type != _SERVERLESS_GPU_TYPE:
         raise ConfigError(
@@ -252,12 +252,8 @@ def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
         )
     return {
         "spark.dataproc.executor.compute.tier": "premium",
+        "spark.dataproc.executor.disk.tier": "premium",
         "spark.dataproc.executor.resource.accelerator.type": gpu_type.lower(),
-        "spark.executor.resource.gpu.amount": "1",
-        "spark.executor.resource.gpu.discoveryScript": (
-            "/usr/lib/spark/scripts/gpu/getGpusResources.sh"
-        ),
-        "spark.task.resource.gpu.amount": "0.5",
     }
 
 

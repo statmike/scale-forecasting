@@ -215,7 +215,11 @@ def test_build_batch_gpu_attaches_l4_executor() -> None:
     props = dict(batch.runtime_config.properties)
     assert props["spark.dataproc.executor.resource.accelerator.type"] == "l4"
     assert props["spark.dataproc.executor.compute.tier"] == "premium"
-    assert props["spark.executor.resource.gpu.amount"] == "1"
+    # L4 on Serverless mandates the premium disk tier; the Spark-level GPU resource-scheduling
+    # properties are unsupported on Serverless and must not be set.
+    assert props["spark.dataproc.executor.disk.tier"] == "premium"
+    assert not any(k.startswith("spark.executor.resource.gpu") for k in props)
+    assert "spark.task.resource.gpu.amount" not in props
 
 
 def test_build_batch_gpu_rejects_non_l4_on_serverless() -> None:
