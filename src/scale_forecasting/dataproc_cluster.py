@@ -349,3 +349,60 @@ def submit_cluster_job(
     finally:
         if not reuse:
             _delete_cluster(cluster_client, project_id, region, name)
+
+
+def provision_shared_cluster(
+    cfg: RunConfig,
+    *,
+    run_id: str,
+    use_gpu: bool,
+    gpu_type: str | None = None,
+    settings: Settings | None = None,
+    infra: BatchInfra | None = None,
+    worker_count: int = _DEFAULT_WORKER_COUNT,
+) -> str:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
+    """Create one shared ephemeral Dataproc cluster for a run's cluster families; return its name.
+
+    The multi-family analog of `submit_cluster_job`'s create step. When a run has more than one
+    ephemeral cluster family the DAG orchestrator provisions **one** cluster here rather than let
+    each family create its own: every family derives the same ``sf-cluster-<run_id>`` name and would
+    each create *and* tear it down, so a family finishing first deletes the cluster out from under
+    the others (``cluster is in state DELETING and cannot accept jobs``). Sized for the **union** of
+    those families' hardware (GPU workers when ``use_gpu`` — any cluster family needs one; CPU
+    families run on the same cluster, their jobs simply not using the GPU), mirroring the shared Ray
+    cluster. The caller threads the name into every cluster family's `submit_cluster_job` as the
+    ``spark_cluster_name`` reuse target (each submits its own failure-isolated job, no per-family
+    create/delete) and tears it down once via `teardown_shared_cluster` after all families join.
+    """
+    from .settings import Settings
+
+    settings = settings or Settings.resolve()
+    infra = infra or BatchInfra.resolve()
+    name = cluster_name(run_id, None)
+    cluster = build_cluster(
+        infra=infra,
+        settings=settings,
+        project_id=settings.project_id,
+        name=name,
+        hardware="gpu" if use_gpu else "cpu",
+        gpu_type=gpu_type,
+        worker_count=worker_count,
+    )
+    _log.info(
+        "provisioning shared Dataproc cluster %s: use_gpu=%s workers=%d",
+        name,
+        use_gpu,
+        worker_count,
+    )
+    _create_cluster(_cluster_client(settings.region), settings.project_id, settings.region, cluster)
+    return name
+
+
+def teardown_shared_cluster(
+    name: str, settings: Settings | None = None
+) -> None:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
+    """Delete the shared ephemeral Dataproc cluster (best-effort — a delete error is logged)."""
+    from .settings import Settings
+
+    settings = settings or Settings.resolve()
+    _delete_cluster(_cluster_client(settings.region), settings.project_id, settings.region, name)

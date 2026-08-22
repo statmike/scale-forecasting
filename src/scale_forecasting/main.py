@@ -211,6 +211,69 @@ def _shared_ray_cluster(
         ray_submit.teardown_shared_cluster(name, region, settings)
 
 
+def _shared_spark_inputs(python_jobs: list[FamilyJob]) -> tuple[bool, str | None] | None:
+    """The union sizing inputs for a run's ephemeral Dataproc cluster families, or ``None`` if fewer
+    than two.
+
+    Sharing one cluster only matters when **more than one** family resolves to an ephemeral Spark
+    cluster (``spark_mode="cluster"`` with no standing ``spark_cluster_name``) — the case that would
+    otherwise have each family both create *and* tear down the shared run-derived
+    ``sf-cluster-<run_id>`` name, so a family finishing first deletes the cluster out from under the
+    others. Returns whether **any** of them needs a GPU pool and the GPU type to size it (the first
+    GPU family's) — the inputs to one shared cluster. Fewer than two ephemeral cluster families (or
+    none) returns ``None`` and keeps the proven per-family lifecycle (a single family has no
+    collision risk; a family naming a standing cluster already reuses).
+    """
+    cluster_jobs = [
+        j
+        for j in python_jobs
+        if j.runtime == "spark"
+        and j.compute is not None
+        and j.compute.spark_mode == "cluster"
+        and j.compute.spark_cluster_name is None
+    ]
+    if len(cluster_jobs) < 2:
+        return None
+    any_gpu = False
+    gpu_type: str | None = None
+    for j in cluster_jobs:
+        assert j.compute is not None  # a Python family always resolves compute
+        if j.compute.hardware == "gpu":
+            any_gpu = True
+            gpu_type = gpu_type or j.compute.gpu_type
+    return any_gpu, gpu_type
+
+
+@contextmanager
+def _shared_spark_cluster(
+    cfg: RunConfig, run_dag: RunDag, run_id: str, settings: Settings
+) -> Iterator[str | None]:
+    """Provision one shared ephemeral Dataproc cluster when a run has several ephemeral cluster
+    families.
+
+    Yields the cluster name to thread into each cluster family's job as a reuse target (so each
+    submits its own failure-isolated job to the one cluster, skipping the per-family create/delete
+    that would otherwise race — a family finishing first would tear down the shared cluster out from
+    under the others), or ``None`` when sharing doesn't apply — fewer than two cluster families. The
+    cluster is torn down once in a ``finally`` so a family failure never leaks it. The Dataproc
+    analog of `_shared_ray_cluster`.
+    """
+    inputs = _shared_spark_inputs(run_dag.python_jobs)
+    if inputs is None:
+        yield None
+        return
+    from .dataproc_cluster import provision_shared_cluster, teardown_shared_cluster
+
+    any_gpu, gpu_type = inputs
+    name = provision_shared_cluster(
+        cfg, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
+    )
+    try:
+        yield name
+    finally:
+        teardown_shared_cluster(name, settings)
+
+
 def _launch_family_job(
     cfg: RunConfig,
     job: FamilyJob,
@@ -221,6 +284,7 @@ def _launch_family_job(
     force: bool = False,
     max_executors: int | None = None,
     ray_cluster: tuple[str, str] | None = None,
+    spark_cluster: str | None = None,
 ) -> None:
     """Run one Python family's job on its resolved runtime, wrapped in its ``run_jobs`` row.
 
@@ -249,7 +313,10 @@ def _launch_family_job(
 
     ``ray_cluster``, when set, is the run's shared ephemeral Ray cluster ``(name, region)``
     (`_shared_ray_cluster`): a Ray family reuses it instead of self-provisioning; every other
-    runtime ignores it.
+    runtime ignores it. ``spark_cluster``, when set, is the run's shared ephemeral Dataproc cluster
+    name (`_shared_spark_cluster`): an ephemeral cluster family reuses it (submits its own job, no
+    per-family create/delete); a family naming its own standing cluster keeps that, and every
+    other runtime/mode ignores it.
     """
     from .registry import bq
     from .registry.ids import make_job_key
@@ -263,6 +330,17 @@ def _launch_family_job(
     # only by Ray families; every other runtime ignores it.
     ray_cluster_name = ray_cluster[0] if ray_cluster and compute.runtime == "ray" else None
     ray_cluster_region = ray_cluster[1] if ray_cluster and compute.runtime == "ray" else None
+    # The shared Dataproc cluster is targeted only by ephemeral Spark cluster families (spark_mode
+    # cluster, no standing cluster of their own) as a reuse target; a family naming its own standing
+    # cluster keeps it, and serverless/Ray families ignore it.
+    shared_spark_name = (
+        spark_cluster
+        if spark_cluster
+        and compute.runtime == "spark"
+        and compute.spark_mode == "cluster"
+        and compute.spark_cluster_name is None
+        else None
+    )
     with bq.run_job(
         run_id,
         job.family,
@@ -285,7 +363,7 @@ def _launch_family_job(
             hardware=compute.hardware,
             gpu_type=compute.gpu_type,
             spark_mode=compute.spark_mode,
-            spark_cluster_name=compute.spark_cluster_name,
+            spark_cluster_name=compute.spark_cluster_name or shared_spark_name,
             ray_cluster_name=ray_cluster_name,
             ray_cluster_region=ray_cluster_region,
         )
@@ -513,14 +591,16 @@ def run(
         # inline on the main thread, so all families overlap. Each family carries the same
         # contributor-mode contract (its model subset + shared header owned here) and its own
         # run_jobs row, so N heterogeneous families run under one run_id.
-        # When the run has several ephemeral Ray families, provision one shared Ray cluster for the
-        # duration of the launch block (they submit their own jobs to it, and it's torn down once on
-        # exit); otherwise this yields None and each family self-provisions as before.
+        # When the run has several ephemeral Ray (or Dataproc-cluster) families, provision one
+        # shared cluster per runtime for the duration of the launch block (each family submits its
+        # own job to it, torn down once on exit); otherwise these yield None and each family
+        # self-provisions as before.
         # +1 pool worker for the concurrent microbatch ensemble so it never contends with a family
         # for a thread; barrier mode keeps the exact family-only pool it always had.
         max_workers = max(1, len(python_jobs)) + (1 if ensemble_concurrent else 0)
         with (
             _shared_ray_cluster(cfg, run_dag, run_id, settings) as ray_cluster,
+            _shared_spark_cluster(cfg, run_dag, run_id, settings) as spark_cluster,
             ThreadPoolExecutor(max_workers=max_workers) as pool,
         ):
             futures = {
@@ -534,6 +614,7 @@ def run(
                     force=force,
                     max_executors=max_executors,
                     ray_cluster=ray_cluster,
+                    spark_cluster=spark_cluster,
                 ): job
                 for job in python_jobs
             }

@@ -1048,6 +1048,181 @@ def test_launch_family_job_ignores_shared_cluster_for_spark(
     assert sub.kwargs["ray_cluster_region"] is None
 
 
+# --- shared ephemeral Dataproc cluster across families -------------------------
+# The Dataproc analog of the shared-Ray tests above: a run with two or more ephemeral cluster
+# families shares ONE cluster (the orchestrator provisions it, each family submits its own job to it
+# as a reuse target, torn down once), so no family's teardown races another's job. Offline —
+# provision/teardown are faked; nothing touches Dataproc.
+
+
+def _spark_cluster_cfg(**over: Any) -> RunConfig:
+    # theta (statistical) + xgboost (ml), both forced to spark_mode=cluster → two ephemeral
+    # cluster families sharing one run-derived cluster.
+    base: dict[str, Any] = {
+        "run_name": "shared spark cluster test",
+        "data": {"source_table": "source_series_native", "horizon": 7, "series_limit": 5},
+        "models": ["theta", "xgboost"],
+        "compute": {
+            "families": {
+                "statistical": {"spark_mode": "cluster"},
+                "ml": {"spark_mode": "cluster"},
+            }
+        },
+    }
+    base.update(over)
+    return RunConfig(**base)
+
+
+def test_shared_spark_inputs_none_for_single_cluster_family() -> None:
+    # One ephemeral cluster family self-manages its own cluster (no collision); no sharing.
+    cfg = _spark_cluster_cfg(
+        models=["theta"], compute={"families": {"statistical": {"spark_mode": "cluster"}}}
+    )
+    run_dag = dag.plan_dag(cfg)
+    assert main._shared_spark_inputs(run_dag.python_jobs) is None
+
+
+def test_shared_spark_inputs_none_for_serverless_run() -> None:
+    run_dag = dag.plan_dag(_cfg(models=["theta", "holtwinters"]))  # default serverless spark
+    assert main._shared_spark_inputs(run_dag.python_jobs) is None
+
+
+def test_shared_spark_inputs_engages_for_two_cluster_families_cpu() -> None:
+    run_dag = dag.plan_dag(_spark_cluster_cfg())
+    inputs = main._shared_spark_inputs(run_dag.python_jobs)
+    assert inputs == (False, None)  # (any_gpu, gpu_type)
+
+
+def test_shared_spark_inputs_flags_gpu_union() -> None:
+    # statistical (cpu) + deep_learning (gpu T4), both on spark_mode=cluster → union to GPU.
+    cfg = _spark_cluster_cfg(
+        models=["theta", "neuralprophet"],
+        compute={
+            "families": {
+                "statistical": {"spark_mode": "cluster"},
+                "deep_learning": {"spark_mode": "cluster", "hardware": "gpu", "gpu_type": "T4"},
+            }
+        },
+    )
+    run_dag = dag.plan_dag(cfg)
+    assert main._shared_spark_inputs(run_dag.python_jobs) == (True, "T4")
+
+
+def test_shared_spark_inputs_ignores_family_with_standing_cluster() -> None:
+    # A family naming its own standing cluster is already reuse; only one *ephemeral* family is
+    # left, so sharing doesn't engage.
+    cfg = _spark_cluster_cfg(
+        compute={
+            "families": {
+                "statistical": {"spark_mode": "cluster"},
+                "ml": {"spark_mode": "cluster", "spark_cluster_name": "my-standing"},
+            }
+        }
+    )
+    run_dag = dag.plan_dag(cfg)
+    assert main._shared_spark_inputs(run_dag.python_jobs) is None
+
+
+def _patch_shared_spark(monkeypatch: pytest.MonkeyPatch, calls: dict[str, Any]) -> None:
+    from scale_forecasting import dataproc_cluster
+
+    def _provision(cfg: RunConfig, **kw: Any) -> str:
+        calls["provision"] = kw
+        return "sf-cluster-shared"
+
+    def _teardown(name: str, settings: Settings) -> None:
+        calls["teardown"] = name
+
+    monkeypatch.setattr(dataproc_cluster, "provision_shared_cluster", _provision)
+    monkeypatch.setattr(dataproc_cluster, "teardown_shared_cluster", _teardown)
+
+
+def test_shared_spark_cluster_engages_and_tears_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_shared_spark(monkeypatch, calls)
+    cfg = _spark_cluster_cfg()
+    run_dag = dag.plan_dag(cfg)
+    with main._shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS) as spark_cluster:
+        assert spark_cluster == "sf-cluster-shared"
+        assert calls["provision"] == {
+            "run_id": "run-abc",
+            "use_gpu": False,
+            "gpu_type": None,
+            "settings": _SETTINGS,
+        }
+        assert "teardown" not in calls  # not yet — torn down on exit
+    assert calls["teardown"] == "sf-cluster-shared"
+
+
+def test_shared_spark_cluster_tears_down_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_shared_spark(monkeypatch, calls)
+    cfg = _spark_cluster_cfg()
+    run_dag = dag.plan_dag(cfg)
+    with pytest.raises(RuntimeError, match="boom"):
+        with main._shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
+            raise RuntimeError("boom")
+    assert calls["teardown"] == "sf-cluster-shared"  # finally still ran
+
+
+def test_shared_spark_cluster_skips_single_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_shared_spark(monkeypatch, calls)
+    cfg = _spark_cluster_cfg(
+        models=["theta"], compute={"families": {"statistical": {"spark_mode": "cluster"}}}
+    )
+    run_dag = dag.plan_dag(cfg)
+    with main._shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS) as spark_cluster:
+        assert spark_cluster is None
+    assert calls == {}  # never provisioned, never torn down
+
+
+def test_launch_family_job_threads_shared_spark_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    sub = _CapturingSubmitter()
+    _patch_launch_seams(monkeypatch, sub)
+    cfg = _spark_cluster_cfg()
+    run_dag = dag.plan_dag(cfg)
+    cluster_job = next(
+        j for j in run_dag.python_jobs if j.compute and j.compute.spark_mode == "cluster"
+    )
+    main._launch_family_job(
+        cfg, cluster_job, "run-abc", _SETTINGS, spark_cluster="sf-cluster-shared"
+    )
+    assert sub.kwargs["spark_cluster_name"] == "sf-cluster-shared"
+
+
+def test_launch_family_job_ignores_shared_spark_for_serverless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sub = _CapturingSubmitter()
+    _patch_launch_seams(monkeypatch, sub)
+    cfg = _cfg(models=["theta", "holtwinters"])  # default serverless spark
+    run_dag = dag.plan_dag(cfg)
+    spark_job = next(j for j in run_dag.python_jobs if j.runtime == "spark")
+    main._launch_family_job(cfg, spark_job, "run-abc", _SETTINGS, spark_cluster="sf-cluster-shared")
+    assert sub.kwargs["spark_cluster_name"] is None
+
+
+def test_launch_family_job_keeps_standing_cluster_over_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A family naming its own standing cluster keeps it even when a shared cluster is offered.
+    sub = _CapturingSubmitter()
+    _patch_launch_seams(monkeypatch, sub)
+    cfg = _spark_cluster_cfg(
+        compute={
+            "families": {"statistical": {"spark_mode": "cluster", "spark_cluster_name": "standing"}}
+        },
+        models=["theta"],
+    )
+    run_dag = dag.plan_dag(cfg)
+    cluster_job = next(j for j in run_dag.python_jobs if j.compute)
+    main._launch_family_job(
+        cfg, cluster_job, "run-abc", _SETTINGS, spark_cluster="sf-cluster-shared"
+    )
+    assert sub.kwargs["spark_cluster_name"] == "standing"
+
+
 # --- ensemble DAG node: identity + mode dispatch -------------------------------
 
 
