@@ -926,6 +926,35 @@ def read_leaderboard(
     return [dict(r) for r in rows]
 
 
+def read_prediction_counts(
+    run_id: str, *, settings: Settings | None = None
+) -> dict[str, int]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return ``{model_type: forecast row count}`` for ``run_id`` from ``forecast_predictions``.
+
+    The direct proof that fits produced forecasts (not just metadata): a model whose cells all
+    failed writes metadata rows but **zero** predictions, so it still shows on the leaderboard yet
+    has a count of 0 here. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT model_type, COUNT(*) AS n FROM `{resolved.table_ref('forecast_predictions')}` "
+        "WHERE run_id=@run_id GROUP BY model_type"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_prediction_counts failed for run {run_id}: {exc}") from exc
+    return {str(r["model_type"]): int(r["n"]) for r in rows}
+
+
 # --- I/O: run_jobs (per-job identity + trace) ----------------------------------
 
 # run_jobs columns that may be set by write_job / update_job, with their BQ types.

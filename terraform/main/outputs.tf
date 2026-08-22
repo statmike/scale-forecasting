@@ -48,6 +48,11 @@ output "runtime_image_repo" {
   value       = module.container.image_repo_path
 }
 
+output "venv_archive_uri" {
+  description = "Packed-venv archive the Dataproc-cluster path attaches for its deps. Feeds SF_VENV_ARCHIVE."
+  value       = module.container.venv_archive_uri
+}
+
 output "subnetwork_uri" {
   description = "Subnet the serverless batches run in (needed by the submit helper for forecast runs)."
   value       = module.network.subnetwork_uri

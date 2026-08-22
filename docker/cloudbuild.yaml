@@ -1,4 +1,5 @@
-# Cloud Build config — build the shared Spark runtime image and push it to Artifact Registry.
+# Cloud Build config — build the shared Spark runtime image, push it to Artifact Registry, and emit
+# the packed-venv archive that the Dataproc-*cluster* path uses to get its dependencies.
 #
 # Build on demand from the repo root:
 #
@@ -10,6 +11,12 @@
 # Serverless requires a **linux/amd64** image; Cloud Build's default workers are amd64, so a plain
 # `docker build` produces the right architecture (no buildx/QEMU needed).
 #
+# WHY the packed-venv step: Dataproc Serverless + Ray-on-Vertex both consume this container directly,
+# but a Dataproc *cluster* can't use a custom container — so the cluster path ships the exact same
+# locked env as a venv-pack archive attached to the job (--archives=…#env). We build that archive
+# FROM this image's /opt/venv (one source of truth for deps, no drift) and upload it to the code
+# bucket at envs/<hash>.tar.gz. Skipped when _CODE_BUCKET is empty (image-only manual builds).
+#
 # A git-push-triggered rebuild (Cloud Build trigger) is deferred until the GitHub repo connection
 # exists; until then this is the explicit, cost-reviewed build step.
 
@@ -18,6 +25,8 @@ substitutions:
   _REPO: scale-forecasting
   _IMAGE: spark-runtime
   _TAG: latest
+  _CODE_BUCKET: "" # code bucket for the packed-venv archive; empty = skip the pack/upload
+  _VENV_HASH: "latest" # archive object name envs/<hash>.tar.gz (Terraform passes the requirements md5)
 
 images:
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}"
@@ -32,6 +41,39 @@ steps:
       - --tag
       - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}"
       - .
+
+  # Pack the image's locked /opt/venv into a relocatable archive (venv-pack rewrites paths so
+  # ./env/bin/python works after Dataproc unpacks the #env fragment). Run as root to write into the
+  # root-owned venv; the just-built tag is present in the local daemon, so no pull is needed.
+  - id: pack-venv
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [ -z "${_CODE_BUCKET}" ]; then
+          echo "no _CODE_BUCKET set; skipping packed-venv archive"
+          exit 0
+        fi
+        docker run --rm --user root -v /workspace:/workspace \
+          "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}" \
+          bash -c "pip install --quiet venv-pack && venv-pack -p /opt/venv -o /workspace/env.tar.gz"
+
+  # Upload to the code bucket at the content-addressed path the app resolves (SF_VENV_ARCHIVE /
+  # terraform venv_archive_uri output). Bucket versioning keeps prior archives recoverable.
+  - id: upload-venv
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [ -z "${_CODE_BUCKET}" ]; then
+          echo "no _CODE_BUCKET set; skipping packed-venv upload"
+          exit 0
+        fi
+        gsutil cp /workspace/env.tar.gz "gs://${_CODE_BUCKET}/envs/${_VENV_HASH}.tar.gz"
 
 options:
   logging: CLOUD_LOGGING_ONLY

@@ -69,6 +69,7 @@ module "container" {
   region      = var.region
   build_image = var.build_image
   image_tag   = var.seed_image_tag
+  code_bucket = module.storage.code_bucket # receives the packed-venv archive for the cluster path
 
   depends_on = [module.apis]
 }

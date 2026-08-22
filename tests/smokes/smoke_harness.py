@@ -98,6 +98,25 @@ def verify_leaderboard(board_rows: list[dict[str, Any]], cfg: RunConfig) -> list
     return problems
 
 
+def verify_predictions(pred_counts: dict[str, int], cfg: RunConfig) -> list[str]:
+    """Check every configured model actually produced forecasts (not just metadata).
+
+    The leaderboard is built from ``forecast_metadata``, so a model whose cells **all failed** still
+    shows there with ``n_cells`` set — but writes zero rows to ``forecast_predictions``. This is the
+    guard that turns that silent failure into a FAIL: each configured model must have a non-zero
+    prediction count (``pred_counts`` is ``model_type -> row count`` from
+    `bq.read_prediction_counts`).
+    """
+    problems: list[str] = []
+    for model in cfg.models:
+        if pred_counts.get(model, 0) <= 0:
+            problems.append(
+                f"model {model!r} produced no forecast rows (fits failed? metadata without "
+                "predictions) — its cells did not land in forecast_predictions"
+            )
+    return problems
+
+
 def verify_rerun(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[str]:
     """Check a no-``--force`` re-run left the leaderboard unchanged (append-only + dedupe-on-read).
 
@@ -187,7 +206,12 @@ def run_smoke(
     run_status = str(summary.get("status")) if summary else None
     job_rows = bq.read_run_jobs(run_id, settings=settings)
     board = bq.read_leaderboard(run_id, settings=settings)
-    problems = verify_run_jobs(job_rows, cfg) + verify_leaderboard(board, cfg)
+    pred_counts = bq.read_prediction_counts(run_id, settings=settings)
+    problems = (
+        verify_run_jobs(job_rows, cfg)
+        + verify_leaderboard(board, cfg)
+        + verify_predictions(pred_counts, cfg)
+    )
     if run_status != "COMPLETED":
         problems.append(f"run status is {run_status!r}, expected COMPLETED")
 

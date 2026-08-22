@@ -102,6 +102,7 @@ nav:
       - Adding a model: adding_a_model.md
       - Editing code without rebuilding: editing_code_without_rebuilding.md
       - Version matrix: version_matrix.md
+      - Runtime dependencies: runtime_dependencies.md
       - Notebook runtimes: notebook_runtimes.md
   - SDK: using_the_sdk.md
   - API Reference:

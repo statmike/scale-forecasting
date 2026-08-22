@@ -59,7 +59,8 @@ proof; together they validate both source formats.
   print(f"export SF_CONTAINER_IMAGE={g(\"runtime_image_repo\")}:latest")
   print(f"export SF_COMPUTE_SA={g(\"compute_sa\")}")
   print(f"export SF_SUBNETWORK_URI={g(\"subnetwork_uri\")}")
-  print(f"export SF_RAY_NETWORK_ATTACHMENT={g(\"network_attachment_id\")}")')"
+  print(f"export SF_RAY_NETWORK_ATTACHMENT={g(\"network_attachment_id\")}")
+  print(f"export SF_VENV_ARCHIVE={g(\"venv_archive_uri\")}")')"
   export SF_REGION=us-central1   # or your deploy region
   ```
 - **Source tables** — both `source_series_iceberg` and `source_series_native` must exist in the
@@ -68,6 +69,10 @@ proof; together they validate both source formats.
   `neuralprophet` can fit; the run image built by the deploy already includes it.
 - **GPU smokes (03, 06, 08, 09, 10, 14)** — GPU quota in the run's region: L4 for Serverless
   (03, 14), T4 for cluster/Ray (06, 08, 09, 10).
+- **Cluster smokes (04, 05, 06)** — a Dataproc **cluster** can't use the custom container, so it
+  gets its dependencies from the **packed-venv archive** instead. `SF_VENV_ARCHIVE` must point at it
+  (the `venv_archive_uri` Terraform output, wired above); the deploy's Cloud Build packs + uploads it
+  alongside the image. See [runtime_dependencies.md](./runtime_dependencies.md#dataproc-cluster--packed-venv-archive).
 - **Cluster-reuse smoke (05)** — a standing Dataproc cluster named `sf-smoke-cluster` must already
   exist; the run submits to it rather than creating one. Delete it when the campaign is done.
 
@@ -137,7 +142,7 @@ One row per live execution. Fill it in as the campaign runs.
 | 01 | `01_serverless_cpu.json` | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | ✅ PASS | 2 families (statistical + ML) on Serverless CPU; 3 models × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, reverse-traced to Dataproc batches. Surfaced + fixed the rerun-collision guard. |
 | 02 | `02_bq_native.json` | 2026-08-22 | `smoke-02-bq-native-7b34cfd9eb98` | ✅ PASS | Native family (arima_plus + timesfm) in BigQuery; 5,600 predictions (100×28×2), 200 metadata rows; `mean_wape` null (no backtest). Surfaced that BQML `CREATE MODEL` can't time-travel a BigLake Iceberg source — native path now reads Iceberg un-pinned (see [CONSIDERATIONS.md](../CONSIDERATIONS.md), C1). |
 | 03 | `03_serverless_gpu.json` | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | ✅ PASS | Deep-learning family (`neuralprophet`) on Serverless GPU (L4); 2,800 predictions (100×28), 100 metadata rows; `mean_wape` null (no backtest). Fixed the Serverless GPU property set (Dataproc-managed accelerator + premium compute/disk tiers; the Spark-level GPU scheduling props are unsupported). Reverse-traced to the Serverless batch (attempt `a2` after an env-policy failure on `a1`). |
-| 04 | `04_cluster_cpu.json` | _pending_ | | | |
+| 04 | `04_cluster_cpu.json` | 2026-08-22 | `smoke-04-cluster-cpu-88fddc72b8a1` | ⚠️ BLOCKED | Shared-cluster orchestration validated (one ephemeral cluster, both families' jobs on it, single teardown — the DELETING race is fixed). But **0 predictions landed**: the Dataproc **cluster** runtime installs no model libraries (the container delivers deps for serverless + Ray only; clusters can't use it), so every fit errors instantly (`fit_seconds=0.0`, metadata written, no forecast). Fix in progress: implement the packed-venv archive (`compute.spark_deps`, the design default). Blocks 04/05/06. |
 | 05 | `05_cluster_reuse.json` | _pending_ | | | |
 | 06 | `06_cluster_gpu.json` | _pending_ | | | |
 | 07 | `07_ray_cpu.json` | _pending_ | | | |

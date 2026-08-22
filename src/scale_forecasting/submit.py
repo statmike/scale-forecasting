@@ -51,6 +51,10 @@ _ENV_CODE_BUCKET = "SF_CODE_BUCKET"
 _ENV_CONTAINER_IMAGE = "SF_CONTAINER_IMAGE"
 _ENV_COMPUTE_SA = "SF_COMPUTE_SA"
 _ENV_SUBNETWORK = "SF_SUBNETWORK_URI"
+# Optional: the packed-venv archive URI (gs://…/envs/<hash>.tar.gz). The Dataproc-cluster runtime's
+# dependency-delivery mechanism — clusters can't use the custom container, so a cluster job attaches
+# this archive instead (see dataproc_cluster.build_job). Unset for serverless/Ray-only deployments.
+_ENV_VENV_ARCHIVE = "SF_VENV_ARCHIVE"
 
 _DEFAULT_RUNTIME_VERSION = "2.2"
 
@@ -92,6 +96,9 @@ class BatchInfra:
     subnetwork_uri: str  # subnet with Private Google Access + internal-ingress firewall
     runtime_version: str = _DEFAULT_RUNTIME_VERSION
     ttl_seconds: int = _DEFAULT_TTL_SECONDS  # batch max-runtime cap; > default 4h so 100k finishes
+    # Packed-venv archive URI for the Dataproc-*cluster* path (clusters can't use the container).
+    # Optional: only cluster families with spark_deps="packed_venv" need it; serverless/Ray ignore.
+    venv_archive_uri: str | None = None
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -117,6 +124,7 @@ class BatchInfra:
             compute_sa=values["compute_sa"],
             subnetwork_uri=values["subnetwork_uri"],
             runtime_version=os.environ.get("SF_RUNTIME_VERSION") or _DEFAULT_RUNTIME_VERSION,
+            venv_archive_uri=os.environ.get(_ENV_VENV_ARCHIVE) or None,
         )
 
     @classmethod
@@ -126,7 +134,8 @@ class BatchInfra:
         """Build from a ``terraform output -json`` value map (local dev/tests).
 
         Reads the keys the ``terraform/main`` stage emits — ``code_bucket``, ``runtime_image_repo``
-        (a base path; ``image_tag`` is appended), ``compute_sa``, ``subnetwork_uri``.
+        (a base path; ``image_tag`` is appended), ``compute_sa``, ``subnetwork_uri``, and the
+        optional ``venv_archive_uri`` (the packed-venv archive for the cluster path).
         """
         try:
             return cls(
@@ -134,6 +143,7 @@ class BatchInfra:
                 container_image=f"{outputs['runtime_image_repo']}:{image_tag}",
                 compute_sa=outputs["compute_sa"],
                 subnetwork_uri=outputs["subnetwork_uri"],
+                venv_archive_uri=outputs.get("venv_archive_uri") or None,
             )
         except KeyError as exc:
             raise ConfigError(f"terraform outputs missing key: {exc.args[0]}") from exc

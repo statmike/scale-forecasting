@@ -103,6 +103,30 @@ def test_verify_leaderboard_accepts_ensemble_rows_when_enabled() -> None:
     assert h.verify_leaderboard(board, cfg) == []
 
 
+# --- verify_predictions --------------------------------------------------------
+
+
+def test_verify_predictions_all_models_landed_is_clean() -> None:
+    cfg = _cfg()  # theta + arima_plus
+    counts = {"theta": 2800, "arima_plus": 2800}
+    assert h.verify_predictions(counts, cfg) == []
+
+
+def test_verify_predictions_flags_model_with_zero_rows() -> None:
+    # The smoke-04 failure: fits errored, metadata written, zero predictions — must FAIL now.
+    cfg = _cfg()
+    counts = {"theta": 0, "arima_plus": 2800}
+    problems = h.verify_predictions(counts, cfg)
+    assert any("theta" in p and "no forecast rows" in p for p in problems)
+
+
+def test_verify_predictions_flags_model_missing_entirely() -> None:
+    cfg = _cfg()
+    counts = {"arima_plus": 2800}  # theta absent from forecast_predictions entirely
+    problems = h.verify_predictions(counts, cfg)
+    assert any("theta" in p for p in problems)
+
+
 # --- verify_rerun --------------------------------------------------------------
 
 

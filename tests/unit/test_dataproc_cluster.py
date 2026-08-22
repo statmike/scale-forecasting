@@ -187,3 +187,69 @@ def test_build_job_defaults_omit_oncluster_flags() -> None:
     args = list(job.pyspark_job.args)
     assert "--models" not in args
     assert "--manage-header" not in args
+
+
+# --- packed-venv delivery (cluster dependency mechanism) -----------------------
+
+
+def test_build_job_attaches_packed_venv_archive() -> None:
+    job = dataproc_cluster.build_job(
+        cluster="sf-cluster-run-abc",
+        launcher_uri="gs://c/spark_main.py",
+        package_uri="gs://c/pkg.zip",
+        config_uri="gs://c/run.json",
+        settings=_settings(),
+        engine="explode",
+        venv_archive_uri="gs://code-bkt/envs/deadbeef.tar.gz",
+    )
+    ps = job.pyspark_job
+    # Archive attached with the #env fragment Dataproc unpacks to ./env, and both driver + executor
+    # Python point at that interpreter — so the cluster runs the exact locked env.
+    assert list(ps.archive_uris) == ["gs://code-bkt/envs/deadbeef.tar.gz#env"]
+    assert ps.properties["spark.pyspark.python"] == "./env/bin/python"
+    assert ps.properties["spark.pyspark.driver.python"] == "./env/bin/python"
+
+
+def test_build_job_without_venv_archive_stays_bare() -> None:
+    job = dataproc_cluster.build_job(
+        cluster="sf-cluster-run-abc",
+        launcher_uri="gs://c/spark_main.py",
+        package_uri="gs://c/pkg.zip",
+        config_uri="gs://c/run.json",
+        settings=_settings(),
+        engine="explode",
+    )
+    ps = job.pyspark_job
+    assert list(ps.archive_uris) == []
+    assert "spark.pyspark.python" not in dict(ps.properties)
+
+
+def _infra_with_venv() -> BatchInfra:
+    return BatchInfra(
+        code_bucket="code-bkt",
+        container_image="us-docker.pkg.dev/proj-x/repo/runtime:latest",
+        compute_sa="compute@proj-x.iam.gserviceaccount.com",
+        subnetwork_uri="projects/proj-x/regions/us-central1/subnetworks/sf",
+        venv_archive_uri="gs://code-bkt/envs/deadbeef.tar.gz",
+    )
+
+
+def test_resolve_cluster_deps_returns_archive_for_packed_venv() -> None:
+    cfg = _cfg(compute={"spark_deps": "packed_venv"})
+    assert (
+        dataproc_cluster._resolve_cluster_deps(cfg, _infra_with_venv())
+        == "gs://code-bkt/envs/deadbeef.tar.gz"
+    )
+
+
+def test_resolve_cluster_deps_rejects_container_on_cluster() -> None:
+    cfg = _cfg(compute={"spark_deps": "container"})
+    with pytest.raises(ConfigError, match="Serverless mechanism"):
+        dataproc_cluster._resolve_cluster_deps(cfg, _infra_with_venv())
+
+
+def test_resolve_cluster_deps_requires_archive_uri() -> None:
+    cfg = _cfg(compute={"spark_deps": "packed_venv"})
+    # infra without a venv archive configured — a cluster forecast job can't run bare.
+    with pytest.raises(ConfigError, match="packed-venv archive"):
+        dataproc_cluster._resolve_cluster_deps(cfg, _infra())

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from .commands import build_driver_args
 from .errors import ConfigError, EngineError, get_logger
-from .submit import BatchInfra, _stage_code, _stage_config
+from .submit import _ENV_VENV_ARCHIVE, BatchInfra, _stage_code, _stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -56,6 +56,18 @@ _GPU_INIT_ACTION = (
 # How long ``wait=True`` blocks on the job before giving up (parity with the batch wait ceiling).
 _WAIT_TIMEOUT_SECONDS = 7200.0
 
+# Packed-venv delivery: a Dataproc cluster can't use the Serverless custom container, so the locked
+# dependency env is shipped as a venv-pack archive attached to the job via ``archive_uris`` with the
+# ``#env`` fragment (Dataproc localizes + unpacks it to ``./env`` in each task's working dir). Point
+# the driver *and* executors at that interpreter so on-cluster code runs the exact same locked env
+# as the container path — the model libraries (statsmodels, xgboost, …) live inside it.
+_VENV_ARCHIVE_FRAGMENT = "#env"
+_VENV_PYTHON = "./env/bin/python"
+_VENV_JOB_PROPERTIES = {
+    "spark.pyspark.python": _VENV_PYTHON,
+    "spark.pyspark.driver.python": _VENV_PYTHON,
+}
+
 
 def cluster_name(run_id: str, spark_cluster_name: str | None) -> str:
     """The cluster name: the reuse target if set, else ``sf-cluster-<run_id>`` (Dataproc-legal).
@@ -67,6 +79,30 @@ def cluster_name(run_id: str, spark_cluster_name: str | None) -> str:
     if spark_cluster_name:
         return spark_cluster_name
     return f"sf-cluster-{run_id}"[:51].rstrip("-")
+
+
+def _resolve_cluster_deps(cfg: RunConfig, infra: BatchInfra) -> str:
+    """The packed-venv archive URI a cluster job must attach, per ``compute.spark_deps`` (pure).
+
+    A Dataproc cluster can't use the Serverless custom container, so ``packed_venv`` (the default)
+    is the only viable dependency mechanism on a cluster — it requires ``infra.venv_archive_uri``
+    (the ``SF_VENV_ARCHIVE`` env / terraform ``venv_archive_uri`` output). ``container`` is a
+    Serverless-only mechanism, so requesting it for a cluster is a config error rather than a
+    silent run with no model libraries. Raises `ConfigError` on ``container`` or a missing URI.
+    """
+    spark_deps = cfg.compute.spark_deps
+    if spark_deps == "container":
+        raise ConfigError(
+            "compute.spark_deps='container' is a Dataproc Serverless mechanism, not available on a "
+            "Dataproc cluster; use spark_deps='packed_venv' for cluster families"
+        )
+    if not infra.venv_archive_uri:
+        raise ConfigError(
+            "a Dataproc cluster forecast job needs the packed-venv archive but none is configured; "
+            f"set {_ENV_VENV_ARCHIVE} (or the terraform 'venv_archive_uri' output). Without it the "
+            "cluster runs bare Python with no model libraries and every fit fails"
+        )
+    return infra.venv_archive_uri
 
 
 # --- pure: cluster + job spec assembly (no network) ----------------------------
@@ -168,24 +204,38 @@ def build_job(
     engine: str,
     models: list[str] | None = None,
     manage_header: bool = True,
+    venv_archive_uri: str | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Job`` (a PySpark job placed on ``cluster``) (pure).
 
     Same launcher shim + package zip + driver args as the Serverless batch (`build_driver_args`), so
     on-cluster code and its contract (``--engine``/``--config-uri``/``--models``/
     ``--manage-header``) are identical between the batch and cluster surfaces.
+
+    ``venv_archive_uri`` (packed-venv delivery) attaches the locked-dependency archive to the job so
+    the cluster runs the exact same env as the container path: it's added to ``archive_uris`` with a
+    ``#env`` fragment (Dataproc unpacks it to ``./env``) and the job's ``spark.pyspark.python`` /
+    ``spark.pyspark.driver.python`` point at that interpreter. Without it the job runs the cluster's
+    bare Python — which lacks the model libraries — so it's required for a cluster forecast job.
     """
     from google.cloud import dataproc_v1 as dataproc
 
     args = build_driver_args(
         config_uri, settings, engine=engine, models=models, manage_header=manage_header
     )
+    archive_uris: list[str] = []
+    properties: dict[str, str] = {}
+    if venv_archive_uri:
+        archive_uris.append(f"{venv_archive_uri}{_VENV_ARCHIVE_FRAGMENT}")
+        properties.update(_VENV_JOB_PROPERTIES)
     return dataproc.Job(
         placement=dataproc.JobPlacement(cluster_name=cluster),
         pyspark_job=dataproc.PySparkJob(
             main_python_file_uri=launcher_uri,
             python_file_uris=[package_uri],
             args=args,
+            archive_uris=archive_uris,
+            properties=properties,
         ),
     )
 
@@ -294,6 +344,7 @@ def submit_cluster_job(
     run_id = make_run_id(cfg)
     name = cluster_name(run_id, spark_cluster_name)
     reuse = spark_cluster_name is not None
+    venv_archive_uri = _resolve_cluster_deps(cfg, infra)
 
     package_uri, launcher_uri = _stage_code(infra)
     config_uri = _stage_config(cfg, run_id, infra)
@@ -333,6 +384,7 @@ def submit_cluster_job(
             engine=engine,
             models=models,
             manage_header=manage_header,
+            venv_archive_uri=venv_archive_uri,
         )
         submitted_id, state_name, detail = _submit_job_and_wait(
             job_client, project_id, region, job, wait=wait

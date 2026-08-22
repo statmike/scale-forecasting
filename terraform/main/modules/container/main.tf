@@ -59,6 +59,15 @@ variable "image_tag" {
   default     = "latest"
 }
 
+variable "code_bucket" {
+  description = <<-EOT
+    Bucket that receives the packed-venv archive (envs/<hash>.tar.gz). The Dataproc *cluster* path
+    can't use the custom container, so it attaches this venv-pack of the same locked env instead.
+    The build packs it from the image's /opt/venv and uploads it here.
+  EOT
+  type        = string
+}
+
 resource "google_artifact_registry_repository" "images" {
   project       = var.project_id
   location      = var.region
@@ -90,6 +99,19 @@ locals {
     "roles/cloudbuild.builds.builder", # run builds, read the source-staging bucket, write logs
     "roles/artifactregistry.writer",   # push the built image into this repo
   ]
+
+  # The packed-venv archive is content-addressed on requirements.txt (the same file that gates the
+  # image build), so its object name changes only when deps change — matching the image lifecycle.
+  venv_hash        = filemd5("${path.module}/../../../../docker/requirements.txt")
+  venv_archive_uri = "gs://${var.code_bucket}/envs/${local.venv_hash}.tar.gz"
+}
+
+# Cloud Build packs the image's /opt/venv and uploads it to the code bucket, so its SA needs object
+# write there (scoped to just this bucket — narrower than a project-wide storage role).
+resource "google_storage_bucket_iam_member" "cloudbuild_code_bucket" {
+  bucket = var.code_bucket
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${local.cloudbuild_sa}"
 }
 
 resource "google_project_iam_member" "cloudbuild" {
@@ -114,6 +136,7 @@ resource "null_resource" "build" {
     dockerfile   = filemd5("${path.module}/../../../../docker/Dockerfile")
     requirements = filemd5("${path.module}/../../../../docker/requirements.txt")
     image        = "${local.image_repo_path}:${var.image_tag}"
+    venv_archive = local.venv_archive_uri
   }
 
   provisioner "local-exec" {
@@ -121,7 +144,8 @@ resource "null_resource" "build" {
     command = join(" ", [
       "gcloud builds submit",
       "--config docker/cloudbuild.yaml",
-      "--substitutions=_REGION=${var.region},_REPO=${var.repository_id},_IMAGE=${var.image_name},_TAG=${var.image_tag}",
+      # _CODE_BUCKET/_VENV_HASH drive the pack+upload of the venv archive for the cluster path.
+      "--substitutions=_REGION=${var.region},_REPO=${var.repository_id},_IMAGE=${var.image_name},_TAG=${var.image_tag},_CODE_BUCKET=${var.code_bucket},_VENV_HASH=${local.venv_hash}",
       "--project ${var.project_id}", # explicit — never the ambient ADC project
       ".",
     ])
@@ -130,6 +154,7 @@ resource "null_resource" "build" {
   depends_on = [
     google_artifact_registry_repository.images,
     google_project_iam_member.cloudbuild,
+    google_storage_bucket_iam_member.cloudbuild_code_bucket,
   ]
 }
 
@@ -148,4 +173,12 @@ output "image_built" {
 output "image_repo_path" {
   description = "Base image path: <region>-docker.pkg.dev/<project>/<repo>/<image>."
   value       = local.image_repo_path
+}
+
+# The packed-venv archive the Dataproc *cluster* path attaches (--archives=<uri>#env). Feeds
+# SF_VENV_ARCHIVE / BatchInfra.venv_archive_uri; content-addressed on requirements.txt so it tracks
+# the image. The object exists after the build has packed+uploaded it (build_image = true).
+output "venv_archive_uri" {
+  description = "gs:// URI of the packed-venv archive for the Dataproc-cluster dependency path."
+  value       = local.venv_archive_uri
 }
