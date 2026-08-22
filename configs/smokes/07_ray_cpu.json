@@ -1,0 +1,17 @@
+{
+  "run_name": "smoke_07_ray_cpu",
+  "python_runtime": "ray",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "holtwinters", "xgboost"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "compute": {
+    "ray_regions": ["us-central1", "us-east1", "us-west1"]
+  }
+}

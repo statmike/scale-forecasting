@@ -1,0 +1,24 @@
+{
+  "run_name": "smoke_10_mixed_runtimes",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "xgboost", "neuralprophet", "arima_plus", "timesfm"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "runtime": "ray",
+        "hardware": "gpu",
+        "gpu_type": "T4"
+      }
+    },
+    "ray_regions": ["us-central1", "us-east1", "us-west1"]
+  }
+}

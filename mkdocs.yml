@@ -83,6 +83,7 @@ nav:
   - Operate:
       - Running & reviewing: running_and_reviewing.md
       - Operations runbook: operations.md
+      - Smoke testing: smoke_testing.md
   - Demo:
       - Workshop: workshop.md
       - Notebook tour:

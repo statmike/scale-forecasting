@@ -1,0 +1,24 @@
+{
+  "run_name": "smoke_04_cluster_cpu",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "holtwinters", "xgboost"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "compute": {
+    "families": {
+      "statistical": {
+        "spark_mode": "cluster"
+      },
+      "ml": {
+        "spark_mode": "cluster"
+      }
+    }
+  }
+}

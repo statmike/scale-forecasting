@@ -1,0 +1,22 @@
+{
+  "run_name": "smoke_08_ray_gpu",
+  "python_runtime": "ray",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["neuralprophet"],
+  "features": {
+    "holidays": ["US"]
+  },
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "hardware": "gpu",
+        "gpu_type": "T4"
+      }
+    },
+    "ray_regions": ["us-central1", "us-east1", "us-west1"]
+  }
+}

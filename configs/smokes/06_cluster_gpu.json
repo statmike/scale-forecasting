@@ -1,0 +1,22 @@
+{
+  "run_name": "smoke_06_cluster_gpu",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["neuralprophet"],
+  "features": {
+    "holidays": ["US"]
+  },
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "spark_mode": "cluster",
+        "hardware": "gpu",
+        "gpu_type": "T4"
+      }
+    }
+  }
+}

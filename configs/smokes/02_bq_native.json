@@ -1,0 +1,12 @@
+{
+  "run_name": "smoke_02_bq_native",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["arima_plus", "timesfm"],
+  "features": {
+    "holidays": ["US"]
+  }
+}

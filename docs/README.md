@@ -16,6 +16,8 @@ Run forecasts, review results, and keep a deployment healthy.
   BigQuery), watch it land, review the leaderboard, re-ensemble. Home of the `SF_*` identity setup.
 - [operations.md](./operations.md) — rework/reset, disk hygiene, and long-running jobs on a
   persistent VM.
+- [smoke_testing.md](./smoke_testing.md) — the smoke-test library and driver: prove each
+  runtime/hardware/ensemble combination end to end on live GCP. Runbook + living results log.
 
 ## Demo
 Show the system end to end.

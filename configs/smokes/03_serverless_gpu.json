@@ -1,0 +1,21 @@
+{
+  "run_name": "smoke_03_serverless_gpu",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["neuralprophet"],
+  "features": {
+    "holidays": ["US"]
+  },
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "hardware": "gpu",
+        "gpu_type": "L4"
+      }
+    }
+  }
+}

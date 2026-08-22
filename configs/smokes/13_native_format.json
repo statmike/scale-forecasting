@@ -1,0 +1,14 @@
+{
+  "run_name": "smoke_13_native_format",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_native",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "xgboost", "arima_plus", "timesfm"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  }
+}

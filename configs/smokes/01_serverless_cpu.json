@@ -1,0 +1,14 @@
+{
+  "run_name": "smoke_01_serverless_cpu",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "holtwinters", "xgboost"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  }
+}

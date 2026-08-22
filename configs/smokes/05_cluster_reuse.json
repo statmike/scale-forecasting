@@ -1,0 +1,26 @@
+{
+  "run_name": "smoke_05_cluster_reuse",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "xgboost"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "compute": {
+    "families": {
+      "statistical": {
+        "spark_mode": "cluster",
+        "spark_cluster_name": "sf-smoke-cluster"
+      },
+      "ml": {
+        "spark_mode": "cluster",
+        "spark_cluster_name": "sf-smoke-cluster"
+      }
+    }
+  }
+}

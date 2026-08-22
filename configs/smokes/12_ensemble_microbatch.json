@@ -1,0 +1,30 @@
+{
+  "run_name": "smoke_12_ensemble_microbatch",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 100
+  },
+  "models": ["theta", "holtwinters", "arima_plus", "timesfm"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": ["mean", "median", "inverse_error", "nnls"]
+  },
+  "compute": {
+    "ensemble": {
+      "mode": "microbatch",
+      "microbatch_interval_s": 30.0
+    }
+  }
+}
