@@ -38,9 +38,30 @@ proof; together they validate both source formats.
 
 ## Prerequisites
 
-- **Identity** — the same `SF_*` environment the run loop uses (see
-  [running & reviewing](./running_and_reviewing.md)) plus Application Default Credentials
-  (`gcloud auth application-default login`). The harness resolves `Settings` from this environment.
+- **Identity** — the `SF_*` environment plus Application Default Credentials
+  (`gcloud auth application-default login`). The harness **submits** (not just reads), so it needs the
+  full set, not only the five `Settings` vars from [running & reviewing](./running_and_reviewing.md):
+  `Settings.resolve()` reads `SF_PROJECT_ID` / `SF_CONNECTION` / `SF_WAREHOUSE_URI` (+ optional
+  `SF_DATASET_ID` / `SF_REGION`), **and** `BatchInfra.resolve()` reads `SF_CODE_BUCKET` /
+  `SF_CONTAINER_IMAGE` / `SF_COMPUTE_SA` / `SF_SUBNETWORK_URI`, **and** the Ray smokes' `RayInfra.resolve()`
+  reads `SF_RAY_NETWORK_ATTACHMENT` (or `SF_RAY_NETWORK`) plus optional `SF_RAY_VERSION` /
+  `SF_RUNTIME_VERSION`. Wire them straight from Terraform:
+
+  ```bash
+  cd terraform/main
+  eval "$(terraform output -json | python -c 'import json,sys
+  o=json.load(sys.stdin); g=lambda k: o[k]["value"]
+  print(f"export SF_PROJECT_ID={g(\"project_id\")}")
+  print(f"export SF_CONNECTION={g(\"iceberg_connection\")}")
+  print(f"export SF_WAREHOUSE_URI={g(\"warehouse_uri\")}")
+  print(f"export SF_DATASET_ID={g(\"dataset_id\")}")
+  print(f"export SF_CODE_BUCKET={g(\"code_bucket\")}")
+  print(f"export SF_CONTAINER_IMAGE={g(\"runtime_image_repo\")}:latest")
+  print(f"export SF_COMPUTE_SA={g(\"compute_sa\")}")
+  print(f"export SF_SUBNETWORK_URI={g(\"subnetwork_uri\")}")
+  print(f"export SF_RAY_NETWORK_ATTACHMENT={g(\"network_attachment_id\")}")')"
+  export SF_REGION=us-central1   # or your deploy region
+  ```
 - **Source tables** — both `source_series_iceberg` and `source_series_native` must exist in the
   deployment dataset (they are created by the Terraform + seed step).
 - **Deep-learning smokes (03, 06, 08, 09, 10, 14)** — the container must carry the `models` extra so
@@ -113,7 +134,7 @@ One row per live execution. Fill it in as the campaign runs.
 
 | # | Config | Date | run_id | Status | Notes |
 |---|--------|------|--------|--------|-------|
-| 01 | `01_serverless_cpu.json` | _pending_ | | | |
+| 01 | `01_serverless_cpu.json` | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | ✅ PASS | 2 families (statistical + ML) on Serverless CPU; 3 models × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, reverse-traced to Dataproc batches. Surfaced + fixed the rerun-collision guard. |
 | 02 | `02_bq_native.json` | _pending_ | | | |
 | 03 | `03_serverless_gpu.json` | _pending_ | | | |
 | 04 | `04_cluster_cpu.json` | _pending_ | | | |
