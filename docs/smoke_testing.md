@@ -135,7 +135,7 @@ One row per live execution. Fill it in as the campaign runs.
 | # | Config | Date | run_id | Status | Notes |
 |---|--------|------|--------|--------|-------|
 | 01 | `01_serverless_cpu.json` | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | ✅ PASS | 2 families (statistical + ML) on Serverless CPU; 3 models × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, reverse-traced to Dataproc batches. Surfaced + fixed the rerun-collision guard. |
-| 02 | `02_bq_native.json` | _pending_ | | | |
+| 02 | `02_bq_native.json` | 2026-08-22 | `smoke-02-bq-native-7b34cfd9eb98` | ✅ PASS | Native family (arima_plus + timesfm) in BigQuery; 5,600 predictions (100×28×2), 200 metadata rows; `mean_wape` null (no backtest). Surfaced that BQML `CREATE MODEL` can't time-travel a BigLake Iceberg source — native path now reads Iceberg un-pinned (see [CONSIDERATIONS.md](../CONSIDERATIONS.md), C1). |
 | 03 | `03_serverless_gpu.json` | _pending_ | | | |
 | 04 | `04_cluster_cpu.json` | _pending_ | | | |
 | 05 | `05_cluster_reuse.json` | _pending_ | | | |
