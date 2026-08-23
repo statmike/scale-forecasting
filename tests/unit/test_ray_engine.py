@@ -231,6 +231,12 @@ def _install_fake_read_client(
     fake_mod.types = fake_types  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "google.cloud.bigquery_storage_v1", fake_mod)
 
+    # Keep the read fully offline: the snapshot lookup would otherwise construct a real BigQuery
+    # client (needs ADC) to fetch the run header. These tests exercise the stream read, not snapshot
+    # pinning, so pin it to None (an unpinned read) — the same value the best-effort lookup returns
+    # for a run with no recorded snapshot.
+    monkeypatch.setattr(ray_engine, "_snapshot_millis", lambda cfg, settings: None)
+
 
 def test_read_source_series_concats_multiple_streams(monkeypatch: pytest.MonkeyPatch) -> None:
     # The scale path: the Storage Read server fans the table into several streams, so the frames
@@ -350,6 +356,8 @@ def test_read_ray_data_reads_by_dataset_and_projects_columns(
     fake_ray = pytypes.ModuleType("ray")
     fake_ray.data = pytypes.SimpleNamespace(read_bigquery=_read_bigquery)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    # Offline: skip the snapshot lookup (it would build a real BigQuery client needing ADC).
+    monkeypatch.setattr(ray_engine, "_snapshot_millis", lambda cfg, settings: None)
 
     cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7})
     out = ray_engine._read_ray_data(cfg, _settings())
