@@ -5,8 +5,8 @@ never baked into the container image — so a data scientist edits ``src/`` and 
 *existing* slow-moving image, with no rebuild and no stale code hiding in the container. These tests
 lock that property at every seam:
 
-* the **image** carries dependencies only (no ``COPY src``, and ``uv sync --no-install-project`` keeps
-  the package out);
+* the **image** carries dependencies only (no ``COPY src``, and ``uv sync --no-install-project``
+  keeps the package out);
 * the **Cloud Build** step and the **Dockerfile** together never add the package to the image;
 * every **submit path** delivers the package externally — ``python_file_uris`` (Spark batch / seed /
   smoke) or ``runtime_env.working_dir`` (Ray on Vertex).
@@ -45,15 +45,15 @@ _LOCKFILES = (".python-version", "pyproject.toml", "uv.lock", "requirements.txt"
 
 def test_dockerfile_never_copies_source() -> None:
     # No ``COPY src`` / ``COPY . ...`` / ``ADD src`` — the package must not enter the build context.
-    # The only copies permitted are build tooling from ANOTHER image (``COPY --from=...``, e.g. the uv
-    # binary) and the lockfiles (.python-version / pyproject.toml / uv.lock / requirements.txt) — never
-    # anything under src/.
+    # The only copies permitted are build tooling from ANOTHER image (``COPY --from=...``, e.g. the
+    # uv binary) and the lockfiles (.python-version / pyproject.toml / uv.lock / requirements.txt) —
+    # never anything under src/.
     for directive in _dockerfile_directives():
         upper = directive.upper()
         if not upper.startswith(("COPY ", "ADD ")):
             continue
         if upper.startswith("COPY --FROM="):
-            continue  # copied from another image stage/tool, not the build context — carries no source
+            continue  # from another image stage/tool, not the build context — carries no source
         assert any(lf in directive for lf in _LOCKFILES), f"image bakes source via: {directive}"
         assert " src" not in f" {directive}", f"image bakes src/ via: {directive}"
 
@@ -69,10 +69,10 @@ def test_dockerfile_never_installs_the_package() -> None:
 
 
 def test_dockerfile_installs_only_the_locked_deps_not_the_package() -> None:
-    # The one dependency-install path is ``uv sync --frozen ... --no-install-project``: --frozen pins to
-    # uv.lock verbatim (no re-resolve, no drift), and --no-install-project keeps the package OUT of the
-    # image (code ships at runtime via python_file_uris). Guards against dropping either flag — a
-    # re-resolve would drift from the lock, and installing the project would bake stale code in.
+    # The one dependency-install path is ``uv sync --frozen ... --no-install-project``. --frozen
+    # pins to uv.lock verbatim (no re-resolve, no drift); --no-install-project keeps the package OUT
+    # of the image (code ships at runtime). Guards against dropping either flag — a re-resolve would
+    # drift from the lock, and installing the project would bake stale code in.
     syncs = [d for d in _dockerfile_directives() if "uv sync" in d]
     assert syncs, "expected a `uv sync --frozen ... --no-install-project` layer"
     for d in syncs:
