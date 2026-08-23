@@ -87,7 +87,47 @@ def test_build_cluster_cpu_default_attaches_no_accelerator() -> None:
     assert cfg.worker_config.machine_type_uri == dataproc_cluster._DEFAULT_WORKER_MACHINE
     assert list(cfg.worker_config.accelerators) == []
     assert list(cfg.initialization_actions) == []
+    assert dict(cfg.gce_cluster_config.metadata) == {}  # no venv wired → no venv metadata
     assert cfg.software_config.image_version == dataproc_cluster._DEFAULT_IMAGE_VERSION
+
+
+def test_build_cluster_wires_venv_init_action_and_metadata() -> None:
+    cluster = dataproc_cluster.build_cluster(
+        infra=_infra(),
+        settings=_settings(),
+        project_id="proj-x",
+        name="sf-cluster-run-abc",
+        venv_archive_uri="gs://code-bkt/envs/deadbeef.tar.gz",
+        venv_init_uri="gs://code-bkt/init/sf-venv-init-abcd1234.sh",
+    )
+    cfg = cluster.config
+    # The archive URI + target dir ride as cluster metadata for the init action to read at create.
+    meta = dict(cfg.gce_cluster_config.metadata)
+    assert meta["sf-venv-archive-uri"] == "gs://code-bkt/envs/deadbeef.tar.gz"
+    assert meta["sf-venv-dir"] == "/opt/sf-venv"
+    # The staged init script is a node init action so the venv lands on master + workers alike.
+    init = list(cfg.initialization_actions)
+    assert len(init) == 1
+    assert init[0].executable_file == "gs://code-bkt/init/sf-venv-init-abcd1234.sh"
+
+
+def test_build_cluster_gpu_with_venv_runs_both_init_actions() -> None:
+    cluster = dataproc_cluster.build_cluster(
+        infra=_infra(),
+        settings=_settings(),
+        project_id="proj-x",
+        name="sf-cluster-run-abc",
+        hardware="gpu",
+        gpu_type="T4",
+        venv_archive_uri="gs://code-bkt/envs/deadbeef.tar.gz",
+        venv_init_uri="gs://code-bkt/init/sf-venv-init-abcd1234.sh",
+    )
+    # Venv unpack first, then the GPU-driver install — both present, venv before GPU.
+    init = [a.executable_file for a in cluster.config.initialization_actions]
+    assert init == [
+        "gs://code-bkt/init/sf-venv-init-abcd1234.sh",
+        dataproc_cluster._GPU_INIT_ACTION,
+    ]
 
 
 def test_build_cluster_gpu_t4_attaches_n1_accelerator_and_init_action() -> None:
@@ -192,7 +232,7 @@ def test_build_job_defaults_omit_oncluster_flags() -> None:
 # --- packed-venv delivery (cluster dependency mechanism) -----------------------
 
 
-def test_build_job_attaches_packed_venv_archive() -> None:
+def test_build_job_use_venv_points_python_at_absolute_venv() -> None:
     job = dataproc_cluster.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://c/spark_main.py",
@@ -200,17 +240,18 @@ def test_build_job_attaches_packed_venv_archive() -> None:
         config_uri="gs://c/run.json",
         settings=_settings(),
         engine="explode",
-        venv_archive_uri="gs://code-bkt/envs/deadbeef.tar.gz",
+        use_venv=True,
     )
     ps = job.pyspark_job
-    # Archive attached with the #env fragment Dataproc unpacks to ./env, and both driver + executor
-    # Python point at that interpreter — so the cluster runs the exact locked env.
-    assert list(ps.archive_uris) == ["gs://code-bkt/envs/deadbeef.tar.gz#env"]
-    assert ps.properties["spark.pyspark.python"] == "./env/bin/python"
-    assert ps.properties["spark.pyspark.driver.python"] == "./env/bin/python"
+    # The venv is delivered by the cluster init action to an absolute path (not attached to the job:
+    # job archives reach only executors, never the client-mode driver), so no archive_uris here and
+    # both driver + executor Python point at the same absolute interpreter.
+    assert list(ps.archive_uris) == []
+    assert ps.properties["spark.pyspark.python"] == "/opt/sf-venv/bin/python"
+    assert ps.properties["spark.pyspark.driver.python"] == "/opt/sf-venv/bin/python"
 
 
-def test_build_job_without_venv_archive_stays_bare() -> None:
+def test_build_job_without_venv_stays_bare() -> None:
     job = dataproc_cluster.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://c/spark_main.py",
@@ -253,3 +294,14 @@ def test_resolve_cluster_deps_requires_archive_uri() -> None:
     # infra without a venv archive configured — a cluster forecast job can't run bare.
     with pytest.raises(ConfigError, match="packed-venv archive"):
         dataproc_cluster._resolve_cluster_deps(cfg, _infra())
+
+
+def test_cluster_init_script_reads_metadata_and_unpacks_to_absolute_dir() -> None:
+    script = dataproc_cluster._CLUSTER_INIT_SCRIPT
+    # Reads both metadata keys the cluster carries, and unpacks to the absolute venv dir the job's
+    # Python points at — so driver + executors resolve the same interpreter.
+    assert "attributes/sf-venv-archive-uri" in script
+    assert "attributes/sf-venv-dir" in script
+    assert 'tar xzf /tmp/sf-venv.tar.gz -C "${VENV_DIR}"' in script
+    assert "set -euo pipefail" in script  # a fetch/unpack failure fails the node, not silently bare
+    assert dataproc_cluster._VENV_PYTHON == "/opt/sf-venv/bin/python"

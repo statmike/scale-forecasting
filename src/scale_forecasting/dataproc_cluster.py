@@ -57,16 +57,45 @@ _GPU_INIT_ACTION = (
 _WAIT_TIMEOUT_SECONDS = 7200.0
 
 # Packed-venv delivery: a Dataproc cluster can't use the Serverless custom container, so the locked
-# dependency env is shipped as a venv-pack archive attached to the job via ``archive_uris`` with the
-# ``#env`` fragment (Dataproc localizes + unpacks it to ``./env`` in each task's working dir). Point
-# the driver *and* executors at that interpreter so on-cluster code runs the exact same locked env
-# as the container path — the model libraries (statsmodels, xgboost, …) live inside it.
-_VENV_ARCHIVE_FRAGMENT = "#env"
-_VENV_PYTHON = "./env/bin/python"
+# dependency env is shipped as a self-contained venv archive and unpacked to a fixed absolute path
+# on every node by a cluster **init action** (below). Job ``archive_uris`` are localized only to the
+# *executors'* working dirs — never the client-mode *driver's* CWD (the driver runs on the master) —
+# so a relative ``./env/bin/python`` fails for the driver with ``error=2, No such file or dir``.
+# The init action sidesteps that: it lands the venv at ``/opt/sf-venv`` on master + workers alike,
+# so both driver and executors point at the same absolute interpreter and run the exact same locked
+# env as the container path — the model libraries (statsmodels, xgboost, …) live inside it.
+_VENV_DIR = "/opt/sf-venv"
+_VENV_PYTHON = f"{_VENV_DIR}/bin/python"
 _VENV_JOB_PROPERTIES = {
     "spark.pyspark.python": _VENV_PYTHON,
     "spark.pyspark.driver.python": _VENV_PYTHON,
 }
+
+# Cluster metadata keys the init action reads to know what to fetch + where to unpack it. Metadata
+# rides on the cluster (not the job), so it's available to the init action at create time on every
+# node; the archive URI is the same ``venv_archive_uri`` a forecast job would otherwise attach.
+_VENV_ARCHIVE_METADATA_KEY = "sf-venv-archive-uri"
+_VENV_DIR_METADATA_KEY = "sf-venv-dir"
+
+# The init-action script: on every node at cluster create, download the venv archive named in
+# cluster metadata and unpack it to the absolute venv dir. The archive is a plain tar of the venv's
+# *contents* (packed with ``tar -C /opt/venv .``), so it extracts straight into the target dir; the
+# bundled interpreter + relative ``bin/python`` symlink make it runnable at any absolute path. Fails
+# the node (``set -e``) if the metadata is missing or the fetch/unpack errors, so a broken env
+# surfaces at create rather than as a silent bare-Python job later.
+_CLUSTER_INIT_SCRIPT = f"""#!/bin/bash
+set -euo pipefail
+ARCHIVE_URI="$(/usr/share/google/get_metadata_value attributes/{_VENV_ARCHIVE_METADATA_KEY})"
+VENV_DIR="$(/usr/share/google/get_metadata_value attributes/{_VENV_DIR_METADATA_KEY})"
+if [[ -z "${{ARCHIVE_URI}}" || -z "${{VENV_DIR}}" ]]; then
+  echo "sf venv init: missing venv cluster metadata" >&2
+  exit 1
+fi
+mkdir -p "${{VENV_DIR}}"
+gsutil -q cp "${{ARCHIVE_URI}}" /tmp/sf-venv.tar.gz
+tar xzf /tmp/sf-venv.tar.gz -C "${{VENV_DIR}}"
+rm -f /tmp/sf-venv.tar.gz
+"""
 
 
 def cluster_name(run_id: str, spark_cluster_name: str | None) -> str:
@@ -105,6 +134,27 @@ def _resolve_cluster_deps(cfg: RunConfig, infra: BatchInfra) -> str:
     return infra.venv_archive_uri
 
 
+def _stage_cluster_init(infra: BatchInfra) -> str:
+    """Upload the venv init-action script to the code bucket; return its ``gs://`` URI.
+
+    Mirrors `submit._stage_code`'s staging pattern. The object name carries the script's md5 so an
+    edit to the script is a new object (no in-place-overwrite races) and an unchanged script re-uses
+    the same URI across runs. `build_cluster` points a `NodeInitializationAction` at the returned
+    URI.
+    """
+    import hashlib
+
+    from google.cloud import storage
+
+    data = _CLUSTER_INIT_SCRIPT.encode("utf-8")
+    digest = hashlib.md5(data, usedforsecurity=False).hexdigest()[:8]
+    name = f"init/sf-venv-init-{digest}.sh"
+    client = storage.Client()
+    bucket = client.bucket(infra.code_bucket)
+    bucket.blob(name).upload_from_string(data, content_type="text/x-shellscript")
+    return f"gs://{infra.code_bucket}/{name}"
+
+
 # --- pure: cluster + job spec assembly (no network) ----------------------------
 
 
@@ -117,6 +167,8 @@ def build_cluster(
     hardware: str = "cpu",
     gpu_type: str | None = None,
     worker_count: int = _DEFAULT_WORKER_COUNT,
+    venv_archive_uri: str | None = None,
+    venv_init_uri: str | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Cluster`` message for one run (pure — builds the message only).
 
@@ -125,16 +177,29 @@ def build_cluster(
     accelerator on each worker (`_GPU_WORKER_MACHINE`/`_GPU_ACCELERATOR_TYPE` by ``gpu_type``) and
     adds the GPU-driver init action, so the executor's Python worker can use the device. A CPU
     cluster attaches no accelerator and runs the default worker machine.
+
+    ``venv_archive_uri`` + ``venv_init_uri`` wire the packed-venv delivery: the archive URI (and the
+    target dir) ride as cluster metadata, and `venv_init_uri` (the staged `_stage_cluster_init`
+    script) becomes a `NodeInitializationAction` that unpacks the venv to `_VENV_DIR` on every node
+    at create — so driver + executors share the absolute interpreter (`build_job` points Spark's
+    Python there). Both are required together for a forecast cluster; omitting them (the
+    pure-builder tests) yields a bare cluster with no venv metadata or init action.
     """
     from google.cloud import dataproc_v1 as dataproc
 
     zone_uri = ""  # empty = Dataproc auto-places within the subnet's region
+
+    metadata: dict[str, str] = {}
+    if venv_archive_uri:
+        metadata[_VENV_ARCHIVE_METADATA_KEY] = venv_archive_uri
+        metadata[_VENV_DIR_METADATA_KEY] = _VENV_DIR
 
     gce = dataproc.GceClusterConfig(
         subnetwork_uri=infra.subnetwork_uri,
         service_account=infra.compute_sa,
         internal_ip_only=True,
         zone_uri=zone_uri,
+        metadata=metadata,
     )
     master = dataproc.InstanceGroupConfig(
         num_instances=1,
@@ -142,6 +207,10 @@ def build_cluster(
     )
 
     init_actions: list[Any] = []
+    # Unpack the venv first so it's in place before any downstream action; the GPU driver install
+    # (below) is independent and appended after.
+    if venv_init_uri:
+        init_actions.append(dataproc.NodeInitializationAction(executable_file=venv_init_uri))
     if hardware == "gpu":
         worker_machine, accelerators = _gpu_worker(gpu_type)
         init_actions.append(dataproc.NodeInitializationAction(executable_file=_GPU_INIT_ACTION))
@@ -204,7 +273,7 @@ def build_job(
     engine: str,
     models: list[str] | None = None,
     manage_header: bool = True,
-    venv_archive_uri: str | None = None,
+    use_venv: bool = False,
 ) -> object:
     """Assemble the ``dataproc_v1.Job`` (a PySpark job placed on ``cluster``) (pure).
 
@@ -212,29 +281,25 @@ def build_job(
     on-cluster code and its contract (``--engine``/``--config-uri``/``--models``/
     ``--manage-header``) are identical between the batch and cluster surfaces.
 
-    ``venv_archive_uri`` (packed-venv delivery) attaches the locked-dependency archive to the job so
-    the cluster runs the exact same env as the container path: it's added to ``archive_uris`` with a
-    ``#env`` fragment (Dataproc unpacks it to ``./env``) and the job's ``spark.pyspark.python`` /
-    ``spark.pyspark.driver.python`` point at that interpreter. Without it the job runs the cluster's
-    bare Python — which lacks the model libraries — so it's required for a cluster forecast job.
+    ``use_venv`` points the job's ``spark.pyspark.python`` / ``spark.pyspark.driver.python`` at the
+    absolute ``_VENV_PYTHON`` the cluster's venv init action lands on every node (see
+    `build_cluster`), so on-cluster code runs the exact same locked env as the container path. The
+    interpreter is delivered by the *cluster* (init action), not attached to the *job* — job
+    ``archive_uris`` reach only executors, never the client-mode driver. Without ``use_venv`` the
+    job runs the cluster's bare Python (no model libraries), so it's required for a forecast job.
     """
     from google.cloud import dataproc_v1 as dataproc
 
     args = build_driver_args(
         config_uri, settings, engine=engine, models=models, manage_header=manage_header
     )
-    archive_uris: list[str] = []
-    properties: dict[str, str] = {}
-    if venv_archive_uri:
-        archive_uris.append(f"{venv_archive_uri}{_VENV_ARCHIVE_FRAGMENT}")
-        properties.update(_VENV_JOB_PROPERTIES)
+    properties: dict[str, str] = dict(_VENV_JOB_PROPERTIES) if use_venv else {}
     return dataproc.Job(
         placement=dataproc.JobPlacement(cluster_name=cluster),
         pyspark_job=dataproc.PySparkJob(
             main_python_file_uri=launcher_uri,
             python_file_uris=[package_uri],
             args=args,
-            archive_uris=archive_uris,
             properties=properties,
         ),
     )
@@ -348,6 +413,9 @@ def submit_cluster_job(
 
     package_uri, launcher_uri = _stage_code(infra)
     config_uri = _stage_config(cfg, run_id, infra)
+    # The venv init-action script is only needed when we create the cluster; a reuse target already
+    # carries the init action (it was created with one), so skip the upload on the reuse path.
+    venv_init_uri = None if reuse else _stage_cluster_init(infra)
     project_id = settings.project_id
     region = settings.region
 
@@ -372,6 +440,8 @@ def submit_cluster_job(
                 hardware=hardware,
                 gpu_type=gpu_type,
                 worker_count=worker_count,
+                venv_archive_uri=venv_archive_uri,
+                venv_init_uri=venv_init_uri,
             )
             _create_cluster(cluster_client, project_id, region, cluster)
 
@@ -384,7 +454,7 @@ def submit_cluster_job(
             engine=engine,
             models=models,
             manage_header=manage_header,
-            venv_archive_uri=venv_archive_uri,
+            use_venv=True,
         )
         submitted_id, state_name, detail = _submit_job_and_wait(
             job_client, project_id, region, job, wait=wait
@@ -431,6 +501,8 @@ def provision_shared_cluster(
     settings = settings or Settings.resolve()
     infra = infra or BatchInfra.resolve()
     name = cluster_name(run_id, None)
+    venv_archive_uri = _resolve_cluster_deps(cfg, infra)
+    venv_init_uri = _stage_cluster_init(infra)
     cluster = build_cluster(
         infra=infra,
         settings=settings,
@@ -439,6 +511,8 @@ def provision_shared_cluster(
         hardware="gpu" if use_gpu else "cpu",
         gpu_type=gpu_type,
         worker_count=worker_count,
+        venv_archive_uri=venv_archive_uri,
+        venv_init_uri=venv_init_uri,
     )
     _log.info(
         "provisioning shared Dataproc cluster %s: use_gpu=%s workers=%d",
