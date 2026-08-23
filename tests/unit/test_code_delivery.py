@@ -82,6 +82,43 @@ def test_dockerfile_installs_only_the_locked_deps_not_the_package() -> None:
         )
 
 
+def _gcloudignore_whitelist() -> set[str]:
+    """The first path component of every re-include (``!``) rule in .gcloudignore, e.g.
+    ``!/docker/**`` → ``docker`` and ``!/uv.lock`` → ``uv.lock``. .gcloudignore excludes all (``*``)
+    then
+    re-includes only the build inputs; these are the roots that survive into the upload."""
+    out: set[str] = set()
+    for ln in (_REPO_ROOT / ".gcloudignore").read_text().splitlines():
+        ln = ln.strip()
+        if not ln.startswith("!"):
+            continue
+        p = ln[1:].lstrip("/")  # drop the '!' and any leading '/'
+        out.add(p.split("/")[0])  # first path component ('docker/**' -> 'docker')
+    return out
+
+
+def test_gcloudignore_ships_every_root_file_the_dockerfile_copies() -> None:
+    # `gcloud builds submit` uploads the build context filtered by .gcloudignore (exclude-all,
+    # then re-include only build inputs). If the Dockerfile COPYs a repo-root file that
+    # .gcloudignore does not re-include, that file is absent from the uploaded context and the
+    # build dies with "file not found in build context". Cross-check both ways so adding a root
+    # COPY without updating .gcloudignore (or vice versa) fails here instead of in Cloud Build.
+    whitelist = _gcloudignore_whitelist()
+    for directive in _dockerfile_directives():
+        if not directive.upper().startswith("COPY "):
+            continue
+        if directive.upper().startswith("COPY --FROM="):
+            continue  # from another image, not the build context — not subject to .gcloudignore
+        for src in directive.split()[1:-1]:  # tokens between COPY and the destination
+            if src.startswith("-"):
+                continue  # a flag like --chown=
+            root = (src[2:] if src.startswith("./") else src).split("/")[0]
+            assert root in whitelist, (
+                f".gcloudignore does not re-include {src!r} that the Dockerfile COPYs — the Cloud "
+                f"Build context will be missing it (whitelisted roots: {sorted(whitelist)})"
+            )
+
+
 def test_requirements_lock_does_not_install_the_package() -> None:
     # ``# via scale-forecasting`` lines are pip-compile provenance comments (deps pulled in *by* the
     # package), not an install directive. No *uncommented* line may name the package as a dep.
