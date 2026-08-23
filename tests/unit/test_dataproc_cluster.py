@@ -151,31 +151,6 @@ def test_build_cluster_gpu_t4_attaches_n1_accelerator_and_init_action() -> None:
     assert init[0].executable_file == dataproc_cluster._GPU_INIT_ACTION
 
 
-def test_build_cluster_gpu_disables_secure_boot_only_on_gpu() -> None:
-    # The GPU-driver install action loads unsigned NVIDIA kernel modules, which Secure Boot blocks;
-    # a GPU cluster turns Secure Boot off (vTPM + integrity monitoring stay on).
-    gpu = dataproc_cluster.build_cluster(
-        infra=_infra(),
-        settings=_settings(),
-        project_id="proj-x",
-        name="sf-cluster-run-abc",
-        hardware="gpu",
-        gpu_type="T4",
-    )
-    shielded = gpu.config.gce_cluster_config.shielded_instance_config
-    assert shielded.enable_secure_boot is False
-    assert shielded.enable_vtpm is True
-    assert shielded.enable_integrity_monitoring is True
-    # A CPU cluster builds no kernel modules, so it keeps the image default (no override set).
-    cpu = dataproc_cluster.build_cluster(
-        infra=_infra(),
-        settings=_settings(),
-        project_id="proj-x",
-        name="sf-cluster-run-abc",
-    )
-    assert "shielded_instance_config" not in cpu.config.gce_cluster_config
-
-
 def test_build_cluster_gpu_l4_attaches_g2_machine() -> None:
     cluster = dataproc_cluster.build_cluster(
         infra=_infra(),

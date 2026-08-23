@@ -194,26 +194,12 @@ def build_cluster(
         metadata[_VENV_ARCHIVE_METADATA_KEY] = venv_archive_uri
         metadata[_VENV_DIR_METADATA_KEY] = _VENV_DIR
 
-    gce_kwargs: dict[str, Any] = {}
-    if hardware == "gpu":
-        # The stock GPU-driver install action builds unsigned NVIDIA kernel modules, which Secure
-        # Boot (on by default in the Dataproc image) refuses to load — the install fails with
-        # "Secure boot is enabled, but no signing material provided". Turn Secure Boot off on the
-        # GPU cluster's VMs so the driver loads, keeping vTPM + integrity monitoring on. CPU
-        # clusters build no kernel modules, so they keep the stronger default (Secure Boot on).
-        gce_kwargs["shielded_instance_config"] = dataproc.ShieldedInstanceConfig(
-            enable_secure_boot=False,
-            enable_vtpm=True,
-            enable_integrity_monitoring=True,
-        )
-
     gce = dataproc.GceClusterConfig(
         subnetwork_uri=infra.subnetwork_uri,
         service_account=infra.compute_sa,
         internal_ip_only=True,
         zone_uri=zone_uri,
         metadata=metadata,
-        **gce_kwargs,
     )
     master = dataproc.InstanceGroupConfig(
         num_instances=1,
