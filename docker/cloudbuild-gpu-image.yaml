@@ -19,6 +19,16 @@
 # base Dataproc image, runs the customization script on it, captures the disk as a new Compute image,
 # and deletes the builder VM. `--no-smoke-test` skips the tool's optional post-build test cluster
 # (extra spend, and it would hit the same Secure Boot org policy a GPU cluster does).
+#
+# `dataproc-temp-bucket` metadata: the stock GPU driver action caches the downloaded driver runfile to
+# gs://<dataproc-temp-bucket>/dpgce-packages/ and installs from there. On a real cluster Dataproc sets
+# that metadata; the builder VM has no such default, so we point it at the code bucket (the build SA
+# already has objectAdmin there). Without it the cache path is gs:/// and the customization aborts.
+#
+# `--no-external-ip`: this solution runs internal-IP-only (org policy commonly denies external IPs),
+# so the builder VM gets no external IP and reaches the NVIDIA driver mirrors through the deployment's
+# Cloud NAT. This requires _SUBNET to be set (a subnet on a network with NAT + Private Google Access);
+# without NAT the driver download has no egress and the build fails.
 
 substitutions:
   _IMAGE_NAME: "" # output Compute image name; empty = skip (nothing to build)
@@ -43,16 +53,17 @@ steps:
         cd /tmp/custom-images
         SUBNET_FLAG=()
         if [ -n "${_SUBNET}" ]; then SUBNET_FLAG=(--subnet "${_SUBNET}"); fi
-        python generate_custom_image.py \
+        python3 generate_custom_image.py \
           --image-name "${_IMAGE_NAME}" \
           --dataproc-version "${_DATAPROC_VERSION}" \
           --customization-script /workspace/docker/gpu_image_customize.sh \
           --zone "${_ZONE}" \
           --gcs-bucket "gs://${_CODE_BUCKET}" \
           --project-id "${PROJECT_ID}" \
-          --metadata cudnn-version= \
+          --metadata "cudnn-version=,dataproc-temp-bucket=${_CODE_BUCKET}" \
           --no-smoke-test \
           --shutdown-instance-timer-sec 300 \
+          --no-external-ip \
           "${SUBNET_FLAG[@]}"
 
 # The driver compile can take a while; give the whole build a generous ceiling (well under the once,
