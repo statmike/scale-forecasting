@@ -44,6 +44,7 @@ class RuntimeSubmitter(Protocol):
         gpu_type: str | None = None,
         spark_mode: str | None = None,
         spark_cluster_name: str | None = None,
+        spark_cluster_region: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
     ) -> str | None:
@@ -67,7 +68,9 @@ class RuntimeSubmitter(Protocol):
         ``gpu_type`` names it. They default to CPU, so a CPU family launches exactly as before.
 
         ``spark_mode``/``spark_cluster_name`` select the Spark sub-runtime (``serverless`` batch xor
-        a Dataproc ``cluster`` job, the latter reusing a standing cluster by name when given); other
+        a Dataproc ``cluster`` job, the latter reusing a standing cluster by name when given);
+        ``spark_cluster_region`` is the region a reuse target lives in (the run's shared ephemeral
+        cluster may have hopped there on a capacity failover; unset = the deployment region). Other
         runtimes ignore them.
 
         ``ray_cluster_name``/``ray_cluster_region`` target one shared ephemeral Ray cluster the
@@ -105,6 +108,7 @@ class SparkSubmitter:
         gpu_type: str | None = None,
         spark_mode: str | None = None,
         spark_cluster_name: str | None = None,
+        spark_cluster_region: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
     ) -> str | None:
@@ -135,6 +139,7 @@ class SparkSubmitter:
                 hardware=hardware,
                 gpu_type=gpu_type,
                 spark_cluster_name=spark_cluster_name,
+                spark_cluster_region=spark_cluster_region,
                 job_id=system_job_id,
             )
         from .submit import submit_batch
@@ -174,6 +179,7 @@ class RaySubmitter:
         gpu_type: str | None = None,
         spark_mode: str | None = None,
         spark_cluster_name: str | None = None,
+        spark_cluster_region: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
     ) -> str | None:

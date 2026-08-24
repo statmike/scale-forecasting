@@ -17,7 +17,10 @@ from scale_forecasting.config import RunConfig
 from scale_forecasting.dag import plan_dag
 
 _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
-_CONFIGS = sorted(_CONFIGS_DIR.glob("*.json"))
+# Not RunConfig demos: infra catalogs that live alongside the run configs but have their own schema
+# (validated by their own tests). Excluded so this RunConfig-shaped check doesn't try to load them.
+_NON_RUNCONFIG = {"compute_fallback.json"}
+_CONFIGS = sorted(p for p in _CONFIGS_DIR.glob("*.json") if p.name not in _NON_RUNCONFIG)
 
 
 def test_configs_dir_is_present_and_nonempty() -> None:

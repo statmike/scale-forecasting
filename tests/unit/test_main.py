@@ -1126,12 +1126,12 @@ def test_shared_spark_inputs_ignores_family_with_standing_cluster() -> None:
 def _patch_shared_spark(monkeypatch: pytest.MonkeyPatch, calls: dict[str, Any]) -> None:
     from scale_forecasting import dataproc_cluster
 
-    def _provision(cfg: RunConfig, **kw: Any) -> str:
+    def _provision(cfg: RunConfig, **kw: Any) -> tuple[str, str]:
         calls["provision"] = kw
-        return "sf-cluster-shared"
+        return "sf-cluster-shared", "us-central1"
 
-    def _teardown(name: str, settings: Settings) -> None:
-        calls["teardown"] = name
+    def _teardown(name: str, region: str, settings: Settings) -> None:
+        calls["teardown"] = (name, region)
 
     monkeypatch.setattr(dataproc_cluster, "provision_shared_cluster", _provision)
     monkeypatch.setattr(dataproc_cluster, "teardown_shared_cluster", _teardown)
@@ -1143,7 +1143,7 @@ def test_shared_spark_cluster_engages_and_tears_down(monkeypatch: pytest.MonkeyP
     cfg = _spark_cluster_cfg()
     run_dag = dag.plan_dag(cfg)
     with main._shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS) as spark_cluster:
-        assert spark_cluster == "sf-cluster-shared"
+        assert spark_cluster == ("sf-cluster-shared", "us-central1")
         assert calls["provision"] == {
             "run_id": "run-abc",
             "use_gpu": False,
@@ -1151,7 +1151,7 @@ def test_shared_spark_cluster_engages_and_tears_down(monkeypatch: pytest.MonkeyP
             "settings": _SETTINGS,
         }
         assert "teardown" not in calls  # not yet — torn down on exit
-    assert calls["teardown"] == "sf-cluster-shared"
+    assert calls["teardown"] == ("sf-cluster-shared", "us-central1")
 
 
 def test_shared_spark_cluster_tears_down_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1162,7 +1162,7 @@ def test_shared_spark_cluster_tears_down_on_exception(monkeypatch: pytest.Monkey
     with pytest.raises(RuntimeError, match="boom"):
         with main._shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
             raise RuntimeError("boom")
-    assert calls["teardown"] == "sf-cluster-shared"  # finally still ran
+    assert calls["teardown"] == ("sf-cluster-shared", "us-central1")  # finally still ran
 
 
 def test_shared_spark_cluster_skips_single_family(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1186,9 +1186,10 @@ def test_launch_family_job_threads_shared_spark_cluster(monkeypatch: pytest.Monk
         j for j in run_dag.python_jobs if j.compute and j.compute.spark_mode == "cluster"
     )
     main._launch_family_job(
-        cfg, cluster_job, "run-abc", _SETTINGS, spark_cluster="sf-cluster-shared"
+        cfg, cluster_job, "run-abc", _SETTINGS, spark_cluster=("sf-cluster-shared", "us-east4")
     )
     assert sub.kwargs["spark_cluster_name"] == "sf-cluster-shared"
+    assert sub.kwargs["spark_cluster_region"] == "us-east4"
 
 
 def test_launch_family_job_ignores_shared_spark_for_serverless(
@@ -1199,8 +1200,11 @@ def test_launch_family_job_ignores_shared_spark_for_serverless(
     cfg = _cfg(models=["theta", "holtwinters"])  # default serverless spark
     run_dag = dag.plan_dag(cfg)
     spark_job = next(j for j in run_dag.python_jobs if j.runtime == "spark")
-    main._launch_family_job(cfg, spark_job, "run-abc", _SETTINGS, spark_cluster="sf-cluster-shared")
+    main._launch_family_job(
+        cfg, spark_job, "run-abc", _SETTINGS, spark_cluster=("sf-cluster-shared", "us-central1")
+    )
     assert sub.kwargs["spark_cluster_name"] is None
+    assert sub.kwargs["spark_cluster_region"] is None
 
 
 def test_launch_family_job_keeps_standing_cluster_over_shared(
@@ -1218,9 +1222,11 @@ def test_launch_family_job_keeps_standing_cluster_over_shared(
     run_dag = dag.plan_dag(cfg)
     cluster_job = next(j for j in run_dag.python_jobs if j.compute)
     main._launch_family_job(
-        cfg, cluster_job, "run-abc", _SETTINGS, spark_cluster="sf-cluster-shared"
+        cfg, cluster_job, "run-abc", _SETTINGS, spark_cluster=("sf-cluster-shared", "us-central1")
     )
     assert sub.kwargs["spark_cluster_name"] == "standing"
+    # A standing-cluster family isn't the shared-cluster reuser, so no shared region is threaded.
+    assert sub.kwargs["spark_cluster_region"] is None
 
 
 # --- ensemble DAG node: identity + mode dispatch -------------------------------

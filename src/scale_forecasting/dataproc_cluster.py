@@ -22,6 +22,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .commands import build_driver_args
+from .compute_fallback import Candidate, is_capacity_error, resolve_candidates
 from .errors import ConfigError, EngineError, get_logger
 from .submit import _ENV_VENV_ARCHIVE, BatchInfra, _stage_code, _stage_config
 
@@ -175,6 +176,8 @@ def build_cluster(
     venv_archive_uri: str | None = None,
     venv_init_uri: str | None = None,
     gpu_image_uri: str | None = None,
+    zone: str | None = None,
+    subnetwork_uri: str | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Cluster`` message for one run (pure — builds the message only).
 
@@ -183,6 +186,11 @@ def build_cluster(
     accelerator on each worker (`_GPU_WORKER_MACHINE`/`_GPU_ACCELERATOR_TYPE` by ``gpu_type``) so
     the executor's Python worker can use the device. A CPU cluster attaches no accelerator and runs
     the default worker machine.
+
+    ``zone`` and ``subnetwork_uri`` are the capacity-failover overrides (see `compute_fallback`):
+    ``zone=None`` (default) lets Dataproc auto-place within the subnet's region — the pre-failover
+    behavior — while an explicit zone pins the create to it; ``subnetwork_uri=None`` uses the
+    deployment subnet (``infra.subnetwork_uri``); a value overrides it for a cross-region attempt.
 
     The GPU **driver** is delivered one of two ways: with ``gpu_image_uri`` the cluster boots from a
     custom image that has the driver pre-baked (fast, repeatable — no per-create compile), so no
@@ -198,7 +206,8 @@ def build_cluster(
     """
     from google.cloud import dataproc_v1 as dataproc
 
-    zone_uri = ""  # empty = Dataproc auto-places within the subnet's region
+    zone_uri = zone or ""  # empty = Dataproc auto-places within the subnet's region
+    subnet = subnetwork_uri or infra.subnetwork_uri
 
     metadata: dict[str, str] = {}
     if venv_archive_uri:
@@ -230,7 +239,7 @@ def build_cluster(
         )
 
     gce = dataproc.GceClusterConfig(
-        subnetwork_uri=infra.subnetwork_uri,
+        subnetwork_uri=subnet,
         service_account=infra.compute_sa,
         internal_ip_only=True,
         zone_uri=zone_uri,
@@ -389,6 +398,54 @@ def _create_cluster(
     op.result(timeout=_WAIT_TIMEOUT_SECONDS)
 
 
+def _create_cluster_across_candidates(
+    candidates: list[Candidate],
+    *,
+    project_id: str,
+    name: str,
+    build_kwargs: dict[str, Any],
+) -> Candidate:  # pragma: no cover - orchestrates live Dataproc I/O, exercised by the @gcp smoke
+    """Create the cluster, walking ``candidates`` until one has capacity; return the one that won.
+
+    Compute capacity is zonal and stocks out transiently (`compute_fallback`): the first candidate
+    is the deployment region with auto-zone placement — identical to the pre-failover single attempt
+    — so a run that would have succeeded takes the same first step. On a *capacity* failure
+    (`is_capacity_error`: a Compute Engine ``ServiceUnavailable``/``ResourceExhausted`` or an
+    "insufficient resources"/"does not have enough resources" message) the partial cluster is torn
+    down and the next candidate tried; any *other* error (bad machine type, missing quota,
+    permission) is re-raised at once because another zone/region won't fix it. Each attempt targets
+    its candidate's region (the regional cluster client) and pins its zone + subnet via
+    `build_cluster`. Exhausting every candidate raises `EngineError` naming how many were tried.
+    """
+    last_exc: Exception | None = None
+    for cand in candidates:
+        client = _cluster_client(cand.region)
+        cluster = build_cluster(
+            name=name, zone=cand.zone, subnetwork_uri=cand.subnetwork_uri, **build_kwargs
+        )
+        try:
+            _log.info("attempting cluster %s at %s", name, cand.label)
+            _create_cluster(client, project_id, cand.region, cluster)
+            _log.info("cluster %s created at %s", name, cand.label)
+            return cand
+        except Exception as exc:  # noqa: BLE001 - classify, then either advance or re-raise
+            if not is_capacity_error(exc):
+                raise
+            _log.warning(
+                "no capacity for cluster %s at %s (%s); trying next candidate",
+                name,
+                cand.label,
+                exc,
+            )
+            # A create that errors mid-provision can still leave a resource — clean it before hop.
+            _delete_cluster(client, project_id, cand.region, name)
+            last_exc = exc
+    raise EngineError(
+        f"cluster {name} could not be created in any of {len(candidates)} candidate "
+        f"zone(s)/region(s) (no capacity): last error {last_exc!r}"
+    )
+
+
 def _delete_cluster(
     client: Any, project_id: str, region: str, name: str
 ) -> None:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
@@ -435,6 +492,7 @@ def submit_cluster_job(
     hardware: str = "cpu",
     gpu_type: str | None = None,
     spark_cluster_name: str | None = None,
+    spark_cluster_region: str | None = None,
     job_id: str | None = None,
     worker_count: int = _DEFAULT_WORKER_COUNT,
     wait: bool = True,
@@ -453,6 +511,13 @@ def submit_cluster_job(
     per-family id (the orchestrator's `registry.ids.dataproc_job_id`), used only as a fallback: the
     returned id is Dataproc's own server-assigned ``reference.job_id`` (the console-resolvable one)
     when we waited. With ``wait`` a non-DONE terminal state raises so a failed job never exits 0.
+
+    The ephemeral create walks zone/region capacity candidates (`compute_fallback`): the deployment
+    region's auto-zone first (unchanged), then its other zones, then opt-in cross-region — hopping
+    on a transient stockout so a scarce-GPU run isn't lost to one stocked-out zone. The job then
+    submits to (and the cluster is torn down in) the region the create landed in. On the reuse path
+    ``spark_cluster_region`` names the region the reuse target lives in (a shared cluster may have
+    hopped; defaults to the deployment region for a standing cluster); no failover, no teardown.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -470,10 +535,7 @@ def submit_cluster_job(
     # carries the init action (it was created with one), so skip the upload on the reuse path.
     venv_init_uri = None if reuse else _stage_cluster_init(infra)
     project_id = settings.project_id
-    region = settings.region
 
-    cluster_client = _cluster_client(region)
-    job_client = _job_client(region)
     _log.info(
         "cluster submit: run_id=%s cluster=%s reuse=%s hardware=%s workers=%d",
         run_id,
@@ -483,22 +545,36 @@ def submit_cluster_job(
         worker_count,
     )
 
-    try:
-        if not reuse:
-            cluster = build_cluster(
-                infra=infra,
-                settings=settings,
-                project_id=project_id,
-                name=name,
-                hardware=hardware,
-                gpu_type=gpu_type,
-                worker_count=worker_count,
-                venv_archive_uri=venv_archive_uri,
-                venv_init_uri=venv_init_uri,
-                gpu_image_uri=infra.gpu_image_uri,
-            )
-            _create_cluster(cluster_client, project_id, region, cluster)
+    if reuse:
+        # A named cluster (standing, or the run's shared ephemeral): submit to its region — a shared
+        # cluster may have hopped on a capacity failover, so trust the region the caller threads.
+        region = spark_cluster_region or settings.region
+    else:
+        # Ephemeral: create with zone/region capacity failover; the create lands in some candidate's
+        # region and the rest of the lifecycle (submit, teardown) follows it there.
+        candidates = resolve_candidates(settings=settings, infra=infra)
+        landed = _create_cluster_across_candidates(
+            candidates,
+            project_id=project_id,
+            name=name,
+            build_kwargs={
+                "infra": infra,
+                "settings": settings,
+                "project_id": project_id,
+                "hardware": hardware,
+                "gpu_type": gpu_type,
+                "worker_count": worker_count,
+                "venv_archive_uri": venv_archive_uri,
+                "venv_init_uri": venv_init_uri,
+                "gpu_image_uri": infra.gpu_image_uri,
+            },
+        )
+        region = landed.region
 
+    cluster_client = _cluster_client(region)
+    job_client = _job_client(region)
+
+    try:
         job = build_job(
             cluster=name,
             launcher_uri=launcher_uri,
@@ -536,8 +612,8 @@ def provision_shared_cluster(
     settings: Settings | None = None,
     infra: BatchInfra | None = None,
     worker_count: int = _DEFAULT_WORKER_COUNT,
-) -> str:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
-    """Create one shared ephemeral Dataproc cluster for a run's cluster families; return its name.
+) -> tuple[str, str]:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
+    """Create one shared ephemeral Dataproc cluster for a run's families; return ``(name, region)``.
 
     The multi-family analog of `submit_cluster_job`'s create step. When a run has more than one
     ephemeral cluster family the DAG orchestrator provisions **one** cluster here rather than let
@@ -546,9 +622,12 @@ def provision_shared_cluster(
     the others (``cluster is in state DELETING and cannot accept jobs``). Sized for the **union** of
     those families' hardware (GPU workers when ``use_gpu`` — any cluster family needs one; CPU
     families run on the same cluster, their jobs simply not using the GPU), mirroring the shared Ray
-    cluster. The caller threads the name into every cluster family's `submit_cluster_job` as the
-    ``spark_cluster_name`` reuse target (each submits its own failure-isolated job, no per-family
+    cluster. The caller threads the name **and region** into every cluster family's
+    `submit_cluster_job` as the ``spark_cluster_name``/``spark_cluster_region`` reuse target (each
+    submits its own failure-isolated job to the region the cluster landed in, no per-family
     create/delete) and tears it down once via `teardown_shared_cluster` after all families join.
+    Like the single-family path the create walks zone/region candidates (`compute_fallback`), so
+    the returned region may differ from the deployment region on a capacity hop.
     """
     from .settings import Settings
 
@@ -557,33 +636,41 @@ def provision_shared_cluster(
     name = cluster_name(run_id, None)
     venv_archive_uri = _resolve_cluster_deps(cfg, infra)
     venv_init_uri = _stage_cluster_init(infra)
-    cluster = build_cluster(
-        infra=infra,
-        settings=settings,
-        project_id=settings.project_id,
-        name=name,
-        hardware="gpu" if use_gpu else "cpu",
-        gpu_type=gpu_type,
-        worker_count=worker_count,
-        venv_archive_uri=venv_archive_uri,
-        venv_init_uri=venv_init_uri,
-        gpu_image_uri=infra.gpu_image_uri,
-    )
     _log.info(
         "provisioning shared Dataproc cluster %s: use_gpu=%s workers=%d",
         name,
         use_gpu,
         worker_count,
     )
-    _create_cluster(_cluster_client(settings.region), settings.project_id, settings.region, cluster)
-    return name
+    candidates = resolve_candidates(settings=settings, infra=infra)
+    landed = _create_cluster_across_candidates(
+        candidates,
+        project_id=settings.project_id,
+        name=name,
+        build_kwargs={
+            "infra": infra,
+            "settings": settings,
+            "project_id": settings.project_id,
+            "hardware": "gpu" if use_gpu else "cpu",
+            "gpu_type": gpu_type,
+            "worker_count": worker_count,
+            "venv_archive_uri": venv_archive_uri,
+            "venv_init_uri": venv_init_uri,
+            "gpu_image_uri": infra.gpu_image_uri,
+        },
+    )
+    return name, landed.region
 
 
 def teardown_shared_cluster(
-    name: str, settings: Settings | None = None
+    name: str, region: str, settings: Settings | None = None
 ) -> None:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
-    """Delete the shared ephemeral Dataproc cluster (best-effort — a delete error is logged)."""
+    """Delete the shared ephemeral Dataproc cluster (best-effort — a delete error is logged).
+
+    Deletes in ``region`` — the one `provision_shared_cluster` landed in, which a capacity hop may
+    have moved off the deployment region.
+    """
     from .settings import Settings
 
     settings = settings or Settings.resolve()
-    _delete_cluster(_cluster_client(settings.region), settings.project_id, settings.region, name)
+    _delete_cluster(_cluster_client(region), settings.project_id, region, name)

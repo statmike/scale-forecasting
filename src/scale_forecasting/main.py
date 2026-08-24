@@ -247,14 +247,16 @@ def _shared_spark_inputs(python_jobs: list[FamilyJob]) -> tuple[bool, str | None
 @contextmanager
 def _shared_spark_cluster(
     cfg: RunConfig, run_dag: RunDag, run_id: str, settings: Settings
-) -> Iterator[str | None]:
+) -> Iterator[tuple[str, str] | None]:
     """Provision one shared ephemeral Dataproc cluster when a run has several ephemeral cluster
     families.
 
-    Yields the cluster name to thread into each cluster family's job as a reuse target (so each
-    submits its own failure-isolated job to the one cluster, skipping the per-family create/delete
-    that would otherwise race — a family finishing first would tear down the shared cluster out from
-    under the others), or ``None`` when sharing doesn't apply — fewer than two cluster families. The
+    Yields ``(cluster_name, cluster_region)`` to thread into each cluster family's job as a reuse
+    target (so each submits its own failure-isolated job to the one cluster, skipping the per-family
+    create/delete that would otherwise race — a family finishing first would tear down the shared
+    cluster out from under the others), or ``None`` when sharing doesn't apply — fewer than two
+    cluster families. The region is returned because a capacity failover may have moved the cluster
+    off the deployment region, and each family's job must submit to where it actually landed. The
     cluster is torn down once in a ``finally`` so a family failure never leaks it. The Dataproc
     analog of `_shared_ray_cluster`.
     """
@@ -265,13 +267,13 @@ def _shared_spark_cluster(
     from .dataproc_cluster import provision_shared_cluster, teardown_shared_cluster
 
     any_gpu, gpu_type = inputs
-    name = provision_shared_cluster(
+    name, region = provision_shared_cluster(
         cfg, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
     )
     try:
-        yield name
+        yield (name, region)
     finally:
-        teardown_shared_cluster(name, settings)
+        teardown_shared_cluster(name, region, settings)
 
 
 def _launch_family_job(
@@ -284,7 +286,7 @@ def _launch_family_job(
     force: bool = False,
     max_executors: int | None = None,
     ray_cluster: tuple[str, str] | None = None,
-    spark_cluster: str | None = None,
+    spark_cluster: tuple[str, str] | None = None,
 ) -> None:
     """Run one Python family's job on its resolved runtime, wrapped in its ``run_jobs`` row.
 
@@ -314,9 +316,10 @@ def _launch_family_job(
     ``ray_cluster``, when set, is the run's shared ephemeral Ray cluster ``(name, region)``
     (`_shared_ray_cluster`): a Ray family reuses it instead of self-provisioning; every other
     runtime ignores it. ``spark_cluster``, when set, is the run's shared ephemeral Dataproc cluster
-    name (`_shared_spark_cluster`): an ephemeral cluster family reuses it (submits its own job, no
-    per-family create/delete); a family naming its own standing cluster keeps that, and every
-    other runtime/mode ignores it.
+    ``(name, region)`` (`_shared_spark_cluster`): an ephemeral cluster family reuses it (submits its
+    own job to that region — a capacity failover may have moved the cluster off the deployment
+    region — with no per-family create/delete); a family naming its own standing cluster keeps that,
+    and every other runtime/mode ignores it.
     """
     from .registry import bq
     from .registry.ids import make_job_key
@@ -333,14 +336,14 @@ def _launch_family_job(
     # The shared Dataproc cluster is targeted only by ephemeral Spark cluster families (spark_mode
     # cluster, no standing cluster of their own) as a reuse target; a family naming its own standing
     # cluster keeps it, and serverless/Ray families ignore it.
-    shared_spark_name = (
-        spark_cluster
-        if spark_cluster
+    is_shared_spark_family = (
+        spark_cluster is not None
         and compute.runtime == "spark"
         and compute.spark_mode == "cluster"
         and compute.spark_cluster_name is None
-        else None
     )
+    shared_spark_name = spark_cluster[0] if is_shared_spark_family and spark_cluster else None
+    shared_spark_region = spark_cluster[1] if is_shared_spark_family and spark_cluster else None
     with bq.run_job(
         run_id,
         job.family,
@@ -364,6 +367,7 @@ def _launch_family_job(
             gpu_type=compute.gpu_type,
             spark_mode=compute.spark_mode,
             spark_cluster_name=compute.spark_cluster_name or shared_spark_name,
+            spark_cluster_region=shared_spark_region,
             ray_cluster_name=ray_cluster_name,
             ray_cluster_region=ray_cluster_region,
         )

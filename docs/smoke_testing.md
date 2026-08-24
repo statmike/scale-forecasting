@@ -79,6 +79,15 @@ proof; together they validate both source formats.
   the driver pre-baked and exports it as `SF_GPU_IMAGE`, so the cluster boots ready. Without it the
   cluster installs the driver at create time — a source compile that can exceed Dataproc's
   cluster-create window. Prefer the pre-baked image for this smoke.
+- **Cluster capacity failover** — GPU (and sometimes CPU) capacity is *zonal* and can stock out
+  transiently even with quota to spare, so an ephemeral cluster create walks a candidate list: the
+  deploy region's auto-zone first (unchanged), then that region's other zones, then — opt-in — other
+  regions. The candidate list is the user-editable
+  [`configs/compute_fallback.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/compute_fallback.json)
+  (or `SF_COMPUTE_FALLBACK`), prepopulated with the US regions/zones; same-region zone failover works
+  with no edits, while cross-region failover activates only for regions you give a `subnetwork_uri`
+  (a subnet with Cloud NAT + Private Google Access in that region). Non-capacity errors still fail
+  fast, and the list never affects `run_id`.
 - **Cluster smokes (04, 05, 06)** — a Dataproc **cluster** can't use the custom container, so it
   gets its dependencies from the **self-contained venv archive** instead. `SF_VENV_ARCHIVE` must point
   at it (the `venv_archive_uri` Terraform output, wired above); the deploy's Cloud Build packs + uploads
@@ -154,7 +163,7 @@ One row per live execution. Fill it in as the campaign runs.
 | 03 | `03_serverless_gpu.json` | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | ✅ PASS | Deep-learning family (`neuralprophet`) on Serverless GPU (L4); 2,800 predictions (100×28), 100 metadata rows; `mean_wape` null (no backtest). Fixed the Serverless GPU property set (Dataproc-managed accelerator + premium compute/disk tiers; the Spark-level GPU scheduling props are unsupported). Reverse-traced to the Serverless batch (attempt `a2` after an env-policy failure on `a1`). |
 | 04 | `04_cluster_cpu.json` | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | ✅ PASS | Ephemeral Dataproc cluster, CPU; 2 families (statistical + ML), 3 models (theta, holtwinters, xgboost) × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, both families reverse-traced to Dataproc cluster jobs. The cluster gets its model libraries from the self-contained venv archive, delivered by a **node init action** that unpacks it to an absolute path on every node — a job-attached archive reaches only executors, never the client-mode driver, so the driver needs the venv on-node. |
 | 05 | `05_cluster_reuse.json` | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | ✅ PASS | Standing Dataproc cluster reused by name (create/teardown skipped); 2 families (statistical + ML), theta + xgboost × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, reverse-traced to cluster jobs. The standing cluster carries the same venv init action, so reuse runs the identical locked env. |
-| 06 | `06_cluster_gpu.json` | _pending_ | | | The venv init action succeeds; blocked on the **stock GPU-driver install action failing under Secure Boot** ("Secure boot is enabled, but no signing material provided") — unrelated to venv delivery. Resolution pending. |
+| 06 | `06_cluster_gpu.json` | _pending_ | | | Driver + Secure Boot resolved: the deploy bakes a custom VM image with the NVIDIA driver pre-baked (`build_gpu_image`, exported as `SF_GPU_IMAGE`) and the GPU cluster disables Secure Boot so the unsigned modules load — validated live (master + T4 worker boot clean, no driver init action). Remaining flake was **transient T4 capacity** in the deploy zone; now mitigated by zone/region capacity failover (`configs/compute_fallback.json`). Live end-to-end re-run pending. |
 | 07 | `07_ray_cpu.json` | _pending_ | | | |
 | 08 | `08_ray_gpu.json` | _pending_ | | | |
 | 09 | `09_shared_ray.json` | _pending_ | | | |

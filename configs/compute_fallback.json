@@ -1,0 +1,41 @@
+{
+  "comment": "Zone/region capacity failover for ephemeral Dataproc CLUSTER creation (GPU capacity is zonal and stocks out transiently). The submitter tries the deployment region's auto-zone first (unchanged behavior), then that region's other zones on the deployment subnet, then any OTHER region below that has a 'subnetwork_uri' set. Same-region zone failover needs no edits. Cross-region failover is opt-in: fill in 'subnetwork_uri' with a subnet (relative form projects/PROJECT/regions/REGION/subnetworks/NAME) that has Cloud NAT + Private Google Access in that region; a null entry is listed-but-skipped. Point at a custom file with SF_COMPUTE_FALLBACK. This list is a runtime detail only and never affects run_id.",
+  "regions": {
+    "us-central1": {
+      "zones": ["us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f"],
+      "subnetwork_uri": null
+    },
+    "us-east1": {
+      "zones": ["us-east1-b", "us-east1-c", "us-east1-d"],
+      "subnetwork_uri": null
+    },
+    "us-east4": {
+      "zones": ["us-east4-a", "us-east4-b", "us-east4-c"],
+      "subnetwork_uri": null
+    },
+    "us-east5": {
+      "zones": ["us-east5-a", "us-east5-b", "us-east5-c"],
+      "subnetwork_uri": null
+    },
+    "us-south1": {
+      "zones": ["us-south1-a", "us-south1-b", "us-south1-c"],
+      "subnetwork_uri": null
+    },
+    "us-west1": {
+      "zones": ["us-west1-a", "us-west1-b", "us-west1-c"],
+      "subnetwork_uri": null
+    },
+    "us-west2": {
+      "zones": ["us-west2-a", "us-west2-b", "us-west2-c"],
+      "subnetwork_uri": null
+    },
+    "us-west3": {
+      "zones": ["us-west3-a", "us-west3-b", "us-west3-c"],
+      "subnetwork_uri": null
+    },
+    "us-west4": {
+      "zones": ["us-west4-a", "us-west4-b", "us-west4-c"],
+      "subnetwork_uri": null
+    }
+  }
+}
