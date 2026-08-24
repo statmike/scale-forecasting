@@ -1,0 +1,63 @@
+# Cloud Build config — build a custom Dataproc VM image with the NVIDIA driver pre-baked, for GPU
+# clusters. This is the cluster-GPU analog of the container/venv build in docker/cloudbuild.yaml:
+# same mechanism (a Cloud Build invoked by a Terraform null_resource, content-addressed so it runs
+# only when its inputs change), producing the third runtime artifact.
+#
+# WHY a custom VM image: a Dataproc *cluster* is a plain set of VMs and can't use the custom
+# container. GPU clusters need the host NVIDIA kernel driver, and installing it at each cluster
+# create compiles from source — slow enough to race the (non-configurable) cluster-create window.
+# Baking the driver into a custom image once, here, removes that per-create cost: a GPU cluster boots
+# from this image with the driver already present. CPU clusters keep using the stock image.
+#
+# Build on demand from the repo root:
+#
+#   gcloud builds submit --no-source --config docker/cloudbuild-gpu-image.yaml \
+#     --substitutions=_IMAGE_NAME=sf-dataproc-gpu-<hash>,_ZONE=us-central1-a,_CODE_BUCKET=<bucket>,_SUBNET=<relative-subnet> \
+#     --project <PROJECT_ID>
+#
+# generate_custom_image (GoogleCloudDataproc/custom-images) boots a temporary builder VM from the
+# base Dataproc image, runs the customization script on it, captures the disk as a new Compute image,
+# and deletes the builder VM. `--no-smoke-test` skips the tool's optional post-build test cluster
+# (extra spend, and it would hit the same Secure Boot org policy a GPU cluster does).
+
+substitutions:
+  _IMAGE_NAME: "" # output Compute image name; empty = skip (nothing to build)
+  _DATAPROC_VERSION: "2.2-debian12" # base image line; must match the cluster image version
+  _ZONE: us-central1-a # zone for the temporary builder VM
+  _CODE_BUCKET: "" # staging bucket generate_custom_image writes its build logs/artifacts to
+  _SUBNET: "" # subnet (relative form: projects/../regions/../subnetworks/..) for the builder VM
+
+steps:
+  - id: build-gpu-image
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [ -z "${_IMAGE_NAME}" ]; then
+          echo "no _IMAGE_NAME set; skipping GPU custom-image build"
+          exit 0
+        fi
+        git clone --depth 1 https://github.com/GoogleCloudDataproc/custom-images /tmp/custom-images
+        cd /tmp/custom-images
+        SUBNET_FLAG=()
+        if [ -n "${_SUBNET}" ]; then SUBNET_FLAG=(--subnet "${_SUBNET}"); fi
+        python generate_custom_image.py \
+          --image-name "${_IMAGE_NAME}" \
+          --dataproc-version "${_DATAPROC_VERSION}" \
+          --customization-script /workspace/docker/gpu_image_customize.sh \
+          --zone "${_ZONE}" \
+          --gcs-bucket "gs://${_CODE_BUCKET}" \
+          --project-id "${PROJECT_ID}" \
+          --metadata cudnn-version= \
+          --no-smoke-test \
+          --shutdown-instance-timer-sec 300 \
+          "${SUBNET_FLAG[@]}"
+
+# The driver compile can take a while; give the whole build a generous ceiling (well under the once,
+# cached lifecycle — this only runs when the customization script or Dataproc version changes).
+timeout: 9000s
+
+options:
+  logging: CLOUD_LOGGING_ONLY

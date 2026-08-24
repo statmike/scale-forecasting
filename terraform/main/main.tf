@@ -71,6 +71,11 @@ module "container" {
   image_tag   = var.seed_image_tag
   code_bucket = module.storage.code_bucket # receives the packed-venv archive for the cluster path
 
+  # Opt-in custom GPU cluster image (driver pre-baked). Uses the deployment subnet for the builder VM
+  # when greenfield; brownfield/BYO passes gpu_image_subnet explicitly.
+  build_gpu_image  = var.build_gpu_image
+  gpu_image_subnet = var.gpu_image_subnet
+
   depends_on = [module.apis]
 }
 

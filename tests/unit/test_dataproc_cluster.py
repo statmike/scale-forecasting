@@ -182,6 +182,66 @@ def test_build_cluster_gpu_disables_secure_boot_only_on_gpu() -> None:
     assert "shielded_instance_config" not in cpu.config.gce_cluster_config
 
 
+def test_build_cluster_gpu_with_custom_image_bakes_driver_no_init_action() -> None:
+    # A pre-baked GPU image delivers the driver, so the cluster boots from it (image_uri on master +
+    # workers), drops the create-time GPU-driver init action, and omits image_version (the custom
+    # image pins its own Dataproc version). The accelerator + Secure-Boot-off still apply.
+    image = "projects/proj-x/global/images/sf-dataproc-gpu-abcd1234"
+    cluster = dataproc_cluster.build_cluster(
+        infra=_infra(),
+        settings=_settings(),
+        project_id="proj-x",
+        name="sf-cluster-run-abc",
+        hardware="gpu",
+        gpu_type="T4",
+        gpu_image_uri=image,
+    )
+    cfg = cluster.config
+    assert cfg.master_config.image_uri == image
+    assert cfg.worker_config.image_uri == image
+    # No GPU-driver init action (the driver is baked in); no cuDNN-skip metadata (nothing installs).
+    assert list(cfg.initialization_actions) == []
+    assert "cudnn-version" not in dict(cfg.gce_cluster_config.metadata)
+    # Custom image carries its own version, so image_version is unset.
+    assert not cfg.software_config.image_version
+    # The physical card is still attached, and unsigned modules still need Secure Boot off.
+    assert list(cfg.worker_config.accelerators)[0].accelerator_type_uri == "nvidia-tesla-t4"
+    assert cfg.gce_cluster_config.shielded_instance_config.enable_secure_boot is False
+
+
+def test_build_cluster_gpu_custom_image_keeps_venv_init_action() -> None:
+    # The custom image bakes only the OS + driver; the venv (deps) still ships via its init action.
+    image = "projects/proj-x/global/images/sf-dataproc-gpu-abcd1234"
+    cluster = dataproc_cluster.build_cluster(
+        infra=_infra(),
+        settings=_settings(),
+        project_id="proj-x",
+        name="sf-cluster-run-abc",
+        hardware="gpu",
+        gpu_type="T4",
+        gpu_image_uri=image,
+        venv_archive_uri="gs://code-bkt/envs/deadbeef.tar.gz",
+        venv_init_uri="gs://code-bkt/init/sf-venv-init-abcd1234.sh",
+    )
+    init = [a.executable_file for a in cluster.config.initialization_actions]
+    assert init == ["gs://code-bkt/init/sf-venv-init-abcd1234.sh"]  # venv only, no GPU driver
+
+
+def test_build_cluster_cpu_ignores_gpu_image_uri() -> None:
+    # A stray gpu_image_uri on a CPU cluster is ignored: stock image_version, no per-group image.
+    cluster = dataproc_cluster.build_cluster(
+        infra=_infra(),
+        settings=_settings(),
+        project_id="proj-x",
+        name="sf-cluster-run-abc",
+        gpu_image_uri="projects/proj-x/global/images/sf-dataproc-gpu-abcd1234",
+    )
+    cfg = cluster.config
+    assert cfg.software_config.image_version == dataproc_cluster._DEFAULT_IMAGE_VERSION
+    assert not cfg.master_config.image_uri
+    assert not cfg.worker_config.image_uri
+
+
 def test_build_cluster_gpu_l4_attaches_g2_machine() -> None:
     cluster = dataproc_cluster.build_cluster(
         infra=_infra(),

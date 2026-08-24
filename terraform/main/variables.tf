@@ -211,6 +211,26 @@ variable "build_image" {
   default     = true
 }
 
+variable "build_gpu_image" {
+  description = <<-EOT
+    Build a custom Dataproc VM image with the NVIDIA driver pre-baked, for GPU *clusters* (opt-in;
+    default FALSE). GPU clusters are the one surface that both needs the host driver and can't use
+    the custom container; baking the driver into a VM image here removes the slow per-cluster-create
+    driver compile. Off by default because it needs extra IAM (Compute image/instance admin on the
+    Cloud Build SA) and builder-VM egress to the NVIDIA mirrors; when false, GPU clusters install the
+    driver at create time (slower, and can race the cluster-create window). Independent of
+    build_image — content-addressed on docker/gpu_image_customize.sh + the base Dataproc version.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "gpu_image_subnet" {
+  description = "Subnet (relative form) for the GPU-image builder VM. Empty = the tool's default network."
+  type        = string
+  default     = ""
+}
+
 # --- budget --------------------------------------------------------------------
 
 variable "billing_account" {

@@ -60,15 +60,25 @@ proof; together they validate both source formats.
   print(f"export SF_COMPUTE_SA={g(\"compute_sa\")}")
   print(f"export SF_SUBNETWORK_URI={g(\"subnetwork_uri\")}")
   print(f"export SF_RAY_NETWORK_ATTACHMENT={g(\"network_attachment_id\")}")
-  print(f"export SF_VENV_ARCHIVE={g(\"venv_archive_uri\")}")')"
+  print(f"export SF_VENV_ARCHIVE={g(\"venv_archive_uri\")}")
+  gpu=g("gpu_image_uri")
+  print(f"export SF_GPU_IMAGE={gpu}") if gpu else None')"
   export SF_REGION=us-central1   # or your deploy region
   ```
+  `SF_GPU_IMAGE` is exported only when the deploy built the pre-baked GPU cluster image
+  (`build_gpu_image = true`); without it, GPU cluster smokes install the driver at cluster-create
+  time instead (slower). See [runtime_dependencies.md](./runtime_dependencies.md#gpu-clusters--the-pre-baked-driver-image).
 - **Source tables** — both `source_series_iceberg` and `source_series_native` must exist in the
   deployment dataset (they are created by the Terraform + seed step).
 - **Deep-learning smokes (03, 06, 08, 09, 10, 14)** — the container must carry the `models` extra so
   `neuralprophet` can fit; the run image built by the deploy already includes it.
 - **GPU smokes (03, 06, 08, 09, 10, 14)** — GPU quota in the run's region: L4 for Serverless
   (03, 14), T4 for cluster/Ray (06, 08, 09, 10).
+- **GPU cluster smoke (06)** — a Dataproc *cluster* is a bare set of VMs, so the host NVIDIA driver
+  is the deploy's to supply. With `build_gpu_image = true` the deploy bakes a custom VM image with
+  the driver pre-baked and exports it as `SF_GPU_IMAGE`, so the cluster boots ready. Without it the
+  cluster installs the driver at create time — a source compile that can exceed Dataproc's
+  cluster-create window. Prefer the pre-baked image for this smoke.
 - **Cluster smokes (04, 05, 06)** — a Dataproc **cluster** can't use the custom container, so it
   gets its dependencies from the **self-contained venv archive** instead. `SF_VENV_ARCHIVE` must point
   at it (the `venv_archive_uri` Terraform output, wired above); the deploy's Cloud Build packs + uploads

@@ -53,6 +53,11 @@ output "venv_archive_uri" {
   value       = module.container.venv_archive_uri
 }
 
+output "gpu_image_uri" {
+  description = "Pre-baked GPU cluster image (driver baked in). Feeds SF_GPU_IMAGE; null when not built."
+  value       = module.container.gpu_image_uri
+}
+
 output "subnetwork_uri" {
   description = "Subnet the serverless batches run in (needed by the submit helper for forecast runs)."
   value       = module.network.subnetwork_uri

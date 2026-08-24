@@ -68,6 +68,35 @@ variable "code_bucket" {
   type        = string
 }
 
+variable "build_gpu_image" {
+  description = <<-EOT
+    Build a custom Dataproc VM image with the NVIDIA driver pre-baked, for GPU clusters (opt-in;
+    off by default). Needs extra IAM (Compute image/instance admin) and builder-VM egress to the
+    NVIDIA mirrors, so it is separate from the always-on container build. When false, GPU clusters
+    fall back to installing the driver at cluster-create time.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "gpu_image_zone" {
+  description = "Zone the GPU-image builder VM boots in. Empty = <region>-a."
+  type        = string
+  default     = ""
+}
+
+variable "gpu_image_subnet" {
+  description = "Subnet (relative form) for the GPU-image builder VM. Empty = the tool's default network."
+  type        = string
+  default     = ""
+}
+
+variable "gpu_dataproc_version" {
+  description = "Base Dataproc image line the GPU custom image is built from (must match the cluster image)."
+  type        = string
+  default     = "2.2-debian12"
+}
+
 resource "google_artifact_registry_repository" "images" {
   project       = var.project_id
   location      = var.region
@@ -95,15 +124,34 @@ locals {
   )
 
   cloudbuild_sa = "${data.google_project.this.number}-compute@developer.gserviceaccount.com"
-  cloudbuild_roles = [
-    "roles/cloudbuild.builds.builder", # run builds, read the source-staging bucket, write logs
-    "roles/artifactregistry.writer",   # push the built image into this repo
-  ]
+  cloudbuild_roles = concat(
+    [
+      "roles/cloudbuild.builds.builder", # run builds, read the source-staging bucket, write logs
+      "roles/artifactregistry.writer",   # push the built image into this repo
+    ],
+    # The GPU custom-image build boots + captures a temporary builder VM, so the build SA additionally
+    # needs Compute instance/image admin and to actAs the builder VM's SA. Granted only when opted in.
+    var.build_gpu_image ? [
+      "roles/compute.instanceAdmin.v1", # create/delete the builder VM + create the captured image
+      "roles/iam.serviceAccountUser",   # actAs the builder VM's service account
+    ] : [],
+  )
 
   # The packed-venv archive is content-addressed on requirements.txt (the same file that gates the
   # image build), so its object name changes only when deps change — matching the image lifecycle.
   venv_hash        = filemd5("${path.module}/../../../../docker/requirements.txt")
   venv_archive_uri = "gs://${var.code_bucket}/envs/${local.venv_hash}.tar.gz"
+
+  # The custom GPU image is content-addressed on the customization script + the base Dataproc version,
+  # so its name changes only when either does — the driver layer is independent of the Python deps, so
+  # it has its own lifecycle (never rebuilds on a requirements or source change). Image names are
+  # lowercase, <=63 chars: a stable prefix + an 8-char digest fits with room to spare.
+  gpu_image_hash = substr(md5("${filemd5("${path.module}/../../../../docker/gpu_image_customize.sh")}:${var.gpu_dataproc_version}"), 0, 8)
+  gpu_image_name = "sf-dataproc-gpu-${local.gpu_image_hash}"
+  # Dataproc accepts the relative resource path for a custom image. Emitted only when opted in — when
+  # off, the app gets no SF_GPU_IMAGE and GPU clusters install the driver at create (the fallback).
+  gpu_image_uri  = var.build_gpu_image ? "projects/${var.project_id}/global/images/${local.gpu_image_name}" : null
+  gpu_image_zone = var.gpu_image_zone != "" ? var.gpu_image_zone : "${var.region}-a"
 }
 
 # Cloud Build packs the image's /opt/venv and uploads it to the code bucket, so its SA needs object
@@ -158,6 +206,37 @@ resource "null_resource" "build" {
   ]
 }
 
+# Build the custom GPU cluster image via Cloud Build, reusing docker/cloudbuild-gpu-image.yaml. Same
+# content-addressing discipline as the container build, but on its OWN inputs — the customization
+# script + the base Dataproc version — because the driver layer is independent of the Python deps
+# (it must NOT rebuild on a requirements or source change). Opt-in (build_gpu_image); --no-source
+# because this build needs no repo context beyond the customization script, which is passed by path.
+resource "null_resource" "build_gpu_image" {
+  count = var.build_gpu_image ? 1 : 0
+
+  triggers = {
+    customize = filemd5("${path.module}/../../../../docker/gpu_image_customize.sh")
+    version   = var.gpu_dataproc_version
+    image     = local.gpu_image_name
+  }
+
+  provisioner "local-exec" {
+    working_dir = "${path.module}/../../../.." # repo root: customization script path is /workspace-relative
+    command = join(" ", [
+      "gcloud builds submit",
+      "--config docker/cloudbuild-gpu-image.yaml",
+      "--substitutions=_IMAGE_NAME=${local.gpu_image_name},_DATAPROC_VERSION=${var.gpu_dataproc_version},_ZONE=${local.gpu_image_zone},_CODE_BUCKET=${var.code_bucket},_SUBNET=${var.gpu_image_subnet}",
+      "--project ${var.project_id}", # explicit — never the ambient ADC project
+      ".",
+    ])
+  }
+
+  depends_on = [
+    google_project_iam_member.cloudbuild,
+    google_storage_bucket_iam_member.cloudbuild_code_bucket,
+  ]
+}
+
 output "repository_id" {
   description = "Artifact Registry repository id."
   value       = google_artifact_registry_repository.images.repository_id
@@ -181,4 +260,12 @@ output "image_repo_path" {
 output "venv_archive_uri" {
   description = "gs:// URI of the packed-venv archive for the Dataproc-cluster dependency path."
   value       = local.venv_archive_uri
+}
+
+# The custom GPU cluster image (NVIDIA driver pre-baked). Feeds SF_GPU_IMAGE /
+# BatchInfra.gpu_image_uri; null when build_gpu_image = false, in which case GPU clusters install the
+# driver at create time. Content-addressed on the customization script + Dataproc version.
+output "gpu_image_uri" {
+  description = "Resource path of the pre-baked GPU cluster image, or null when not built."
+  value       = local.gpu_image_uri
 }

@@ -249,6 +249,7 @@ def test_batch_infra_resolve_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert infra.container_image == "img:tag"
     assert infra.runtime_version == "2.2"  # default
     assert infra.venv_archive_uri is None  # optional, absent by default
+    assert infra.gpu_image_uri is None  # optional, absent by default
 
 
 def test_batch_infra_resolve_reads_venv_archive(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,6 +260,16 @@ def test_batch_infra_resolve_reads_venv_archive(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("SF_VENV_ARCHIVE", "gs://code-bkt/envs/deadbeef.tar.gz")
     infra = BatchInfra.resolve()
     assert infra.venv_archive_uri == "gs://code-bkt/envs/deadbeef.tar.gz"
+
+
+def test_batch_infra_resolve_reads_gpu_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
+    monkeypatch.setenv("SF_CONTAINER_IMAGE", "img:tag")
+    monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
+    monkeypatch.setenv("SF_SUBNETWORK_URI", "projects/p/regions/r/subnetworks/s")
+    monkeypatch.setenv("SF_GPU_IMAGE", "projects/p/global/images/sf-dataproc-gpu-abcd1234")
+    infra = BatchInfra.resolve()
+    assert infra.gpu_image_uri == "projects/p/global/images/sf-dataproc-gpu-abcd1234"
 
 
 def test_batch_infra_resolve_missing_var_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,9 +301,11 @@ def test_batch_infra_from_terraform_outputs_reads_venv_archive() -> None:
             "compute_sa": "sa@x.iam",
             "subnetwork_uri": "projects/p/regions/r/subnetworks/s",
             "venv_archive_uri": "gs://code-bkt/envs/deadbeef.tar.gz",
+            "gpu_image_uri": "projects/p/global/images/sf-dataproc-gpu-abcd1234",
         }
     )
     assert infra.venv_archive_uri == "gs://code-bkt/envs/deadbeef.tar.gz"
+    assert infra.gpu_image_uri == "projects/p/global/images/sf-dataproc-gpu-abcd1234"
 
 
 def test_batch_infra_from_terraform_outputs_missing_key_raises() -> None:

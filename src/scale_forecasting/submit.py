@@ -55,6 +55,11 @@ _ENV_SUBNETWORK = "SF_SUBNETWORK_URI"
 # dependency-delivery mechanism — clusters can't use the custom container, so a cluster job attaches
 # this archive instead (see dataproc_cluster.build_job). Unset for serverless/Ray-only deployments.
 _ENV_VENV_ARCHIVE = "SF_VENV_ARCHIVE"
+# Optional: the custom GPU cluster image URI (a Compute image with the NVIDIA driver pre-baked,
+# built from the same 2.2 line). GPU Dataproc *clusters* boot from it so the driver is already
+# present at create time instead of being compiled on every node. Unset → GPU clusters install the
+# driver at create via the stock init action (the fallback). CPU clusters, serverless, Ray ignore.
+_ENV_GPU_IMAGE = "SF_GPU_IMAGE"
 
 _DEFAULT_RUNTIME_VERSION = "2.2"
 
@@ -99,6 +104,9 @@ class BatchInfra:
     # Packed-venv archive URI for the Dataproc-*cluster* path (clusters can't use the container).
     # Optional: only cluster families with spark_deps="packed_venv" need it; serverless/Ray ignore.
     venv_archive_uri: str | None = None
+    # Custom GPU cluster image URI (NVIDIA driver pre-baked). Optional: only GPU cluster families
+    # use it; when unset a GPU cluster installs the driver at create. CPU/serverless/Ray ignore it.
+    gpu_image_uri: str | None = None
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -125,6 +133,7 @@ class BatchInfra:
             subnetwork_uri=values["subnetwork_uri"],
             runtime_version=os.environ.get("SF_RUNTIME_VERSION") or _DEFAULT_RUNTIME_VERSION,
             venv_archive_uri=os.environ.get(_ENV_VENV_ARCHIVE) or None,
+            gpu_image_uri=os.environ.get(_ENV_GPU_IMAGE) or None,
         )
 
     @classmethod
@@ -134,8 +143,9 @@ class BatchInfra:
         """Build from a ``terraform output -json`` value map (local dev/tests).
 
         Reads the keys the ``terraform/main`` stage emits — ``code_bucket``, ``runtime_image_repo``
-        (a base path; ``image_tag`` is appended), ``compute_sa``, ``subnetwork_uri``, and the
-        optional ``venv_archive_uri`` (the packed-venv archive for the cluster path).
+        (a base path; ``image_tag`` is appended), ``compute_sa``, ``subnetwork_uri``, the optional
+        ``venv_archive_uri`` (the packed-venv archive for the cluster path), and the optional
+        ``gpu_image_uri`` (the pre-baked GPU cluster image).
         """
         try:
             return cls(
@@ -144,6 +154,7 @@ class BatchInfra:
                 compute_sa=outputs["compute_sa"],
                 subnetwork_uri=outputs["subnetwork_uri"],
                 venv_archive_uri=outputs.get("venv_archive_uri") or None,
+                gpu_image_uri=outputs.get("gpu_image_uri") or None,
             )
         except KeyError as exc:
             raise ConfigError(f"terraform outputs missing key: {exc.args[0]}") from exc

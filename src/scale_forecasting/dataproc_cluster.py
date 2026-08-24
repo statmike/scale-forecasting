@@ -174,14 +174,20 @@ def build_cluster(
     worker_count: int = _DEFAULT_WORKER_COUNT,
     venv_archive_uri: str | None = None,
     venv_init_uri: str | None = None,
+    gpu_image_uri: str | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Cluster`` message for one run (pure — builds the message only).
 
     A master + ``worker_count`` workers on the resolved subnet, running as the compute SA with
     internal-IP-only networking (the same isolation the batch uses). ``hardware="gpu"`` puts an
-    accelerator on each worker (`_GPU_WORKER_MACHINE`/`_GPU_ACCELERATOR_TYPE` by ``gpu_type``) and
-    adds the GPU-driver init action, so the executor's Python worker can use the device. A CPU
-    cluster attaches no accelerator and runs the default worker machine.
+    accelerator on each worker (`_GPU_WORKER_MACHINE`/`_GPU_ACCELERATOR_TYPE` by ``gpu_type``) so
+    the executor's Python worker can use the device. A CPU cluster attaches no accelerator and runs
+    the default worker machine.
+
+    The GPU **driver** is delivered one of two ways: with ``gpu_image_uri`` the cluster boots from a
+    custom image that has the driver pre-baked (fast, repeatable — no per-create compile), so no
+    GPU-driver init action is added and `image_version` is dropped in favour of that image. Without
+    it (the fallback) the stock GPU-driver init action installs the driver on each node at create.
 
     ``venv_archive_uri`` + ``venv_init_uri`` wire the packed-venv delivery: the archive URI (and the
     target dir) ride as cluster metadata, and `venv_init_uri` (the staged `_stage_cluster_init`
@@ -199,19 +205,24 @@ def build_cluster(
         metadata[_VENV_ARCHIVE_METADATA_KEY] = venv_archive_uri
         metadata[_VENV_DIR_METADATA_KEY] = _VENV_DIR
 
+    # A GPU cluster boots from the pre-baked custom image when one is supplied; otherwise it
+    # installs the driver at create time (the fallback). This gates several GPU-only knobs below.
+    use_gpu_image = hardware == "gpu" and bool(gpu_image_uri)
+
     gce_kwargs: dict[str, Any] = {}
     if hardware == "gpu":
-        # Skip the stock init action's cuDNN + NCCL install: both compile from source (the whole
-        # GPU-stack build can run ~150 min on small nodes and is what stalls the cluster create),
-        # and we don't need the system copies — the deep-learning wheel bundles its own cuDNN/NCCL.
-        # The action gates both on a non-empty cuDNN version; an empty metadata value reads back as
-        # empty, so it installs the base driver + CUDA only.
-        metadata["cudnn-version"] = ""
-        # The stock GPU-driver install action builds unsigned NVIDIA kernel modules, which Secure
-        # Boot (on by default in the Dataproc image) refuses to load — the install fails with
-        # "Secure boot is enabled, but no signing material provided". Turn Secure Boot off on the
-        # GPU cluster's VMs so the driver loads, keeping vTPM + integrity monitoring on. CPU
-        # clusters build no kernel modules, so they keep the stronger default (Secure Boot on).
+        if not use_gpu_image:
+            # Fallback (no pre-baked image): the stock init action installs the driver at create.
+            # Skip its cuDNN + NCCL install — both compile from source (the whole GPU-stack build
+            # can run ~150 min on small nodes and is what stalls the cluster create), and we don't
+            # need the system copies (the deep-learning wheel bundles its own cuDNN/NCCL). The
+            # action gates both on a non-empty cuDNN version; an empty metadata value reads back as
+            # empty, so it installs the base driver + CUDA only.
+            metadata["cudnn-version"] = ""
+        # The NVIDIA kernel modules are unsigned, which Secure Boot (on by default in the Dataproc
+        # image) refuses to load — whether they were baked into the custom image or built by the
+        # init action. Turn Secure Boot off on the GPU cluster's VMs so the driver loads, keeping
+        # vTPM + integrity monitoring on. CPU clusters keep the stronger default (Secure Boot on).
         gce_kwargs["shielded_instance_config"] = dataproc.ShieldedInstanceConfig(
             enable_secure_boot=False,
             enable_vtpm=True,
@@ -226,9 +237,14 @@ def build_cluster(
         metadata=metadata,
         **gce_kwargs,
     )
+    # A custom image is set per instance group (master + workers), not on SoftwareConfig; it carries
+    # its own Dataproc version, so `image_version` is omitted when one is used.
+    image_kwargs: dict[str, Any] = {"image_uri": gpu_image_uri} if use_gpu_image else {}
+
     master = dataproc.InstanceGroupConfig(
         num_instances=1,
         machine_type_uri=_DEFAULT_MASTER_MACHINE,
+        **image_kwargs,
     )
 
     init_actions: list[Any] = []
@@ -238,12 +254,15 @@ def build_cluster(
         init_actions.append(dataproc.NodeInitializationAction(executable_file=venv_init_uri))
     if hardware == "gpu":
         worker_machine, accelerators = _gpu_worker(gpu_type)
-        init_actions.append(
-            dataproc.NodeInitializationAction(
-                executable_file=_GPU_INIT_ACTION,
-                execution_timeout=_GPU_INIT_TIMEOUT,
+        if not use_gpu_image:
+            # No pre-baked driver image: install the driver on each node at create time. (With a
+            # pre-baked image the driver is already on disk, so no init action is needed.)
+            init_actions.append(
+                dataproc.NodeInitializationAction(
+                    executable_file=_GPU_INIT_ACTION,
+                    execution_timeout=_GPU_INIT_TIMEOUT,
+                )
             )
-        )
     else:
         worker_machine, accelerators = _DEFAULT_WORKER_MACHINE, []
 
@@ -251,13 +270,17 @@ def build_cluster(
         num_instances=worker_count,
         machine_type_uri=worker_machine,
         accelerators=accelerators,
+        **image_kwargs,
     )
-    software = dataproc.SoftwareConfig(
-        # A *cluster* image version (2.2-debian12), distinct from the Serverless *runtime* version.
-        image_version=_DEFAULT_IMAGE_VERSION,
+    software_kwargs: dict[str, Any] = {
         # Dynamic allocation lets the job scale executors within the cluster to the run's fan-out.
-        properties={"spark:spark.dynamicAllocation.enabled": "true"},
-    )
+        "properties": {"spark:spark.dynamicAllocation.enabled": "true"},
+    }
+    if not use_gpu_image:
+        # A *cluster* image version (2.2-debian12), distinct from the Serverless *runtime* version.
+        # Omitted on the custom-image path (the image pins its own version).
+        software_kwargs["image_version"] = _DEFAULT_IMAGE_VERSION
+    software = dataproc.SoftwareConfig(**software_kwargs)
 
     return dataproc.Cluster(
         project_id=project_id,
@@ -472,6 +495,7 @@ def submit_cluster_job(
                 worker_count=worker_count,
                 venv_archive_uri=venv_archive_uri,
                 venv_init_uri=venv_init_uri,
+                gpu_image_uri=infra.gpu_image_uri,
             )
             _create_cluster(cluster_client, project_id, region, cluster)
 
@@ -543,6 +567,7 @@ def provision_shared_cluster(
         worker_count=worker_count,
         venv_archive_uri=venv_archive_uri,
         venv_init_uri=venv_init_uri,
+        gpu_image_uri=infra.gpu_image_uri,
     )
     _log.info(
         "provisioning shared Dataproc cluster %s: use_gpu=%s workers=%d",
