@@ -152,6 +152,9 @@ def test_build_cluster_gpu_t4_attaches_n1_accelerator_and_init_action() -> None:
     # It compiles the driver from source, so it carries a longer-than-default execution timeout.
     assert init[0].execution_timeout == dataproc_cluster._GPU_INIT_TIMEOUT
     assert dataproc_cluster._GPU_INIT_TIMEOUT.total_seconds() > 600  # above the 10-min default
+    # An empty cuDNN version tells the init action to skip the cuDNN + NCCL source builds (the
+    # deep-learning wheel bundles its own), leaving just the base driver + CUDA.
+    assert dict(cfg.gce_cluster_config.metadata)["cudnn-version"] == ""
 
 
 def test_build_cluster_gpu_disables_secure_boot_only_on_gpu() -> None:

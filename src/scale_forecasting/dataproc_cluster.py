@@ -201,6 +201,12 @@ def build_cluster(
 
     gce_kwargs: dict[str, Any] = {}
     if hardware == "gpu":
+        # Skip the stock init action's cuDNN + NCCL install: both compile from source (the whole
+        # GPU-stack build can run ~150 min on small nodes and is what stalls the cluster create),
+        # and we don't need the system copies — the deep-learning wheel bundles its own cuDNN/NCCL.
+        # The action gates both on a non-empty cuDNN version; an empty metadata value reads back as
+        # empty, so it installs the base driver + CUDA only.
+        metadata["cudnn-version"] = ""
         # The stock GPU-driver install action builds unsigned NVIDIA kernel modules, which Secure
         # Boot (on by default in the Dataproc image) refuses to load — the install fails with
         # "Secure boot is enabled, but no signing material provided". Turn Secure Boot off on the
