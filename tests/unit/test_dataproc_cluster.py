@@ -149,6 +149,9 @@ def test_build_cluster_gpu_t4_attaches_n1_accelerator_and_init_action() -> None:
     init = list(cfg.initialization_actions)
     assert len(init) == 1
     assert init[0].executable_file == dataproc_cluster._GPU_INIT_ACTION
+    # It compiles the driver from source, so it carries a longer-than-default execution timeout.
+    assert init[0].execution_timeout == dataproc_cluster._GPU_INIT_TIMEOUT
+    assert dataproc_cluster._GPU_INIT_TIMEOUT.total_seconds() > 600  # above the 10-min default
 
 
 def test_build_cluster_gpu_disables_secure_boot_only_on_gpu() -> None:

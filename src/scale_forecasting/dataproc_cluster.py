@@ -18,6 +18,7 @@ and unit-tested. The exact GPU init-action + accelerator wiring is validated aga
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .commands import build_driver_args
@@ -52,6 +53,10 @@ _GPU_ACCELERATOR_TYPE = {"T4": "nvidia-tesla-t4", "L4": "nvidia-l4"}
 _GPU_INIT_ACTION = (
     "gs://goog-dataproc-initialization-actions-us-central1/gpu/install_gpu_driver.sh"
 )
+# The stock driver install compiles the NVIDIA kernel modules from source, which exceeds Dataproc's
+# 10-minute default per-init-action timeout. Give it a generous ceiling so the build finishes (still
+# well under the client-side create wait below).
+_GPU_INIT_TIMEOUT = timedelta(minutes=30)
 
 # How long ``wait=True`` blocks on the job before giving up (parity with the batch wait ceiling).
 _WAIT_TIMEOUT_SECONDS = 7200.0
@@ -227,7 +232,12 @@ def build_cluster(
         init_actions.append(dataproc.NodeInitializationAction(executable_file=venv_init_uri))
     if hardware == "gpu":
         worker_machine, accelerators = _gpu_worker(gpu_type)
-        init_actions.append(dataproc.NodeInitializationAction(executable_file=_GPU_INIT_ACTION))
+        init_actions.append(
+            dataproc.NodeInitializationAction(
+                executable_file=_GPU_INIT_ACTION,
+                execution_timeout=_GPU_INIT_TIMEOUT,
+            )
+        )
     else:
         worker_machine, accelerators = _DEFAULT_WORKER_MACHINE, []
 
