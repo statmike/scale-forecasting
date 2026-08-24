@@ -43,6 +43,46 @@ image and the archive both rebuild only when the locked deps change, never on a 
 
 The rest of this page walks each row: *why* that mechanism, and what to know operationally.
 
+## The full alignment picture — substrate, Python, and GPU driver
+
+The matrix above covers **one** layer: the Python environment. A running fit actually stands on three
+layers, and each is aligned independently:
+
+1. **Compute substrate** — the VM/OS (or its managed equivalent) the job runs on.
+2. **Python runtime** — the interpreter + locked third-party stack (the matrix above; everything traces
+   back to `uv.lock`).
+3. **GPU driver** — the host NVIDIA **kernel** driver, needed only by the deep-learning family on GPU
+   hardware. This is a host/kernel layer, distinct from the Python `torch` wheel (which bundles its own
+   CUDA userspace); a wheel can't supply the kernel driver.
+
+This chart shows how each service satisfies all three — it is the map of *which software reaches which
+service and how they stay aligned*:
+
+| Service | Compute substrate | Python runtime | GPU driver |
+|---------|-------------------|----------------|------------|
+| **Dataproc Serverless** | Google-managed | shared container image (from `uv.lock`) | **Google-managed** |
+| **Ray on Vertex** | Google-managed | the same container image | **Google-managed** |
+| **Dataproc cluster — CPU** | stock `2.2-debian12` VM image | packed-venv archive (same lock) | — (no GPU) |
+| **Dataproc cluster — GPU** | **custom `2.2-debian12` VM image** (driver pre-baked) | packed-venv archive (same lock) | **provided by us**, baked into the VM image at build time |
+
+Two invariants keep the whole picture aligned:
+
+- **One Python source of truth across every service.** `uv.lock` builds the container image; the cluster
+  archive is a tar of that *same* image's `/opt/venv`. Managed services consume the container directly;
+  clusters can't, so they carry the byte-identical environment as an archive. There is no second
+  dependency definition anywhere — see [the one source of truth](#the-one-source-of-truth-uvlock--python-version).
+- **The GPU driver is the one layer managed services get for free and clusters do not.** Serverless and
+  Ray run on Google-managed substrate with the driver already present. A Dataproc cluster is a plain set
+  of VMs, so the driver is ours to supply — and it is **baked once into a custom `2.2-debian12` VM image
+  at image-build time**, not installed on each cluster create. Baking it at build time is what makes GPU
+  cluster creates fast and repeatable: the driver is already on the disk, so a node boot just loads it.
+  The **same build** that produces the container image and the packed-venv archive also produces this
+  GPU VM image, so all three artifacts stay in lockstep from one source (see
+  [Dataproc cluster](#dataproc-cluster--self-contained-venv-archive) below and `docker/cloudbuild.yaml`).
+
+> Only the deep-learning family on GPU hardware touches the driver layer. Statistical and ML families,
+> and everything running on CPU, ignore it entirely.
+
 ## Dataproc Serverless — custom container
 
 Serverless batches accept a **custom container image**, so the cleanest path is to hand them the
@@ -110,6 +150,22 @@ Config + identity:
 > (slow, and not guaranteed identical to the tested image), and it would need network egress to PyPI
 > from the cluster. The archive is a single content-addressed artifact that is provably the same
 > environment as the container — one build, reused everywhere.
+
+### GPU clusters — the pre-baked driver image
+
+The venv archive delivers the Python stack (including the CUDA `torch` wheel), but the deep-learning
+family on GPU hardware also needs the **host NVIDIA kernel driver**, which a wheel can't provide. On the
+managed services Google supplies it; on a cluster it is ours to bake in.
+
+Rather than install the driver on every cluster create — a source build that is slow and races the
+cluster-create window — the driver is baked **once** into a **custom `2.2-debian12` VM image** at
+image-build time. GPU clusters then boot from that image and simply load the already-present module; the
+create is fast and repeatable, and CPU clusters keep using the stock `2.2-debian12` image unchanged.
+
+The custom image is produced by the **same build** that produces the container image and the venv
+archive (`docker/cloudbuild.yaml`), so it is content-addressed and moves in lockstep with the rest of
+the runtime. `dataproc_cluster.py` selects it for GPU clusters via the image URI (a Terraform output);
+when no custom GPU image is configured, the cluster falls back to installing the driver at create time.
 
 ## Colab Enterprise — `uv`-from-lock install
 

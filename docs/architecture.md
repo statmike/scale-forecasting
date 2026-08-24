@@ -404,5 +404,7 @@ everywhere, one job per family, one run" real.
 - [running_and_reviewing.md](./running_and_reviewing.md) — submit, watch, and review a run.
 - [editing_code_without_rebuilding.md](./editing_code_without_rebuilding.md) — why a code edit ships on
   the next run with no image rebuild (the runtime code-delivery seam).
+- [runtime_dependencies.md](./runtime_dependencies.md) — how each service gets its software and stays
+  aligned across three layers (substrate, Python runtime, GPU driver).
 </content>
 </invoke>
