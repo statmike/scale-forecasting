@@ -86,10 +86,12 @@ def test_build_entrypoint_appends_oncluster_flags_when_non_default() -> None:
 # --- build_runtime_env: runtime code delivery ----------------------------------
 
 
-def test_build_runtime_env_ships_src_and_requirements() -> None:
+def test_build_runtime_env_prebuilt_image_ships_src_and_requirements() -> None:
     import os
 
-    env = ray_submit.build_runtime_env()
+    # No custom image (Vertex prebuilt Ray image): the image lacks our deps but has pip, so the
+    # runtime_env carries the requirements list.
+    env = ray_submit.build_runtime_env(None)
     # working_dir is the package root (so `python -m scale_forecasting.ray_entry` resolves) — a real
     # local dir that exists for the upload to succeed.
     assert env["working_dir"].endswith("/src")
@@ -108,6 +110,18 @@ def test_build_runtime_env_ships_src_and_requirements() -> None:
     names = {re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower() for spec in specs}
     assert "neuralprophet" in names
     assert "ray" not in names
+
+
+def test_build_runtime_env_custom_image_omits_pip() -> None:
+    import os
+
+    # A custom node image already bundles the full dep set, so no pip key is emitted: Ray then skips
+    # its runtime_env pip plugin (which, on the image's pip-less self-contained venv, would fail env
+    # setup with "No module named pip"). Only the working_dir (code delivery) ships.
+    env = ray_submit.build_runtime_env("us-docker.pkg.dev/p/repo/spark-runtime:latest")
+    assert env["working_dir"].endswith("/src")
+    assert os.path.isdir(env["working_dir"])
+    assert "pip" not in env
 
 
 # --- RayInfra resolution -------------------------------------------------------

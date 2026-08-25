@@ -249,28 +249,34 @@ def _requirements_packages() -> list[str]:
     return packages
 
 
-def build_runtime_env() -> dict[str, Any]:
-    """The Ray ``runtime_env`` shipping current ``src/`` + on-cluster deps (pure; local paths).
+def build_runtime_env(container_image: str | None = None) -> dict[str, Any]:
+    """The Ray ``runtime_env``: current ``src/`` + (only when needed) on-cluster deps (pure).
 
     Delivers code at RUNTIME the way the Spark path uploads a ``src/`` zip: ``working_dir`` is the
-    package root (so ``python -m scale_forecasting.ray_entry`` imports the code that was just
-    submitted, not anything baked into the image — the "same code local and in the cloud" seam), and
-    ``pip`` is the
-    requirements package **list minus Ray** (`_requirements_packages`): a Vertex prebuilt
-    image gains our deps, while Ray itself stays the image's version rather than being swapped by a
-    conflicting pip pin. With a custom node image that already bundles them the pip step is a fast
-    no-op, so it is always kept for safety.
+    package root, so ``python -m scale_forecasting.ray_entry`` imports the code that was just
+    submitted, not anything baked into the image — the "same code local and in the cloud" seam.
 
-    The list leads with ``--extra-index-url`` for the PyTorch CUDA wheels
-    (`_TORCH_CUDA_INDEX`, mirroring docker/Dockerfile): the x86_64/linux torch pin is a
-    ``+cu126`` local build that only resolves from that index, so without it the on-cluster pip
-    fails the whole job at env setup. pip reads the option line from the requirements file Ray
-    materializes; PyPI stays the primary index.
+    Dependencies come from ONE of two places, never both, keyed on whether a custom node image is in
+    use:
+
+    * **Custom node image set** (``container_image`` given — the default deployment): the image
+      already bundles the full locked dep set (built with ``uv sync --extra models --extra ray``,
+      including the ``+cu126`` torch build), so the job runs directly in that interpreter and NO
+      ``pip`` key is emitted — Ray then skips its runtime_env pip plugin entirely. Omitting it is
+      required, not merely an optimization: the image's self-contained venv ships no ``pip``, so a
+      runtime_env pip install would fail at env setup ("No module named pip"). It also avoids a
+      redundant per-job reinstall of packages the image already has.
+    * **No custom image** (``container_image`` is None → Vertex's prebuilt Ray image): that image
+      lacks our deps but does provide ``pip``, so ship the requirements package **list minus Ray**
+      (`_requirements_packages` — Ray stays the image's pinned version rather than being swapped by
+      a conflicting pin). The list leads with ``--extra-index-url`` for the PyTorch CUDA wheels
+      (`_TORCH_CUDA_INDEX`, mirroring docker/Dockerfile): the x86_64/linux torch pin is a ``+cu126``
+      local build that only resolves from that index. PyPI stays the primary index.
     """
-    return {
-        "working_dir": str(_SRC_DIR),
-        "pip": [f"--extra-index-url {_TORCH_CUDA_INDEX}", *_requirements_packages()],
-    }
+    env: dict[str, Any] = {"working_dir": str(_SRC_DIR)}
+    if container_image is None:
+        env["pip"] = [f"--extra-index-url {_TORCH_CUDA_INDEX}", *_requirements_packages()]
+    return env
 
 
 def extract_ray_telemetry(
@@ -963,7 +969,7 @@ def submit_ray(
 
     config_uri = _stage_config(cfg, run_id, infra)
     entrypoint = build_entrypoint(config_uri, settings, models=models, manage_header=manage_header)
-    runtime_env = build_runtime_env()
+    runtime_env = build_runtime_env(infra.container_image)
     regions = _resolve_regions(cfg, settings)
     _log.info(
         "ray submit: run_id=%s cluster=%s reuse=%s cpu_nodes=%d gpu_nodes=%d regions=%s",
