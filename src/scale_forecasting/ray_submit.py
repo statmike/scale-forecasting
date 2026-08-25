@@ -430,11 +430,36 @@ _CAPACITY_ERROR_MARKERS = (
 def _is_capacity_error(message: str) -> bool:
     """True if a cluster-create error message signals a *regional capacity* shortage (pure).
 
-    Capacity errors are worth retrying in another region; anything else (bad machine type, missing
-    quota, permission) is not — so the fallback loop only advances on these, else fails fast.
+    Capacity errors are worth retrying in another region; a bad machine type or permission fault is
+    not. Quota is handled separately by `_is_quota_error` (also region-hoppable, different reason).
     """
     low = message.lower()
     return any(marker in low for marker in _CAPACITY_ERROR_MARKERS)
+
+
+# Substrings that mark a *regional quota* ceiling. GPU/accelerator quota on Vertex is granted
+# per-region, so a region that is over its quota says nothing about the next region's ceiling — the
+# fallback advances on these just as it does on capacity stockouts. A quota error is distinct from a
+# capacity stockout (the region has room, this project is simply not allowed more), so it gets its
+# own classifier rather than widening the capacity markers.
+_QUOTA_ERROR_MARKERS = (
+    "quota exceeded",
+    "exceeds quota",
+    "exceed quota",
+    "exceeded quota",
+    "quota limit",
+)
+
+
+def _is_quota_error(message: str) -> bool:
+    """True if a cluster-create error message signals a *regional quota* ceiling (pure).
+
+    Vertex accelerator quota is per-region, so a quota-exhausted region is worth retrying elsewhere:
+    another region carries its own independent ceiling. (A capacity stockout is a different reason
+    with the same remedy — hop — and is classified by `_is_capacity_error`.)
+    """
+    low = message.lower()
+    return any(marker in low for marker in _QUOTA_ERROR_MARKERS)
 
 
 def _is_generic_cluster_error(message: str) -> bool:
@@ -578,18 +603,19 @@ def _create_cluster_across_regions(
     settings: Settings,
     regions: list[str],
 ) -> tuple[str, str]:  # pragma: no cover - orchestrates live Vertex I/O; @gpu smoke exercises it
-    """Create the cluster, walking ``regions`` in order until one has T4 capacity.
+    """Create the cluster, walking ``regions`` in order until one can provision it.
 
     Returns ``(cluster_resource_name, region)`` for the region that succeeded. On a *regional
-    capacity* failure (`_is_capacity_error`) the stocked-out attempt's (deterministic)
-    resource is torn down and the next region tried; any *other* error (bad machine type, missing
-    quota, permission) is re-raised at once because another region won't fix it. Exhausting every
-    region raises `EngineError` naming the regions tried.
+    capacity* failure (`_is_capacity_error`) or a *regional quota* ceiling (`_is_quota_error`) the
+    failed attempt's (deterministic) resource is torn down and the next region tried — both are
+    per-region conditions another region may not share. Any *other* error (bad machine type,
+    permission, bad config) is re-raised at once because another region won't fix it. Exhausting
+    every region raises `EngineError` naming the regions tried.
 
-    The capacity signal is read from the failed resource's ``error.message`` (via
+    The failure signal is read from the failed resource's ``error.message`` (via
     `_cluster_error_message`) *and* the raised exception string — the SDK's exception is a
-    generic "returned an error" while the "Resources are insufficient in region" text lives only on
-    the resource, so classifying on the exception alone would never detect a stockout.
+    generic "returned an error" while the "Resources are insufficient in region" / quota text lives
+    only on the resource, so classifying on the exception alone would never detect a stockout.
 
     Only the cluster hops — the data plane (config staging, registry writes) stays in
     ``settings.region``. The SDK is re-pinned to each attempted region via `_init_vertex`
@@ -612,23 +638,27 @@ def _create_cluster_across_regions(
             _delete_cluster(
                 resource_path
             )  # a create that errors mid-provision still leaves a resource
-            # Hop when the reason reads as capacity, OR when we couldn't read the reason but the SDK
-            # raised its generic post-provision "returned an error" (which only fires after polling
-            # to ERROR state — in practice a stockout). A specific exception with no capacity signal
-            # is a real config/quota/permission fault: another region won't help, so re-raise.
+            # Hop when the reason reads as a per-region condition — capacity stockout or quota
+            # ceiling — OR when we couldn't read the reason but the SDK raised its generic
+            # post-provision "returned an error" (which only fires after polling to ERROR state — in
+            # practice a stockout). A specific exception with none of those signals is a real
+            # config/permission fault: another region won't help, so re-raise.
             capacity = _is_capacity_error(message)
+            quota = _is_quota_error(message)
             generic_provision_error = not detail and _is_generic_cluster_error(str(exc))
-            if not (capacity or generic_provision_error):
+            if not (capacity or quota or generic_provision_error):
                 raise
+            reason = "quota ceiling" if quota and not capacity else "insufficient capacity"
             _log.warning(
-                "region %s lacks T4 capacity (%s); trying next region",
+                "region %s hit %s (%s); trying next region",
                 region,
+                reason,
                 detail or exc,
             )
             last_exc = exc
     raise EngineError(
         f"Ray cluster {name} could not be created in any of {regions} "
-        f"(no T4 capacity): last error {last_exc!r}"
+        f"(no capacity or quota available): last error {last_exc!r}"
     )
 
 

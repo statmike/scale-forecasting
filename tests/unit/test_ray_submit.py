@@ -573,12 +573,37 @@ def test_is_capacity_error_true_for_stockout_messages(message: str) -> None:
     [
         "machine type's memory is too small",
         "Permission denied on service account",
-        "Quota exceeded for aiplatform.googleapis.com",
+        "Quota exceeded for aiplatform.googleapis.com",  # a quota error, not a *capacity* one
     ],
 )
 def test_is_capacity_error_false_for_non_capacity_messages(message: str) -> None:
-    # A config/quota/permission error must NOT trigger a region hop (retrying elsewhere won't help).
+    # Capacity is a classifier distinct from quota; a bad machine type / permission is neither.
     assert ray_submit._is_capacity_error(message) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Quota exceeded for quota metric 'Nvidia T4 GPUs' of service 'aiplatform.googleapis.com'",
+        "The request exceeds quota for the region",
+        "resource creation would exceed quota limit for NVIDIA_T4_GPUS",
+    ],
+)
+def test_is_quota_error_true_for_quota_messages(message: str) -> None:
+    # Vertex accelerator quota is per-region, so a quota ceiling in one region is worth hopping.
+    assert ray_submit._is_quota_error(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Resources are insufficient in region: us-central1",  # capacity, not quota
+        "machine type's memory is too small",
+        "Permission denied on service account",
+    ],
+)
+def test_is_quota_error_false_for_non_quota_messages(message: str) -> None:
+    assert ray_submit._is_quota_error(message) is False
 
 
 def test_is_generic_cluster_error_matches_sdk_opaque_error() -> None:
