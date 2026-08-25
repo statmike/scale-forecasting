@@ -606,27 +606,6 @@ def render_setup_sql(
 # --- engine --------------------------------------------------------------------
 
 
-def _source_is_iceberg(client: Any, source_ref: str) -> bool:  # pragma: no cover - GCP metadata I/O
-    """True when ``source_ref`` resolves to a BigLake managed-Iceberg table.
-
-    BQML ``CREATE MODEL`` cannot pin a BigLake Iceberg source with ``FOR SYSTEM_TIME AS OF`` — it
-    rejects a valid, already-committed past snapshot as "in the future" (a plain ``SELECT`` against
-    the same table at the same instant time-travels fine; only the ``CREATE MODEL`` path is
-    affected). The native path therefore reads an Iceberg source **un-pinned**; a native
-    (non-Iceberg) BigQuery table time-travels correctly and keeps the snapshot pin. See
-    ``CONSIDERATIONS.md``.
-
-    Best-effort: any lookup failure returns ``False`` (keep pinning — the default that preserves the
-    cross-runtime snapshot guarantee for the common native-table case).
-    """
-    try:
-        tbl = client.get_table(source_ref)
-        biglake = getattr(tbl, "_properties", {}).get("biglakeConfiguration") or {}
-        return str(biglake.get("tableFormat", "")).upper() == "ICEBERG"
-    except Exception:  # noqa: BLE001 - detection is best-effort; default to pinning
-        return False
-
-
 def run(
     cfg: RunConfig,
     models: list[str],
@@ -705,23 +684,16 @@ def run(
         created_at = datetime.now(UTC)
         status = "COMPLETED"
         nan_panel = {name: float("nan") for name in METRIC_NAMES}
-        # Pin every source read in this run to the snapshot the header recorded (owner mode wrote it
-        # on entry above; contributor mode's shared header was written by main.run before launch),
-        # so the native models time-travel to the identical input state the Spark/Ray jobs do. None
-        # (an old run or a transient) → un-pinned live reads, the pre-snapshot behavior.
-        snapshot_millis = bq.snapshot_millis_for(run_id, settings=settings)
-        # BQML CREATE MODEL cannot pin a BigLake Iceberg source with FOR SYSTEM_TIME AS OF (see
-        # _source_is_iceberg / CONSIDERATIONS.md), so drop the pin for the whole native subset when
-        # the source is Iceberg — keeping the native reads internally consistent (all un-pinned)
-        # rather than mixing pinned SELECTs with an un-pinnable CREATE MODEL.
-        if snapshot_millis is not None and _source_is_iceberg(client, _source_ref(cfg, dataset)):
-            log.warning(
-                "source %s is BigLake Iceberg; BQML CREATE MODEL cannot time-travel it, so the "
-                "native subset reads un-pinned for run_id=%s (see CONSIDERATIONS.md)",
-                _source_ref(cfg, dataset),
-                run_id,
-            )
-            snapshot_millis = None
+        # The Spark and Ray jobs pin every source read to the snapshot the header recorded, so they
+        # time-travel to one identical input state. The BigQuery-native subset cannot join them:
+        # BQML CREATE MODEL rejects a constant FOR SYSTEM_TIME AS OF as "in the future" — even for a
+        # timestamp committed hours ago that a plain SELECT against the same table time-travels to
+        # fine (only CREATE MODEL is affected, and it accepts only a CURRENT_TIMESTAMP()-relative
+        # expression, not a fixed snapshot instant; this holds for both native and BigLake Iceberg
+        # sources — see CONSIDERATIONS.md). So the native subset reads un-pinned (live), keeping its
+        # reads internally consistent (all un-pinned) rather than mixing pinned SELECTs with an
+        # un-pinnable CREATE MODEL. Safe because a run's source data is static for its duration.
+        snapshot_millis = None
         series_ids = [
             str(r.ts_id)
             for r in _query(build_series_ids_query(cfg, dataset, snapshot_millis=snapshot_millis))
