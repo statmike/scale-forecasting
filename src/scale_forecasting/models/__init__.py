@@ -16,11 +16,18 @@ from ..errors import ModelError
 # --- model registration imports (side-effect: each calls register()) -----------
 # One line per model file.
 from . import (  # noqa: E402,F401
+    autoets,
     bigquery_native,
+    croston,
     holtwinters,
     lightgbm_model,
+    naive_drift,
+    naive_mean,
+    naive_moving_average,
+    naive_seasonal,
     neuralprophet_model,
     prophet_model,
+    regression_lags,
     sarimax,
     stl_bagging,
     theta,

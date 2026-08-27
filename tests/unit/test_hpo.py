@@ -107,8 +107,8 @@ def test_has_search_space_true_for_models_that_override() -> None:
 
 
 def test_has_search_space_false_for_models_without_one() -> None:
-    # holtwinters inherits the base (empty) search_space → nothing to tune.
-    assert _has_search_space(get_model("holtwinters")) is False
+    # naive_mean is parameterless — it inherits the base (empty) search_space, nothing to tune.
+    assert _has_search_space(get_model("naive_mean")) is False
 
 
 def test_has_search_space_false_for_native_models() -> None:
@@ -135,8 +135,8 @@ def test_tune_model_is_deterministic() -> None:
 
 
 def test_tune_model_empty_search_space_returns_empty_no_study() -> None:
-    # holtwinters has no space → {} without constructing a study (costs nothing).
-    assert tune_model("holtwinters", _sample(), _cfg(models=["holtwinters"])) == {}
+    # naive_mean has no space → {} without constructing a study (costs nothing).
+    assert tune_model("naive_mean", _sample(), _cfg(models=["naive_mean"])) == {}
 
 
 def test_tune_model_native_model_returns_empty() -> None:
@@ -169,8 +169,8 @@ def test_resolve_fleetwide_maps_each_tunable_model() -> None:
 
 
 def test_resolve_fleetwide_omits_models_with_no_search_space() -> None:
-    # holtwinters has nothing to tune → absent from the map (it keeps {} defaults in run_cell).
-    cfg = _cfg(models=["xgboost", "holtwinters"])
+    # naive_mean has nothing to tune → absent from the map (it keeps {} defaults in run_cell).
+    cfg = _cfg(models=["xgboost", "naive_mean"])
     resolved = resolve_fleetwide(_sample(), cfg)
     assert set(resolved) == {"xgboost"}
 
@@ -184,5 +184,5 @@ def test_resolve_fleetwide_requires_backtest() -> None:
 
 def test_resolve_fleetwide_all_calculated_models_is_empty_map() -> None:
     # a config of only no-search-space models → empty resolution (every cell uses {} defaults).
-    cfg = _cfg(models=["holtwinters"])
+    cfg = _cfg(models=["naive_mean"])
     assert resolve_fleetwide(_sample(), cfg) == {}

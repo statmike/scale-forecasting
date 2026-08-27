@@ -6,6 +6,8 @@ structural model (local linear trend + optional seasonal); native Gaussian inter
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 import pandas as pd
 
@@ -13,6 +15,11 @@ from ..errors import ModelError
 from ..features import invert_transform
 from ..seasonality import seasonal_period
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
+
+if TYPE_CHECKING:
+    import optuna
+
+_LEVELS = ("local level", "local linear trend", "smooth trend")
 
 
 class Ucm(BaseModel):
@@ -31,13 +38,19 @@ class Ucm(BaseModel):
         if len(y) < 3:
             raise ModelError("ucm requires at least 3 observations")
         period = seasonal_period(self.ctx.freq)
-        seasonal = period if len(y) >= 2 * period else None
+        # HPO knobs (search_space): trend spec, AR order, seasonal on/off. Defaults reproduce
+        # the local-linear-trend + auto-seasonal, no-AR behavior.
+        level = str(self.params.get("level", "local linear trend"))
+        ar = int(self.params.get("autoregressive", 0))
+        seasonal_on = bool(self.params.get("seasonal", True))
+        seasonal = period if (seasonal_on and len(y) >= 2 * period) else None
         self._last_date = y.index[-1]
         self._fitted = UnobservedComponents(
             y.astype(float),
             exog=X,
-            level="local linear trend",
+            level=level,
             seasonal=seasonal,
+            autoregressive=ar if ar > 0 else None,
         ).fit(disp=False)
 
     def predict(
@@ -55,6 +68,14 @@ class Ucm(BaseModel):
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
+
+    @classmethod
+    def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
+        return {
+            "level": trial.suggest_categorical("level", list(_LEVELS)),
+            "autoregressive": trial.suggest_int("autoregressive", 0, 1),
+            "seasonal": trial.suggest_categorical("seasonal", [True, False]),
+        }
 
 
 register(Ucm)

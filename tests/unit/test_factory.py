@@ -26,6 +26,13 @@ _PYTHON_MODELS = {
     "stl_bagging",
     "prophet",
     "neuralprophet",
+    "naive_seasonal",
+    "naive_drift",
+    "naive_mean",
+    "naive_moving_average",
+    "croston",
+    "autoets",
+    "regression_lags",
 }
 _BIGQUERY_MODELS = {"arima_plus", "timesfm"}
 _ALL_MODELS = _PYTHON_MODELS | _BIGQUERY_MODELS

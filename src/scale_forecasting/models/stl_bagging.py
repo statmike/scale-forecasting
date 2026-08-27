@@ -9,6 +9,8 @@ forecast paths, then read empirical quantiles off the ensemble (so intervals are
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 import pandas as pd
 
@@ -16,6 +18,9 @@ from ..errors import ModelError
 from ..features import invert_transform
 from ..seasonality import seasonal_period
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
+
+if TYPE_CHECKING:
+    import optuna
 
 _N_BAG = 40  # bootstrap replicates for the predictive distribution
 
@@ -40,12 +45,17 @@ class StlBagging(BaseModel):
         self._period = period
         self._last_date = y.index[-1]
 
-        stl = STL(y.astype(float), period=period, robust=True).fit()
+        # HPO knobs (search_space): STL robustness + the deseasonalized ARIMA (p, q); the
+        # differencing order d is held at 1. Defaults reproduce robust STL + ARIMA(1, 1, 1).
+        robust = bool(self.params.get("stl_robust", True))
+        p = int(self.params.get("arima_p", 1))
+        q = int(self.params.get("arima_q", 1))
+        stl = STL(y.astype(float), period=period, robust=robust).fit()
         self._seasonal = np.asarray(stl.seasonal, dtype=float)
         self._resid = np.asarray(stl.resid, dtype=float)
         deseasonalized = y.astype(float).to_numpy() - self._seasonal
         # Forecast the (trend + remainder) deseasonalized series with a light ARIMA.
-        self._arima = ARIMA(deseasonalized, order=(1, 1, 1)).fit()
+        self._arima = ARIMA(deseasonalized, order=(p, 1, q)).fit()
 
     def predict(
         self,
@@ -73,6 +83,14 @@ class StlBagging(BaseModel):
         qmap = {q: invert_transform(np.quantile(paths, q, axis=0), t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
+
+    @classmethod
+    def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
+        return {
+            "stl_robust": trial.suggest_categorical("stl_robust", [True, False]),
+            "arima_p": trial.suggest_int("arima_p", 0, 2),
+            "arima_q": trial.suggest_int("arima_q", 0, 2),
+        }
 
 
 register(StlBagging)
