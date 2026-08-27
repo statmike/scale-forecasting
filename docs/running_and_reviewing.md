@@ -31,14 +31,36 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
   export SF_REGION="us-central1"   # or your deploy region
   ```
 
-  The Ray path needs a little more, also straight from `terraform output`: `compute_sa`,
-  `code_bucket`, and (for the private path) `network_attachment_id` — `RayInfra.from_terraform_outputs()`
-  reads them for you (see notebook 04).
+  The five above are all **reviewing** needs. **Submitting** a run needs a little more, depending on
+  which runtime the run targets — also straight from `terraform output`:
+
+  - **Spark / Dataproc** (the CLI, and notebooks `03` / `08`) resolves its batch infra from four more
+    vars (`BatchInfra.resolve()` reads them; a bare shell that skips them fails with
+    `missing required environment variable SF_CODE_BUCKET`):
+
+    ```bash
+    export SF_CODE_BUCKET="$(terraform output -raw code_bucket)"
+    export SF_CONTAINER_IMAGE="$(terraform output -raw runtime_image_repo):latest"
+    export SF_COMPUTE_SA="$(terraform output -raw compute_sa)"
+    export SF_SUBNETWORK_URI="$(terraform output -raw subnetwork_uri)"
+    # optional — only the Dataproc-*cluster* path (packed-venv deps / pre-baked GPU image) reads these:
+    export SF_VENV_ARCHIVE="$(terraform output -raw venv_archive_uri)"
+    export SF_GPU_IMAGE="$(terraform output -raw gpu_image_uri)"
+    ```
+
+  - **Ray on Vertex** (notebook `04`) reads `compute_sa`, `code_bucket`, and (for the private path)
+    `network_attachment_id` — notebook `04` calls `RayInfra.from_terraform_outputs()` itself, so on a
+    machine with the Terraform dir reachable it needs no extra exports.
+
+  The Spark/Dataproc path (`03` / `08` / the CLI) resolves its infra from the `SF_*` env only — it
+  does **not** auto-read `terraform output` — so export the four `SF_*` vars above before launching
+  from a bare shell (Cloud Shell, CI, a local kernel). The deployed Colab templates and Composer bake
+  them in, so a one-click or Composer run never needs this step.
 
   > **No Terraform state handy?** These values are also **deterministic from your `project_id` +
   > `region`** — the deployment names everything by convention — so a Cloud Shell session with neither
-  > the Terraform directory nor its state can still derive the full `SF_*` set (including the Ray
-  > extras) from those two variables. The copy-paste convention block lives in the runbooks that need
+  > the Terraform directory nor its state can still derive the full `SF_*` set (including the
+  > batch-infra and Ray extras) from those two variables. The copy-paste convention block lives in the runbooks that need
   > it offline: [workshop.md Act 1](./workshop.md#act-1--populate-the-run-history-at-100k-cloud-shell-before-the-workshop)
   > (demo) and [operations.md §3](./operations.md#3-re-run-a-config-short-runs-only) (rework). Only
   > override defaults (dataset/bucket/connection/subnet names) break the convention — then read the
