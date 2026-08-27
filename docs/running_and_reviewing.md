@@ -64,9 +64,9 @@ uv run python -m ipykernel install --user --name scale-forecasting --display-nam
 
 Three notebooks need **no** cluster and run fully locally: `model_playground.ipynb` (pure
 `worker.run_cell`), `07_scale_review.ipynb` (compares several runs side by side), and
-`08_job_review.ipynb` (monitor a running run / review a finished one via the `review` layer) — the
-latter two are read-only over the registry, needing only the `SF_*` env + ADC. The rest submit to
-Dataproc / Ray / BigQuery.
+`09_review_run.ipynb` (review a finished run via the `review` layer) — the latter two are read-only
+over the registry, needing only the `SF_*` env + ADC. The rest submit to Dataproc / Ray / BigQuery
+(`08_run_and_monitor.ipynb` launches a run *and* watches it land, so it submits too).
 
 **Python-version note.** The project pins Python **3.11** on every surface (why: Vertex Ray
 client↔cluster parity and the Dataproc packed-venv — see [version_matrix.md](./version_matrix.md)).
@@ -148,8 +148,8 @@ header, the run's own config, the per-family jobs, and the landed-cell counts in
 per-family job state on its runner, `n_done / n_expected` cells, mean fit time, and a run-wide
 fraction — with `review.plot_progress` for the progress-bar readout. Progress is coarse (cells land
 when a family's writer runs, often at job end), so the per-job `status` is the primary live signal.
-[`08_job_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_job_review.ipynb)
-drives it end to end.
+[`08_run_and_monitor`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_run_and_monitor.ipynb)
+launches a run on a background thread and drives this live-refreshing dashboard until it lands.
 
 ## 4. Review — which model won
 
@@ -179,8 +179,9 @@ execution timeline, `sdk.build_trace_frame` + `plot_trace`.
 
 The demo notebooks ([`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks)) wrap these queries in charts:
 [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) compares several runs
-side by side, and [`08_job_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_job_review.ipynb) monitors one
-run in flight and reviews it once finished.
+side by side, [`08_run_and_monitor`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_run_and_monitor.ipynb) launches
+a run and watches it land, and [`09_review_run`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_review_run.ipynb)
+reviews any finished run in data-science detail.
 
 These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or

@@ -21,8 +21,10 @@ def test_notebooks_for_tier_is_cumulative() -> None:
     full = {s.name for s in na.notebooks_for_tier(na.TIER_FULL)}
     assert smoke < batch < full  # each tier strictly contains the previous
     assert "04_ray_on_vertex" in full and "04_ray_on_vertex" not in batch
-    # The job-review notebook is registry-read-only (no compute) → cheapest tier.
-    assert "08_job_review" in smoke
+    # 09 reviews a finished run — registry-read-only (no compute) → cheapest tier.
+    assert "09_review_run" in smoke
+    # 08 launches a multi-engine run then monitors it — Dataproc spend → batch, not smoke.
+    assert "08_run_and_monitor" in batch and "08_run_and_monitor" not in smoke
 
 
 def test_every_notebook_file_is_registered() -> None:

@@ -78,8 +78,11 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   the execution timeline reuses `sdk.build_trace_frame` + `plot_trace`. Exposed lazily off the
   package and via `Forecaster.monitor()` / `Forecaster.review_run()`; new registry readers
   (`read_run_config`, `read_progress`, `read_metric_aggregates`, `read_cell_metrics`). Demonstrated
-  by `notebooks/08_job_review.ipynb` (registry-read-only, smoke tier). Pure assembly + plots
-  offline-tested in `test_review.py`; the `@gcp` readers await a live acceptance run.
+  by a pair of notebooks: `08_run_and_monitor.ipynb` launches a multi-engine run (Spark ∥ BigQuery)
+  on a background thread and drives a live-refreshing progress dashboard until it lands (batch tier —
+  it submits Dataproc), and `09_review_run.ipynb` reviews any finished `run_id` read-only —
+  leaderboard, metric distribution, ensemble lift, execution timeline (smoke tier). Pure assembly +
+  plots offline-tested in `test_review.py`; the `@gcp` readers await a live acceptance run.
 - Airflow/Composer DAG emitter: `airflow_emit.emit_airflow_dag` renders a run's execution DAG as a
   flat, hand-written-quality `dag_<run_id>.py` (one `PythonOperator` per family node calling the
   `airflow_tasks` callables, explicit `>>` edges, a shared-cluster create/delete bracket when several
