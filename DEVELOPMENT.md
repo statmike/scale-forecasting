@@ -68,6 +68,18 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- Run-inspection layer (`review.py`): keyed on a bare `run_id` (reads the run's own `raw_config`
+  back to recover its plan), with the same pure/I-O seam as `sdk`. `monitor_run` → a `RunProgress`
+  (per-family job state on its runner, `n_done / n_expected` cells, mean fit time, run-wide fraction)
+  for a run in flight; `review_run` → a `RunReview` (every model best-first in the run's decision
+  metric, best per family/overall, the full metric panel aggregated server-side across all series —
+  mean + p10/p50/p90 — and each ensemble's lift over the best base model). Plots (`plot_progress`,
+  `plot_leaderboard`, `plot_metric_distribution`) with a palette validated by the dataviz checker;
+  the execution timeline reuses `sdk.build_trace_frame` + `plot_trace`. Exposed lazily off the
+  package and via `Forecaster.monitor()` / `Forecaster.review_run()`; new registry readers
+  (`read_run_config`, `read_progress`, `read_metric_aggregates`, `read_cell_metrics`). Demonstrated
+  by `notebooks/08_job_review.ipynb` (registry-read-only, smoke tier). Pure assembly + plots
+  offline-tested in `test_review.py`; the `@gcp` readers await a live acceptance run.
 - Airflow/Composer DAG emitter: `airflow_emit.emit_airflow_dag` renders a run's execution DAG as a
   flat, hand-written-quality `dag_<run_id>.py` (one `PythonOperator` per family node calling the
   `airflow_tasks` callables, explicit `>>` edges, a shared-cluster create/delete bracket when several

@@ -62,9 +62,11 @@ uv sync                                                          # core deps inc
 uv run python -m ipykernel install --user --name scale-forecasting --display-name "scale-forecasting (uv)"
 ```
 
-Two notebooks need **no** cluster and run fully locally: `model_playground.ipynb` (pure
-`worker.run_cell`) and `07_scale_review.ipynb` (read-only over the registry views, needs the `SF_*`
-env + ADC). The rest submit to Dataproc / Ray / BigQuery.
+Three notebooks need **no** cluster and run fully locally: `model_playground.ipynb` (pure
+`worker.run_cell`), `07_scale_review.ipynb` (compares several runs side by side), and
+`08_job_review.ipynb` (monitor a running run / review a finished one via the `review` layer) — the
+latter two are read-only over the registry, needing only the `SF_*` env + ADC. The rest submit to
+Dataproc / Ray / BigQuery.
 
 **Python-version note.** The project pins Python **3.11** on every surface (why: Vertex Ray
 client↔cluster parity and the Dataproc packed-venv — see [version_matrix.md](./version_matrix.md)).
@@ -141,6 +143,14 @@ SELECT family, runtime, hardware, system_job_id, status, runtime_seconds
 FROM `PROJECT.DATASET.v_run_jobs` WHERE run_id = 'YOUR_RUN_ID';
 ```
 
+Rather than poll SQL by hand, `review.monitor_run(run_id)` (also `Forecaster.monitor()`) rolls the
+header, the run's own config, the per-family jobs, and the landed-cell counts into a `RunProgress`:
+per-family job state on its runner, `n_done / n_expected` cells, mean fit time, and a run-wide
+fraction — with `review.plot_progress` for the progress-bar readout. Progress is coarse (cells land
+when a family's writer runs, often at job end), so the per-job `status` is the primary live signal.
+[`08_job_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_job_review.ipynb)
+drives it end to end.
+
 ## 4. Review — which model won
 
 ```sql
@@ -160,9 +170,17 @@ ORDER BY mean_wape;
 - `median_fit_seconds` — per-cell fit time (the per-model straggler signal).
 - `mean_wape` / `mean_mae` — the decision metrics, populated where a backtest ran.
 
-The demo notebooks ([`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks)) wrap these two queries in a small polling helper
-and a chart; [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) compares several runs
-side by side.
+For the data-science view without hand-writing SQL, `review.review_run(run_id)` (also
+`Forecaster.review_run()`) returns a `RunReview`: every model best-first in the run's own
+`decision_metric`, the best model per family and overall, the full metric panel aggregated across
+every series (mean + p10/p50/p90, read server-side so it holds at 100k+), and each ensemble's lift
+over the best base model — with `plot_leaderboard` / `plot_metric_distribution` and, for the
+execution timeline, `sdk.build_trace_frame` + `plot_trace`.
+
+The demo notebooks ([`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks)) wrap these queries in charts:
+[`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) compares several runs
+side by side, and [`08_job_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_job_review.ipynb) monitors one
+run in flight and reviews it once finished.
 
 These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or

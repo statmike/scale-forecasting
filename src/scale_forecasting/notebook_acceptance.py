@@ -1,6 +1,6 @@
 """Headless notebook acceptance — run every notebook on its Colab Enterprise template.
 
-The 8 notebooks in ``notebooks/`` are first-class run drivers, and Terraform ships two Colab
+The 7 notebooks in ``notebooks/`` are first-class run drivers, and Terraform ships two Colab
 Enterprise runtime templates that carry the full ``SF_*`` run identity in their env (see
 ``terraform/main/modules/colab``). This module is the repeatable way to *prove* each notebook runs
 green on the right template — and to re-prove it whenever a notebook changes — without a human
@@ -82,6 +82,7 @@ REGISTRY: dict[str, NotebookSpec] = {
         NotebookSpec("model_playground", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("02_bigquery_native", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("07_scale_review", TEMPLATE_MAIN, TIER_SMOKE, 900),
+        NotebookSpec("08_job_review", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("01_spark_via_connect", TEMPLATE_MAIN, TIER_BATCH, 1800),
         NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 1800),
         NotebookSpec("04_ray_on_vertex", TEMPLATE_MAIN, TIER_FULL, 5400),
@@ -92,8 +93,8 @@ REGISTRY: dict[str, NotebookSpec] = {
 def notebooks_for_tier(tier: str) -> list[NotebookSpec]:
     """Every notebook at ``tier`` or a cheaper one (cumulative), in registry order.
 
-    ``smoke`` → the 3 BQ/local notebooks; ``batch`` → those + the 2 Dataproc ones; ``full`` →
-    all 6 (adds Ray). Raises `EngineError` on an unknown tier so a CLI typo fails clearly.
+    ``smoke`` → the 4 BQ/local notebooks; ``batch`` → those + the 2 Dataproc ones; ``full`` →
+    all 7 (adds Ray). Raises `EngineError` on an unknown tier so a CLI typo fails clearly.
     """
     if tier not in _TIER_ORDER:
         raise EngineError(f"unknown tier {tier!r}; choose one of {', '.join(_TIER_ORDER)}")

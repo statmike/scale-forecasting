@@ -242,6 +242,29 @@ class Forecaster:
             run_id=self.run_id, dataset_ref=self._resolved_dataset_ref(), views=VIEW_NAMES
         )
 
+    def monitor(self, run_id: str | None = None) -> Any:
+        """Live progress of a run: per-family job state + series done vs. expected (`RunProgress`).
+
+        Delegates to `review.monitor_run` for ``run_id`` (default: this config's id) — header
+        status, each family's runner and status, and how many cells have landed vs. the expected
+        total. Poll it while a run is in flight; pair with `review.plot_progress` for the bar.
+        """
+        from .review import monitor_run
+
+        return monitor_run(run_id or self.run_id, settings=self._settings)
+
+    def review_run(self, run_id: str | None = None) -> Any:
+        """Data-science review of a finished run: bests, metric panel, ensemble lift (`RunReview`).
+
+        Delegates to `review.review_run` for ``run_id`` (default: this config's id) — best model per
+        family and overall, the full metric panel aggregated across series, and each ensemble's lift
+        over the best base model. The reading counterpart to the offline `review` pointer; pair with
+        `review.plot_leaderboard` / `review.plot_metric_distribution`.
+        """
+        from .review import review_run as _review_run
+
+        return _review_run(run_id or self.run_id, settings=self._settings)
+
     def status(self, run_id: str | None = None) -> str | None:
         """The current registry status of a run (``RUNNING``/``COMPLETED``/``FAILED``/``PARTIAL``).
 

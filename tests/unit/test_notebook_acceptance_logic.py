@@ -21,6 +21,18 @@ def test_notebooks_for_tier_is_cumulative() -> None:
     full = {s.name for s in na.notebooks_for_tier(na.TIER_FULL)}
     assert smoke < batch < full  # each tier strictly contains the previous
     assert "04_ray_on_vertex" in full and "04_ray_on_vertex" not in batch
+    # The job-review notebook is registry-read-only (no compute) → cheapest tier.
+    assert "08_job_review" in smoke
+
+
+def test_every_notebook_file_is_registered() -> None:
+    """Every shipped notebook has an acceptance spec — a new notebook can't slip the harness."""
+    notebooks_dir = Path(__file__).resolve().parents[2] / "notebooks"
+    on_disk = {p.stem for p in notebooks_dir.glob("*.ipynb")}
+    registered = set(na.REGISTRY)
+    assert on_disk == registered, (
+        f"unregistered: {on_disk - registered}; stale: {registered - on_disk}"
+    )
 
 
 @pytest.mark.parametrize(

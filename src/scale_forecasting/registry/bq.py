@@ -26,8 +26,10 @@ Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_
 ``write_cells``, the ``run_jobs`` per-job
 writers/readers (``write_job``, ``update_job``, ``latest_job_attempt``, ``next_job_attempt``,
 ``read_run_jobs``) and ``run_job`` (the per-job lifecycle context manager), the read surface
-(``header_status``, ``read_run_summary``, ``read_leaderboard``), plus the pure assemblers used by
-the writers and the tests.
+(``header_status``, ``read_run_summary``, ``read_leaderboard``, ``read_prediction_counts``,
+``read_cell_timing``, and the review-layer reads ``read_run_config`` / ``read_progress`` /
+``read_metric_aggregates`` / ``read_cell_metrics``), plus the pure assemblers used by the writers
+and the tests.
 """
 
 from __future__ import annotations
@@ -1156,6 +1158,169 @@ def read_cell_timing(
         )
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"read_cell_timing failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_run_config(
+    run_id: str, *, settings: Settings | None = None
+) -> dict[str, Any] | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the validated ``raw_config`` a run landed under, as a dict — or ``None`` if never run.
+
+    Reads the latest ``run_registry`` header's ``raw_config`` JSON column for ``run_id`` (the config
+    *is* the experiment record). The review layer rebuilds a `config.RunConfig` from this to recover
+    the run's plan — models per family, decision metric, ensemble strategies — so a monitor keyed on
+    a bare ``run_id`` knows the *expected* work, not just what has landed. ``TO_JSON_STRING`` +
+    ``json.loads`` sidesteps the client's native-JSON decoding so the shape is a plain dict. Raises
+    `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT TO_JSON_STRING(raw_config) AS raw_config "
+        f"FROM `{resolved.table_ref('run_registry')}` "
+        "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_run_config failed for run {run_id}: {exc}") from exc
+    if not rows or rows[0]["raw_config"] is None:
+        return None
+    return json.loads(rows[0]["raw_config"])
+
+
+def read_progress(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return per-model landed-cell counts + mean fit time for ``run_id`` — the live-progress read.
+
+    One row per ``(model_type, ensemble_id)`` with ``n_cells_done`` (deduped full-fit cells that
+    have landed) and ``mean_fit_seconds``. Deliberately light (COUNT + AVG, no quantiles) so a
+    monitor can poll it cheaply while a run is in flight, at any scale. Progress is coarse-grained:
+    cells land when a job's ``write_cells`` runs (often at job end), so counts step up per job
+    rather than ticking per series — pair with the per-job status from `read_run_jobs` for the live
+    picture. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        "WITH deduped AS ("
+        "  SELECT * FROM `" + resolved.table_ref("forecast_metadata") + "`"
+        "  WHERE run_id=@run_id AND fold_id IS NULL"
+        "  QUALIFY ROW_NUMBER() OVER ("
+        "    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id"
+        "    ORDER BY created_at DESC) = 1"
+        ") "
+        "SELECT model_type, ensemble_id, "
+        "COUNT(*) AS n_cells_done, AVG(fit_seconds) AS mean_fit_seconds "
+        "FROM deduped GROUP BY model_type, ensemble_id"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_progress failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_metric_aggregates(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the full metric panel aggregated across series, per model — the finished-run stats.
+
+    One row per ``(model_type, ensemble_id)``: ``n_series`` (deduped full-fit cells),
+    ``mean_fit_seconds``, and for **every** metric in `METRIC_COLUMNS` its cross-series ``mean_``
+    plus ``p10_``/``p50_``/``p90_`` (via ``APPROX_QUANTILES``). The aggregation runs server-side so
+    it holds at 100k+ series without pulling per-series rows to the client — the review layer reads
+    distribution shape from here, falling back to `read_cell_metrics` only for a bounded drill-down.
+    The projection is generated from `METRIC_COLUMNS`, so it tracks the one metric source of truth.
+    Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    metric_aggs = ", ".join(
+        f"AVG({m}) AS mean_{m}, "
+        f"APPROX_QUANTILES({m}, 10)[OFFSET(1)] AS p10_{m}, "
+        f"APPROX_QUANTILES({m}, 10)[OFFSET(5)] AS p50_{m}, "
+        f"APPROX_QUANTILES({m}, 10)[OFFSET(9)] AS p90_{m}"
+        for m in METRIC_COLUMNS
+    )
+    sql = (
+        "WITH deduped AS ("
+        "  SELECT * FROM `" + resolved.table_ref("forecast_metadata") + "`"
+        "  WHERE run_id=@run_id AND fold_id IS NULL"
+        "  QUALIFY ROW_NUMBER() OVER ("
+        "    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id"
+        "    ORDER BY created_at DESC) = 1"
+        ") "
+        "SELECT model_type, ensemble_id, ANY_VALUE(compute_engine) AS compute_engine, "
+        "COUNT(*) AS n_series, AVG(fit_seconds) AS mean_fit_seconds, " + metric_aggs + " "
+        "FROM deduped GROUP BY model_type, ensemble_id"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_metric_aggregates failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_cell_metrics(
+    run_id: str, *, limit: int = 20000, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return per-series metric rows for ``run_id`` — the bounded drill-down under the aggregates.
+
+    One deduped full-fit row per ``(ts_id, model_type, ensemble_id)`` carrying ``compute_engine`` /
+    ``fit_seconds`` and the whole `METRIC_COLUMNS` panel — the raw material for per-series
+    distribution plots and outlier hunts. Capped at ``limit`` rows (a 100k×N run would swamp the
+    client and any plot); use `read_metric_aggregates` for the whole-run distribution shape and this
+    for a bounded sample or a small run. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    metric_cols = ", ".join(METRIC_COLUMNS)
+    sql = (
+        "SELECT ts_id, model_type, ensemble_id, compute_engine, fit_seconds, " + metric_cols + " "
+        "FROM `" + resolved.table_ref("forecast_metadata") + "` "
+        "WHERE run_id=@run_id AND fold_id IS NULL "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
+        "ORDER BY created_at DESC) = 1 "
+        "LIMIT @limit"
+    )
+    params = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_cell_metrics failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
 

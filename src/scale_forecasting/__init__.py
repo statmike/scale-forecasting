@@ -52,6 +52,14 @@ _LAZY: dict[str, tuple[str, str]] = {
     "JobTrace": (".sdk", "JobTrace"),
     "build_trace_frame": (".sdk", "build_trace_frame"),
     "plot_trace": (".sdk", "plot_trace"),
+    # Run inspection — monitor a running run, review a finished one.
+    "monitor_run": (".review", "monitor_run"),
+    "review_run": (".review", "review_run"),
+    "RunProgress": (".review", "RunProgress"),
+    "RunReview": (".review", "RunReview"),
+    "plot_progress": (".review", "plot_progress"),
+    "plot_leaderboard": (".review", "plot_leaderboard"),
+    "plot_metric_distribution": (".review", "plot_metric_distribution"),
     "DagNode": (".dag", "DagNode"),
     # Orchestration.
     "run": (".main", "run"),
@@ -99,6 +107,15 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     )
     from .main import run  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
+    from .review import (  # noqa: F401
+        RunProgress,
+        RunReview,
+        monitor_run,
+        plot_leaderboard,
+        plot_metric_distribution,
+        plot_progress,
+        review_run,
+    )
     from .router import split_by_runtime  # noqa: F401
     from .sdk import (  # noqa: F401
         DryRunResult,
