@@ -92,6 +92,8 @@ nav:
           - notebooks/03_combo_and_ensemble.ipynb
           - notebooks/04_ray_on_vertex.ipynb
           - notebooks/07_scale_review.ipynb
+          - notebooks/08_run_and_monitor.ipynb
+          - notebooks/09_review_run.ipynb
           - notebooks/model_playground.ipynb
   - Reference:
       - Architecture: architecture.md
