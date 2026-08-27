@@ -58,12 +58,12 @@ def _infra() -> BatchInfra:
 # --- batch id ------------------------------------------------------------------
 
 
-def test_batch_id_is_engine_prefixed_and_clamped() -> None:
-    bid = _batch_id("run-abc123", "explode")
-    assert bid.startswith("sf-explode-")
+def test_batch_id_is_sf_prefixed_and_clamped() -> None:
+    bid = _batch_id("run-abc123")
+    assert bid == "sf-run-abc123"
     assert len(bid) <= 63
     # a very long run_id is trimmed, never leaving a trailing hyphen (Dataproc rejects it).
-    long = _batch_id("x" * 100, "explode")
+    long = _batch_id("x" * 100)
     assert len(long) == 63
     assert not long.endswith("-")
 
@@ -75,7 +75,6 @@ def test_build_batch_wires_launcher_package_and_args() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://code-bkt/runs/pkg-1234.zip",
         launcher_uri="gs://code-bkt/runs/spark_main.py",
         config_uri="gs://code-bkt/runs/run-abc.json",
@@ -83,8 +82,8 @@ def test_build_batch_wires_launcher_package_and_args() -> None:
     ps = batch.pyspark_batch
     assert ps.main_python_file_uri == "gs://code-bkt/runs/spark_main.py"
     assert list(ps.python_file_uris) == ["gs://code-bkt/runs/pkg-1234.zip"]
-    # engine + config-uri lead; the --sf-* infra args follow (the Dataproc delivery path).
-    assert ps.args[:4] == ["--engine", "explode", "--config-uri", "gs://code-bkt/runs/run-abc.json"]
+    # config-uri leads; the --sf-* infra args follow (the Dataproc delivery path).
+    assert ps.args[:2] == ["--config-uri", "gs://code-bkt/runs/run-abc.json"]
     assert "--sf-project-id" in ps.args
     assert "proj-x" in ps.args
     rc = batch.runtime_config
@@ -104,7 +103,6 @@ def test_build_batch_sets_explicit_ttl_over_dataproc_default() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -121,7 +119,6 @@ def test_build_batch_honours_custom_ttl() -> None:
     batch = build_batch(
         infra=replace(_infra(), ttl_seconds=10800),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -133,7 +130,6 @@ def test_build_batch_without_max_executors_sets_no_cap() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -147,7 +143,6 @@ def test_build_batch_defaults_omit_oncluster_flags() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -162,7 +157,6 @@ def test_build_batch_appends_oncluster_flags_when_non_default() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -179,7 +173,6 @@ def test_build_batch_max_executors_caps_dynamic_allocation() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -192,7 +185,6 @@ def test_build_batch_cpu_default_adds_no_accelerator_properties() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -205,7 +197,6 @@ def test_build_batch_gpu_attaches_l4_executor() -> None:
     batch = build_batch(
         infra=_infra(),
         settings=_settings(),
-        engine="explode",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -227,8 +218,7 @@ def test_build_batch_gpu_rejects_non_l4_on_serverless() -> None:
         build_batch(
             infra=_infra(),
             settings=_settings(),
-            engine="explode",
-            package_uri="gs://c/p.zip",
+                package_uri="gs://c/p.zip",
             launcher_uri="gs://c/e.py",
             config_uri="gs://c/r.json",
             hardware="gpu",
@@ -357,7 +347,6 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
 
     batch_id = submit.submit_batch(
         _cfg(models=["theta"]),
-        engine="explode",
         n_series=1000,
         settings=_settings(),
         infra=_infra(),
@@ -365,7 +354,7 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     )
     assert staged["series_limit"] == 1000  # the scale override reached the staged config
     assert staged["parent"] == "projects/proj-x/locations/us-central1"
-    assert batch_id.startswith("sf-explode-")
+    assert batch_id.startswith("sf-")
     assert staged["batch_id"] == batch_id
     # The blocking wait must use the long timeout (a 100k batch exceeds api-core's 900s default),
     # not the bare no-arg result() that regressed to it.
@@ -404,8 +393,7 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
     with pytest.raises(EngineError, match="FAILED"):
         submit.submit_batch(
             _cfg(models=["theta"]),
-            engine="explode",
-            settings=_settings(),
+                settings=_settings(),
             infra=_infra(),
             wait=True,
         )

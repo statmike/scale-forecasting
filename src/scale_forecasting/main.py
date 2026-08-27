@@ -799,13 +799,11 @@ def _assemble_commands(
     from .submit import BatchInfra, _batch_id
 
     assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
-    engine = "explode"
     models_arg = plan.python_models if plan.bq_models else None
     commands["spark"] = build_spark_commands(
         settings=settings,
         infra=infra,
-        engine=engine,
-        batch_id=_batch_id(plan.run_id, engine),
+        batch_id=_batch_id(plan.run_id),
         package_uri=package_uri or "",
         launcher_uri=launcher_uri or "",
         config_uri=config_uri,
@@ -1054,8 +1052,30 @@ def _resolve_settings() -> Settings:
     return Settings.resolve()
 
 
+def _emit_airflow(cfg: RunConfig, config_uri: str, *, out_path: str | None = None) -> str:
+    """Render this run's Airflow DAG to a local file and return the path (offline — touches no GCP).
+
+    The "emit" verb: resolves the run's DAG and renders it to a standalone ``dag_<run_id>.py``
+    (`airflow_emit.emit_airflow_dag`) whose tasks load the config from ``config_uri`` — the same
+    ``--config``/``--config-uri`` value passed in, embedded verbatim. Pass a ``gs://``
+    ``--config-uri`` (a staged config, digest == run_id) to emit a DAG a Composer environment can
+    run directly; a local ``--config`` path emits a DAG suitable for local parse/compile checks and
+    inspection. ``out_path`` overrides the default ``./dag_<run_id>.py`` destination. Writing is the
+    only side effect.
+    """
+    from pathlib import Path
+
+    from .airflow_emit import emit_airflow_dag
+
+    run_id = make_run_id(cfg)
+    source = emit_airflow_dag(cfg, config_uri)
+    out = Path(out_path) if out_path else Path(f"dag_{run_id}.py")
+    out.write_text(source, encoding="utf-8")
+    return str(out)
+
+
 def _main(argv: list[str] | None = None) -> None:
-    """CLI: ``main (--config run.json | --config-uri gs://…) [--dry-run | --stage-only]``."""
+    """CLI: ``main (--config … | --config-uri …) [--dry-run | --stage-only | --emit-airflow]``."""
     import argparse
 
     from .config import load_config_uri
@@ -1076,6 +1096,15 @@ def _main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="stage artifacts to GCS + emit the runnable command + manifest; do not submit",
     )
+    verbs.add_argument(
+        "--emit-airflow",
+        action="store_true",
+        help="render this run's Airflow DAG to a local dag_<run_id>.py; touch no GCP",
+    )
+    p.add_argument(
+        "--emit-out",
+        help="where to write the emitted DAG (default: ./dag_<run_id>.py); implies --emit-airflow",
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -1084,6 +1113,10 @@ def _main(argv: list[str] | None = None) -> None:
     ns = p.parse_args(argv)
 
     cfg = load_config_uri(ns.config or ns.config_uri)
+    if ns.emit_airflow or ns.emit_out:
+        out = _emit_airflow(cfg, ns.config or ns.config_uri, out_path=ns.emit_out)
+        _log.info("wrote Airflow DAG: %s", out)
+        return
     if ns.stage_only:
         result = stage_run(cfg, force=ns.force)
         _log.info("staged: %s", result.run_id)

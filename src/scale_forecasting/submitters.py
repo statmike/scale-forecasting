@@ -131,7 +131,6 @@ class SparkSubmitter:
 
             return submit_cluster_job(
                 cfg,
-                engine="explode",
                 models=models,
                 manage_header=manage_header,
                 settings=settings,
@@ -146,7 +145,6 @@ class SparkSubmitter:
 
         submit_batch(
             cfg,
-            engine="explode",
             models=models,
             manage_header=manage_header,
             settings=settings,

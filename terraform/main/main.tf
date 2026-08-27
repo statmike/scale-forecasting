@@ -49,13 +49,40 @@ module "budget" {
   depends_on = [module.apis]
 }
 
-# Gated: created only when create_composer = true (see modules/composer for the lifecycle).
+# The SF_* identity a Composer worker needs to BE a launch point — same set the smokes/SDK read,
+# built from module outputs so a worker resolves runs exactly as a local launch does. Nullable
+# outputs (BYO network, un-built GPU/venv images) are merged in only when present, because
+# env_variables rejects null values. The code itself is NOT here — it arrives per-job as the src/
+# zip the worker builds from the composer-sync'd src/ (see docs/smoke_testing.md).
+locals {
+  composer_env_variables = merge(
+    {
+      SF_PROJECT_ID      = var.project_id
+      SF_REGION          = var.region
+      SF_DATASET_ID      = module.bigquery.dataset_id
+      SF_CONNECTION      = module.bigquery.connection_id
+      SF_WAREHOUSE_URI   = module.storage.warehouse_uri
+      SF_CODE_BUCKET     = module.storage.code_bucket
+      SF_CONTAINER_IMAGE = "${module.container.image_repo_path}:latest"
+      SF_COMPUTE_SA      = module.iam.compute_email
+      SF_SUBNETWORK_URI  = module.network.subnetwork_uri
+    },
+    module.network.network_attachment_id != null ? { SF_RAY_NETWORK_ATTACHMENT = module.network.network_attachment_id } : {},
+    module.container.venv_archive_uri != null ? { SF_VENV_ARCHIVE = module.container.venv_archive_uri } : {},
+    module.container.gpu_image_uri != null ? { SF_GPU_IMAGE = module.container.gpu_image_uri } : {},
+  )
+}
+
+# Gated: created only when create_composer = true (see modules/composer for the lifecycle). The
+# env + submit-side pypi packages make a worker a launch point; the src/ code is delivered by the
+# composer-sync bootstrap (make composer-sync), not baked into the environment.
 module "composer" {
   source          = "./modules/composer"
   create          = var.create_composer
   project_id      = var.project_id
   region          = var.region
   service_account = module.iam.runner_email
+  env_variables   = local.composer_env_variables
 
   depends_on = [module.apis]
 }

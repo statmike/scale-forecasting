@@ -55,21 +55,18 @@ def build_driver_args(
     config_uri: str,
     settings: Settings,
     *,
-    engine: str | None = None,
     models: list[str] | None = None,
     manage_header: bool = True,
 ) -> list[str]:
     """The on-cluster driver arg list shared by the Spark batch, the Ray entrypoint, and emission.
 
     ``--config-uri`` (the staged config, whose digest is the shared ``run_id``) + the ``--sf-*``
-    infra identity, plus — only when non-default — ``--engine`` (Spark only; Ray has no method
-    switch), ``--models m1,m2`` (executed subset), and ``--manage-header false`` (contributor mode).
-    Defaults omit the optional flags so a standalone run builds the plain arg list.
+    infra identity, plus — only when non-default — ``--models m1,m2`` (executed subset) and
+    ``--manage-header false`` (contributor mode). Defaults omit the optional flags so a standalone
+    run builds the plain arg list. Each runtime runs its single built-in engine (Spark's
+    cross-join/explode strategy, Ray's), so there is no method flag.
     """
-    args: list[str] = []
-    if engine is not None:
-        args += ["--engine", engine]
-    args += ["--config-uri", config_uri, *infra_args_from(settings)]
+    args: list[str] = ["--config-uri", config_uri, *infra_args_from(settings)]
     if models is not None:
         args += ["--models", ",".join(models)]
     if not manage_header:
@@ -81,7 +78,6 @@ def build_spark_commands(
     *,
     settings: Settings,
     infra: BatchInfra,
-    engine: str,
     batch_id: str,
     package_uri: str,
     launcher_uri: str,
@@ -97,9 +93,7 @@ def build_spark_commands(
     the same ``build_driver_args`` list — so it is byte-faithful to the batch that would be
     submitted. The universal command is the standalone re-submission via the ``submit`` launcher.
     """
-    driver = build_driver_args(
-        config_uri, settings, engine=engine, models=models, manage_header=manage_header
-    )
+    driver = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
 
     gcloud: list[str] = [
         "gcloud",

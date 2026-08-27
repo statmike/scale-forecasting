@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
-from statsmodels.tsa.statespace.structural import UnobservedComponents
 
 from ..errors import ModelError
 from ..features import invert_transform
@@ -27,6 +25,9 @@ class Ucm(BaseModel):
     supports_native_intervals = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
+        # Lazy import: keep the model stack off the module top (lean launch point).
+        from statsmodels.tsa.statespace.structural import UnobservedComponents
+
         if len(y) < 3:
             raise ModelError("ucm requires at least 3 observations")
         period = seasonal_period(self.ctx.freq)
@@ -45,6 +46,8 @@ class Ucm(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
+        from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
+
         fc = self._fitted.get_forecast(horizon, exog=X)
         mean = np.asarray(fc.predicted_mean, dtype=float)
         sigma = np.asarray(fc.se_mean, dtype=float)

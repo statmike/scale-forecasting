@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.seasonal import STL
 
 from ..errors import ModelError
 from ..features import invert_transform
@@ -32,6 +30,10 @@ class StlBagging(BaseModel):
     supports_native_intervals = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
+        # Lazy import: keep the model stack off the module top (lean launch point).
+        from statsmodels.tsa.arima.model import ARIMA
+        from statsmodels.tsa.seasonal import STL
+
         period = seasonal_period(self.ctx.freq)
         if len(y) < 2 * period:
             raise ModelError(f"stl_bagging requires at least {2 * period} observations")

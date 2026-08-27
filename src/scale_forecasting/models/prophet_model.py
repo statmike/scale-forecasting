@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
-from scipy.stats import norm
 
 from ..errors import ModelError
 from ..features import invert_transform
@@ -67,6 +66,8 @@ class ProphetModel(BaseModel):
             if X is None or col not in X.columns:
                 raise ModelError(f"prophet: exog column '{col}' missing at predict time")
             future[col] = X[col].to_numpy(dtype=float)[:horizon]
+
+        from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
 
         fc = self._model.predict(future)
         mean = fc["yhat"].to_numpy(dtype=float)

@@ -66,9 +66,9 @@ def test_spark_launch_no_session_submits_batch(monkeypatch: pytest.MonkeyPatch) 
         manage_header=False,
         settings=_SETTINGS,
     )
-    assert seen["engine"] == "explode"
     assert seen["models"] == [_SPARK]
     assert seen["manage_header"] is False
+    assert "engine" not in seen  # the Spark engine is built in — no method flag threaded through
     assert seen["batch_id"] is None  # standalone: no per-family id → submit derives one from run_id
 
 

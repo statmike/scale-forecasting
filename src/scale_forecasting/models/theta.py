@@ -15,8 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
-from statsmodels.tsa.forecasting.theta import ThetaModel as _StatsmodelsTheta
 
 from ..errors import ModelError
 from ..features import invert_transform
@@ -37,6 +35,9 @@ class ThetaModel(BaseModel):
     supports_native_intervals = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
+        # Lazy import: keep the model stack off the module top (lean launch point).
+        from statsmodels.tsa.forecasting.theta import ThetaModel as _StatsmodelsTheta
+
         if len(y) < 2:
             raise ModelError("theta requires at least 2 observations")
         period = seasonal_period(self.ctx.freq)
@@ -54,6 +55,8 @@ class ThetaModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
+        from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
+
         mean = np.asarray(self._fitted.forecast(horizon), dtype=float)
         # Theta's forecast SE ≈ (upper − lower) / (2 z) from a symmetric PI; use it to
         # place arbitrary requested quantiles, so the frame honors any quantile set.

@@ -291,7 +291,6 @@ def test_build_job_places_pyspark_job_on_cluster_with_contract() -> None:
         package_uri="gs://code-bkt/runs/pkg-1234.zip",
         config_uri="gs://code-bkt/runs/run-abc.json",
         settings=_settings(),
-        engine="explode",
         models=["theta", "holtwinters"],
         manage_header=False,
     )
@@ -300,7 +299,7 @@ def test_build_job_places_pyspark_job_on_cluster_with_contract() -> None:
     assert ps.main_python_file_uri == "gs://code-bkt/runs/spark_main.py"
     assert list(ps.python_file_uris) == ["gs://code-bkt/runs/pkg-1234.zip"]
     args = list(ps.args)
-    assert args[:4] == ["--engine", "explode", "--config-uri", "gs://code-bkt/runs/run-abc.json"]
+    assert args[:2] == ["--config-uri", "gs://code-bkt/runs/run-abc.json"]
     # The same on-cluster contract as the Serverless batch (subset + contributor-mode header).
     assert args[args.index("--models") + 1] == "theta,holtwinters"
     assert args[args.index("--manage-header") + 1] == "false"
@@ -313,7 +312,6 @@ def test_build_job_defaults_omit_oncluster_flags() -> None:
         package_uri="gs://c/pkg.zip",
         config_uri="gs://c/run.json",
         settings=_settings(),
-        engine="explode",
     )
     args = list(job.pyspark_job.args)
     assert "--models" not in args
@@ -330,7 +328,6 @@ def test_build_job_use_venv_points_python_at_absolute_venv() -> None:
         package_uri="gs://c/pkg.zip",
         config_uri="gs://c/run.json",
         settings=_settings(),
-        engine="explode",
         use_venv=True,
     )
     ps = job.pyspark_job
@@ -349,7 +346,6 @@ def test_build_job_without_venv_stays_bare() -> None:
         package_uri="gs://c/pkg.zip",
         config_uri="gs://c/run.json",
         settings=_settings(),
-        engine="explode",
     )
     ps = job.pyspark_job
     assert list(ps.archive_uris) == []

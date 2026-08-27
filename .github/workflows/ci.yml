@@ -48,3 +48,32 @@ jobs:
         run: uv run ruff check src tests
       - name: offline test gate
         run: uv run pytest -m "not gcp and not spark and not ray" -q
+
+  # airflow-parse — the cheap "does Airflow actually parse the emitted DAG?" gate. Airflow is heavy
+  # and prone to dependency conflicts with our torch/ray/spark pins, so it is deliberately NOT in
+  # uv.lock: this job installs it ISOLATED (core+dev synced from the lock, then apache-airflow pinned
+  # to Composer 3's image version against Airflow's official constraints) and runs only the @airflow
+  # tests. A resolution problem here can never break the main offline gate above.
+  airflow-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      # Core + dev (pytest) + the editable package, no heavy extras — the DAG parse only needs the
+      # package's light modules (airflow_tasks imports nothing heavy at module load).
+      - run: uv sync --frozen
+      # Match Composer 3's Airflow (composer-3-airflow-2.10.5); the constraints file pins Airflow's
+      # own transitive stack for Python 3.11 so the install is reproducible. That file pins
+      # typing_extensions OLDER than our pydantic_core needs (it imports Sentinel), so restore a
+      # compatible version afterward — Airflow tolerates the newer one.
+      - name: install Airflow (isolated, constraints-pinned) into the synced venv
+        run: |
+          uv pip install "apache-airflow==2.10.5" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.11.txt"
+          uv pip install -U typing_extensions
+      # Call the venv's pytest directly — `uv run` would re-sync the env to uv.lock and drop Airflow
+      # (which is intentionally not in the lock).
+      - name: parse the emitted DAG under Airflow
+        run: .venv/bin/python -m pytest -m airflow -q

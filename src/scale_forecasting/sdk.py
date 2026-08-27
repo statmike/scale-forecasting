@@ -315,6 +315,25 @@ class Forecaster:
 
         return dag_nodes(plan_dag(self._config))
 
+    def emit_airflow(self, config_uri: str | None = None, *, dag_id: str | None = None) -> str:
+        """Render this config's Airflow DAG as a ``dag_<run_id>.py`` source string — pure, offline.
+
+        The Composer counterpart to `dag`: instead of the node list, it returns a standalone Airflow
+        DAG file (`airflow_emit.emit_airflow_dag`) whose tasks reproduce this exact run — one job
+        per family on its resolved runtime, the ensemble node, and (when the run has several
+        ephemeral Ray/Dataproc-cluster families) the shared-cluster bracket — all under the same
+        deterministic ``run_id``. ``config_uri`` is embedded verbatim as the DAG's ``CONFIG_URI``
+        (what each task loads the config from); pass the ``gs://`` URI of a staged config for a
+        Composer-runnable DAG, or omit it to reference this config's own `run_id` file under the
+        convention (``runs/<run_id>.json``). ``dag_id`` overrides the default
+        ``scale_forecasting_<run_id>``. Touches no GCP — write the returned string to the Airflow
+        DAGs folder (or stage it with `staging.stage_dag`).
+        """
+        from .airflow_emit import emit_airflow_dag
+
+        uri = config_uri if config_uri is not None else f"runs/{self.run_id}.json"
+        return emit_airflow_dag(self._config, uri, dag_id=dag_id)
+
     def jobs(self, run_id: str | None = None) -> list[JobTrace]:
         """The per-job cross-system trace for a run — one `JobTrace` per family, plus the ensemble.
 

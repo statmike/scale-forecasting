@@ -247,12 +247,13 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
     return tel
 
 
-def _batch_id(run_id: str, engine: str) -> str:
-    """A Dataproc batch id: ``sf-<engine>-<run_id>``, clamped to the 4-63 char / alnum+hyphen rule.
+def _batch_id(run_id: str) -> str:
+    """A Dataproc batch id: ``sf-<run_id>``, clamped to the 4-63 char / alnum+hyphen rule.
 
-    ``run_id`` is already a slug + hex digest; prefix the engine and trim to fit.
+    ``run_id`` is already a slug + hex digest; prefix ``sf-`` and trim to fit. This is a cosmetic
+    platform batch name only — never persisted to BigQuery, never used by idempotency.
     """
-    raw = f"sf-{engine}-{run_id}"
+    raw = f"sf-{run_id}"
     return raw[:63].rstrip("-")
 
 
@@ -282,7 +283,6 @@ def build_batch(
     *,
     infra: BatchInfra,
     settings: Settings,
-    engine: str,
     package_uri: str,
     launcher_uri: str,
     config_uri: str,
@@ -295,8 +295,8 @@ def build_batch(
     """Assemble the ``dataproc_v1.Batch`` for one forecast run (pure — builds the message only).
 
     Mirrors the Terraform seed batch: runtime container + package zip on ``python_file_uris``, the
-    ``spark_main`` shim as the ``gs://`` main file, ``--engine``/``--config-uri`` + the ``--sf-*``
-    infra args. ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (executor throttle).
+    ``spark_main`` shim as the ``gs://`` main file, ``--config-uri`` + the ``--sf-*`` infra args.
+    ``max_executors`` caps ``spark.dynamicAllocation.maxExecutors`` (executor throttle).
 
     ``models`` / ``manage_header`` carry the on-cluster contract: ``--models m1,m2`` restricts
     the executed subset (run_id still derives from the full staged config) and ``--manage-header
@@ -313,9 +313,7 @@ def build_batch(
 
     from google.cloud import dataproc_v1 as dataproc
 
-    args = build_driver_args(
-        config_uri, settings, engine=engine, models=models, manage_header=manage_header
-    )
+    args = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
     properties = {}
     if max_executors is not None:
         properties["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
@@ -402,7 +400,6 @@ def _batch_client(region: str) -> object:
 def submit_batch(
     cfg: RunConfig,
     *,
-    engine: str = "explode",
     n_series: int | None = None,
     settings: Settings | None = None,
     infra: BatchInfra | None = None,
@@ -417,8 +414,7 @@ def submit_batch(
 ) -> str:
     """Stage code + config and submit one Dataproc Serverless forecast batch; return its batch id.
 
-    Resolves infra from the environment when not passed. ``engine`` names the Spark engine
-    (``explode``). ``n_series`` overrides
+    Resolves infra from the environment when not passed. ``n_series`` overrides
     ``data.series_limit`` at submit time — the scale knob for the 10 → 100 → 1k → 100k story;
     because it changes the config it yields a distinct ``run_id``/header per scale (each scale is
     its own queryable run). With ``wait`` the call blocks until the batch is terminal (parity with
@@ -431,7 +427,7 @@ def submit_batch(
     (``main.run`` owns the shared header). Both default to standalone behavior, so every existing
     caller stages and submits exactly as before.
 
-    ``batch_id`` overrides the derived ``sf-<engine>-<run_id>`` id. A caller that fans out several
+    ``batch_id`` overrides the derived ``sf-<run_id>`` id. A caller that fans out several
     batches under **one** shared ``run_id`` (each staging the same full cfg) supplies a distinct
     per-batch id, since the derived id would otherwise collide. When ``None`` the id is derived.
 
@@ -446,14 +442,13 @@ def submit_batch(
     infra = infra or BatchInfra.resolve()
     cfg = cfg.with_series_limit(n_series)
     run_id = make_run_id(cfg)
-    batch_id = batch_id or _batch_id(run_id, engine)
+    batch_id = batch_id or _batch_id(run_id)
 
     package_uri, launcher_uri = _stage_code(infra)
     config_uri = _stage_config(cfg, run_id, infra)
     batch = build_batch(
         infra=infra,
         settings=settings,
-        engine=engine,
         package_uri=package_uri,
         launcher_uri=launcher_uri,
         config_uri=config_uri,
@@ -466,7 +461,7 @@ def submit_batch(
 
     client = _batch_client(settings.region)
     parent = f"projects/{settings.project_id}/locations/{settings.region}"
-    _log.info("submitting batch %s (engine=%s) to %s", batch_id, engine, parent)
+    _log.info("submitting batch %s to %s", batch_id, parent)
     operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
     if wait:
         # Block until terminal, but with a timeout long enough for a full-scale (100k) batch — the

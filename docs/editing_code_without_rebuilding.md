@@ -36,7 +36,7 @@ purpose.
 $EDITOR src/scale_forecasting/models/theta.py
 
 # 2. Run it. The submit helper zips your current src/ and ships it.
-python -m scale_forecasting.submit --config configs/explode_demo.json --engine explode
+python -m scale_forecasting.submit --config configs/explode_demo.json
 
 # 3. See the result on the leaderboard. Iterate. Repeat.
 ```

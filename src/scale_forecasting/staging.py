@@ -34,6 +34,25 @@ def stage_config(cfg: RunConfig, run_id: str, code_bucket: str) -> str:
     return f"gs://{code_bucket}/{name}"
 
 
+def stage_dag(dag_source: str, run_id: str, code_bucket: str) -> str:
+    """Write a rendered Airflow DAG to ``gs://<code_bucket>/runs/dag_<run_id>.py``; return the URI.
+
+    The Composer counterpart to `stage_config`: `airflow_emit.emit_airflow_dag` renders a run's
+    ``dag_<run_id>.py`` (whose ``CONFIG_URI`` points at the config staged alongside it), and this
+    uploads it next to that config so a deployment can sync it into the Airflow DAGs folder. The
+    source is the deterministic emitter output, so re-staging an unchanged config overwrites with
+    byte-identical text.
+    """
+    from google.cloud import storage
+
+    client = storage.Client()
+    name = f"runs/dag_{run_id}.py"
+    client.bucket(code_bucket).blob(name).upload_from_string(
+        dag_source, content_type="text/x-python"
+    )
+    return f"gs://{code_bucket}/{name}"
+
+
 def stage_manifest(manifest: dict[str, object], run_id: str, code_bucket: str) -> str:
     """Write the run's reproducibility manifest to ``gs://<code_bucket>/runs/<run_id>.plan.json``.
 

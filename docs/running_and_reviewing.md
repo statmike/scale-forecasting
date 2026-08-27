@@ -102,7 +102,7 @@ to GCS, then submit:
 
 ```bash
 # Spark family → Dataproc (explode fan-out: one task per (series, model) cell)
-python -m scale_forecasting.submit --config configs/explode_demo.json --engine explode
+python -m scale_forecasting.submit --config configs/explode_demo.json
 
 # Ray family → Vertex
 python -m scale_forecasting.ray_submit --config configs/ray_cpu_demo.json
@@ -207,7 +207,7 @@ python -m scale_forecasting.reset --yes      # actually drops
 | Command | Purpose |
 |---------|---------|
 | `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run — a job per family in parallel (Spark/Ray ∥ BigQuery) under one `run_id`. |
-| `python -m scale_forecasting.submit --config C --engine explode` | Submit a single Spark family job to Dataproc. |
+| `python -m scale_forecasting.submit --config C` | Submit a single Spark family job to Dataproc. |
 | `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |

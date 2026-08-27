@@ -64,8 +64,8 @@ def _infra() -> BatchInfra:
 
 
 def test_shell_join_quotes_only_what_needs_it() -> None:
-    line = shell_join(["gcloud", "batches", "submit", "--batch=sf-explode-abc"])
-    assert line == "gcloud batches submit --batch=sf-explode-abc"
+    line = shell_join(["gcloud", "batches", "submit", "--batch=sf-abc"])
+    assert line == "gcloud batches submit --batch=sf-abc"
     # a token with spaces/specials is quoted so the line stays copy-pasteable and re-parses cleanly.
     joined = shell_join(["--label", "run one", "--filter", "a=b;c"])
     assert shlex.split(joined) == ["--label", "run one", "--filter", "a=b;c"]
@@ -80,20 +80,19 @@ def test_driver_args_default_is_config_uri_plus_infra_only() -> None:
     assert args[:2] == ["--config-uri", "gs://c/runs/r.json"]
     assert "--sf-project-id" in args and "proj-x" in args
     # defaults omit the optional flags entirely
-    assert "--engine" not in args
     assert "--models" not in args
     assert "--manage-header" not in args
 
 
-def test_driver_args_engine_leads_and_optionals_appended_when_non_default() -> None:
+def test_driver_args_config_uri_leads_and_optionals_appended_when_non_default() -> None:
     args = build_driver_args(
         "gs://c/runs/r.json",
         _settings(),
-        engine="explode",
         models=["theta", "holtwinters"],
         manage_header=False,
     )
-    assert args[:4] == ["--engine", "explode", "--config-uri", "gs://c/runs/r.json"]
+    # config-uri always leads (there is no method flag); the optionals append when non-default.
+    assert args[:2] == ["--config-uri", "gs://c/runs/r.json"]
     assert args[-2:] == ["--manage-header", "false"]
     i = args.index("--models")
     assert args[i + 1] == "theta,holtwinters"
@@ -111,8 +110,7 @@ def test_spark_native_command_reconstructs_the_exact_batch() -> None:
     cmds = build_spark_commands(
         settings=settings,
         infra=infra,
-        engine="explode",
-        batch_id="sf-explode-run-abc",
+        batch_id="sf-run-abc",
         package_uri=package_uri,
         launcher_uri=launcher_uri,
         config_uri=config_uri,
@@ -125,7 +123,6 @@ def test_spark_native_command_reconstructs_the_exact_batch() -> None:
     batch = build_batch(
         infra=infra,
         settings=settings,
-        engine="explode",
         package_uri=package_uri,
         launcher_uri=launcher_uri,
         config_uri=config_uri,
@@ -138,7 +135,7 @@ def test_spark_native_command_reconstructs_the_exact_batch() -> None:
     assert native[5] == ps.main_python_file_uri == launcher_uri
     assert f"--project={settings.project_id}" in native
     assert f"--region={settings.region}" in native
-    assert "--batch=sf-explode-run-abc" in native
+    assert "--batch=sf-run-abc" in native
     assert f"--py-files={ps.python_file_uris[0]}" in native
     assert f"--version={rc.version}" in native
     assert f"--container-image={rc.container_image}" in native
@@ -155,8 +152,7 @@ def test_spark_max_executors_sets_native_property_and_universal_flag() -> None:
     cmds = build_spark_commands(
         settings=_settings(),
         infra=_infra(),
-        engine="explode",
-        batch_id="sf-explode-x",
+        batch_id="sf-x",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",
@@ -177,8 +173,7 @@ def test_spark_universal_omits_max_executors_when_unset() -> None:
     cmds = build_spark_commands(
         settings=_settings(),
         infra=_infra(),
-        engine="explode",
-        batch_id="sf-explode-x",
+        batch_id="sf-x",
         package_uri="gs://c/p.zip",
         launcher_uri="gs://c/e.py",
         config_uri="gs://c/r.json",

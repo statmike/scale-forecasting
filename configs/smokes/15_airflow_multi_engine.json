@@ -1,0 +1,37 @@
+{
+  "run_name": "smoke_15_airflow_multi_engine",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 200
+  },
+  "models": ["theta", "xgboost", "neuralprophet", "arima_plus", "timesfm"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 10,
+    "horizon": 28,
+    "step": 28
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": ["mean", "median", "inverse_error", "nnls"]
+  },
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "runtime": "ray",
+        "hardware": "gpu",
+        "gpu_type": "T4"
+      }
+    },
+    "ensemble": {
+      "mode": "microbatch",
+      "microbatch_interval_s": 30.0
+    }
+  }
+}

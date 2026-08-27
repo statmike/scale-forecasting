@@ -50,9 +50,9 @@ variable "create_composer" {
   description = <<-EOT
     Create the Composer 3 (Airflow) environment. Default FALSE — Composer is the only
     at-rest cost (~$300-400/mo), and many use cases run the pipeline ad-hoc (local/notebook)
-    and never need a scheduler. Turn it on to develop scheduled DAG orchestration (the run DAG
-    is not shipped yet — see modules/composer); turn it off again with `terraform apply` to stop
-    the meter. See modules/composer for the documented start / run / stop lifecycle.
+    and never need a scheduler. Turn it on to run scheduled DAG orchestration (DAGs are emitted
+    per-run and imported into the environment — see modules/composer); turn it off again with
+    `terraform apply` to stop the meter. See modules/composer for the start / run / stop lifecycle.
   EOT
   type        = bool
   default     = false

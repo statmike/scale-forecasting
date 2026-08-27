@@ -200,4 +200,5 @@ markers = [
     "raylive: provisions a live (billed) Vertex Ray cluster — CPU-only, opt-in",
     "gpu: needs a real GPU (T4)",
     "slow: long-running (scale smokes)",
+    "airflow: needs apache-airflow installed (parses an emitted DAG; opt-in, isolated)",
 ]

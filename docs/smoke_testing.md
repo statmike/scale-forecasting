@@ -32,9 +32,14 @@ Run them cheap → expensive; each is numbered in that order.
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode (drain series as they complete) |
 | 13 | `13_native_format.json` | Reading the **native** BigQuery source table (dual-format) |
 | 14 | `14_full_dag.json` | The flagship: all families + native + ensemble, one run_id |
+| 15 | `15_airflow_multi_engine.json` | The whole DAG **orchestrated by Composer/Airflow** — three engines (Spark + Ray GPU + BigQuery) under a microbatch ensemble |
 
 Every other smoke reads the managed-Iceberg source table, so 13 gives the native-format read its own
 proof; together they validate both source formats.
+
+Smokes 01–14 launch the run directly (`main.run`); smoke 15 is the one that proves the **Airflow
+layer** actually orchestrates the same building blocks — see
+[Orchestrating on Composer](#orchestrating-on-composer-airflow-smoke) below.
 
 ## Prerequisites
 
@@ -125,6 +130,77 @@ Flags:
 
 The command exits non-zero if any check fails, so it drops straight into CI or a `for` loop.
 
+## Orchestrating on Composer (Airflow smoke)
+
+Smokes 01–14 launch the run directly. Smoke 15 instead drives the run **through Composer**, proving
+the emitted Airflow DAG orchestrates the same building blocks the direct smokes launch by hand. It
+takes the identical config, resolves its `run_id`, stages its artifacts, emits `dag_<run_id>.py`
+([`airflow_emit.emit_airflow_dag`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/airflow_emit.py)),
+imports it into the environment, triggers it, and waits for the run to land in the registry — the
+same terminal signal the direct harness polls. Because the `run_id` is a digest of the config, a
+Composer-orchestrated run writes the registry under the **identical** id a local run would, so
+success is direct proof of *same code local↔Composer*. Verification reuses the direct harness's
+checkers (`verify_run_jobs` / `verify_leaderboard` / `verify_predictions`), holding both smokes to
+one standard.
+
+Two levels of proof, cheap → expensive:
+
+- **Parse-under-Airflow (always-on, free).** The offline emitter tests `compile()` the DAG and walk
+  its `ast`; they never import Airflow. `tests/unit/test_airflow_dagbag.py` closes that gap — it
+  loads an emitted DAG through a real `airflow.models.DagBag` and asserts no import errors, catching
+  operator-kwarg / import-chain mistakes the string checks can't. Airflow is heavy and conflicts
+  with our torch/ray/spark pins, so it is **not** in `uv.lock`; the test is marked `@airflow` and
+  skips cleanly when Airflow is absent (like `@spark`/`@ray`). A dedicated CI job (`airflow-parse`)
+  installs Airflow isolated against its official constraints and runs it on every push, so it can
+  never destabilize the main offline gate.
+- **Live on Composer (gated).** Provisioning Composer costs money and time, so it is gated behind
+  `create_composer=true` and run only on explicit go.
+
+**How the code and config reach Composer.** A Composer worker is just another *launch point* — it
+runs the same driver code a local launch does. It never runs the model code (that ships per-job as
+the `src/` zip and executes in Dataproc/Ray/BigQuery), but it does need three things to *be* a launch
+point, and none of them come from GitHub at runtime:
+
+- **The `SF_*` identity** — set as environment variables on the environment, wired from the Terraform
+  outputs (`terraform/main` builds this map and passes it to the composer module). This is infra, so
+  `terraform apply -var create_composer=true` sets it.
+- **The submit-side dependencies** — the `pypi_packages` the driver imports to talk to the services
+  (BigQuery registry, Dataproc/Vertex submit, the Ray `JobSubmissionClient` handshake). **Not** the
+  model stack (torch/darts/neuralprophet/pyspark) — that runs in-service. Also set by the apply.
+- **The code** (`src/`) — delivered by `make composer-sync`, which `gsutil rsync`s **this working
+  tree's** `src/` into the environment's plugins prefix (on the workers' `PYTHONPATH`). The worker
+  then imports the driver **and** re-zips that same `src/` to ship code to the jobs — so your
+  clone/fork/customizations flow through with no image rebuild. GitHub is only the origin: you pull
+  and modify locally, and `composer-sync` is what carries the result to the environment. This is a
+  bootstrap step (code changes more often than infra), not baked into Terraform.
+
+**Prerequisite — a running Composer environment.** Composer is off by default
+([`terraform/main/modules/composer`](https://github.com/statmike/scale-forecasting/tree/main/terraform/main/modules/composer)).
+Provision it, deliver the code, run the smoke, then turn the meter back off:
+
+```bash
+# 1. Provision (~25 min build; ~$300–400/mo while up — the smallest env). This also sets the
+#    workers' SF_* env + submit-side pypi packages.
+cd terraform/main
+terraform apply -var create_composer=true
+
+# 2. Deliver this working tree's src/ to the workers (the code-delivery step; re-run after edits).
+cd ..
+make composer-sync
+
+# 3. Run the Airflow smoke end-to-end (stage → emit → import → trigger → wait → verify).
+.venv/bin/python tests/smokes/airflow_smoke.py configs/smokes/15_airflow_multi_engine.json \
+    --composer-env scale-forecasting --location "$SF_REGION"
+
+# 4. Stop the meter — destroys just the environment; data/registry/buckets untouched.
+cd terraform/main
+terraform apply -var create_composer=false
+```
+
+The deep-learning family on Ray GPU over 200 series × 10 folds is the long pole and can approach the
+~60-min bearer-token expiry (a known limit); the config is the knob — drop `backtest.n_folds` or move
+`deep_learning` to CPU if a live run runs long.
+
 ## Verifying by hand in BigQuery
 
 The harness reads the same views you can query directly for the run_id it prints:
@@ -149,8 +225,14 @@ The config library is checked in the offline gate so a broken config never reach
   still spans every runtime/hardware/ensemble combination; both source formats are exercised.
 - `tests/smokes/test_harness.py` — the harness's verify/trace logic (what decides PASS/FAIL) is
   unit-tested with fixture rows.
+- `tests/smokes/test_airflow_smoke.py` — the Airflow smoke's pure command-builders (which `gcloud
+  composer` argv it shells out) and its `dag_id` derivation, so a typo can't point the live smoke at
+  the wrong environment or DAG.
 
-Both run in the standard offline suite (`pytest -m "not gcp and not spark and not ray"`).
+Both run in the standard offline suite (`pytest -m "not gcp and not spark and not ray"`). The
+parse-under-Airflow test (`tests/unit/test_airflow_dagbag.py`) is separate: marked `@airflow`, it
+skips unless Airflow is installed and runs in its own CI job (see
+[Orchestrating on Composer](#orchestrating-on-composer-airflow-smoke)).
 
 ## Results log
 
@@ -172,3 +254,4 @@ One row per live execution. Fill it in as the campaign runs.
 | 12 | `12_ensemble_microbatch.json` | _pending_ | | | |
 | 13 | `13_native_format.json` | _pending_ | | | |
 | 14 | `14_full_dag.json` | _pending_ | | | |
+| 15 | `15_airflow_multi_engine.json` | _pending_ | | | Orchestrated by Composer/Airflow, not direct-launch — gated on `create_composer=true`. |

@@ -68,11 +68,58 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- Airflow/Composer DAG emitter: `airflow_emit.emit_airflow_dag` renders a run's execution DAG as a
+  flat, hand-written-quality `dag_<run_id>.py` (one `PythonOperator` per family node calling the
+  `airflow_tasks` callables, explicit `>>` edges, a shared-cluster create/delete bracket when several
+  ephemeral Ray/Dataproc-cluster families co-locate, and the ensemble node wired `barrier` or
+  `microbatch`). It resolves the same DAG as `main.run` and calls the identical run building blocks,
+  so a config produces the same run on Composer as locally under one `run_id`. Exposed via
+  `--emit-airflow` on the CLI and `Forecaster.emit_airflow()`; `staging.stage_dag` uploads the
+  rendered file next to the staged config. The renderer is pure/offline (verified by
+  compiling the emitted source, no Airflow install needed). The docstring records the two native
+  operator alternatives (deferrable Dataproc operators + per-family finalize; native operators +
+  single reconcile-at-finalize) and when to prefer them over the uniform-PythonOperator model.
+- Airflow emitter — two-level testing beyond the offline `compile()`/`ast` checks:
+  - Parse-under-Airflow (`tests/unit/test_airflow_dagbag.py`, `@airflow`): loads an emitted DAG
+    through a real `airflow.models.DagBag` and asserts no import errors, so operator-kwarg / import-
+    chain mistakes the string checks can't see are caught. Airflow conflicts with our torch/ray/spark
+    pins, so it's deliberately **not** in `uv.lock`; the test skips cleanly when Airflow is absent
+    (like `@spark`/`@ray`), and a dedicated CI job (`airflow-parse`) installs it isolated against its
+    official constraints and runs it every push — a resolution problem there can't break the main
+    offline gate.
+  - Live Composer smoke (`configs/smokes/15_airflow_multi_engine.json` +
+    `tests/smokes/airflow_smoke.py`, `@gcp`): drives the most-complex config (three engines —
+    Spark + Ray GPU + BigQuery — under a microbatch ensemble) through Composer end to end (stage →
+    emit → import → trigger → wait → verify), reusing the direct smoke's verifiers. The
+    config-derived `run_id` proves same-code local↔Composer. Gated on `create_composer=true`; runbook
+    in `docs/smoke_testing.md`. The Ray-token-expiry known limit covers the long-GPU-run caveat.
+- Composer enablement (a worker = a launch point, no product-code changes): `build_package_zip`
+  resolves its zip root from `__file__`, so wherever `src/` is synced becomes the code shipped to the
+  jobs — the emitted DAG already calls the identical driver path, so nothing in `src/` changed. The
+  wiring is environment-only: the composer module now takes `env_variables` (the `SF_*` identity,
+  built in `terraform/main` from module outputs) + `pypi_packages` (the **submit-side** subset only —
+  Dataproc/Vertex/BQ clients + the version-matched Ray client + `holidays` for the native track's
+  worker-side holiday-feature build, *not* torch/darts/pyspark), and code is
+  delivered by `make composer-sync` (rsyncs the working tree's `src/` into the env's plugins prefix,
+  on `PYTHONPATH`). Image stays deps-only (the `test_code_delivery` invariant holds); GitHub is only
+  the origin, nothing pulls from it at runtime. **Live validation done** (Composer 3 / Airflow
+  2.10.5): a multi-runtime run (Spark statistical + ml, BigQuery native + ensemble) reached
+  `COMPLETED` under the config-derived `run_id`, byte-identical to the local `plan_dag` id. Three
+  launch-point defects surfaced and were fixed here: (1) the worker OOM-restarted on the family
+  fan-out at 1cpu/2gb → raised to 2cpu/6gb; (2) model files eager-imported the model stack
+  (`statsmodels`, `scipy`, …) at module top, crashing family tasks on the lean worker → moved every
+  heavy import into `fit`/`predict`, guarded by `tests/unit/test_launch_point_lean.py`; (3) the
+  native track builds holiday exog columns in Python on the worker but `holidays` wasn't in
+  `pypi_packages` → added. Trigger the DAG via the Airflow REST API (`executeAirflowCommand` 500s/502s
+  on a minimal env). Re-running the same `run_id` collides on the deterministic Dataproc batch id —
+  delete the prior batches or use a fresh `run_id`.
 - Family→runtime DAG: one run plans one job per model family (statistical / ml / deep_learning /
   native), each on its own resolved runtime, all in parallel under a shared `run_id` plus a
   downstream ensemble node. Traceable via the `v_run_jobs` view and the SDK's `Forecaster.dag()` /
   `Forecaster.jobs()`. The retired `spark_method` config knob and the `multi`/`naive` Spark methods
-  are gone — `explode` is the sole Spark engine.
+  are gone — the cross-join/explode strategy is the
+  sole, built-in Spark engine, so the `--engine` dispatch flag was removed too (both Spark and Ray
+  run their one engine directly).
 - Documentation & repo refactor: MkDocs Material site + auto-generated API reference published to
   GitHub Pages, slim README, single-sourced guides, all internal tokens/dev-notes corralled here.
 - Ray-on-Vertex autoscaling.

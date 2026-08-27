@@ -149,7 +149,7 @@ export SF_CONTAINER_IMAGE="$REGION-docker.pkg.dev/$PROJECT/scale-forecasting/spa
 export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJECT/regions/$REGION/subnetworks/scale-forecasting-compute"
 
 uv run python -m scale_forecasting.main --config configs/explode_demo.json --dry-run   # preflight
-uv run python -m scale_forecasting.submit --config configs/explode_demo.json --engine explode
+uv run python -m scale_forecasting.submit --config configs/explode_demo.json
 ```
 
 > **Long run?** Anything that runs for hours (the full 100k suite, GPU NeuralProphet) must go on the

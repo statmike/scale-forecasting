@@ -14,7 +14,7 @@ budget_amount_usd = 200
 # --- BYO toggles (defaults shown) ---
 # enable_apis             = true
 # create_service_accounts = true
-# create_composer         = false   # keep off — provisions Airflow; the run DAG is not shipped yet
+# create_composer         = false   # keep off — provisions Airflow (~$300-400/mo); opt in when you want scheduled DAGs
 # build_image             = true    # build+push the runtime image on apply; false = you build it yourself
 # dataset_id              = "scale_forecasting"
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 from ..errors import ModelError
 from ..features import invert_transform
@@ -26,6 +25,9 @@ class HoltWinters(BaseModel):
     supports_native_intervals = False
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
+        # Lazy import: keep the model stack off the module top (lean launch point).
+        from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
         if len(y) < 2:
             raise ModelError("holtwinters requires at least 2 observations")
         period = seasonal_period(self.ctx.freq)

@@ -82,6 +82,7 @@ locals {
     "dataproc.editor"  = "roles/dataproc.editor"          # submit Dataproc Serverless batches
     "aiplatform.user"  = "roles/aiplatform.user"          # submit Ray on Vertex jobs (get/list clusters)
     "ray.cluster"      = local.ray_cluster_role           # create/delete the Ray cluster it runs on
+    "composer.worker"  = "roles/composer.worker"          # Composer runs AS this SA: env workers need logging.logEntries.create + monitoring/storage (Google's prescribed env-SA role). Inert until create_composer = true.
   }
   compute_roles = {
     "bq.dataEditor"    = "roles/bigquery.dataEditor" # read source_series, write results

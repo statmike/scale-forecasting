@@ -4,9 +4,9 @@ Both `spark_entry` and `ray_entry` parse the same on-cluster contract — ``--co
 config, staged to GCS as JSON — the JSON *is* the reproducibility record) + the executed
 ``--models`` subset + ``--manage-header`` + the ``--sf-*`` infra args, which `export_infra_env`
 promotes to ``os.environ`` before anything resolves `Settings` — then load the staged config and
-dispatch to an engine's ``run(cfg, models=, manage_header=)``. This module is that shared skeleton,
-parametrized by an engine resolver so each launcher differs only in which engine a parsed Namespace
-selects.
+run the runtime's engine ``run(cfg, models=, manage_header=)``. This module is that shared skeleton,
+parametrized by a resolver so each launcher differs only in which engine callable it selects (Spark
+and Ray each have exactly one — there is no method switch).
 
 ``--models m1,m2`` restricts the executed subset (the staged config's ``run_id`` is unchanged, so
 both runtimes share it) and ``--manage-header false`` puts the engine in contributor mode (``main``
@@ -47,17 +47,9 @@ def parse_models(raw: str | None) -> list[str] | None:
     return names or None
 
 
-def build_parser(
-    prog: str, description: str, *, engines: dict[str, str] | None = None
-) -> argparse.ArgumentParser:
-    """The shared launcher parser: ``--config-uri`` + ``--models`` + ``--manage-header`` + infra.
-
-    ``engines`` (Spark only) adds the required ``--engine`` choice over its keys; Ray has a single
-    engine and omits it.
-    """
+def build_parser(prog: str, description: str) -> argparse.ArgumentParser:
+    """The shared launcher parser: ``--config-uri`` + ``--models`` + ``--manage-header`` + infra."""
     p = argparse.ArgumentParser(prog=prog, description=description)
-    if engines is not None:
-        p.add_argument("--engine", required=True, choices=sorted(engines))
     p.add_argument("--config-uri", required=True, help="gs:// (or local) path to run config JSON")
     p.add_argument(
         "--models",
@@ -80,9 +72,8 @@ def run_entry(
     prog: str,
     description: str,
     resolve_engine: EngineResolver,
-    engines: dict[str, str] | None = None,
 ) -> None:
-    """Parse the shared launcher args, load the staged config, and dispatch to the resolved engine.
+    """Parse the shared launcher args, load the staged config, and run the resolved engine.
 
     The one on-cluster driver skeleton for both runtimes: parse → export infra env → load the
     staged config (`load_config_uri`, which reads a ``gs://`` URI directly or a local path) →
@@ -90,14 +81,14 @@ def run_entry(
     """
     from .config import load_config_uri
 
-    p = build_parser(prog, description, engines=engines)
+    p = build_parser(prog, description)
     ns = p.parse_args(argv)
     export_infra_env(ns)
     models = parse_models(ns.models)
     manage_header = ns.manage_header == "true"
     engine_run, label = resolve_engine(ns)
     _log.info(
-        "%s: engine=%s config_uri=%s models=%s manage_header=%s",
+        "%s: runtime=%s config_uri=%s models=%s manage_header=%s",
         prog,
         label,
         ns.config_uri,

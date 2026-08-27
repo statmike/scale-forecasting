@@ -43,6 +43,11 @@ output "airflow_uri" {
   value       = module.composer.airflow_uri
 }
 
+output "composer_plugins_prefix" {
+  description = "GCS prefix `make composer-sync` rsyncs src/ into (workers' PYTHONPATH). null unless create_composer = true."
+  value       = module.composer.plugins_gcs_prefix
+}
+
 output "runtime_image_repo" {
   description = "Base path for the shared Spark/Ray runtime image (append :tag). Build target for Cloud Build."
   value       = module.container.image_repo_path

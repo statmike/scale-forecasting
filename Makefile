@@ -10,7 +10,7 @@
 # guarantees the committed file always equals the lock.
 EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra models --extra ray --format requirements-txt
 
-.PHONY: lock lock-check sync test docs
+.PHONY: lock lock-check sync test docs composer-sync
 
 ## lock: re-resolve uv.lock from pyproject.toml and regenerate docker/requirements.txt from it.
 ## Run this after editing dependencies in pyproject.toml, then commit both files.
@@ -42,3 +42,16 @@ test:
 ## docs: build the documentation site (strict — fails on any broken nav/link/xref).
 docs:
 	uv run --group docs mkdocs build --strict
+
+## composer-sync: deliver THIS working tree's src/ to the Composer workers (the code-delivery step).
+## GitHub is only the origin — you pull/fork/modify locally, and this ships your src/ to the env so a
+## worker imports the driver AND re-zips that same src/ to the jobs (custom models flow through, no
+## image rebuild). Nothing at runtime pulls from GitHub. Run after `terraform apply
+## -var create_composer=true`. Mirrors the package subtree (safe: won't touch unrelated plugins).
+composer-sync:
+	@prefix=$$(cd terraform/main && terraform output -raw composer_plugins_prefix 2>/dev/null); \
+	 test -n "$$prefix" || { echo "ERROR: Composer not enabled — apply with create_composer=true first."; exit 1; }; \
+	 echo "Delivering src/ -> $$prefix"; \
+	 gsutil -m rsync -r -d src/scale_forecasting "$$prefix/scale_forecasting"; \
+	 gsutil -m cp src/spark_main.py "$$prefix/spark_main.py"; \
+	 echo "src/ delivered. Workers can now import the driver and ship this code to jobs."

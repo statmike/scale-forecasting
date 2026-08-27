@@ -164,7 +164,6 @@ def test_spark_batch_ships_the_package_via_python_file_uris() -> None:
     batch = build_batch(
         infra=infra,
         settings=settings,
-        engine="explode",
         package_uri="gs://code-bkt/runs/pkg-1234.zip",
         launcher_uri="gs://code-bkt/runs/spark_main.py",
         config_uri="gs://code-bkt/runs/run-abc.json",

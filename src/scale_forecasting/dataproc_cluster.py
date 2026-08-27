@@ -332,7 +332,6 @@ def build_job(
     package_uri: str,
     config_uri: str,
     settings: Settings,
-    engine: str,
     models: list[str] | None = None,
     manage_header: bool = True,
     use_venv: bool = False,
@@ -340,8 +339,8 @@ def build_job(
     """Assemble the ``dataproc_v1.Job`` (a PySpark job placed on ``cluster``) (pure).
 
     Same launcher shim + package zip + driver args as the Serverless batch (`build_driver_args`), so
-    on-cluster code and its contract (``--engine``/``--config-uri``/``--models``/
-    ``--manage-header``) are identical between the batch and cluster surfaces.
+    on-cluster code and its contract (``--config-uri``/``--models``/``--manage-header``) are
+    identical between the batch and cluster surfaces.
 
     ``use_venv`` points the job's ``spark.pyspark.python`` / ``spark.pyspark.driver.python`` at the
     absolute ``_VENV_PYTHON`` the cluster's venv init action lands on every node (see
@@ -352,9 +351,7 @@ def build_job(
     """
     from google.cloud import dataproc_v1 as dataproc
 
-    args = build_driver_args(
-        config_uri, settings, engine=engine, models=models, manage_header=manage_header
-    )
+    args = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
     properties: dict[str, str] = dict(_VENV_JOB_PROPERTIES) if use_venv else {}
     return dataproc.Job(
         placement=dataproc.JobPlacement(cluster_name=cluster),
@@ -484,7 +481,6 @@ def _submit_job_and_wait(
 def submit_cluster_job(
     cfg: RunConfig,
     *,
-    engine: str = "explode",
     settings: Settings | None = None,
     infra: BatchInfra | None = None,
     models: list[str] | None = None,
@@ -581,7 +577,6 @@ def submit_cluster_job(
             package_uri=package_uri,
             config_uri=config_uri,
             settings=settings,
-            engine=engine,
             models=models,
             manage_header=manage_header,
             use_venv=True,

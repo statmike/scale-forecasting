@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
-from scipy.stats import norm
 
 from ..errors import ModelError
 from ..features import invert_transform
@@ -66,6 +65,8 @@ class NeuralProphetModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
+        from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
+
         future = self._model.make_future_dataframe(self._train, periods=horizon)
         fc = self._model.predict(future).tail(horizon)
         mean = fc["yhat1"].to_numpy(dtype=float)

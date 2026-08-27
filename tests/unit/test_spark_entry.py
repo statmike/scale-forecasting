@@ -1,7 +1,7 @@
-"""Offline tests for the Spark launcher dispatch (``spark_entry``).
+"""Offline tests for the Spark launcher (``spark_entry``).
 
-No Spark, no GCP: the launcher parses ``--engine`` + ``--config-uri`` + the ``--models`` /
-``--manage-header`` flags, loads a local config, and forwards to the engine's
+No Spark, no GCP: the launcher parses ``--config-uri`` + the ``--models`` /
+``--manage-header`` flags, loads a local config, and forwards to the one Spark engine's
 ``run(cfg, models=..., manage_header=...)``. The engine module's ``run`` is monkeypatched to capture
 the forwarded call, so the actual pyspark path (covered by ``@spark``/``@gcp``) never runs here. The
 CSV parser (:func:`_parse_models`) is exercised directly as the pure unit it is.
@@ -66,7 +66,7 @@ def test_main_defaults_forward_standalone(tmp_path: Path, monkeypatch: pytest.Mo
         captured["manage_header"] = manage_header
 
     monkeypatch.setattr(spark_explode, "run", _fake_run)
-    spark_entry.main(["--engine", "explode", "--config-uri", _write_config(tmp_path)])
+    spark_entry.main(["--config-uri", _write_config(tmp_path)])
 
     assert captured["models"] is None
     assert captured["manage_header"] is True
@@ -86,8 +86,6 @@ def test_main_forwards_oncluster_contributor_flags(
     monkeypatch.setattr(spark_explode, "run", _fake_run)
     spark_entry.main(
         [
-            "--engine",
-            "explode",
             "--config-uri",
             _write_config(tmp_path),
             "--models",
