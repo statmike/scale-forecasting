@@ -608,7 +608,7 @@ wheels = [
 
 [[package]]
 name = "dataproc-spark-connect"
-version = "1.1.0"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-api-core" },
@@ -618,9 +618,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/16/8fb6f9e5b409a11b87d58ecbabda66a7f2af2c1f8609cb9a8c5923b8f1ab/dataproc_spark_connect-1.1.0.tar.gz", hash = "sha256:c4d7337a422e80fe6c5cab7ca4e642de5948c6f5dcbe2e6d6ae4aafd32aad55e", size = 28044, upload-time = "2026-04-07T02:02:58.527Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/e6/ad2546d364d4de87ffb3f59e8729b0a11e1ecbfc83900eb1657cefbeb42f/dataproc_spark_connect-0.9.0.tar.gz", hash = "sha256:b3ea066d5ae24b0c35e8ba656b27e6237fef51ba256cb8783d66fdd5899135bd", size = 20882, upload-time = "2025-08-01T14:55:14.685Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/1b/ee56df54bd3413d6a9328bbc184bce2583dffa4c9262f5b9655247eb83ee/dataproc_spark_connect-1.1.0-py2.py3-none-any.whl", hash = "sha256:0202ebb8e3816b5d3f27642e17464a2d64c320776baaef0e6acee88ef45be557", size = 33224, upload-time = "2026-04-07T02:02:57.215Z" },
+    { url = "https://files.pythonhosted.org/packages/33/53/e55df75b88fdfd173e499d7b3b0492f50b12bb46d90674af7df9d50ab4e7/dataproc_spark_connect-0.9.0-py2.py3-none-any.whl", hash = "sha256:951fe8e0c84ea5117e023f90324ce4cb2eb87db84df429b22abb7adc5d4e6870", size = 25299, upload-time = "2025-08-01T14:55:13.724Z" },
 ]
 
 [[package]]
@@ -2760,12 +2760,12 @@ wheels = [
 
 [[package]]
 name = "pyspark"
-version = "4.0.4"
+version = "3.5.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "py4j" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9a/c8/27b5316543a4d724efef4ecc1cfcb42a9afcb8af33cfdff989164b9a4487/pyspark-4.0.4.tar.gz", hash = "sha256:7e119366364d48e3cda1b1efd1ebc6cd672949500667c9cabbeef858daba700f", size = 434312230, upload-time = "2026-07-15T11:15:10.721Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/ce/81e53e729790556e3983e95de1a7d5df91a34adfcd34b5a5ab0e0c6e9b33/pyspark-3.5.9.tar.gz", hash = "sha256:ea27adc39ddac9413b8951e45aa748cbed6c785971b81386efc41938f6243d93", size = 317858593, upload-time = "2026-07-16T08:52:04.494Z" }
 
 [package.optional-dependencies]
 connect = [
@@ -3122,7 +3122,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dataproc-spark-connect", marker = "extra == 'spark'", specifier = ">=0.7" },
+    { name = "dataproc-spark-connect", marker = "extra == 'spark'", specifier = ">=0.7,<1.0" },
     { name = "db-dtypes", specifier = ">=1.2" },
     { name = "google-cloud-aiplatform", marker = "extra == 'ray'", specifier = ">=1.60" },
     { name = "google-cloud-aiplatform", marker = "extra == 'submit'", specifier = ">=1.60" },

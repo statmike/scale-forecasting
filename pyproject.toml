@@ -56,7 +56,11 @@ spark = [
     # Client-side only — lets a notebook drive the engine over a Dataproc Spark Connect endpoint
     # (an injected DataprocSparkSession). NEVER imported by the engine modules (they run on-cluster
     # against a classic session), so the same engine code runs as a batch and over Connect (G1).
-    "dataproc-spark-connect>=0.7",
+    # Capped <1.0 on purpose: 0.7.x brings pyspark 3.5 (py3.11-compatible) and defaults to runtime
+    # 2.3 (Spark 3.5 / py3.11 workers), which is what notebook 01 targets. The 1.x line pins
+    # pyspark 4.0 AND hard-codes a client-side runtime-3.0 floor (py3.12 workers) — that would break
+    # driver↔worker parity on the single py3.11 build. Keep the client on the 0.7 line.
+    "dataproc-spark-connect>=0.7,<1.0",
 ]
 # Python runtime B — Ray on Vertex AI.
 ray = [
