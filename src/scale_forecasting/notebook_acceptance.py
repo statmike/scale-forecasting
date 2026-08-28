@@ -84,7 +84,11 @@ REGISTRY: dict[str, NotebookSpec] = {
         NotebookSpec("07_scale_review", TEMPLATE_MAIN, TIER_SMOKE, 900),
         # 09 is registry-read-only (reviews any finished run_id) → cheapest tier.
         NotebookSpec("09_review_run", TEMPLATE_MAIN, TIER_SMOKE, 900),
-        NotebookSpec("01_spark_via_connect", TEMPLATE_MAIN, TIER_BATCH, 1800),
+        # 01 brings up an interactive Spark Connect session AND its bootstrap installs the locked
+        # deps (incl. pyspark) into a private prefix from scratch (no cache on a fresh runtime) to
+        # shadow the base image's numpy 2.x — together ~30 min, so it gets a wider budget than a
+        # normal batch notebook.
+        NotebookSpec("01_spark_via_connect", TEMPLATE_MAIN, TIER_BATCH, 3600),
         NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 1800),
         # 08 launches a multi-engine run (Spark ∥ BigQuery) then live-monitors it → Dataproc spend.
         NotebookSpec("08_run_and_monitor", TEMPLATE_MAIN, TIER_BATCH, 1800),
