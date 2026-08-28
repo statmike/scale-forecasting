@@ -86,42 +86,40 @@ def test_build_entrypoint_appends_oncluster_flags_when_non_default() -> None:
 # --- build_runtime_env: runtime code delivery ----------------------------------
 
 
-def test_build_runtime_env_prebuilt_image_ships_src_and_requirements() -> None:
+def test_build_runtime_env_ships_src_and_uv_deps() -> None:
     import os
 
-    # No custom image (Vertex prebuilt Ray image): the image lacks our deps but has pip, so the
-    # runtime_env carries the requirements list.
-    env = ray_submit.build_runtime_env(None)
+    # Ray always runs on Vertex's prebuilt image, which lacks our deps, so the runtime_env carries
+    # the requirements list, installed by uv (byte-aligned with the container's own build).
+    env = ray_submit.build_runtime_env()
     # working_dir is the package root (so `python -m scale_forecasting.ray_entry` resolves) — a real
     # local dir that exists for the upload to succeed.
     assert env["working_dir"].endswith("/src")
     assert os.path.isdir(env["working_dir"])
-    # pip is the locked deps as a package LIST (pinned "name==version" specs), not a file path, so
-    # we can drop cluster-provided packages from it.
-    pip = env["pip"]
-    assert isinstance(pip, list) and pip
-    # The list LEADS with the PyTorch CUDA extra index (mirrors docker/Dockerfile) so the x86_64
-    # torch "+cu126" pin resolves on the cluster instead of 404-ing the whole job at env setup.
-    assert pip[0] == "--extra-index-url https://download.pytorch.org/whl/cu126"
-    specs = pip[1:]
-    assert specs and all("==" in spec for spec in specs)
+    # No pip key on the uv path: Ray's runtime_env uv plugin owns the install.
+    assert "pip" not in env
+    uv = env["uv"]
+    # packages is the locked deps as a LIST (pinned "name==version" specs), not a file path, so we
+    # can drop cluster-provided packages from it.
+    packages = uv["packages"]
+    assert isinstance(packages, list) and packages
+    assert all("==" in spec for spec in packages)
     # neuralprophet (a real [models] dep) is shipped; Ray is NOT (the cluster image provides it, and
-    # a pip pin could clash with the version Vertex booted).
-    names = {re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower() for spec in specs}
+    # a pin could clash with the version Vertex booted).
+    names = {re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower() for spec in packages}
     assert "neuralprophet" in names
     assert "ray" not in names
-
-
-def test_build_runtime_env_custom_image_omits_pip() -> None:
-    import os
-
-    # A custom node image already bundles the full dep set, so no pip key is emitted: Ray then skips
-    # its runtime_env pip plugin (which, on the image's pip-less self-contained venv, would fail env
-    # setup with "No module named pip"). Only the working_dir (code delivery) ships.
-    env = ray_submit.build_runtime_env("us-docker.pkg.dev/p/repo/spark-runtime:latest")
-    assert env["working_dir"].endswith("/src")
-    assert os.path.isdir(env["working_dir"])
-    assert "pip" not in env
+    # The install options carry the PyTorch CUDA extra index + unsafe-best-match (mirrors
+    # docker/Dockerfile) so the x86_64 torch "+cu126" pin resolves on the cluster instead of
+    # 404-ing the whole job at env setup. --no-cache is re-listed (it replaces the plugin default).
+    opts = uv["uv_pip_install_options"]
+    assert "--no-cache" in opts
+    assert "https://download.pytorch.org/whl/cu126" in opts
+    i = opts.index("--extra-index-url")
+    assert opts[i + 1] == "https://download.pytorch.org/whl/cu126"
+    assert "--index-strategy" in opts and "unsafe-best-match" in opts
+    # uv_check runs `uv pip check` after install so dependency drift fails loudly at env setup.
+    assert uv["uv_check"] is True
 
 
 # --- RayInfra resolution -------------------------------------------------------
@@ -131,11 +129,9 @@ def test_ray_infra_resolve_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SF_RAY_NETWORK", "projects/p/global/networks/n")
     monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
     monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
-    monkeypatch.delenv("SF_CONTAINER_IMAGE", raising=False)
     infra = ray_submit.RayInfra.resolve()
     assert infra.network.endswith("/networks/n")
     assert infra.code_bucket == "code-bkt"
-    assert infra.container_image is None  # unset → Vertex prebuilt image + requirements
     assert infra.ray_version == ray_submit._DEFAULT_RAY_VERSION
 
 
@@ -175,18 +171,16 @@ def test_ray_infra_resolve_missing_var_raises(monkeypatch: pytest.MonkeyPatch) -
         ray_submit.RayInfra.resolve()
 
 
-def test_ray_infra_from_terraform_outputs_with_and_without_image() -> None:
+def test_ray_infra_from_terraform_outputs_maps_keys() -> None:
     outputs = {
         "network_id": "projects/p/global/networks/scale-forecasting",
         "compute_sa": "sa@x.iam",
         "code_bucket": "code-bkt",
-        "runtime_image_repo": "us-docker.pkg.dev/p/repo/runtime",
     }
-    no_image = ray_submit.RayInfra.from_terraform_outputs(outputs)
-    assert no_image.container_image is None
-    assert no_image.network == "projects/p/global/networks/scale-forecasting"
-    with_image = ray_submit.RayInfra.from_terraform_outputs(outputs, image_tag="v1")
-    assert with_image.container_image == "us-docker.pkg.dev/p/repo/runtime:v1"
+    infra = ray_submit.RayInfra.from_terraform_outputs(outputs)
+    assert infra.network == "projects/p/global/networks/scale-forecasting"
+    assert infra.compute_sa == "sa@x.iam"
+    assert infra.code_bucket == "code-bkt"
 
 
 def test_ray_infra_from_terraform_outputs_without_network_is_public() -> None:
@@ -317,7 +311,7 @@ def test_worker_resources_attaches_autoscaling_spec_per_pool(_fake_vertex_ray: N
         _cfg(compute={"use_gpu": True, "ray_cpu_max_nodes": 20, "ray_gpu_max_nodes": 4}),
         run_id="rid",
     )
-    workers = ray_submit._worker_resources(plan, _infra())
+    workers = ray_submit._worker_resources(plan)
     assert len(workers) == 2  # CPU + GPU pool
     specs = {}
     for w in workers:
@@ -334,7 +328,7 @@ def test_worker_resources_omits_spec_when_autoscale_off(_fake_vertex_ray: None) 
     plan = ray_io.plan_cluster(
         _cfg(compute={"use_gpu": True, "ray_autoscale": False}), run_id="rid"
     )
-    workers = ray_submit._worker_resources(plan, _infra())
+    workers = ray_submit._worker_resources(plan)
     assert workers  # pools still built
     for w in workers:
         assert w.kwargs["autoscaling_spec"] is None

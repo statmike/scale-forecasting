@@ -76,12 +76,13 @@ _TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
 
 # Ray-cluster infra env vars (beyond the SF_* identity Settings resolves). Kept together so the
 # docstring, resolve(), and any tooling agree. code_bucket + compute_sa are shared with the Spark
-# batch; network (optional) is a VPC for a private endpoint; container_image is optional.
+# batch; network (optional) is a VPC for a private endpoint. There is deliberately no custom-image
+# var: Ray always runs on Vertex's prebuilt image + a uv runtime_env (a custom node image fails
+# Vertex Ray GPU-node provisioning — see build_runtime_env). SF_CONTAINER_IMAGE stays Spark-only.
 _ENV_NETWORK = "SF_RAY_NETWORK"
 _ENV_NETWORK_ATTACHMENT = "SF_RAY_NETWORK_ATTACHMENT"
 _ENV_COMPUTE_SA = "SF_COMPUTE_SA"
 _ENV_CODE_BUCKET = "SF_CODE_BUCKET"
-_ENV_CONTAINER_IMAGE = "SF_CONTAINER_IMAGE"
 _ENV_RAY_VERSION = "SF_RAY_VERSION"
 
 # Vertex Ray's supported Ray version + our runtime Python. Vertex AI accepts only a fixed set of Ray
@@ -128,16 +129,16 @@ class RayInfra:
     * neither set: a public endpoint (Vertex's default; same handshake caveat).
 
     ``compute_sa`` is the runtime SA the cluster runs as; ``code_bucket`` where the run config JSON
-    is staged. ``container_image`` is an optional custom node image (the shared runtime that bundles
-    ``[ray]`` + ``[models]``); when unset, Vertex's prebuilt Ray image is used and ``runtime_env``
-    installs ``requirements.txt`` on top.
+    is staged. There is no custom-image field: Ray always runs on Vertex's prebuilt image and the
+    uv ``runtime_env`` installs the deps on top. Unlike the Spark path, Ray never uses a custom node
+    image — one fails Vertex Ray GPU-node provisioning (see ``build_runtime_env``), so
+    ``SF_CONTAINER_IMAGE`` stays Spark-only and is never read here.
     """
 
     compute_sa: str
     code_bucket: str
     network: str | None = None
     network_attachment: str | None = None
-    container_image: str | None = None
     ray_version: str = _DEFAULT_RAY_VERSION
     python_version: str = _DEFAULT_PYTHON_VERSION
 
@@ -147,7 +148,8 @@ class RayInfra:
 
         ``SF_COMPUTE_SA`` and ``SF_CODE_BUCKET`` are required; ``SF_RAY_NETWORK_ATTACHMENT``
         (PSC-I, preferred) and ``SF_RAY_NETWORK`` (VPC peering) are optional — set at most one; if
-        both are set the attachment wins. Neither set → public endpoint.
+        both are set the attachment wins. Neither set → public endpoint. Ray always runs on Vertex's
+        prebuilt image + a uv ``runtime_env`` (no custom-image var).
         """
         required = {
             "compute_sa": _ENV_COMPUTE_SA,
@@ -167,32 +169,24 @@ class RayInfra:
             code_bucket=values["code_bucket"],
             network=os.environ.get(_ENV_NETWORK) or None,
             network_attachment=os.environ.get(_ENV_NETWORK_ATTACHMENT) or None,
-            container_image=os.environ.get(_ENV_CONTAINER_IMAGE) or None,
             ray_version=os.environ.get(_ENV_RAY_VERSION) or _DEFAULT_RAY_VERSION,
         )
 
     @classmethod
-    def from_terraform_outputs(
-        cls, outputs: dict[str, str], image_tag: str | None = None
-    ) -> RayInfra:
+    def from_terraform_outputs(cls, outputs: dict[str, str]) -> RayInfra:
         """Build from a ``terraform output -json`` value map (local dev/tests).
 
         Reads the keys the ``terraform/main`` stage emits — ``compute_sa``, ``code_bucket``, an
         optional ``network_attachment_id`` (PSC-I, preferred) and/or ``network_id`` (VPC peering);
-        both absent → public endpoint, and if both are present the attachment wins. When
-        ``image_tag`` is given, ``runtime_image_repo`` is read for a custom node image; omitting it
-        leaves ``container_image`` unset (Vertex prebuilt image + ``requirements.txt``).
+        both absent → public endpoint, and if both are present the attachment wins. Ray always runs
+        on Vertex's prebuilt image + a uv ``runtime_env``, so no image is read here.
         """
         try:
-            image = (
-                f"{outputs['runtime_image_repo']}:{image_tag}" if image_tag is not None else None
-            )
             return cls(
                 compute_sa=outputs["compute_sa"],
                 code_bucket=outputs["code_bucket"],
                 network=outputs.get("network_id") or None,
                 network_attachment=outputs.get("network_attachment_id") or None,
-                container_image=image,
             )
         except KeyError as exc:
             raise ConfigError(f"terraform outputs missing key: {exc.args[0]}") from exc
@@ -249,34 +243,45 @@ def _requirements_packages() -> list[str]:
     return packages
 
 
-def build_runtime_env(container_image: str | None = None) -> dict[str, Any]:
-    """The Ray ``runtime_env``: current ``src/`` + (only when needed) on-cluster deps (pure).
+def build_runtime_env() -> dict[str, Any]:
+    """The Ray ``runtime_env``: current ``src/`` + on-cluster deps installed by uv (pure).
 
     Delivers code at RUNTIME the way the Spark path uploads a ``src/`` zip: ``working_dir`` is the
     package root, so ``python -m scale_forecasting.ray_entry`` imports the code that was just
     submitted, not anything baked into the image — the "same code local and in the cloud" seam.
 
-    Dependencies come from ONE of two places, never both, keyed on whether a custom node image is in
-    use:
-
-    * **Custom node image set** (``container_image`` given — the default deployment): the image
-      already bundles the full locked dep set (built with ``uv sync --extra models --extra ray``,
-      including the ``+cu126`` torch build), so the job runs directly in that interpreter and NO
-      ``pip`` key is emitted — Ray then skips its runtime_env pip plugin entirely. Omitting it is
-      required, not merely an optimization: the image's self-contained venv ships no ``pip``, so a
-      runtime_env pip install would fail at env setup ("No module named pip"). It also avoids a
-      redundant per-job reinstall of packages the image already has.
-    * **No custom image** (``container_image`` is None → Vertex's prebuilt Ray image): that image
-      lacks our deps but does provide ``pip``, so ship the requirements package **list minus Ray**
-      (`_requirements_packages` — Ray stays the image's pinned version rather than being swapped by
-      a conflicting pin). The list leads with ``--extra-index-url`` for the PyTorch CUDA wheels
-      (`_TORCH_CUDA_INDEX`, mirroring docker/Dockerfile): the x86_64/linux torch pin is a ``+cu126``
-      local build that only resolves from that index. PyPI stays the primary index.
+    Ray always runs on Vertex's prebuilt image (a custom node image fails Vertex Ray GPU-node
+    provisioning), which lacks our deps — so **uv** installs the requirements package **list minus
+    Ray** into the per-job virtualenv (`_requirements_packages` — Ray stays the image's pinned
+    version rather than being swapped by a conflicting pin). uv resolves from the same pinned
+    requirements export the container is built from, so the on-cluster env is byte-aligned with
+    every other surface, and it installs markedly faster than pip; Ray 2.47's runtime_env uv plugin
+    self-bootstraps uv into the prebuilt image if absent, so nothing has to preinstall it.
+    ``--extra-index-url`` adds the PyTorch CUDA wheels (`_TORCH_CUDA_INDEX`, mirroring
+    docker/Dockerfile): the x86_64/linux torch pin is a ``+cu126`` local build that only resolves
+    from that index, and ``--index-strategy unsafe-best-match`` lets uv pick it from the extra index
+    even though the same name exists on PyPI (uv's default first-index strategy would stop at PyPI
+    and never find the ``+cu126`` build). PyPI stays the primary index.
     """
-    env: dict[str, Any] = {"working_dir": str(_SRC_DIR)}
-    if container_image is None:
-        env["pip"] = [f"--extra-index-url {_TORCH_CUDA_INDEX}", *_requirements_packages()]
-    return env
+    return {
+        "working_dir": str(_SRC_DIR),
+        "uv": {
+            "packages": _requirements_packages(),
+            # Passed through to ``uv pip install`` — this REPLACES the plugin default
+            # ``["--no-cache"]``, so re-list it. See the docstring for why the extra index +
+            # unsafe-best-match are needed for the ``+cu126`` torch build.
+            "uv_pip_install_options": [
+                "--no-cache",
+                "--extra-index-url",
+                _TORCH_CUDA_INDEX,
+                "--index-strategy",
+                "unsafe-best-match",
+            ],
+            # Run ``uv pip check`` after install so dependency drift fails loudly at env setup
+            # rather than as a confusing runtime import error — the byte-alignment guarantee.
+            "uv_check": True,
+        },
+    }
 
 
 def extract_ray_telemetry(
@@ -345,7 +350,7 @@ def _stage_config(cfg: RunConfig, run_id: str, infra: RayInfra) -> str:
 # --- I/O: Vertex Ray cluster lifecycle -----------------------------------------
 
 
-def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]:
+def _worker_resources(plan: ray_io.RayClusterPlan) -> list[Any]:
     """Build the worker ``Resources`` list — one entry per non-empty pool.
 
     A GPU pool (``accelerator_type``/``accelerator_count``) for NeuralProphet and a CPU pool for
@@ -355,13 +360,11 @@ def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]
     still pass the derived count as the documented fixed-size-equivalent. When ``autoscale``
     is False both pools are fixed at their derived ``node_count`` with **no** ``autoscaling_spec``
     (a deterministic fixed-size path). A pool with zero planned nodes is omitted (Vertex rejects
-    a zero-node worker type). The optional custom node image is applied to every pool so the
-    on-cluster code sees the bundled deps.
+    a zero-node worker type). No ``custom_image`` is set — Ray runs on Vertex's prebuilt image and
+    the uv ``runtime_env`` delivers the deps (see ``build_runtime_env``).
     """
     from google.cloud.aiplatform import vertex_ray
     from google.cloud.aiplatform.vertex_ray.util.resources import AutoscalingSpec
-
-    image = infra.container_image
 
     def _spec(min_nodes: int, max_nodes: int) -> Any:
         return AutoscalingSpec(min_replica_count=min_nodes, max_replica_count=max_nodes)
@@ -372,7 +375,6 @@ def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]
             vertex_ray.Resources(
                 machine_type=plan.cpu_machine_type,
                 node_count=plan.cpu_node_count,
-                custom_image=image,
                 autoscaling_spec=(
                     _spec(plan.cpu_min_nodes, plan.cpu_max_nodes) if plan.autoscale else None
                 ),
@@ -385,7 +387,6 @@ def _worker_resources(plan: ray_io.RayClusterPlan, infra: RayInfra) -> list[Any]
                 node_count=plan.gpu_node_count,
                 accelerator_type=plan.accelerator_type,
                 accelerator_count=plan.accelerator_count,
-                custom_image=image,
                 autoscaling_spec=(
                     _spec(plan.gpu_min_nodes, plan.gpu_max_nodes) if plan.autoscale else None
                 ),
@@ -510,7 +511,6 @@ def _create_cluster(
     head = vertex_ray.Resources(
         machine_type=plan.head_machine_type,
         node_count=1,
-        custom_image=infra.container_image,
     )
 
     # PSC-I takes precedence over peering; only one of psc_interface_config / network may be set.
@@ -544,7 +544,7 @@ def _create_cluster(
     )
     return vertex_ray.create_ray_cluster(
         head_node_type=head,
-        worker_node_types=_worker_resources(plan, infra),
+        worker_node_types=_worker_resources(plan),
         cluster_name=name,
         network=network,
         psc_interface_config=psc_config,
@@ -999,7 +999,7 @@ def submit_ray(
 
     config_uri = _stage_config(cfg, run_id, infra)
     entrypoint = build_entrypoint(config_uri, settings, models=models, manage_header=manage_header)
-    runtime_env = build_runtime_env(infra.container_image)
+    runtime_env = build_runtime_env()
     regions = _resolve_regions(cfg, settings)
     _log.info(
         "ray submit: run_id=%s cluster=%s reuse=%s cpu_nodes=%d gpu_nodes=%d regions=%s",

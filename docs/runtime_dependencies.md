@@ -36,7 +36,7 @@ image and the archive both rebuild only when the locked deps change, never on a 
 |---------|-----------|-----------------------|--------|
 | **Dataproc Serverless** (`explode` / `multi` batches) | **Custom container** | the shared runtime image, attached on every submit | `submit.py` (`runtime_config.container_image`) |
 | **Spark Connect** (interactive, nb01) | **Custom container** + artifacts | image pinned on the session; code via `addArtifacts` | notebook session cell |
-| **Ray on Vertex** (nb04) | **Custom container** | the same image as the Ray cluster's worker image | `ray_submit.py` |
+| **Ray on Vertex** (nb04) | **`uv` runtime_env** | `uv` installs the frozen lock into the per-job venv on Vertex's **prebuilt** Ray image | `ray_submit.py` (`build_runtime_env`) |
 | **Dataproc cluster** (`spark_mode="cluster"`) | **Self-contained venv archive** | a tar of the image's `/opt/venv` (interpreter bundled) attached to the job (`#env`) | `dataproc_cluster.py` + `compute.spark_deps` |
 | **Colab Enterprise** (all notebooks) | **`uv`-from-lock install** | `uv` installs the frozen lock in the runtime (bootstrap or post-startup) | notebook bootstrap cell / template |
 | **Local dev** | **`uv` project env** | `uv sync --frozen` installs the same lock | `uv.lock` |
@@ -61,16 +61,18 @@ service and how they stay aligned*:
 | Service | Compute substrate | Python runtime | GPU driver |
 |---------|-------------------|----------------|------------|
 | **Dataproc Serverless** | Google-managed | shared container image (from `uv.lock`) | **Google-managed** |
-| **Ray on Vertex** | Google-managed | the same container image | **Google-managed** |
+| **Ray on Vertex** | Google-managed | Vertex prebuilt image + `uv` runtime_env (same lock) | **Google-managed** |
 | **Dataproc cluster — CPU** | stock `2.2-debian12` VM image | packed-venv archive (same lock) | — (no GPU) |
 | **Dataproc cluster — GPU** | **custom `2.2-debian12` VM image** (driver pre-baked) | packed-venv archive (same lock) | **provided by us**, baked into the VM image at build time |
 
 Two invariants keep the whole picture aligned:
 
-- **One Python source of truth across every service.** `uv.lock` builds the container image; the cluster
-  archive is a tar of that *same* image's `/opt/venv`. Managed services consume the container directly;
-  clusters can't, so they carry the byte-identical environment as an archive. There is no second
-  dependency definition anywhere — see [the one source of truth](#the-one-source-of-truth-uvlock--python-version).
+- **One Python source of truth across every service.** `uv.lock` builds the container image and the
+  `requirements.txt` export; the cluster archive is a tar of that *same* image's `/opt/venv`. Dataproc
+  Serverless consumes the container directly; Ray installs the same locked deps with `uv` into the
+  per-job venv on Vertex's prebuilt image (byte-aligned with the container, no custom image needed);
+  clusters can't take a container, so they carry the byte-identical environment as an archive. There is
+  no second dependency definition anywhere — see [the one source of truth](#the-one-source-of-truth-uvlock--python-version).
 - **The GPU driver is the one layer managed services get for free and clusters do not.** Serverless and
   Ray run on Google-managed substrate with the driver already present. A Dataproc cluster is a plain set
   of VMs, so the driver is ours to supply — and it is **baked once into a custom `2.2-debian12` VM image
@@ -102,13 +104,19 @@ so its executors carry the deps — and additionally ships the **code** with
 notebook kernel. The dep story is identical to Serverless; only the code-delivery step differs. Full
 detail lives in [notebook_runtimes.md](./notebook_runtimes.md#per-notebook-mapping).
 
-## Ray on Vertex — custom container
+## Ray on Vertex — uv runtime_env
 
-A Vertex Ray cluster takes a **worker container image**, and it is the **same shared runtime image**.
-`ray_submit.py` points the cluster's workers at it, so a Ray task imports the identical stack a Spark
-task does. The image also carries the CUDA-12.6 torch build the GPU path needs (see
-[the size note](#known-limits-and-gotchas) below). Because client↔cluster Ray parity is strict, the
-image's Python (3.11) and the pinned Ray version are load-bearing — see
+A Vertex Ray cluster **could** take a custom worker image, but ours does not: a custom node image
+fails Vertex Ray **GPU-node** provisioning ("An internal error occurred on your cluster"), so the Ray
+path runs on Vertex's **prebuilt** Ray image and `ray_submit.py`'s `build_runtime_env` installs the
+deps at job submit via Ray's `runtime_env` **`uv`** plugin. `uv` installs the same pinned
+`requirements.txt` export (the container is built from) into a per-job virtualenv, so a Ray task
+imports the identical stack a Spark task does — byte-aligned, no second resolve. The CUDA-12.6 torch
+build the GPU path needs comes from an extra index (`--extra-index-url` + `--index-strategy
+unsafe-best-match`, mirroring `docker/Dockerfile`), and Ray drops the image's pinned Ray version from
+the install list so the client↔cluster Ray stays matched. Ray 2.47's `uv` plugin self-bootstraps `uv`
+into the prebuilt image, so nothing preinstalls it. Because client↔cluster Ray parity is strict, the
+prebuilt image's Python (3.11) and the pinned Ray version are load-bearing — see
 [version_matrix.md](./version_matrix.md#why-311-everywhere--the-four-parity-boundaries).
 
 ## Dataproc cluster — self-contained venv archive
@@ -212,10 +220,11 @@ hand-edit anyway.
 
 - **The interpreter *is* in the archive, but system libraries are not.** The archive bundles the
   Python interpreter (so it needs no Python on the node), but not the OS packages the container
-  installs via `apt` (e.g. `libgomp1`, which **lightgbm** links against). The custom-container paths
-  (Serverless, Ray) have these baked in; a Dataproc **cluster** relies on its base image providing
-  them. If a cluster fit fails with a missing `.so` (e.g. `libgomp.so.1`), the fix is a cluster **init
-  action** that `apt-get install`s the library — the tarred venv can't carry a system lib.
+  installs via `apt` (e.g. `libgomp1`, which **lightgbm** links against). Serverless bakes these into
+  the custom container; Ray relies on Vertex's **prebuilt** Ray image providing them (it does — the
+  live CPU/GPU smokes fit fine); a Dataproc **cluster** relies on its base image providing them. If a
+  cluster fit fails with a missing `.so` (e.g. `libgomp.so.1`), the fix is a cluster **init action**
+  that `apt-get install`s the library — the tarred venv can't carry a system lib.
 - **The archive is large.** The venv includes the CUDA-12.6 **torch** build (the GPU deep-learning
   path) plus the bundled interpreter, on the order of a gigabyte. That is fine for a cluster job
   (staged once to nodes) but is the reason the archive is content-addressed and cached in the code

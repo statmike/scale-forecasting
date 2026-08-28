@@ -31,7 +31,7 @@ this provisions a real T4 cluster (cost + ~20-40 min, most of it T4 provisioning
 ``_SERIES_LIMIT`` / ``_N_FOLDS`` / ``_CALIBRATION_SAMPLES`` module constants) so the *compute* stays
 cheap and the run finishes comfortably within an hour. Beyond the ``SF_*`` identity the writers
 resolve, set the Ray infra vars (``SF_RAY_NETWORK`` / ``SF_COMPUTE_SA`` / ``SF_CODE_BUCKET``;
-optionally ``SF_CONTAINER_IMAGE`` / ``SF_RAY_VERSION``), then run::
+optionally ``SF_RAY_VERSION``), then run::
 
     SF_ENABLE_GPU=1 uv run --active pytest -m gpu tests/integration/test_ray_gpu_smoke.py
 

@@ -29,7 +29,7 @@ Skipped unless **both** ``SF_ENABLE_RAY`` and ``SF_PROJECT_ID`` are set (see ``t
 it provisions a real (billed) Vertex Ray cluster (~15-25 min) — but needs **no GPU quota**. Beyond
 the ``SF_*`` identity the writers resolve, set the Ray infra vars (``SF_COMPUTE_SA`` /
 ``SF_CODE_BUCKET`` required; ``SF_RAY_NETWORK`` optional — unset uses the public endpoint;
-optionally ``SF_CONTAINER_IMAGE`` / ``SF_RAY_VERSION``), then run::
+optionally ``SF_RAY_VERSION``), then run::
 
     SF_ENABLE_RAY=1 uv run pytest -m raylive tests/integration/test_ray_cpu_smoke.py
 

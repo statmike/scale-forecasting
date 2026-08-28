@@ -26,12 +26,15 @@ issue, not the client's location.
 `runtime_env setup failed` and, in the job logs, `ERROR: No matching distribution found for
 torch==2.13.0+cu126`. No cells are written.
 **Cause:** the x86_64/linux `torch` pin is a CUDA local build (`+cu126`) that exists **only** on the
-PyTorch wheel index, not PyPI. The Ray `runtime_env` pip install needs the same `--extra-index-url`
-the container image build uses; without it, pip can't resolve the pinned wheel and the whole job
-dies before any work runs.
-**Fix:** handled — `build_runtime_env()` leads the pip list with
-`--extra-index-url https://download.pytorch.org/whl/cu126` (kept in lockstep with `docker/Dockerfile`,
-with PyPI still primary). If you re-pin torch to a different CUDA minor, update the URL in both places.
+PyTorch wheel index, not PyPI. The Ray `runtime_env` **`uv`** install needs the same `--extra-index-url`
+the container image build uses; without it — and without letting `uv` prefer that index — the pinned
+wheel can't resolve and the whole job dies before any work runs.
+**Fix:** handled — `build_runtime_env()` passes `--extra-index-url
+https://download.pytorch.org/whl/cu126` **and** `--index-strategy unsafe-best-match` in the `uv`
+plugin's `uv_pip_install_options` (kept in lockstep with `docker/Dockerfile`, with PyPI still primary;
+`unsafe-best-match` is what lets `uv` pick the `+cu126` build from the extra index even though a
+same-named wheel exists on PyPI). If you re-pin torch to a different CUDA minor, update the URL in both
+places.
 
 ### Ray driver OOM — no traceback, killed at "uploading package"
 **Symptom:** the run dies with no Python traceback, often right after logging the package upload.
