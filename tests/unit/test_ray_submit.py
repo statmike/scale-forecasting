@@ -846,6 +846,70 @@ def test_submit_and_poll_reraises_non_401_poll_error(monkeypatch: pytest.MonkeyP
     assert len(connects) == 1  # no refresh on a non-401
 
 
+def test_client_needs_refresh_false_when_fresh() -> None:
+    # Still comfortably inside the token TTL → keep the existing client, no rebuild.
+    born = 100.0
+    assert (
+        ray_submit._client_needs_refresh(born, born + ray_submit._CLIENT_MAX_AGE_SECONDS - 1.0)
+        is False
+    )
+
+
+def test_client_needs_refresh_true_at_and_past_ttl() -> None:
+    # At the age threshold (and beyond) the cached OAuth token may be near expiry → rebuild.
+    born = 100.0
+    assert ray_submit._client_needs_refresh(born, born + ray_submit._CLIENT_MAX_AGE_SECONDS) is True
+    assert (
+        ray_submit._client_needs_refresh(born, born + ray_submit._CLIENT_MAX_AGE_SECONDS + 500.0)
+        is True
+    )
+
+
+def test_submit_and_poll_proactively_refreshes_before_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Jobs client is rebuilt once it ages past the token TTL — no 401 required.
+
+    A long run whose client crosses ``_CLIENT_MAX_AGE_SECONDS`` gets a fresh client *proactively*,
+    so the next poll is already authenticated and the reactive 401 path is never exercised. Here no
+    client ever raises a 401; the second connect must be driven purely by the age check.
+    """
+    resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
+    connects: list[int] = []
+
+    class _FakeClient:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+
+        def submit_job(self, *, entrypoint: str, runtime_env: dict) -> str:
+            return "job-1"
+
+        def get_job_status(self, job_id: str) -> str:
+            # No 401 anywhere — the first client is still RUNNING, the rebuilt one is done.
+            return "RUNNING" if self.idx == 0 else "SUCCEEDED"
+
+    def _fake_connect(_name: str) -> _FakeClient:
+        idx = len(connects)
+        connects.append(idx)
+        return _FakeClient(idx)
+
+    # Clock: born at 0, fresh on the first poll, aged past the TTL on the second (then steady).
+    aged = ray_submit._CLIENT_MAX_AGE_SECONDS + 1.0
+    ticks = [0.0, 0.0, aged, aged]
+
+    def _clock() -> float:
+        return ticks.pop(0) if len(ticks) > 1 else ticks[0]
+
+    monkeypatch.setattr(ray_submit, "_connect_job_client", _fake_connect)
+    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(ray_submit.time, "monotonic", _clock)
+
+    job_id, status, detail = ray_submit._submit_and_poll(
+        resource_name, "python -m x", {"working_dir": "/src"}, wait=True
+    )
+    assert (job_id, status) == ("job-1", "SUCCEEDED")
+    assert detail == ""
+    assert len(connects) == 2  # rebuilt once purely due to age — no 401 was ever raised
+
+
 def test_resolve_regions_defaults_to_settings_region() -> None:
     # No ray_regions configured → just the data-plane region.
     assert ray_submit._resolve_regions(_cfg(), _settings()) == ["us-central1"]

@@ -109,6 +109,12 @@ _FAILURE_LOG_TAIL_LINES = 60
 _DASHBOARD_CONNECT_ATTEMPTS = 20
 _DASHBOARD_CONNECT_BACKOFF_SECONDS = 15
 
+# The vertex_ray:// Jobs client mints an OAuth Bearer token (~60-min TTL) at construction and never
+# refreshes it (see `_is_auth_expiry_error`). A long GPU run (NeuralProphet) can outlive it, so we
+# proactively rebuild the client — minting a fresh token — once it reaches this age, comfortably
+# under the TTL, rather than waiting to absorb the 401 the reactive poll path handles as a backstop.
+_CLIENT_MAX_AGE_SECONDS = 2700  # 45 min
+
 
 @dataclass(frozen=True)
 class RayInfra:
@@ -722,6 +728,20 @@ def _is_auth_expiry_error(exc: Exception) -> bool:
     return " 401" in low or "unauthorized" in low
 
 
+def _client_needs_refresh(
+    born_monotonic: float,
+    now_monotonic: float,
+    max_age_s: float = _CLIENT_MAX_AGE_SECONDS,
+) -> bool:
+    """True once the Jobs client is old enough that its cached OAuth token may be nearing expiry.
+
+    The ``vertex_ray://`` client mints a Bearer token (~60-min TTL) at construction and never
+    refreshes it; rebuilding *before* the TTL keeps a long poll authenticated. Pure and
+    time-injected so the age policy is unit-testable without any live Ray I/O.
+    """
+    return (now_monotonic - born_monotonic) >= max_age_s
+
+
 def _connect_job_client(
     cluster_resource_name: str,
 ) -> Any:  # pragma: no cover - live Ray Jobs I/O, exercised by the @gpu smoke
@@ -789,24 +809,38 @@ def _submit_and_poll(
     post-submit state (the caller skips telemetry + the terminal-state check).
     """
     client = _connect_job_client(cluster_resource_name)
+    client_born = time.monotonic()
     submit_kwargs: dict[str, Any] = {"entrypoint": entrypoint, "runtime_env": runtime_env}
     if submission_id is not None:
         submit_kwargs["submission_id"] = submission_id
     job_id = client.submit_job(**submit_kwargs)
     _log.info("submitted Ray job %s", job_id)
 
+    def _fresh_client() -> Any:
+        # Proactively re-mint the OAuth token BEFORE it dies (see `_client_needs_refresh`): the
+        # vertex_ray:// client caches a Bearer token (~60-min TTL) at construction, and a long GPU
+        # run (NeuralProphet) can outlive it. Rebuilding at 45 min keeps every poll authenticated,
+        # so we never even take the 401 the reactive branch below would otherwise absorb.
+        nonlocal client, client_born
+        if _client_needs_refresh(client_born, time.monotonic()):
+            _log.info("Ray Jobs client nearing token TTL; proactively refreshing")
+            client = _connect_job_client(cluster_resource_name)
+            client_born = time.monotonic()
+        return client
+
     def _status() -> str:
-        # The Jobs client's OAuth token has a ~60-min TTL; a run outliving it gets a 401 on the
-        # next status call. That's not a job failure — rebuild the client (fresh token) and retry
-        # once, so a long GPU run (NeuralProphet) polls to completion instead of aborting.
-        nonlocal client
+        # Backstop: if the proactive refresh ever misses (clock skew / a rebuild that lands late), a
+        # 401 is still recoverable — rebuild the client (fresh token) and retry once, so a long run
+        # polls to completion instead of aborting.
+        nonlocal client, client_born
         try:
-            return str(client.get_job_status(job_id))
+            return str(_fresh_client().get_job_status(job_id))
         except Exception as exc:  # noqa: BLE001 - only a 401 is recoverable here; re-raise the rest
             if not _is_auth_expiry_error(exc):
                 raise
             _log.info("Ray job poll hit auth expiry (%r); refreshing client and retrying", exc)
             client = _connect_job_client(cluster_resource_name)
+            client_born = time.monotonic()
             return str(client.get_job_status(job_id))
 
     if not wait:
@@ -817,7 +851,9 @@ def _submit_and_poll(
         time.sleep(_POLL_SECONDS)
         status = _status()
     _log.info("Ray job %s finished: status=%s", job_id, status)
-    detail = _fetch_job_failure_detail(client, job_id) if status == "FAILED" else ""
+    # Use the age-checked client here too: a token dying right at terminal-FAILED would otherwise
+    # cost us the driver diagnosis (`_fetch_job_failure_detail` is best-effort and unwrapped).
+    detail = _fetch_job_failure_detail(_fresh_client(), job_id) if status == "FAILED" else ""
     if detail:
         _log.error("Ray job %s FAILED — driver diagnosis:\n%s", job_id, detail)
     return job_id, status, detail
