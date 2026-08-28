@@ -26,8 +26,8 @@ and the human-open path validate the *same* thing.
 **Tiers** bound cost — most notebooks orchestrate real Dataproc/Ray compute, so the harness
 escalates deliberately (smoke → batch → full); see `REGISTRY` and `notebooks_for_tier`.
 
-Public surface: `REGISTRY`, `AcceptanceResult`, `run_acceptance`,
-`notebooks_for_tier`, and a ``python -m scale_forecasting.notebook_acceptance`` CLI.
+Public surface: `REGISTRY`, `AcceptanceResult`, `run_acceptance`, `notebooks_for_tier`,
+`notebook_completed_clean`, and a ``python -m scale_forecasting.notebook_acceptance`` CLI.
 """
 
 from __future__ import annotations
@@ -123,8 +123,14 @@ class AcceptanceResult:
 
     @property
     def ok(self) -> bool:
-        """True iff the job SUCCEEDED and no cell emitted an error output."""
-        return self.state == "JOB_STATE_SUCCEEDED" and self.n_cell_errors == 0
+        """True iff the notebook ran clean: no cell error output, and a terminal state that means
+        the cells actually executed — either the API's ``JOB_STATE_SUCCEEDED`` or the synthetic
+        ``JOB_STATE_SUCCEEDED_WITH_TEARDOWN`` (cells ran to the end but the job wrapper reported
+        FAILED during post-execution teardown; see that constant)."""
+        return (
+            self.state in ("JOB_STATE_SUCCEEDED", JOB_STATE_SUCCEEDED_WITH_TEARDOWN)
+            and self.n_cell_errors == 0
+        )
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,15 @@ _TERMINAL_STATES = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCEL
 # in the notebook or the product, so the acceptance test skips rather than fails on it. See
 # `is_capacity_unavailable` for the signals; the harness rewrites FAILED → this before return.
 JOB_STATE_CAPACITY_UNAVAILABLE = "JOB_STATE_CAPACITY_UNAVAILABLE"
+
+# Synthetic (non-API) state: the notebook ran EVERY cell clean to the end, but the job wrapper still
+# reported FAILED — a post-execution teardown artifact (e.g. the runtime VM was reclaimed after the
+# executed notebook was already written, seen under regional CPU-quota pressure). The API's terminal
+# state and the actual execution disagree; cell-level success is the source of truth, so acceptance
+# passes on this. `run_acceptance` rewrites FAILED → this only when the executed notebook exists,
+# has zero cell errors, and every code cell carries an execution_count (proving execution reached
+# the end, not a silent mid-run death). See `notebook_completed_clean`.
+JOB_STATE_SUCCEEDED_WITH_TEARDOWN = "JOB_STATE_SUCCEEDED_WITH_TEARDOWN"
 
 # Substrings that mark a capacity/stockout failure (case-insensitive), drawn from the messages GCP
 # returns: Colab runtime provisioning ("does not have enough resources", "ZONE_RESOURCE_POOL_
@@ -349,6 +364,38 @@ def assert_no_cell_errors(notebook_bytes: bytes) -> int:
     return errors
 
 
+def notebook_completed_clean(notebook_bytes: bytes) -> bool:
+    """True iff an executed notebook ran EVERY code cell to the end with no error output.
+
+    This distinguishes a *finished* run whose job wrapper failed only at teardown (a background
+    thread still alive, a runtime VM reclaimed after output was written — the notebook is complete)
+    from a run that died mid-way (a later cell never executed, or a cell raised). The signals:
+
+    * at least one code cell exists (an empty notebook is not "completed"),
+    * no code cell has an ``output_type == 'error'`` output, and
+    * every code cell with non-blank source carries an ``execution_count`` — nbclient assigns one
+      only to cells it ran, so a ``None`` count on a real cell means execution stopped early.
+
+    Used by `run_acceptance` to reclassify a FAILED-but-clean job to
+    ``JOB_STATE_SUCCEEDED_WITH_TEARDOWN`` without masking a genuine partial failure.
+    """
+    import nbformat
+
+    nb = nbformat.reads(notebook_bytes.decode("utf-8"), as_version=4)
+    code_cells = [c for c in nb.cells if c.get("cell_type") == "code"]
+    if not code_cells:
+        return False
+    for cell in code_cells:
+        for output in cell.get("outputs", []):
+            if output.get("output_type") == "error":
+                return False
+        # A blank code cell may legitimately carry no count; only real cells must have executed.
+        source = "".join(cell.get("source", []))
+        if source.strip() and cell.get("execution_count") is None:
+            return False
+    return True
+
+
 def run_acceptance(
     *,
     specs: list[NotebookSpec],
@@ -430,16 +477,28 @@ def run_acceptance(
                     # transient infra — surface the offending cell's message so we can classify it.
                     detail = f"{detail}: {_first_cell_error(nb_bytes)}"
         elif state == "JOB_STATE_FAILED":
-            # The job may have failed AFTER writing a partial notebook (in-cell error) or BEFORE it
-            # ever started (runtime VM couldn't be provisioned — no output). Prefer the executed
-            # notebook's own error message when present; else fall back to the API failure detail.
+            # A FAILED job can mean three different things; the executed notebook (if any) tells
+            # them apart. It may have (a) never started — runtime VM couldn't be provisioned, no
+            # output; (b) died mid-run — a cell raised or a later cell never executed; or (c) run
+            # every cell clean and only failed at TEARDOWN (e.g. notebook 08's daemon monitor thread
+            # is still alive at kernel shutdown, or the VM was reclaimed after output was written).
+            # Case (c) is a false FAILED: the product ran fine, so we take cell-level success as the
+            # source of truth and reclassify. Prefer the notebook's own error message for (b); fall
+            # back to the API detail for (a).
             executed_uri, nb_bytes = download_executed(
                 gcs_output_uri=out_uri, job_id=job_id, project_id=project_id
             )
             if nb_bytes is not None:
+                n_errors = assert_no_cell_errors(nb_bytes)
                 cell_err = _first_cell_error(nb_bytes)
                 if cell_err:
                     detail = cell_err
+                elif n_errors == 0 and notebook_completed_clean(nb_bytes):
+                    state = JOB_STATE_SUCCEEDED_WITH_TEARDOWN
+                    detail = (
+                        "notebook ran every cell clean to completion; job wrapper reported FAILED "
+                        f"only at teardown ({detail})"
+                    )
 
         # Reclassify a transient GCP capacity/stockout (runtime VM or in-notebook pool) so
         # acceptance skips rather than fails — infra, not a product/notebook defect.
@@ -652,8 +711,13 @@ def main(argv: list[str] | None = None) -> int:
     skipped = [r for r in results if r.state == JOB_STATE_CAPACITY_UNAVAILABLE]
     failed = [r for r in results if not r.ok and r not in skipped]
     passed = len(results) - len(failed) - len(skipped)
+    # Passed-but-reclassified: cells ran clean, job wrapper failed at teardown. Counted in `passed`
+    # (ok is True), but called out so a real teardown regression isn't hidden by a green summary.
+    teardown = [r for r in results if r.state == JOB_STATE_SUCCEEDED_WITH_TEARDOWN]
     print()
     summary = f"{passed}/{len(results)} passed"
+    if teardown:
+        summary += f" ({len(teardown)} clean-but-FAILED-at-teardown)"
     if skipped:
         summary += f", {len(skipped)} skipped (capacity unavailable)"
     if failed:

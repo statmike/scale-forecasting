@@ -107,6 +107,142 @@ def test_first_cell_error_empty_on_clean_notebook() -> None:
     assert na.assert_no_cell_errors(clean) == 0
 
 
+# --- completed-clean detection + teardown reclassification ---------------------------------------
+
+
+def _nb_json(cells: list[dict[str, object]]) -> bytes:
+    return json.dumps(
+        {"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    ).encode("utf-8")
+
+
+def _code(source: str, execution_count: int | None, outputs: list[dict] | None = None) -> dict:
+    return {
+        "cell_type": "code",
+        "source": [source],
+        "metadata": {},
+        "execution_count": execution_count,
+        "outputs": outputs or [],
+    }
+
+
+def _err(ename: str = "E", evalue: str = "v") -> dict:
+    return {"output_type": "error", "ename": ename, "evalue": evalue, "traceback": []}
+
+
+def test_completed_clean_true_when_all_cells_ran_no_errors() -> None:
+    nb = _nb_json(
+        [
+            {"cell_type": "markdown", "source": ["# hi"], "metadata": {}},
+            _code("import x", 1),
+            _code("x.run()", 2, [{"output_type": "stream", "text": ["done\n"]}]),
+        ]
+    )
+    assert na.notebook_completed_clean(nb) is True
+
+
+def test_completed_clean_false_when_a_cell_never_executed() -> None:
+    # A real (non-blank) code cell with execution_count None → execution stopped short.
+    nb = _nb_json([_code("import x", 1), _code("x.run()", None)])
+    assert na.notebook_completed_clean(nb) is False
+
+
+def test_completed_clean_false_on_cell_error() -> None:
+    nb = _nb_json([_code("boom()", 1, [_err()])])
+    assert na.notebook_completed_clean(nb) is False
+
+
+def test_completed_clean_false_on_empty_notebook() -> None:
+    assert na.notebook_completed_clean(_nb_json([])) is False
+
+
+def test_completed_clean_ignores_blank_code_cell_without_count() -> None:
+    # A whitespace-only trailing code cell may carry no count; it must not fail the check.
+    nb = _nb_json([_code("x.run()", 1), _code("   ", None)])
+    assert na.notebook_completed_clean(nb) is True
+
+
+def _run_one_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    terminal_state: str,
+    nb_bytes: bytes | None,
+) -> na.AcceptanceResult:
+    """Drive run_acceptance for a single notebook with submit/poll/download all stubbed."""
+    spec = na.REGISTRY["08_run_and_monitor"]
+    nb_dir = _touch_notebooks(tmp_path, [spec])
+
+    api_detail = "Error encountered during cell execution."
+    monkeypatch.setattr(na, "submit_job", lambda **_: "job-1")
+    monkeypatch.setattr(na, "poll_to_terminal", lambda **_: (terminal_state, api_detail))
+    monkeypatch.setattr(
+        na, "download_executed", lambda **_: ("gs://out/job-1/content.ipynb", nb_bytes)
+    )
+
+    results = na.run_acceptance(
+        specs=[spec],
+        project_id="p",
+        region="us-central1",
+        notebooks_dir=nb_dir,
+        template_ids={na.TEMPLATE_MAIN: "tmpl/main"},
+        service_account="runner@p.iam.gserviceaccount.com",
+        gcs_output_uri="gs://out",
+        credentials=object(),
+        run_label="t",
+    )
+    return results[0]
+
+
+def test_run_acceptance_reclassifies_failed_but_clean_notebook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 08's real-world signature: job FAILED (teardown), but every cell ran clean → treat as passed.
+    clean = _nb_json([_code("import x", 1), _code("x.run()", 2)])
+    result = _run_one_acceptance(
+        tmp_path, monkeypatch, terminal_state="JOB_STATE_FAILED", nb_bytes=clean
+    )
+    assert result.state == na.JOB_STATE_SUCCEEDED_WITH_TEARDOWN
+    assert result.n_cell_errors == 0
+    assert result.ok is True
+    assert "teardown" in result.detail
+
+
+def test_run_acceptance_keeps_failed_when_a_cell_errored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A genuine in-cell failure must NOT be reclassified — stays FAILED, not ok.
+    errored = _nb_json([_code("boom()", 1, [_err("RuntimeError", "x")])])
+    result = _run_one_acceptance(
+        tmp_path, monkeypatch, terminal_state="JOB_STATE_FAILED", nb_bytes=errored
+    )
+    assert result.state == "JOB_STATE_FAILED"
+    assert result.ok is False
+
+
+def test_run_acceptance_keeps_failed_when_run_died_partway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No error output, but a later cell never ran → incomplete: a real failure, not reclassified.
+    partial = _nb_json([_code("import x", 1), _code("x.run()", None)])
+    result = _run_one_acceptance(
+        tmp_path, monkeypatch, terminal_state="JOB_STATE_FAILED", nb_bytes=partial
+    )
+    assert result.state == "JOB_STATE_FAILED"
+    assert result.ok is False
+
+
+def test_run_acceptance_keeps_failed_when_no_notebook_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Job died before writing output (VM never provisioned) → nothing to reclassify.
+    result = _run_one_acceptance(
+        tmp_path, monkeypatch, terminal_state="JOB_STATE_FAILED", nb_bytes=None
+    )
+    assert result.state == "JOB_STATE_FAILED"
+    assert result.ok is False
+
+
 # --- fan-out (non-blocking submit) ---------------------------------------------------------------
 
 
