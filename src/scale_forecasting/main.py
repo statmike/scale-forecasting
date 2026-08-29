@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
     from .dag import DagNode, FamilyJob, RunDag
-    from .probes import ProbeReport
+    from .probes import CancelReport, ProbeReport
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -1163,8 +1163,40 @@ def _print_probe_report(report: ProbeReport) -> None:
         )
 
 
+def _print_cancel_report(report: CancelReport) -> None:
+    """Print a `CancelReport` — the blast-radius preview, then (if executed) the per-family outcome.
+
+    A no-``--force`` call is a **preview only**: it lists what *would* stop and what data is kept,
+    then a "Confirm with --force" line. With ``--force`` it also prints each family's outcome and
+    the run's rolled-up header status. Written to stdout (not the logger): the report *is* the
+    ``--cancel`` verb's output and must show regardless of log level.
+    """
+    plan = report.plan
+    verb = "Cancelled" if report.executed else "Cancel"
+    print(
+        f"{verb} run {report.run_id}: {plan.n_cancellable} in-flight job(s) "
+        f"{'stopped' if report.executed else 'will be stopped'}; partial results are RETAINED"
+    )
+    row_fmt = "  %-14s %-16s %-10s %s"
+    print(row_fmt % ("family", "runtime", "status", "effect"))
+    for item in plan.items:
+        print(
+            row_fmt
+            % (item.family, item.runtime or "-", item.registry_status or "-", item.note)
+        )
+    if plan.ensemble_suppressed:
+        print("  note: the ensemble node is suppressed because a base family is cancelled")
+    if not report.executed:
+        print("Confirm with --force (CLI) / confirm=True (SDK) to stop these jobs.")
+        return
+    print(f"actor={report.actor}  reason={report.reason or '-'}  header={report.header_status}")
+    for oc in report.outcomes:
+        state = "cancelled" if oc.cancelled else "NOT cancelled"
+        print(f"  {oc.family:<14} {state:<14} {oc.detail}")
+
+
 def _main(argv: list[str] | None = None) -> None:
-    """CLI: ``main (--config … | --config-uri …) [--dry-run | --stage-only | --emit-airflow]``."""
+    """CLI: ``main (--config …|--config-uri …) [--dry-run|--stage-only|--probe|--cancel|…]``."""
     import argparse
 
     from .config import load_config_uri
@@ -1196,10 +1228,20 @@ def _main(argv: list[str] | None = None) -> None:
         help="registry-first reconciled status of this config's run; escalate incomplete/stale "
         "jobs to their runtime; touch no runtime if the run is already terminal",
     )
+    verbs.add_argument(
+        "--cancel",
+        action="store_true",
+        help="stop this config's in-flight jobs and finalize the registry to CANCELLED; without "
+        "--force this only PREVIEWS the blast radius and stops nothing",
+    )
     p.add_argument(
         "--job",
-        help="with --probe: narrow to one family "
+        help="with --probe/--cancel: narrow to one family "
         "(statistical/ml/deep_learning/native/ensemble)",
+    )
+    p.add_argument(
+        "--reason",
+        help="with --cancel --force: free-text reason recorded in the cancel audit trail",
     )
     p.add_argument(
         "--emit-out",
@@ -1226,6 +1268,16 @@ def _main(argv: list[str] | None = None) -> None:
 
         report = probe_run(make_run_id(cfg), job=ns.job)
         _print_probe_report(report)
+        return
+    if ns.cancel:
+        from .probes import cancel_run
+
+        # --force is the cancel confirmation gate: without it, cancel_run only previews the blast
+        # radius and stops nothing (the "never implicit" rule, §7.1).
+        cancel_report = cancel_run(
+            make_run_id(cfg), job=ns.job, confirm=ns.force, reason=ns.reason or ""
+        )
+        _print_cancel_report(cancel_report)
         return
     run_id = run(cfg, dry_run=ns.dry_run, force=ns.force)
     _log.info("%s: %s", "planned" if ns.dry_run else "submitted", run_id)

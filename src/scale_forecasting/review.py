@@ -479,6 +479,7 @@ _STATUS_COLORS: dict[str | None, str] = {
     "PENDING": "#999999",
     "FAILED": "#D55E00",
     "PARTIAL": "#E69F00",
+    "CANCELLED": "#CC79A7",
 }
 _STATUS_DEFAULT = "#999999"
 

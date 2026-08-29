@@ -33,7 +33,8 @@ from typing import Any
 # A family/ensemble ``run_jobs`` row is "done" once it reaches one of these; a row still RUNNING (or
 # absent) when finalize reads it means the task died before finalizing, which the run counts as
 # FAILED. The same set is the microbatch ensemble's cross-process "base family finished" signal.
-_TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "PARTIAL"})
+# CANCELLED counts as done (a stopped job won't produce more) so a drained ensemble stops waiting.
+_TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "PARTIAL", "CANCELLED"})
 
 
 def _xcom_cluster(ti: Any, task_id: str) -> tuple[str, str] | None:

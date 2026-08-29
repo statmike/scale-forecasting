@@ -37,8 +37,11 @@ from scale_forecasting.probes import (
     ProbeResult,
     RayProbe,
     SparkProbe,
+    _assemble_cancel_plan,
     _assemble_probe_report,
+    _build_cancel_audit,
     _is_stale,
+    _roll_header_after_cancel,
     get_probe,
 )
 from scale_forecasting.review import FamilyProgress, RunProgress
@@ -158,6 +161,7 @@ class _FakeBatchClient:
         self._batch = batch
         self._exc = exc
         self.seen: dict[str, Any] = {}
+        self.deleted = False
 
     def get_batch(self, *, name: str, timeout: float) -> _FakeBatch:
         self.seen["name"] = name
@@ -166,6 +170,13 @@ class _FakeBatchClient:
             raise self._exc
         assert self._batch is not None
         return self._batch
+
+    def delete_batch(self, *, name: str, timeout: float) -> None:
+        self.seen["delete_name"] = name
+        self.seen["delete_timeout"] = timeout
+        if self._exc is not None:
+            raise self._exc
+        self.deleted = True
 
 
 def _serverless_handle() -> ProbeHandle:
@@ -338,12 +349,17 @@ class _FakeRayJobClient:
     def __init__(self, status: str, message: str = "") -> None:
         self._status = status
         self._message = message
+        self.stopped_id: str | None = None
 
     def get_job_status(self, job_id: str) -> str:
         return self._status
 
     def get_job_info(self, job_id: str) -> Any:
         return types.SimpleNamespace(message=self._message)
+
+    def stop_job(self, job_id: str) -> bool:
+        self.stopped_id = job_id
+        return True
 
 
 def _ray_handle() -> ProbeHandle:
@@ -446,10 +462,15 @@ class _FakeBqClient:
     def __init__(self, jobs: list[_FakeBqJob]) -> None:
         self._jobs = jobs
         self.seen: dict[str, Any] = {}
+        self.cancelled: list[str] = []
 
     def list_jobs(self, **kwargs: Any) -> list[_FakeBqJob]:
         self.seen.update(kwargs)
         return self._jobs
+
+    def cancel_job(self, job_id: str, *, location: str, timeout: float | None = None) -> None:
+        self.cancelled.append(job_id)
+        self.seen["cancel_location"] = location
 
 
 def _bq_handle() -> ProbeHandle:
@@ -813,3 +834,255 @@ def test_report_disagreement_rolls_up_across_families() -> None:
     ml = next(f for f in report.families if f.family == "ml")
     assert ml.registry_status == "RUNNING"
     assert (ml.n_done, ml.n_expected) == (5, 5)
+
+
+# --- P5: CANCELLED is terminal (short-circuit + no-op re-cancel) ---------------
+
+
+def test_report_cancelled_family_trusts_registry() -> None:
+    # CANCELLED joins the terminal set: a cancelled job is settled → trusted, never re-escalated.
+    progress = _progress(_fp("ml", "CANCELLED"), status="CANCELLED")
+    report = _assemble_probe_report(progress, {}, frozenset())
+    fv = _only(report)
+    assert fv.verdict == VERDICT_TRUST_REGISTRY
+    assert fv.native_state is None
+    assert report.escalated is False
+
+
+# --- P5: cancel blast-radius plan (_assemble_cancel_plan, pure) ----------------
+
+
+def _report(*families: FamilyProgress, native: dict[str, ProbeResult] | None = None) -> Any:
+    """Reconcile some families (default: nothing escalated) into a `ProbeReport` for plan tests."""
+    return _assemble_probe_report(_progress(*families), native or {}, frozenset())
+
+
+def test_cancel_plan_marks_running_family_cancellable() -> None:
+    report = _report(
+        _fp("ml", "RUNNING", runtime="spark", n_done=312, n_expected=500),
+        native={"ml": ProbeResult(NATIVE_RUNNING, exists=True)},
+    )
+    plan = _assemble_cancel_plan(report)
+    item = plan.items[0]
+    assert item.cancellable is True
+    assert "312/500" in item.note and "retained" in item.note
+    assert plan.n_cancellable == 1
+    assert plan.ensemble_suppressed is False
+
+
+def test_cancel_plan_terminal_family_untouched() -> None:
+    report = _assemble_probe_report(
+        _progress(_fp("native", "COMPLETED", runtime="bigquery"), status="COMPLETED"),
+        {}, frozenset(),
+    )
+    plan = _assemble_cancel_plan(report)
+    assert plan.items[0].cancellable is False
+    assert "already COMPLETED" in plan.items[0].note
+    assert plan.n_cancellable == 0
+
+
+def test_cancel_plan_already_cancelled_is_noop() -> None:
+    # An already-CANCELLED family is terminal → not cancellable (re-cancel is a no-op).
+    report = _assemble_probe_report(
+        _progress(_fp("ml", "CANCELLED"), status="CANCELLED"), {}, frozenset()
+    )
+    plan = _assemble_cancel_plan(report)
+    assert plan.items[0].cancellable is False
+    assert "already CANCELLED" in plan.items[0].note
+
+
+def test_cancel_plan_suppresses_ensemble_when_base_cancelled() -> None:
+    report = _report(
+        _fp("ml", "RUNNING"),
+        _fp("ensemble", "RUNNING", runtime="bigquery"),
+        native={
+            "ml": ProbeResult(NATIVE_RUNNING, exists=True),
+            "ensemble": ProbeResult(NATIVE_RUNNING, exists=True),
+        },
+    )
+    plan = _assemble_cancel_plan(report)
+    assert plan.ensemble_suppressed is True
+    ens = next(i for i in plan.items if i.family == "ensemble")
+    assert "SKIPPED" in ens.note
+
+
+def test_cancel_plan_no_ensemble_not_suppressed() -> None:
+    report = _report(
+        _fp("ml", "RUNNING"), native={"ml": ProbeResult(NATIVE_RUNNING, exists=True)}
+    )
+    assert _assemble_cancel_plan(report).ensemble_suppressed is False
+
+
+def test_cancel_plan_flags_vanished_runtime() -> None:
+    # Cancellability is keyed on the registry status, so a family whose runtime job already vanished
+    # is still "cancellable" (we finalize the registry) — the note says the runtime is gone.
+    report = _assemble_probe_report(
+        _progress(_fp("dl", "RUNNING", runtime="ray", n_done=0, n_expected=500)),
+        {"dl": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+        frozenset(),
+        frozenset({"dl"}),
+    )
+    item = _assemble_cancel_plan(report).items[0]
+    assert item.cancellable is True
+    assert "already gone" in item.note
+
+
+# --- P5: header roll-up after cancel (_roll_header_after_cancel, pure) ---------
+
+
+def test_roll_header_all_cancelled_is_cancelled() -> None:
+    assert _roll_header_after_cancel(["CANCELLED", "CANCELLED"]) == "CANCELLED"
+
+
+def test_roll_header_mix_of_terminals_is_partial() -> None:
+    assert _roll_header_after_cancel(["CANCELLED", "COMPLETED"]) == "PARTIAL"
+    assert _roll_header_after_cancel(["CANCELLED", "FAILED"]) == "PARTIAL"
+
+
+def test_roll_header_live_job_leaves_header_unchanged() -> None:
+    # A stop that failed (job still RUNNING) must not finalize the run — leave the header alone.
+    assert _roll_header_after_cancel(["CANCELLED", "RUNNING"]) is None
+
+
+def test_roll_header_no_cancelled_leaves_header_unchanged() -> None:
+    assert _roll_header_after_cancel(["COMPLETED", "FAILED"]) is None
+
+
+def test_roll_header_empty_is_none() -> None:
+    assert _roll_header_after_cancel([]) is None
+
+
+# --- P5: cancel audit blob (_build_cancel_audit, pure) ------------------------
+
+
+def test_build_cancel_audit_shape() -> None:
+    ts = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
+    audit = _build_cancel_audit(
+        actor="sa@proj.iam", cancelled_at=ts, reason="stuck job",
+        native_state=NATIVE_RUNNING, n_done=7,
+    )
+    assert audit == {
+        "cancelled_by": "sa@proj.iam",
+        "cancelled_at": ts.isoformat(),
+        "reason": "stuck job",
+        "native_state_at_cancel": NATIVE_RUNNING,
+        "n_done_at_cancel": 7,
+    }
+
+
+# --- P5: per-engine cancel() (stubbed clients, never touch GCP) ----------------
+
+
+def test_spark_serverless_cancel_issues_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeBatchClient(batch=_FakeBatch("RUNNING"))
+    _patch_batch_client(monkeypatch, client)
+
+    result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
+
+    assert result.stopped is True and result.already_gone is False
+    assert client.deleted is True
+    assert client.seen["delete_name"].endswith("/batches/sf-run-abc-statistical-a1")
+
+
+def test_spark_serverless_cancel_not_found_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    from google.api_core.exceptions import NotFound
+
+    _patch_batch_client(monkeypatch, _FakeBatchClient(exc=NotFound("gone")))
+
+    result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
+
+    assert result.already_gone is True and result.stopped is False
+
+
+def test_spark_serverless_cancel_permission_denied_gives_iam_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from google.api_core.exceptions import PermissionDenied
+
+    _patch_batch_client(monkeypatch, _FakeBatchClient(exc=PermissionDenied("nope")))
+
+    result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
+
+    assert result.stopped is False and result.already_gone is False
+    assert "job-canceller" in result.detail  # actionable IAM message, not a stack trace
+
+
+def test_spark_cluster_cancel_calls_cancel_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.dataproc_cluster as cluster_mod
+
+    seen: dict[str, Any] = {}
+
+    def _fake_cancel(region: str, job_id: str, **kw: Any) -> None:
+        seen.update(region=region, job_id=job_id, timeout=kw.get("timeout"))
+
+    monkeypatch.setattr(cluster_mod, "cancel_cluster_job", _fake_cancel)
+
+    result = SparkProbe().cancel(_cluster_handle(), settings=_SETTINGS)
+
+    assert result.stopped is True
+    assert seen == {
+        "region": "us-west1", "job_id": "real-dataproc-job-id", "timeout": pytest.approx(20.0),
+    }
+
+
+def test_spark_cluster_cancel_no_id_reports_failure() -> None:
+    # No server-assigned id yet → nothing addressable to cancel (and no false "already gone").
+    handle = ProbeHandle("spark", native_id="", region="us-west1", spark_mode="cluster")
+    result = SparkProbe().cancel(handle, settings=_SETTINGS)
+    assert result.stopped is False and result.already_gone is False
+    assert "not yet assigned" in result.detail
+
+
+def test_ray_cancel_stops_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeRayJobClient("RUNNING")
+    _patch_ray(monkeypatch, client=client)
+
+    result = RayProbe().cancel(_ray_handle(), settings=_SETTINGS)
+
+    assert result.stopped is True and result.already_gone is False
+    assert client.stopped_id == "job-1"
+
+
+def test_ray_cancel_cluster_gone_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    from google.api_core.exceptions import NotFound
+
+    _patch_ray(monkeypatch, cluster_exc=NotFound("cluster gone"))
+
+    result = RayProbe().cancel(_ray_handle(), settings=_SETTINGS)
+
+    assert result.already_gone is True and result.stopped is False
+
+
+def test_bigquery_cancel_cancels_live_statements(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeBqClient(
+        [
+            _FakeBqJob("sf-run-abc-native-a1-0", "DONE"),  # already done → skipped
+            _FakeBqJob("sf-run-abc-native-a1-1", "RUNNING"),  # live → cancelled
+            _FakeBqJob("other-run", "RUNNING"),  # different prefix → excluded
+        ]
+    )
+    _patch_bq(monkeypatch, client)
+
+    result = BigQueryProbe().cancel(_bq_handle(), settings=_SETTINGS)
+
+    assert result.stopped is True
+    assert client.cancelled == ["sf-run-abc-native-a1-1"]
+    assert client.seen["cancel_location"] == "us"
+
+
+def test_bigquery_cancel_no_live_jobs_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_bq(
+        monkeypatch, _FakeBqClient([_FakeBqJob("sf-run-abc-native-a1-0", "DONE")])
+    )
+
+    result = BigQueryProbe().cancel(_bq_handle(), settings=_SETTINGS)
+
+    assert result.already_gone is True and result.stopped is False
+
+
+def test_cancel_error_degrades_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A non-permission error is reported (not raised) with stopped=already_gone=False.
+    _patch_batch_client(monkeypatch, _FakeBatchClient(exc=RuntimeError("transport down")))
+    result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
+    assert result.stopped is False and result.already_gone is False
+    assert "transport down" in result.detail

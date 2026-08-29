@@ -411,6 +411,26 @@ def get_cluster_job(
     return state_name, detail
 
 
+def cancel_cluster_job(
+    region: str, job_id: str, *, settings: Settings | None = None, timeout: float | None = None
+) -> None:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp cancel path
+    """Cancel a Dataproc **cluster** job — the write counterpart to `get_cluster_job`.
+
+    A `JobControllerClient.cancel_job` requests that one already-submitted job stop; the cluster
+    winds it down (the job's state moves through ``CANCEL_PENDING``/``CANCEL_STARTED`` to
+    ``CANCELLED``). Raises ``google.api_core.exceptions.NotFound`` when the job id is unknown (the
+    cluster was torn down, or the id never existed) — the cancel caller maps that to "already gone".
+    ``timeout`` caps the RPC so a slow control plane can't hang the caller.
+    """
+    from .settings import Settings
+
+    settings = settings or Settings.resolve()
+    _job_client(region).cancel_job(
+        request={"project_id": settings.project_id, "region": region, "job_id": job_id},
+        timeout=timeout,
+    )
+
+
 def _create_cluster(
     client: Any, project_id: str, region: str, cluster: object
 ) -> None:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke

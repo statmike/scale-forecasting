@@ -59,7 +59,8 @@ _TRACE_COLUMNS: tuple[str, ...] = (
 )
 
 # Registry statuses that mean a run has stopped changing — what `Forecaster.wait` blocks for.
-_TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "PARTIAL"})
+# CANCELLED is terminal too (a stopped run is settled), so `wait`/`monitor` don't hang on one.
+_TERMINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "PARTIAL", "CANCELLED"})
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,36 @@ class Forecaster:
         from .probes import probe_run
 
         return probe_run(run_id or self.run_id, job=job, settings=self._settings)
+
+    def cancel(
+        self,
+        run_id: str | None = None,
+        job: str | None = None,
+        *,
+        confirm: bool = False,
+        reason: str = "",
+    ) -> Any:
+        """Cancel a run (or one family) — a **preview by default**; stop for real only on confirm.
+
+        Delegates to `probes.cancel_run` for ``run_id`` (default: this config's id): it probes the
+        run to reconcile live state, then returns a `CancelReport`. Without ``confirm`` the report
+        is a blast-radius **preview** — it touches no runtime and no registry, so you see exactly
+        which jobs would stop and what partial data is retained. With ``confirm=True`` it stops each
+        non-terminal family's runtime job, finalizes its registry row to ``CANCELLED`` (retaining —
+        never deleting — landed partial results), records ``reason`` + the ADC actor for audit, and
+        rolls the run header up. ``job`` narrows to one family
+        (``statistical``/``ml``/``deep_learning``/``native``/``ensemble``); an already-terminal job
+        is a no-op.
+        """
+        from .probes import cancel_run
+
+        return cancel_run(
+            run_id or self.run_id,
+            job=job,
+            confirm=confirm,
+            reason=reason,
+            settings=self._settings,
+        )
 
     def trace(self, run_id: str | None = None, *, cell_limit: int = 5000) -> pd.DataFrame:
         """The run's execution timeline as a long-form frame — per-job spans + per-cell spans.
