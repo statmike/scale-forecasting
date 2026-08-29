@@ -352,6 +352,43 @@ def test_jobs_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).jobs() == []
 
 
+# --- probe: the registry-vs-runtime reconciled drill-down ----------------------
+
+
+def test_probe_delegates_to_probe_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.probes as probes_mod
+
+    seen: dict[str, Any] = {}
+
+    def _fake_probe_run(
+        run_id: str, *, job: str | None = None, settings: Any = None
+    ) -> str:
+        seen["run_id"] = run_id
+        seen["job"] = job
+        seen["settings"] = settings
+        return "report"
+
+    monkeypatch.setattr(probes_mod, "probe_run", _fake_probe_run)
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+
+    assert f.probe(job="statistical") == "report"
+    assert seen["run_id"] == f.run_id  # defaults to this config's id
+    assert seen["job"] == "statistical"
+    assert seen["settings"] is _SETTINGS  # injected identity is threaded through
+
+
+def test_probe_honors_explicit_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scale_forecasting.probes as probes_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        probes_mod, "probe_run", lambda run_id, **kw: seen.update(run_id=run_id, **kw)
+    )
+    sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).probe(run_id="sf-other")
+    assert seen["run_id"] == "sf-other"
+    assert seen["job"] is None  # default: whole run, no family narrowing
+
+
 # --- trace: the per-job + per-cell execution timeline --------------------------
 
 

@@ -383,6 +383,72 @@ def test_resolve_cluster_deps_requires_archive_uri() -> None:
         dataproc_cluster._resolve_cluster_deps(cfg, _infra())
 
 
+# --- get_cluster_job: non-blocking state read (probe path) ---------------------
+
+
+class _FakeJobResult:
+    def __init__(self, state_name: str, details: str = "") -> None:
+        import types as _types
+
+        self.status = _types.SimpleNamespace(
+            state=_types.SimpleNamespace(name=state_name), details=details
+        )
+
+
+class _FakeJobClient:
+    def __init__(self, result: Any = None, exc: Exception | None = None) -> None:
+        self._result = result
+        self._exc = exc
+        self.seen: dict[str, Any] = {}
+
+    def get_job(self, *, request: dict[str, Any], timeout: Any) -> Any:
+        self.seen["request"] = request
+        self.seen["timeout"] = timeout
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+
+def test_get_cluster_job_returns_state_and_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeJobClient(result=_FakeJobResult("RUNNING", details="in progress"))
+    monkeypatch.setattr(dataproc_cluster, "_job_client", lambda region: client)
+
+    state, detail = dataproc_cluster.get_cluster_job(
+        "us-west1", "job-abc", settings=_settings(), timeout=20.0
+    )
+
+    assert (state, detail) == ("RUNNING", "in progress")
+    # Addresses the job by (project, region, job_id) and forwards the timeout ceiling.
+    assert client.seen["request"] == {
+        "project_id": "proj-x",
+        "region": "us-west1",
+        "job_id": "job-abc",
+    }
+    assert client.seen["timeout"] == 20.0
+
+
+def test_get_cluster_job_missing_detail_is_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeJobClient(result=_FakeJobResult("DONE"))
+    monkeypatch.setattr(dataproc_cluster, "_job_client", lambda region: client)
+
+    state, detail = dataproc_cluster.get_cluster_job("us-central1", "j", settings=_settings())
+
+    assert state == "DONE"
+    assert detail == ""
+
+
+def test_get_cluster_job_propagates_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An unknown job id raises NotFound so the probe caller can map it to NOT_FOUND (not a crash).
+    from google.api_core.exceptions import NotFound
+
+    monkeypatch.setattr(
+        dataproc_cluster, "_job_client", lambda region: _FakeJobClient(exc=NotFound("gone"))
+    )
+
+    with pytest.raises(NotFound):
+        dataproc_cluster.get_cluster_job("us-central1", "j", settings=_settings())
+
+
 def test_cluster_init_script_reads_metadata_and_unpacks_to_absolute_dir() -> None:
     script = dataproc_cluster._CLUSTER_INIT_SCRIPT
     # Reads both metadata keys the cluster carries, and unpacks to the absolute venv dir the job's

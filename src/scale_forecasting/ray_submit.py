@@ -980,8 +980,13 @@ def submit_ray(
     use_gpu: bool | None = None,
     gpu_type: str | None = None,
     cluster_region: str | None = None,
-) -> str:
-    """Size, provision, run, and (ephemeral) tear down a Ray-on-Vertex forecast run; return job id.
+) -> tuple[str, str, str]:
+    """Size, provision, run, and (ephemeral) tear down a Ray-on-Vertex forecast run.
+
+    Returns ``(job_id, cluster_resource_name, region)`` — the Ray job's id plus the coordinates a
+    reader needs to probe it later: the cluster's Vertex persistent-resource path and the region it
+    actually landed in (the reuse target's region, or the region an ephemeral create settled on
+    after any capacity hop).
 
     The Ray analog of `submit_batch`. Resolves infra from the
     environment when not passed, sizes an **autoscaling** cluster to the run's fan-out
@@ -1065,6 +1070,7 @@ def submit_ray(
             cluster_resource_name, cluster_region = _create_cluster_across_regions(
                 plan, infra, name, settings, regions
             )
+            region = cluster_region
             teardown_target = _resource_name(settings, name, cluster_region)
 
         cluster = _get_cluster(cluster_resource_name)
@@ -1089,7 +1095,7 @@ def submit_ray(
                 # raised error so the *cause* — not just "FAILED" — reaches the operator.
                 suffix = f"\n{detail}" if detail else ""
                 raise EngineError(f"ray job {job_id} terminal state {status}{suffix}")
-        return job_id
+        return job_id, cluster_resource_name, region
     finally:
         # Guaranteed teardown of an ephemeral cluster — even on a raised job *or a create that
         # errored mid-provision*. teardown_target is set (to the
@@ -1130,7 +1136,7 @@ def main(argv: list[str] | None = None) -> None:
     ns = p.parse_args(argv)
 
     cfg = load_config_uri(ns.config or ns.config_uri)
-    job_id = submit_ray(
+    job_id, _, _ = submit_ray(
         cfg, cluster_name=ns.cluster_name, n_series=ns.n_series, wait=not ns.no_wait
     )
     _log.info("submitted: %s", job_id)

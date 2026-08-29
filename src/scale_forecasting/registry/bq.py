@@ -207,6 +207,7 @@ def assemble_job_row(
     system_job_id: str | None = None,
     status: str = "RUNNING",
     started_at: datetime | None = None,
+    probe_handle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a ``run_jobs`` row for one family's job under a run.
 
@@ -239,7 +240,9 @@ def assemble_job_row(
         "started_at": started_at if started_at is not None else created_at,
         "ended_at": None,
         "runtime_seconds": None,
-        "job_telemetry": None,
+        # The probe handle (runtime coordinates for reconciliation) is stamped at RUNNING entry so a
+        # reader can check a live job; NULL when no handle was captured (a pre-feature run).
+        "job_telemetry": {"probe_handle": probe_handle} if probe_handle is not None else None,
     }
 
 
@@ -1420,6 +1423,7 @@ def run_job(
     hardware: str | None = None,
     gpu_type: str | None = None,
     system_job_id: str | None = None,
+    probe_handle: dict[str, Any] | None = None,
     settings: Settings | None = None,
     manage: bool = True,
 ) -> Iterator[JobFinalizer]:
@@ -1453,6 +1457,7 @@ def run_job(
             hardware=hardware,
             gpu_type=gpu_type,
             system_job_id=system_job_id,
+            probe_handle=probe_handle,
         )
         write_job(row, settings=settings)
     started = time.perf_counter()

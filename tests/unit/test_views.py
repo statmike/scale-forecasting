@@ -100,6 +100,13 @@ def test_run_jobs_view_exposes_job_timing_for_the_trace() -> None:
     assert "ended_at" in stmt
 
 
+def test_run_jobs_view_projects_probe_handle() -> None:
+    # The probe handle (runtime coordinates for reconciliation) is projected out of the per-job
+    # job_telemetry JSON so a reader can parse it without unpacking the whole column.
+    stmt = render_create_views("d")["v_run_jobs"]
+    assert "JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle" in stmt
+
+
 def test_views_snapshot() -> None:
     rendered = _render_all()
     if os.environ.get("SF_UPDATE_SNAPSHOTS") == "1":

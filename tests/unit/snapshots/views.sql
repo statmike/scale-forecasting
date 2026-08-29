@@ -40,7 +40,8 @@ SELECT
   ended_at,
   runtime_seconds,
   CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
-  CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds
+  CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
+  JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle
 FROM `proj.scale_forecasting.run_jobs`
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC

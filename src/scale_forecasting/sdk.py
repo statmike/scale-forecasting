@@ -385,6 +385,20 @@ class Forecaster:
             for r in rows
         ]
 
+    def probe(self, run_id: str | None = None, job: str | None = None) -> Any:
+        """Reconcile a run against its runtime: per-family verdict + a disagreement flag.
+
+        Delegates to `probes.probe_run` for ``run_id`` (default: this config's id): the
+        registry-first drill-down that fuses the header + landed artifacts with, **only for the
+        incomplete or stale jobs**, their live native state (Spark / Ray / BigQuery) — flagging each
+        row where the runtime contradicts the registry. ``job`` narrows the escalation to one family
+        (``statistical``/``ml``/``deep_learning``/``native``/``ensemble``). A run that is already
+        terminal short-circuits and touches no runtime; for the fleet-wide view use `monitor`.
+        """
+        from .probes import probe_run
+
+        return probe_run(run_id or self.run_id, job=job, settings=self._settings)
+
     def trace(self, run_id: str | None = None, *, cell_limit: int = 5000) -> pd.DataFrame:
         """The run's execution timeline as a long-form frame — per-job spans + per-cell spans.
 

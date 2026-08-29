@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .errors import ConfigError, get_logger
 from .registry.ids import make_run_id
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
     from .dag import DagNode, FamilyJob, RunDag
+    from .probes import ProbeReport
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -321,6 +322,7 @@ def _launch_family_job(
     region — with no per-family create/delete); a family naming its own standing cluster keeps that,
     and every other runtime/mode ignores it.
     """
+    from .probes import ProbeHandle
     from .registry import bq
     from .registry.ids import make_job_key
     from .submitters import get_submitter
@@ -344,6 +346,36 @@ def _launch_family_job(
     )
     shared_spark_name = spark_cluster[0] if is_shared_spark_family and spark_cluster else None
     shared_spark_region = spark_cluster[1] if is_shared_spark_family and spark_cluster else None
+    # The ENTRY probe handle, built from coordinates known before submit — the handle the probe
+    # actually reads while a job is RUNNING. It never asserts an id it doesn't truly have (a cluster
+    # job's real id is server-assigned, so native_id is empty until the stamp-back refresh below),
+    # so a probe degrades to registry-only rather than emitting a false NOT_FOUND.
+    if compute.runtime == "ray":
+        resource_name = None
+        if ray_cluster_name is not None:
+            from .ray_submit import _resource_name
+
+            resource_name = _resource_name(settings, ray_cluster_name, ray_cluster_region)
+        entry_handle = ProbeHandle(
+            "ray",
+            native_id=system_job_id,
+            region=ray_cluster_region or settings.region,
+            resource_name=resource_name,
+        )
+    elif compute.spark_mode == "cluster":
+        entry_handle = ProbeHandle(
+            "spark",
+            native_id="",  # real id is server-assigned; filled in at the stamp-back refresh
+            region=shared_spark_region or settings.region,
+            spark_mode="cluster",
+        )
+    else:
+        entry_handle = ProbeHandle(
+            "spark",
+            native_id=system_job_id,
+            region=settings.region,
+            spark_mode="serverless",
+        )
     with bq.run_job(
         run_id,
         job.family,
@@ -353,9 +385,10 @@ def _launch_family_job(
         hardware=compute.hardware,
         gpu_type=compute.gpu_type,
         system_job_id=system_job_id,
+        probe_handle=entry_handle.to_blob(),
         settings=settings,
     ) as fin:
-        real_job_id = get_submitter(compute.runtime).launch(
+        handle = get_submitter(compute.runtime).launch(
             cfg,
             models=list(job.models),
             manage_header=False,
@@ -371,10 +404,15 @@ def _launch_family_job(
             ray_cluster_name=ray_cluster_name,
             ray_cluster_region=ray_cluster_region,
         )
-        # A cluster job's id is server-assigned; stamp the real one back for reverse-trace. The
-        # Serverless/Ray submitters return None (their id == system_job_id, already on the row).
-        if real_job_id and real_job_id != system_job_id:
-            fin.finalize(system_job_id=real_job_id)
+        # Stamp-back refresh: replace the entry handle with post-submit truths (a cluster's real id,
+        # the landed region + Ray resource path). A cluster job's id is server-assigned, so when the
+        # returned native_id differs from system_job_id, also stamp the real id back for
+        # reverse-trace. The in-process session submits nothing and returns None (no refresh).
+        if handle is not None:
+            fields: dict[str, Any] = {"job_telemetry": {"probe_handle": handle.to_blob()}}
+            if handle.native_id != system_job_id:
+                fields["system_job_id"] = handle.native_id
+            fin.finalize(**fields)
 
 
 def _launch_native_job(
@@ -395,17 +433,27 @@ def _launch_native_job(
     engine's `BqOutcome` so the caller can stamp the observed ``n_series`` onto the header.
     """
     from .engines import bigquery_engine
+    from .probes import ProbeHandle
     from .registry import bq
     from .registry.ids import make_job_key
 
     attempt, _ = bq.next_job_attempt(run_id, "native", force=force, settings=settings)
     system_job_id = _system_job_id(make_job_key(run_id, "native", attempt), "bigquery")
+    # BigQuery coordinates are fully known up front (jobs share the deterministic id prefix), so the
+    # entry handle is the only one — there is no stamp-back site for the native family.
+    native_handle = ProbeHandle(
+        "bigquery",
+        native_id=f"{system_job_id}-",
+        region=settings.region,
+        id_kind="prefix",
+    )
     with bq.run_job(
         run_id,
         "native",
         attempt,
         runtime="bigquery",
         system_job_id=system_job_id,
+        probe_handle=native_handle.to_blob(),
         settings=settings,
     ):
         # Prefix the family's BigQuery jobs with its deterministic id so they resolve in the console
@@ -451,17 +499,27 @@ def _launch_ensemble_job(
     the concurrent node produces nothing — preserving the "no ensembles for a failed run" contract.
     """
     from .ensemble_run import run_ensembles, run_ensembles_microbatch
+    from .probes import ProbeHandle
     from .registry import bq
     from .registry.ids import make_job_key
 
     attempt, _ = bq.next_job_attempt(run_id, "ensemble", force=force, settings=settings)
     system_job_id = _system_job_id(make_job_key(run_id, "ensemble", attempt), "bigquery")
+    # BigQuery coordinates are fully known up front (jobs share the deterministic id prefix), so the
+    # entry handle is the only one — there is no stamp-back site for the ensemble node.
+    ensemble_handle = ProbeHandle(
+        "bigquery",
+        native_id=f"{system_job_id}-",
+        region=settings.region,
+        id_kind="prefix",
+    )
     with bq.run_job(
         run_id,
         "ensemble",
         attempt,
         runtime="bigquery",
         system_job_id=system_job_id,
+        probe_handle=ensemble_handle.to_blob(),
         settings=settings,
     ):
         # Prefix the ensemble's BigQuery jobs with its deterministic id so they resolve in the
@@ -1074,6 +1132,37 @@ def _emit_airflow(cfg: RunConfig, config_uri: str, *, out_path: str | None = Non
     return str(out)
 
 
+def _print_probe_report(report: ProbeReport) -> None:
+    """Print a `ProbeReport` as one compact per-family table — one job or a whole run, same shape.
+
+    A header line (``run <id>  status=…  escalated=…  disagreement=…``) then one row per family:
+    ``family · runtime · registry · native · verdict · n_done/n_expected · detail``. Written to
+    stdout (not the logger) because the report *is* the ``--probe`` verb's output — it must show
+    regardless of the log level — and it stays plain text (no plots, no colour) so it reads
+    identically in a terminal, a notebook, or a Composer task log.
+    """
+    row_fmt = "  %-14s %-8s %-10s %-10s %-17s %-9s %s"
+    print(
+        f"run {report.run_id}  status={report.status}  "
+        f"escalated={report.escalated}  disagreement={report.disagreement}"
+    )
+    print(row_fmt % ("family", "runtime", "registry", "native", "verdict", "done/exp", "detail"))
+    for fv in report.families:
+        expected = fv.n_expected if fv.n_expected is not None else "?"
+        print(
+            row_fmt
+            % (
+                fv.family,
+                fv.runtime or "-",
+                fv.registry_status or "-",
+                fv.native_state or "-",
+                fv.verdict,
+                f"{fv.n_done}/{expected}",
+                fv.detail or "",
+            )
+        )
+
+
 def _main(argv: list[str] | None = None) -> None:
     """CLI: ``main (--config … | --config-uri …) [--dry-run | --stage-only | --emit-airflow]``."""
     import argparse
@@ -1101,6 +1190,17 @@ def _main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="render this run's Airflow DAG to a local dag_<run_id>.py; touch no GCP",
     )
+    verbs.add_argument(
+        "--probe",
+        action="store_true",
+        help="registry-first reconciled status of this config's run; escalate incomplete/stale "
+        "jobs to their runtime; touch no runtime if the run is already terminal",
+    )
+    p.add_argument(
+        "--job",
+        help="with --probe: narrow to one family "
+        "(statistical/ml/deep_learning/native/ensemble)",
+    )
     p.add_argument(
         "--emit-out",
         help="where to write the emitted DAG (default: ./dag_<run_id>.py); implies --emit-airflow",
@@ -1120,6 +1220,12 @@ def _main(argv: list[str] | None = None) -> None:
     if ns.stage_only:
         result = stage_run(cfg, force=ns.force)
         _log.info("staged: %s", result.run_id)
+        return
+    if ns.probe:
+        from .probes import probe_run
+
+        report = probe_run(make_run_id(cfg), job=ns.job)
+        _print_probe_report(report)
         return
     run_id = run(cfg, dry_run=ns.dry_run, force=ns.force)
     _log.info("%s: %s", "planned" if ns.dry_run else "submitted", run_id)

@@ -14,6 +14,7 @@ import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
+from scale_forecasting.probes import ProbeHandle
 from scale_forecasting.settings import Settings
 from scale_forecasting.submitters import (
     RaySubmitter,
@@ -60,7 +61,7 @@ def test_spark_launch_no_session_submits_batch(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(submit_mod, "submit_batch", _fake_submit_batch)
 
-    SparkSubmitter().launch(
+    handle = SparkSubmitter().launch(
         _cfg(),
         models=[_SPARK],
         manage_header=False,
@@ -70,6 +71,10 @@ def test_spark_launch_no_session_submits_batch(monkeypatch: pytest.MonkeyPatch) 
     assert seen["manage_header"] is False
     assert "engine" not in seen  # the Spark engine is built in — no method flag threaded through
     assert seen["batch_id"] is None  # standalone: no per-family id → submit derives one from run_id
+    # A Serverless launch reports a single-region spark handle for later probing.
+    assert handle == ProbeHandle(
+        "spark", native_id=None, region="us-central1", spark_mode="serverless"
+    )
 
 
 def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -80,7 +85,7 @@ def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.Monk
     seen: dict[str, Any] = {}
     monkeypatch.setattr(submit_mod, "submit_batch", lambda cfg, **kw: seen.update(kw) or "b")
 
-    real_id = SparkSubmitter().launch(
+    handle = SparkSubmitter().launch(
         _cfg(),
         models=[_SPARK],
         manage_header=False,
@@ -88,8 +93,13 @@ def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.Monk
         system_job_id="sf-run-abc-statistical-a1",
     )
     assert seen["batch_id"] == "sf-run-abc-statistical-a1"
-    # Serverless batch id == system_job_id (we set it), so nothing to stamp back.
-    assert real_id is None
+    # Serverless batch id == system_job_id (we set it): the handle's native_id is that same id.
+    assert handle == ProbeHandle(
+        "spark",
+        native_id="sf-run-abc-statistical-a1",
+        region="us-central1",
+        spark_mode="serverless",
+    )
 
 
 def test_spark_launch_threads_gpu_to_batch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,14 +126,15 @@ def test_spark_launch_cluster_mode_submits_cluster_job(monkeypatch: pytest.Monke
     import scale_forecasting.dataproc_cluster as cluster_mod
 
     seen: dict[str, Any] = {}
-    # The fake returns Dataproc's server-assigned id, distinct from the deterministic one passed in.
+    # The fake returns (server-assigned id, landed region); the id is distinct from the
+    # deterministic one passed in, and the region is where the job actually ran.
     monkeypatch.setattr(
         cluster_mod,
         "submit_cluster_job",
-        lambda cfg, **kw: seen.update(kw) or "real-dataproc-job-id",
+        lambda cfg, **kw: seen.update(kw) or ("real-dataproc-job-id", "us-west1"),
     )
 
-    real_id = SparkSubmitter().launch(
+    handle = SparkSubmitter().launch(
         _cfg(),
         models=[_SPARK],
         manage_header=False,
@@ -138,8 +149,11 @@ def test_spark_launch_cluster_mode_submits_cluster_job(monkeypatch: pytest.Monke
     assert seen["hardware"] == "gpu"
     assert seen["gpu_type"] == "T4"
     assert seen["spark_cluster_name"] == "warm-cluster"
-    # The cluster path returns the real server-assigned id so the orchestrator can stamp it back.
-    assert real_id == "real-dataproc-job-id"
+    # The cluster path carries the real server-assigned id + landed region in the handle so the
+    # orchestrator can stamp the real id back and probe the job later.
+    assert handle == ProbeHandle(
+        "spark", native_id="real-dataproc-job-id", region="us-west1", spark_mode="cluster"
+    )
 
 
 def test_spark_launch_with_session_ignores_system_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,7 +163,7 @@ def test_spark_launch_with_session_ignores_system_job_id(monkeypatch: pytest.Mon
     seen: dict[str, Any] = {}
     monkeypatch.setattr(spark_explode, "run", lambda cfg, **kw: seen.update(kw))
 
-    SparkSubmitter().launch(
+    handle = SparkSubmitter().launch(
         _cfg(),
         models=[_SPARK],
         manage_header=False,
@@ -159,6 +173,7 @@ def test_spark_launch_with_session_ignores_system_job_id(monkeypatch: pytest.Mon
     )
     assert "batch_id" not in seen
     assert "system_job_id" not in seen
+    assert handle is None  # in-process session submits nothing → no handle
 
 
 def test_ray_launch_threads_system_job_id_as_submission_id(
@@ -167,9 +182,14 @@ def test_ray_launch_threads_system_job_id_as_submission_id(
     import scale_forecasting.ray_submit as ray_submit_mod
 
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or "j")
+    resource = "projects/p/locations/us-west1/pr/c"
+    monkeypatch.setattr(
+        ray_submit_mod,
+        "submit_ray",
+        lambda cfg, **kw: seen.update(kw) or ("j", resource, "us-west1"),
+    )
 
-    real_id = RaySubmitter().launch(
+    handle = RaySubmitter().launch(
         _cfg(python_runtime="ray"),
         models=[_SPARK],
         manage_header=False,
@@ -177,15 +197,22 @@ def test_ray_launch_threads_system_job_id_as_submission_id(
         system_job_id="sf-run-abc-ml-a1",
     )
     assert seen["submission_id"] == "sf-run-abc-ml-a1"
-    # Ray submission_id == system_job_id (we set it), so nothing to stamp back.
-    assert real_id is None
+    # Ray submission_id == system_job_id (we set it); the handle carries the resource path + region.
+    assert handle == ProbeHandle(
+        "ray",
+        native_id="j",
+        region="us-west1",
+        resource_name=resource,
+    )
 
 
 def test_ray_launch_maps_hardware_to_use_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     import scale_forecasting.ray_submit as ray_submit_mod
 
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or "j")
+    monkeypatch.setattr(
+        ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or ("j", "rn", "us-west1")
+    )
 
     RaySubmitter().launch(
         _cfg(python_runtime="ray"),
@@ -204,7 +231,9 @@ def test_ray_launch_threads_shared_cluster_target(monkeypatch: pytest.MonkeyPatc
     import scale_forecasting.ray_submit as ray_submit_mod
 
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or "j")
+    monkeypatch.setattr(
+        ray_submit_mod, "submit_ray", lambda cfg, **kw: seen.update(kw) or ("j", "rn", "us-west1")
+    )
 
     RaySubmitter().launch(
         _cfg(python_runtime="ray"),
@@ -247,9 +276,9 @@ def test_ray_launch_submits_ray_ignoring_session(monkeypatch: pytest.MonkeyPatch
 
     seen: dict[str, Any] = {}
 
-    def _fake_submit_ray(cfg: RunConfig, **kw: Any) -> str:
+    def _fake_submit_ray(cfg: RunConfig, **kw: Any) -> tuple[str, str, str]:
         seen.update(kw)
-        return "job-1"
+        return "job-1", "rn", "us-west1"
 
     monkeypatch.setattr(ray_submit_mod, "submit_ray", _fake_submit_ray)
 

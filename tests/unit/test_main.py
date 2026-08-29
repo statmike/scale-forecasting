@@ -447,6 +447,15 @@ def test_launch_family_job_dispatches_to_resolved_submitter(
     expected_id = dataproc_job_id(make_job_key("rid-0", "statistical", 1))
     assert seen["job"]["system_job_id"] == expected_id
     assert captured["system_job_id"] == expected_id
+    # The ENTRY probe handle is stamped into the RUNNING row: a serverless spark job knows its id
+    # and single region up front, so native_id is the system id and id_kind stays "exact".
+    assert seen["job"]["probe_handle"] == {
+        "runtime": "spark",
+        "native_id": expected_id,
+        "region": "us-central1",
+        "id_kind": "exact",
+        "spark_mode": "serverless",
+    }
     # The default fake submitter returns None (its id == system_job_id), so nothing is stamped back.
     assert "system_job_id" not in seen["fin"].extra
 
@@ -454,14 +463,20 @@ def test_launch_family_job_dispatches_to_resolved_submitter(
 def test_launch_family_job_stamps_real_id_when_submitter_returns_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cluster submitter returns a server-assigned id → it's finalized onto the row."""
+    """A cluster submitter returns a handle with a server-assigned id → it's finalized onto the row,
+    and the entry handle is refreshed with the post-submit truths."""
     import scale_forecasting.submitters as submitters_mod
+    from scale_forecasting.probes import ProbeHandle
 
     seen = _fake_job_lifecycle(monkeypatch)
 
     class _ClusterSubmitter:
-        def launch(self, cfg: RunConfig, **kw: Any) -> str:
-            return "real-dataproc-job-id"  # differs from the deterministic system_job_id
+        def launch(self, cfg: RunConfig, **kw: Any) -> ProbeHandle:
+            # A cluster job's id is server-assigned (differs from the deterministic system_job_id);
+            # the handle also carries the region the job actually landed in.
+            return ProbeHandle(
+                "spark", native_id="real-dataproc-job-id", region="us-west1", spark_mode="cluster"
+            )
 
     monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _ClusterSubmitter())
 
@@ -471,6 +486,16 @@ def test_launch_family_job_stamps_real_id_when_submitter_returns_one(
 
     # The real (server-assigned) id is stamped back onto the run_jobs row for reverse-trace.
     assert seen["fin"].extra["system_job_id"] == "real-dataproc-job-id"
+    # The stamp-back also refreshes the probe handle with the post-submit truths (real id + region).
+    assert seen["fin"].extra["job_telemetry"] == {
+        "probe_handle": {
+            "runtime": "spark",
+            "native_id": "real-dataproc-job-id",
+            "region": "us-west1",
+            "id_kind": "exact",
+            "spark_mode": "cluster",
+        }
+    }
 
 
 def test_launch_family_job_dispatches_ray_for_ray_family(
@@ -478,7 +503,7 @@ def test_launch_family_job_dispatches_ray_for_ray_family(
 ) -> None:
     import scale_forecasting.submitters as submitters_mod
 
-    _fake_job_lifecycle(monkeypatch)
+    seen = _fake_job_lifecycle(monkeypatch)
     captured: dict[str, Any] = {}
 
     class _FakeSubmitter:
@@ -498,7 +523,46 @@ def test_launch_family_job_dispatches_ray_for_ray_family(
     # Ray keeps the canonical key verbatim as its submission id.
     from scale_forecasting.registry.ids import make_job_key, ray_submission_id
 
-    assert captured["system_job_id"] == ray_submission_id(make_job_key("rid-0", "statistical", 1))
+    submission_id = ray_submission_id(make_job_key("rid-0", "statistical", 1))
+    assert captured["system_job_id"] == submission_id
+    # The ENTRY probe handle for a self-provisioning Ray family: no shared cluster, so no resource
+    # path yet (omitted from the blob) and the region defaults to the deployment region.
+    assert seen["job"]["probe_handle"] == {
+        "runtime": "ray",
+        "native_id": submission_id,
+        "region": "us-central1",
+        "id_kind": "exact",
+    }
+
+
+def test_launch_family_job_cluster_entry_handle_omits_unresolved_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A cluster job's real id is server-assigned, unknown at entry. The ENTRY handle must not assert
+    # an id it doesn't have (that would risk a false NOT_FOUND on probe), so native_id is empty
+    # until the stamp-back refresh fills it in.
+    import scale_forecasting.submitters as submitters_mod
+
+    seen = _fake_job_lifecycle(monkeypatch)
+
+    class _NoOpSubmitter:
+        def launch(self, cfg: RunConfig, **kw: Any) -> None:
+            return None  # nothing to stamp back for this entry-handle assertion
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _NoOpSubmitter())
+
+    cfg = _cfg(models=[_SPARK], compute={"families": {"statistical": {"spark_mode": "cluster"}}})
+    job = dag.plan_dag(cfg).python_jobs[0]
+    assert job.compute is not None and job.compute.spark_mode == "cluster"
+    main._launch_family_job(cfg, job, "rid-0", _SETTINGS)
+
+    assert seen["job"]["probe_handle"] == {
+        "runtime": "spark",
+        "native_id": "",
+        "region": "us-central1",
+        "id_kind": "exact",
+        "spark_mode": "cluster",
+    }
 
 
 def test_launch_native_job_runs_bigquery_engine_inline(
@@ -524,12 +588,40 @@ def test_launch_native_job_runs_bigquery_engine_inline(
     assert captured["models"] == _NATIVE
     assert captured["manage_header"] is False
     assert outcome.n_series == 3
+    # The native family's entry probe handle: BigQuery coordinates are fully known up front, so the
+    # handle is a job-id *prefix* (id_kind="prefix") ending in the "-" the engine prefixes its jobs.
+    handle = seen["job"]["probe_handle"]
+    assert handle["runtime"] == "bigquery"
+    assert handle["id_kind"] == "prefix"
+    assert handle["native_id"] == f"{seen['job']['system_job_id']}-"
+    assert handle["region"] == "us-central1"
     # The native family's row is opened with the BigQuery runtime.
     assert seen["job"]["family"] == "native"
     assert seen["job"]["runtime"] == "bigquery"
     from scale_forecasting.registry.ids import bigquery_job_id, make_job_key
 
     assert seen["job"]["system_job_id"] == bigquery_job_id(make_job_key("rid-0", "native", 1))
+
+
+def test_launch_ensemble_job_stamps_bigquery_prefix_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ensemble node runs in BigQuery like the native family, so its entry handle is the only one
+    # (no stamp-back site) and carries a BigQuery job-id prefix.
+    import scale_forecasting.ensemble_run as ensemble_run
+
+    seen = _fake_job_lifecycle(monkeypatch)
+    monkeypatch.setattr(ensemble_run, "run_ensembles", lambda *a, **k: None)
+
+    cfg = _cfg()
+    main._launch_ensemble_job(cfg, "rid-0", _SETTINGS)
+
+    handle = seen["job"]["probe_handle"]
+    assert handle["runtime"] == "bigquery"
+    assert handle["id_kind"] == "prefix"
+    assert handle["native_id"] == f"{seen['job']['system_job_id']}-"
+    assert handle["region"] == "us-central1"
+    assert seen["job"]["family"] == "ensemble"
 
 
 # --- run(): ensemble orchestration after the engine join -----------------------
@@ -807,6 +899,77 @@ def test_cli_dispatches_dry_run(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) 
     )
     main._main(["--config", str(path), "--dry-run"])
     assert seen == {"dry_run": True, "force": False, "run_name": "cli main test"}
+
+
+def test_cli_dispatches_probe(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    import scale_forecasting.probes as probes_mod
+    from scale_forecasting.config import load_config_uri
+
+    seen: dict[str, Any] = {}
+
+    def _fake_probe_run(run_id: str, *, job: str | None = None, settings: Any = None) -> str:
+        seen["run_id"] = run_id
+        seen["job"] = job
+        return "REPORT"
+
+    monkeypatch.setattr(probes_mod, "probe_run", _fake_probe_run)
+    printed: dict[str, Any] = {}
+    monkeypatch.setattr(main, "_print_probe_report", lambda r: printed.__setitem__("report", r))
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli probe test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    # --probe resolves the config's run_id offline, escalates via probe_run, and prints — no run().
+    main._main(["--config", str(path), "--probe", "--job", "statistical"])
+
+    assert seen["run_id"] == make_run_id(load_config_uri(str(path)))
+    assert seen["job"] == "statistical"
+    assert printed["report"] == "REPORT"
+
+
+def test_print_probe_report_formats_header_and_rows(capsys: pytest.CaptureFixture[str]) -> None:
+    from scale_forecasting.probes import (
+        VERDICT_RUNNING,
+        VERDICT_STALE_REGISTRY,
+        FamilyVerdict,
+        ProbeReport,
+    )
+
+    report = ProbeReport(
+        run_id="sf-run-xyz",
+        status="RUNNING",
+        escalated=True,
+        families=(
+            FamilyVerdict(
+                family="statistical", runtime="spark", registry_status="RUNNING",
+                native_state="RUNNING", exists=True, verdict=VERDICT_RUNNING,
+                disagreement=False, n_done=3, n_expected=10, detail="in flight",
+            ),
+            FamilyVerdict(
+                family="native", runtime="bigquery", registry_status="RUNNING",
+                native_state="SUCCEEDED", exists=True, verdict=VERDICT_STALE_REGISTRY,
+                disagreement=True, n_done=5, n_expected=None, detail="",
+            ),
+        ),
+        disagreement=True,
+    )
+    main._print_probe_report(report)
+    text = capsys.readouterr().out
+    # Header line carries the run-wide roll-up.
+    assert "run sf-run-xyz" in text
+    assert "status=RUNNING" in text and "escalated=True" in text and "disagreement=True" in text
+    # One row per family with its verdict + done/expected (unknown denominator renders as ?).
+    assert "statistical" in text and "RUNNING_CONFIRMED" in text and "3/10" in text
+    assert "native" in text and "STALE_REGISTRY" in text and "5/?" in text
 
 
 def test_cli_force_flag_threads_through(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:

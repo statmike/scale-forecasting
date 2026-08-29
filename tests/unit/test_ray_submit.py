@@ -415,10 +415,13 @@ def test_submit_ray_ephemeral_creates_submits_and_deletes(
     _stubbed_lifecycle: dict[str, Any],
 ) -> None:
     calls = _stubbed_lifecycle
-    job_id = ray_submit.submit_ray(
+    job_id, resource_name, region = ray_submit.submit_ray(
         _cfg(), settings=_settings(), infra=_infra(), wait=True, submission_id="sf-rid-ml-a1"
     )
     assert job_id == "job-xyz"
+    # submit_ray also hands back the cluster's resource path + landed region for later probing.
+    assert resource_name.endswith("/persistentResources/" + calls["create_name"])
+    assert region == "us-central1"
     assert calls["created"] == 1
     assert calls["submitted"] == 1
     assert calls["deleted"] == 1  # ephemeral tears down
@@ -540,7 +543,9 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
         return "job-nw", "PENDING", ""
 
     monkeypatch.setattr(ray_submit, "_submit_and_poll", _immediate_submit)
-    job_id = ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), wait=False)
+    job_id, _resource_name, _region = ray_submit.submit_ray(
+        _cfg(), settings=_settings(), infra=_infra(), wait=False
+    )
     assert job_id == "job-nw"
     assert calls["wait"] is False
     assert calls["telemetry"] is None  # no telemetry without wait
@@ -943,9 +948,12 @@ def test_submit_ray_falls_back_to_next_region_on_capacity_stockout(
 
     monkeypatch.setattr(ray_submit, "_create_cluster", _stockout_then_ok)
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
-    job_id = ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+    job_id, _resource_name, region = ray_submit.submit_ray(
+        cfg, settings=_settings(), infra=_infra(), wait=True
+    )
 
     assert job_id == "job-xyz"
+    assert region == "us-west1"  # the region the create actually landed in after the hop
     assert calls["created"] == 2  # first region failed, second succeeded
     assert calls["init_regions"][:2] == ["us-east1", "us-west1"]  # tried in order
     # teardown count = 1 stocked-out region + 1 successful region after the job.
@@ -976,7 +984,9 @@ def test_submit_ray_falls_back_when_capacity_reason_only_on_resource_error(
 
     monkeypatch.setattr(ray_submit, "_create_cluster", _generic_then_ok)
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
-    job_id = ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+    job_id, _resource_name, _region = ray_submit.submit_ray(
+        cfg, settings=_settings(), infra=_infra(), wait=True
+    )
 
     assert job_id == "job-xyz"
     assert calls["created"] == 2  # hopped despite the generic exception text

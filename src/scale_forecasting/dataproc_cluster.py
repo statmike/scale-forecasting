@@ -385,6 +385,32 @@ def _job_client(region: str) -> object:  # pragma: no cover - thin client factor
     )
 
 
+def get_cluster_job(
+    region: str, job_id: str, *, settings: Settings | None = None, timeout: float | None = None
+) -> tuple[str, str]:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
+    """Read a Dataproc **cluster** job's current state without blocking; return ``(state, detail)``.
+
+    The non-blocking read the probe path needs: today the only cluster job-state access is inside
+    `_submit_job_and_wait`, which blocks to terminal. A `JobControllerClient.get_job` fetches the
+    live ``JobStatus.State`` (its ``.name``) plus the status message for one already-submitted job,
+    so a reader can reconcile the registry against the runtime. Raises
+    ``google.api_core.exceptions.NotFound`` when the job id is unknown (the cluster was torn down,
+    or the id never existed) — the caller maps that to a NOT_FOUND probe result. ``timeout`` caps
+    the RPC (the probe passes a short ceiling so a slow control plane can't hang the reader).
+    """
+    from .settings import Settings
+
+    settings = settings or Settings.resolve()
+    result = _job_client(region).get_job(
+        request={"project_id": settings.project_id, "region": region, "job_id": job_id},
+        timeout=timeout,
+    )
+    state = result.status.state
+    state_name = getattr(state, "name", str(state))
+    detail = getattr(result.status, "details", "") or ""
+    return state_name, detail
+
+
 def _create_cluster(
     client: Any, project_id: str, region: str, cluster: object
 ) -> None:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
@@ -492,8 +518,8 @@ def submit_cluster_job(
     job_id: str | None = None,
     worker_count: int = _DEFAULT_WORKER_COUNT,
     wait: bool = True,
-) -> str:
-    """Stage code + config, run a PySpark job on a Dataproc cluster; return its job id.
+) -> tuple[str, str]:
+    """Stage code + config, run a PySpark job on a Dataproc cluster; return ``(job id, region)``.
 
     The cluster analog of `submit.submit_batch`. Stages the **full** ``cfg`` (so its ``run_id``
     matches `main.run`'s) and the shared launcher + package, then runs the lifecycle:
@@ -506,7 +532,10 @@ def submit_cluster_job(
     workers' accelerator (a cluster is the T4 Spark path). ``job_id`` is the deterministic
     per-family id (the orchestrator's `registry.ids.dataproc_job_id`), used only as a fallback: the
     returned id is Dataproc's own server-assigned ``reference.job_id`` (the console-resolvable one)
-    when we waited. With ``wait`` a non-DONE terminal state raises so a failed job never exits 0.
+    when we waited. The returned ``region`` is where the job actually ran (the reuse target's
+    region, or the region an ephemeral create landed in after any capacity failover) so the caller
+    can record a probe-able coordinate. With ``wait`` a non-DONE terminal state raises so a failed
+    job never exits 0.
 
     The ephemeral create walks zone/region capacity candidates (`compute_fallback`): the deployment
     region's auto-zone first (unchanged), then its other zones, then opt-in cross-region — hopping
@@ -592,7 +621,7 @@ def submit_cluster_job(
             raise EngineError(
                 f"cluster job {final_id} terminal state {state_name}: {detail or '(no detail)'}"
             )
-        return final_id
+        return final_id, region
     finally:
         if not reuse:
             _delete_cluster(cluster_client, project_id, region, name)

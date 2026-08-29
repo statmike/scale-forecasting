@@ -335,6 +335,22 @@ def test_job_row_id_reflects_attempt() -> None:
     assert row["attempt"] == 3
 
 
+def test_job_row_wraps_probe_handle_into_job_telemetry() -> None:
+    # A probe handle passed at entry is nested under job_telemetry.$.probe_handle (the JSON path the
+    # v_run_jobs view projects); absent, job_telemetry stays NULL.
+    handle = {
+        "runtime": "spark",
+        "native_id": "dp-batch-xyz",
+        "region": "us-central1",
+        "id_kind": "exact",
+        "spark_mode": "serverless",
+    }
+    row = bq.assemble_job_row(
+        "rid-0123456789ab", "statistical", 1, _CREATED, probe_handle=handle
+    )
+    assert row["job_telemetry"] == {"probe_handle": handle}
+
+
 def test_job_row_columns_match_param_types() -> None:
     # The assembled row's keys are exactly the columns write_job/update_job know how to bind.
     row = bq.assemble_job_row("rid-0123456789ab", "statistical", 1, _CREATED)

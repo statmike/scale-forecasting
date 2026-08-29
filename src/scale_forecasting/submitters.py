@@ -21,6 +21,7 @@ from .errors import ConfigError
 
 if TYPE_CHECKING:
     from .config import RunConfig
+    from .probes import ProbeHandle
     from .settings import Settings
 
 
@@ -47,7 +48,7 @@ class RuntimeSubmitter(Protocol):
         spark_cluster_region: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
-    ) -> str | None:
+    ) -> ProbeHandle | None:
         """Run ``models`` on this runtime, blocking until terminal when ``wait``.
 
         ``manage_header`` threads the header-ownership contract (``False`` = contributor mode, the
@@ -78,11 +79,13 @@ class RuntimeSubmitter(Protocol):
         (submits its own failure-isolated job) instead of creating its own; other runtimes ignore
         them, and when unset a Ray family self-provisions as before.
 
-        Returns the platform's **real** job id when it differs from ``system_job_id`` — i.e. when
-        the platform assigns its own id rather than accepting the one we hand it (a Dataproc
-        *cluster* job). The caller stamps it back onto the ``run_jobs`` row for reverse-trace.
-        Returns ``None`` when the stored ``system_job_id`` is already the real id (a Serverless
-        batch or Ray job, whose id we set) or when nothing was submitted (an in-process session).
+        Returns a `ProbeHandle` carrying the launched job's runtime coordinates (platform-native id,
+        region, and the runtime-specific path/mode) so the caller can stamp it back onto the
+        ``run_jobs`` row for reconciliation and reverse-trace. The handle's ``native_id`` is the
+        platform's **real** id: for a Dataproc *cluster* job that's the server-assigned id (differs
+        from ``system_job_id``, so the caller re-stamps ``system_job_id``); for a Serverless batch
+        or Ray job it equals ``system_job_id`` (the id we set, so nothing to re-stamp). Returns
+        ``None`` when nothing was submitted (an in-process session).
         """
         ...
 
@@ -111,7 +114,9 @@ class SparkSubmitter:
         spark_cluster_region: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
-    ) -> str | None:
+    ) -> ProbeHandle | None:
+        from .probes import ProbeHandle
+
         # ray_cluster_name/ray_cluster_region are Ray-only (a shared cluster); Spark ignores them.
         if spark is not None:
             # In-process Spark over an injected (Connect or local) session — no remote submit.
@@ -126,10 +131,11 @@ class SparkSubmitter:
             return None  # in-process: nothing submitted, no platform id
         if spark_mode == "cluster":
             # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named). Its
-            # id is server-assigned, so return the real id for the caller to record (reverse-trace).
+            # id is server-assigned, so the handle carries the real id (differs from system_job_id)
+            # for the caller to record (reverse-trace), plus the region the job actually ran in.
             from .dataproc_cluster import submit_cluster_job
 
-            return submit_cluster_job(
+            real_id, region = submit_cluster_job(
                 cfg,
                 models=models,
                 manage_header=manage_header,
@@ -140,6 +146,9 @@ class SparkSubmitter:
                 spark_cluster_name=spark_cluster_name,
                 spark_cluster_region=spark_cluster_region,
                 job_id=system_job_id,
+            )
+            return ProbeHandle(
+                "spark", native_id=real_id, region=region, spark_mode="cluster"
             )
         from .submit import submit_batch
 
@@ -154,7 +163,10 @@ class SparkSubmitter:
             hardware=hardware,
             gpu_type=gpu_type,
         )
-        return None  # Serverless batch id == system_job_id (we set it); nothing to stamp back
+        # Serverless batch id == system_job_id (we set it); single-region (settings.region).
+        return ProbeHandle(
+            "spark", native_id=system_job_id, region=settings.region, spark_mode="serverless"
+        )
 
 
 class RaySubmitter:
@@ -180,16 +192,17 @@ class RaySubmitter:
         spark_cluster_region: str | None = None,
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
-    ) -> str | None:
+    ) -> ProbeHandle | None:
         # spark, max_executors, and the spark_* args are ignored — there is no in-process Ray path
         # from the orchestrator, the Ray cluster autoscales on its own (no fixed executor cap), and
         # spark_mode/spark_cluster_name are Spark-only. system_job_id becomes the Ray submission_id
         # so the job's own id is deterministic; hardware="gpu" provisions the Ray GPU pool for this
         # family (kept out of cfg for run_id). ray_cluster_name/region, when set, target the run's
         # shared ephemeral cluster (reuse path — submit this family's own job to it, no create).
+        from .probes import ProbeHandle
         from .ray_submit import submit_ray
 
-        submit_ray(
+        job_id, resource_name, region = submit_ray(
             cfg,
             models=models,
             manage_header=manage_header,
@@ -201,7 +214,9 @@ class RaySubmitter:
             cluster_name=ray_cluster_name,
             cluster_region=ray_cluster_region,
         )
-        return None  # Ray submission_id == system_job_id (we set it); nothing to stamp back
+        # Ray submission_id == system_job_id (we set it); the handle also carries the cluster's
+        # persistent-resource path and the region it landed in for later probing.
+        return ProbeHandle("ray", native_id=job_id, region=region, resource_name=resource_name)
 
 
 # Registered by cfg.python_runtime. A new runtime = one class + one entry here.
