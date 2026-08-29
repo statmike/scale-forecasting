@@ -1022,19 +1022,6 @@ def _roll_header_after_cancel(statuses: list[str | None]) -> str | None:
 # --- cancel I/O orchestrator ---------------------------------------------------
 
 
-def _resolve_actor(settings: Settings) -> str | None:  # pragma: no cover - ADC identity I/O
-    """Best-effort ADC principal for the cancel audit trail — a service-account email when the
-    credentials carry one, else ``None`` (a user-ADC laptop has no cheap email without a token
-    call). P6 expands this; here it never raises and never blocks a cancel."""
-    try:
-        import google.auth
-
-        creds, _ = google.auth.default()
-        return getattr(creds, "service_account_email", None) or None
-    except Exception:  # noqa: BLE001 - actor resolution is best-effort; a cancel proceeds without it
-        return None
-
-
 def _finalize_cancelled(
     row: dict[str, Any],
     handle: ProbeHandle,
@@ -1090,6 +1077,7 @@ def cancel_run(
     ``reason`` and ``actor`` (default: resolved from ADC) are recorded for audit. Cancel **never
     deletes** — landed partial results are retained and labelled by the CANCELLED status + counts.
     """
+    from .identity import resolve_principal
     from .settings import Settings
 
     s = settings if settings is not None else Settings.resolve()
@@ -1101,7 +1089,7 @@ def cancel_run(
             header_status=None, actor=None, reason=reason,
         )
 
-    resolved_actor = actor if actor is not None else _resolve_actor(s)
+    resolved_actor = actor if actor is not None else resolve_principal(s)
     cancelled_at = datetime.now(UTC)
     rows_by_family = {r["family"]: r for r in rows}
     outcomes: list[CancelOutcome] = []

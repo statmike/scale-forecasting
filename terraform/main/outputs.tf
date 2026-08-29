@@ -38,6 +38,16 @@ output "compute_sa" {
   value = module.iam.compute_email
 }
 
+output "probe_reader_role_id" {
+  description = "Custom role (sfProbeReader) to bind to read-only run responders — reconcile a run, no cancel."
+  value       = module.iam.probe_reader_role_id
+}
+
+output "job_canceller_role_id" {
+  description = "Custom role (sfJobCanceller) to bind to whoever may cancel in-flight runs (probe-reader + stop)."
+  value       = module.iam.job_canceller_role_id
+}
+
 output "airflow_uri" {
   description = "Airflow UI (null unless create_composer = true)."
   value       = module.composer.airflow_uri

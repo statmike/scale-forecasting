@@ -270,6 +270,20 @@ def test_header_row_carries_snapshot_millis_when_given() -> None:
     assert row["snapshot_millis"] == 1_724_000_000_000
 
 
+def test_header_row_stamps_user_id_for_audit() -> None:
+    # The launching principal (resolved by write_header via identity.resolve_principal) lands on the
+    # header so *launch* is attributable, alongside the P5 cancel actor.
+    row = bq.assemble_header_row(
+        _cfg(), "rid", _CREATED, user_id="runner@proj.iam.gserviceaccount.com"
+    )
+    assert row["user_id"] == "runner@proj.iam.gserviceaccount.com"
+
+
+def test_header_row_user_id_defaults_null() -> None:
+    # Unresolved principal (or a pre-audit call) → NULL, never a fabricated actor.
+    assert bq.assemble_header_row(_cfg(), "rid", _CREATED)["user_id"] is None
+
+
 def test_header_ensemble_strategies_empty_when_disabled() -> None:
     row = bq.assemble_header_row(_cfg(), "rid", _CREATED)
     assert row["ensemble_strategies"] == []

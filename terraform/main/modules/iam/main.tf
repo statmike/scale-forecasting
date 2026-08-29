@@ -11,6 +11,12 @@
 #
 # `create` = false lets you bring your own SAs (pass their emails in); then this module only
 # resolves the emails through to outputs and grants nothing (your admin owns the grants).
+#
+# This module also DEFINES (but does not bind) two run-observability operator roles —
+# sfProbeReader and sfJobCanceller (§9 of the runtime-probe design) — for the humans/responders who
+# probe and cancel live runs. They are deliberately separate from the runner SA's operational grants
+# so a read-only responder can diagnose a stuck run without the power to stop it. An admin binds them
+# to a person or group; the module outputs their ids.
 
 variable "project_id" {
   type = string
@@ -94,6 +100,26 @@ locals {
     "artifactreg.read" = "roles/artifactregistry.reader"  # pull the custom Spark runtime image
   }
 
+  # Run-observability operator permission sets (§9 two-tier). job-canceller is a strict SUPERSET of
+  # probe-reader — expressed with concat() so the "superset" relationship is structural, not a
+  # copy-paste that can drift. probe-reader READS live runtime state (Dataproc/Ray/BigQuery) to
+  # reconcile a run; job-canceller adds the STOP verbs. Reading the registry itself (the reconcile
+  # query) needs BigQuery job + dataset read (roles/bigquery.jobUser + a dataViewer/readSession grant
+  # on the registry dataset); that is granted where the operator is bound, not in these roles.
+  probe_reader_perms = [
+    "dataproc.batches.get",               # Dataproc Serverless: batch state
+    "dataproc.jobs.get",                  # Dataproc cluster: job state
+    "bigquery.jobs.list",                 # native family: resolve the run's jobs by id prefix
+    "bigquery.jobs.get",                  # ...and read each statement's state
+    "aiplatform.persistentResources.get", # Ray: reach the cluster to read job status
+  ]
+  job_canceller_perms = concat(local.probe_reader_perms, [
+    "dataproc.batches.delete", # Serverless has no cancel — deleting a running batch stops it
+    "dataproc.jobs.cancel",    # Dataproc cluster job cancel
+    "bigquery.jobs.update",    # cancel a running BigQuery statement
+    # Ray stop_job goes through the cluster dashboard — no IAM verb beyond persistentResources.get.
+  ])
+
   # Flatten (email, role) pairs into one map — static keys, apply-time role values.
   grants = var.create ? merge(
     { for k, r in local.runner_roles : "runner:${k}" => { member = local.runner_email, role = r } },
@@ -134,6 +160,30 @@ resource "google_project_iam_custom_role" "ray_cluster_manager" {
     "aiplatform.persistentResources.get",
     "aiplatform.persistentResources.list",
   ]
+}
+
+# Operator role, tier 1: read live runtime state to reconcile a run — but NOT stop it. Bind this to
+# a read-only responder (an on-call diagnosing a stuck run) who should never be able to cancel.
+resource "google_project_iam_custom_role" "probe_reader" {
+  count       = var.create ? 1 : 0
+  project     = var.project_id
+  role_id     = "sfProbeReader"
+  title       = "scale-forecasting probe reader"
+  description = "Read live Dataproc/Ray/BigQuery job state to reconcile a run — no cancel."
+  permissions = local.probe_reader_perms
+}
+
+# Operator role, tier 2: probe-reader + the stop verbs. Bind this to whoever may cancel in-flight
+# runs. A strict superset of sfProbeReader (see local.job_canceller_perms). The cancel path
+# pre-flights nothing extra — a missing permission surfaces as a clear "needs the job-canceller
+# role" message (probes._cancel_failure) on the actual cancel call, not a stack trace.
+resource "google_project_iam_custom_role" "job_canceller" {
+  count       = var.create ? 1 : 0
+  project     = var.project_id
+  role_id     = "sfJobCanceller"
+  title       = "scale-forecasting job canceller"
+  description = "Superset of probe-reader: also STOP a run's in-flight Dataproc/Ray/BigQuery jobs."
+  permissions = local.job_canceller_perms
 }
 
 resource "google_project_iam_member" "grant" {
@@ -232,4 +282,14 @@ output "runner_email" {
 output "compute_email" {
   description = "scale-forecasting-compute service account email."
   value       = local.compute_email
+}
+
+output "probe_reader_role_id" {
+  description = "Custom role id (sfProbeReader): read-only run reconciliation. Bind to responders. null in BYO mode."
+  value       = var.create ? google_project_iam_custom_role.probe_reader[0].id : null
+}
+
+output "job_canceller_role_id" {
+  description = "Custom role id (sfJobCanceller): probe-reader + stop verbs. Bind to run cancellers. null in BYO mode."
+  value       = var.create ? google_project_iam_custom_role.job_canceller[0].id : null
 }

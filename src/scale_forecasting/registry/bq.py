@@ -152,7 +152,12 @@ def assemble_metadata_row(
 
 
 def assemble_header_row(
-    cfg: RunConfig, run_id: str, created_at: datetime, *, snapshot_millis: int | None = None
+    cfg: RunConfig,
+    run_id: str,
+    created_at: datetime,
+    *,
+    snapshot_millis: int | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``run_registry`` header row from a config.
 
@@ -161,6 +166,11 @@ def assemble_header_row(
     parameter serializes the value itself (``json.dumps``), so the row must carry the dict, not
     a pre-serialized string (a string would be double-encoded). ``bq_models`` is left empty here
     and filled by the router once model runtimes are known; status starts RUNNING.
+
+    ``user_id`` is the principal that launched the run (the ADC identity resolved by `write_header`
+    via `identity.resolve_principal` — a runner SA under Composer/CI, a user's email on a laptop),
+    stamped so *launch* is attributable in the audit trail. ``None`` leaves it NULL (the pre-audit
+    behavior, and when the principal couldn't be resolved cheaply).
 
     ``snapshot_millis`` is the input-data snapshot the run pins every read to (epoch millis on the
     BigQuery clock, resolved once by `resolve_snapshot_millis`): stored on the header so every
@@ -173,7 +183,7 @@ def assemble_header_row(
         "run_id": run_id,
         "created_at": created_at,
         "snapshot_millis": snapshot_millis,
-        "user_id": None,
+        "user_id": user_id,
         "git_sha": None,
         "python_runtime": cfg.python_runtime,
         "bq_models": [],
@@ -790,17 +800,27 @@ def write_header(
     A single-row parameterized INSERT (not the Write API — no benefit for one row, and the
     header is updated in place later by `update_header`). Resolves the run's input-data snapshot
     once here (`resolve_snapshot_millis`) and stamps it on the header so every family job pins the
-    same source state (`snapshot_millis_for`). Raises `RegistryError` on failure.
+    same source state (`snapshot_millis_for`). Also resolves the launching principal
+    (`identity.resolve_principal`, best-effort) into ``user_id`` so *launch* is attributable in the
+    audit trail — alongside the cancel actor recorded by the P5 cancel path. Raises `RegistryError`
+    on failure.
     """
     from datetime import UTC, datetime
 
     from google.cloud import bigquery
 
     from ..errors import RegistryError
+    from ..identity import resolve_principal
 
     resolved = _resolve_settings(settings)
     snapshot_millis = resolve_snapshot_millis(settings=resolved)
-    row = assemble_header_row(cfg, run_id, datetime.now(UTC), snapshot_millis=snapshot_millis)
+    row = assemble_header_row(
+        cfg,
+        run_id,
+        datetime.now(UTC),
+        snapshot_millis=snapshot_millis,
+        user_id=resolve_principal(resolved),
+    )
     columns = list(row)
     placeholders = ", ".join(f"@{col}" for col in columns)
     sql = (
