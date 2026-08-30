@@ -236,22 +236,12 @@ skips unless Airflow is installed and runs in its own CI job (see
 
 ## Results log
 
-One row per live execution. Fill it in as the campaign runs.
+Live results are recorded in the **[validation ledger](validation.md)** — the single source of
+truth for what has been proven on real infrastructure. It is kept there rather than here because a
+result only means something relative to the architecture it ran on, and the ledger records that:
+each entry declares the architecture axes it depended on, so a later change that invalidates a
+passing result is caught mechanically by `tests/unit/test_validation_ledger.py` in the offline gate
+instead of going unnoticed.
 
-| # | Config | Date | run_id | Status | Notes |
-|---|--------|------|--------|--------|-------|
-| 01 | `01_serverless_cpu.json` | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | ✅ PASS | 2 families (statistical + ML) on Serverless CPU; 3 models × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, reverse-traced to Dataproc batches. Surfaced + fixed the rerun-collision guard. |
-| 02 | `02_bq_native.json` | 2026-08-22 | `smoke-02-bq-native-7b34cfd9eb98` | ✅ PASS | Native family (arima_plus + timesfm) in BigQuery; 5,600 predictions (100×28×2), 200 metadata rows; `mean_wape` null (no backtest). Surfaced that BQML `CREATE MODEL` can't time-travel a BigLake Iceberg source — native path now reads Iceberg un-pinned (see [CONSIDERATIONS.md](https://github.com/statmike/scale-forecasting/blob/main/CONSIDERATIONS.md), C1). |
-| 03 | `03_serverless_gpu.json` | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | ✅ PASS | Deep-learning family (`neuralprophet`) on Serverless GPU (L4); 2,800 predictions (100×28), 100 metadata rows; `mean_wape` null (no backtest). Fixed the Serverless GPU property set (Dataproc-managed accelerator + premium compute/disk tiers; the Spark-level GPU scheduling props are unsupported). Reverse-traced to the Serverless batch (attempt `a2` after an env-policy failure on `a1`). |
-| 04 | `04_cluster_cpu.json` | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | ✅ PASS | Ephemeral Dataproc cluster, CPU; 2 families (statistical + ML), 3 models (theta, holtwinters, xgboost) × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, both families reverse-traced to Dataproc cluster jobs. The cluster gets its model libraries from the self-contained venv archive, delivered by a **node init action** that unpacks it to an absolute path on every node — a job-attached archive reaches only executors, never the client-mode driver, so the driver needs the venv on-node. |
-| 05 | `05_cluster_reuse.json` | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | ✅ PASS | Standing Dataproc cluster reused by name (create/teardown skipped); 2 families (statistical + ML), theta + xgboost × 100 cells; `mean_wape` null (no backtest); rerun no-op'd, reverse-traced to cluster jobs. The standing cluster carries the same venv init action, so reuse runs the identical locked env. |
-| 06 | `06_cluster_gpu.json` | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | ✅ PASS | Dataproc cluster GPU (T4), deep-learning family (`neuralprophet`) × 100 cells; `mean_wape` null (no backtest); rerun no-op'd (same id, board unchanged), reverse-traced to a Dataproc cluster job. Boots from the pre-baked NVIDIA-driver VM image (`build_gpu_image`/`SF_GPU_IMAGE`, no driver init action) with Secure Boot disabled. **Transient T4 capacity in `us-central1-a` was rescued by the zone failover** (`configs/compute_fallback.json`): several CREATE ops failed on capacity, then the create landed and ran in `us-central1-b` — no config edits, same run_id. Cluster torn down after (no orphan spend). |
-| 07 | `07_ray_cpu.json` | _pending_ | | | |
-| 08 | `08_ray_gpu.json` | _pending_ | | | |
-| 09 | `09_shared_ray.json` | _pending_ | | | |
-| 10 | `10_mixed_runtimes.json` | _pending_ | | | |
-| 11 | `11_ensemble_barrier.json` | _pending_ | | | |
-| 12 | `12_ensemble_microbatch.json` | _pending_ | | | |
-| 13 | `13_native_format.json` | _pending_ | | | |
-| 14 | `14_full_dag.json` | _pending_ | | | |
-| 15 | `15_airflow_multi_engine.json` | _pending_ | | | Orchestrated by Composer/Airflow, not direct-launch — gated on `create_composer=true`. |
+After running a smoke, add its row to the ledger — including the `run_id`, which is what lets
+anyone reverse-trace the result back to the platform job.

@@ -84,6 +84,7 @@ nav:
       - Running & reviewing: running_and_reviewing.md
       - Operations runbook: operations.md
       - Smoke testing: smoke_testing.md
+      - Validation ledger: validation.md
   - Demo:
       - Workshop: workshop.md
       - Notebook tour:
