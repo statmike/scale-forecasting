@@ -355,6 +355,56 @@ def test_the_two_derived_switches_agree_with_the_two_knobs(
     assert (profile.records_measurements, profile.unpins_threads) == (records, unpins)
 
 
+@pytest.mark.parametrize(
+    "source", ["auto", "baseline", "none", "my-run-name-0123456789ab", "a-0123456789ab"]
+)
+def test_a_source_may_be_a_keyword_or_a_run_id(source: str) -> None:
+    cfg = RunConfig(**_minimal_dict(compute={"profile": {"source": source}}))
+    assert cfg.compute.profile.source == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "latest",  # a plausible keyword that is not one of ours
+        "my-run-name-0123456789",  # 10 hex, not 12
+        "MY-RUN-0123456789ab",  # run ids are lower-case
+        "0123456789ab",  # a bare digest with no name slug
+        "",
+    ],
+)
+def test_a_source_that_is_neither_is_rejected_at_load(source: str) -> None:
+    """A typo'd run_id must fail loudly at load, not silently size the run off nothing."""
+    with pytest.raises(ValidationError):
+        RunConfig(**_minimal_dict(compute={"profile": {"source": source}}))
+
+
+@pytest.mark.parametrize(
+    ("mode", "source", "consumes", "resolves"),
+    [
+        ("auto", "auto", True, True),
+        ("auto", "none", False, False),
+        # A concrete pointer is already resolved; plan time has nothing left to look up.
+        ("auto", "baseline", True, False),
+        ("auto", "my-run-0123456789ab", True, False),
+        # `mode="off"` remains the master switch on the consuming side too.
+        ("off", "auto", False, False),
+    ],
+)
+def test_the_two_derived_consumer_switches_agree_with_the_two_knobs(
+    mode: str, source: str, consumes: bool, resolves: bool
+) -> None:
+    profile = RunConfig(
+        **_minimal_dict(compute={"profile": {"mode": mode, "source": source}})
+    ).compute.profile
+    assert (profile.consumes_evidence, profile.needs_source_resolution) == (consumes, resolves)
+
+
+def test_source_defaults_to_auto_so_a_second_run_sizes_itself_from_the_first() -> None:
+    """The payoff of harvesting by default is only collected if consuming is default too."""
+    assert RunConfig(**_minimal_dict()).compute.profile.source == "auto"
+
+
 def test_profile_is_part_of_the_run_id() -> None:
     """The config *is* the experiment record; a differently-sized fleet is a different run.
 

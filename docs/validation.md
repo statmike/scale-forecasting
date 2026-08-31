@@ -34,7 +34,7 @@ old value goes stale by definition.
 | `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
-| `run_id_inputs` | `+compute.profile.measure` | W10 (2026-08-31) | `+compute.profile` (W5) |
+| `run_id_inputs` | `+compute.profile.source` | W11a (2026-08-31) | `+compute.profile.measure` (W10) |
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
@@ -164,8 +164,9 @@ Things that are true today and that no entry above covers. Keep this list short 
   W5 nothing yet *reads* `compute.profile`. What was lost is narrower and worth naming — the ids
   above remain valid pointers *into* the registry, but you can no longer recompute one *from* its
   config to find it. Re-running any of 01–06 will record a new id, at which point the old one
-  becomes purely historical. W10 moved every id a second time by adding `compute.profile.measure`;
-  the same reasoning applies unchanged, and no row is stale for it.
+  becomes purely historical. W10 moved every id a second time by adding `compute.profile.measure`,
+  and W11a a third by adding `compute.profile.source`; the same reasoning applies unchanged to both,
+  and no row is stale for either.
   The change that *did* make live results stale arrived at W7b/W8, and it was not the one predicted
   here. This note used to say the staleness event would be W6, "when `profile.mode='auto'` starts
   actually sizing fleets from measurement." That never happened and now never will in that form —
@@ -188,8 +189,18 @@ Things that are true today and that no entry above covers. Keep this list short 
   yet run on a real executor, so three things stay unverified until a live run: that the probes
   return sane numbers on Dataproc and Vertex rather than zeros or nulls, that the five columns
   auto-migrate onto the existing deployed `forecast_metadata`, and that the per-cell overhead is
-  genuinely negligible at 100k scale. W12 is where that is settled; W11 (consuming a harvest to size
-  a later run) and W13 (shipping a baseline) both depend on it.
+  genuinely negligible at 100k scale. W12 is where that is settled; W13 (shipping a baseline)
+  depends on it.
+
+  **W11a built the consumer against the same unproven evidence.** `compute.profile.source` defaults
+  to `"auto"`, and `profiling.resolve_profile_source` implements the whole precedence chain —
+  named run, discovered run, shipped baseline, static config — with every loader injected, so the
+  chain is tested offline end to end with no BigQuery. It cannot yet change a live run: nothing
+  calls it (that is W11b), there is no baseline to load (W13), and there is no harvested run
+  anywhere to discover, because of the gap above. The consequence worth stating plainly: **the first
+  live run that resolves a source will be the first one whose sizing came from a measurement**, and
+  its `provenance` block — basis, `run_id`, timestamp, signature, warnings — is the artifact to
+  check when that happens.
 
 ## Provenance confidence
 

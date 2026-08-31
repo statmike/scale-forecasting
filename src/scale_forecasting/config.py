@@ -13,11 +13,19 @@ Public surface:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .errors import ConfigError, get_logger
 
@@ -53,6 +61,11 @@ GpuType = Literal["T4", "L4"]
 EnsembleMode = Literal["barrier", "microbatch"]
 ProfileMode = Literal["off", "auto", "always"]
 ProfileMeasure = Literal["off", "harvest", "controlled"]
+# `compute.profile.source` is not a closed set: besides the three keywords it accepts any run_id,
+# which is the whole point ("size this run like run X"). The keywords are named here so the
+# validator and the resolver agree on them in one place.
+PROFILE_SOURCE_KEYWORDS = ("none", "auto", "baseline")
+_RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$")
 
 
 # --- nested config blocks ------------------------------------------------------
@@ -315,6 +328,50 @@ class ProfileConfig(BaseModel):
     # off     — record nothing. Also implied by ``mode="off"``, so one setting turns the whole
     #           profiler off in an incident rather than two.
     measure: ProfileMeasure = "harvest"
+    # What evidence this run *consumes*, the mirror of `measure`. Four values, three of them
+    # keywords:
+    #
+    # auto (default) — resolve at **plan** time to the newest profile matching this run's data
+    #           signature, falling back to the shipped baseline and then to static arithmetic. The
+    #           resolved reference is written into the staged config before the digest is taken, so
+    #           a user who never thinks about any of this still gets evidence, and re-running a
+    #           staged config still reproduces exactly. Two `auto` runs a week apart may land on
+    #           different ids — correct, not a bug: different evidence is a different fleet, and a
+    #           different fleet is a different run.
+    # <run_id> — consume that run's harvest. The explicit, reproducible form, and what `auto`
+    #           resolves itself into.
+    # baseline — consume the version shipped with the product and nothing else. The cold-start
+    #           answer, and the one axis (`effective_cores`) a user should never have to measure.
+    # none    — consume nothing; size from static arithmetic. Distinct from `mode="off"`, which
+    #           additionally turns off the arithmetic itself. This one still sizes; it just does
+    #           not read anyone's measurements.
+    source: str = "auto"
+
+    @field_validator("source")
+    @classmethod
+    def _source_is_a_keyword_or_a_run_id(cls, value: str) -> str:
+        """Reject a source that is neither keyword nor run_id, rather than silently finding nothing.
+
+        A typo here is invisible at runtime — an unresolvable reference degrades to static sizing,
+        which is exactly what the run would have done anyway, so the operator would believe they
+        pinned a profile and never learn otherwise.
+        """
+        if value in PROFILE_SOURCE_KEYWORDS or _RUN_ID_RE.match(value):
+            return value
+        raise ValueError(
+            f"compute.profile.source must be one of {PROFILE_SOURCE_KEYWORDS} or a run_id "
+            f"(<name-slug>-<12 hex>); got {value!r}"
+        )
+
+    @property
+    def consumes_evidence(self) -> bool:
+        """Should this run try to size itself from measurements? (``mode="off"`` vetoes it.)"""
+        return self.mode != "off" and self.source != "none"
+
+    @property
+    def needs_source_resolution(self) -> bool:
+        """Is the source still a *question* rather than an answer? (i.e. must plan time lock it.)"""
+        return self.consumes_evidence and self.source == "auto"
 
     @property
     def records_measurements(self) -> bool:

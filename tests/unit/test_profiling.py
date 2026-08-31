@@ -35,6 +35,7 @@ import json
 import math
 import os
 import random
+from dataclasses import replace
 from typing import Any
 
 import pandas as pd
@@ -1814,3 +1815,199 @@ def test_non_finite_and_junk_readings_read_as_no_evidence_rather_than_raising() 
     )
     assert profile.n_ok == 0
     assert profile.models == {}
+
+
+# --- the consumer: signatures, drift, and the precedence chain -------------------
+
+
+def _sourced(source: str, **over: Any) -> RunConfig:
+    """A config whose ``compute.profile.source`` is ``source``."""
+    profile: dict[str, Any] = {"source": source}
+    profile.update(over)
+    return _cfg(compute={"profile": profile})
+
+
+def _harvest_rows(n: int = 4, **over: Any) -> list[dict[str, Any]]:
+    """``n`` distinct-series harvest rows, all otherwise identical."""
+    return [_row(ts_id=f"series-{i}", created_at="2026-08-30T00:00:00Z", **over) for i in range(n)]
+
+
+def test_a_config_signature_leaves_history_length_unknown_rather_than_guessing() -> None:
+    """At plan time nobody has read the data; an invented length would compare as if it had."""
+    sig = profiling.signature_from_config(_cfg(data={"source_table": "t", "series_limit": 500}))
+    assert (sig.source_table, sig.n_series, sig.freq) == ("t", 500, "D")
+    assert sig.median_n_obs is None
+
+
+def test_a_row_signature_counts_distinct_series_not_rows() -> None:
+    """One series fitted by five models is one series, not five."""
+    rows = [_row(ts_id="a", model_type=m) for m in ("theta", "ets", "croston")] + [_row(ts_id="b")]
+    assert profiling.signature_from_rows(rows).n_series == 2
+
+
+def test_a_row_signature_ignores_fold_and_ensemble_rows_like_the_harvest_does() -> None:
+    """Backtest folds and ensembles are not fits; counting them would inflate the panel."""
+    rows = [_row(ts_id="a"), _row(ts_id="b", fold_id=0), _row(ts_id="c", ensemble_id="mean")]
+    assert profiling.signature_from_rows(rows).n_series == 1
+
+
+def test_a_row_signature_takes_the_median_history_length() -> None:
+    """The typical series, not the longest — this axis is about "is this the same panel"."""
+    rows = [_row(ts_id="a", n_obs=100), _row(ts_id="b", n_obs=400), _row(ts_id="c", n_obs=4000)]
+    assert profiling.signature_from_rows(rows).median_n_obs == 400
+
+
+def test_an_axis_neither_side_can_see_is_skipped_rather_than_warned_on() -> None:
+    """An unchecked axis is honest; an axis compared against a placeholder is not."""
+    want = profiling.DataSignature(source_table="t", n_series=1000)
+    have = profiling.DataSignature(source_table=None, n_series=None, median_n_obs=400, freq="W")
+    assert profiling.compare_signatures(want, have) == ()
+
+
+def test_a_different_table_or_frequency_always_warns() -> None:
+    """No tolerance band on an identity axis: a different table is different data, full stop."""
+    warnings = profiling.compare_signatures(
+        profiling.DataSignature(source_table="t", freq="D"),
+        profiling.DataSignature(source_table="u", freq="W"),
+    )
+    assert len(warnings) == 2
+    assert "different table" in warnings[0] and "different frequency" in warnings[1]
+
+
+@pytest.mark.parametrize(
+    ("planned", "measured", "warns"),
+    [(1000, 1000, False), (1000, 200, False), (1000, 100, True), (100, 1000, True)],
+)
+def test_scale_axes_warn_only_past_an_order_of_magnitude(
+    planned: int, measured: int, warns: bool
+) -> None:
+    """A band tight enough to fire every week trains operators to ignore the warning."""
+    got = profiling.compare_signatures(
+        profiling.DataSignature(n_series=planned), profiling.DataSignature(n_series=measured)
+    )
+    assert bool(got) is warns
+
+
+def test_source_none_consults_nothing_at_all() -> None:
+    """"none" is an opt-out, not a lookup that happens to fail: no loader may be called."""
+
+    def explode(*_: Any) -> Any:
+        raise AssertionError("source='none' must not reach a loader")
+
+    resolved = profiling.resolve_profile_source(
+        _sourced("none"), load_run=explode, load_baseline=explode, discover=explode
+    )
+    assert resolved is None
+
+
+def test_profiling_off_wins_over_any_source() -> None:
+    """`mode` stays the master switch; a source setting cannot re-enable a disabled profiler."""
+    cfg = _sourced("auto", mode="off")
+    assert profiling.resolve_profile_source(cfg, load_run=lambda _: ([], None)) is None
+
+
+def test_a_named_run_is_loaded_directly_without_a_discovery_query() -> None:
+    """Naming a run is a decision; re-searching would let the resolver overrule the operator."""
+    seen: list[str] = []
+
+    def load(run_id: str) -> Any:
+        seen.append(run_id)
+        return _harvest_rows(), "source_series_native"
+
+    profile = profiling.resolve_profile_source(
+        _sourced("my-run-abc123def456"),
+        load_run=load,
+        discover=lambda _: pytest.fail("a named run must not be re-discovered"),
+    )
+    assert seen == ["my-run-abc123def456"]
+    assert profile is not None and profile.provenance is not None
+    assert profile.provenance.run_id == "my-run-abc123def456"
+
+
+def test_matching_evidence_is_measured_and_drifted_evidence_is_reference() -> None:
+    """The third basis is the whole point: "measured, but not on your data" must be visible."""
+    cfg = _cfg(data={"source_table": "source_series_native", "series_limit": 4})
+    rows = _harvest_rows()
+    matched = profiling.resolve_profile_source(
+        cfg, load_run=lambda _: (rows, "source_series_native"), discover=lambda _: "r-1"
+    )
+    drifted = profiling.resolve_profile_source(
+        cfg, load_run=lambda _: (rows, "somewhere_else"), discover=lambda _: "r-1"
+    )
+    assert matched is not None and matched.provenance is not None
+    assert drifted is not None and drifted.provenance is not None
+    assert matched.provenance.basis == "measured"
+    assert matched.provenance.warnings == ()
+    assert drifted.provenance.basis == "reference"
+    assert drifted.provenance.warnings
+
+
+def test_drifted_evidence_is_still_used_rather_than_discarded() -> None:
+    """A warning is not a veto: sizing off old evidence still beats sizing off none."""
+    profile = profiling.resolve_profile_source(
+        _sourced("my-run-abc123def456"), load_run=lambda _: (_harvest_rows(), "another_table")
+    )
+    assert profile is not None
+    assert profile.models  # the numbers survived the warning
+
+
+def test_the_resolved_profile_is_the_harvest_of_those_rows() -> None:
+    """The resolver routes evidence; it must never become a second aggregation."""
+    rows = _harvest_rows()
+    resolved = profiling.resolve_profile_source(
+        _sourced("my-run-abc123def456"), load_run=lambda _: (rows, None)
+    )
+    direct = profiling.harvest_profile(rows)
+    assert resolved is not None
+    assert replace(resolved, provenance=None).to_dict() == direct.to_dict()
+
+
+def test_the_measurement_timestamp_comes_from_the_rows() -> None:
+    """"When was this measured" is the question an operator asks of a suspicious profile."""
+    rows = _harvest_rows(2)
+    rows[1]["created_at"] = "2026-09-01T00:00:00Z"
+    profile = profiling.resolve_profile_source(
+        _sourced("my-run-abc123def456"), load_run=lambda _: (rows, None)
+    )
+    assert profile is not None and profile.provenance is not None
+    assert profile.provenance.measured_at == "2026-09-01T00:00:00Z"
+
+
+def test_auto_falls_through_to_the_baseline_when_nothing_matches() -> None:
+    """Step 4 of the chain: no prior run is a reason to reach for reference numbers, not to stop."""
+    baseline = profiling.build_profile([])
+    profile = profiling.resolve_profile_source(
+        _sourced("auto"), discover=lambda _: None, load_baseline=lambda: baseline
+    )
+    assert profile is not None and profile.provenance is not None
+    assert profile.provenance.basis == "reference"
+    assert profile.provenance.warnings  # never silently presented as your own measurement
+
+
+def test_no_evidence_anywhere_resolves_to_static_config() -> None:
+    """The floor under every path: `None` means "size from what you declared", not "fail"."""
+    assert profiling.resolve_profile_source(_sourced("auto")) is None
+    empty = profiling.resolve_profile_source(_sourced("baseline"), load_baseline=lambda: None)
+    assert empty is None
+
+
+def test_a_registry_hiccup_falls_back_instead_of_sinking_the_run() -> None:
+    """Sizing evidence is an optimisation; a BigQuery outage must not stop a run submitting."""
+
+    def boom(*_: Any) -> Any:
+        raise RuntimeError("bigquery unavailable")
+
+    assert profiling.resolve_profile_source(_sourced("auto"), discover=boom, load_run=boom) is None
+
+
+def test_the_in_run_pre_pass_stamps_a_measured_provenance() -> None:
+    """The one path that measures your data on your hardware, in-run, says so unconditionally."""
+    profile = profiling.resolve_profile(
+        _profilable_panel(),
+        _cfg(compute={"profile": {"min_cells": 1, "samples": 2}}),
+        ["theta"],
+        measure=_recording_measure([]),
+    )
+    assert profile is not None and profile.provenance is not None
+    assert profile.provenance.basis == "measured"
+    assert profile.provenance.source == "in-run"

@@ -288,10 +288,12 @@ cheap probes around a fit that was happening anyway — onto `forecast_metadata`
 is therefore a measured cost model you can point a bigger run at. It is on by default, because the
 run you wish you had measured is always the one you already finished.
 
-`measure` produces; `mode` still governs whether the fleet arithmetic and any in-run measurement
-happen, and `mode = "off"` vetoes measurement too, so there is one switch that makes the whole
-feature inert. *(Consuming a past run's measurements — pointing this run at that `run_id` — is the
-next piece of work; today the harvest accumulates and `profiling.harvest_profile` reads it.)*
+**Three knobs, three questions.** `mode` is the master switch — whether the fleet arithmetic runs at
+all, and the threshold the in-run Ray pre-pass compares against. `measure` decides what evidence this
+run **produces**. `source` decides what evidence it **consumes**. They are orthogonal because the
+questions are: a run can harvest without consuming (the first one ever), consume without harvesting
+(a one-off resize), or do both (the ordinary case, and the default). `mode = "off"` vetoes all of it,
+so there is still exactly one switch that makes the whole feature inert.
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|------------|---------|
@@ -301,12 +303,34 @@ next piece of work; today the harvest accumulates and `profiling.harvest_profile
 | `memory_margin` | `float` | `1.3` | `> 1.0` | Headroom on the measured **max**, which sizes the slot. |
 | `time_margin` | `float` | `1.2` | `> 1.0` | Headroom on the measured **median**, which sizes the fleet. |
 | `measure` | `"off"` \| `"harvest"` \| `"controlled"` | `"harvest"` | — | What evidence this run **produces**. See the table below. |
+| `source` | `"auto"` \| `"baseline"` \| `"none"` \| `"<run_id>"` | `"auto"` | keyword or a well-formed run_id | What evidence this run **consumes**. See the precedence chain below. |
 
 | `measure` | What the run does | Use it when |
 |-----------|-------------------|-------------|
 | `"harvest"` | Records per-cell CPU time, absolute process memory, peak device bytes, the thread cap and `n_obs` onto `forecast_metadata`. Changes nothing about how the run executes. | Always — this is the default. |
 | `"controlled"` | Harvest, **plus** the Spark fleet leaves the native thread pools uncapped so a fit's measured `effective_cores` reflects the library instead of the cap. | A deliberate calibration run, and never a production one: the executors are knowingly oversubscribed, so the run is slower and its shape is not a real run's shape. The translation carries a note saying so. |
 | `"off"` | Writes NULL in all five columns. | You have a reason to skip three probes per fit. |
+
+| `source` | Where the numbers come from | Provenance basis |
+|----------|-----------------------------|------------------|
+| `"auto"` | The newest completed run whose harvest matches this run's data signature; failing that, the shipped baseline; failing that, static config. Resolved **at plan time** and written into the staged config as a concrete `run_id`, so the run records what it actually sized from rather than a search that might resolve differently tomorrow. | `measured` / `reference` |
+| `"<run_id>"` | That run's harvest, whatever its signature. Naming a run is a decision, so it is honoured — a drifted signature comes back as a warning, not a substitution. | `measured` / `reference` |
+| `"baseline"` | The shipped, versioned reference measurements. Real numbers, taken on reference hardware and reference data — never on yours. | `reference` |
+| `"none"` | Nothing is consulted; size from declared config. | — |
+
+The precedence, outside-in: **explicit `compute` settings > `compute.profile.source` > shipped
+baseline > static config.** Anything you set by hand always wins; the evidence only fills what you
+left to be derived, and the static floor is the behaviour this product shipped with.
+
+Every resolved profile carries a `provenance` block naming its basis, the `run_id` and timestamp
+behind it, the data signature it was measured on, and any drift warnings. `measured` means the
+evidence matches this run's signature on every axis both sides can see; **`reference` means measured,
+but not on your data**. That third value exists because a pinned profile from months ago on a
+different table is worse than no profile at all — precisely because it looks authoritative. A
+mismatch is never silent, and never fatal: sizing off drifted evidence still beats sizing off none.
+
+If BigQuery is unreachable when the source is resolved, the run logs a warning and sizes from static
+config. Evidence is an optimisation; a registry hiccup must not stop a run from submitting.
 
 **Why the two margins differ, and why they apply to different tails.** Over-estimating time buys
 extra slots, which costs money; under-estimating memory OOM-kills the task, which costs the run.
@@ -321,8 +345,8 @@ the resource shape rather than the forecasts, so that is a deliberate choice: th
 experiment record, and a run whose fleet was sized differently is not the same run for performance
 purposes. One practical consequence: adding these fields moved every pre-existing `run_id`, so a
 config saved before the profiler existed no longer re-derives the id it originally produced — and
-adding `measure` moved them again. Re-running an older config produces a new `run_id` and therefore
-a new run rather than a resumed one.
+adding `measure` and then `source` moved them again. Re-running an older config produces a new
+`run_id` and therefore a new run rather than a resumed one.
 
 **None of the derived fleet arithmetic has run on live infrastructure yet.** It is offline-proven
 self-consistent — the legal-value snapping, the AM reserve, the worker derivation all have unit

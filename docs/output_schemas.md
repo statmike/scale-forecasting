@@ -126,6 +126,11 @@ All five read NULL when it is off — which is also how rows written before thes
 back, so both mean "no evidence" rather than "zero". A cell that errored has `fit_seconds = 0`,
 which is how the reader tells a failed fit from a measured one (there is no `status` column here).
 
+Consumption is on by default too: `compute.profile.source = "auto"` makes the next run look for the
+newest harvest matching its data signature and size itself from it, stamping the `run_id` it chose
+into the staged config so the choice is on the record. Set `source` to a specific `run_id` to pin
+one, or to `"none"` to ignore the harvest entirely.
+
 ## `forecast_predictions` — the forecast values
 
 The values tier: one row per (run, series, model, **date**) over the horizon. Partitioned by

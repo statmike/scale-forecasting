@@ -78,28 +78,36 @@ import os
 import statistics
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Literal
 
-from .errors import DataError
+from .errors import DataError, get_logger
 
 if TYPE_CHECKING:
     import pandas as pd
 
     from .config import RunConfig
 
+_log = get_logger(__name__)
+
 __all__ = [
     "ComputeProfile",
+    "DataSignature",
     "FamilyCost",
     "MeasuredFit",
     "ModelCost",
+    "ProfileProvenance",
     "SampleSpec",
     "SeriesStats",
     "build_profile",
+    "compare_signatures",
     "harvest_profile",
     "measure_fit",
     "resolve_profile",
+    "resolve_profile_source",
     "select_profile_sample",
+    "signature_from_config",
+    "signature_from_rows",
     "series_stats",
     "should_profile",
 ]
@@ -1109,6 +1117,74 @@ class FamilyCost:
 
 
 @dataclass(frozen=True)
+class DataSignature:
+    """What a set of measurements was taken *on* — the basis for "is this evidence yours?" (pure).
+
+    Deliberately coarse. The question a signature has to answer is not "is this the same data"
+    (nothing is) but "is this close enough that its costs transfer" — a fit's cost tracks the shape
+    of the panel, not its values. Four fields cover that: a different **table** is different work, a
+    10x change in **series count** changes nothing per-cell but everything about the fleet, a 10x
+    change in **history length** changes the per-fit cost directly, and a different **frequency**
+    changes the seasonality every model estimates.
+
+    Every field is optional because the two sides are read from different places and neither is
+    complete: a config knows its table and frequency but not how long its series are until it
+    reads them, while a harvest knows the lengths it measured but not the table it read
+    (``forecast_metadata`` records no source). `compare_signatures` compares what both sides have.
+    """
+
+    source_table: str | None = None
+    n_series: int | None = None
+    median_n_obs: int | None = None
+    freq: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe dict, for the telemetry stamp."""
+        return {
+            "source_table": self.source_table,
+            "n_series": self.n_series,
+            "median_n_obs": self.median_n_obs,
+            "freq": self.freq,
+        }
+
+
+@dataclass(frozen=True)
+class ProfileProvenance:
+    """Where a profile's numbers came from, carried with the numbers (pure).
+
+    A sizing decision an operator cannot attribute is one they cannot argue with. The load-bearing
+    field is ``basis``:
+
+    * ``measured`` — taken on this run's own data. The strongest claim.
+    * ``reference`` — measured, genuinely, but **not on your data**: another run's harvest, or the
+      baseline shipped with the product. Real evidence with a caveat, and without a name for that
+      state an operator reading a resolved fleet shape cannot tell whose evidence produced it.
+    * ``assumed`` — no measurement; the static arithmetic. Recorded so "we had nothing" is a stated
+      outcome rather than an absent field.
+    """
+
+    basis: Literal["measured", "reference", "assumed"]
+    source: str  # the `compute.profile.source` value that produced this — the audit key
+    run_id: str | None = None  # the harvest's run, when the evidence came from one
+    baseline_version: str | None = None  # the shipped baseline's version, when it came from that
+    measured_at: str | None = None  # ISO-8601, when the evidence was recorded
+    signature: DataSignature | None = None  # what it was measured on
+    warnings: tuple[str, ...] = ()  # signature mismatches; see `compare_signatures`
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe dict, for the telemetry stamp."""
+        return {
+            "basis": self.basis,
+            "source": self.source,
+            "run_id": self.run_id,
+            "baseline_version": self.baseline_version,
+            "measured_at": self.measured_at,
+            "signature": self.signature.to_dict() if self.signature else None,
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
 class ComputeProfile:
     """The measured cost model for one run: per-model and per-family, both tails kept (pure).
 
@@ -1140,6 +1216,9 @@ class ComputeProfile:
     first_error_by_model: dict[str, str] | None = None
     # The pre-pass sample, when the caller passes it — which series were measured and why.
     sample: tuple[SampleSpec, ...] = ()
+    # Whose evidence this is. ``None`` on a profile built straight from measurements by a caller
+    # that has not decided yet — `resolve_profile_source` is what stamps it.
+    provenance: ProfileProvenance | None = None
 
     @property
     def n_failed(self) -> int:
@@ -1164,6 +1243,7 @@ class ComputeProfile:
         succeed with no custom encoder.
         """
         return {
+            "provenance": self.provenance.to_dict() if self.provenance else None,
             "memory_margin": self.memory_margin,
             "time_margin": self.time_margin,
             "n_measurements": self.n_measurements,
@@ -1526,6 +1606,88 @@ def harvest_profile(
     )
 
 
+def signature_from_config(cfg: RunConfig) -> DataSignature:
+    """What this run is about to read, as far as the config alone can say (pure).
+
+    ``median_n_obs`` is always ``None`` here: history length is a property of the data, and at plan
+    time nobody has read it. That asymmetry is deliberate rather than a gap — `compare_signatures`
+    skips what one side cannot know, so a config-side signature checks the table, the series count
+    and the frequency, and lets the length axis go unchecked rather than guessing at it.
+    """
+    return DataSignature(
+        source_table=cfg.data.source_table,
+        n_series=cfg.data.series_limit,
+        median_n_obs=None,
+        freq=cfg.data.freq,
+    )
+
+
+def signature_from_rows(
+    rows: Iterable[Mapping[str, Any]], *, source_table: str | None = None
+) -> DataSignature:
+    """What a harvest was measured on, read off the rows themselves (pure).
+
+    ``source_table`` is passed in because ``forecast_metadata`` does not record one — the run's
+    header does. A caller that has the header supplies it; one that does not leaves it ``None``
+    and the table axis simply goes unchecked.
+    """
+    ts_ids: set[str] = set()
+    lengths: list[int] = []
+    for row in rows:
+        if row.get("fold_id") is not None or row.get("ensemble_id") is not None:
+            continue
+        ts_id = row.get("ts_id")
+        if ts_id is not None:
+            ts_ids.add(str(ts_id))
+        n_obs = _as_optional_int(row.get("n_obs"))
+        if n_obs:
+            lengths.append(n_obs)
+    return DataSignature(
+        source_table=source_table,
+        n_series=len(ts_ids) or None,
+        median_n_obs=int(statistics.median(lengths)) if lengths else None,
+        freq=None,
+    )
+
+
+# How far two signatures may drift on a *scale* axis before the evidence stops transferring. An
+# order of magnitude, because that is the point at which per-fit cost and fleet width stop being
+# the same problem — and because a tighter band would warn on every ordinary week-to-week change
+# in a panel and train operators to ignore the warning, which is worse than not emitting one.
+_SIGNATURE_DRIFT_FACTOR = 10.0
+
+
+def compare_signatures(want: DataSignature, have: DataSignature) -> tuple[str, ...]:
+    """Human-readable reasons ``have``'s evidence may not describe ``want``'s run (pure).
+
+    Warnings, never errors. A profile is a *hint* about hardware; sizing off drifted evidence is
+    still better than sizing off nothing, and a hard failure here would turn a convenience into a
+    thing that blocks runs. But it is never silent either — §3.10's rule is that a pinned profile
+    from months ago on different data is worse than no profile precisely *because it looks
+    authoritative*, and an unnamed mismatch is how it gets to look that way.
+
+    Axes either side leaves ``None`` are skipped: an unchecked axis is honest, an axis compared
+    against a placeholder is not.
+    """
+    out: list[str] = []
+    if want.source_table and have.source_table and want.source_table != have.source_table:
+        out.append(
+            f"measured on a different table ({have.source_table} vs {want.source_table})"
+        )
+    if want.freq and have.freq and want.freq != have.freq:
+        out.append(f"measured at a different frequency ({have.freq} vs {want.freq})")
+    for label, mine, theirs in (
+        ("series count", want.n_series, have.n_series),
+        ("history length", want.median_n_obs, have.median_n_obs),
+    ):
+        if not mine or not theirs:
+            continue
+        ratio = max(mine, theirs) / min(mine, theirs)
+        if ratio >= _SIGNATURE_DRIFT_FACTOR:
+            out.append(f"{label} differs by {ratio:.0f}x ({theirs} measured vs {mine} planned)")
+    return tuple(out)
+
+
 def _as_number(value: Any) -> float:
     """A row cell as a finite float, with NULL / non-numeric / non-finite all reading as ``0.0``.
 
@@ -1579,6 +1741,128 @@ def should_profile(cfg: RunConfig, n_cells: int) -> bool:
     if mode == "always":
         return True
     return n_cells >= cfg.compute.profile.min_cells
+
+
+# --- the consumer: which evidence this run sizes from ---------------------------
+
+# A loader for one run's harvest. Returns the ``forecast_metadata`` rows and the source table the
+# run read (which those rows do not carry — the run header does), or ``None`` when the run has no
+# harvest to give. The tuple is the seam's whole vocabulary: rows say what the fits cost, the table
+# says what they cost it *on*, and `compare_signatures` needs both to say anything useful.
+RunHarvestLoader = Callable[[str], "tuple[Sequence[Mapping[str, Any]], str | None] | None"]
+# Finds the newest run whose harvest matches a signature, or ``None``. Separate from the loader
+# because "which run" is a search and "what did it cost" is a read, and only `auto` does the search.
+RunDiscoverer = Callable[[DataSignature], "str | None"]
+# The shipped, versioned baseline (W13), or ``None`` before one exists.
+BaselineLoader = Callable[[], "ComputeProfile | None"]
+
+
+def resolve_profile_source(
+    cfg: RunConfig,
+    *,
+    load_run: RunHarvestLoader | None = None,
+    load_baseline: BaselineLoader | None = None,
+    discover: RunDiscoverer | None = None,
+) -> ComputeProfile | None:
+    """The profile this run should size from, per ``compute.profile.source`` (pure + injected I/O).
+
+    Returns ``None`` for "no evidence" — the static-config case every consumer already handles
+    (`resources.resource_slot` takes ``profile=None`` as its identity case). ``None`` is a
+    *decision*, not a failure: sizing from declared config is the behaviour this product shipped
+    with, and it stays the floor under every path here.
+
+    The precedence, resolved outside-in:
+
+    1. ``mode == "off"`` or ``source == "none"`` → ``None``. Nothing consulted, nothing loaded.
+    2. ``source == "<run_id>"`` → that run's harvest. An operator naming a run has made a
+       decision; it is honoured even if the signature has drifted, and the drift comes back as
+       warnings on the provenance rather than as a substitution they did not ask for.
+    3. ``source == "auto"`` → the newest run whose harvest matches this run's signature, if
+       ``discover`` finds one.
+    4. the shipped baseline, if one is loadable.
+    5. ``None``.
+
+    Every loader is injected. That keeps this function pure enough to test the whole precedence
+    chain offline with no BigQuery and no baseline file — the same seam ``resolve_profile`` uses
+    for ``measure``. A loader that raises is treated as a loader that found nothing: sizing
+    evidence is an optimisation, and a registry hiccup must not sink a run that would otherwise
+    size itself from config.
+    """
+    profile_cfg = cfg.compute.profile
+    if not profile_cfg.consumes_evidence:
+        return None
+
+    want = signature_from_config(cfg)
+    source = profile_cfg.source
+
+    run_id = source if source != "baseline" else None
+    if source == "auto":
+        run_id = _try(lambda: discover(want)) if discover else None
+
+    if run_id and load_run:
+        loaded = _try(lambda: load_run(run_id))
+        if loaded:
+            rows, source_table = loaded
+            profile = harvest_profile(
+                rows,
+                memory_margin=profile_cfg.memory_margin,
+                time_margin=profile_cfg.time_margin,
+            )
+            have = signature_from_rows(rows, source_table=source_table)
+            warnings = compare_signatures(want, have)
+            return _with_provenance(
+                profile,
+                ProfileProvenance(
+                    # No drift on any axis both sides can see is as close to "measured on your
+                    # data" as harvested evidence gets; anything else is honest about being
+                    # someone else's measurement.
+                    basis="measured" if not warnings else "reference",
+                    source=source,
+                    run_id=run_id,
+                    measured_at=_measured_at(rows),
+                    signature=have,
+                    warnings=warnings,
+                ),
+            )
+
+    if load_baseline:
+        baseline = _try(load_baseline)
+        if baseline is not None:
+            existing = baseline.provenance
+            return _with_provenance(
+                baseline,
+                ProfileProvenance(
+                    basis="reference",  # measured, but never on your data — that is what it is for
+                    source=source,
+                    baseline_version=existing.baseline_version if existing else None,
+                    measured_at=existing.measured_at if existing else None,
+                    signature=existing.signature if existing else None,
+                    warnings=(
+                        "sized from the shipped baseline, not from a measurement of your data",
+                    ),
+                ),
+            )
+    return None
+
+
+def _try(load: Callable[[], Any]) -> Any:
+    """Run a loader, swallowing its failure (see `resolve_profile_source`)."""
+    try:
+        return load()
+    except Exception as e:  # noqa: BLE001 - evidence is an optimisation; never fatal
+        _log.warning("profile source lookup failed, falling back: %r", e)
+        return None
+
+
+def _with_provenance(profile: ComputeProfile, provenance: ProfileProvenance) -> ComputeProfile:
+    """``profile`` with its provenance stamped on (frozen dataclass → a copy)."""
+    return replace(profile, provenance=provenance)
+
+
+def _measured_at(rows: Iterable[Mapping[str, Any]]) -> str | None:
+    """The newest ``created_at`` in a harvest, as a string, or None when the rows carry none."""
+    stamps = [str(row["created_at"]) for row in rows if row.get("created_at") is not None]
+    return max(stamps) if stamps else None
 
 
 def _profilable_models(models: Sequence[str]) -> list[str]:
@@ -1686,9 +1970,17 @@ def resolve_profile(
                 measure_one(series, model_name, cfg, params=tuned.get(model_name, untuned))
             )
 
-    return build_profile(
+    profile = build_profile(
         measurements,
         sample=sample,
         memory_margin=cfg.compute.profile.memory_margin,
         time_margin=cfg.compute.profile.time_margin,
+    )
+    # The one path that measures this run's own data, on this run's own hardware, in-run: the
+    # only place `basis="measured"` is unconditional.
+    return _with_provenance(
+        profile,
+        ProfileProvenance(
+            basis="measured", source="in-run", signature=signature_from_config(cfg)
+        ),
     )
