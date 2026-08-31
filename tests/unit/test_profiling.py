@@ -1475,3 +1475,221 @@ def test_an_environment_that_cannot_be_pinned_reports_none_rather_than_claiming_
         assert os.environ["OMP_NUM_THREADS"] == "1", "the half we can still do, we still do"
 
     assert "OMP_NUM_THREADS" not in os.environ, "restored even on the degraded path"
+
+
+# --- the driver-side pre-pass: resolve_profile ---------------------------------
+
+
+def _recording_measure(
+    calls: list[tuple[str, str, Any]],
+    *,
+    rss_by_model: dict[str, int] | None = None,
+) -> Any:
+    """A stand-in for `measure_fit` that records its arguments and returns a fixed record.
+
+    The whole pre-pass is testable offline because the measurement is injected: no fit runs, no
+    statsmodels, no accelerator — and the *order* it was called in becomes assertable, which is
+    the property the warm-heap argument in `resolve_profile` rests on.
+    """
+    rss_by_model = rss_by_model or {}
+
+    def measure(series: pd.DataFrame, model_name: str, cfg: RunConfig, *, params: Any = None):
+        ts_id = str(series["ts_id"].iloc[0])
+        calls.append((ts_id, model_name, params))
+        return MeasuredFit(
+            ts_id=ts_id,
+            model_type=model_name,
+            family="statistical",
+            n_obs=len(series),
+            wall_s=1.0,
+            cpu_s=1.0,
+            peak_rss_bytes=1024,
+            peak_gpu_bytes=None,
+            ok=True,
+            error=None,
+            intraop_threads=1,
+            process_rss_bytes=rss_by_model.get(model_name, 512 * 1024 * 1024),
+        )
+
+    return measure
+
+
+def _profilable_panel(n_series: int = 6, n_obs: int = 40) -> pd.DataFrame:
+    return _panel(
+        *(
+            _frame(f"s{i:02d}", [float(i + j) for j in range(n_obs)])
+            for i in range(n_series)
+        )
+    )
+
+
+def test_the_mode_gate_is_the_only_thing_that_decides_whether_to_measure() -> None:
+    """off never, always unconditionally, auto on the size of the fan-out."""
+    off = _cfg(compute={"profile": {"mode": "off", "min_cells": 1}})
+    always = _cfg(compute={"profile": {"mode": "always", "min_cells": 10**9}})
+    auto = _cfg(compute={"profile": {"mode": "auto", "min_cells": 1000}})
+    assert not profiling.should_profile(off, 10**9)
+    assert profiling.should_profile(always, 0)
+    assert not profiling.should_profile(auto, 999)
+    assert profiling.should_profile(auto, 1000)
+
+
+def test_the_gate_counts_cells_not_series() -> None:
+    """100 series x 6 models is the same work as 600 x 1; the fleet is sized for the work."""
+    cfg = _cfg(compute={"profile": {"mode": "auto", "min_cells": 600}})
+    assert profiling.should_profile(cfg, 100 * 6)
+    assert not profiling.should_profile(cfg, 100 * 5)
+
+
+def test_profiling_off_takes_no_measurement_at_all() -> None:
+    """The escape hatch has to be free: not a cheap pre-pass, no pre-pass."""
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(compute={"profile": {"mode": "off"}})
+    assert (
+        profiling.resolve_profile(
+            _profilable_panel(), cfg, ["theta"], measure=_recording_measure(calls)
+        )
+        is None
+    )
+    assert calls == []
+
+
+def test_a_small_fan_out_under_auto_is_not_worth_the_pre_pass() -> None:
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(compute={"profile": {"mode": "auto", "min_cells": 1000}})
+    assert (
+        profiling.resolve_profile(
+            _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
+        )
+        is None
+    )
+    assert calls == []
+
+
+def test_every_model_is_measured_on_every_sampled_series() -> None:
+    """samples x models fits, and the sample loop is the outer one — see the warm-heap argument."""
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(
+        models=["theta", "holtwinters"],
+        compute={"profile": {"mode": "always", "samples": 3}},
+    )
+    profile = profiling.resolve_profile(
+        _profilable_panel(6), cfg, ["theta", "holtwinters"], measure=_recording_measure(calls)
+    )
+    assert profile is not None
+    assert len(calls) == 6
+    assert [model for _, model, _ in calls] == ["theta", "holtwinters"] * 3
+    assert len({ts_id for ts_id, _, _ in calls}) == 3
+
+
+def test_a_model_measured_late_still_reaches_the_family_max() -> None:
+    """The reason the sample loop is outer: max over a cycled sample picks up the warm reading."""
+    cfg = _cfg(
+        models=["theta", "holtwinters"],
+        compute={"profile": {"mode": "always", "samples": 4}},
+    )
+    profile = profiling.resolve_profile(
+        _profilable_panel(6),
+        cfg,
+        ["theta", "holtwinters"],
+        measure=_recording_measure([], rss_by_model={"theta": 400_000_000}),
+    )
+    assert profile is not None
+    family = profile.for_family("statistical")
+    assert family is not None
+    assert family.max_process_rss_bytes == 512 * 1024 * 1024  # the heavier member, not the first
+
+
+def test_bigquery_native_models_are_never_profiled() -> None:
+    """There is no process to measure and no slot to size; measuring one would issue a write."""
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(models=["theta", "arima_plus"], compute={"profile": {"mode": "always"}})
+    profiling.resolve_profile(
+        _profilable_panel(6), cfg, ["theta", "arima_plus"], measure=_recording_measure(calls)
+    )
+    assert {model for _, model, _ in calls} == {"theta"}
+
+
+def test_a_model_list_with_nothing_profilable_takes_no_pre_pass() -> None:
+    cfg = _cfg(models=["arima_plus"], compute={"profile": {"mode": "always"}})
+    calls: list[tuple[str, str, Any]] = []
+    assert (
+        profiling.resolve_profile(
+            _profilable_panel(6), cfg, ["arima_plus"], measure=_recording_measure(calls)
+        )
+        is None
+    )
+    assert calls == []
+
+
+def test_tuned_parameters_are_measured_rather_than_defaults() -> None:
+    """Measuring an untuned fit for a tuned run sizes the fleet for different work."""
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(compute={"profile": {"mode": "always", "samples": 2}})
+    profiling.resolve_profile(
+        _profilable_panel(6),
+        cfg,
+        ["theta"],
+        params_by_model={"theta": {"seasonal_periods": 12}},
+        measure=_recording_measure(calls),
+    )
+    assert all(params == {"seasonal_periods": 12} for _, _, params in calls)
+
+
+def test_per_series_hpo_is_short_circuited_so_the_pre_pass_stays_a_pre_pass() -> None:
+    """params=None would run a full Optuna study per probe — hundreds of driver-side fits."""
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(
+        compute={"profile": {"mode": "always", "samples": 2}},
+        backtest={"enabled": True},
+        hpo={"enabled": True, "granularity": "per_series"},
+    )
+    profiling.resolve_profile(
+        _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
+    )
+    assert calls and all(params == {} for _, _, params in calls)
+
+
+def test_without_hpo_the_probe_defers_to_the_cells_own_resolution() -> None:
+    """No tuning in play → params=None, so the probe resolves exactly as run_cell would."""
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(compute={"profile": {"mode": "always", "samples": 2}})
+    profiling.resolve_profile(
+        _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
+    )
+    assert calls and all(params is None for _, _, params in calls)
+
+
+def test_an_undescribable_panel_falls_back_to_static_config_rather_than_guessing() -> None:
+    """A panel we cannot even take statistics on is one we cannot sample."""
+    calls: list[tuple[str, str, Any]] = []
+    cfg = _cfg(compute={"profile": {"mode": "always"}})
+    empty = pd.DataFrame({"ts_id": [], "ds": [], "y": []})
+    assert (
+        profiling.resolve_profile(empty, cfg, ["theta"], measure=_recording_measure(calls))
+        is None
+    )
+    assert calls == []
+
+
+def test_the_profile_carries_the_configured_margins_not_the_module_defaults() -> None:
+    """The margins are a config decision; a profile that forgot them is not re-derivable."""
+    cfg = _cfg(
+        compute={"profile": {"mode": "always", "memory_margin": 1.75, "time_margin": 1.5}}
+    )
+    profile = profiling.resolve_profile(
+        _profilable_panel(6), cfg, ["theta"], measure=_recording_measure([])
+    )
+    assert profile is not None
+    assert (profile.memory_margin, profile.time_margin) == (1.75, 1.5)
+
+
+def test_the_sample_travels_with_the_profile_for_audit() -> None:
+    """"What did this cost" and "measured on which series, and why" from one object."""
+    cfg = _cfg(compute={"profile": {"mode": "always", "samples": 3}})
+    profile = profiling.resolve_profile(
+        _profilable_panel(8), cfg, ["theta"], measure=_recording_measure([])
+    )
+    assert profile is not None
+    assert len(profile.sample) == 3
+    assert profile.sample[0].reason == "longest"

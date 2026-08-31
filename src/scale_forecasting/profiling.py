@@ -42,7 +42,10 @@ accelerator, no cluster, and no cloud.
   per-family cost model). All three are unit-tested with injected numbers, exactly as
   ``calibrate_gpu_fraction`` is.
 * **I/O** (a real fit runs, so live-only): `measure_fit` — brackets exactly one
-  ``run_cell`` and reports what it consumed.
+  ``run_cell`` and reports what it consumed — and `resolve_profile`, the
+  driver-side pre-pass that decides whether to measure at all, picks the sample, runs the
+  fits and hands back the aggregate. The pre-pass takes its measurement function as an
+  argument, so even *it* is exercised offline against a deterministic stand-in.
 
 **Why both tails.** `build_profile` keeps the **max** of the peaks and the **median** of
 the times. Max governs *safety* — how many tasks may share a device or an executor without
@@ -64,7 +67,7 @@ module never re-declares a device table.
 
 Public surface: ``SeriesStats``, ``SampleSpec``, ``MeasuredFit``, ``ModelCost``,
 ``FamilyCost``, ``ComputeProfile``, ``series_stats``, ``select_profile_sample``,
-``measure_fit``, ``build_profile``.
+``measure_fit``, ``build_profile``, ``should_profile``, ``resolve_profile``.
 """
 
 from __future__ import annotations
@@ -74,7 +77,7 @@ import math
 import os
 import statistics
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -94,8 +97,10 @@ __all__ = [
     "SeriesStats",
     "build_profile",
     "measure_fit",
+    "resolve_profile",
     "select_profile_sample",
     "series_stats",
+    "should_profile",
 ]
 
 # --- sampling budget -----------------------------------------------------------
@@ -1428,4 +1433,145 @@ def build_profile(
         dropped_models=dropped,
         first_error_by_model=first_errors,
         sample=tuple(sample),
+    )
+
+
+# --- I/O: the driver-side pre-pass ----------------------------------------------
+
+
+def should_profile(cfg: RunConfig, n_cells: int) -> bool:
+    """Is a measurement pre-pass worth running for a fan-out of ``n_cells``? (pure)
+
+    The three ``compute.profile.mode`` values, and the reasoning behind the middle one:
+
+    * ``off`` — never. The escape hatch: static config, exactly as before the profiler existed.
+    * ``always`` — unconditionally. What the smokes use, so the path is exercised on runs small
+      enough that exercising it is cheap.
+    * ``auto`` (default) — only when the fan-out is big enough to repay the pre-pass. The
+      pre-pass costs ``samples x models`` real fits on the driver; below ``min_cells`` that is a
+      measurable fraction of the whole run, spent to size a fleet that barely needs sizing. Above
+      it, the same fixed cost is rounding error against the work it is optimising.
+
+    The comparison is on **cells**, not series, because a 100-series run over 6 models is the
+    same amount of work as a 600-series run over one, and it is the work — not the panel — that
+    the fleet is sized for.
+    """
+    mode = cfg.compute.profile.mode
+    if mode == "off":
+        return False
+    if mode == "always":
+        return True
+    return n_cells >= cfg.compute.profile.min_cells
+
+
+def _profilable_models(models: Sequence[str]) -> list[str]:
+    """The subset of ``models`` that runs as a Python fit, in the given order (I/O: imports).
+
+    BigQuery-native models (``runtime == "bigquery"``) execute as SQL inside BigQuery: there is no
+    process whose cores, RSS or device bytes we could measure, and no slot to size. Measuring one
+    would mean issuing a real ``CREATE MODEL`` from a sizing pre-pass, which is both expensive and
+    a write. An unresolvable name is dropped rather than raised on — the router has already
+    validated the model list, so a failure here is a probe problem, and a probe must not sink a run.
+    """
+    from .models import get_model
+
+    keep: list[str] = []
+    for name in models:
+        try:
+            if get_model(name).runtime != "bigquery":
+                keep.append(name)
+        except Exception:  # noqa: BLE001 - a name we cannot resolve is simply not profilable
+            continue
+    return keep
+
+
+def resolve_profile(
+    panel: pd.DataFrame,
+    cfg: RunConfig,
+    models: Sequence[str],
+    *,
+    params_by_model: dict[str, dict[str, Any]] | None = None,
+    measure: Callable[..., MeasuredFit] | None = None,
+) -> ComputeProfile | None:
+    """Driver-side measurement pre-pass: sample the panel, fit, aggregate → `ComputeProfile`.
+
+    The structural twin of the fleetwide-HPO pre-pass (``resolve_fleetwide_hpo``) — same seam,
+    same place, same "resolve once on the driver before fanning out" shape — and it runs *after*
+    that one, so tuned hyperparameters can be measured rather than defaults.
+
+    Returns ``None`` when no measurement was taken: profiling is off, the fan-out is below
+    ``min_cells``, nothing profilable is in the model list, or the panel yields no usable
+    statistics. ``None`` is the signal to size from static config, and every consumer already
+    treats it that way (`resources.resource_slot` takes ``profile=None`` as its
+    identity case). A profile that *was* taken but measured nothing usable comes back as an empty
+    ``ComputeProfile`` rather than ``None`` — the distinction is "we did not look" versus "we
+    looked and found nothing", and only the second is worth an audit record.
+
+    **The sample loop is the outer one, deliberately.** Absolute process RSS only grows within a
+    process, so a model measured exactly once is charged whatever happened to be imported by the
+    time its turn came — the first model measured looks artificially small because the later
+    models' libraries were not loaded yet. Cycling every model across every sampled series means
+    each model is measured at least once against a fully warm heap, and the ``max`` aggregation
+    picks that measurement up. (At ``samples=1`` there is no second pass to warm into, so a
+    one-sample budget under-states early models. It also has no length spread and no complexity
+    spread; one sample is a smoke-test setting, not a sizing one.)
+
+    **Hyperparameters.** ``params_by_model`` (the fleetwide pre-pass's output) is passed straight
+    through, so the measured fit is the fit that will run. Under **per-series** HPO the pre-pass
+    instead passes ``{}``: leaving it ``None`` would make each probe call ``worker._resolve_params``
+    and run a full Optuna study, turning an 8-sample pre-pass into hundreds of driver-side fits
+    with nothing to bound it (see `measure_fit`). Profiling an untuned fit under per-series
+    tuning is a known under-statement; running the tuner ``samples x models`` times to avoid it is
+    worse.
+
+    ``measure`` injects the measurement function for the offline gate — the default is
+    `measure_fit`, and the tests pass a deterministic stand-in so the whole pre-pass, gate
+    included, is testable with no fit, no accelerator, and no cloud.
+    """
+    measure_one = measure or measure_fit
+    profilable = _profilable_models(models if models is not None else cfg.models)
+    id_col = cfg.data.ts_id_col
+    n_series = int(panel[id_col].nunique()) if len(panel) and id_col in panel.columns else 0
+    if not profilable or not should_profile(cfg, n_series * len(profilable)):
+        return None
+
+    try:
+        stats = series_stats(panel, cfg)
+    except DataError:
+        # A panel we cannot even describe is a panel we cannot sample. Fall back to static
+        # config rather than to an arbitrary subset — the run itself will report the real error.
+        return None
+    sample = select_profile_sample(stats, samples=cfg.compute.profile.samples)
+    if not sample:
+        return None
+
+    # One frame per sampled id, taken once: slicing the panel inside the loop would rescan it
+    # samples x models times for no benefit.
+    wanted = {spec.ts_id for spec in sample}
+    frames = {
+        str(key): frame.reset_index(drop=True)
+        for key, frame in panel.groupby(panel[id_col].astype(str), sort=False)
+        if str(key) in wanted
+    }
+
+    tuned = dict(params_by_model or {})
+    untuned: dict[str, Any] | None = (
+        {} if (cfg.hpo.enabled and cfg.hpo.granularity == "per_series") else None
+    )
+
+    measurements: list[MeasuredFit] = []
+    for spec in sample:
+        series = frames.get(spec.ts_id)
+        if series is None:
+            continue
+        for model_name in profilable:
+            measurements.append(
+                measure_one(series, model_name, cfg, params=tuned.get(model_name, untuned))
+            )
+
+    return build_profile(
+        measurements,
+        sample=sample,
+        memory_margin=cfg.compute.profile.memory_margin,
+        time_margin=cfg.compute.profile.time_margin,
     )
