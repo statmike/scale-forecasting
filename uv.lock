@@ -3076,6 +3076,7 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "statsmodels" },
+    { name = "threadpoolctl" },
 ]
 
 [package.optional-dependencies]
@@ -3151,6 +3152,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.5" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "statsmodels", specifier = ">=0.14" },
+    { name = "threadpoolctl", specifier = ">=3.1" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'models'", specifier = ">=2.13,<2.14", index = "https://download.pytorch.org/whl/cu126" },
     { name = "torch", marker = "(platform_machine != 'x86_64' and extra == 'models') or (sys_platform != 'linux' and extra == 'models')", specifier = ">=2.13,<2.14" },
     { name = "xgboost", marker = "extra == 'models'", specifier = ">=2.0" },
