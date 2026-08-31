@@ -20,7 +20,12 @@ What `submit_batch` does:
    optionally capping executors (``--max-executors`` → ``spark.dynamicAllocation.maxExecutors``, how
    a run is throttled), and return the batch id.
 
-Public surface: ``BatchInfra``, ``submit_batch``, ``sizing_properties``, ``plan_sizing``, ``main``.
+Dependencies reach the batch in one of two envelopes around the same locked environment — the
+shared runtime image (default) or the packed-venv archive — resolved by `serverless_dep_properties`
+and switched with ``SF_SERVERLESS_DEPS``. See the note above that function.
+
+Public surface: ``BatchInfra``, ``submit_batch``, ``serverless_dep_properties``,
+``sizing_properties``, ``plan_sizing``, ``main``.
 """
 
 from __future__ import annotations
@@ -63,6 +68,34 @@ _ENV_VENV_ARCHIVE = "SF_VENV_ARCHIVE"
 _ENV_GPU_IMAGE = "SF_GPU_IMAGE"
 
 _DEFAULT_RUNTIME_VERSION = "2.2"
+
+# How a Dataproc SERVERLESS batch gets its dependencies. Two envelopes around the *same* locked
+# environment:
+#   "container"   (default) — the shared runtime image. Nothing installs at launch, and the batch's
+#                             Python is ours regardless of which Python the runtime version ships.
+#   "packed_venv"           — the self-contained venv archive the Dataproc-*cluster* path uses,
+#                             attached via ``spark.archives``. Lets a deployment with no Artifact
+#                             Registry run Spark, at the cost of a per-node fetch of the archive.
+#
+# This is deployment infrastructure, NOT a run parameter, so it lives on `BatchInfra` (env-resolved,
+# like the archive URI itself) and deliberately not in `ComputeConfig`: both envelopes deliver the
+# byte-identical uv.lock environment, so the science of a run is the same either way, and folding
+# the choice into the config would fold it into the ``run_id`` — making one experiment two runs.
+# ``compute.spark_deps`` stays what it has always been: the Dataproc-*cluster* knob.
+#
+# ⚠️ ``packed_venv`` on serverless is UNPROVEN and is the reason this switch exists. Job archives are
+# localized to the *executors'* working dirs; whether the serverless *driver* gets one is the open
+# question (on a cluster it does not — see ``dataproc_cluster._VENV_DIR``, where an init action
+# lands the venv at an absolute path instead, a fix serverless has no equivalent of). Default stays
+# "container" until a live batch says otherwise.
+_ENV_SERVERLESS_DEPS = "SF_SERVERLESS_DEPS"
+_SERVERLESS_DEPS_CONTAINER = "container"
+_SERVERLESS_DEPS_PACKED_VENV = "packed_venv"
+
+# Where ``spark.archives``' ``#env`` fragment unpacks, and the interpreter inside it — relative to
+# the working directory Spark localizes into.
+_VENV_UNPACK_DIR = "env"
+_VENV_ARCHIVE_PYTHON = f"./{_VENV_UNPACK_DIR}/bin/python"
 
 # Dataproc Serverless offers L4 only (no T4 on serverless — the config resolver forces L4 there and
 # rejects a T4). A single accelerator per executor is attached; the deep-learning fit runs inside
@@ -108,17 +141,27 @@ class BatchInfra:
     # Custom GPU cluster image URI (NVIDIA driver pre-baked). Optional: only GPU cluster families
     # use it; when unset a GPU cluster installs the driver at create. CPU/serverless/Ray ignore it.
     gpu_image_uri: str | None = None
+    # Which envelope delivers deps to a SERVERLESS batch — see `_ENV_SERVERLESS_DEPS`. Clusters and
+    # Ray ignore it (they have exactly one mechanism each).
+    serverless_deps: str = _SERVERLESS_DEPS_CONTAINER
 
     @classmethod
     def resolve(cls) -> BatchInfra:
-        """Build from the ``SF_*`` batch-infra environment; raise naming the first missing var."""
+        """Build from the ``SF_*`` batch-infra environment; raise naming the first missing var.
+
+        ``SF_CONTAINER_IMAGE`` is required for the default ``container`` envelope and *not* required
+        under ``SF_SERVERLESS_DEPS=packed_venv`` — a deployment that delivers deps by archive has no
+        Artifact Registry to name, which is the point of the switch.
+        """
+        serverless_deps = os.environ.get(_ENV_SERVERLESS_DEPS) or _SERVERLESS_DEPS_CONTAINER
         required = {
             "code_bucket": _ENV_CODE_BUCKET,
-            "container_image": _ENV_CONTAINER_IMAGE,
             "compute_sa": _ENV_COMPUTE_SA,
             "subnetwork_uri": _ENV_SUBNETWORK,
         }
-        values: dict[str, str] = {}
+        if serverless_deps == _SERVERLESS_DEPS_CONTAINER:
+            required["container_image"] = _ENV_CONTAINER_IMAGE
+        values: dict[str, str] = {"container_image": os.environ.get(_ENV_CONTAINER_IMAGE) or ""}
         for field_name, env_name in required.items():
             raw = os.environ.get(env_name)
             if not raw:
@@ -135,6 +178,7 @@ class BatchInfra:
             runtime_version=os.environ.get("SF_RUNTIME_VERSION") or _DEFAULT_RUNTIME_VERSION,
             venv_archive_uri=os.environ.get(_ENV_VENV_ARCHIVE) or None,
             gpu_image_uri=os.environ.get(_ENV_GPU_IMAGE) or None,
+            serverless_deps=serverless_deps,
         )
 
     @classmethod
@@ -162,6 +206,41 @@ class BatchInfra:
 
 
 # --- pure: batch spec assembly (no network) ------------------------------------
+
+
+def serverless_dep_properties(infra: BatchInfra) -> tuple[str, dict[str, str]]:
+    """Resolve serverless dependency delivery → ``(container_image, extra properties)`` (pure).
+
+    The one place the two envelopes are spelled out, shared by `build_batch` and the ``gcloud``
+    emitter so the submitted batch and the printed command can't disagree about how deps arrive:
+
+    - ``container`` (default) — the image, no properties.
+    - ``packed_venv`` — no image, and three properties: ``spark.archives`` attaches the
+      self-contained venv archive under ``#env``, and ``PYSPARK_PYTHON`` is repointed at the
+      interpreter inside it for **both** sides (``spark.dataproc.driverEnv.*`` for the driver,
+      ``spark.executorEnv.*`` for the executors — the driver-side prefix is Dataproc-specific).
+
+    Raises `ConfigError` on an unknown mode, and on ``packed_venv`` with no archive URI resolved:
+    a batch submitted without either envelope would run against the stock runtime's Python and fail
+    deep inside a model fit, long after the point where the mistake was fixable.
+    """
+    if infra.serverless_deps == _SERVERLESS_DEPS_CONTAINER:
+        return infra.container_image, {}
+    if infra.serverless_deps != _SERVERLESS_DEPS_PACKED_VENV:
+        raise ConfigError(
+            f"unknown {_ENV_SERVERLESS_DEPS}={infra.serverless_deps!r}; expected "
+            f"{_SERVERLESS_DEPS_CONTAINER!r} or {_SERVERLESS_DEPS_PACKED_VENV!r}"
+        )
+    if not infra.venv_archive_uri:
+        raise ConfigError(
+            f"{_ENV_SERVERLESS_DEPS}={_SERVERLESS_DEPS_PACKED_VENV!r} needs the packed-venv "
+            f"archive; set {_ENV_VENV_ARCHIVE} (terraform output venv_archive_uri)"
+        )
+    return "", {
+        "spark.archives": f"{infra.venv_archive_uri}#{_VENV_UNPACK_DIR}",
+        "spark.dataproc.driverEnv.PYSPARK_PYTHON": _VENV_ARCHIVE_PYTHON,
+        "spark.executorEnv.PYSPARK_PYTHON": _VENV_ARCHIVE_PYTHON,
+    }
 
 
 def _rfc3339_seconds(a: object, b: object) -> float | None:
@@ -247,6 +326,10 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
     tel["container_image"] = (
         getattr(runtime_config, "container_image", None) or None if runtime_config else None
     )
+    # The other way a batch can get its dependencies (`serverless_dep_properties`). Exactly one of
+    # these two is set on any batch, so the pair reads as "which envelope delivered the env" — and a
+    # batch with neither is one running against the stock runtime's Python, which is a finding.
+    tel["venv_archive"] = props.get("spark.archives") or None
 
     env = getattr(batch, "environment_config", None)
     exec_cfg = getattr(env, "execution_config", None) if env else None
@@ -445,13 +528,18 @@ def build_batch(
     ``spark.*`` — applied *first*, so the two things a caller states explicitly still win over
     it: an explicit ``max_executors`` and the GPU attachment. Omitted (the default) the message
     is byte-identical to the pre-profiler one.
+
+    The dependency envelope comes from `serverless_dep_properties` and is laid down *before* the
+    overlay: the default ``container`` mode contributes the image and no properties (so the message
+    is unchanged), while ``packed_venv`` contributes no image and the archive properties instead.
     """
     from datetime import timedelta
 
     from google.cloud import dataproc_v1 as dataproc
 
     args = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
-    props: dict[str, str] = dict(properties or {})
+    container_image, props = serverless_dep_properties(infra)
+    props.update(properties or {})
     if max_executors is not None:
         props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
     if hardware == "gpu":
@@ -465,7 +553,7 @@ def build_batch(
         ),
         runtime_config=dataproc.RuntimeConfig(
             version=infra.runtime_version,
-            container_image=infra.container_image,
+            container_image=container_image,
             properties=props,
         ),
         environment_config=dataproc.EnvironmentConfig(

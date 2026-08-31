@@ -68,6 +68,19 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- Runtime-environment standardization: asked whether the three dep-delivery mechanisms could collapse
+  to one, and answered no with reasons rather than preference — the four constraints now open
+  [runtime_dependencies.md](docs/runtime_dependencies.md#why-more-than-one-mechanism). The decisive
+  one is that `spark.archives` localizes to *executors*, not a client-mode driver (we hit this on
+  clusters and fixed it with an init action; Serverless has none), and Ray takes neither an image nor
+  an archive — so the ceiling is two mechanisms, not one. What *is* single is the part that matters:
+  one `uv.lock`, one build, one bump. Serverless gained the archive path anyway as a tested fallback
+  for a deployment with no Artifact Registry (`SF_SERVERLESS_DEPS=packed_venv` →
+  `serverless_dep_properties`, shared by the submitter and the command emitter so they can't drift);
+  it lives on `BatchInfra`, *not* in the run config, because both envelopes deliver the identical
+  environment and folding the choice into `run_id` would make one experiment two runs. Which envelope
+  ran is recorded on the header (`container_image` xor `venv_archive`). Unproven live — it is also
+  the experiment that *measures* the driver-localization gap instead of inferring it.
 - Monitor ⇄ probe convergence: a registry row is written *by the job*, so a job that dies without
   writing leaves its row `RUNNING` and its bar frozen — indistinguishable from a slow one. Every
   `FamilyProgress` now carries `last_signal_at` / `quiet_seconds` (derived from rows `monitor_run`

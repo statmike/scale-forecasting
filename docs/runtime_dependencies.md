@@ -43,6 +43,57 @@ image and the archive both rebuild only when the locked deps change, never on a 
 
 The rest of this page walks each row: *why* that mechanism, and what to know operationally.
 
+## Why more than one mechanism?
+
+The obvious question about the table above is why it isn't one row. It can't be, and the reasons are
+platform facts rather than preferences. Four of them decide the whole shape:
+
+1. **A venv carries an interpreter but not system libraries.** The archive bundles Python, so it
+   needs no Python on the node — but it cannot bundle `libgomp1` (which **lightgbm** links against),
+   jemalloc, or an NVIDIA kernel driver. Something else has to supply those: the container installs
+   them with `apt`; every other surface inherits them from its base image.
+2. **`spark.archives` reaches executors, not a client-mode driver.** Job archives are localized into
+   the *executors'* working directories, so a relative `./env/bin/python` fails for the driver. On a
+   Dataproc cluster we work around this with an **init action** that lands the venv at an absolute
+   path on master and workers alike. Dataproc Serverless has no init actions — so the archive route
+   is not a drop-in replacement for the container there, which is why the container is the default.
+3. **Ray-on-Vertex accepts neither an image nor an archive.** A custom node image fails Vertex Ray
+   GPU-node provisioning, and `runtime_env` offers `pip` / `uv` / `conda` / `py_modules` with no
+   venv-tarball hook. Ray therefore *must* install at job start; there is no mechanism it shares
+   with Spark.
+4. **Installing at job start makes a package index a run-time dependency.** The container (Artifact
+   Registry) and the archive (Cloud Storage) are both fetched over Google-internal paths and need no
+   internet. `uv pip install` needs PyPI *and* the PyTorch CUDA index reachable from the subnet at
+   the moment the job runs, for a set that includes a ~1 GB CUDA `torch` wheel. Ray pays this;
+   nothing else should have to.
+
+Constraints 2 and 3 together set the ceiling: **at most two mechanisms**, because the surface that
+must install at job start (Ray) and the surface that must not (Serverless) share none. What *is*
+single is the thing that matters — one `uv.lock`, one build, one bump.
+
+### The Artifact-Registry-free fallback (`SF_SERVERLESS_DEPS`)
+
+Because constraint 2 is about localization rather than support, `spark.archives` **is** a supported
+Serverless property, and the batch path can be switched to it:
+
+```bash
+export SF_SERVERLESS_DEPS=packed_venv     # default: container
+export SF_VENV_ARCHIVE="$(terraform output -raw venv_archive_uri)"
+# SF_CONTAINER_IMAGE is then not required
+```
+
+The batch is submitted with no container image and three properties instead: `spark.archives` with
+the archive under `#env`, and `PYSPARK_PYTHON` repointed at `./env/bin/python` for both the driver
+(`spark.dataproc.driverEnv.*`) and the executors (`spark.executorEnv.*`). Which envelope ran is
+recorded on the run header — `container_image` and `venv_archive` in the batch telemetry, exactly
+one of them set.
+
+> **This is a fallback, not a recommendation.** It exists for a deployment with no Artifact Registry,
+> and to make constraint 2 measurable on Serverless rather than assumed. It has **not** been proven
+> live: if the driver doesn't get the archive localized, the job fails at startup with a missing
+> interpreter. The default stays `container`, which installs nothing at launch and keeps the batch's
+> Python ours regardless of which Python the runtime version ships.
+
 ## The full alignment picture — substrate, Python, and GPU driver
 
 The matrix above covers **one** layer: the Python environment. A running fit actually stands on three
@@ -91,10 +142,16 @@ Serverless batches accept a **custom container image**, so the cleanest path is 
 shared runtime image directly. `submit.py` attaches it on **every** batch via
 `runtime_config.container_image`, which overrides the base runtime's interpreter and libraries for
 both driver and executors. Nothing is installed at launch — the image is already the environment — so
-startup is fast and the executed environment is byte-for-byte the one that was built and tested.
+startup is fast and the executed environment is byte-for-byte the one that was built and tested. It
+also decouples our Python from the runtime version's: runtime 3.0 ships 3.12, we need 3.11 (Ray's
+ceiling), and the image makes that a non-issue.
 
-This is the default Spark path (`compute.spark_deps = "container"` is the Serverless behaviour) and
-needs no per-run configuration beyond `SF_CONTAINER_IMAGE` (populated from `terraform output`).
+This is the default Spark path and needs no per-run configuration beyond `SF_CONTAINER_IMAGE`
+(populated from `terraform output`). The envelope is chosen by the deployment, not by the run —
+`SF_SERVERLESS_DEPS` (default `container`; see the fallback section above), *not*
+`compute.spark_deps`, which is the Dataproc-**cluster** knob. Keeping it
+out of the config is deliberate: both envelopes deliver the identical locked environment, so folding
+the choice into the run config would fold it into the `run_id` and make one experiment two runs.
 
 ## Spark Connect (interactive notebook) — container + shipped artifacts
 
@@ -232,6 +289,11 @@ hand-edit anyway.
 - **The tar runs as root.** `/opt/venv` is root-owned while the image's default user is the `spark`
   user (UID 1099), so the build tars the venv as root (`docker run --user root …`). This is a
   build-time detail; nothing about the running job changes.
+- **`spark.archives` on Serverless is unproven.** The `SF_SERVERLESS_DEPS=packed_venv` fallback is
+  offline-tested (the batch message and the emitted `gcloud` command both carry the archive and the
+  two `PYSPARK_PYTHON` properties) but has never run live. The open question is exactly constraint 2
+  above: whether the Serverless *driver* gets the archive localized. If it doesn't, the batch fails at
+  startup with a missing interpreter — and unlike a cluster, there is no init action to fix it with.
 - **One version knob for all surfaces.** Because every mechanism traces back to `uv.lock`, edit
   `pyproject.toml` → `make lock` → re-apply (or rebuild): the image, the archive, and — after a
   `uv sync` / Colab reinstall — the notebook and local envs all move together. See

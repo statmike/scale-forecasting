@@ -148,6 +148,36 @@ def test_spark_native_command_reconstructs_the_exact_batch() -> None:
     assert native[dash + 1 :] == list(ps.args)
 
 
+def test_spark_native_command_follows_the_packed_venv_envelope() -> None:
+    # The emitted command and the submitted batch resolve dependency delivery through the SAME
+    # helper, so a deployment with no Artifact Registry prints a command with no --container-image
+    # and the archive properties instead. Drift here would hand someone a command that runs against
+    # the stock runtime's Python.
+    infra = BatchInfra(
+        code_bucket="code-bkt",
+        container_image="",
+        compute_sa="compute@proj-x.iam.gserviceaccount.com",
+        subnetwork_uri="projects/proj-x/regions/us-central1/subnetworks/sf",
+        venv_archive_uri="gs://code-bkt/envs/deadbeef.tar.gz",
+        serverless_deps="packed_venv",
+    )
+    native = shlex.split(
+        build_spark_commands(
+            settings=_settings(),
+            infra=infra,
+            batch_id="sf-x",
+            package_uri="gs://c/p.zip",
+            launcher_uri="gs://c/e.py",
+            config_uri="gs://c/r.json",
+        ).native
+    )
+    assert not any(t.startswith("--container-image") for t in native)
+    props = next(t for t in native if t.startswith("--properties="))
+    assert "spark.archives=gs://code-bkt/envs/deadbeef.tar.gz#env" in props
+    assert "spark.dataproc.driverEnv.PYSPARK_PYTHON=./env/bin/python" in props
+    assert "spark.executorEnv.PYSPARK_PYTHON=./env/bin/python" in props
+
+
 def test_spark_max_executors_sets_native_property_and_universal_flag() -> None:
     cmds = build_spark_commands(
         settings=_settings(),

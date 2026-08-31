@@ -100,8 +100,20 @@ def build_spark_commands(
     that flag replaces the first rather than adding to it. The universal command needs nothing:
     re-running the launcher against the same staged config recomputes the identical overlay,
     which is the point of deriving it rather than storing it.
+
+    Dependency delivery is resolved through `submit.serverless_dep_properties`, so a deployment
+    running the ``packed_venv`` envelope emits a command with no ``--container-image`` and the
+    archive properties instead — the same batch, spelled for ``gcloud``.
     """
     driver = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
+
+    from .submit import serverless_dep_properties
+
+    # The dependency envelope, from the same resolver `submit.build_batch` uses — so the printed
+    # command and the submitted batch can never disagree about how deps reach the job. The default
+    # container mode yields the image and no properties (this command is unchanged); packed_venv
+    # yields no image and the archive properties instead, so the --container-image flag is dropped.
+    container_image, dep_props = serverless_dep_properties(infra)
 
     gcloud: list[str] = [
         "gcloud",
@@ -115,12 +127,15 @@ def build_spark_commands(
         f"--batch={batch_id}",
         f"--py-files={package_uri}",
         f"--version={infra.runtime_version}",
-        f"--container-image={infra.container_image}",
+    ]
+    if container_image:
+        gcloud.append(f"--container-image={container_image}")
+    gcloud += [
         f"--service-account={infra.compute_sa}",
         f"--subnet={infra.subnetwork_uri}",
         f"--ttl={infra.ttl_seconds}s",
     ]
-    props: dict[str, str] = dict(properties or {})
+    props: dict[str, str] = {**dep_props, **(properties or {})}
     if max_executors is not None:
         props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
     if props:

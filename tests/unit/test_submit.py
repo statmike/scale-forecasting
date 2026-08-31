@@ -20,6 +20,7 @@ from scale_forecasting.submit import (
     BatchInfra,
     _batch_id,
     build_batch,
+    serverless_dep_properties,
     sizing_properties,
 )
 
@@ -305,6 +306,124 @@ def test_batch_infra_from_terraform_outputs_missing_key_raises() -> None:
         BatchInfra.from_terraform_outputs(
             {"code_bucket": "b", "runtime_image_repo": "r", "compute_sa": "s"}
         )
+
+
+# --- the dependency envelope: container (default) xor packed venv ----------------
+#
+# Two ways the same locked environment reaches a serverless batch. `container` is the default and
+# must stay byte-identical to the pre-switch message; `packed_venv` is the Artifact-Registry-free
+# fallback whose live behaviour is still unproven (job archives are localized to the *executors'*
+# working dirs — whether the serverless driver gets one is exactly what the switch exists to test).
+
+
+def _archive_infra(**over: Any) -> BatchInfra:
+    base: dict[str, Any] = {
+        "code_bucket": "code-bkt",
+        "container_image": "",
+        "compute_sa": "compute@proj-x.iam.gserviceaccount.com",
+        "subnetwork_uri": "projects/proj-x/regions/us-central1/subnetworks/sf",
+        "venv_archive_uri": "gs://code-bkt/envs/deadbeef.tar.gz",
+        "serverless_deps": "packed_venv",
+    }
+    base.update(over)
+    return BatchInfra(**base)
+
+
+def test_the_default_envelope_is_the_container_and_adds_no_properties() -> None:
+    image, props = serverless_dep_properties(_infra())
+    assert image == "us-docker.pkg.dev/proj-x/repo/runtime:latest"
+    assert props == {}
+
+
+def test_the_packed_venv_envelope_drops_the_image_and_attaches_the_archive() -> None:
+    image, props = serverless_dep_properties(_archive_infra())
+    assert image == ""  # no Artifact Registry in play at all
+    assert props["spark.archives"] == "gs://code-bkt/envs/deadbeef.tar.gz#env"
+    # BOTH sides get repointed, and the driver's prefix is the Dataproc-specific one. Missing either
+    # is the failure this fallback is most likely to hit, so assert them separately.
+    assert props["spark.dataproc.driverEnv.PYSPARK_PYTHON"] == "./env/bin/python"
+    assert props["spark.executorEnv.PYSPARK_PYTHON"] == "./env/bin/python"
+
+
+def test_packed_venv_without_an_archive_fails_at_submit_not_mid_fit() -> None:
+    # Silently submitting neither envelope would run against the stock runtime's Python and die deep
+    # inside a model fit, long after the mistake was cheap to fix.
+    with pytest.raises(ConfigError, match="SF_VENV_ARCHIVE"):
+        serverless_dep_properties(_archive_infra(venv_archive_uri=None))
+
+
+def test_an_unknown_envelope_is_rejected_by_name() -> None:
+    with pytest.raises(ConfigError, match="conda"):
+        serverless_dep_properties(_archive_infra(serverless_deps="conda"))
+
+
+def test_build_batch_carries_the_packed_venv_envelope_onto_the_wire() -> None:
+    batch = build_batch(
+        infra=_archive_infra(),
+        settings=_settings(),
+        package_uri="gs://code-bkt/runs/pkg-1234.zip",
+        launcher_uri="gs://code-bkt/runs/spark_main.py",
+        config_uri="gs://code-bkt/runs/run-abc.json",
+    )
+    rc = batch.runtime_config
+    assert not rc.container_image  # proto3 omits the empty string — the field is simply unset
+    assert rc.properties["spark.archives"] == "gs://code-bkt/envs/deadbeef.tar.gz#env"
+    assert rc.properties["spark.executorEnv.PYSPARK_PYTHON"] == "./env/bin/python"
+    # …and the run is otherwise the identical batch.
+    assert list(batch.pyspark_batch.python_file_uris) == ["gs://code-bkt/runs/pkg-1234.zip"]
+
+
+def test_the_envelope_shows_up_in_the_telemetry_so_a_run_records_which_one_ran() -> None:
+    from scale_forecasting.submit import extract_job_telemetry
+
+    tel = extract_job_telemetry(
+        build_batch(
+            infra=_archive_infra(),
+            settings=_settings(),
+            package_uri="gs://c/p.zip",
+            launcher_uri="gs://c/e.py",
+            config_uri="gs://c/r.json",
+        )
+    )
+    assert tel["venv_archive"] == "gs://code-bkt/envs/deadbeef.tar.gz#env"
+    assert tel["container_image"] is None
+    # The container batch is the mirror image of that pair.
+    container = extract_job_telemetry(
+        build_batch(
+            infra=_infra(),
+            settings=_settings(),
+            package_uri="gs://c/p.zip",
+            launcher_uri="gs://c/e.py",
+            config_uri="gs://c/r.json",
+        )
+    )
+    assert container["venv_archive"] is None
+    assert container["container_image"] == "us-docker.pkg.dev/proj-x/repo/runtime:latest"
+
+
+def test_resolve_reads_the_envelope_and_stops_requiring_an_image_under_packed_venv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole point of the fallback is a deployment with no Artifact Registry, so there is no
+    # SF_CONTAINER_IMAGE to set — resolve must not demand one.
+    monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
+    monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
+    monkeypatch.setenv("SF_SUBNETWORK_URI", "projects/p/regions/r/subnetworks/s")
+    monkeypatch.setenv("SF_VENV_ARCHIVE", "gs://code-bkt/envs/deadbeef.tar.gz")
+    monkeypatch.setenv("SF_SERVERLESS_DEPS", "packed_venv")
+    monkeypatch.delenv("SF_CONTAINER_IMAGE", raising=False)
+    infra = BatchInfra.resolve()
+    assert infra.serverless_deps == "packed_venv"
+    assert infra.container_image == ""
+
+
+def test_resolve_defaults_to_the_container_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
+    monkeypatch.setenv("SF_CONTAINER_IMAGE", "img:tag")
+    monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
+    monkeypatch.setenv("SF_SUBNETWORK_URI", "projects/p/regions/r/subnetworks/s")
+    monkeypatch.delenv("SF_SERVERLESS_DEPS", raising=False)
+    assert BatchInfra.resolve().serverless_deps == "container"
 
 
 # --- submit_batch: n_series override + client wiring (mocked) -------------------

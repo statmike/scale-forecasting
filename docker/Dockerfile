@@ -112,26 +112,28 @@ RUN set -eux; \
 
 # --- make the interpreter discoverable on the DEFAULT system PATH ---------------------------------
 # Serverless points PYSPARK_PYTHON at an absolute path and every in-container shell inherits the ENV
-# PATH below, so those paths always find /opt/venv/bin. A managed head bootstrap (Ray on Vertex),
-# however, does NOT inherit this image's ENV PATH — it invokes `python`/`ray` by bare name on the
-# base system PATH, where — now that the self-contained venv is the ONLY interpreter — nothing
-# resolves. These wrappers restore that discoverability the way the removed apt python used to. They
-# must be WRAPPER SCRIPTS, not symlinks: a symlink into the venv resolves through to the in-tree base
-# binary (/opt/venv/_python/bin/python3.11), which does not activate the venv (its base_prefix is
-# in-tree) and so cannot import the installed packages; exec'ing /opt/venv/bin/python keeps sys.prefix
-# on the venv. Placed in both /usr/local/bin (default PATH front) and /usr/bin (hard-coded callers).
-# Purely additive — the in-container ENV-PATH and PYSPARK_PYTHON callers are unchanged, and the
-# packed-venv archive (which ships only /opt/venv) is untouched.
+# PATH below, so those paths always find /opt/venv/bin. A process that does NOT inherit this image's
+# ENV PATH, however, invokes `python` by bare name on the base system PATH, where — now that the
+# self-contained venv is the ONLY interpreter — nothing resolves. These wrappers restore that
+# discoverability the way the removed apt python used to. They must be WRAPPER SCRIPTS, not symlinks:
+# a symlink into the venv resolves through to the in-tree base binary
+# (/opt/venv/_python/bin/python3.11), which does not activate the venv (its base_prefix is in-tree)
+# and so cannot import the installed packages; exec'ing /opt/venv/bin/python keeps sys.prefix on the
+# venv. Placed in both /usr/local/bin (default PATH front) and /usr/bin (hard-coded callers). Purely
+# additive — the in-container ENV-PATH and PYSPARK_PYTHON callers are unchanged, and the packed-venv
+# archive (which ships only /opt/venv) is untouched.
+#
+# There was a matching `ray` wrapper here for the Ray-on-Vertex managed head bootstrap. It is gone:
+# Ray never uses this image (a custom node image fails Vertex Ray GPU provisioning), so the Ray path
+# is the stock Vertex image + a uv runtime_env and nothing in it ever reads this container.
 RUN set -eux; \
     for d in /usr/local/bin /usr/bin; do \
         for n in python python3 python3.11; do \
             printf '#!/bin/sh\nexec %s/bin/python "$@"\n' "${VENV}" > "$d/$n"; \
             chmod 0755 "$d/$n"; \
         done; \
-        printf '#!/bin/sh\nexec %s/bin/ray "$@"\n' "${VENV}" > "$d/ray"; \
-        chmod 0755 "$d/ray"; \
     done; \
-    env -i PATH=/usr/local/bin:/usr/bin:/bin python -c "import ray, sys; print('bare-PATH import ok:', sys.executable, ray.__version__)"
+    env -i PATH=/usr/local/bin:/usr/bin:/bin python -c "import sys; print('bare-PATH python ok:', sys.executable, sys.version.split()[0])"
 
 # Serverless launches the driver/executors with PYSPARK_PYTHON; point it at this interpreter.
 ENV PATH="${VENV}/bin:${PATH}"
