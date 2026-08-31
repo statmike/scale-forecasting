@@ -218,3 +218,41 @@ def test_ray_entrypoint_shares_the_driver_args() -> None:
     assert parts[3:] == build_driver_args(
         "gs://c/r.json", settings, models=["theta"], manage_header=False
     )
+
+
+def test_spark_native_carries_the_sizing_overlay_in_one_properties_flag() -> None:
+    # gcloud replaces an earlier --properties with a later one, so the overlay and the explicit
+    # cap have to arrive merged, in build_batch's precedence order (cap wins).
+    cmds = build_spark_commands(
+        settings=_settings(),
+        infra=_infra(),
+        batch_id="sf-x",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        max_executors=4,
+        properties={
+            "spark.executor.cores": "8",
+            "spark.dynamicAllocation.maxExecutors": "500",
+        },
+    )
+    native = shlex.split(cmds.native)
+    flags = [a for a in native if a.startswith("--properties=")]
+    assert len(flags) == 1
+    emitted = dict(p.split("=", 1) for p in flags[0].removeprefix("--properties=").split(","))
+    assert emitted == {
+        "spark.executor.cores": "8",
+        "spark.dynamicAllocation.maxExecutors": "4",
+    }
+
+
+def test_spark_native_is_unchanged_when_there_is_no_overlay() -> None:
+    common: dict[str, object] = dict(
+        settings=_settings(),
+        infra=_infra(),
+        batch_id="sf-x",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+    )
+    assert build_spark_commands(**common) == build_spark_commands(**common, properties={})

@@ -85,6 +85,7 @@ def build_spark_commands(
     max_executors: int | None = None,
     models: list[str] | None = None,
     manage_header: bool = True,
+    properties: dict[str, str] | None = None,
 ) -> LaunchCommands:
     """Both command tiers for a Dataproc Serverless (Spark) run.
 
@@ -92,6 +93,13 @@ def build_spark_commands(
     `submit.build_batch` spec — same launcher/py-files/runtime/image/SA/subnet/ttl/properties and
     the same ``build_driver_args`` list — so it is byte-faithful to the batch that would be
     submitted. The universal command is the standalone re-submission via the ``submit`` launcher.
+
+    ``properties`` is the sizing overlay (`submit.sizing_properties`), merged with the same
+    precedence `submit.build_batch` uses — overlay first, an explicit ``max_executors`` over it —
+    and emitted as a *single* comma-joined ``--properties`` flag, because a second occurrence of
+    that flag replaces the first rather than adding to it. The universal command needs nothing:
+    re-running the launcher against the same staged config recomputes the identical overlay,
+    which is the point of deriving it rather than storing it.
     """
     driver = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
 
@@ -112,8 +120,11 @@ def build_spark_commands(
         f"--subnet={infra.subnetwork_uri}",
         f"--ttl={infra.ttl_seconds}s",
     ]
+    props: dict[str, str] = dict(properties or {})
     if max_executors is not None:
-        gcloud.append(f"--properties=spark.dynamicAllocation.maxExecutors={max_executors}")
+        props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
+    if props:
+        gcloud.append("--properties=" + ",".join(f"{k}={v}" for k, v in props.items()))
     gcloud += ["--", *driver]
 
     universal_argv = ["python", "-m", "scale_forecasting.submit", "--config-uri", config_uri]

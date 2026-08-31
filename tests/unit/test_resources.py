@@ -807,3 +807,142 @@ def test_the_slots_own_notes_survive_into_the_translation() -> None:
 def test_the_translation_serializes_for_telemetry() -> None:
     out = _serverless(cores=1, memory_bytes=_GIB)
     assert json.loads(json.dumps(out.to_dict()))["executor_cores"] == 4
+
+
+# --- plan_serverless: the two-pass wiring ---------------------------------------
+
+
+def test_the_executor_shape_is_the_one_the_snapped_core_count_buys() -> None:
+    unit = resources.serverless_unit(8, gpu=False)
+    assert unit.cores == 8
+    assert unit.accelerators == 0
+    # The standard tier's per-core ceiling is what an 8-core executor can be given at most.
+    assert unit.memory_bytes == 8 * resources._SERVERLESS_MAX_MB_PER_CORE["standard"] * _MIB
+
+
+def test_a_gpu_executor_shape_carries_its_cards_and_the_narrower_memory_band() -> None:
+    unit = resources.serverless_unit(24, gpu=True)
+    assert (unit.cores, unit.accelerators) == (24, 2)
+    assert unit.memory_bytes == 24 * resources._SERVERLESS_L4_MB_PER_CORE * _MIB
+
+
+def test_planning_with_no_profile_reproduces_the_unmeasured_translation() -> None:
+    plan, translation = resources.plan_serverless(None, ["statistical"], 800)
+    assert plan.runtime == "serverless"
+    assert plan.family == "statistical"
+    # Nothing was measured, so nothing about memory is requested — the platform defaults stand.
+    assert "spark.executor.memory" not in translation.properties
+    assert "memory unmeasured; serverless memory defaults left in place" in translation.notes
+
+
+def test_the_second_pass_plans_against_the_executor_the_first_pass_chose() -> None:
+    # A 5-core family snaps up to an 8-core executor; the fleet is then packed into *that*
+    # shape, not into the 4-core one the first pass had to start from.
+    profile = build_profile(
+        [_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=10.0)] * 5
+    )
+    plan, translation = resources.plan_serverless(profile, ["ml"], 400)
+    assert translation.executor_cores == 8
+    assert plan.unit.cores == 8
+
+
+def test_the_ceiling_saturates_the_work_so_the_fan_out_can_reach_it() -> None:
+    # 800 tasks, 4 per executor (a 1-core family on a 4-core executor) → 200 executors is the
+    # widest fleet that has anything to do.
+    plan, translation = resources.plan_serverless(None, ["statistical"], 800)
+    assert plan.slots_per_unit == 4
+    assert plan.max_units == 200
+    assert translation.properties["spark.dynamicAllocation.maxExecutors"] == "200"
+    # ...and the invariant that motivated it: the fan-out is wide enough to get there.
+    assert tasks_for_ceiling(plan) <= 800
+
+
+def test_an_explicit_operator_cap_wins_over_the_saturating_count() -> None:
+    _, translation = resources.plan_serverless(None, ["statistical"], 800, max_executors=3)
+    assert translation.properties["spark.dynamicAllocation.maxExecutors"] == "3"
+
+
+def test_a_cap_below_the_platform_floor_is_raised_to_it() -> None:
+    _, translation = resources.plan_serverless(None, ["statistical"], 800, max_executors=1)
+    props = translation.properties
+    assert props["spark.dynamicAllocation.minExecutors"] == "2"
+    assert props["spark.dynamicAllocation.maxExecutors"] == "2"
+
+
+def test_an_empty_batch_provisions_the_floor_and_nothing_more() -> None:
+    plan, translation = resources.plan_serverless(None, ["statistical"], 0)
+    assert plan.derived_units == 0
+    assert translation.properties["spark.dynamicAllocation.initialExecutors"] == "2"
+
+
+def test_several_families_share_one_executor_shape_sized_for_the_heaviest() -> None:
+    profile = build_profile(
+        [_fit(wall_s=2.0, cpu_s=2.0)] * 5
+        + [_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=12.0)] * 5
+    )
+    plan, translation = resources.plan_serverless(profile, ["statistical", "ml"], 400)
+    assert plan.family == "statistical+ml"
+    # One executor has to hold whichever cell arrives, so the 6-core ML family sets the shape.
+    assert translation.executor_cores == 8
+    assert translation.properties["spark.task.cpus"] == "6"
+
+
+def test_a_gpu_batch_plans_against_l4_executors() -> None:
+    profile = build_profile(
+        [
+            _fit(
+                family="deep_learning",
+                model_type="neuralprophet",
+                peak_gpu_bytes=4 * _GIB,
+            )
+        ]
+        * 5
+    )
+    plan, translation = resources.plan_serverless(
+        profile, ["deep_learning"], 200, gpu=True, device_bytes=24 * _GIB
+    )
+    assert plan.unit.accelerators >= 1
+    assert translation.tasks_per_device is not None
+    assert translation.executor_cores in resources._SERVERLESS_L4_CORES
+
+
+def test_the_gpu_fleet_is_sized_off_the_packing_the_core_table_grants() -> None:
+    # A sixth of a card is 6 cells per device by arithmetic, but the legal core table has no
+    # shape that runs 6 tasks on one L4 — it snaps down to 4. Sizing the fleet off the 6 the
+    # measurement asked for would under-provision it by a third, since the executors it counted
+    # on never materialize.
+    profile = build_profile(
+        [_fit(family="deep_learning", model_type="neuralprophet", peak_gpu_bytes=4 * _GIB)] * 5
+    )
+    plan, translation = resources.plan_serverless(
+        profile, ["deep_learning"], 240, gpu=True, device_bytes=24 * _GIB
+    )
+    granted = plan.unit.accelerators * (translation.tasks_per_device or 1)
+    assert plan.slots_per_unit == granted
+    assert plan.max_units == math.ceil(240 / granted)
+    # The invariant the whole exercise is for: the fan-out can reach the ceiling it asks for.
+    assert tasks_for_ceiling(plan) <= 240
+
+
+def test_the_serverless_density_is_the_executors_task_slots_not_its_devices() -> None:
+    # floor(1/0.1) = 10 cells per card by arithmetic; a 1-core task on an 8-core executor runs 8.
+    slot = _slot("deep_learning", cores=1, gpu_fraction=0.1)
+    assert resources.serverless_tasks_per_executor(slot, 8) == 8
+
+
+def test_a_threaded_family_takes_whole_task_slots_at_a_time() -> None:
+    slot = _slot("ml", cores=6)
+    assert resources.serverless_tasks_per_executor(slot, 8) == 1
+    assert resources.serverless_tasks_per_executor(slot, 16) == 2
+
+
+def test_an_explicit_density_overrides_what_the_slot_arithmetic_would_derive() -> None:
+    slot = _slot("cpu", cores=1)
+    unit = resources.UnitShape(cores=16, memory_bytes=64 * _GIB)
+    derived = resources.plan_fleet(slot, runtime="serverless", n_cells=64, unit=unit)
+    assert derived.slots_per_unit == 16  # what the cores alone would say
+    forced = resources.plan_fleet(
+        slot, runtime="serverless", n_cells=64, unit=unit, max_units=99, density=4
+    )
+    assert forced.slots_per_unit == 4
+    assert forced.saturating_units == 16  # 64 cells / 4 per unit, not / 16

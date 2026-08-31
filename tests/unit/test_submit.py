@@ -19,6 +19,7 @@ from scale_forecasting.submit import (
     BatchInfra,
     _batch_id,
     build_batch,
+    sizing_properties,
 )
 
 # pyspark is not needed here, but google-cloud-dataproc (the [spark] extra) is — build_batch
@@ -505,3 +506,175 @@ def test_extract_job_telemetry_no_executor_cap_when_unset() -> None:
     tel = extract_job_telemetry(_B())
     assert tel["executor_instances"] == 8
     assert tel["max_executors"] is None
+
+
+# --- sizing overlay ------------------------------------------------------------
+
+
+def test_build_batch_applies_the_sizing_overlay_verbatim() -> None:
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        properties={"spark.executor.cores": "8", "spark.task.cpus": "2"},
+    )
+    props = dict(batch.runtime_config.properties)
+    assert props["spark.executor.cores"] == "8"
+    assert props["spark.task.cpus"] == "2"
+
+
+def test_an_explicit_max_executors_overrides_the_overlays_ceiling() -> None:
+    # The overlay is a derived default; --max-executors is the operator saying a number out loud.
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        max_executors=2,
+        properties={"spark.dynamicAllocation.maxExecutors": "500"},
+    )
+    props = dict(batch.runtime_config.properties)
+    assert props["spark.dynamicAllocation.maxExecutors"] == "2"
+
+
+def test_the_gpu_attachment_wins_over_anything_the_overlay_said() -> None:
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="gpu",
+        gpu_type="L4",
+        properties={"spark.dataproc.executor.compute.tier": "standard"},
+    )
+    props = dict(batch.runtime_config.properties)
+    assert props["spark.dataproc.executor.compute.tier"] == "premium"
+
+
+def test_no_overlay_leaves_the_batch_with_the_pre_profiler_empty_properties() -> None:
+    # The pre-profiler CPU batch set no properties at all — every spark.* knob was the service's.
+    # Asserting the concrete emptiness (not "equals itself with properties=None", which cannot
+    # fail) is what would catch the overlay leaking in through a default.
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+    )
+    assert dict(batch.runtime_config.properties) == {}
+
+
+def test_profiling_off_emits_no_sizing_properties_at_all() -> None:
+    # The documented escape hatch: mode="off" restores the pre-profiler batch exactly.
+    cfg = _cfg(
+        data={"source_table": "t", "series_limit": 100},
+        compute={"profile": {"mode": "off"}},
+    )
+    assert sizing_properties(cfg) == {}
+
+
+def test_the_overlay_sizes_against_tasks_not_cells() -> None:
+    # 100 series × 4 models = 400 cells → ceil(400/8) = 50 buckets. One 4-core executor runs 4
+    # single-core tasks, so 13 executors is the widest fleet the fan-out can keep busy — sizing
+    # against the 400 cells instead would ask for 100 and leave most of them idle.
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100}, compute={"bucket_target_cells": 8})
+    props = sizing_properties(cfg)
+    assert props["spark.executor.cores"] == "4"
+    assert props["spark.dynamicAllocation.maxExecutors"] == "13"
+    assert props["spark.dynamicAllocation.minExecutors"] == "2"
+
+
+def test_the_overlay_pins_native_thread_pools_so_tasks_do_not_thrash() -> None:
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    props = sizing_properties(cfg)
+    # One task per core, so every task gets exactly one BLAS/OMP thread.
+    assert props["spark.executorEnv.OMP_NUM_THREADS"] == "1"
+    assert props["spark.executorEnv.MKL_NUM_THREADS"] == "1"
+
+
+def test_the_overlay_asks_for_no_memory_because_nothing_measured_it() -> None:
+    # There is no submit-side probe today, so the memory axis is absent and the platform's own
+    # defaults stand — "absence is a value".
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    props = sizing_properties(cfg)
+    assert "spark.executor.memory" not in props
+    assert "spark.executor.memoryOverhead" not in props
+
+
+def test_the_overlay_respects_an_explicit_executor_cap() -> None:
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    props = sizing_properties(cfg, max_executors=4)
+    assert props["spark.dynamicAllocation.maxExecutors"] == "4"
+
+
+def test_the_overlay_sizes_to_the_executed_subset_not_the_whole_config() -> None:
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    full = sizing_properties(cfg)
+    subset = sizing_properties(cfg, ["theta"])
+    assert int(subset["spark.dynamicAllocation.maxExecutors"]) < int(
+        full["spark.dynamicAllocation.maxExecutors"]
+    )
+
+
+def test_a_gpu_overlay_uses_the_configs_own_gpu_fraction_not_the_nominal_one() -> None:
+    # On the GPU path executor.cores IS the per-task device share, so a config that says a cell
+    # takes a tenth of a card must not be sized as if it took half: 8 cells per L4 rather than 4.
+    common: dict[str, Any] = dict(data={"source_table": "t", "series_limit": 100})
+    half = sizing_properties(_cfg(**common, compute={"gpu_fraction": 0.5}), hardware="gpu")
+    tenth = sizing_properties(_cfg(**common, compute={"gpu_fraction": 0.1}), hardware="gpu")
+    assert half["spark.executor.cores"] == "4"
+    assert tenth["spark.executor.cores"] == "8"
+
+
+def _submit_capturing_properties(
+    monkeypatch: pytest.MonkeyPatch, cfg: RunConfig, **kwargs: Any
+) -> dict[str, str]:
+    """Run ``submit_batch`` against stubbed staging/client and return the batch's properties."""
+    from scale_forecasting import submit
+
+    captured: dict[str, str] = {}
+
+    class _FakeOp:
+        def result(self, timeout: float | None = None) -> Any:
+            return type("R", (), {"state": "SUCCEEDED"})()
+
+    class _FakeClient:
+        def create_batch(self, *, parent: str, batch: Any, batch_id: str) -> _FakeOp:
+            captured.update(dict(batch.runtime_config.properties))
+            return _FakeOp()
+
+        def get_batch(self, *, name: str) -> Any:
+            return type("B", (), {})()
+
+    monkeypatch.setattr(submit, "_stage_code", lambda infra: ("gs://c/p.zip", "gs://c/e.py"))
+    monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
+    monkeypatch.setattr(submit, "_batch_client", lambda region: _FakeClient())
+    monkeypatch.setattr(submit, "_stamp_job_telemetry", lambda *a, **k: None)
+    submit.submit_batch(cfg, settings=_settings(), infra=_infra(), **kwargs)
+    return captured
+
+
+def test_submit_batch_puts_the_sizing_overlay_on_the_batch_it_creates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The unit above proves the overlay is *computed* correctly; this proves it is *wired*.
+    # Without it, dropping `properties=sizing_properties(...)` from submit_batch is invisible.
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    props = _submit_capturing_properties(monkeypatch, cfg)
+    assert props == sizing_properties(cfg)
+    assert props  # and it is not the vacuously-passing empty dict
+
+
+def test_submit_batch_with_profiling_off_creates_the_pre_profiler_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _cfg(
+        data={"source_table": "t", "series_limit": 100},
+        compute={"profile": {"mode": "off"}},
+    )
+    assert _submit_capturing_properties(monkeypatch, cfg) == {}

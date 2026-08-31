@@ -20,7 +20,7 @@ What `submit_batch` does:
    optionally capping executors (``--max-executors`` → ``spark.dynamicAllocation.maxExecutors``, how
    a run is throttled), and return the batch id.
 
-Public surface: ``BatchInfra``, ``submit_batch``, ``main``.
+Public surface: ``BatchInfra``, ``submit_batch``, ``sizing_properties``, ``main``.
 """
 
 from __future__ import annotations
@@ -284,6 +284,80 @@ def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
     }
 
 
+def sizing_properties(
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+    max_executors: int | None = None,
+) -> dict[str, str]:
+    """The ``spark.*`` overlay this batch's shape implies (pure; ``{}`` when profiling is off).
+
+    A Serverless executor's shape is fixed at batch *creation*, so unlike Ray — where the
+    engine sizes tasks on a cluster that already exists — this has to be decided here, before
+    anything runs. `resources.plan_serverless` does the arithmetic; this only assembles its
+    inputs from the config.
+
+    **No measurement is involved yet, and most of the win does not need any.** The executor
+    cores, the thread pins, the warm ``initialExecutors`` and the allocation ratio all follow
+    from the task count and the family list alone. Only the memory sizing needs a profile, and
+    there is no submit-side probe today (the fleetwide pre-pass runs on the Spark driver
+    *inside* the batch, by which point the executors exist) — so the memory properties are
+    simply not emitted and Serverless' own defaults stand, exactly as before.
+
+    **The unit sized against is a task, not a cell.** The engine shuffles cells into buckets and
+    runs one task per bucket (`engines.spark_io.default_bucket_count`), each holding
+    ``compute.bucket_target_cells`` cells that execute *sequentially* inside one pandas frame.
+    So the widest useful fleet is the one that runs every bucket at once, not every cell — sizing
+    against cells would ask for `bucket_target_cells`x more executors than the fan-out can ever
+    keep busy. The driver enforces the other side of the same identity
+    (`engines.spark_io.reachable_bucket_count`): whatever ceiling ends up on the batch, the
+    bucket count is raised to match it.
+
+    **A GPU batch is sized against the device the config names, not a nominal one.** On the GPU
+    path ``executor.cores`` *is* the per-task device share, so the config's own
+    ``compute.gpu_fraction`` and the accelerator's memory decide the executor's shape. A fixed
+    fraction is passed through; ``"auto"`` cannot be calibrated here (there is no device to
+    measure yet, exactly as on the Ray submit path) and falls back to the nominal share.
+
+    ``compute.profile.mode == "off"`` returns ``{}`` — the documented escape hatch back to
+    the pre-profiler batch, reused rather than adding a field that would move every
+    ``run_id``.
+    """
+    if cfg.compute.profile.mode == "off":
+        return {}
+
+    # `device_memory_bytes` lives with the Ray engine because that is where the device table is
+    # maintained; one table, consulted by both runtimes, beats a second copy that drifts.
+    from .engines.ray_io import device_memory_bytes
+    from .engines.spark_io import default_bucket_count
+    from .models import get_model
+    from .resources import plan_serverless
+
+    executed = models if models is not None else cfg.models
+    families: list[str] = []
+    for name in executed:
+        family = get_model(name).family
+        if family not in families:
+            families.append(family)
+
+    gpu = hardware == "gpu"
+    fraction = cfg.compute.gpu_fraction
+    n_tasks = default_bucket_count(cfg, executed)
+    _, translation = plan_serverless(
+        None,
+        families,
+        n_tasks,
+        gpu=gpu,
+        device_bytes=device_memory_bytes(gpu_type or cfg.compute.gpu_type) if gpu else None,
+        static_gpu_fraction=float(fraction) if isinstance(fraction, float) else None,
+        max_executors=max_executors,
+    )
+    _log.info("serverless sizing: %s", translation.to_dict())
+    return translation.properties
+
+
 def build_batch(
     *,
     infra: BatchInfra,
@@ -296,6 +370,7 @@ def build_batch(
     manage_header: bool = True,
     hardware: str = "cpu",
     gpu_type: str | None = None,
+    properties: dict[str, str] | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Batch`` for one forecast run (pure — builds the message only).
 
@@ -313,17 +388,22 @@ def build_batch(
     deep-learning family's serverless job. ``gpu_type`` names the accelerator (serverless is
     L4-only; the resolver already forces this). A CPU batch adds no accelerator properties, so its
     message is unchanged.
+
+    ``properties`` is the sizing overlay — `resources.translate_serverless` spelled as
+    ``spark.*`` — applied *first*, so the two things a caller states explicitly still win over
+    it: an explicit ``max_executors`` and the GPU attachment. Omitted (the default) the message
+    is byte-identical to the pre-profiler one.
     """
     from datetime import timedelta
 
     from google.cloud import dataproc_v1 as dataproc
 
     args = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
-    properties = {}
+    props: dict[str, str] = dict(properties or {})
     if max_executors is not None:
-        properties["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
+        props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
     if hardware == "gpu":
-        properties.update(_serverless_gpu_properties(gpu_type or _SERVERLESS_GPU_TYPE))
+        props.update(_serverless_gpu_properties(gpu_type or _SERVERLESS_GPU_TYPE))
 
     return dataproc.Batch(
         pyspark_batch=dataproc.PySparkBatch(
@@ -334,7 +414,7 @@ def build_batch(
         runtime_config=dataproc.RuntimeConfig(
             version=infra.runtime_version,
             container_image=infra.container_image,
-            properties=properties,
+            properties=props,
         ),
         environment_config=dataproc.EnvironmentConfig(
             execution_config=dataproc.ExecutionConfig(
@@ -462,6 +542,9 @@ def submit_batch(
         manage_header=manage_header,
         hardware=hardware,
         gpu_type=gpu_type,
+        properties=sizing_properties(
+            cfg, models, hardware=hardware, gpu_type=gpu_type, max_executors=max_executors
+        ),
     )
 
     client = _batch_client(settings.region)

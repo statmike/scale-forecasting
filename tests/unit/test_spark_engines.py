@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from scale_forecasting.config import RunConfig
-from scale_forecasting.engines import spark_io
+from scale_forecasting.engines import spark_explode, spark_io
 from scale_forecasting.engines.spark_io import (
     STATUS_COLUMNS,
     aggregate_status,
@@ -102,6 +102,143 @@ def test_bucket_count_defaults_to_cap_when_unlimited() -> None:
     cfg = _cfg(compute={"max_parallelism": 123})
     # series_limit unset → cell count unknown offline → fall back to the parallelism cap.
     assert default_bucket_count(cfg) == 123
+
+
+# --- reachable_bucket_count: the buckets-≥-ceiling invariant --------------------
+
+
+def test_a_fan_out_narrower_than_the_ceiling_is_widened_to_reach_it() -> None:
+    # 100 executors × (8 cores / 1 cpu per task) = 800 tasks before the autoscaler has any reason
+    # to grow to 100. At 40 buckets the fleet would sit near its minimum for the whole run.
+    assert (
+        spark_io.reachable_bucket_count(40, max_executors=100, executor_cores=8, task_cpus=1) == 800
+    )
+
+
+def test_a_fan_out_already_wide_enough_is_left_exactly_alone() -> None:
+    assert (
+        spark_io.reachable_bucket_count(5000, max_executors=100, executor_cores=8, task_cpus=1)
+        == 5000
+    )
+
+
+def test_wide_tasks_lower_the_bar_because_fewer_fit_per_executor() -> None:
+    # spark.task.cpus=4 on an 8-core executor → 2 tasks each, so 100 executors need only 200.
+    assert (
+        spark_io.reachable_bucket_count(40, max_executors=100, executor_cores=8, task_cpus=4) == 200
+    )
+
+
+def test_an_unset_ceiling_leaves_the_policy_count_untouched() -> None:
+    # No maxExecutors property → the platform default applies and we did not choose it; sizing
+    # fan-out against a guess at someone else's number is worse than not raising at all.
+    assert spark_io.reachable_bucket_count(40, max_executors=None, executor_cores=8) == 40
+    assert spark_io.reachable_bucket_count(40, max_executors=100, executor_cores=None) == 40
+
+
+def test_the_widened_count_still_respects_the_safety_ceiling() -> None:
+    raised = spark_io.reachable_bucket_count(
+        40, max_executors=2000, executor_cores=96, task_cpus=1
+    )
+    assert raised == spark_io._MAX_BUCKETS
+
+
+def test_a_zero_core_executor_cannot_drive_the_count_to_zero() -> None:
+    assert spark_io.reachable_bucket_count(40, max_executors=10, executor_cores=0) == 40
+
+
+# --- _conf_int: reading the live conf without trusting it ----------------------
+
+
+class _ConfStub:
+    def __init__(self, values: dict[str, Any], *, raises: bool = False) -> None:
+        self._values = values
+        self._raises = raises
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if self._raises:
+            raise RuntimeError("unknown conf key")
+        return self._values.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        self._values[key] = value
+
+
+class _SessionStub:
+    def __init__(self, values: dict[str, Any], *, raises: bool = False) -> None:
+        self.conf = _ConfStub(values, raises=raises)
+
+
+def test_a_set_property_is_read_back_as_an_int() -> None:
+    spark = _SessionStub({"spark.executor.cores": "16"})
+    assert spark_explode._conf_int(spark, "spark.executor.cores") == 16
+
+
+def test_an_unset_property_reads_as_none_not_zero() -> None:
+    assert spark_explode._conf_int(_SessionStub({}), "spark.executor.cores") is None
+
+
+def test_a_non_numeric_property_reads_as_none_rather_than_raising() -> None:
+    spark = _SessionStub({"spark.executor.cores": "8g"})
+    assert spark_explode._conf_int(spark, "spark.executor.cores") is None
+
+
+def test_a_session_that_rejects_the_key_outright_reads_as_none() -> None:
+    # A Spark Connect session may refuse an unknown key instead of returning the default; the
+    # bucket count must not die because a conf lookup did.
+    spark = _SessionStub({}, raises=True)
+    assert spark_explode._conf_int(spark, "spark.dynamicAllocation.maxExecutors") is None
+
+
+# --- fanout_properties + _widen_fanout: making a bucket actually be a task ------
+
+
+def test_the_shuffle_width_is_pinned_to_the_bucket_count() -> None:
+    # Without this, groupBy(...).applyInPandas plans spark.sql.shuffle.partitions tasks — 200 by
+    # default — no matter how many buckets the cells were hashed into.
+    props = spark_io.fanout_properties(4000)
+    assert props["spark.sql.shuffle.partitions"] == "4000"
+
+
+def test_aqe_is_stopped_from_coalescing_the_pin_away() -> None:
+    # Pinning the partition count is not enough on its own: AQE coalesces small partitions after
+    # the fact, which is how a 200-task stage becomes a 1-task stage.
+    props = spark_io.fanout_properties(4000)
+    assert props["spark.sql.adaptive.coalescePartitions.minPartitionNum"] == "4000"
+
+
+def _fanout_cfg(**compute: Any) -> RunConfig:
+    return _cfg(data={"source_table": "t", "series_limit": 100}, compute=compute)
+
+
+def test_widen_fanout_raises_the_count_and_pins_the_shuffle_to_the_raised_one() -> None:
+    spark = _SessionStub(
+        {"spark.dynamicAllocation.maxExecutors": "50", "spark.executor.cores": "8"}
+    )
+    assert spark_explode._widen_fanout(_fanout_cfg(), spark, 40) == 400
+    # The pin must follow the *raised* count, not the policy count it started from.
+    assert spark.conf.get("spark.sql.shuffle.partitions") == "400"
+
+
+def test_widen_fanout_still_pins_the_shuffle_when_the_count_is_already_wide_enough() -> None:
+    # The raise and the pin are independent: a fan-out that needs no widening still needs its
+    # tasks to exist.
+    spark = _SessionStub(
+        {"spark.dynamicAllocation.maxExecutors": "2", "spark.executor.cores": "4"}
+    )
+    assert spark_explode._widen_fanout(_fanout_cfg(), spark, 500) == 500
+    assert spark.conf.get("spark.sql.shuffle.partitions") == "500"
+
+
+def test_widen_fanout_touches_nothing_when_profiling_is_off() -> None:
+    # The escape hatch has to survive Serverless writing its own dynamicAllocation defaults into
+    # the driver conf — which is why the gate is here and not at the call site.
+    spark = _SessionStub(
+        {"spark.dynamicAllocation.maxExecutors": "1000", "spark.executor.cores": "4"}
+    )
+    cfg = _fanout_cfg(profile={"mode": "off"})
+    assert spark_explode._widen_fanout(cfg, spark, 500) == 500
+    assert spark.conf.get("spark.sql.shuffle.partitions") is None
 
 
 # --- run_group: tagged frame (cross-joined, model column present) ---------------

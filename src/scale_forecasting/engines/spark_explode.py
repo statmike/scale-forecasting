@@ -32,6 +32,57 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 
+def _conf_int(spark: SparkSession, key: str) -> int | None:
+    """One Spark conf entry as an int, or ``None`` when it is unset or unparseable.
+
+    ``None`` is the honest answer for "the platform default applies" — we did not choose that
+    number and should not size fan-out against a guess at it.
+    """
+    try:
+        raw = spark.conf.get(key, None)
+    except Exception:  # a Connect session may reject an unknown key outright
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _widen_fanout(cfg: RunConfig, spark: SparkSession, n_buckets: int) -> int:
+    """Reconcile the bucket count with the fleet it is about to run on; return the final count.
+
+    Two halves of one identity, and both are needed. `spark_io.reachable_bucket_count` raises the
+    count until it can create the pending demand the autoscaler grows on, reading the ceiling off
+    the live conf so it holds however that number got onto the batch — `submit.sizing_properties`,
+    ``--max-executors``, or the operator's own property. `spark_io.fanout_properties` then pins the
+    shuffle width to the result, because the group count and the task count are otherwise
+    unrelated numbers and it is the task count the scheduler acts on.
+
+    ``profile.mode == "off"`` returns the count untouched. That is the documented escape hatch
+    back to the pre-profiler run, and it has to be checked *here* rather than at the call site
+    because Serverless materializes its own dynamic-allocation defaults into the driver conf:
+    read without the gate, an unsized batch reports a 1000-executor ceiling we never chose, and
+    a run nobody asked to reshape gets reshaped around it.
+    """
+    if cfg.compute.profile.mode == "off":
+        return n_buckets
+    reachable = spark_io.reachable_bucket_count(
+        n_buckets,
+        max_executors=_conf_int(spark, "spark.dynamicAllocation.maxExecutors"),
+        executor_cores=_conf_int(spark, "spark.executor.cores"),
+        task_cpus=_conf_int(spark, "spark.task.cpus") or 1,
+    )
+    if reachable != n_buckets:
+        _log.info(
+            "buckets raised %d -> %d so the executor ceiling is reachable",
+            n_buckets,
+            reachable,
+        )
+    for key, value in spark_io.fanout_properties(reachable).items():
+        spark.conf.set(key, value)
+    return reachable
+
+
 def run(
     cfg: RunConfig,
     models: list[str] | None = None,
@@ -107,6 +158,10 @@ def run(
             spark = SparkSession.builder.appName(
                 f"scale-forecasting-explode-{run_id}"
             ).getOrCreate()
+        # Fan-out width is only decidable once there is a session to ask: the fleet's ceiling is
+        # set on the batch and read back from the live conf. See `_widen_fanout`.
+        n_buckets = _widen_fanout(cfg, spark, n_buckets)
+
         started = time.perf_counter()
         try:
             # 2. Fan cells across the cluster. The frozen Settings is captured directly in the group

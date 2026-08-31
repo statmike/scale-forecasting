@@ -57,7 +57,8 @@ same rule, stated on the runtime that had been ignoring it.
 
 Public surface: ``ResourceSlot``, ``UnitShape``, ``RuntimeResourcePlan``,
 ``ServerlessTranslation``, ``resource_slot``, ``merge_slots``, ``plan_resources``,
-``plan_fleet``, ``machine_memory_bytes``, ``schedulable_memory_bytes``,
+``plan_fleet``, ``plan_serverless``, ``machine_memory_bytes``,
+``schedulable_memory_bytes``, ``serverless_tasks_per_executor``, ``serverless_unit``,
 ``slots_per_unit``, ``snap_to_legal``, ``tasks_for_ceiling``, ``translate_serverless``.
 """
 
@@ -81,8 +82,11 @@ __all__ = [
     "merge_slots",
     "plan_fleet",
     "plan_resources",
+    "plan_serverless",
     "resource_slot",
     "schedulable_memory_bytes",
+    "serverless_tasks_per_executor",
+    "serverless_unit",
     "slots_per_unit",
     "snap_to_legal",
     "tasks_for_ceiling",
@@ -658,6 +662,7 @@ def plan_fleet(
     target_cells_per_slot: int = _DEFAULT_TARGET_CELLS_PER_SLOT,
     min_units: int = 1,
     max_units: int = 1,
+    density: int | None = None,
 ) -> RuntimeResourcePlan:
     """The fleet half of `plan_resources`, over a slot the caller already sized (pure).
 
@@ -670,8 +675,14 @@ def plan_fleet(
     having clamped it to the unit (`schedulable_memory_bytes` is the ceiling to clamp
     against). `slots_per_unit` still floors the density at 1, so an unclamped slot
     yields an inefficient plan rather than a stalled pool.
+
+    ``density`` overrides the cells-per-unit figure for a runtime whose own scheduler is the
+    authority on it: Serverless divides an executor's cores by ``spark.task.cpus`` and honours
+    nothing else, so a fleet sized off `slots_per_unit`'s device arithmetic would be sized off a
+    density the platform never grants (`serverless_tasks_per_executor`). Left ``None`` — every Ray
+    caller — the derivation stands.
     """
-    per_unit = slots_per_unit(slot, unit)
+    per_unit = max(1, density) if density is not None else slots_per_unit(slot, unit)
     cells_per_unit = max(1, per_unit * max(1, target_cells_per_slot))
     saturating = math.ceil(n_cells / per_unit) if n_cells > 0 else 0
     if n_cells <= 0:
@@ -816,6 +827,21 @@ def _serverless_gpu_cores(fraction: float) -> tuple[int, float, int]:
     return cores, ideal, cores // _SERVERLESS_L4_GPUS_PER_EXECUTOR[cores]
 
 
+def serverless_tasks_per_executor(slot: ResourceSlot, cores: int) -> int:
+    """Cells one Serverless executor runs at once (pure) — the number Spark will really honour.
+
+    ``spark.task.cpus`` divides an executor's cores into task slots, and that division is the
+    *only* concurrency a Spark executor enforces. `slots_per_unit` answers the same question in
+    the plan's vocabulary and, on a GPU slot, answers it in device terms —
+    ``accelerators x floor(1 / gpu_fraction)`` — which is what the measurement *asked* for, not
+    what the legal core table *granted*: `_serverless_gpu_cores` snaps down, so the granted
+    packing is the smaller of the two. Sizing a fleet against the ask leaves it short of the
+    hardware it will actually get, so the Serverless planner and the translation both size
+    against this one number instead of each deriving their own.
+    """
+    return max(1, cores // max(1, min(slot.cores, cores)))
+
+
 def _executor_counts(plan: RuntimeResourcePlan) -> tuple[int, int, int]:
     """``(min, initial, max)`` executors, clamped into the platform's ``[2, 2000]`` (pure).
 
@@ -891,7 +917,7 @@ def translate_serverless(
     # numbers have to agree — tasks, the thread pin, and the memory budgeted for them — or the
     # translation over-packs on one axis while under-packing another.
     task_cpus = max(1, min(slot.cores, cores))
-    tasks_per_executor = max(1, cores // task_cpus)
+    tasks_per_executor = serverless_tasks_per_executor(slot, cores)
     if task_cpus > 1:
         properties["spark.task.cpus"] = str(task_cpus)
     for name in _INTRAOP_ENV_VARS:
@@ -950,3 +976,102 @@ def translate_serverless(
         properties=properties,
         notes=tuple(notes) + slot.notes,
     )
+
+
+def serverless_unit(cores: int, *, gpu: bool) -> UnitShape:
+    """The executor a given core count buys, as a `UnitShape` (pure).
+
+    Serverless bills the executor as a shape rather than a machine type, so memory follows
+    the tier band rather than a GCE ratio: the standard-tier per-core maximum is what an
+    executor can actually be given. ``accelerators`` comes from the L4 table, where the
+    device count is a property of the core count and not a separate knob.
+    """
+    per_core = _SERVERLESS_L4_MB_PER_CORE if gpu else _SERVERLESS_MAX_MB_PER_CORE["standard"]
+    return UnitShape(
+        cores=cores,
+        memory_bytes=cores * per_core * _MIB,
+        accelerators=_SERVERLESS_L4_GPUS_PER_EXECUTOR.get(cores, 0) if gpu else 0,
+    )
+
+
+def plan_serverless(
+    profile: ComputeProfile | None,
+    families: Sequence[str],
+    n_cells: int,
+    *,
+    gpu: bool = False,
+    device_bytes: int | None = None,
+    static_gpu_fraction: float | None = None,
+    target_cells_per_slot: int = _DEFAULT_TARGET_CELLS_PER_SLOT,
+    max_executors: int | None = None,
+    tier: str = "standard",
+) -> tuple[RuntimeResourcePlan, ServerlessTranslation]:
+    """Size a Serverless batch and spell it as properties, in one call (pure).
+
+    Two passes, because the executor's shape and the fleet's size each depend on the other.
+    The slot fixes ``executor.cores`` on its own — that is the whole point of the inversion,
+    the cores come from the measured fraction rather than from the fleet — so pass one
+    translates against the *widest* legal executor purely to learn the core count, and pass two
+    builds the real `serverless_unit` from it and plans the fleet properly. The same shape
+    `ray_io.plan_cluster` uses for its autoscaling ceiling, and for the same reason.
+
+    Pass one deliberately clamps against the widest shape rather than a nominal one: clamping
+    to a small executor first would cap the measured slot *before* it had a chance to ask for a
+    bigger executor, and the batch would then be sized to the clamp instead of to the work. The
+    slot is re-derived against the chosen shape in pass two, so the plan that comes out is still
+    clamped to the executor it will actually run on.
+
+    ``max_executors`` is the operator's explicit cap (``--max-executors``). Left ``None`` the
+    ceiling is the **saturating** count — enough executors to run every cell at once — rather
+    than a derived guess. That asymmetry is deliberate: Serverless already defaults
+    ``maxExecutors`` to 1000, so a ceiling we invent can only ever make a large run *slower*
+    than leaving it alone, while a floor we raise can only make it faster.
+
+    ``families`` is every family the batch will run, merged the same way a shared Ray pool's
+    is (`merge_slots`): one executor shape has to hold whichever cell arrives.
+    """
+    label = "+".join(families) or "cpu"
+
+    def sized_for(unit: UnitShape) -> ResourceSlot:
+        return merge_slots(
+            [
+                resource_slot(
+                    profile,
+                    family,
+                    use_gpu=gpu,
+                    device_bytes=device_bytes,
+                    static_gpu_fraction=static_gpu_fraction,
+                    max_cores=unit.cores,
+                    max_memory_bytes=schedulable_memory_bytes(unit),
+                )
+                for family in (families or ["cpu"])
+            ],
+            family=label,
+        )
+
+    widest = serverless_unit(
+        (_SERVERLESS_L4_CORES if gpu else _SERVERLESS_CPU_CORES)[-1], gpu=gpu
+    )
+    first = translate_serverless(
+        plan_fleet(sized_for(widest), runtime="serverless", n_cells=n_cells, unit=widest),
+        tier=tier,
+    )
+
+    unit = serverless_unit(first.executor_cores, gpu=gpu)
+    slot = sized_for(unit)
+    # Density comes from the executor's task slots, not from `slots_per_unit`'s device
+    # arithmetic — see `serverless_tasks_per_executor`. Both the ceiling and the plan use it, so
+    # the fleet and the properties describe one machine rather than two.
+    per_unit = serverless_tasks_per_executor(slot, unit.cores)
+    ceiling = max_executors or (math.ceil(n_cells / per_unit) if n_cells > 0 else 1)
+    plan = plan_fleet(
+        slot,
+        runtime="serverless",
+        n_cells=n_cells,
+        unit=unit,
+        target_cells_per_slot=target_cells_per_slot,
+        min_units=_SERVERLESS_MIN_EXECUTORS,
+        max_units=max(_SERVERLESS_MIN_EXECUTORS, ceiling),
+        density=per_unit,
+    )
+    return plan, translate_serverless(plan, tier=tier)

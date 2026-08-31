@@ -854,7 +854,7 @@ def _assemble_commands(
         )
         return commands
 
-    from .submit import BatchInfra, _batch_id
+    from .submit import BatchInfra, _batch_id, sizing_properties
 
     assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
     models_arg = plan.python_models if plan.bq_models else None
@@ -867,6 +867,9 @@ def _assemble_commands(
         config_uri=config_uri,
         models=models_arg,
         manage_header=True,
+        # The emitted gcloud command has to carry the sizing overlay the SDK path applies, or
+        # copy-pasting it would submit a differently-shaped batch than `run` would.
+        properties=sizing_properties(cfg, models_arg),
     )
     return commands
 

@@ -5,13 +5,16 @@ Split along the pure/I-O seam so the interesting logic is offline-testable:
 * **Pure** (no Spark, no BigQuery): `run_group` — the body of the grouped-Pandas UDF, which
   runs `run_cell` for every cell in one group's pandas frame and
   returns ``(results, status_frame)``; `aggregate_status` — fold the per-cell status frame
-  into a run-level `RunOutcome`; `default_bucket_count`, `bucket_key_cols`.
+  into a run-level `RunOutcome`; `default_bucket_count`, `reachable_bucket_count`,
+  `fanout_properties`, `bucket_key_cols`.
 * **I/O / Spark shell** (pyspark imported lazily, parity with the seed job):
   `read_source_series` (connector read + deterministic ``series_limit`` subset),
   `add_bucket`, `cross_join_models`, `status_schema`, `make_group_runner`.
 
 **Fan-out mechanics.** The engine shuffles cells into *buckets* and runs one Spark task per bucket
-(``groupBy(bucket).applyInPandas``). The bucket key is the natural unit of independence
+(``groupBy(bucket).applyInPandas``, with the shuffle width pinned to the bucket count by
+`fanout_properties` — Spark would otherwise plan its default 200 tasks whatever the bucket count
+is, and the fan-out would be a fiction). The bucket key is the natural unit of independence
 (`bucket_key_cols`): a cell — ``(ts_id, model_type)``. A slow ``(series, deep-model)`` cell lands in
 its own bucket while that same series' fast cells sit in *other* buckets and run concurrently, so
 the scheduler spreads cells and autoscales. Every history row of a given cell shares both keys, so a
@@ -71,9 +74,11 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
 def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int:
     """Bucket count that keeps each ``applyInPandas`` frame bounded as scale grows.
 
-    Buckets are *shuffle partitions*, not executor concurrency (that's
+    Buckets are *groups*, not executor concurrency (that's
     ``spark.dynamicAllocation.maxExecutors``): each bucket is materialized as one pandas frame in
-    one task, so its size — not the cluster width — is what OOMs an executor. We therefore size
+    one ``run_group`` call, so its size — not the cluster width — is what OOMs an executor. (A
+    group only becomes a *task* because `fanout_properties` pins the shuffle width to match;
+    Spark's own default would run the whole fan-out in 200 tasks whatever this returns.) We size
     buckets to hold ~``compute.bucket_target_cells`` cells each: ``buckets = ceil(cells / target)``.
     That holds ~``target`` series-histories per frame at *every* scale (1k and 100k alike), instead
     of the old ``min(cells, max_parallelism)`` which silently fattened frames past the executor
@@ -83,6 +88,9 @@ def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int
     falls back to ``max_parallelism`` buckets (best guess without a known cell count). ``models`` is
     the executed subset; ``None`` means ``cfg.models`` — so a standalone run and a subset run size
     buckets to the work they actually fan out.
+
+    This is the *policy* number. `reachable_bucket_count` then raises it if the cluster it is
+    about to run on is wider than the policy would keep busy.
     """
     executed = models if models is not None else cfg.models
     target = cfg.compute.bucket_target_cells
@@ -91,6 +99,56 @@ def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int
         return max(1, min(cfg.compute.max_parallelism, _MAX_BUCKETS))
     cells = limit * len(executed)
     return max(1, min(math.ceil(cells / target), _MAX_BUCKETS))
+
+
+def reachable_bucket_count(
+    buckets: int,
+    *,
+    max_executors: int | None,
+    executor_cores: int | None,
+    task_cpus: int = 1,
+) -> int:
+    """Raise a bucket count until the autoscaler's ceiling is actually reachable (pure).
+
+    Dynamic allocation grows on *pending demand*: Spark adds an executor because tasks are
+    queued and cannot be placed. A run that never submits more tasks than the current fleet
+    can hold has nothing pending, so the fleet sits at its minimum for the whole run — the
+    "we enabled autoscaling and nothing scaled" report, which reads as a platform problem and
+    is arithmetic. One executor runs ``executor.cores / task.cpus`` tasks at once, so reaching
+    ``maxExecutors`` takes at least that many tasks times the ceiling.
+
+    Raising the count is the cheap side of the trade: extra buckets mean smaller pandas frames
+    (further from the OOM `default_bucket_count` exists to avoid), while too few caps the run's
+    width for its entire duration. Any argument left ``None`` — the property is unset, so the
+    platform default applies and we are not the ones who chose it — leaves the count alone.
+    """
+    if max_executors is None or executor_cores is None:
+        return buckets
+    per_executor = max(1, executor_cores // max(1, task_cpus))
+    return max(1, min(max(buckets, max_executors * per_executor), _MAX_BUCKETS))
+
+
+def fanout_properties(buckets: int) -> dict[str, str]:
+    """The Spark confs that make one bucket one *task* (pure).
+
+    ``groupBy(bucket).applyInPandas`` is a shuffle, and a shuffle stage's task count is
+    ``spark.sql.shuffle.partitions`` — **not** the number of distinct groups. Nothing about
+    hashing cells into 4000 buckets makes Spark run 4000 tasks: left alone it plans Spark's
+    default 200 and AQE then coalesces *below* that, so a run carefully fanned out for a wide
+    fleet arrives at the scheduler as a couple of hundred tasks and the fleet it was sized for
+    never fills. That is the same "we enabled autoscaling and nothing scaled" arithmetic
+    `reachable_bucket_count` guards from the other side, and raising the bucket count alone
+    would not have moved it.
+
+    So the width is stated outright. The AQE floor goes with it because coalescing would undo
+    the pin from underneath: each partition here holds a whole bucket's cells, and merging
+    partitions serialises cells that were meant to run side by side. It costs nothing when the
+    partitions are genuinely small — that is what `default_bucket_count` is for.
+    """
+    return {
+        "spark.sql.shuffle.partitions": str(buckets),
+        "spark.sql.adaptive.coalescePartitions.minPartitionNum": str(buckets),
+    }
 
 
 # --- pure: the grouped-UDF body ------------------------------------------------
