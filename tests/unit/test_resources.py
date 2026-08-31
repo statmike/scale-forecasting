@@ -40,10 +40,13 @@ from scale_forecasting.resources import (
     UnitShape,
     machine_memory_bytes,
     merge_slots,
+    plan_fleet,
     plan_resources,
     resource_slot,
     slots_per_unit,
+    snap_to_legal,
     tasks_for_ceiling,
+    translate_serverless,
 )
 
 _GIB = 1024**3
@@ -620,3 +623,187 @@ def test_a_hand_assembled_slot_bigger_than_its_unit_still_yields_one_slot() -> N
         device_bytes=None,
     )
     assert slots_per_unit(oversized, _N1_STANDARD_8) == 1
+
+
+# --- serverless: the same measurement, spelled backwards ------------------------
+
+
+def _serverless(
+    *,
+    cores: int = 1,
+    memory_bytes: int | None = None,
+    gpu_fraction: float | None = None,
+    min_units: int = 1,
+    max_units: int = 10,
+    n_cells: int = 1000,
+    tier: str = "standard",
+    notes: tuple[str, ...] = (),
+) -> resources.ServerlessTranslation:
+    """Translate a hand-built slot straight through `plan_fleet` into properties."""
+    slot = _slot(
+        "statistical",
+        cores=cores,
+        memory_bytes=memory_bytes,
+        gpu_fraction=gpu_fraction,
+        measured=_HOST_AXES,
+        notes=notes,
+    )
+    plan = plan_fleet(
+        slot,
+        runtime="serverless",
+        n_cells=n_cells,
+        unit=UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=1 if gpu_fraction else 0),
+        min_units=min_units,
+        max_units=max_units,
+    )
+    return translate_serverless(plan, tier=tier)
+
+
+def test_snapping_up_takes_the_smallest_legal_value_that_still_fits() -> None:
+    assert snap_to_legal(5, (4, 8, 16), up=True) == 8
+    assert snap_to_legal(8, (4, 8, 16), up=True) == 8
+    assert snap_to_legal(99, (4, 8, 16), up=True) == 16  # off the top → the largest we may ask for
+
+
+def test_snapping_down_takes_the_largest_legal_value_that_does_not_overshoot() -> None:
+    assert snap_to_legal(15, (4, 8, 16), up=False) == 8
+    assert snap_to_legal(1, (4, 8, 16), up=False) == 4  # off the bottom → the smallest that exists
+
+
+def test_snapping_against_an_empty_table_is_a_caller_bug() -> None:
+    with pytest.raises(ValueError, match="at least one legal value"):
+        snap_to_legal(4, (), up=True)
+
+
+def test_a_single_threaded_family_lands_on_the_four_core_default_from_evidence() -> None:
+    """The cores axis measuring 1 confirms the default rather than changing it."""
+    out = _serverless(cores=1, memory_bytes=2 * _GIB)
+    assert out.properties["spark.executor.cores"] == "4"
+    assert out.ideal_executor_cores == 1.0
+
+
+def test_a_multi_core_family_snaps_up_to_a_legal_executor_shape() -> None:
+    assert _serverless(cores=5).properties["spark.executor.cores"] == "8"
+    assert _serverless(cores=9).properties["spark.executor.cores"] == "16"
+
+
+def test_the_measured_footprint_lands_in_overhead_not_in_the_jvm_heap() -> None:
+    """A PySpark fit is charged to memoryOverhead; sizing executor.memory would OOM the worker."""
+    out = _serverless(cores=1, memory_bytes=2 * _GIB)
+    assert out.properties["spark.executor.memoryOverhead"] == f"{4 * 2 * 1024}m"  # 4 cores x 2 GiB
+    assert out.properties["spark.executor.memory"] == "2048m"  # 4 cores x the JVM floor
+
+
+def test_a_slot_too_fat_for_the_standard_tier_is_clamped_and_says_so() -> None:
+    out = _serverless(cores=1, memory_bytes=10 * _GIB)
+    assert any("standard-tier ceiling" in note for note in out.notes)
+    assert out.properties["spark.executor.memoryOverhead"] == f"{4 * 7424 - 4 * 512}m"
+
+
+def test_the_premium_tier_widens_the_band_instead_of_clamping() -> None:
+    out = _serverless(cores=1, memory_bytes=10 * _GIB, tier="premium")
+    assert not any("ceiling" in note for note in out.notes)
+    assert out.properties["spark.executor.memoryOverhead"] == f"{4 * 10 * 1024}m"
+
+
+def test_a_tiny_slot_is_raised_to_the_platform_memory_floor() -> None:
+    """Below 1024m per core the pair is illegal, so the ask is snapped up, not down."""
+    out = _serverless(cores=1, memory_bytes=64 * _MIB)
+    assert out.properties["spark.executor.memoryOverhead"] == f"{4 * 1024 - 4 * 512}m"
+
+
+def test_an_unmeasured_memory_axis_emits_no_memory_properties_at_all() -> None:
+    """Absence propagates here too: no measurement, no request, serverless defaults stand."""
+    out = _serverless(cores=1, memory_bytes=None)
+    assert "spark.executor.memory" not in out.properties
+    assert "spark.executor.memoryOverhead" not in out.properties
+    assert any("memory unmeasured" in note for note in out.notes)
+
+
+def test_native_thread_pools_are_pinned_to_one_because_spark_runs_a_task_per_core() -> None:
+    """Ray gets this for free; a Spark executor oversubscribes unless we export it."""
+    out = _serverless(cores=1, memory_bytes=_GIB)
+    assert out.properties["spark.executorEnv.OMP_NUM_THREADS"] == "1"
+    assert out.properties["spark.executorEnv.MKL_NUM_THREADS"] == "1"
+    assert "spark.task.cpus" not in out.properties  # one task per core is Spark's own default
+
+
+def test_a_threaded_family_gets_wider_tasks_and_the_memory_budget_follows() -> None:
+    """Tasks, the thread pin and the memory budget are one decision — they may not disagree.
+
+    Without ``spark.task.cpus`` Spark would run 8 tasks on the 8-core executor while each one
+    spawned 5 BLAS threads: 40 threads on 8 cores, the exact thrash the pin exists to stop.
+    """
+    out = _serverless(cores=5, memory_bytes=_GIB)
+    assert out.properties["spark.executor.cores"] == "8"
+    assert out.properties["spark.task.cpus"] == "5"
+    assert out.properties["spark.executorEnv.OMP_NUM_THREADS"] == "5"
+    # 8 // 5 == 1 concurrent cell, so one cell's memory — not eight.
+    assert out.properties["spark.executor.memoryOverhead"] == f"{8 * 1024 - 8 * 512}m"
+
+
+def test_the_gpu_fraction_is_inverted_into_a_legal_core_count() -> None:
+    """A tenth of a card per cell means ten cells fit; 8 cores on 1 device is the legal shape."""
+    out = _serverless(cores=1, memory_bytes=_GIB, gpu_fraction=0.1)
+    assert out.properties["spark.executor.cores"] == "8"
+    assert out.tasks_per_device == 8
+
+
+def test_a_cell_that_wants_a_whole_card_still_gets_serverless_minimum_of_four() -> None:
+    """Serverless has no shape below 4 tasks per L4, so the honest answer is a warning."""
+    out = _serverless(cores=1, memory_bytes=_GIB, gpu_fraction=1.0)
+    assert out.tasks_per_device == 4
+    assert any("device pressure" in note for note in out.notes)
+
+
+def test_a_gpu_batch_sizes_memory_through_the_service_owned_overhead_ratio() -> None:
+    """Overhead is rejected on the GPU path, so executor.memory is the only handle left."""
+    out = _serverless(cores=1, memory_bytes=768 * _MIB, gpu_fraction=0.25)
+    assert "spark.executor.memoryOverhead" not in out.properties
+    assert out.properties["spark.executor.memory"] == f"{math.ceil(4 * 768 / 0.4)}m"
+
+
+def test_the_gpu_inversion_is_clamped_to_the_per_config_maximum() -> None:
+    """Dividing by 0.4 puts an ordinary DL footprint past the cap — raw, the batch is rejected."""
+    out = _serverless(cores=1, memory_bytes=2 * _GIB, gpu_fraction=0.25)
+    assert out.properties["spark.executor.memory"] == f"{4 * 3346}m"  # not the raw 20480m
+    assert any("L4 maximum" in note for note in out.notes)
+
+
+def test_a_tiny_gpu_slot_is_raised_to_the_memory_floor_too() -> None:
+    out = _serverless(cores=1, memory_bytes=8 * _MIB, gpu_fraction=0.25)
+    assert out.properties["spark.executor.memory"] == f"{4 * 1024}m"
+
+
+def test_the_autoscaler_starts_warm_and_fills_the_whole_gap() -> None:
+    """initialExecutors at the derived count and ratio 1.0 — the slow-ramp defaults are the bug."""
+    out = _serverless(cores=1, memory_bytes=_GIB, n_cells=1000, min_units=1, max_units=50)
+    props = out.properties
+    assert props["spark.dynamicAllocation.enabled"] == "true"
+    assert props["spark.dynamicAllocation.minExecutors"] == "2"  # 1 is below the platform floor
+    assert props["spark.dynamicAllocation.initialExecutors"] == "16"  # the derived fleet, warm
+    assert props["spark.dynamicAllocation.maxExecutors"] == "50"
+    assert props["spark.dynamicAllocation.executorAllocationRatio"] == "1.0"
+
+
+def test_a_fleet_already_at_its_ceiling_leaves_the_allocation_ratio_alone() -> None:
+    """Nothing to ramp into, so there is no gap to fill and no reason to touch the default."""
+    out = _serverless(cores=1, memory_bytes=_GIB, min_units=4, max_units=4)
+    assert "spark.dynamicAllocation.executorAllocationRatio" not in out.properties
+    assert out.properties["spark.dynamicAllocation.initialExecutors"] == "4"
+
+
+def test_an_absurd_ceiling_is_clamped_to_the_platform_maximum() -> None:
+    out = _serverless(cores=1, memory_bytes=_GIB, n_cells=10**7, max_units=5000)
+    assert out.properties["spark.dynamicAllocation.maxExecutors"] == "2000"
+    assert any("platform max" in note for note in out.notes)
+
+
+def test_the_slots_own_notes_survive_into_the_translation() -> None:
+    out = _serverless(cores=1, memory_bytes=_GIB, notes=("cores clamped to the unit",))
+    assert "cores clamped to the unit" in out.notes
+
+
+def test_the_translation_serializes_for_telemetry() -> None:
+    out = _serverless(cores=1, memory_bytes=_GIB)
+    assert json.loads(json.dumps(out.to_dict()))["executor_cores"] == 4
