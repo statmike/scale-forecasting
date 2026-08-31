@@ -35,7 +35,7 @@ image and the archive both rebuild only when the locked deps change, never on a 
 | Surface | Mechanism | What carries the deps | Set by |
 |---------|-----------|-----------------------|--------|
 | **Dataproc Serverless** (`explode` / `multi` batches) | **Custom container** | the shared runtime image, attached on every submit | `submit.py` (`runtime_config.container_image`) |
-| **Spark Connect** (interactive, nb01) | **Custom container** + artifacts | image pinned on the session; code via `addArtifacts` | notebook session cell |
+| **Spark Connect** (interactive, nb01) — *the same Serverless product, session API not batch API* | **Custom container** + artifacts | the same image, pinned on the session; code via `addArtifacts`. Covers the **executors only** — the driver is your local process | notebook session cell |
 | **Ray on Vertex** (nb04) | **`uv` runtime_env** | `uv` installs the frozen lock into the per-job venv on Vertex's **prebuilt** Ray image | `ray_submit.py` (`build_runtime_env`) |
 | **Dataproc cluster** (`spark_mode="cluster"`) | **Self-contained venv archive** | a tar of the image's `/opt/venv` (interpreter bundled) attached to the job (`#env`) | `dataproc_cluster.py` + `compute.spark_deps` |
 | **Colab Enterprise** (all notebooks) | **`uv`-from-lock install** | `uv` installs the frozen lock in the runtime (bootstrap or post-startup) | notebook bootstrap cell / template |
@@ -155,6 +155,17 @@ the choice into the run config would fold it into the `run_id` and make one expe
 
 ## Spark Connect (interactive notebook) — container + shipped artifacts
 
+**This is not a fourth compute surface — it is Dataproc Serverless.** A Connect session is a
+`dataproc_v1.Session` carrying the *same* `runtime_config.container_image` a `Batch` carries; only
+the API differs (interactive session vs. batch submit). It gets its own section for one reason:
+
+**the container covers the executors, but not the driver.** In a batch, driver and executors both run
+in the cloud inside our image, so the environment question is closed. Under Connect the driver is
+*your local Python process* — the notebook kernel — and Connect refuses to run a driver whose Python
+minor doesn't match the workers'. That is why the session pins runtime **2.3** (workers already 3.11)
+rather than 3.0 (workers 3.12): our environment is 3.11 because Ray ceilings it there. See
+[version_matrix.md](./version_matrix.md#the-spark-connect-2x-vs-3x-decision-the-connect-2--connect-3-question).
+
 The interactive Connect session (nb01) reuses the **same container image** — pinned on the `Session`
 so its executors carry the deps — and additionally ships the **code** with
 `spark.addArtifacts(zip, pyfile=True)`, because an interactive session runs a closure pickled on the
@@ -227,9 +238,10 @@ cluster-create window — the driver is baked **once** into a **custom `2.2-debi
 image-build time. GPU clusters then boot from that image and simply load the already-present module; the
 create is fast and repeatable, and CPU clusters keep using the stock `2.2-debian12` image unchanged.
 
-The custom image is produced by the **same build** that produces the container image and the venv
-archive (`docker/cloudbuild.yaml`), so it is content-addressed and moves in lockstep with the rest of
-the runtime. `dataproc_cluster.py` selects it for GPU clusters via the image URI (a Terraform output);
+The custom image is produced by a **separate** Cloud Build (`docker/cloudbuild-gpu-image.yaml`) with
+its own content-addressing — the customization script + the base Dataproc version, *not* the lock.
+That is deliberate: it carries a kernel driver, not our packages, so it must **not** rebuild when a
+dependency changes. `dataproc_cluster.py` selects it for GPU clusters via the image URI (a Terraform output);
 when no custom GPU image is configured, the cluster falls back to installing the driver at create time.
 
 ## Colab Enterprise — `uv`-from-lock install

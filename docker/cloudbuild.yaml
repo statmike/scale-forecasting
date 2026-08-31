@@ -11,9 +11,11 @@
 # Serverless requires a **linux/amd64** image; Cloud Build's default workers are amd64, so a plain
 # `docker build` produces the right architecture (no buildx/QEMU needed).
 #
-# WHY the packed-venv step: Dataproc Serverless + Ray-on-Vertex both consume this container directly,
-# but a Dataproc *cluster* can't use a custom container — so the cluster path ships the exact same
-# locked env as an archive attached to the job (--archives=…#env). The image's /opt/venv is built
+# WHY the packed-venv step: Dataproc Serverless consumes this container directly, but a Dataproc
+# *cluster* can't use a custom container — so the cluster path ships the exact same locked env as an
+# archive, unpacked to an absolute path by a cluster init action. (Ray-on-Vertex takes neither: a
+# custom node image fails its GPU provisioning, so Ray runs the stock Vertex image and uv-installs
+# the same locked set at job start. See docs/runtime_dependencies.md.) The image's /opt/venv is built
 # fully SELF-CONTAINED (its uv/python-build-standalone interpreter is bundled in-tree — see
 # docker/Dockerfile), so the archive is just a plain tar of that tree: it unpacks to ./env and
 # ./env/bin/python runs on a bare cluster node with no Python of its own. We build it FROM this
