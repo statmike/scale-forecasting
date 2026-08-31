@@ -34,6 +34,7 @@ old value goes stale by definition.
 | `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
+| `run_id_inputs` | `+compute.profile` | W5 (2026-08-31) | pre-profile-config |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not
@@ -119,6 +120,18 @@ Things that are true today and that no entry above covers. Keep this list short 
 - **No `run_id` was recorded for smokes 07–14.** Smokes 01–06 have them. Without one there is no
   reverse-trace from the ledger to the platform job, which is the whole point of recording a
   result. Any re-run must capture it.
+- **The recorded `run_id`s for smokes 01–06 are no longer re-derivable.** W5 added
+  `compute.profile` to `ComputeConfig`, and `run_id` is a digest of the whole config, so feeding
+  those same config files to today's code yields different ids. **No row was marked `STALE` for
+  this, deliberately**: `run_id_inputs` is not an axis any of those claims rests on. Smoke 01 proved
+  that Spark-on-Serverless-CPU works, and it still did; nothing about the run changed, because in
+  W5 nothing yet *reads* `compute.profile`. What was lost is narrower and worth naming — the ids
+  above remain valid pointers *into* the registry, but you can no longer recompute one *from* its
+  config to find it. Re-running any of 01–06 will record a new id, at which point the old one
+  becomes purely historical.
+  The change that *will* make live results stale is W6, when `profile.mode="auto"` starts actually
+  sizing fleets from measurement. That is a behaviour change, and every performance claim predating
+  it should be re-checked; the correctness claims still stand.
 
 ## Provenance confidence
 

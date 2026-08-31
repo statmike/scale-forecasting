@@ -250,3 +250,81 @@ def test_load_config_invalid_schema_raises_configerror(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as exc:
         load_config(p)
     assert "invalid config" in str(exc.value).lower()
+
+
+# --- compute.profile: measured compute profiling ---------------------------------
+
+
+def test_profile_defaults_are_off_the_shelf_and_conservative() -> None:
+    # `auto` is the default because an unconditional pre-pass taxes every tiny run, and `off`
+    # would mean the feature ships dark. The margins default to the same asymmetric pair the
+    # profiler applies: memory wider than time, because the failure modes differ in kind.
+    profile = RunConfig(**_minimal_dict()).compute.profile
+    assert profile.mode == "auto"
+    assert profile.samples == 8
+    assert profile.min_cells == 1000
+    assert profile.memory_margin > profile.time_margin
+
+
+def test_config_profile_defaults_match_profiling() -> None:
+    """The margins are declared twice — in config and in `profiling` — so pin them together.
+
+    `config.py` deliberately does not import `profiling` (which pulls pandas) just to reach two
+    floats, so the duplication is intentional. This test is what makes it safe: change one
+    default and this fails rather than the two silently disagreeing, which would show up as a
+    profile whose margins do not match the config that requested it.
+    """
+    from scale_forecasting import profiling
+
+    profile = RunConfig(**_minimal_dict()).compute.profile
+    assert profile.memory_margin == profiling._DEFAULT_MEMORY_MARGIN
+    assert profile.time_margin == profiling._DEFAULT_TIME_MARGIN
+
+
+@pytest.mark.parametrize("mode", ["off", "auto", "always"])
+def test_every_profile_mode_is_accepted(mode: str) -> None:
+    cfg = RunConfig(**_minimal_dict(compute={"profile": {"mode": mode}}))
+    assert cfg.compute.profile.mode == mode
+
+
+def test_an_unknown_profile_mode_is_rejected_at_load() -> None:
+    # Typo'd modes must fail at load, not fall through to a silent default — the difference
+    # between them is whether a run is sized by measurement or by guess.
+    with pytest.raises(ValidationError):
+        RunConfig(**_minimal_dict(compute={"profile": {"mode": "sometimes"}}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("samples", 0),  # a sample of nothing is not a measurement
+        ("min_cells", 0),  # would make `auto` mean `always`, by a different name
+        ("memory_margin", 1.0),  # sizes the slot at the largest value observed to fit
+        ("time_margin", 1.0),
+        ("memory_margin", 0.5),  # a margin below 1.0 sizes *under* the measurement
+    ],
+)
+def test_a_margin_or_budget_with_no_headroom_is_rejected(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        RunConfig(**_minimal_dict(compute={"profile": {field: value}}))
+
+
+def test_profile_is_frozen_and_rejects_unknown_keys() -> None:
+    # Same contract as every other config block: a misspelled knob is an error, never a no-op
+    # that leaves the operator believing they changed something.
+    with pytest.raises(ValidationError):
+        RunConfig(**_minimal_dict(compute={"profile": {"sample": 4}}))
+
+
+def test_profile_is_part_of_the_run_id() -> None:
+    """The config *is* the experiment record; a differently-sized fleet is a different run.
+
+    ``profile`` changes resource shape rather than forecast values, so this is a deliberate
+    choice rather than an inevitability — see the class docstring. Pinning it here stops the
+    opposite choice being made silently later.
+    """
+    from scale_forecasting.registry.ids import make_run_id
+
+    baseline = make_run_id(RunConfig(**_minimal_dict()))
+    profiled = make_run_id(RunConfig(**_minimal_dict(compute={"profile": {"mode": "always"}})))
+    assert baseline != profiled

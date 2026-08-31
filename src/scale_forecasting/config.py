@@ -51,6 +51,7 @@ SparkMode = Literal["serverless", "cluster"]
 Hardware = Literal["cpu", "gpu"]
 GpuType = Literal["T4", "L4"]
 EnsembleMode = Literal["barrier", "microbatch"]
+ProfileMode = Literal["off", "auto", "always"]
 
 
 # --- nested config blocks ------------------------------------------------------
@@ -234,6 +235,53 @@ class EnsembleCompute(BaseModel):
         return self
 
 
+class ProfileConfig(BaseModel):
+    """Whether to *measure* what a run costs before sizing it, and with how much headroom.
+
+    Sizing today is a pure cell **count**: ``n_series x n_models x n_folds``, turned into nodes by a
+    flat cells-per-slot constant. Nothing in that arithmetic knows that a deep-learning fit and a
+    naive mean differ by orders of magnitude, so a fleet is provisioned for the count and not for
+    the work. Turning this on replaces the guess with a short instrumented pre-pass
+    (``scale_forecasting.profiling``): fit a stratified sample of series, measure what they actually
+    consumed, and size each family's slot from the measurement.
+
+    The two margins are deliberately different, and the asymmetry is the point: over-estimating
+    time buys extra slots, which costs money, while under-estimating memory OOM-kills the task,
+    which costs the run. So memory carries the larger headroom, and the two are applied to
+    different tails — ``memory_margin`` to the sample **max** (a slot must hold the worst case that
+    lands in it), ``time_margin`` to the **median** (a fleet is sized for typical work, and sizing
+    it for the worst case over-provisions every run).
+
+    Part of the ``run_id`` digest, like everything else under ``compute``. It changes the resource
+    shape rather than the numbers a run produces, so it is arguable — but the config *is* the
+    experiment record, and a run whose fleet was sized differently is not the same run for
+    performance purposes. Silently varying the shape under a stable id would be the worse trade.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # off    — no measurement; size from static config exactly as before. The escape hatch, and
+    #          the setting to reach for if a pre-pass ever misbehaves in production.
+    # auto   — measure only when the fan-out is big enough to repay the pre-pass (see min_cells).
+    # always — measure unconditionally. What the smokes use, so the path stays exercised cheaply
+    #          on runs far too small for `auto` to trigger on.
+    mode: ProfileMode = "auto"
+    # Series to fit in the pre-pass, spread across length/complexity strata (see
+    # `profiling.select_profile_sample`). The floor is set by wanting more than one point per
+    # stratum; the ceiling by the pre-pass being pure overhead that every run pays.
+    samples: int = Field(default=8, gt=0)
+    # `mode="auto"` profiles only at or above this many cells. Below it the pre-pass costs a
+    # meaningful fraction of the run it is sizing, and a small run's mis-sizing is cheap anyway.
+    min_cells: int = Field(default=1000, gt=0)
+    # Headroom on measured peaks (memory) and medians (time). Must exceed 1.0: a margin of exactly
+    # 1.0 sizes a slot at the largest value that was *observed to fit*, with nothing left for the
+    # series that was not sampled. Kept in step with `profiling._DEFAULT_MEMORY_MARGIN` /
+    # `_DEFAULT_TIME_MARGIN` by a unit test rather than by an import, so this module stays free of
+    # pandas — see `test_config_profile_defaults_match_profiling`.
+    memory_margin: float = Field(default=1.3, gt=1.0)
+    time_margin: float = Field(default=1.2, gt=1.0)
+
+
 class ComputeConfig(BaseModel):
     """Runtime scale, dependency delivery, and cost guardrails."""
 
@@ -328,6 +376,12 @@ class ComputeConfig(BaseModel):
     # headroom multiplier applied to measured peak GPU memory before dividing by device memory.
     gpu_calibration_samples: int = Field(default=3, gt=0)
     gpu_safety_margin: float = Field(default=1.3, gt=1.0)
+    # Measured compute profiling — the general form of the two knobs above. Auto-fraction
+    # calibration profiles one axis (GPU bytes) for one model on one runtime; this profiles every
+    # axis for every family on all three. The two coexist deliberately: the GPU axis needs a GPU,
+    # so it keeps refining on-cluster after creation, while the CPU/memory/time axes profile on the
+    # driver at submit time, which is when the fleet has to be sized. See `ProfileConfig`.
+    profile: ProfileConfig = Field(default_factory=ProfileConfig)
     # How the Ray driver reads the source panel. Both paths hit the SAME BigQuery Storage Read API
     # (no query slots, matching Spark) and yield the SAME driver-side pandas panel, so the
     # downstream fan-out is byte-identical either way — this knob only chooses the client:

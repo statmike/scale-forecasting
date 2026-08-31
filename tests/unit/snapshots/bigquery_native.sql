@@ -1,4 +1,4 @@
-CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_a4e1558586a8`
+CREATE OR REPLACE MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_5885afe44af8`
 OPTIONS(
   model_type = 'ARIMA_PLUS',
   time_series_id_col = 'ts_id',
@@ -280,7 +280,7 @@ SELECT
   @run_id, ts_id, 'arima_plus', 'bigquery',
   DATE(forecast_timestamp), forecast_value,
   prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
-FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_a4e1558586a8`, STRUCT(28 AS horizon, 0.8 AS confidence_level));
+FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_5885afe44af8`, STRUCT(28 AS horizon, 0.8 AS confidence_level));
 
 -- ===== next model =====
 

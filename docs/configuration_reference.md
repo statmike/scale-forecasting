@@ -252,6 +252,40 @@ spec is hashed into `run_id` and stamped to `run_registry.job_telemetry`. Set `r
 for the proven fixed-size path (no autoscaling spec). See the Ray runtime in
 [architecture.md](./architecture.md).
 
+### `compute.profile` — measured compute profiling
+
+Sizing is otherwise a pure cell **count** (`n_series × n_models × n_folds`, divided by a flat
+cells-per-slot constant). That arithmetic cannot know that a deep-learning fit and a naive mean
+differ by orders of magnitude, so the fleet is provisioned for the count rather than for the work.
+`compute.profile` replaces the guess with a short instrumented pre-pass: fit a stratified sample of
+series, measure what they actually consumed, and size each family's slot from the measurement.
+
+Think of it as the general form of `gpu_calibration_samples` / `gpu_safety_margin` above, which
+already do exactly this for one axis (GPU bytes), one model, one runtime. Both remain: the GPU axis
+needs a GPU, so it keeps refining on-cluster after creation, while the CPU / memory / time axes are
+measured on the driver at submit time — which is when the fleet has to be sized.
+
+| Field | Type | Default | Constraint | Purpose |
+|-------|------|---------|------------|---------|
+| `mode` | `"off"` \| `"auto"` \| `"always"` | `"auto"` | — | `off` sizes from static config exactly as before (the escape hatch). `auto` measures only when the fan-out is large enough to repay the pre-pass. `always` measures unconditionally. |
+| `samples` | `int` | `8` | `> 0` | Series fitted in the pre-pass, spread across length/complexity strata. |
+| `min_cells` | `int` | `1000` | `> 0` | The threshold `auto` compares the cell count against. |
+| `memory_margin` | `float` | `1.3` | `> 1.0` | Headroom on the measured **max**, which sizes the slot. |
+| `time_margin` | `float` | `1.2` | `> 1.0` | Headroom on the measured **median**, which sizes the fleet. |
+
+**Why the two margins differ, and why they apply to different tails.** Over-estimating time buys
+extra slots, which costs money; under-estimating memory OOM-kills the task, which costs the run.
+Asymmetric risk, asymmetric margin — so memory carries the wider one. They also attach to different
+statistics on purpose: a slot must hold the *worst* series that lands in it (max), while a fleet is
+sized for *typical* work (median). Sizing the fleet off the worst case over-provisions every run;
+sizing memory off the median OOM-kills it. Using one tail for both is the mistake the split exists
+to prevent.
+
+`compute.profile` is part of the `run_id` digest, like everything else under `compute`. It changes
+the resource shape rather than the forecasts, so that is a deliberate choice: the config is the
+experiment record, and a run whose fleet was sized differently is not the same run for performance
+purposes.
+
 ### `compute.families` — per-family runtime & hardware
 
 By default every Python family runs on the run-level `python_runtime` on CPU. `compute.families` maps
