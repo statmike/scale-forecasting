@@ -21,6 +21,7 @@ import pytest
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.engines.spark_io import _MODEL_COL
+from scale_forecasting.profiling import MeasuredFit, build_profile
 from scale_forecasting.registry.ids import make_run_id
 
 # theta/holtwinters = CPU (statistical); xgboost = CPU (ml); neuralprophet = GPU (deep_learning).
@@ -353,6 +354,117 @@ def test_plan_finer_gpu_fraction_packs_more_and_needs_fewer_nodes() -> None:
         run_id="r",
     )
     assert fine.gpu_node_count <= coarse.gpu_node_count
+
+
+# --- plan_pool: the measured-profile translation -------------------------------
+
+_GIB = 1024**3
+
+
+def _fit(family: str, *, model_type: str, rss: int | None, gpu_bytes: int | None = None):
+    """One measurement for ``family``, single-threaded, at the given process footprint."""
+    return MeasuredFit(
+        ts_id="s1",
+        model_type=model_type,
+        family=family,
+        n_obs=1000,
+        wall_s=1.0,
+        cpu_s=1.0,
+        peak_rss_bytes=1024,
+        peak_gpu_bytes=gpu_bytes,
+        ok=True,
+        error=None,
+        intraop_threads=1,
+        host_cpu_count=8,
+        process_rss_bytes=rss,
+    )
+
+
+def test_an_unprofiled_pool_reproduces_the_constants_the_engine_used_inline() -> None:
+    """The safety property the whole wiring rests on: no measurement, no behaviour change."""
+    cfg = _cfg(compute=_compute())
+    cpu = ray_io.plan_pool(cfg, [_CPU, "xgboost"], 1000, gpu=False)
+    gpu = ray_io.plan_pool(cfg, [_GPU], 1000, gpu=True, gpu_type="T4")
+    assert cpu.slots_per_unit == ray_io._machine_cores(cfg.compute.ray_cpu_machine_type)
+    assert gpu.slots_per_unit == cfg.compute.accelerator_count * ray_io.gpu_slots_per_device(
+        ray_io._sizing_fraction(cfg)
+    )
+    assert cpu.task_options == {"num_cpus": 1}
+    assert gpu.task_options == {"num_gpus": ray_io._sizing_fraction(cfg)}
+
+
+def test_a_shared_cpu_pool_is_sized_for_the_heaviest_family_that_lands_on_it() -> None:
+    """statistical and ml cells go through the same worker, so its slot must hold either one."""
+    profile = build_profile(
+        [
+            _fit("statistical", model_type=_CPU, rss=1 * _GIB),
+            _fit("ml", model_type="xgboost", rss=5 * _GIB),
+        ],
+        memory_margin=1.0,
+        time_margin=1.0,
+    )
+    plan = ray_io.plan_pool(_cfg(compute=_compute()), [_CPU, "xgboost"], 1000, gpu=False,
+                            profile=profile)
+    assert plan.slot.memory_bytes == 5 * _GIB
+    assert plan.family == "statistical+ml"
+    assert plan.task_options["memory"] == 5 * _GIB
+
+
+def test_a_measured_heavy_family_shrinks_the_density_and_widens_the_fleet() -> None:
+    """The behaviour change W6 exists for: sizing follows the work, not just the cell count."""
+    cfg = _cfg(data={"source_table": "s", "series_limit": 200}, compute=_compute(use_gpu=False))
+    light = ray_io.plan_cluster(cfg, [_CPU], run_id="r")
+    heavy = ray_io.plan_cluster(
+        cfg,
+        [_CPU],
+        run_id="r",
+        profile=build_profile(
+            [_fit("statistical", model_type=_CPU, rss=8 * _GIB)],
+            memory_margin=1.0,
+            time_margin=1.0,
+        ),
+    )
+    assert heavy.cpu_pool.slots_per_unit < light.cpu_pool.slots_per_unit
+    assert heavy.cpu_node_count > light.cpu_node_count
+
+
+def test_a_measured_device_footprint_beats_the_nominal_sizing_fraction() -> None:
+    """The L4 under-pack this line of work started from, at the pool seam."""
+    profile = build_profile(
+        [_fit("deep_learning", model_type=_GPU, rss=None, gpu_bytes=4 * _GIB)],
+        memory_margin=1.0,
+        time_margin=1.0,
+    )
+    plan = ray_io.plan_pool(
+        _cfg(compute=_compute()), [_GPU], 1000, gpu=True, gpu_type="L4", profile=profile
+    )
+    assert plan.task_options["num_gpus"] == (4 * _GIB) / ray_io.device_memory_bytes("L4")
+
+
+def test_a_live_calibrated_fraction_beats_the_submit_time_nominal() -> None:
+    """On the cluster the engine has measured a real device; the plan should use that number."""
+    plan = ray_io.plan_pool(
+        _cfg(compute=_compute()), [_GPU], 1000, gpu=True, gpu_type="T4", gpu_fraction=0.2
+    )
+    assert plan.task_options == {"num_gpus": 0.2}
+    assert plan.slots_per_unit == 5
+
+
+def test_the_stored_pool_plans_carry_the_ceiling_the_pool_can_actually_reach() -> None:
+    """``slots_at_ceiling`` feeds the chunk floor, so it must be the autoscaling max not the cap."""
+    plan = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 1000}, compute=_compute()), run_id="r"
+    )
+    assert plan.cpu_pool.max_units == plan.cpu_max_nodes
+    assert plan.gpu_pool.max_units == plan.gpu_max_nodes
+    assert plan.cpu_pool.derived_units == plan.cpu_node_count
+    assert plan.gpu_pool.derived_units == plan.gpu_node_count
+
+
+def test_an_unused_gpu_pool_plans_no_nodes() -> None:
+    plan = ray_io.plan_cluster(_cfg(compute=_compute(use_gpu=False)), run_id="r")
+    assert plan.gpu_pool.derived_units == 0
+    assert plan.gpu_pool.n_cells == 0
 
 
 # --- chunk_cells ---------------------------------------------------------------

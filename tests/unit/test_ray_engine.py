@@ -2,9 +2,9 @@
 
 Two tiers, mirroring the pure/I-O seam:
 
-* **Offline (no marker):** the pure driver helpers — the heterogeneous GPU/CPU task-options routing
-  (:func:`_task_options`), the per-pool chunk count (:func:`_chunk_count`), the pool cell count
-  (:func:`_pool_cells`). No Ray, no GPU, no BigQuery.
+* **Offline (no marker):** the pure driver helpers — the heterogeneous GPU/CPU pool sizing and its
+  task options (:func:`_pool_plans`), the per-pool chunk count (:func:`_chunk_count`,
+  :func:`_pool_chunks`), the pool cell count (:func:`_pool_cells`). No Ray, no GPU, no BigQuery.
 * **``@ray`` (needs the [ray] extra):** :func:`run` end-to-end on a *real* local Ray session
   (``local_mode`` was removed in Ray 2.x). A session-scoped 2-CPU cluster is started once; the
   engine reuses it (so it doesn't tear it down). The source read is monkeypatched to an in-memory
@@ -65,27 +65,74 @@ def _panel(n_series: int, rows_each: int = 6) -> pd.DataFrame:
 # --- offline: pure driver helpers ----------------------------------------------
 
 
+def _plans(cfg: RunConfig, panel: pd.DataFrame | None = None, gpu_fraction: float = 0.25):
+    """Both pool plans for the standard CPU/GPU model split, over ``panel`` (default 4 series)."""
+    return ray_engine._pool_plans(
+        _panel(4) if panel is None else panel,
+        cfg,
+        "rid",
+        [_CPU],
+        [_GPU],
+        None,
+        gpu_fraction,
+    )
+
+
 def test_task_options_gpu_pool_requests_fraction_when_gpu_on() -> None:
-    cfg = _cfg(compute=_compute(use_gpu=True))
-    assert ray_engine._task_options(cfg, 0.25, gpu=True) == {"num_gpus": 0.25}
+    _cpu, gpu = _plans(_cfg(compute=_compute(use_gpu=True)))
+    assert gpu.task_options == {"num_gpus": 0.25}
 
 
 def test_task_options_cpu_pool_always_requests_one_cpu() -> None:
-    cfg = _cfg(compute=_compute(use_gpu=True))
-    assert ray_engine._task_options(cfg, 0.25, gpu=False) == {"num_cpus": 1}
+    cpu, _gpu = _plans(_cfg(compute=_compute(use_gpu=True)))
+    assert cpu.task_options == {"num_cpus": 1}
 
 
 def test_task_options_gpu_pool_falls_back_to_cpu_when_gpu_off() -> None:
     # use_gpu=False: no device to schedule against, so a GPU-model chunk runs as a plain CPU task
     # (NeuralProphet falls back to CPU inside the cell).
-    cfg = _cfg(compute=_compute(use_gpu=False))
-    assert ray_engine._task_options(cfg, 0.25, gpu=True) == {"num_cpus": 1}
+    _cpu, gpu = _plans(_cfg(compute=_compute(use_gpu=False)))
+    assert gpu.task_options == {"num_cpus": 1}
+
+
+def test_an_unprofiled_pool_asks_for_no_memory() -> None:
+    """Ray treats ``memory`` as a hard scheduling resource; a number nobody took wedges tasks."""
+    cpu, gpu = _plans(_cfg(compute=_compute(use_gpu=True)))
+    assert "memory" not in cpu.task_options
+    assert "memory" not in gpu.task_options
+
+
+def test_the_pools_are_sized_from_the_panel_not_from_series_limit() -> None:
+    """``series_limit`` is an upper bound; the sizing should describe the run that is happening."""
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7, "series_limit": 1000})
+    cpu, _gpu = _plans(cfg, panel=_panel(3))
+    assert cpu.n_cells == 3  # 3 series in the panel x 1 CPU model, not 1000
 
 
 def test_chunk_count_ceils_and_floors() -> None:
     assert ray_engine._chunk_count(0, 8) == 0  # empty pool → no chunks
     assert ray_engine._chunk_count(1, 8) == 1  # a single cell still needs one chunk
     assert ray_engine._chunk_count(20, 8) == 3  # ceil(20 / 8)
+
+
+def test_an_empty_pool_gets_no_chunks_however_wide_its_ceiling() -> None:
+    """A pool with no work must not be handed tasks to make an autoscaler happy."""
+    cfg = _cfg(models=[_CPU], compute=_compute(use_gpu=False))
+    _cpu, gpu = ray_engine._pool_plans(_panel(4), cfg, "rid", [_CPU], [], None, 0.5)
+    assert ray_engine._pool_chunks(gpu, 8) == 0
+
+
+def test_the_chunk_count_is_floored_so_the_autoscaler_can_reach_its_ceiling() -> None:
+    """Ray grows on *pending* demand: too few tasks and the pool sits at its minimum forever."""
+    cfg = _cfg(
+        models=[_CPU],
+        data={"source_table": "source_series_native", "horizon": 7, "series_limit": 1000},
+        compute=_compute(use_gpu=False),
+    )
+    cpu, _gpu = ray_engine._pool_plans(_panel(40), cfg, "rid", [_CPU], [], None, 0.5)
+    # 40 cells at 2 per chunk is only 20 tasks, but the cluster was created able to hold far more.
+    assert ray_engine._chunk_count(cpu.n_cells, 2) == 20
+    assert ray_engine._pool_chunks(cpu, 2) == cpu.slots_at_ceiling > 20
 
 
 def test_pool_cells_counts_series_times_models() -> None:

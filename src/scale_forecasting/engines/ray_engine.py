@@ -25,7 +25,9 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from .. import profiling
 from ..errors import get_logger
+from ..resources import RuntimeResourcePlan, tasks_for_ceiling
 from . import ray_io
 from .spark_io import STATUS_COLUMNS, _needed_columns, _resolve_source_table, _snapshot_millis
 
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from ..config import RunConfig
+    from ..profiling import ComputeProfile
     from ..settings import Settings
 
 _log = get_logger(__name__)
@@ -265,10 +268,12 @@ def run(
     2. Read the source panel to the driver, split the executed models into GPU/CPU pools
        (`split_gpu_cpu_models`), calibrate the per-task GPU fraction
        (`calibrate_gpu_fraction` — live NeuralProphet memory profiling when ``auto``),
-       chunk each pool's cells (`chunk_cells`), and dispatch one Ray task per chunk —
-       GPU chunks as ``@ray.remote(num_gpus=fraction)`` (packed onto T4s), CPU chunks as
-       ``num_cpus=1``. Every task runs the shared chunk runner (`make_chunk_runner`),
-       which calls the exact `run_group` + `write_cells`
+       measure what the models cost (`profiling.resolve_profile`) and size each pool from
+       that measurement (`_pool_plans`), chunk each pool's cells (`chunk_cells`),
+       and dispatch one Ray task per chunk — GPU chunks as ``@ray.remote(num_gpus=fraction)``
+       (packed onto T4s), CPU chunks as ``num_cpus=1`` plus, when it was measured, the host
+       ``memory`` the family needs. Every task runs the shared chunk runner
+       (`make_chunk_runner`), which calls the exact `run_group` + `write_cells`
        and returns only the compact status frame.
     3. Concatenate the statuses, `aggregate_status`, and — in owner mode —
        ``update_header`` (COMPLETED/PARTIAL/FAILED, wall-clock, ``n_series``).
@@ -338,26 +343,38 @@ def run(
                 cfg, sample_series=sample, gpu_type=cfg.compute.gpu_type
             )
 
-            # Chunk counts come from the true cell counts (series in the panel × pool models).
+            # Measure what the models actually cost before deciding what to ask Ray for. Driver-side
+            # and short (`compute.profile` gates it; "off" and a too-small fan-out both return
+            # None), and it never enters cfg — the run_id must not move because a probe ran.
+            profile = profiling.resolve_profile(
+                source, cfg, executed, params_by_model=params_by_model
+            )
+            cpu_plan, gpu_plan = _pool_plans(
+                source, cfg, run_id, cpu_models, gpu_models, profile, gpu_fraction
+            )
+            _log.info("ray sizing: cpu=%s gpu=%s", cpu_plan.to_dict(), gpu_plan.to_dict())
+
+            # Chunk counts come from the true cell counts (series in the panel × pool models),
+            # floored so the pool can actually reach its autoscaling ceiling (`tasks_for_ceiling`).
             target = cfg.compute.bucket_target_cells
             gpu_chunks = ray_io.chunk_cells(
-                source, cfg, gpu_models, _chunk_count(_pool_cells(source, cfg, gpu_models), target)
+                source, cfg, gpu_models, _pool_chunks(gpu_plan, target)
             )
             cpu_chunks = ray_io.chunk_cells(
-                source, cfg, cpu_models, _chunk_count(_pool_cells(source, cfg, cpu_models), target)
+                source, cfg, cpu_models, _pool_chunks(cpu_plan, target)
             )
 
             # One Ray task per chunk. The remote closes over the picklable runner (cloudpickle
             # handles the cfg/settings closure — the single local/cloud seam, no second env path).
             # GPU tasks request a fraction of a T4 so several pack onto one device; when no GPU is
-            # provisioned, NeuralProphet cells fall back to CPU inside the task, so route them as
-            # CPU work too (see _task_options).
+            # provisioned, NeuralProphet cells fall back to CPU inside the task, so the GPU pool is
+            # planned as CPU work too and its options say so.
             @ray.remote
             def _task(chunk: pd.DataFrame) -> pd.DataFrame:
                 return runner(chunk)
 
-            cpu_opts = _task_options(cfg, gpu_fraction, gpu=False)
-            gpu_opts = _task_options(cfg, gpu_fraction, gpu=True)
+            cpu_opts = cpu_plan.task_options
+            gpu_opts = gpu_plan.task_options
             futures = [_task.options(**cpu_opts).remote(c) for c in cpu_chunks]
             futures += [_task.options(**gpu_opts).remote(c) for c in gpu_chunks]
 
@@ -395,16 +412,59 @@ def _pool_cells(source: pd.DataFrame, cfg: RunConfig, pool_models: list[str]) ->
     return n_series * len(pool_models)
 
 
-def _task_options(cfg: RunConfig, gpu_fraction: float, *, gpu: bool) -> dict[str, float]:
-    """The ``@ray.remote.options`` for one pool's tasks — the heterogeneous-routing decision (pure).
+def _pool_plans(
+    source: pd.DataFrame,
+    cfg: RunConfig,
+    run_id: str,
+    cpu_models: list[str],
+    gpu_models: list[str],
+    profile: ComputeProfile | None,
+    gpu_fraction: float,
+) -> tuple[RuntimeResourcePlan, RuntimeResourcePlan]:
+    """Size both worker pools for the *actual* panel — the heterogeneous-routing decision (pure).
 
-    CPU-pool tasks (``gpu=False``) always request ``num_cpus=1``. GPU-pool tasks (``gpu=True``)
-    request ``num_gpus=gpu_fraction`` **only when a GPU is actually provisioned** (``use_gpu``), so
-    several NeuralProphet tasks pack onto one T4 (Ray sums fractions against the device's 1.0). When
-    ``use_gpu`` is off there is no device to schedule against, so a GPU-model chunk runs as a plain
-    ``num_cpus=1`` task and NeuralProphet falls back to CPU inside the cell — the run still
-    finishes, just slower. Kept pure (no Ray) so the routing is unit-testable without a GPU.
+    Two plans, one per pool, each carrying what a task should request and how wide the pool can
+    grow. The GPU pool is planned with ``gpu=cfg.compute.use_gpu``: when no device is provisioned
+    there is nothing to schedule against, so its cells are planned as plain CPU work and
+    NeuralProphet falls back to CPU inside the cell — the run still finishes, just slower.
+
+    The cell counts come from the panel that was actually read, not from ``series_limit``, so the
+    sizing reflects the run rather than its upper bound. The autoscaling ceilings, however, come
+    from `plan_cluster` — the cluster was created from those bounds at submit time and the
+    engine cannot widen them now; re-deriving them here would let the chunk count chase a ceiling
+    the pool can never reach. Pure (no Ray, no GPU) so the routing stays unit-testable.
     """
-    if gpu and cfg.compute.use_gpu:
-        return {"num_gpus": gpu_fraction}
-    return {"num_cpus": 1}
+    cluster = ray_io.plan_cluster(cfg, cpu_models + gpu_models, run_id=run_id, profile=profile)
+    cpu_plan = ray_io.plan_pool(
+        cfg,
+        cpu_models,
+        _pool_cells(source, cfg, cpu_models),
+        gpu=False,
+        profile=profile,
+        max_units=cluster.cpu_max_nodes,
+    )
+    gpu_plan = ray_io.plan_pool(
+        cfg,
+        gpu_models,
+        _pool_cells(source, cfg, gpu_models),
+        gpu=cfg.compute.use_gpu,
+        gpu_type=cfg.compute.gpu_type,
+        profile=profile,
+        gpu_fraction=gpu_fraction,
+        max_units=cluster.gpu_max_nodes,
+    )
+    return cpu_plan, gpu_plan
+
+
+def _pool_chunks(plan: RuntimeResourcePlan, target_cells: int) -> int:
+    """Chunks for one pool: the target-density count, floored so the autoscaler can reach its max.
+
+    `_chunk_count` sizes chunks for bounded per-task memory. That is necessary but not
+    sufficient under autoscaling: Ray grows a pool only while tasks are *pending*, so a run that
+    submits no more tasks than the current fleet can hold leaves the pool at its minimum forever —
+    the "we turned on autoscaling and nothing scaled" failure, which is arithmetic rather than a
+    platform problem. `tasks_for_ceiling` is the demand the ceiling needs to see, so take
+    the larger of the two. Overshooting is free: `chunk_cells` clamps the count and drops
+    the empty chunks, so a pool never gets more tasks than it has cells.
+    """
+    return max(_chunk_count(plan.n_cells, target_cells), tasks_for_ceiling(plan))

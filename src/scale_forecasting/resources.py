@@ -48,13 +48,16 @@ memory-bound concurrency is explicit (``floor(usable_python_mem / peak_rss)``); 
 same rule, stated on the runtime that had been ignoring it.
 
 Public surface: ``ResourceSlot``, ``UnitShape``, ``RuntimeResourcePlan``,
-``resource_slot``, ``plan_resources``, ``machine_memory_bytes``, ``tasks_for_ceiling``.
+``resource_slot``, ``merge_slots``, ``plan_resources``, ``plan_fleet``,
+``machine_memory_bytes``, ``schedulable_memory_bytes``, ``slots_per_unit``,
+``tasks_for_ceiling``.
 """
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -66,8 +69,11 @@ __all__ = [
     "RuntimeResourcePlan",
     "UnitShape",
     "machine_memory_bytes",
+    "merge_slots",
+    "plan_fleet",
     "plan_resources",
     "resource_slot",
+    "schedulable_memory_bytes",
     "slots_per_unit",
     "tasks_for_ceiling",
 ]
@@ -294,6 +300,74 @@ def resource_slot(
     )
 
 
+def merge_slots(slots: Sequence[ResourceSlot], *, family: str) -> ResourceSlot:
+    """Collapse several families' slots into the one slot a shared pool needs (pure).
+
+    A Ray CPU pool runs whatever lands on it — statistical cells and ML cells go through the
+    same worker — so its slot has to hold the heaviest of them. Same roll-up rule
+    `FamilyCost` applies across a family's models, one level out: **max per axis**,
+    because the slot must fit whichever cell arrives, not the average one.
+
+    Provenance is resolved per axis by asking *where the winning number came from*: an axis is
+    ``measured`` iff a contributor that measured it supplied the max. That is the honest
+    answer — a 4 GiB max taken from a real fit is measured evidence even if a lighter family
+    beside it had none. What the lighter family's gap does earn is a **note**, so a reader can
+    see that the pool was sized off a subset of the families that will run on it. Without that
+    note "measured" would over-claim; with it, both facts are on the record.
+
+    ``family`` is the merged label (``"statistical+ml"``). Raises on an empty sequence: a pool
+    with no families is a caller bug, not a slot.
+    """
+    if not slots:
+        raise ValueError("merge_slots needs at least one slot")
+
+    def pick(values: list[tuple[float | None, bool]]) -> tuple[float | None, bool]:
+        """The max across contributors, plus whether a *measuring* contributor supplied it."""
+        present = [(value, was_measured) for value, was_measured in values if value is not None]
+        if not present:
+            return None, False
+        best = max(value for value, _ in present)
+        return best, any(was_measured for value, was_measured in present if value == best)
+
+    def axis_of(slot: ResourceSlot, axis: str) -> tuple[float | None, bool]:
+        raw = getattr(slot, axis)
+        return (None if raw is None else float(raw)), axis in slot.measured
+
+    cores, cores_measured = pick([axis_of(s, "cores") for s in slots])
+    memory, memory_measured = pick([axis_of(s, "memory_bytes") for s in slots])
+    fraction, fraction_measured = pick([axis_of(s, "gpu_fraction") for s in slots])
+
+    measured: list[str] = []
+    assumed: list[str] = []
+    for axis, value, was_measured in (
+        ("cores", cores, cores_measured),
+        ("memory_bytes", memory, memory_measured),
+        ("gpu_fraction", fraction, fraction_measured),
+    ):
+        if axis == "gpu_fraction" and value is None:
+            continue  # a CPU pool has no device axis at all, measured or otherwise
+        (measured if was_measured else assumed).append(axis)
+
+    notes = [note for slot in slots for note in slot.notes]
+    for axis in ("cores", "memory_bytes", "gpu_fraction"):
+        if axis == "gpu_fraction" and fraction is None:
+            continue
+        blind = sorted(s.family for s in slots if axis not in s.measured)
+        if blind and len(blind) < len(slots):
+            notes.append(f"{axis} sized without a measurement for {', '.join(blind)}")
+
+    return ResourceSlot(
+        family=family,
+        cores=max(1, int(cores or _DEFAULT_SLOT_CORES)),
+        memory_bytes=None if memory is None else int(memory),
+        gpu_fraction=fraction,
+        device_bytes=next((s.device_bytes for s in slots if s.device_bytes is not None), None),
+        measured=tuple(measured),
+        assumed=tuple(assumed),
+        notes=tuple(notes),
+    )
+
+
 def _resolve_gpu_fraction(
     cost: Any,
     *,
@@ -433,17 +507,43 @@ class RuntimeResourcePlan:
         }
 
 
+def schedulable_memory_bytes(unit: UnitShape) -> int | None:
+    """The share of a unit's RAM a scheduler will actually hand out (pure; unknown → ``None``).
+
+    ``_SCHEDULABLE_MEMORY_FRACTION`` of nameplate. ``None`` when the unit's memory is unknown
+    (an unparseable machine type), which callers must read as *no memory bound* rather than
+    as a unit with no memory. Exposed because every caller that clamps a slot has to clamp
+    against the same ceiling the packing arithmetic uses.
+    """
+    return int(unit.memory_bytes * _SCHEDULABLE_MEMORY_FRACTION) if unit.memory_bytes else None
+
+
+def _memory_bound(slot: ResourceSlot, unit: UnitShape) -> int | None:
+    """Cells one unit's schedulable RAM holds, or ``None`` when either side is unknown (pure)."""
+    schedulable = schedulable_memory_bytes(unit)
+    if schedulable is None or not slot.memory_bytes:
+        return None
+    return math.floor(schedulable / slot.memory_bytes)
+
+
 def slots_per_unit(slot: ResourceSlot, unit: UnitShape) -> int:
-    """Concurrent cells one unit holds — the min of its core bound and its memory bound (pure).
+    """Concurrent cells one unit holds — the min of its primary bound and its memory bound (pure).
+
+    The primary bound is whichever resource the slot is *defined* by:
 
     * **GPU slot** — ``accelerators x floor(1 / gpu_fraction)``. The device is the scarce
-      resource; a GPU node's cores and RAM are sized around its cards, so they do not bind
-      first. A unit with a fraction but no accelerators holds one cell (whatever provisioned
-      it believed there was a device).
-    * **CPU slot** — ``floor(cores / slot.cores)``, and when both memory numbers are known
-      also ``floor(schedulable_memory / slot.memory_bytes)``, taking the smaller. Cores
-      alone is the design's formula and it silently over-packs a memory-heavy family; the
-      memory bound is what stops eight 4 GiB cells being scheduled onto a 30 GiB node.
+      resource; a GPU node's cores and RAM are sized around its cards, so they usually do
+      not bind first. A unit with a fraction but no accelerators holds one cell (whatever
+      provisioned it believed there was a device).
+    * **CPU slot** — ``floor(cores / slot.cores)``.
+
+    Then, on **either** kind of slot, when both memory numbers are known, also
+    ``floor(schedulable_memory / slot.memory_bytes)`` — taking the smaller. The primary
+    bound alone is the design's formula and it silently over-packs a memory-heavy family;
+    the memory bound is what stops eight 4 GiB cells landing on a 30 GiB node. It has to
+    apply to the GPU slot too, because `RuntimeResourcePlan.task_options` requests
+    ``memory`` alongside ``num_gpus`` and Ray enforces it: a device bound this function
+    reported but Ray will not honour is a density the pool never reaches.
 
     Always at least 1. A slot too big for its unit has already been clamped to fit by
     `resource_slot`, so the floor here is a belt-and-braces guard against a caller
@@ -451,14 +551,12 @@ def slots_per_unit(slot: ResourceSlot, unit: UnitShape) -> int:
     """
     if slot.gpu_fraction is not None:
         packed = max(1, math.floor(1.0 / slot.gpu_fraction))
-        return max(1, unit.accelerators * packed) if unit.accelerators else 1
+        primary = max(1, unit.accelerators * packed) if unit.accelerators else 1
+    else:
+        primary = math.floor(unit.cores / slot.cores) if slot.cores > 0 else 1
 
-    by_cores = math.floor(unit.cores / slot.cores) if slot.cores > 0 else 1
-    bounds = [by_cores]
-    if unit.memory_bytes and slot.memory_bytes:
-        schedulable = unit.memory_bytes * _SCHEDULABLE_MEMORY_FRACTION
-        bounds.append(math.floor(schedulable / slot.memory_bytes))
-    return max(1, min(bounds))
+    by_memory = _memory_bound(slot, unit)
+    return max(1, primary if by_memory is None else min(primary, by_memory))
 
 
 def tasks_for_ceiling(plan: RuntimeResourcePlan) -> int:
@@ -520,9 +618,6 @@ def plan_resources(
     available node yields a schedulable — if inefficient — plan with the clamp recorded,
     instead of a task the scheduler will never place.
     """
-    schedulable_memory = (
-        int(unit.memory_bytes * _SCHEDULABLE_MEMORY_FRACTION) if unit.memory_bytes else None
-    )
     slot = resource_slot(
         profile,
         family,
@@ -530,10 +625,42 @@ def plan_resources(
         device_bytes=device_bytes,
         static_gpu_fraction=static_gpu_fraction,
         max_cores=unit.cores if unit.cores > 0 else None,
-        max_memory_bytes=schedulable_memory,
+        max_memory_bytes=schedulable_memory_bytes(unit),
     )
-    per_unit = slots_per_unit(slot, unit)
+    return plan_fleet(
+        slot,
+        runtime=runtime,
+        n_cells=n_cells,
+        unit=unit,
+        target_cells_per_slot=target_cells_per_slot,
+        min_units=min_units,
+        max_units=max_units,
+    )
 
+
+def plan_fleet(
+    slot: ResourceSlot,
+    *,
+    runtime: str,
+    n_cells: int,
+    unit: UnitShape,
+    target_cells_per_slot: int = _DEFAULT_TARGET_CELLS_PER_SLOT,
+    min_units: int = 1,
+    max_units: int = 1,
+) -> RuntimeResourcePlan:
+    """The fleet half of `plan_resources`, over a slot the caller already sized (pure).
+
+    Split out because a *pool* is not a family: a shared Ray CPU pool runs several families
+    through one worker, so its slot comes from `merge_slots` rather than from a single
+    `resource_slot` call. Both entry points then need the identical fleet arithmetic, and
+    duplicating it is how the two paths would quietly drift apart.
+
+    The slot is taken as given — a caller that assembles one by hand is responsible for
+    having clamped it to the unit (`schedulable_memory_bytes` is the ceiling to clamp
+    against). `slots_per_unit` still floors the density at 1, so an unclamped slot
+    yields an inefficient plan rather than a stalled pool.
+    """
+    per_unit = slots_per_unit(slot, unit)
     cells_per_unit = max(1, per_unit * max(1, target_cells_per_slot))
     saturating = math.ceil(n_cells / per_unit) if n_cells > 0 else 0
     if n_cells <= 0:
@@ -543,7 +670,7 @@ def plan_resources(
 
     return RuntimeResourcePlan(
         runtime=runtime,
-        family=family,
+        family=slot.family,
         slot=slot,
         unit=unit,
         n_cells=max(0, n_cells),

@@ -41,6 +41,18 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+# The measured-profile → runtime-knobs translation. It lives at the top level rather than under
+# ``engines/`` and depends on no engine, so importing it here cannot cycle.
+from ..resources import (
+    RuntimeResourcePlan,
+    UnitShape,
+    machine_memory_bytes,
+    merge_slots,
+    plan_fleet,
+    resource_slot,
+    schedulable_memory_bytes,
+)
+
 # The pure Spark core is engine-agnostic — reuse it verbatim rather than duplicating.
 # ``_MODEL_COL`` is the internal per-cell model tag ``run_group`` reads to take its
 # explode branch (one cell per ``(ts_id, model)``); a Ray chunk carries it exactly like a Spark
@@ -51,6 +63,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from ..config import RunConfig
+    from ..profiling import ComputeProfile
     from ..settings import Settings
 
 __all__ = [
@@ -61,6 +74,7 @@ __all__ = [
     "device_memory_bytes",
     "make_chunk_runner",
     "plan_cluster",
+    "plan_pool",
     "split_gpu_cpu_models",
 ]
 
@@ -270,6 +284,14 @@ class RayClusterPlan:
     cpu_max_nodes: int
     gpu_min_nodes: int
     gpu_max_nodes: int
+    # The full sizing decision behind each pool's node count, with its evidence attached — which
+    # axes were measured, which fell back to a constant, what was clamped. The node counts above
+    # are `derived_units` off these; keeping the whole record on the plan is what makes a
+    # sizing choice auditable after the run rather than only reproducible from the config.
+    # ``None`` on a plan built before the pool plans existed (nothing constructs one that way
+    # today, but the default keeps the dataclass constructible field-by-field in tests).
+    cpu_pool: RuntimeResourcePlan | None = None
+    gpu_pool: RuntimeResourcePlan | None = None
 
     @property
     def total_worker_nodes(self) -> int:
@@ -338,31 +360,98 @@ def _sizing_fraction(cfg: RunConfig) -> float:
     return float(fraction) if isinstance(fraction, float) else _NOMINAL_AUTO_FRACTION
 
 
-def _pool_node_count(
-    n_cells: int, slots_per_node: int, target_per_slot: int, max_nodes: int
-) -> int:
-    """Fixed nodes for one pool: ``ceil(cells / (slots × target))`` clamped to ``[1, max]`` (pure).
+def _pool_families(models: list[str]) -> list[str]:
+    """The distinct model families landing on one pool, in first-seen order (pure).
 
-    Each node offers ``slots_per_node`` concurrent task slots; we want roughly ``target_per_slot``
-    cells to flow through each slot before adding another node (so per-node warm-up amortizes). Zero
-    cells → zero nodes (the pool isn't needed); otherwise at least one node, never more than
-    ``max_nodes`` (the guardrail against a runaway fan-out requesting an unbounded cluster).
+    A pool is not a family: everything that isn't ``deep_learning`` shares the CPU pool, so its
+    worker has to hold a statistical cell and an ML cell alike. Order is first-seen so the merged
+    label is deterministic and the digest it feeds stays stable.
     """
-    if n_cells <= 0:
-        return 0
-    per_node = max(1, slots_per_node * target_per_slot)
-    return max(1, min(math.ceil(n_cells / per_node), max_nodes))
+    from ..models import get_model
+
+    families: list[str] = []
+    for name in models:
+        family = get_model(name).family
+        if family not in families:
+            families.append(family)
+    return families
 
 
-def _clamp_pool_nodes(nodes: int, min_nodes: int) -> int:
-    """Floor a used pool's derived node count at ``min_nodes``; leave an unused pool at 0 (pure).
+def plan_pool(
+    cfg: RunConfig,
+    models: list[str],
+    n_cells: int,
+    *,
+    gpu: bool,
+    gpu_type: str | None = None,
+    profile: ComputeProfile | None = None,
+    gpu_fraction: float | None = None,
+    max_units: int | None = None,
+) -> RuntimeResourcePlan:
+    """Size one Ray worker pool from the measured profile, or from the old constants (pure).
 
-    A zero-cell pool is omitted at create (``nodes == 0`` stays 0), so the min floor applies only
-    when the pool is actually used. Keeps the fixed-path node count and the autoscaling reference
-    size consistent with the resolved ``[min, max]`` bounds. The max clamp already happened inside
-    `_pool_node_count` (its ``max_nodes`` arg is the pool max).
+    The single place the Ray runtime turns a `ComputeProfile` into hardware. Builds the
+    pool's `UnitShape` from its configured machine type (cores from the name, RAM from
+    `machine_memory_bytes`, devices from ``accelerator_count``), sizes one slot per family
+    that lands on the pool, `merge_slots` them into the one slot a shared worker needs, and
+    hands the result to `plan_fleet`.
+
+    **``profile=None`` reproduces the pre-profiler arithmetic exactly**, which is the property
+    that lets this replace the old inline sizing rather than sit beside it. With no measurement a
+    slot is one core, no memory request, and — on the GPU pool — `_sizing_fraction`, so
+    ``slots_per_unit`` collapses to `_machine_cores` on the CPU side and to
+    ``accelerator_count x gpu_slots_per_device(fraction)`` on the GPU side: the two expressions
+    `plan_cluster` used to compute inline.
+
+    ``gpu_fraction`` overrides the sizing fraction with one that is better known — on the cluster
+    `ray_engine` has already run `calibrate_gpu_fraction` against a real device, and
+    that live number beats the submit-time nominal. It is only a *fallback* either way: a profile
+    that measured the device footprint wins over both.
+
+    ``max_units`` overrides the hard ceiling. `plan_cluster` leaves it unset on the first pass (it
+    needs the ceiling-clamped count *before* it can resolve the autoscaling ceiling from it), while
+    `ray_engine` passes the cluster's already-resolved ``[cpu|gpu]_max_nodes`` so that
+    `tasks_for_ceiling` counts against the ceiling the pool can really reach.
     """
-    return max(nodes, min_nodes) if nodes > 0 else 0
+    machine_type = cfg.compute.ray_gpu_machine_type if gpu else cfg.compute.ray_cpu_machine_type
+    unit = UnitShape(
+        cores=_machine_cores(machine_type),
+        memory_bytes=machine_memory_bytes(machine_type),
+        accelerators=cfg.compute.accelerator_count if gpu else 0,
+    )
+    ceiling = max_units if max_units is not None else _pool_ceiling(cfg, gpu=gpu)
+    floor_nodes = cfg.compute.ray_gpu_min_nodes if gpu else cfg.compute.ray_cpu_min_nodes
+
+    families = _pool_families(models) or [_GPU_FAMILY if gpu else "cpu"]
+    slots = [
+        resource_slot(
+            profile,
+            family,
+            use_gpu=gpu,
+            device_bytes=device_memory_bytes(gpu_type or cfg.compute.gpu_type) if gpu else None,
+            static_gpu_fraction=(
+                gpu_fraction if gpu_fraction is not None else _sizing_fraction(cfg)
+            ),
+            max_cores=unit.cores if unit.cores > 0 else None,
+            max_memory_bytes=schedulable_memory_bytes(unit),
+        )
+        for family in families
+    ]
+    return plan_fleet(
+        merge_slots(slots, family="+".join(families)),
+        runtime="ray",
+        n_cells=n_cells,
+        unit=unit,
+        target_cells_per_slot=cfg.compute.ray_target_cells_per_slot,
+        min_units=floor_nodes,
+        max_units=ceiling,
+    )
+
+
+def _pool_ceiling(cfg: RunConfig, *, gpu: bool) -> int:
+    """The hard node ceiling for one pool: its explicit override, else the shared max (pure)."""
+    explicit = cfg.compute.ray_gpu_max_nodes if gpu else cfg.compute.ray_cpu_max_nodes
+    return explicit or cfg.compute.ray_max_nodes
 
 
 # Floor on a *derived* autoscaling ceiling. Even a run whose fan-out implies a single node gets
@@ -379,7 +468,7 @@ def _resolve_pool_max(
     * **``explicit`` set** — the operator pinned this pool's ceiling; honour it verbatim.
       ``ComputeConfig`` has already rejected a pin below the pool's floor, so no check here.
     * **unset** — derive from the run: the fan-out's own node count (already clamped to ``ceiling``
-      inside `_pool_node_count`), floored at `_AUTOSCALE_MAX_FLOOR` and at ``min_nodes``.
+      inside `plan_pool`), floored at `_AUTOSCALE_MAX_FLOOR` and at ``min_nodes``.
     * **unused pool** (``derived_nodes == 0``) — the floors still apply, but the value is inert: a
       zero-node pool is omitted at create, so no ``AutoscalingSpec`` is built from it.
 
@@ -399,6 +488,7 @@ def plan_cluster(
     run_id: str,
     use_gpu: bool | None = None,
     gpu_type: str | None = None,
+    profile: ComputeProfile | None = None,
 ) -> RayClusterPlan:
     """Size an autoscaling Vertex Ray cluster to this run's fan-out (pure).
 
@@ -411,7 +501,7 @@ def plan_cluster(
     Deterministic function of the config — no GCP, no GPU. Splits the executed models into GPU
     (NeuralProphet) and CPU pools, counts the cells each pool must run (``series × models``, using
     ``max_parallelism`` as the basis when ``series_limit`` is unbounded), and derives each pool's
-    fixed-size-equivalent ``node_count`` from those cell counts (`_pool_node_count`), clamped
+    fixed-size-equivalent ``node_count`` from those cell counts (`plan_pool`), clamped
     into the pool's resolved ``[min, max]``. Folds are *not* a factor in the node count — a cell
     runs all its backtest folds internally in one `run_cell`, so folds add per-cell time, not
     more tasks.
@@ -428,6 +518,14 @@ def plan_cluster(
     Either way the whole spec is a pure product of the config — a bigger ``series_limit`` implies
     more cells → a higher derived count (and, on the fixed path, more nodes); the plan is the whole
     sizing decision, logged and stamped to the run for audit.
+
+    ``profile`` is an optional `ComputeProfile` from the driver-side measurement pre-pass
+    (`profiling.resolve_profile`). When given, each pool's slot is sized from what the models
+    actually cost — cores, host memory, and the GPU fraction — instead of from the constants this
+    function used to inline; ``None`` reproduces those constants exactly, so an unprofiled run is
+    byte-identical to one planned before any of this existed. It is an argument rather than a config
+    field for the same reason ``use_gpu``/``gpu_type`` are: ``run_id`` digests ``cfg``, and a
+    measurement taken at submit time must not move it.
     """
     gpu_models, cpu_models = split_gpu_cpu_models(cfg, models)
 
@@ -443,41 +541,54 @@ def plan_cluster(
     n_cpu_cells = basis * len(cpu_models)
 
     sizing_fraction = _sizing_fraction(cfg)
-    gpu_slots_per_node = cfg.compute.accelerator_count * gpu_slots_per_device(sizing_fraction)
-    cpu_slots_per_node = _machine_cores(cfg.compute.ray_cpu_machine_type)
 
     # Hard ceiling per pool — the explicit per-pool override, else the shared ray_max_nodes. This
     # bounds the *derived* node count below; the autoscaling ceiling is resolved from that count
     # afterwards (`_resolve_pool_max`), so an unpinned pool scales to the size of the run rather
     # than to a constant.
-    cpu_ceiling = cfg.compute.ray_cpu_max_nodes or cfg.compute.ray_max_nodes
-    gpu_ceiling = cfg.compute.ray_gpu_max_nodes or cfg.compute.ray_max_nodes
+    cpu_ceiling = _pool_ceiling(cfg, gpu=False)
+    gpu_ceiling = _pool_ceiling(cfg, gpu=True)
     cpu_min = cfg.compute.ray_cpu_min_nodes
     gpu_min = cfg.compute.ray_gpu_min_nodes
 
     # Derived fixed-size-equivalent node counts, each capped by its pool max and (when the pool is
     # used) floored at its pool min so the fixed path and the autoscale reference size agree with
     # the bounds. A pool with zero cells stays at 0 nodes (omitted at create), never bumped to min.
-    gpu_nodes = (
-        _clamp_pool_nodes(
-            _pool_node_count(
-                n_gpu_cells, gpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, gpu_ceiling
-            ),
-            gpu_min,
-        )
-        if effective_use_gpu
-        else 0
+    # `plan_pool` owns the arithmetic for both pools now: with ``profile=None`` it reproduces the
+    # constants this function used inline, and with a profile it sizes the slot from measurement.
+    gpu_pool = plan_pool(
+        cfg,
+        gpu_models,
+        n_gpu_cells if effective_use_gpu else 0,
+        gpu=True,
+        gpu_type=effective_gpu_type,
+        profile=profile,
     )
-    cpu_nodes = _clamp_pool_nodes(
-        _pool_node_count(
-            n_cpu_cells, cpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, cpu_ceiling
-        ),
-        cpu_min,
-    )
+    cpu_pool = plan_pool(cfg, cpu_models, n_cpu_cells, gpu=False, profile=profile)
+    gpu_nodes = gpu_pool.derived_units
+    cpu_nodes = cpu_pool.derived_units
 
     # The autoscaling ceilings, derived from those node counts unless a pool was explicitly pinned.
     cpu_max = _resolve_pool_max(cfg.compute.ray_cpu_max_nodes, cpu_nodes, cpu_ceiling, cpu_min)
     gpu_max = _resolve_pool_max(cfg.compute.ray_gpu_max_nodes, gpu_nodes, gpu_ceiling, gpu_min)
+
+    # Re-plan each pool against the ceiling it can *actually* reach. The first pass had to use the
+    # hard ceiling because the autoscaling one is derived from its answer; this pass makes the
+    # stored plan's ``slots_at_ceiling`` — and therefore `tasks_for_ceiling` — describe the
+    # real pool rather than the guardrail. The derived node count is unchanged by construction
+    # (the resolved max is never below it), so the cluster spec above is unaffected.
+    cpu_pool = plan_pool(
+        cfg, cpu_models, n_cpu_cells, gpu=False, profile=profile, max_units=cpu_max
+    )
+    gpu_pool = plan_pool(
+        cfg,
+        gpu_models,
+        n_gpu_cells if effective_use_gpu else 0,
+        gpu=True,
+        gpu_type=effective_gpu_type,
+        profile=profile,
+        max_units=gpu_max,
+    )
 
     return RayClusterPlan(
         cluster_name=_cluster_name(cfg, run_id),
@@ -497,6 +608,8 @@ def plan_cluster(
         cpu_max_nodes=cpu_max,
         gpu_min_nodes=gpu_min,
         gpu_max_nodes=gpu_max,
+        cpu_pool=cpu_pool,
+        gpu_pool=gpu_pool,
     )
 
 

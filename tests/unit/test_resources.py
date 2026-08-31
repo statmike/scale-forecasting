@@ -30,6 +30,8 @@ import json
 import math
 from typing import Any
 
+import pytest
+
 from scale_forecasting import resources
 from scale_forecasting.engines import ray_io
 from scale_forecasting.profiling import ComputeProfile, MeasuredFit, build_profile
@@ -37,6 +39,7 @@ from scale_forecasting.resources import (
     ResourceSlot,
     UnitShape,
     machine_memory_bytes,
+    merge_slots,
     plan_resources,
     resource_slot,
     slots_per_unit,
@@ -252,6 +255,161 @@ def test_the_gpu_band_matches_the_engine_it_replaces() -> None:
     assert resources._NOMINAL_GPU_FRACTION == ray_io._NOMINAL_AUTO_FRACTION
 
 
+# --- merging: one pool, several families ---------------------------------------
+
+
+_HOST_AXES = ("cores", "memory_bytes")
+
+
+def _slot(
+    family: str,
+    *,
+    cores: int = 1,
+    memory_bytes: int | None = None,
+    gpu_fraction: float | None = None,
+    device_bytes: int | None = None,
+    measured: tuple[str, ...] = (),
+    notes: tuple[str, ...] = (),
+) -> ResourceSlot:
+    """A hand-built slot; ``measured`` names the axes with a basis, the rest are assumed."""
+    axes = {"cores", "memory_bytes"} | ({"gpu_fraction"} if gpu_fraction is not None else set())
+    return ResourceSlot(
+        family=family,
+        cores=cores,
+        memory_bytes=memory_bytes,
+        gpu_fraction=gpu_fraction,
+        device_bytes=device_bytes,
+        measured=measured,
+        assumed=tuple(sorted(axes - set(measured))),
+        notes=notes,
+    )
+
+
+def test_a_shared_pool_is_sized_for_its_heaviest_family() -> None:
+    """A Ray CPU pool runs statistical and ML cells through one worker; the slot holds both."""
+    merged = merge_slots(
+        [
+            _slot("statistical", cores=1, memory_bytes=1 * _GIB, measured=_HOST_AXES),
+            _slot("ml", cores=4, memory_bytes=6 * _GIB, measured=_HOST_AXES),
+        ],
+        family="statistical+ml",
+    )
+    assert (merged.cores, merged.memory_bytes) == (4, 6 * _GIB)
+    assert merged.family == "statistical+ml"
+
+
+def test_the_axes_are_maxed_independently_of_each_other() -> None:
+    """The winner is per axis, not per family — a wide-but-light cell must not shrink memory."""
+    merged = merge_slots(
+        [
+            _slot("statistical", cores=8, memory_bytes=1 * _GIB, measured=_HOST_AXES),
+            _slot("ml", cores=1, memory_bytes=6 * _GIB, measured=_HOST_AXES),
+        ],
+        family="pool",
+    )
+    assert (merged.cores, merged.memory_bytes) == (8, 6 * _GIB)
+
+
+def test_an_axis_is_measured_only_if_the_family_that_won_it_measured_it() -> None:
+    """Provenance follows the winning number, not the majority — that is the honest answer."""
+    merged = merge_slots(
+        [
+            _slot("statistical", memory_bytes=6 * _GIB, measured=("memory_bytes",)),
+            _slot("ml", memory_bytes=1 * _GIB),  # unmeasured, and loses anyway
+        ],
+        family="pool",
+    )
+    assert "memory_bytes" in merged.measured
+
+    flipped = merge_slots(
+        [
+            _slot("statistical", memory_bytes=1 * _GIB, measured=("memory_bytes",)),
+            _slot("ml", memory_bytes=6 * _GIB),  # unmeasured, and it wins
+        ],
+        family="pool",
+    )
+    assert "memory_bytes" in flipped.assumed
+    assert "memory_bytes" not in flipped.measured
+
+
+def test_a_family_that_measured_nothing_is_named_in_a_note() -> None:
+    """"Measured" would over-claim if a family on the pool contributed no evidence."""
+    merged = merge_slots(
+        [
+            _slot("statistical", cores=2, memory_bytes=6 * _GIB, measured=_HOST_AXES),
+            _slot("ml", cores=1),
+        ],
+        family="pool",
+    )
+    assert any("ml" in note for note in merged.notes)
+    assert not any("statistical" in note for note in merged.notes)
+
+
+def test_a_pool_where_nothing_was_measured_earns_no_note_and_no_claim() -> None:
+    """Uniform ignorance is already visible in ``assumed``; a per-family note adds nothing."""
+    merged = merge_slots([_slot("statistical"), _slot("ml")], family="pool")
+    assert merged.notes == ()
+    assert set(merged.assumed) == {"cores", "memory_bytes"}
+    assert merged.measured == ()
+
+
+def test_merging_unmeasured_slots_reproduces_the_hardcoded_slot() -> None:
+    """The no-op guarantee again, at the pool seam: no profile in, today's behaviour out."""
+    merged = merge_slots(
+        [resource_slot(None, "statistical"), resource_slot(None, "ml")], family="pool"
+    )
+    assert (merged.cores, merged.memory_bytes, merged.gpu_fraction) == (1, None, None)
+
+
+def test_a_cpu_pool_carries_no_device_axis_at_all() -> None:
+    """An absent GPU axis is neither measured nor assumed — there is no device to size for."""
+    merged = merge_slots([_slot("statistical"), _slot("ml")], family="pool")
+    assert merged.gpu_fraction is None
+    assert "gpu_fraction" not in set(merged.measured) | set(merged.assumed)
+
+
+def test_a_gpu_pool_keeps_the_largest_fraction_and_its_device() -> None:
+    """Two DL families on one card: the pool packs for whichever cell needs the most of it."""
+    merged = merge_slots(
+        [
+            _slot("deep_learning", gpu_fraction=0.25, device_bytes=16 * _GIB,
+                  measured=("gpu_fraction",)),
+            _slot("foundation", gpu_fraction=0.5, device_bytes=16 * _GIB,
+                  measured=("gpu_fraction",)),
+        ],
+        family="pool",
+    )
+    assert merged.gpu_fraction == 0.5
+    assert merged.device_bytes == 16 * _GIB
+    assert slots_per_unit(merged, UnitShape(cores=8, accelerators=1)) == 2
+
+
+def test_clamp_notes_from_every_contributor_survive_the_merge() -> None:
+    """A clamp is why a number is what it is; losing it on merge loses the audit trail."""
+    merged = merge_slots(
+        [
+            _slot("statistical", measured=_HOST_AXES, notes=("cores clamped",)),
+            _slot("ml", measured=_HOST_AXES, notes=("memory_bytes clamped",)),
+        ],
+        family="pool",
+    )
+    assert set(merged.notes) == {"cores clamped", "memory_bytes clamped"}
+
+
+def test_a_single_family_pool_merges_to_itself() -> None:
+    """Merging must be the identity on one contributor, or the shared path diverges."""
+    only = resource_slot(_profile(_fit(process_rss_bytes=2 * _GIB)), "statistical")
+    merged = merge_slots([only], family="statistical")
+    assert (merged.cores, merged.memory_bytes) == (only.cores, only.memory_bytes)
+    assert set(merged.measured) == set(only.measured)
+
+
+def test_merging_nothing_is_a_caller_bug() -> None:
+    """A pool with no families is not a slot with no size — it is a mistake upstream."""
+    with pytest.raises(ValueError, match="at least one slot"):
+        merge_slots([], family="pool")
+
+
 # --- density: cores are not the only bound -------------------------------------
 
 
@@ -289,6 +447,27 @@ def test_a_heavy_family_is_packed_by_memory_not_by_cores() -> None:
 def test_an_unmeasured_memory_axis_leaves_density_exactly_where_it_was() -> None:
     """No basis → no bound. The memory rule must not shrink a fleet it knows nothing about."""
     assert slots_per_unit(resource_slot(None, "statistical"), _N1_STANDARD_8) == 8
+
+
+def test_host_memory_bounds_a_gpu_slot_too_because_ray_enforces_the_request() -> None:
+    """4 cards would hold 4 cells; 30 GiB of host RAM at 8 GiB a cell holds 2. Ray honours both."""
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=4)
+    slot = _slot("deep_learning", memory_bytes=8 * _GIB, gpu_fraction=1.0, measured=_HOST_AXES)
+    assert slots_per_unit(slot, unit) == 2
+
+
+def test_a_gpu_slot_that_fits_in_host_memory_is_still_bound_by_its_devices() -> None:
+    """The memory bound is a ceiling, not a replacement — it must not *raise* device density."""
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=2)
+    slot = _slot("deep_learning", memory_bytes=1 * _GIB, gpu_fraction=0.5, measured=_HOST_AXES)
+    assert slots_per_unit(slot, unit) == 4  # 2 cards x 2 cells, not the 21 the RAM would allow
+
+
+def test_an_unmeasured_gpu_slot_packs_by_device_alone_exactly_as_before() -> None:
+    """The byte-identity guarantee reaches the GPU branch: no memory measured, no new bound."""
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=2)
+    slot = _slot("deep_learning", gpu_fraction=0.25)
+    assert slots_per_unit(slot, unit) == 8
 
 
 # --- the fleet -----------------------------------------------------------------
