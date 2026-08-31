@@ -77,3 +77,76 @@ Retry a pinned `CREATE MODEL` against a BigLake Iceberg source; if BigQuery ML a
 `FOR SYSTEM_TIME AS OF` there, remove `_source_is_iceberg`'s special-case and let the native path pin
 Iceberg sources like every other runtime. Worth checking on BigQuery ML / BigLake Iceberg release
 notes.
+
+---
+
+## C2 — On Serverless Spark, executor shape is a coarse, indirect control
+
+- **Status:** Active constraint — documented 2026-08-30. Shapes the compute-profiler design; no
+  behaviour change on its own.
+- **Area:** `src/scale_forecasting/submit.py` (`_serverless_gpu_properties`, executor properties);
+  `src/scale_forecasting/config.py` (`FamilyCompute` validator).
+
+**Context / limitation.**
+Every runtime we target lets us size a unit of work, but Serverless for Apache Spark exposes that
+sizing through a narrower and more coupled interface than the others. Four distinct constraints:
+
+1. **`spark.executor.cores` is a short enumeration, not a number.** Non-GPU workloads accept
+   **4, 8, or 16** (default 4). GPU (L4) workloads accept a *different* set — **4, 8, 12, 16, 24,
+   48, 96** — where 24/48/96 additionally attach **2/4/8** GPUs per executor rather than one. An
+   arithmetically-derived core count is therefore usually illegal and must be snapped to a member of
+   the applicable set.
+2. **GPU concurrency is not independently settable; it is `1/cores`.** Serverless applies
+   `spark.executor.resource.gpu.amount=1` and `spark.task.resource.gpu.amount=1/$spark_executor_cores`
+   as service defaults, and rejects attempts to set them explicitly. Fractional GPU scheduling *is*
+   available — but the fraction is the reciprocal of the CPU concurrency, so GPU packing and CPU
+   packing cannot be tuned separately. On Ray (and on a Dataproc cluster) they can.
+3. **On the GPU path, `spark.executor.memoryOverhead` is restricted.** The docs state memory may be
+   set but overhead may not. Since PySpark charges the Python worker's footprint — which is where
+   *all* of our model fitting happens — to `memoryOverhead` (defaulted to 40% for PySpark rather
+   than the usual 10%), the pool that actually holds our working set is the one we cannot address
+   directly on GPU workloads. It can only be moved indirectly, by choosing `spark.executor.memory`
+   so the derived overhead lands where we need it.
+4. **Related fixed values.** `spark.dataproc.executor.disk.size` is pinned at 375 GB for L4 (any
+   other value errors); accelerator type is **L4 only** (T4 is rejected); `spark.executor.instances`
+   is bounded to [2, 2000]; and GPU workloads are incompatible with the organization policy
+   `constraints/compute.requireShieldedVm`.
+
+**Decision.**
+Use Serverless as-is and treat the constraint as part of the plan, not as an error path:
+
+- Resource planning computes the *ideal* shape from measured need, then **snaps to the nearest legal
+  value** — downward for GPU concurrency (fewer tasks sharing a device is the safe direction),
+  upward for memory. Both the ideal and the snapped value are recorded, so an audit shows what was
+  wanted and what the platform allowed.
+- An illegal cores/memory pair is rejected **at plan time, offline**, rather than surfacing as a
+  submit-time API error minutes into a run.
+- On the GPU path, the target per-task GPU share is expressed as a choice of `spark.executor.cores`
+  rather than as a fraction, because on this runtime those are the same decision.
+- Where the platform's shape cannot express what we measured, we accept the nearest safe
+  over-provision rather than tuning around it.
+
+**Impact.**
+- Serverless can be left less densely packed than Ray for the same measured workload, because the
+  legal core counts are coarse and GPU/CPU packing share one knob. The cost is idle headroom, not
+  correctness.
+- A run whose family is pinned to Serverless cannot express "many small CPU tasks, few large GPU
+  tasks" within one executor; splitting that intent across runtimes (per-family `runtime`) is the
+  supported way to get it.
+- The GPU-memory ceiling on Serverless is reached through `spark.executor.memory`, which reads
+  backwards relative to every other runtime; the indirection is a documented step, not an accident.
+- No impact on Ray-on-Vertex or Dataproc-cluster paths, which expose the direct controls.
+
+**References.**
+- [Run Spark workloads with GPUs (Serverless)](https://docs.cloud.google.com/managed-spark/docs/guides/gpus-serverless)
+- [Spark properties (Serverless)](https://docs.cloud.google.com/dataproc-serverless/docs/concepts/properties)
+- [Serverless autoscaling / dynamic allocation](https://docs.cloud.google.com/dataproc-serverless/docs/concepts/autoscaling)
+- [Spark stage-level scheduling / GPU resource properties](https://spark.apache.org/docs/latest/configuration.html)
+
+**Re-evaluation trigger.**
+Check whether Serverless has begun accepting an explicit `spark.task.resource.gpu.amount` (which
+would decouple GPU packing from executor cores), whether `spark.executor.memoryOverhead` becomes
+settable on GPU workloads, or whether the legal `spark.executor.cores` sets widen. Any of the three
+lets the planner emit the measured shape directly instead of snapping to it. Worth checking on
+Serverless for Apache Spark release notes and the runtime-version release notes when the pinned
+runtime version is next bumped.

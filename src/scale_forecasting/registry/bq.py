@@ -658,7 +658,7 @@ def ensure_views(
 def drop_all(
     *, settings: Settings | None = None
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Drop all six registry + source tables and the analyst views (the reset path).
+    """Drop all seven registry + source tables and the analyst views (the reset path).
 
     **Destructive.** Renders `registry.ddl.render_drop_tables` and executes each
     ``DROP TABLE IF EXISTS`` (plus ``DROP VIEW IF EXISTS`` for the two analyst views), so a

@@ -1,6 +1,6 @@
 """Reset the deployment's BigQuery tables — drop everything for a clean re-``ensure_tables``.
 
-**Destructive.** This drops all six tables (the four native run-collection tables + both source
+**Destructive.** This drops all seven tables (the five native run-collection tables + both source
 variants) and the two analyst views via `registry.bq.drop_all`, so a subsequent run's
 `registry.bq.ensure_tables` recreates them in the current native/dual-format shape. The
 Iceberg→native registry switch is a drop-and-recreate, not an ``ALTER``, which is why a reset seam

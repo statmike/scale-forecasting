@@ -111,7 +111,7 @@ TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.backtest_oof`;
 
 ### 2b. Full reset (drop everything, incl. the seed) — needs a reseed after
 
-`reset.py` drops **all six tables** (the four outputs **and both source variants**) plus the two
+`reset.py` drops **all seven tables** (the five outputs **and both source variants**) plus the two
 analyst views, for a clean `ensure_tables` recreate. Use it only when the schema itself changed or you
 want a truly empty dataset — **it forces a 100k reseed afterward** (via the Terraform `seed` module or
 `data_gen.seed_spark`). It reads the `SF_*` env for its target and is a dry run without `--yes`:
@@ -119,8 +119,21 @@ want a truly empty dataset — **it forces a 100k reseed afterward** (via the Te
 ```bash
 # needs the SF_* identity (section 3) so it targets the right deployment:
 uv run python -m scale_forecasting.reset          # DRY RUN — prints what would drop, touches nothing
-uv run python -m scale_forecasting.reset --yes    # actually drops all six tables + views
+uv run python -m scale_forecasting.reset --yes    # actually drops all seven tables + views
 ```
+
+> **Known limitation — reset does not clear GCS.** It drops BigQuery tables only. Run artifacts
+> under `<warehouse>/artifacts/<run_id>/` are left in place, and because the registry rows were the
+> only index of which artifacts belonged to which run, they cannot be traced back afterwards. If you
+> want the storage reclaimed, delete the prefix **before** resetting, while the rows still exist:
+>
+> ```bash
+> bq query --nouse_legacy_sql 'SELECT run_id FROM `PROJECT.DATASET.run_registry`'  # note the ids
+> gcloud storage rm -r "$SF_WAREHOUSE_URI/artifacts/<run_id>"                      # per run
+> ```
+>
+> A first-class registry-lifecycle surface (scoped `drop-run`, orphan sweep, archive, and a reset
+> that clears both together) is planned; until then this ordering is manual.
 
 ---
 

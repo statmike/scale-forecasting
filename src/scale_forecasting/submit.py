@@ -262,10 +262,15 @@ def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
 
     Serverless manages GPU attachment itself: naming the accelerator type and selecting the premium
     compute *and* disk tiers is sufficient for the executor VM to carry an L4 that the
-    torch/NeuralProphet fit inside the pandas UDF can use. Serverless rejects the Spark-level GPU
-    resource-scheduling properties (``spark.executor.resource.gpu.*``,
-    ``spark.task.resource.gpu.amount``) — those are for classic Spark on Dataproc clusters — so they
-    are intentionally omitted; the premium disk tier is mandatory whenever an L4 is requested.
+    torch/NeuralProphet fit inside the pandas UDF can use. The premium disk tier is mandatory
+    whenever an L4 is requested.
+
+    The Spark-level GPU resource-scheduling properties (``spark.executor.resource.gpu.*``,
+    ``spark.task.resource.gpu.amount``) are omitted because Serverless owns them: it applies
+    ``executor.resource.gpu.amount=1`` and ``task.resource.gpu.amount=1/spark.executor.cores`` as
+    service defaults and rejects explicit values. GPU scheduling *is* therefore fractional here —
+    the per-task share is chosen indirectly, by choosing executor cores. See ``CONSIDERATIONS.md``
+    C2 for what that couples together.
     """
     if gpu_type != _SERVERLESS_GPU_TYPE:
         raise ConfigError(
