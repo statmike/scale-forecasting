@@ -302,9 +302,14 @@ def create_spark_cluster(config_uri: str) -> list[str]:
         raise ConfigError(
             f"create_spark_cluster: run {run_id} has no shared Dataproc-cluster families"
         )
-    any_gpu, gpu_type = inputs
+    models, any_gpu, gpu_type = inputs
     name, region = provision_shared_cluster(
-        cfg, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
+        cfg,
+        run_id=run_id,
+        use_gpu=any_gpu,
+        gpu_type=gpu_type,
+        settings=settings,
+        models=models,
     )
     return [name, region]
 

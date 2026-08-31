@@ -146,6 +146,11 @@ class SparkSubmitter:
                 spark_cluster_name=spark_cluster_name,
                 spark_cluster_region=spark_cluster_region,
                 job_id=system_job_id,
+                # One operator ceiling, two surfaces: on Serverless it caps executors (a free
+                # ceiling, billed per executor-second), on a cluster it caps *workers* (billed VMs
+                # create→delete). Same intent — "don't fan out past this" — so the same knob feeds
+                # both rather than a second flag that means the same thing.
+                max_workers=max_executors,
             )
             return ProbeHandle(
                 "spark", native_id=real_id, region=region, spark_mode="cluster"

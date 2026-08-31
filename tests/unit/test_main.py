@@ -1253,7 +1253,10 @@ def test_shared_spark_inputs_none_for_serverless_run() -> None:
 def test_shared_spark_inputs_engages_for_two_cluster_families_cpu() -> None:
     run_dag = dag.plan_dag(_spark_cluster_cfg())
     inputs = main._shared_spark_inputs(run_dag.python_jobs)
-    assert inputs == (False, None)  # (any_gpu, gpu_type)
+    assert inputs is not None
+    models, any_gpu, gpu_type = inputs  # only the cluster families' models
+    assert sorted(models) == sorted(_spark_cluster_cfg().models)
+    assert (any_gpu, gpu_type) == (False, None)
 
 
 def test_shared_spark_inputs_flags_gpu_union() -> None:
@@ -1268,7 +1271,11 @@ def test_shared_spark_inputs_flags_gpu_union() -> None:
         },
     )
     run_dag = dag.plan_dag(cfg)
-    assert main._shared_spark_inputs(run_dag.python_jobs) == (True, "T4")
+    assert main._shared_spark_inputs(run_dag.python_jobs) == (
+        ["theta", "neuralprophet"],
+        True,
+        "T4",
+    )
 
 
 def test_shared_spark_inputs_ignores_family_with_standing_cluster() -> None:
@@ -1312,6 +1319,8 @@ def test_shared_spark_cluster_engages_and_tears_down(monkeypatch: pytest.MonkeyP
             "use_gpu": False,
             "gpu_type": None,
             "settings": _SETTINGS,
+            # Sized against the cluster families' models only — see _shared_spark_inputs.
+            "models": ["theta", "xgboost"],
         }
         assert "teardown" not in calls  # not yet — torn down on exit
     assert calls["teardown"] == ("sf-cluster-shared", "us-central1")

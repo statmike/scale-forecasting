@@ -927,13 +927,13 @@ def test_the_gpu_fleet_is_sized_off_the_packing_the_core_table_grants() -> None:
 def test_the_serverless_density_is_the_executors_task_slots_not_its_devices() -> None:
     # floor(1/0.1) = 10 cells per card by arithmetic; a 1-core task on an 8-core executor runs 8.
     slot = _slot("deep_learning", cores=1, gpu_fraction=0.1)
-    assert resources.serverless_tasks_per_executor(slot, 8) == 8
+    assert resources.spark_tasks_per_executor(slot, 8) == 8
 
 
 def test_a_threaded_family_takes_whole_task_slots_at_a_time() -> None:
     slot = _slot("ml", cores=6)
-    assert resources.serverless_tasks_per_executor(slot, 8) == 1
-    assert resources.serverless_tasks_per_executor(slot, 16) == 2
+    assert resources.spark_tasks_per_executor(slot, 8) == 1
+    assert resources.spark_tasks_per_executor(slot, 16) == 2
 
 
 def test_an_explicit_density_overrides_what_the_slot_arithmetic_would_derive() -> None:
@@ -946,3 +946,276 @@ def test_an_explicit_density_overrides_what_the_slot_arithmetic_would_derive() -
     )
     assert forced.slots_per_unit == 4
     assert forced.saturating_units == 16  # 64 cells / 4 per unit, not / 16
+
+
+# --- dataproc cluster: the worker is the unit, and it is billed whole -----------
+
+
+def _cluster(
+    *,
+    cores: int = 1,
+    memory_bytes: int | None = None,
+    gpu_fraction: float | None = None,
+    machine_type: str = "n1-standard-8",
+    accelerators: int = 0,
+    n_cells: int = 1000,
+    max_units: int = 10,
+    notes: tuple[str, ...] = (),
+) -> resources.ClusterTranslation:
+    """Translate a hand-built slot straight through `plan_fleet` into cluster properties."""
+    slot = _slot(
+        "statistical",
+        cores=cores,
+        memory_bytes=memory_bytes,
+        gpu_fraction=gpu_fraction,
+        measured=_HOST_AXES,
+        notes=notes,
+    )
+    unit = resources.cluster_unit(machine_type, accelerators=accelerators)
+    plan = plan_fleet(
+        slot,
+        runtime="cluster",
+        n_cells=n_cells,
+        unit=unit,
+        min_units=2,
+        max_units=max_units,
+        density=resources._cluster_density(slot, unit)[2],
+    )
+    return resources.translate_cluster(plan)
+
+
+def test_the_worker_is_read_straight_off_its_machine_name() -> None:
+    """No legal-value table and no tier band on a cluster — the name is the whole shape."""
+    unit = resources.cluster_unit("n1-standard-8", accelerators=1)
+    assert (unit.cores, unit.memory_bytes, unit.accelerators) == (8, 30 * _GIB, 1)
+
+
+def test_an_unparseable_machine_name_still_yields_a_countable_worker() -> None:
+    """Cores have no "unknown" answer — every caller divides by them, and 0 holds no cells."""
+    assert resources.machine_cores("n1-standard-16") == 16
+    assert resources.machine_cores("n1-custom-8-16384") == 8  # not 16384 MiB read as cores
+    assert resources.machine_cores("some-alias") == 8
+
+
+def test_the_executor_leaves_the_application_master_room_to_land() -> None:
+    """A whole-worker executor makes the AM unplaceable and the job hangs in ACCEPTED forever."""
+    out = _cluster()
+    assert out.executor_cores == 7  # 8 - _CLUSTER_AM_CORES
+    assert out.properties["spark.executor.cores"] == "7"
+    heap = int(out.properties["spark.executor.memory"].removesuffix("m"))
+    overhead = int(out.properties["spark.executor.memoryOverhead"].removesuffix("m"))
+    schedulable_mb = int(30 * _GIB * resources._SCHEDULABLE_MEMORY_FRACTION) // _MIB
+    assert heap + overhead == schedulable_mb - resources._CLUSTER_AM_RESERVE_MB
+
+
+def test_a_cluster_states_its_memory_even_when_nothing_was_measured() -> None:
+    """The one place absence does *not* mean "request nothing".
+
+    Dataproc bakes ``spark.executor.memory`` into the cluster's ``spark-defaults`` at create,
+    sized for the default executor shape. Widening the executor at job level and leaving memory
+    alone pairs a 7-core executor with a 4-core executor's heap.
+    """
+    out = _cluster(memory_bytes=None)
+    assert out.properties["spark.executor.memory"] == "3584m"  # 7 cores x the JVM floor
+    assert out.properties["spark.executor.memoryOverhead"] == "15872m"  # the rest of the worker
+
+
+def test_an_unparseable_worker_leaves_the_clusters_own_memory_defaults_alone() -> None:
+    """Unknown nameplate → no container to carve, so say so rather than emit a guessed split."""
+    out = _cluster(machine_type="n1-custom-8-16384")
+    assert "spark.executor.memory" not in out.properties
+    assert "spark.executor.memoryOverhead" not in out.properties
+    assert any("unparseable" in note for note in out.notes)
+
+
+def test_the_measured_footprint_narrows_the_task_width_and_the_budget_follows() -> None:
+    # 15872m of Python pool holds three 4 GiB cells, so tasks widen to 2 cores (7 // 2 = 3).
+    out = _cluster(memory_bytes=4 * _GIB)
+    assert out.properties["spark.task.cpus"] == "2"
+    assert out.tasks_per_executor == 3
+    assert out.properties["spark.executor.memoryOverhead"] == f"{3 * 4 * 1024}m"
+
+
+def test_a_cell_too_fat_for_the_worker_is_clamped_and_says_so() -> None:
+    """Unschedulable is worse than tight: run one cell, keep the whole pool, warn."""
+    out = _cluster(memory_bytes=20 * _GIB)
+    assert out.tasks_per_executor == 1
+    assert out.properties["spark.executor.memoryOverhead"] == "15872m"
+    assert any("expect host memory pressure" in note for note in out.notes)
+
+
+def test_the_gpu_fraction_is_what_bounds_how_many_cells_share_the_card() -> None:
+    """The cluster's version of the buckets-are-not-tasks bug.
+
+    Nothing else on a cluster limits concurrency — a 7-core executor would run seven cells on
+    one T4 whatever fraction was measured, which is the device OOM this exists to prevent.
+    """
+    out = _cluster(gpu_fraction=0.5, accelerators=1)
+    assert out.properties["spark.task.cpus"] == "3"  # narrowest width giving 7 // 3 = 2 tasks
+    assert out.tasks_per_executor == 2
+
+
+def test_a_smaller_fraction_packs_more_cells_onto_the_same_card() -> None:
+    out = _cluster(gpu_fraction=0.25, accelerators=1)
+    assert out.properties["spark.task.cpus"] == "2"
+    assert out.tasks_per_executor == 3
+
+
+def test_a_cell_that_wants_a_whole_card_runs_alone_on_the_worker() -> None:
+    # 4 rather than 7: the narrowest width that already yields one task (7 // 4 == 1). Widening
+    # further would idle the same cores and change nothing Spark schedules.
+    out = _cluster(gpu_fraction=1.0, accelerators=1)
+    assert out.tasks_per_executor == 1
+    assert out.properties["spark.task.cpus"] == "4"
+
+
+def test_a_gpu_cluster_records_why_it_withholds_the_yarn_resource_request() -> None:
+    """Dataproc leaves YARN GPU isolation off; the Spark half alone fails every executor."""
+    out = _cluster(gpu_fraction=0.5, accelerators=1)
+    assert "spark.executor.resource.gpu.amount" not in out.properties
+    assert "spark.task.resource.gpu.amount" not in out.properties
+    assert any("yarn gpu isolation off" in note for note in out.notes)
+
+
+def test_the_native_thread_pools_are_pinned_to_the_task_width() -> None:
+    """Same rule as the batch path: a task owning N cores may use N threads, no more."""
+    single = _cluster()
+    wide = _cluster(cores=4)
+    for name in resources._INTRAOP_ENV_VARS:
+        assert single.properties[f"spark.executorEnv.{name}"] == "1"
+        assert wide.properties[f"spark.executorEnv.{name}"] == "4"
+    assert "spark.task.cpus" not in single.properties  # 1 is Spark's own default
+
+
+def test_the_workers_are_all_asked_for_at_once_because_they_are_already_paid_for() -> None:
+    out = _cluster(n_cells=200)
+    props = out.properties
+    assert props["spark.dynamicAllocation.enabled"] == "true"
+    assert props["spark.dynamicAllocation.initialExecutors"] == str(out.worker_count)
+    assert props["spark.dynamicAllocation.maxExecutors"] == str(out.worker_count)
+
+
+def test_a_small_run_keeps_the_two_worker_cluster_it_has_today() -> None:
+    """The safety property: a run too small to derive anything gets the pre-profiler cluster."""
+    out = _cluster(n_cells=25)
+    assert (out.worker_count, out.ideal_workers) == (2, 1)
+    assert out.notes == ()
+
+
+def test_the_worker_count_stops_at_the_spend_ceiling_and_says_what_it_wanted() -> None:
+    """A cluster's workers bill create→delete, so the clamp is a spend decision, on the record."""
+    out = _cluster(n_cells=1000)  # 7 cells per worker x 8 target = 56 per worker
+    assert (out.worker_count, out.ideal_workers) == (10, 18)
+    assert any("raise max_workers" in note for note in out.notes)
+
+
+def test_the_slots_own_notes_survive_into_the_cluster_translation() -> None:
+    assert "clamped something" in _cluster(notes=("clamped something",)).notes
+
+
+def test_the_cluster_translation_serializes_for_telemetry() -> None:
+    out = _cluster(gpu_fraction=0.5, accelerators=1)
+    record = json.loads(json.dumps(out.to_dict()))
+    assert record["executor_cores"] == 7
+    assert record["properties"]["spark.task.cpus"] == "3"
+    assert record["ideal_workers"] >= record["worker_count"] or record["worker_count"] == 2
+
+
+# --- plan_dataproc_cluster: the one-pass wiring ---------------------------------
+
+
+def test_planning_a_cluster_needs_no_second_pass_because_the_machine_is_given() -> None:
+    plan, translation = resources.plan_dataproc_cluster(
+        None, ["statistical"], 25, machine_type="n1-standard-8"
+    )
+    assert plan.runtime == "cluster"
+    assert plan.unit.cores == 8
+    assert translation.executor_cores == 7
+    assert translation.worker_count == 2
+
+
+def test_planning_with_no_profile_still_shapes_the_executor_to_the_worker() -> None:
+    """No measurement anywhere, and the executor/AM split and thread pins are still right."""
+    _plan, translation = resources.plan_dataproc_cluster(
+        None, ["statistical", "ml"], 100, machine_type="n1-standard-8"
+    )
+    assert translation.properties["spark.executor.cores"] == "7"
+    assert translation.properties["spark.executor.memory"] == "3584m"
+    assert "spark.task.cpus" not in translation.properties
+
+
+def test_several_families_share_one_worker_shape_sized_for_the_heaviest() -> None:
+    profile = build_profile(
+        [_fit(wall_s=2.0, cpu_s=2.0)] * 5
+        + [_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=12.0)] * 5
+    )
+    plan, translation = resources.plan_dataproc_cluster(
+        profile, ["statistical", "ml"], 400, machine_type="n1-standard-8"
+    )
+    assert plan.family == "statistical+ml"
+    assert translation.properties["spark.task.cpus"] == "6"  # the 6-core ML family sets it
+    assert translation.tasks_per_executor == 1
+
+
+def test_a_gpu_cluster_plans_against_the_card_its_machine_type_carries() -> None:
+    profile = build_profile(
+        [_fit(family="deep_learning", model_type="neuralprophet", peak_gpu_bytes=4 * _GIB)] * 5
+    )
+    plan, translation = resources.plan_dataproc_cluster(
+        profile,
+        ["deep_learning"],
+        200,
+        machine_type="n1-standard-8",
+        accelerators=1,
+        gpu=True,
+        device_bytes=16 * _GIB,
+    )
+    assert plan.unit.accelerators == 1
+    # A quarter of a 16 GiB T4 per cell → 4 cells the card allows, 3 the 7 cores can spell.
+    assert translation.tasks_per_executor == 3
+    assert plan.slots_per_unit == translation.tasks_per_executor
+
+
+def test_the_cluster_fleet_is_sized_off_the_density_the_properties_spell() -> None:
+    """A fleet sized off a density the job never grants is the bug this whole seam prevents."""
+    profile = build_profile(
+        [_fit(family="deep_learning", model_type="neuralprophet", peak_gpu_bytes=4 * _GIB)] * 5
+    )
+    plan, translation = resources.plan_dataproc_cluster(
+        profile,
+        ["deep_learning"],
+        480,
+        machine_type="n1-standard-8",
+        accelerators=1,
+        gpu=True,
+        device_bytes=16 * _GIB,
+    )
+    assert plan.slots_per_unit == translation.tasks_per_executor
+    assert tasks_for_ceiling(plan) <= 480
+
+
+def test_an_operator_cap_replaces_the_default_spend_ceiling() -> None:
+    _plan, tight = resources.plan_dataproc_cluster(
+        None, ["statistical"], 1000, machine_type="n1-standard-8", max_workers=4
+    )
+    assert tight.worker_count == 4
+    _plan, wide = resources.plan_dataproc_cluster(
+        None, ["statistical"], 1000, machine_type="n1-standard-8", max_workers=40
+    )
+    assert wide.worker_count == wide.ideal_workers == 18
+    assert wide.notes == ()
+
+
+def test_a_cap_below_the_dataproc_floor_is_raised_to_it() -> None:
+    """Two workers is Dataproc's own floor for a standard cluster — not ours to undercut."""
+    _plan, out = resources.plan_dataproc_cluster(
+        None, ["statistical"], 1000, machine_type="n1-standard-8", max_workers=1
+    )
+    assert out.worker_count == 2
+
+
+def test_an_empty_cluster_run_provisions_the_floor_and_nothing_more() -> None:
+    _plan, out = resources.plan_dataproc_cluster(
+        None, ["statistical"], 0, machine_type="n1-standard-8"
+    )
+    assert (out.worker_count, out.ideal_workers) == (2, 0)

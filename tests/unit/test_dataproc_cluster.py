@@ -281,6 +281,86 @@ def test_gpu_worker_unknown_type_raises() -> None:
         dataproc_cluster._gpu_worker("A100")
 
 
+# --- worker_machine_type / cluster_sizing ---------------------------------------
+
+
+def test_the_worker_machine_is_read_from_one_place_by_both_readers() -> None:
+    """`build_cluster` provisions against it and `cluster_sizing` sizes the executor for it."""
+    assert dataproc_cluster.worker_machine_type("cpu") == "n1-standard-8"
+    assert dataproc_cluster.worker_machine_type("gpu") == "n1-standard-8"  # a T4 rides an n1
+    assert dataproc_cluster.worker_machine_type("gpu", "L4") == "g2-standard-8"
+    with pytest.raises(ConfigError, match="unsupported gpu_type"):
+        dataproc_cluster.worker_machine_type("gpu", "A100")
+
+
+def test_profiling_off_sizes_nothing_and_falls_back_to_the_old_cluster() -> None:
+    # The documented escape hatch: mode="off" restores the pre-profiler two-worker cluster with
+    # no job overlay at all.
+    cfg = _cfg(
+        data={"source_table": "t", "horizon": 7, "series_limit": 100},
+        compute={"profile": {"mode": "off"}},
+    )
+    assert dataproc_cluster.cluster_sizing(cfg) == (None, {})
+
+
+def test_the_cluster_sizing_shapes_the_executor_to_the_worker_it_will_run_on() -> None:
+    cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 100})
+    workers, props = dataproc_cluster.cluster_sizing(cfg)
+    # One executor per n1-standard-8 worker, minus the core YARN keeps for the AppMaster.
+    assert props["spark.executor.cores"] == "7"
+    # Unlike the batch overlay, memory is always stated — Dataproc bakes a stale default
+    # otherwise (see resources.translate_cluster).
+    assert props["spark.executor.memory"] == "3584m"
+    assert props["spark.executorEnv.OMP_NUM_THREADS"] == "1"
+    assert props["spark.dynamicAllocation.maxExecutors"] == str(workers)
+
+
+def test_the_cluster_sizing_sizes_against_tasks_not_cells() -> None:
+    # 100 series x 2 models = 200 cells -> ceil(200/8) = 25 buckets. Seven cells at a time per
+    # worker x 8 target each = 56, so one worker suffices and Dataproc's own floor of two stands.
+    cfg = _cfg(
+        data={"source_table": "t", "horizon": 7, "series_limit": 100},
+        compute={"bucket_target_cells": 8},
+    )
+    workers, _props = dataproc_cluster.cluster_sizing(cfg)
+    assert workers == 2
+
+
+def test_the_cluster_sizing_widens_with_the_fan_out_and_stops_at_the_cap() -> None:
+    cfg = _cfg(
+        data={"source_table": "t", "horizon": 7, "series_limit": 20_000},
+        compute={"bucket_target_cells": 8},
+    )
+    wide, _props = dataproc_cluster.cluster_sizing(cfg)
+    capped, _props = dataproc_cluster.cluster_sizing(cfg, max_workers=3)
+    assert wide > 2
+    assert capped == 3
+
+
+def test_the_cluster_sizing_sizes_to_the_executed_subset_not_the_whole_config() -> None:
+    # Below the spend cap on both sides, so the comparison is the arithmetic and not the clamp.
+    cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 1_000})
+    full, _props = dataproc_cluster.cluster_sizing(cfg)
+    subset, _props = dataproc_cluster.cluster_sizing(cfg, ["theta"])
+    assert 2 < subset < full < 10
+
+
+def test_a_gpu_cluster_bounds_the_cells_that_share_the_card() -> None:
+    # The whole point of the cluster translation: without spark.task.cpus a 7-core executor would
+    # run seven neuralprophet cells on one T4 whatever fraction the config asked for.
+    cfg = _cfg(
+        models=["neuralprophet"],
+        data={"source_table": "t", "horizon": 7, "series_limit": 100},
+        compute={"gpu_fraction": 0.5},
+    )
+    _workers, props = dataproc_cluster.cluster_sizing(cfg, hardware="gpu", gpu_type="T4")
+    assert props["spark.task.cpus"] == "3"  # 7 // 3 = 2 cells on the card
+    # Withheld deliberately: Dataproc leaves YARN GPU isolation off, so a resource request the
+    # NodeManager never advertises fails every executor at launch.
+    assert "spark.executor.resource.gpu.amount" not in props
+    assert "spark.task.resource.gpu.amount" not in props
+
+
 # --- build_job -----------------------------------------------------------------
 
 
@@ -337,6 +417,36 @@ def test_build_job_use_venv_points_python_at_absolute_venv() -> None:
     assert list(ps.archive_uris) == []
     assert ps.properties["spark.pyspark.python"] == "/opt/sf-venv/bin/python"
     assert ps.properties["spark.pyspark.driver.python"] == "/opt/sf-venv/bin/python"
+
+
+def test_build_job_carries_the_sizing_overlay() -> None:
+    job = dataproc_cluster.build_job(
+        cluster="sf-cluster-run-abc",
+        launcher_uri="gs://c/spark_main.py",
+        package_uri="gs://c/pkg.zip",
+        config_uri="gs://c/run.json",
+        settings=_settings(),
+        properties={"spark.executor.cores": "7", "spark.task.cpus": "3"},
+    )
+    props = dict(job.pyspark_job.properties)
+    assert props["spark.executor.cores"] == "7"
+    assert props["spark.task.cpus"] == "3"
+
+
+def test_the_venv_interpreter_pins_win_over_any_sizing_overlay() -> None:
+    """A shape decision must never displace the interpreter — that would run bare Python."""
+    job = dataproc_cluster.build_job(
+        cluster="sf-cluster-run-abc",
+        launcher_uri="gs://c/spark_main.py",
+        package_uri="gs://c/pkg.zip",
+        config_uri="gs://c/run.json",
+        settings=_settings(),
+        use_venv=True,
+        properties={"spark.pyspark.python": "/usr/bin/python3", "spark.executor.cores": "7"},
+    )
+    props = dict(job.pyspark_job.properties)
+    assert props["spark.pyspark.python"] == "/opt/sf-venv/bin/python"
+    assert props["spark.executor.cores"] == "7"
 
 
 def test_build_job_without_venv_stays_bare() -> None:

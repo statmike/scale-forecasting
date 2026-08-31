@@ -35,7 +35,6 @@ act on it live in `ray_engine`.
 from __future__ import annotations
 
 import math
-import re
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 from ..resources import (
     RuntimeResourcePlan,
     UnitShape,
+    machine_cores,
     machine_memory_bytes,
     merge_slots,
     plan_fleet,
@@ -303,16 +303,6 @@ class RayClusterPlan:
         return self.cpu_node_count + self.gpu_node_count
 
 
-def _machine_cores(machine_type: str) -> int:
-    """Cores implied by a GCE machine type like ``n1-standard-8`` → 8 (pure; default 8).
-
-    Reads the trailing integer of a ``<family>-<class>-<cores>`` name. Custom/typeless names or an
-    unparseable suffix fall back to 8 (a reasonable N1 default) so sizing never divides by zero.
-    """
-    m = re.search(r"-(\d+)$", machine_type)
-    return int(m.group(1)) if m else 8
-
-
 def _accelerator_type(gpu_type: str) -> str:
     """Map the config's short ``gpu_type`` (``T4``/``L4``) to the Vertex accelerator enum (pure)."""
     try:
@@ -399,7 +389,7 @@ def plan_pool(
     **``profile=None`` reproduces the pre-profiler arithmetic exactly**, which is the property
     that lets this replace the old inline sizing rather than sit beside it. With no measurement a
     slot is one core, no memory request, and — on the GPU pool — `_sizing_fraction`, so
-    ``slots_per_unit`` collapses to `_machine_cores` on the CPU side and to
+    ``slots_per_unit`` collapses to `resources.machine_cores` on the CPU side and to
     ``accelerator_count x gpu_slots_per_device(fraction)`` on the GPU side: the two expressions
     `plan_cluster` used to compute inline.
 
@@ -415,7 +405,7 @@ def plan_pool(
     """
     machine_type = cfg.compute.ray_gpu_machine_type if gpu else cfg.compute.ray_cpu_machine_type
     unit = UnitShape(
-        cores=_machine_cores(machine_type),
+        cores=machine_cores(machine_type),
         memory_bytes=machine_memory_bytes(machine_type),
         accelerators=cfg.compute.accelerator_count if gpu else 0,
     )

@@ -36,9 +36,11 @@ _log = get_logger(__name__)
 # Debian 12, matching the Serverless runtime so on-cluster and batch code run the same stack.
 _DEFAULT_IMAGE_VERSION = "2.2-debian12"
 
-# A small default cluster — dynamic allocation scales executors within it, so the node count is a
-# ceiling, not a fixed fan-out. Tunable later; kept off the config for now so the run_id digest is
-# unchanged (a per-run cluster size is a config change, deferred with shared-cluster sizing).
+# The cluster a run gets when nothing sized it — `cluster_sizing` derives a worker count from the
+# fan-out and only falls back here when profiling is switched off. A cluster's workers bill from
+# create to delete, so unlike a Serverless batch the ceiling *is* this number: there is no
+# Dataproc autoscaling policy behind it, and the honest statement of that is a derived, clamped
+# count rather than a policy we do not have. Kept off the config so the run_id digest is unchanged.
 _DEFAULT_WORKER_COUNT = 2
 _DEFAULT_MASTER_MACHINE = "n1-standard-4"
 _DEFAULT_WORKER_MACHINE = "n1-standard-8"
@@ -304,25 +306,100 @@ def build_cluster(
     )
 
 
-def _gpu_worker(gpu_type: str | None) -> tuple[str, list[Any]]:
-    """The (worker machine type, [AcceleratorConfig]) for a GPU cluster worker (pure).
+def worker_machine_type(hardware: str, gpu_type: str | None = None) -> str:
+    """The GCE machine type this run's workers get (pure).
 
-    Raises on an unknown ``gpu_type`` — a Dataproc cluster supports T4 or L4 (unlike Serverless,
-    which is L4-only).
+    The one place the answer lives, because `build_cluster` provisions against it and
+    `cluster_sizing` sizes the executor that will run on it — two readings of the same fact,
+    and a fleet sized for a machine other than the one created is a silent mis-shape. Raises on
+    an unknown ``gpu_type``: a Dataproc cluster supports T4 or L4 (unlike Serverless, L4-only).
     """
-    from google.cloud import dataproc_v1 as dataproc
-
+    if hardware != "gpu":
+        return _DEFAULT_WORKER_MACHINE
     gt = gpu_type or "T4"
     try:
-        machine = _GPU_WORKER_MACHINE[gt]
-        accel_type = _GPU_ACCELERATOR_TYPE[gt]
+        return _GPU_WORKER_MACHINE[gt]
     except KeyError:
         raise ConfigError(
             f"unsupported gpu_type '{gt}' for a Dataproc cluster; "
             f"supported: {sorted(_GPU_WORKER_MACHINE)}"
         ) from None
-    accel = dataproc.AcceleratorConfig(accelerator_type_uri=accel_type, accelerator_count=1)
+
+
+def _gpu_worker(gpu_type: str | None) -> tuple[str, list[Any]]:
+    """The (worker machine type, [AcceleratorConfig]) for a GPU cluster worker (pure)."""
+    from google.cloud import dataproc_v1 as dataproc
+
+    machine = worker_machine_type("gpu", gpu_type)
+    accel = dataproc.AcceleratorConfig(
+        accelerator_type_uri=_GPU_ACCELERATOR_TYPE[gpu_type or "T4"], accelerator_count=1
+    )
     return machine, [accel]
+
+
+def cluster_sizing(
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+    max_workers: int | None = None,
+) -> tuple[int | None, dict[str, str]]:
+    """``(worker count, job properties)`` this run's shape implies (pure; ``(None, {})`` when off).
+
+    The cluster analog of `submit.sizing_properties`, and it returns one thing more: a batch's
+    fleet is entirely a property, while a cluster's ceiling is a physical worker count fixed at
+    create — so the caller feeds the count to `build_cluster` and the properties to `build_job`.
+    `resources.plan_dataproc_cluster` does the arithmetic; this only assembles its inputs.
+
+    **The unit sized against is a task, not a cell** — the bucket count
+    (`engines.spark_io.default_bucket_count`), each bucket holding
+    ``compute.bucket_target_cells`` cells that run *sequentially* in one pandas frame. Sizing
+    against cells would ask for that many times more workers than the fan-out can keep busy, and
+    on a cluster an idle worker is a billed VM rather than an unclaimed quota slot.
+
+    **No measurement is involved yet, and most of the win does not need any.** There is no
+    submit-side probe (the fleetwide pre-pass runs on the Spark driver, by which point the
+    cluster exists), so the memory *split* is unmeasured — but the executor shape, the
+    thread pins, the device-aware ``spark.task.cpus`` and the worker count all follow from the
+    machine type and the fan-out alone.
+
+    ``max_workers`` is the operator's ceiling; ``compute.profile.mode == "off"`` returns
+    ``(None, {})``, the documented escape hatch back to the pre-profiler two-worker cluster.
+    """
+    if cfg.compute.profile.mode == "off":
+        return None, {}
+
+    # `device_memory_bytes` lives with the Ray engine because that is where the device table is
+    # maintained; one table, consulted by every runtime, beats a second copy that drifts.
+    from .engines.ray_io import device_memory_bytes
+    from .engines.spark_io import default_bucket_count
+    from .models import get_model
+    from .resources import plan_dataproc_cluster
+
+    executed = models if models is not None else cfg.models
+    families: list[str] = []
+    for name in executed:
+        family = get_model(name).family
+        if family not in families:
+            families.append(family)
+
+    gpu = hardware == "gpu"
+    fraction = cfg.compute.gpu_fraction
+    _plan, translation = plan_dataproc_cluster(
+        None,
+        families,
+        default_bucket_count(cfg, executed),
+        machine_type=worker_machine_type(hardware, gpu_type),
+        # Every GPU cluster we build attaches exactly one card per worker (`_gpu_worker`).
+        accelerators=1 if gpu else 0,
+        gpu=gpu,
+        device_bytes=device_memory_bytes(gpu_type or cfg.compute.gpu_type) if gpu else None,
+        static_gpu_fraction=float(fraction) if isinstance(fraction, float) else None,
+        max_workers=max_workers,
+    )
+    _log.info("cluster sizing: %s", translation.to_dict())
+    return translation.worker_count, translation.properties
 
 
 def build_job(
@@ -335,6 +412,7 @@ def build_job(
     models: list[str] | None = None,
     manage_header: bool = True,
     use_venv: bool = False,
+    properties: dict[str, str] | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Job`` (a PySpark job placed on ``cluster``) (pure).
 
@@ -348,18 +426,25 @@ def build_job(
     interpreter is delivered by the *cluster* (init action), not attached to the *job* — job
     ``archive_uris`` reach only executors, never the client-mode driver. Without ``use_venv`` the
     job runs the cluster's bare Python (no model libraries), so it's required for a forecast job.
+
+    ``properties`` is the sizing overlay (`cluster_sizing`), applied over the interpreter pins so
+    a shape decision can never displace the interpreter the venv init action landed. Left
+    ``None`` — every pure-builder test, and any run with profiling off — the job carries exactly
+    the properties it carried before, and the cluster's own ``spark-defaults`` stand.
     """
     from google.cloud import dataproc_v1 as dataproc
 
     args = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
-    properties: dict[str, str] = dict(_VENV_JOB_PROPERTIES) if use_venv else {}
+    job_properties: dict[str, str] = dict(properties or {})
+    if use_venv:
+        job_properties.update(_VENV_JOB_PROPERTIES)
     return dataproc.Job(
         placement=dataproc.JobPlacement(cluster_name=cluster),
         pyspark_job=dataproc.PySparkJob(
             main_python_file_uri=launcher_uri,
             python_file_uris=[package_uri],
             args=args,
-            properties=properties,
+            properties=job_properties,
         ),
     )
 
@@ -536,7 +621,8 @@ def submit_cluster_job(
     spark_cluster_name: str | None = None,
     spark_cluster_region: str | None = None,
     job_id: str | None = None,
-    worker_count: int = _DEFAULT_WORKER_COUNT,
+    worker_count: int | None = None,
+    max_workers: int | None = None,
     wait: bool = True,
 ) -> tuple[str, str]:
     """Stage code + config, run a PySpark job on a Dataproc cluster; return ``(job id, region)``.
@@ -563,6 +649,12 @@ def submit_cluster_job(
     submits to (and the cluster is torn down in) the region the create landed in. On the reuse path
     ``spark_cluster_region`` names the region the reuse target lives in (a shared cluster may have
     hopped; defaults to the deployment region for a standing cluster); no failover, no teardown.
+
+    ``worker_count`` left ``None`` (every caller today) derives the cluster's size from the run's
+    fan-out (`cluster_sizing`), bounded by ``max_workers``; an explicit number overrides the
+    derivation outright. The job carries the matching executor/task overlay either way — on the
+    reuse path the count is moot (the cluster exists) but the overlay still applies, which is what
+    keeps a family's own shape correct on a cluster sized for the union of several.
     """
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -573,6 +665,11 @@ def submit_cluster_job(
     name = cluster_name(run_id, spark_cluster_name)
     reuse = spark_cluster_name is not None
     venv_archive_uri = _resolve_cluster_deps(cfg, infra)
+    derived_workers, job_properties = cluster_sizing(
+        cfg, models, hardware=hardware, gpu_type=gpu_type, max_workers=max_workers
+    )
+    workers = worker_count if worker_count is not None else derived_workers
+    workers = workers if workers is not None else _DEFAULT_WORKER_COUNT
 
     package_uri, launcher_uri = _stage_code(infra)
     config_uri = _stage_config(cfg, run_id, infra)
@@ -587,7 +684,7 @@ def submit_cluster_job(
         name,
         reuse,
         hardware,
-        worker_count,
+        workers,
     )
 
     if reuse:
@@ -608,7 +705,7 @@ def submit_cluster_job(
                 "project_id": project_id,
                 "hardware": hardware,
                 "gpu_type": gpu_type,
-                "worker_count": worker_count,
+                "worker_count": workers,
                 "venv_archive_uri": venv_archive_uri,
                 "venv_init_uri": venv_init_uri,
                 "gpu_image_uri": infra.gpu_image_uri,
@@ -629,6 +726,7 @@ def submit_cluster_job(
             models=models,
             manage_header=manage_header,
             use_venv=True,
+            properties=job_properties,
         )
         submitted_id, state_name, detail = _submit_job_and_wait(
             job_client, project_id, region, job, wait=wait
@@ -655,7 +753,9 @@ def provision_shared_cluster(
     gpu_type: str | None = None,
     settings: Settings | None = None,
     infra: BatchInfra | None = None,
-    worker_count: int = _DEFAULT_WORKER_COUNT,
+    models: list[str] | None = None,
+    worker_count: int | None = None,
+    max_workers: int | None = None,
 ) -> tuple[str, str]:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
     """Create one shared ephemeral Dataproc cluster for a run's families; return ``(name, region)``.
 
@@ -672,6 +772,11 @@ def provision_shared_cluster(
     create/delete) and tears it down once via `teardown_shared_cluster` after all families join.
     Like the single-family path the create walks zone/region candidates (`compute_fallback`), so
     the returned region may differ from the deployment region on a capacity hop.
+
+    Sized like the single-family path: ``models`` is the union of the cluster families' models —
+    the only ones that will ever land here — so the worker count follows *their* fan-out rather
+    than the whole run's (a run whose native/Ray families dwarf its Spark ones would otherwise buy
+    idle VMs). ``worker_count`` overrides the derivation; ``max_workers`` caps it.
     """
     from .settings import Settings
 
@@ -680,11 +785,20 @@ def provision_shared_cluster(
     name = cluster_name(run_id, None)
     venv_archive_uri = _resolve_cluster_deps(cfg, infra)
     venv_init_uri = _stage_cluster_init(infra)
+    derived_workers, _properties = cluster_sizing(
+        cfg,
+        models,
+        hardware="gpu" if use_gpu else "cpu",
+        gpu_type=gpu_type,
+        max_workers=max_workers,
+    )
+    workers = worker_count if worker_count is not None else derived_workers
+    workers = workers if workers is not None else _DEFAULT_WORKER_COUNT
     _log.info(
         "provisioning shared Dataproc cluster %s: use_gpu=%s workers=%d",
         name,
         use_gpu,
-        worker_count,
+        workers,
     )
     candidates = resolve_candidates(settings=settings, infra=infra)
     landed = _create_cluster_across_candidates(
@@ -697,7 +811,7 @@ def provision_shared_cluster(
             "project_id": settings.project_id,
             "hardware": "gpu" if use_gpu else "cpu",
             "gpu_type": gpu_type,
-            "worker_count": worker_count,
+            "worker_count": workers,
             "venv_archive_uri": venv_archive_uri,
             "venv_init_uri": venv_init_uri,
             "gpu_image_uri": infra.gpu_image_uri,

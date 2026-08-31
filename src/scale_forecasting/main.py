@@ -212,7 +212,9 @@ def _shared_ray_cluster(
         ray_submit.teardown_shared_cluster(name, region, settings)
 
 
-def _shared_spark_inputs(python_jobs: list[FamilyJob]) -> tuple[bool, str | None] | None:
+def _shared_spark_inputs(
+    python_jobs: list[FamilyJob],
+) -> tuple[list[str], bool, str | None] | None:
     """The union sizing inputs for a run's ephemeral Dataproc cluster families, or ``None`` if fewer
     than two.
 
@@ -220,10 +222,12 @@ def _shared_spark_inputs(python_jobs: list[FamilyJob]) -> tuple[bool, str | None
     cluster (``spark_mode="cluster"`` with no standing ``spark_cluster_name``) — the case that would
     otherwise have each family both create *and* tear down the shared run-derived
     ``sf-cluster-<run_id>`` name, so a family finishing first deletes the cluster out from under the
-    others. Returns whether **any** of them needs a GPU pool and the GPU type to size it (the first
-    GPU family's) — the inputs to one shared cluster. Fewer than two ephemeral cluster families (or
-    none) returns ``None`` and keeps the proven per-family lifecycle (a single family has no
-    collision risk; a family naming a standing cluster already reuses).
+    others. Returns the union of those families' models, whether **any** of them needs a GPU pool,
+    and the GPU type to size it (the first GPU family's) — the inputs to one shared cluster. The
+    models are only the *cluster* families': a run whose Ray or BigQuery-native families dwarf its
+    Spark ones must not buy workers for work that never lands here. Fewer than two ephemeral cluster
+    families (or none) returns ``None`` and keeps the proven per-family lifecycle (a single family
+    has no collision risk; a family naming a standing cluster already reuses).
     """
     cluster_jobs = [
         j
@@ -235,14 +239,16 @@ def _shared_spark_inputs(python_jobs: list[FamilyJob]) -> tuple[bool, str | None
     ]
     if len(cluster_jobs) < 2:
         return None
+    models: list[str] = []
     any_gpu = False
     gpu_type: str | None = None
     for j in cluster_jobs:
         assert j.compute is not None  # a Python family always resolves compute
+        models.extend(j.models)
         if j.compute.hardware == "gpu":
             any_gpu = True
             gpu_type = gpu_type or j.compute.gpu_type
-    return any_gpu, gpu_type
+    return models, any_gpu, gpu_type
 
 
 @contextmanager
@@ -267,9 +273,14 @@ def _shared_spark_cluster(
         return
     from .dataproc_cluster import provision_shared_cluster, teardown_shared_cluster
 
-    any_gpu, gpu_type = inputs
+    models, any_gpu, gpu_type = inputs
     name, region = provision_shared_cluster(
-        cfg, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
+        cfg,
+        run_id=run_id,
+        use_gpu=any_gpu,
+        gpu_type=gpu_type,
+        settings=settings,
+        models=models,
     )
     try:
         yield (name, region)
