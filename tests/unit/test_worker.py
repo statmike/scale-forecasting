@@ -238,3 +238,53 @@ def test_per_series_hpo_tunes_and_records_best_params() -> None:
     res = run_cell(_series(), "theta", cfg)
     assert res.status == "ok"
     assert set(res.best_params) == {"deseasonalize"}
+
+
+# --- harvested measurement (compute.profile.measure) -----------------------------
+
+
+def test_a_successful_cell_records_what_it_cost() -> None:
+    """Harvest is the default: a completed run is the evidence a later run is sized from."""
+    result = run_cell(_series(), "theta", _cfg())
+    assert result.status == "ok"
+    assert result.cpu_seconds is not None and result.cpu_seconds >= 0.0
+    assert result.n_obs == 120
+    # Absolute footprint, not this cell's increment — the number that sizes a slot.
+    assert result.process_rss_bytes is None or result.process_rss_bytes > 0
+
+
+def test_measurement_off_leaves_every_axis_null_rather_than_zero() -> None:
+    """``0`` is a measurement; NULL is the absence of one, and only one of them is true here."""
+    result = run_cell(_series(), "theta", _cfg(compute={"profile": {"measure": "off"}}))
+    assert result.status == "ok"
+    assert result.cpu_seconds is None
+    assert result.process_rss_bytes is None
+    assert result.peak_gpu_bytes is None
+    assert result.intraop_threads is None
+    assert result.n_obs is None
+    # The wall clock is not part of the opt-in — it always was, and the trace needs it.
+    assert result.fit_seconds > 0.0
+
+
+def test_profiling_off_vetoes_measurement_even_when_measure_asks_for_it() -> None:
+    """One switch turns the whole feature off; ``measure`` cannot re-enable it behind it."""
+    cfg = _cfg(compute={"profile": {"mode": "off", "measure": "controlled"}})
+    assert run_cell(_series(), "theta", cfg).cpu_seconds is None
+
+
+def test_a_failed_cell_carries_no_measurement_because_it_never_fit_anything() -> None:
+    """An error cell's zero elapsed is exactly how the harvest reader infers failure."""
+    result = run_cell(_series(), "no_such_model", _cfg(models=["no_such_model"]))
+    assert result.status == "error"
+    assert result.cpu_seconds is None
+    assert result.fit_seconds == 0.0
+
+
+def test_the_thread_cap_in_force_is_recorded_so_effective_cores_can_be_read_honestly(
+    monkeypatch: Any,
+) -> None:
+    """cpu/wall under a cap reports the cap back; without the cap recorded that is invisible."""
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    assert run_cell(_series(), "theta", _cfg()).intraop_threads == 3
+    monkeypatch.delenv("OMP_NUM_THREADS")
+    assert run_cell(_series(), "theta", _cfg()).intraop_threads is None

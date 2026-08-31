@@ -196,6 +196,42 @@ def test_metadata_row_carries_cell_timing_and_worker() -> None:
     assert bare["cell_started_at"] is None and bare["cell_ended_at"] is None
 
 
+def test_metadata_row_carries_the_harvested_measurement() -> None:
+    # A completed run *is* a profile (`profiling.harvest_profile`), which only works if the cost
+    # every cell already paid lands on the row next to the forecast it produced.
+    row = bq.assemble_metadata_row(
+        _result(
+            cpu_seconds=4.5,
+            process_rss_bytes=2 * 1024**3,
+            peak_gpu_bytes=1024**3,
+            intraop_threads=2,
+            n_obs=730,
+        ),
+        _CREATED,
+    )
+    assert row["cpu_seconds"] == 4.5
+    assert row["process_rss_bytes"] == 2 * 1024**3
+    assert row["peak_gpu_bytes"] == 1024**3
+    assert row["intraop_threads"] == 2
+    assert row["n_obs"] == 730
+
+
+def test_an_unmeasured_cell_writes_nulls_which_is_also_how_older_rows_read_back() -> None:
+    # This is why the harvest reader needs no version check: "measurement was off" and "this row
+    # predates the columns" are the same NULLs, and both mean "no evidence", not "zero".
+    row = bq.assemble_metadata_row(_result(), _CREATED)
+    measured = ("cpu_seconds", "process_rss_bytes", "peak_gpu_bytes", "intraop_threads", "n_obs")
+    for column in measured:
+        assert row[column] is None, column
+
+
+def test_every_measurement_column_is_declared_in_the_write_api_spec() -> None:
+    # A key the assembler emits that `_META_SPEC` does not type is dropped silently by the
+    # Storage Write API — the measurement would vanish between the worker and the table.
+    typed = {name for name, _ in bq._META_SPEC}
+    assert set(bq.assemble_metadata_row(_result(), _CREATED)) <= typed
+
+
 def test_metadata_row_carries_artifact_link() -> None:
     row = bq.assemble_metadata_row(_result(), _CREATED, model_artifact="gs://wh/artifacts/x/m.pkl")
     assert row["model_artifact"] == "gs://wh/artifacts/x/m.pkl"

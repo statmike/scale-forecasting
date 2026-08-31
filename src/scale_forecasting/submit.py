@@ -353,6 +353,9 @@ def sizing_properties(
         device_bytes=device_memory_bytes(gpu_type or cfg.compute.gpu_type) if gpu else None,
         static_gpu_fraction=float(fraction) if isinstance(fraction, float) else None,
         max_executors=max_executors,
+        # A controlled-measurement run wants the native thread pools uncapped, because a pinned
+        # fit can only ever report the pin back as its `effective_cores` (see resources).
+        pin_threads=not cfg.compute.profile.unpins_threads,
     )
     _log.info("serverless sizing: %s", translation.to_dict())
     return translation.properties

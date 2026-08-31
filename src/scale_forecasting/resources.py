@@ -791,6 +791,13 @@ _MIB = 1024**2
 # and the machine thrashes on N x cores threads. The profile was measured with these pinned
 # to one (`profiling._pinned_intraop_threads`), so exporting them is also what makes the
 # measurement describe the environment it is being used to size.
+#
+# The ``pin_threads=False`` escape hatch on both translators exists for exactly one caller: a
+# ``compute.profile.measure="controlled"`` run, which needs `effective_cores` to be real. The pin
+# is self-referential — with OMP_NUM_THREADS exported as ``spark.task.cpus``, a fit's measured
+# cpu/wall ratio reports the cap back rather than the parallelism the library wanted. Unpinning
+# buys that honesty at the price of oversubscription, which is why it is opt-in per run and why
+# both translators leave a note on the plan saying the shape is not a real run's shape.
 _INTRAOP_ENV_VARS = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -887,7 +894,7 @@ def _executor_counts(plan: RuntimeResourcePlan) -> tuple[int, int, int]:
 
 
 def translate_serverless(
-    plan: RuntimeResourcePlan, *, tier: str = "standard"
+    plan: RuntimeResourcePlan, *, tier: str = "standard", pin_threads: bool = True
 ) -> ServerlessTranslation:
     """Spell one `RuntimeResourcePlan` as Dataproc Serverless properties (pure).
 
@@ -950,8 +957,14 @@ def translate_serverless(
     tasks_per_executor = spark_tasks_per_executor(slot, cores)
     if task_cpus > 1:
         properties["spark.task.cpus"] = str(task_cpus)
-    for name in _INTRAOP_ENV_VARS:
-        properties[f"spark.executorEnv.{name}"] = str(task_cpus)
+    if pin_threads:
+        for name in _INTRAOP_ENV_VARS:
+            properties[f"spark.executorEnv.{name}"] = str(task_cpus)
+    else:
+        notes.append(
+            "native thread pools left uncapped so effective_cores can be measured; "
+            "executors are deliberately oversubscribed — do not size a real run from this shape"
+        )
 
     if slot.memory_bytes:
         python_mb = math.ceil(tasks_per_executor * slot.memory_bytes / _MIB)
@@ -1035,6 +1048,7 @@ def plan_serverless(
     target_cells_per_slot: int = _DEFAULT_TARGET_CELLS_PER_SLOT,
     max_executors: int | None = None,
     tier: str = "standard",
+    pin_threads: bool = True,
 ) -> tuple[RuntimeResourcePlan, ServerlessTranslation]:
     """Size a Serverless batch and spell it as properties, in one call (pure).
 
@@ -1085,6 +1099,7 @@ def plan_serverless(
     first = translate_serverless(
         plan_fleet(sized_for(widest), runtime="serverless", n_cells=n_cells, unit=widest),
         tier=tier,
+        pin_threads=pin_threads,
     )
 
     unit = serverless_unit(first.executor_cores, gpu=gpu)
@@ -1104,7 +1119,7 @@ def plan_serverless(
         max_units=max(_SERVERLESS_MIN_EXECUTORS, ceiling),
         density=per_unit,
     )
-    return plan, translate_serverless(plan, tier=tier)
+    return plan, translate_serverless(plan, tier=tier, pin_threads=pin_threads)
 
 
 # --- Dataproc cluster: the worker is the unit, and it is billed whole ----------
@@ -1247,7 +1262,7 @@ def _cluster_task_cpus(
     return max(1, min(cores, max(slot.cores, narrowest)))
 
 
-def translate_cluster(plan: RuntimeResourcePlan) -> ClusterTranslation:
+def translate_cluster(plan: RuntimeResourcePlan, *, pin_threads: bool = True) -> ClusterTranslation:
     """Spell one `RuntimeResourcePlan` as Dataproc **cluster** job properties (pure).
 
     The third algebra over the same three measured numbers. The Serverless inversion does not
@@ -1297,8 +1312,14 @@ def translate_cluster(plan: RuntimeResourcePlan) -> ClusterTranslation:
     # axis while under-packed on another.
     if task_cpus > 1:
         properties["spark.task.cpus"] = str(task_cpus)
-    for name in _INTRAOP_ENV_VARS:
-        properties[f"spark.executorEnv.{name}"] = str(task_cpus)
+    if pin_threads:
+        for name in _INTRAOP_ENV_VARS:
+            properties[f"spark.executorEnv.{name}"] = str(task_cpus)
+    else:
+        notes.append(
+            "native thread pools left uncapped so effective_cores can be measured; "
+            "executors are deliberately oversubscribed — do not size a real run from this shape"
+        )
 
     if pool_mb is None:
         notes.append("worker machine type unparseable; cluster memory defaults left in place")
@@ -1361,6 +1382,7 @@ def plan_dataproc_cluster(
     static_gpu_fraction: float | None = None,
     target_cells_per_slot: int = _DEFAULT_TARGET_CELLS_PER_SLOT,
     max_workers: int | None = None,
+    pin_threads: bool = True,
 ) -> tuple[RuntimeResourcePlan, ClusterTranslation]:
     """Size a Dataproc cluster and spell it as job properties, in one call (pure).
 
@@ -1418,4 +1440,4 @@ def plan_dataproc_cluster(
         max_units=ceiling,
         density=per_unit,
     )
-    return plan, translate_cluster(plan)
+    return plan, translate_cluster(plan, pin_threads=pin_threads)

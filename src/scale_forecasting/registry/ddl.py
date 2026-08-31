@@ -94,7 +94,12 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   created_at     TIMESTAMP NOT NULL,
   worker_id      STRING,
   cell_started_at TIMESTAMP,
-  cell_ended_at  TIMESTAMP
+  cell_ended_at  TIMESTAMP,
+  cpu_seconds    FLOAT64,
+  process_rss_bytes INT64,
+  peak_gpu_bytes INT64,
+  intraop_threads INT64,
+  n_obs          INT64
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id, model_type""",

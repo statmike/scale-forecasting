@@ -34,7 +34,7 @@ old value goes stale by definition.
 | `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
-| `run_id_inputs` | `+compute.profile` | W5 (2026-08-31) | pre-profile-config |
+| `run_id_inputs` | `+compute.profile.measure` | W10 (2026-08-31) | `+compute.profile` (W5) |
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
@@ -164,7 +164,8 @@ Things that are true today and that no entry above covers. Keep this list short 
   W5 nothing yet *reads* `compute.profile`. What was lost is narrower and worth naming — the ids
   above remain valid pointers *into* the registry, but you can no longer recompute one *from* its
   config to find it. Re-running any of 01–06 will record a new id, at which point the old one
-  becomes purely historical.
+  becomes purely historical. W10 moved every id a second time by adding `compute.profile.measure`;
+  the same reasoning applies unchanged, and no row is stale for it.
   The change that *did* make live results stale arrived at W7b/W8, and it was not the one predicted
   here. This note used to say the staleness event would be W6, "when `profile.mode='auto'` starts
   actually sizing fleets from measurement." That never happened and now never will in that form —
@@ -178,8 +179,17 @@ Things that are true today and that no entry above covers. Keep this list short 
   offers 100, so both take the `None` path. Both Spark paths pass `None` unconditionally and
   structurally must — `spark.executor.cores` and `spark.task.cpus` are fixed at submit or at create,
   before any of our code runs on the cluster. So `profiling.measure_fit` and `build_profile` are
-  unit-tested against injected measurements and have never measured anything real. Profiler W10–W13
-  is the work that changes this; W12 is where it first executes live.
+  unit-tested against injected measurements and have never measured anything real.
+
+  **W10 changed what the next live run will do, but not this gap.** Harvest is now on by default:
+  every cell records its CPU time, absolute process memory, peak device bytes, thread cap and
+  `n_obs` onto `forecast_metadata`, and `profiling.harvest_profile` aggregates those rows into the
+  same `ComputeProfile` the pre-pass would have built. All of it is offline-proven only. Nothing has
+  yet run on a real executor, so three things stay unverified until a live run: that the probes
+  return sane numbers on Dataproc and Vertex rather than zeros or nulls, that the five columns
+  auto-migrate onto the existing deployed `forecast_metadata`, and that the per-cell overhead is
+  genuinely negligible at 100k scale. W12 is where that is settled; W11 (consuming a harvest to size
+  a later run) and W13 (shipping a baseline) both depend on it.
 
 ## Provenance confidence
 

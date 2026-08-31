@@ -177,6 +177,20 @@ def test_additive_columns_include_trace_timing_columns() -> None:
     assert meta["cell_ended_at"] == "TIMESTAMP"
 
 
+def test_the_measurement_columns_auto_migrate_onto_an_existing_forecast_metadata() -> None:
+    # All five are nullable, so a deployment that predates them picks them up from
+    # `render_migrations` without a hand-written ALTER — which is the whole point of deriving
+    # the migration from the same table body the CREATE renders.
+    meta = dict(additive_columns("forecast_metadata"))
+    assert meta["cpu_seconds"] == "FLOAT64"
+    assert meta["process_rss_bytes"] == "INT64"
+    assert meta["peak_gpu_bytes"] == "INT64"
+    assert meta["intraop_threads"] == "INT64"
+    assert meta["n_obs"] == "INT64"
+    stmt = render_migrations("proj.ds")["forecast_metadata"]
+    assert "ADD COLUMN IF NOT EXISTS cpu_seconds FLOAT64" in stmt
+
+
 def test_additive_columns_parse_array_type() -> None:
     # a comma-free composite type (ARRAY<STRING>) survives the comma-split of the column block.
     cols = dict(additive_columns("run_registry"))

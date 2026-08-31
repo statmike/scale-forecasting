@@ -77,7 +77,7 @@ import math
 import os
 import statistics
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -96,6 +96,7 @@ __all__ = [
     "SampleSpec",
     "SeriesStats",
     "build_profile",
+    "harvest_profile",
     "measure_fit",
     "resolve_profile",
     "select_profile_sample",
@@ -1434,6 +1435,122 @@ def build_profile(
         first_error_by_model=first_errors,
         sample=tuple(sample),
     )
+
+
+def _harvest_family(model_type: str) -> str:
+    """The compute family of ``model_type``, or ``"unknown"`` when it cannot be resolved.
+
+    Resolved from the model registry rather than persisted per row: family is a property of the
+    code, and a model that has since been re-homed should aggregate where it lives *now*. An
+    unresolvable name (a model deleted since the run) lands in ``"unknown"``, which no translator
+    consumes, so it is dropped from sizing without being hidden from the counts.
+    """
+    from .models import get_model
+
+    try:
+        return str(get_model(model_type).family)
+    except Exception:  # noqa: BLE001 - a stale model name must not sink a profile read
+        return "unknown"
+
+
+def harvest_profile(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    memory_margin: float = _DEFAULT_MEMORY_MARGIN,
+    time_margin: float = _DEFAULT_TIME_MARGIN,
+) -> ComputeProfile:
+    """Aggregate persisted ``forecast_metadata`` rows into a `ComputeProfile` (pure).
+
+    **The second producer, and the one that scales.** `build_profile` aggregates a pre-pass that
+    deliberately fits a small sample; this aggregates the fits a completed run already performed.
+    Both feed the identical aggregation, so a harvested profile and a measured one are the same
+    object and every translator consumes them the same way. The difference is only in how the
+    evidence was obtained — and this way it is obtained for free, from every cell rather than
+    from eight, on the real hardware rather than on a driver.
+
+    That is what makes "size this run like run X" a **query** instead of an artifact store: a
+    completed ``run_id`` *is* a profile, with its config, data signature and lineage already
+    recorded next to it in the registry. Nothing new to version, expire, or garbage-collect.
+
+    ``rows`` are mappings with ``forecast_metadata`` column names — from a BigQuery read, a test
+    fixture, or a committed baseline file; the function never touches BigQuery itself. Missing
+    keys read as NULL, so rows written before the measurement columns existed degrade to
+    wall-time-only evidence rather than raising.
+
+    **Two filters, both structural.** Backtest fold rows (``fold_id`` set) are skipped because
+    ``fit_seconds`` on the full-fit row already brackets the whole cell, folds included — counting
+    folds too would double-count the same work. Ensemble rows (``ensemble_id`` set) are skipped
+    because an ensemble is arithmetic over predictions, not a fit whose cost sizes a slot.
+
+    **How success is inferred, since ``forecast_metadata`` carries no status column.** A cell that
+    errored returns before its wall clock is recorded and lands with ``fit_seconds`` of zero, so a
+    usable wall time is exactly the signal that a fit happened. Those rows still count toward
+    ``n_measurements`` and ``n_failed``, so "we sized off 940 of 1000 cells" stays visible — the
+    same honesty `build_profile` gives a pre-pass, at run scale.
+    """
+    measurements: list[MeasuredFit] = []
+    family_of: dict[str, str] = {}
+    for row in rows:
+        if row.get("fold_id") is not None or row.get("ensemble_id") is not None:
+            continue
+        model_type = str(row.get("model_type") or "")
+        if not model_type:
+            continue
+        if model_type not in family_of:
+            family_of[model_type] = _harvest_family(model_type)
+        wall_s = _as_number(row.get("fit_seconds"))
+        measurements.append(
+            MeasuredFit(
+                ts_id=str(row.get("ts_id") or ""),
+                model_type=model_type,
+                family=family_of[model_type],
+                n_obs=int(_as_number(row.get("n_obs"))),
+                wall_s=wall_s,
+                cpu_s=_as_number(row.get("cpu_seconds")),
+                # The RSS *delta* axis is not harvested: it is order-dependent to the point of
+                # uselessness (see `MeasuredFit`), and 0 already means "no evidence" there. The
+                # absolute high-water — the number that actually sizes a slot — arrives on
+                # ``process_rss_bytes`` below.
+                peak_rss_bytes=0,
+                peak_gpu_bytes=_as_optional_int(row.get("peak_gpu_bytes")),
+                ok=_usable(wall_s),
+                error=None,
+                intraop_threads=_as_optional_int(row.get("intraop_threads")),
+                host_cpu_count=None,
+                rss_peak_reset=False,
+                process_rss_bytes=_as_optional_int(row.get("process_rss_bytes")),
+            )
+        )
+    return build_profile(
+        measurements, memory_margin=memory_margin, time_margin=time_margin
+    )
+
+
+def _as_number(value: Any) -> float:
+    """A row cell as a finite float, with NULL / non-numeric / non-finite all reading as ``0.0``.
+
+    Zero is already this module's "no evidence" value on every axis `_usable` guards, so a missing
+    reading needs no second representation and no branch at every call site.
+    """
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return out if math.isfinite(out) else 0.0
+
+
+def _as_optional_int(value: Any) -> int | None:
+    """A row cell as an int, preserving ``None`` — the axes where NULL means NOT MEASURED.
+
+    ``peak_gpu_bytes`` and ``process_rss_bytes`` must not collapse a missing reading to ``0``: a
+    consumer reading zero device bytes would pack ten tasks onto a device that fits two.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # --- I/O: the driver-side pre-pass ----------------------------------------------

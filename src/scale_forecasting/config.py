@@ -52,6 +52,7 @@ Hardware = Literal["cpu", "gpu"]
 GpuType = Literal["T4", "L4"]
 EnsembleMode = Literal["barrier", "microbatch"]
 ProfileMode = Literal["off", "auto", "always"]
+ProfileMeasure = Literal["off", "harvest", "controlled"]
 
 
 # --- nested config blocks ------------------------------------------------------
@@ -295,6 +296,35 @@ class ProfileConfig(BaseModel):
     # pandas — see `test_config_profile_defaults_match_profiling`.
     memory_margin: float = Field(default=1.3, gt=1.0)
     time_margin: float = Field(default=1.2, gt=1.0)
+    # What evidence this run *produces*, as distinct from what it consumes. The two are separate
+    # questions and the pre-pass framing conflated them; see the class docstring.
+    #
+    # harvest (default) — record what each cell's fit actually cost (CPU seconds, the worker's
+    #           absolute RSS high-water, peak device bytes, the thread cap in force) onto its
+    #           `forecast_metadata` row. Every run already performs these fits, so the marginal
+    #           cost is three cheap probes per cell and four scalars per row — no sample, no
+    #           pre-pass, no extra infrastructure. A completed run is then itself a profile:
+    #           `profiling.harvest_profile` aggregates those rows into the same `ComputeProfile`
+    #           the translators already consume, which is what makes "size this run like run X"
+    #           a query rather than an artifact store.
+    # controlled — harvest, and additionally do not pin the native thread pools, so
+    #           `effective_cores` measures what a model's threading actually wants instead of
+    #           reading back the pin the fleet imposed. This *changes how the run executes* and
+    #           will usually make it slower, so it is for a small deliberate sizing run, never
+    #           for production work. It is the only way to measure that axis at all.
+    # off     — record nothing. Also implied by ``mode="off"``, so one setting turns the whole
+    #           profiler off in an incident rather than two.
+    measure: ProfileMeasure = "harvest"
+
+    @property
+    def records_measurements(self) -> bool:
+        """Should this run write per-cell measurements? (``mode="off"`` vetoes ``measure``.)"""
+        return self.mode != "off" and self.measure != "off"
+
+    @property
+    def unpins_threads(self) -> bool:
+        """Should the fleet leave native thread pools uncapped so `effective_cores` is real?"""
+        return self.records_measurements and self.measure == "controlled"
 
 
 class ComputeConfig(BaseModel):

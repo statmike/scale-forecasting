@@ -273,20 +273,25 @@ worker count derived from the run's fan-out. That arithmetic runs from the confi
 `mode = "off"` is what turns it off, and that is the escape hatch to reach for if a fleet shape ever
 misbehaves in production.
 
-**Measurement is not on.** The one production call site is the Ray engine, which profiles on the head
-node and repacks its pools — and with the defaults below (`mode = "auto"`, `min_cells = 1000`) it
-does not fire for a small run. Both Spark paths never measure, and structurally cannot:
+**Measuring *inside the run that needs it* does not work on Spark, and structurally cannot.**
 `spark.executor.cores` and `spark.task.cpus` are fixed at submit (Serverless) or at create (cluster),
-before any of our code reaches the cluster. A pre-pass has nowhere to run that is both early enough
-to matter and equipped to fit a model — the submit host is deliberately lean and carries no model
-stack. So on Spark, `"auto"` and `"always"` currently size identically; only `"off"` changes anything.
+before any of our code reaches the cluster; and the submit host is deliberately lean, carrying no
+model stack to fit with. A same-run pre-pass has nowhere to run that is both early enough to matter
+and equipped to measure anything. Only the Ray engine can do it — it requests per-task `num_cpus` /
+`num_gpus` in-run against an autoscaling pool — and with the defaults below (`mode = "auto"`,
+`min_cells = 1000`) it does not fire for a small run. So on Spark, `"auto"` and `"always"` size
+identically today; only `"off"` changes anything.
 
-The direction this is heading is that a **profile becomes an artifact produced by one run and
-consumed by later ones** — you run something small, and the large run draws its settings from that
-run's measurements or from a baseline shipped with the product. When that lands, `mode` splits into a
-*source* (what evidence to consume) and a *measure* (what evidence to produce). The fields below
-describe the measurement machinery as it exists; the ones that survive that change are `samples`,
-`memory_margin` and `time_margin`.
+**So measurement is decoupled from consumption: one run produces the evidence, a later run is sized
+from it.** That is what `measure` is. Every cell of an ordinary run records what it cost — three
+cheap probes around a fit that was happening anyway — onto `forecast_metadata`. A completed `run_id`
+is therefore a measured cost model you can point a bigger run at. It is on by default, because the
+run you wish you had measured is always the one you already finished.
+
+`measure` produces; `mode` still governs whether the fleet arithmetic and any in-run measurement
+happen, and `mode = "off"` vetoes measurement too, so there is one switch that makes the whole
+feature inert. *(Consuming a past run's measurements — pointing this run at that `run_id` — is the
+next piece of work; today the harvest accumulates and `profiling.harvest_profile` reads it.)*
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|------------|---------|
@@ -295,6 +300,13 @@ describe the measurement machinery as it exists; the ones that survive that chan
 | `min_cells` | `int` | `1000` | `> 0` | The threshold `auto` compares the cell count against. |
 | `memory_margin` | `float` | `1.3` | `> 1.0` | Headroom on the measured **max**, which sizes the slot. |
 | `time_margin` | `float` | `1.2` | `> 1.0` | Headroom on the measured **median**, which sizes the fleet. |
+| `measure` | `"off"` \| `"harvest"` \| `"controlled"` | `"harvest"` | — | What evidence this run **produces**. See the table below. |
+
+| `measure` | What the run does | Use it when |
+|-----------|-------------------|-------------|
+| `"harvest"` | Records per-cell CPU time, absolute process memory, peak device bytes, the thread cap and `n_obs` onto `forecast_metadata`. Changes nothing about how the run executes. | Always — this is the default. |
+| `"controlled"` | Harvest, **plus** the Spark fleet leaves the native thread pools uncapped so a fit's measured `effective_cores` reflects the library instead of the cap. | A deliberate calibration run, and never a production one: the executors are knowingly oversubscribed, so the run is slower and its shape is not a real run's shape. The translation carries a note saying so. |
+| `"off"` | Writes NULL in all five columns. | You have a reason to skip three probes per fit. |
 
 **Why the two margins differ, and why they apply to different tails.** Over-estimating time buys
 extra slots, which costs money; under-estimating memory OOM-kills the task, which costs the run.
@@ -308,7 +320,9 @@ to prevent.
 the resource shape rather than the forecasts, so that is a deliberate choice: the config is the
 experiment record, and a run whose fleet was sized differently is not the same run for performance
 purposes. One practical consequence: adding these fields moved every pre-existing `run_id`, so a
-config saved before the profiler existed no longer re-derives the id it originally produced.
+config saved before the profiler existed no longer re-derives the id it originally produced — and
+adding `measure` moved them again. Re-running an older config produces a new `run_id` and therefore
+a new run rather than a resumed one.
 
 **None of the derived fleet arithmetic has run on live infrastructure yet.** It is offline-proven
 self-consistent — the legal-value snapping, the AM reserve, the worker derivation all have unit

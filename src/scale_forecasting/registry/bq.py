@@ -145,6 +145,14 @@ def assemble_metadata_row(
         "worker_id": result.worker_id,
         "cell_started_at": result.cell_started_at,
         "cell_ended_at": result.cell_ended_at,
+        # Harvested compute measurement (compute.profile.measure). All None when measurement is
+        # off, which is also how rows written before these columns existed read back — so
+        # `profiling.harvest_profile` needs no version check, only a NULL check.
+        "cpu_seconds": _as_float(result.cpu_seconds),
+        "process_rss_bytes": result.process_rss_bytes,
+        "peak_gpu_bytes": result.peak_gpu_bytes,
+        "intraop_threads": result.intraop_threads,
+        "n_obs": result.n_obs,
     }
     for name in METRIC_COLUMNS:
         row[name] = _as_float(result.metrics.get(name))
@@ -364,6 +372,14 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("worker_id", "S"),
     ("cell_started_at", "S"),
     ("cell_ended_at", "S"),
+    # What the fit cost, harvested from the fit the run was doing anyway (compute.profile.measure).
+    # `fit_seconds` above is the wall-clock half; together these let a completed run be read back
+    # as a `ComputeProfile` that sizes a later one — see profiling.harvest_profile.
+    ("cpu_seconds", "D"),
+    ("process_rss_bytes", "I"),
+    ("peak_gpu_bytes", "I"),
+    ("intraop_threads", "I"),
+    ("n_obs", "I"),
 )
 
 # Which assembler feeds which table, and its column spec. Driven in this one place so

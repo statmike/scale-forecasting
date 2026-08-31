@@ -1693,3 +1693,124 @@ def test_the_sample_travels_with_the_profile_for_audit() -> None:
     assert profile is not None
     assert len(profile.sample) == 3
     assert profile.sample[0].reason == "longest"
+
+
+# --- harvest: a completed run as a profile ---------------------------------------
+
+
+def _row(**over: Any) -> dict[str, Any]:
+    """One ``forecast_metadata`` row as BigQuery hands it back (a plain mapping)."""
+    row: dict[str, Any] = {
+        "ts_id": "series-a",
+        "model_type": "theta",
+        "fold_id": None,
+        "ensemble_id": None,
+        "fit_seconds": 2.0,
+        "cpu_seconds": 2.0,
+        "process_rss_bytes": _GIB,
+        "peak_gpu_bytes": None,
+        "intraop_threads": 1,
+        "n_obs": 400,
+    }
+    row.update(over)
+    return row
+
+
+def test_harvest_reaches_the_same_profile_as_the_pre_pass_from_the_same_evidence() -> None:
+    """A harvested profile is not a second kind of object; it is the same aggregation."""
+    rows = [_row(ts_id=f"s{i}", fit_seconds=1.0 + i) for i in range(4)]
+    harvested = profiling.harvest_profile(rows)
+    equivalent = build_profile(
+        [
+            MeasuredFit(
+                ts_id=f"s{i}",
+                model_type="theta",
+                family="statistical",
+                n_obs=400,
+                wall_s=1.0 + i,
+                cpu_s=2.0,
+                peak_rss_bytes=0,
+                peak_gpu_bytes=None,
+                ok=True,
+                error=None,
+                intraop_threads=1,
+                host_cpu_count=None,
+                rss_peak_reset=False,
+                process_rss_bytes=_GIB,
+            )
+            for i in range(4)
+        ]
+    )
+    assert harvested == equivalent
+
+
+def test_harvest_is_a_pure_function_of_the_row_set() -> None:
+    """Sizing is snapshotted for audit; a profile that depends on row order is a bug."""
+    rows = [_row(ts_id=f"s{i}", fit_seconds=1.0 + i, model_type="theta") for i in range(6)]
+    shuffled = list(rows)
+    random.Random(11).shuffle(shuffled)
+    assert profiling.harvest_profile(shuffled) == profiling.harvest_profile(rows)
+
+
+def test_harvest_skips_backtest_folds_because_the_full_fit_row_already_brackets_them() -> None:
+    """``fit_seconds`` on the full-fit row covers the folds; counting both double-counts."""
+    rows = [_row(), *[_row(fold_id=i, fit_seconds=99.0) for i in range(5)]]
+    profile = profiling.harvest_profile(rows)
+    assert profile.n_measurements == 1
+    assert profile.models["theta"].median_wall_s == 2.0
+
+
+def test_harvest_skips_ensemble_rows_because_arithmetic_is_not_a_fit() -> None:
+    """An ensemble combines predictions; its cost never sizes a model's slot."""
+    rows = [_row(), _row(model_type="ensemble_mean", ensemble_id="abc", fit_seconds=50.0)]
+    profile = profiling.harvest_profile(rows)
+    assert set(profile.models) == {"theta"}
+
+
+def test_a_row_with_no_wall_time_is_read_as_a_failed_fit_and_still_counted() -> None:
+    """``forecast_metadata`` has no status column: an error cell lands with zero elapsed."""
+    rows = [_row(), _row(ts_id="bad", fit_seconds=0.0, cpu_seconds=None, n_obs=None)]
+    profile = profiling.harvest_profile(rows)
+    assert (profile.n_measurements, profile.n_ok) == (2, 1)
+    assert profile.sample_ts_ids == ("series-a",)
+    assert profile.models["theta"].median_wall_s == 2.0
+
+
+def test_a_run_that_recorded_nothing_still_sizes_on_the_wall_clock_it_always_had() -> None:
+    """Rows predating the measurement columns must degrade, not raise."""
+    rows = [
+        {"ts_id": "s1", "model_type": "theta", "fit_seconds": 3.0},
+        {"ts_id": "s2", "model_type": "theta", "fit_seconds": 5.0},
+    ]
+    profile = profiling.harvest_profile(rows)
+    assert profile.models["theta"].median_wall_s == 4.0
+    assert profile.models["theta"].max_process_rss_bytes is None
+    assert profile.models["theta"].max_peak_gpu_bytes is None
+
+
+def test_a_missing_device_reading_stays_absent_rather_than_becoming_zero_bytes() -> None:
+    """``0`` device bytes is a plan — to pack unlimited tasks onto one card. NULL is not."""
+    profile = profiling.harvest_profile([_row(peak_gpu_bytes=None)])
+    assert profile.models["theta"].max_peak_gpu_bytes is None
+    assert profile.models["theta"].max_process_rss_bytes == _GIB
+
+
+def test_a_model_deleted_since_the_run_lands_in_unknown_rather_than_sinking_the_read() -> None:
+    """Family is resolved from today's registry, so a stale name must degrade quietly."""
+    profile = profiling.harvest_profile([_row(model_type="no_such_model_ever")])
+    assert set(profile.families) == {"unknown"}
+
+
+def test_harvest_carries_the_margins_it_was_given() -> None:
+    """The margins are the caller's decision, exactly as on the pre-pass path."""
+    profile = profiling.harvest_profile([_row()], memory_margin=1.75, time_margin=1.5)
+    assert (profile.memory_margin, profile.time_margin) == (1.75, 1.5)
+
+
+def test_non_finite_and_junk_readings_read_as_no_evidence_rather_than_raising() -> None:
+    """A NaN that reached the table must not become a fleet size."""
+    profile = profiling.harvest_profile(
+        [_row(fit_seconds=float("nan")), _row(ts_id="s2", fit_seconds="oops")]
+    )
+    assert profile.n_ok == 0
+    assert profile.models == {}

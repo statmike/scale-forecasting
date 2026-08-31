@@ -397,6 +397,9 @@ def cluster_sizing(
         device_bytes=device_memory_bytes(gpu_type or cfg.compute.gpu_type) if gpu else None,
         static_gpu_fraction=float(fraction) if isinstance(fraction, float) else None,
         max_workers=max_workers,
+        # See the same call in `submit.serverless_properties`: a controlled-measurement run
+        # unpins the native thread pools so `effective_cores` measures the library, not the cap.
+        pin_threads=not cfg.compute.profile.unpins_threads,
     )
     _log.info("cluster sizing: %s", translation.to_dict())
     return translation.worker_count, translation.properties

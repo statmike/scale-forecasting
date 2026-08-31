@@ -68,6 +68,21 @@ class CellResult:
     # boundary as plain data with no local-fs lifecycle; the registry writer uploads it to GCS and
     # stamps the ObjectRef onto forecast_metadata.model_artifact for model-artifact lineage.
     artifact_bytes: bytes | None = None
+    # --- harvested compute measurement (compute.profile.measure) -------------------------------
+    # What this cell cost, recorded so a completed run can size a later one. All None/0 when
+    # measurement is off, which is also how a row written before these columns existed reads.
+    # `fit_seconds` above is the wall-clock half of the same measurement, so it is not repeated.
+    cpu_seconds: float | None = None  # time.process_time delta — sums across threads
+    # The worker process's ABSOLUTE RSS high-water, not this cell's increment. Deliberate: a slot
+    # must hold the interpreter, the libraries and the fit together, and the increment swings 17x
+    # on the order cells happened to run in (see profiling.MeasuredFit). Monotone within a worker,
+    # so MAX across a family's cells is exactly the slot size that family needs.
+    process_rss_bytes: int | None = None
+    peak_gpu_bytes: int | None = None  # torch.cuda high-water; None == NOT MEASURED, never zero
+    # The native-thread cap in force while this cell ran (OMP_NUM_THREADS). Without it
+    # cpu_seconds/fit_seconds is uninterpretable: under a cap the ratio reports the cap back.
+    intraop_threads: int | None = None
+    n_obs: int | None = None  # rows fed to the fit — the data signature a later run matches on
 
 
 def _worker_id() -> str:
@@ -78,6 +93,59 @@ def _worker_id() -> str:
     identical everywhere.
     """
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _intraop_threads() -> int | None:
+    """The native-thread cap this process is running under, or None when nothing caps it.
+
+    Read from the environment rather than inferred, because that is where the fleet actually
+    sets it: `resources` exports ``OMP_NUM_THREADS`` (and its four siblings) to
+    ``spark.task.cpus`` on every Spark job, and Ray exports it to a task's ``num_cpus``. A cell
+    that records the cap it ran under is a cell whose `effective_cores` can be read honestly
+    later; one that does not is a number that silently repeats the pin back to you.
+    """
+    raw = os.environ.get("OMP_NUM_THREADS")
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def _process_rss_bytes() -> int | None:
+    """This worker process's absolute RSS high-water in bytes, or None where unmeasurable.
+
+    Delegates to the probe `profiling` already owns, imported lazily because `profiling` imports
+    *this* module (``measure_fit`` drives ``run_cell``) — a module-level import would be a cycle.
+    The lazy call is a ``sys.modules`` hit after the first cell.
+    """
+    from .profiling import _rss_bytes
+
+    return _rss_bytes()
+
+
+_gpu_probe_useful: bool | None = None  # None = not yet asked; False = no accelerator here
+
+
+def _peak_gpu_bytes() -> int | None:
+    """Peak CUDA bytes this process has allocated, or None when NOT MEASURED.
+
+    ``None`` on every no-accelerator path, never ``0`` — a consumer that read a missing device
+    as zero would compute a minimum GPU fraction and pack ten tasks onto a device that fits two.
+
+    The "is there a GPU" half of the answer is cached per process because the probe's cheap case
+    is not cheap at cell scale: a *failed* ``import torch`` is not memoized in ``sys.modules``, so
+    on a CPU-only Spark worker every one of a hundred thousand cells would re-walk ``sys.path``.
+    Neither torch's presence nor a device's appears mid-process, so one ask settles it; only the
+    high-water *value* is re-read, and only where a device actually exists.
+    """
+    global _gpu_probe_useful
+    if _gpu_probe_useful is False:
+        return None
+    from .profiling import _peak_gpu_bytes as probe
+
+    peak = probe()
+    _gpu_probe_useful = peak is not None
+    return peak
 
 
 def _compute_engine(model_cls: type[BaseModel], cfg: RunConfig) -> str:
@@ -198,6 +266,14 @@ def run_cell(
         return _error(repr(e), cfg.python_runtime)
 
     engine = _compute_engine(model_cls, cfg)
+    # Harvest: record what this fit costs so a later run can be sized from it. Three cheap probes
+    # around work the run was doing anyway — no sample, no pre-pass. Neither RSS nor the CUDA
+    # high-water is reset first: the absolute peak is the number that sizes a slot (see
+    # `CellResult.process_rss_bytes`), and resetting would also perturb whatever else shares this
+    # worker. `intraop_threads` is captured before the fit because that is when it is in force.
+    measuring = cfg.compute.profile.records_measurements
+    intraop_threads = _intraop_threads() if measuring else None
+    cpu_started = time.process_time()
     started = time.perf_counter()
     try:
         # Fit the transform's stateful λ once per cell (None for none/log1p), on the raw target.
@@ -235,6 +311,8 @@ def run_cell(
             except Exception as e:  # noqa: BLE001 - persistence is best-effort, never fatal
                 _log.warning("serialize failed for %s/%s: %r", ts_id, model_name, e)
 
+        fit_seconds = time.perf_counter() - started
+        cpu_seconds = time.process_time() - cpu_started
         return CellResult(
             run_id=run_id,
             ts_id=ts_id,
@@ -247,11 +325,16 @@ def run_cell(
             oof=oof,
             metrics=metrics,
             best_params=model.get_params(),
-            fit_seconds=time.perf_counter() - started,
+            fit_seconds=fit_seconds,
             worker_id=worker_id,
             cell_started_at=cell_started_at,
             cell_ended_at=datetime.now(UTC),
             artifact_bytes=artifact_bytes,
+            cpu_seconds=cpu_seconds if measuring else None,
+            process_rss_bytes=_process_rss_bytes() if measuring else None,
+            peak_gpu_bytes=_peak_gpu_bytes() if measuring else None,
+            intraop_threads=intraop_threads,
+            n_obs=len(series) if measuring else None,
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(repr(e), engine)

@@ -316,6 +316,45 @@ def test_profile_is_frozen_and_rejects_unknown_keys() -> None:
         RunConfig(**_minimal_dict(compute={"profile": {"sample": 4}}))
 
 
+@pytest.mark.parametrize("measure", ["off", "harvest", "controlled"])
+def test_every_measurement_mode_is_accepted(measure: str) -> None:
+    cfg = RunConfig(**_minimal_dict(compute={"profile": {"measure": measure}}))
+    assert cfg.compute.profile.measure == measure
+
+
+def test_an_unknown_measurement_mode_is_rejected_at_load() -> None:
+    with pytest.raises(ValidationError):
+        RunConfig(**_minimal_dict(compute={"profile": {"measure": "sometimes"}}))
+
+
+def test_measurement_is_on_by_default_because_a_run_you_forgot_to_profile_is_the_common_case()\
+        -> None:
+    """Harvest costs three probes per cell; needing it and not having it costs a whole run."""
+    assert RunConfig(**_minimal_dict()).compute.profile.records_measurements is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "measure", "records", "unpins"),
+    [
+        ("auto", "harvest", True, False),
+        ("auto", "controlled", True, True),
+        ("auto", "off", False, False),
+        # `mode="off"` is the master switch: it vetoes measurement whatever `measure` says, so
+        # there is exactly one knob to reach for to make the feature inert.
+        ("off", "controlled", False, False),
+        ("off", "harvest", False, False),
+        ("always", "controlled", True, True),
+    ],
+)
+def test_the_two_derived_switches_agree_with_the_two_knobs(
+    mode: str, measure: str, records: bool, unpins: bool
+) -> None:
+    profile = RunConfig(
+        **_minimal_dict(compute={"profile": {"mode": mode, "measure": measure}})
+    ).compute.profile
+    assert (profile.records_measurements, profile.unpins_threads) == (records, unpins)
+
+
 def test_profile_is_part_of_the_run_id() -> None:
     """The config *is* the experiment record; a differently-sized fleet is a different run.
 

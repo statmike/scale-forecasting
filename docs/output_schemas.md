@@ -104,6 +104,27 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `best_params` | `JSON` | Winning hyperparameters when HPO ran (else NULL). |
 | `model_artifact` | `STRING` | GCS ObjectRef to the persisted model (`persist_models=true`), else NULL. `no_artifact_rate=1.0` in the leaderboard = no cell produced an artifact. |
 | `created_at` | `TIMESTAMP` | When the row was written. |
+| `worker_id` | `STRING` | `hostname:pid` of the worker that ran the cell — the trace's lane. |
+| `cell_started_at`, `cell_ended_at` | `TIMESTAMP` | The cell's wall-clock bracket (Gantt/waterfall). |
+| `cpu_seconds` | `FLOAT64` | CPU time the fit consumed, summed across threads. With `fit_seconds` this gives `effective_cores` — how much parallelism the library actually used. |
+| `process_rss_bytes` | `INT64` | The worker process's **absolute** memory high-water while the cell ran — not the cell's increment. This is the number that sizes an executor slot. |
+| `peak_gpu_bytes` | `INT64` | Peak device bytes allocated. NULL means *no device*, never zero. |
+| `intraop_threads` | `INT64` | The native-thread cap in force (`OMP_NUM_THREADS`). Without it `cpu_seconds / fit_seconds` is uninterpretable — under a cap the ratio just reports the cap back. |
+| `n_obs` | `INT64` | Rows fed to the fit — the data signature a later run matches against. |
+
+### Sizing a future run from a past one
+
+The last five columns are the **compute harvest**. Every cell records what it cost, on the
+hardware it really ran on, so a completed `run_id` doubles as a measured cost model: point
+`profiling.harvest_profile` at those rows and it aggregates them into the same `ComputeProfile` the
+deliberate pre-pass produces, which the fleet translators then size from. Nothing extra is stored
+and nothing extra is versioned — the profile is a query over a run.
+
+Harvest is on by default (`compute.profile.measure`, see
+[configuration_reference.md](./configuration_reference.md)); it costs three cheap probes per fit.
+All five read NULL when it is off — which is also how rows written before these columns existed read
+back, so both mean "no evidence" rather than "zero". A cell that errored has `fit_seconds = 0`,
+which is how the reader tells a failed fit from a measured one (there is no `status` column here).
 
 ## `forecast_predictions` — the forecast values
 

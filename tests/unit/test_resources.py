@@ -1219,3 +1219,55 @@ def test_an_empty_cluster_run_provisions_the_floor_and_nothing_more() -> None:
         None, ["statistical"], 0, machine_type="n1-standard-8"
     )
     assert (out.worker_count, out.ideal_workers) == (2, 0)
+
+
+# --- the thread pin, and the one run that has to turn it off ---------------------
+
+
+_INTRAOP_KEYS = frozenset(f"spark.executorEnv.{n}" for n in resources._INTRAOP_ENV_VARS)
+
+
+def _intraop(properties: dict[str, str]) -> dict[str, str]:
+    """Just the native-thread-cap exports out of a translation's properties."""
+    return {k: v for k, v in properties.items() if k in _INTRAOP_KEYS}
+
+
+def test_both_spark_translators_pin_native_threads_by_default() -> None:
+    """Unpinned, N python workers each grab the whole executor and it thrashes."""
+    serverless = resources.plan_serverless(None, ["statistical"], 800)[1]
+    cluster = resources.plan_dataproc_cluster(
+        None, ["statistical"], 800, machine_type="n1-standard-8"
+    )[1]
+    for translation in (serverless, cluster):
+        exported = _intraop(translation.properties)
+        assert exported, "the pin is the default, on both Spark paths"
+        assert set(exported.values()) == {
+            translation.properties.get("spark.task.cpus", "1")
+        }
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        lambda pin: resources.plan_serverless(None, ["statistical"], 800, pin_threads=pin)[1],
+        lambda pin: resources.plan_dataproc_cluster(
+            None, ["statistical"], 800, machine_type="n1-standard-8", pin_threads=pin
+        )[1],
+    ],
+    ids=["serverless", "cluster"],
+)
+def test_a_controlled_measurement_run_can_unpin_them_and_says_so_on_the_plan(plan: Any) -> None:
+    """The pin is self-referential: a pinned fit can only report the pin back as its cores.
+
+    Unpinning is therefore the only way to measure `effective_cores`, and it is also not the
+    shape of a real run — so the translation has to carry that warning with it rather than
+    leaving a note in a design document.
+    """
+    unpinned = plan(False)
+    assert _intraop(unpinned.properties) == {}
+    assert any("effective_cores" in note for note in unpinned.notes)
+    # Everything else about the fleet is untouched — only the exports changed.
+    pinned = plan(True)
+    assert {k: v for k, v in unpinned.properties.items() if k not in _INTRAOP_KEYS} == {
+        k: v for k, v in pinned.properties.items() if k not in _INTRAOP_KEYS
+    }
