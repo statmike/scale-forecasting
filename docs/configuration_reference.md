@@ -257,17 +257,40 @@ for the proven fixed-size path (no autoscaling spec). See the Ray runtime in
 Sizing is otherwise a pure cell **count** (`n_series × n_models × n_folds`, divided by a flat
 cells-per-slot constant). That arithmetic cannot know that a deep-learning fit and a naive mean
 differ by orders of magnitude, so the fleet is provisioned for the count rather than for the work.
-`compute.profile` replaces the guess with a short instrumented pre-pass: fit a stratified sample of
-series, measure what they actually consumed, and size each family's slot from the measurement.
+`compute.profile` is the machinery for replacing that guess with a measurement.
 
 Think of it as the general form of `gpu_calibration_samples` / `gpu_safety_margin` above, which
-already do exactly this for one axis (GPU bytes), one model, one runtime. Both remain: the GPU axis
-needs a GPU, so it keeps refining on-cluster after creation, while the CPU / memory / time axes are
-measured on the driver at submit time — which is when the fleet has to be sized.
+already do exactly this for one axis (GPU bytes), one model, one runtime.
+
+#### What this actually does today — read this before setting anything
+
+Two things are true at once, and conflating them will mislead you.
+
+**Fleet shaping is on, everywhere, and it does not need a measurement.** Every Spark job now carries
+a derived properties overlay: executor cores, heap and memoryOverhead, the dynamic-allocation band,
+`spark.task.cpus` bounded by the accelerator, matching thread pins, and — on a Dataproc cluster — a
+worker count derived from the run's fan-out. That arithmetic runs from the config alone. Setting
+`mode = "off"` is what turns it off, and that is the escape hatch to reach for if a fleet shape ever
+misbehaves in production.
+
+**Measurement is not on.** The one production call site is the Ray engine, which profiles on the head
+node and repacks its pools — and with the defaults below (`mode = "auto"`, `min_cells = 1000`) it
+does not fire for a small run. Both Spark paths never measure, and structurally cannot:
+`spark.executor.cores` and `spark.task.cpus` are fixed at submit (Serverless) or at create (cluster),
+before any of our code reaches the cluster. A pre-pass has nowhere to run that is both early enough
+to matter and equipped to fit a model — the submit host is deliberately lean and carries no model
+stack. So on Spark, `"auto"` and `"always"` currently size identically; only `"off"` changes anything.
+
+The direction this is heading is that a **profile becomes an artifact produced by one run and
+consumed by later ones** — you run something small, and the large run draws its settings from that
+run's measurements or from a baseline shipped with the product. When that lands, `mode` splits into a
+*source* (what evidence to consume) and a *measure* (what evidence to produce). The fields below
+describe the measurement machinery as it exists; the ones that survive that change are `samples`,
+`memory_margin` and `time_margin`.
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|------------|---------|
-| `mode` | `"off"` \| `"auto"` \| `"always"` | `"auto"` | — | `off` sizes from static config exactly as before (the escape hatch). `auto` measures only when the fan-out is large enough to repay the pre-pass. `always` measures unconditionally. |
+| `mode` | `"off"` \| `"auto"` \| `"always"` | `"auto"` | — | `off` disables **both** the derived fleet overlay and any measurement — the escape hatch, and the only value that changes a Spark run today. `auto` measures when the cell count reaches `min_cells`; `always` measures unconditionally. Both currently affect the Ray path only. |
 | `samples` | `int` | `8` | `> 0` | Series fitted in the pre-pass, spread across length/complexity strata. |
 | `min_cells` | `int` | `1000` | `> 0` | The threshold `auto` compares the cell count against. |
 | `memory_margin` | `float` | `1.3` | `> 1.0` | Headroom on the measured **max**, which sizes the slot. |
@@ -284,7 +307,14 @@ to prevent.
 `compute.profile` is part of the `run_id` digest, like everything else under `compute`. It changes
 the resource shape rather than the forecasts, so that is a deliberate choice: the config is the
 experiment record, and a run whose fleet was sized differently is not the same run for performance
-purposes.
+purposes. One practical consequence: adding these fields moved every pre-existing `run_id`, so a
+config saved before the profiler existed no longer re-derives the id it originally produced.
+
+**None of the derived fleet arithmetic has run on live infrastructure yet.** It is offline-proven
+self-consistent — the legal-value snapping, the AM reserve, the worker derivation all have unit
+tests — but Dataproc has never been asked to accept it. See
+[Validation ledger](./validation.md), where the Spark rows are currently `STALE` for exactly this
+reason.
 
 ### `compute.families` — per-family runtime & hardware
 

@@ -257,15 +257,20 @@ class ProfileConfig(BaseModel):
     experiment record, and a run whose fleet was sized differently is not the same run for
     performance purposes. Silently varying the shape under a stable id would be the worse trade.
 
-    **Not yet connected, and the "pre-pass" framing above is what has to change.** The measurement
-    (`profiling.build_profile`) and all three fleet translations exist and are unit-tested, but no
-    production path calls them: ``submit.sizing_properties`` and ``dataproc_cluster.cluster_sizing``
-    both pass ``None``. A pre-pass cannot work where this is read from — the fleet is already fixed
-    by then (see the note at the ``ComputeConfig.profile`` field). The settled direction is that a
-    profile is produced by one run and consumed by later ones, which will split ``mode`` into a
-    *source* (what evidence to consume) and a *measure* (what evidence to produce). Until that
-    lands, every value of ``mode`` sizes identically; only ``"off"`` is load-bearing, and it also
-    suppresses the static-arithmetic overlay.
+    **Connected on one runtime out of three, and the "pre-pass" framing is what has to change.**
+    ``engines/ray_engine`` calls `profiling.resolve_profile` and sizes its pools from the result —
+    that works, because a Ray task's ``num_cpus``/``num_gpus`` is a request made in-run against an
+    autoscaling pool. Both Spark paths pass ``None`` (``submit.sizing_properties``,
+    ``dataproc_cluster.cluster_sizing``) and structurally must: ``spark.executor.cores`` and
+    ``spark.task.cpus`` are fixed at submit (Serverless) or at create (cluster), before any of our
+    code runs out there. So on Spark the measurement is sized from static arithmetic, and on Ray it
+    can only repack a pool that already exists.
+
+    The settled direction is that a profile is **produced by one run and consumed by later ones**,
+    splitting ``mode`` into a *source* (what evidence to consume) and a *measure* (what evidence to
+    produce). Until that lands, ``"auto"`` and ``"always"`` differ only on the Ray path; on Spark
+    every value sizes identically and only ``"off"`` is load-bearing, where it also suppresses the
+    static-arithmetic overlay.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -393,8 +398,10 @@ class ComputeConfig(BaseModel):
     # has to happen before the fleet exists. That ordering is the whole constraint — a fleet is
     # fixed at submit (Serverless) or at create (cluster, Ray pool), and the submit host is kept
     # deliberately lean (no model stack, a 2-vCPU Composer worker), so there is nowhere in *this*
-    # run to take the measurement. Measurements therefore come from an earlier run. See
-    # `ProfileConfig`.
+    # run to take a measurement that could resize it. Ray is the partial exception: per-task
+    # num_cpus/num_gpus is requested in-run, so `ray_engine` really does profile and repack — but
+    # within a pool that is already provisioned. Measurements that size a fleet therefore have to
+    # come from an earlier run. See `ProfileConfig`.
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
     # How the Ray driver reads the source panel. Both paths hit the SAME BigQuery Storage Read API
     # (no query slots, matching Spark) and yield the SAME driver-side pandas panel, so the

@@ -35,10 +35,26 @@ old value goes stale by definition.
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
 | `run_id_inputs` | `+compute.profile` | W5 (2026-08-31) | pre-profile-config |
+| `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not
 declare this axis.
+
+`fleet_sizing` governs **how a Spark fleet's shape is decided**. Until W7b/W8 we stated a worker or
+executor *count* and let the platform choose everything else: Dataproc Serverless picked its own
+executor cores, memory and dynamic-allocation band, and a Dataproc cluster ran its default two
+4-core executors per worker with nothing bounding a GPU. Now `resources.translate_serverless` /
+`translate_cluster` derive an explicit shape — executor cores, memoryOverhead, the dynamic-allocation
+min/initial/max, `spark.task.cpus`, the thread pins, and a derived worker count — and submit it as a
+properties overlay. **This is a different fleet**, so any Spark result proven on the old one is a
+claim about a machine shape that no longer exists.
+
+Two runtimes do *not* declare it. **BigQuery-native** work has no fleet of ours to shape. **Ray** is
+unmoved in practice: `plan_pool(profile=None)` reproduces the pre-profiler arithmetic exactly, W1's
+autoscale-ceiling derivation only fires when `ray_autoscale` is true and all four Ray smokes pin it
+`false`, and W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
+because it submits Serverless work alongside its Ray families.
 
 ## Status values
 
@@ -56,23 +72,23 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
-| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | `serverless_deps=container-image`, `python=3.11` |
+| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | STALE | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-08-22 | `smoke-02-bq-native-7b34cfd9eb98` | `python=3.11` |
-| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | `serverless_deps=container-image`, `python=3.11` |
-| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | CURRENT | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11` |
-| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11` |
-| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11` |
+| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11` |
-| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11` |
-| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11` |
-| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11` |
-| 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-08-25 | not recorded | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11` |
-| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | CURRENT | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11` |
+| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-08-25 | not recorded | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
 
-### Why 09 and 10 are stale
+### Why almost everything Spark is stale
 
 Both ran the Ray path on the custom container image. `822ae25` deleted that path — the custom image
 fails Vertex Ray GPU provisioning, so all Ray moved to the stock prebuilt image with dependencies
@@ -80,6 +96,26 @@ delivered by Ray 2.47's `runtime_env` uv plugin. Smokes 07 and 08 were re-run on
 pass; **09 and 10 were not.** Smoke 10 is the significant loss: it was the strongest proof in the
 suite — all four families across all three runtimes under a single `run_id` — and that claim does
 not currently stand on the shipped architecture.
+
+**The Spark rows (01, 03, 04, 05, 06, 10–14 and notebooks 03, 08) went stale on 2026-08-31** when
+W7b/W8 moved `fleet_sizing`. Every one of them ran on a fleet the platform shaped; today's code
+states the shape itself. Concretely, a run that used to get Dataproc's default two 4-core executors
+per worker now gets one 7-core executor with a declared heap and overhead, a `spark.task.cpus`
+bounded by the accelerator, `OMP_NUM_THREADS` pinned to match, and a worker count derived from the
+fan-out rather than a flat two.
+
+This is a bigger downgrade than the Ray one, and it is meant to be. The staled claims are mostly
+*correctness* claims ("Serverless GPU works", "cluster reuse works"), and it is tempting to argue
+that a different executor shape cannot break them. It can. W7 pins `spark.executor.cores` and
+`spark.executor.memoryOverhead` to values snapped from the legal-value tables in the design doc, and
+an illegal or unsatisfiable pair fails the batch at submit rather than degrading quietly; W8's
+whole-worker executor is the shape that made YARN's `DominantResourceCalculator` leave the
+ApplicationMaster unplaceable until an AM reserve was carved out. Those are exactly the failures
+that only appear live. **None of the new arithmetic has run on real infrastructure even once** — the
+offline gate proves it is self-consistent, not that Dataproc accepts it.
+
+The campaign that re-earns these rows is profiler **W12**, which also does the `off`-vs-profiled A/B
+and captures the measurements the shipped baseline will carry.
 
 ## Notebooks
 
@@ -91,10 +127,10 @@ notebook reflects the current path.
 |----------|--------|------|---------------|
 | `01_spark_via_connect.ipynb` | CURRENT | 2026-08-28 | `serverless_deps=container-image`, `python=3.11` |
 | `02_bigquery_native.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
-| `03_combo_and_ensemble.ipynb` | CURRENT | 2026-08-28 | `serverless_deps=container-image`, `python=3.11` |
+| `03_combo_and_ensemble.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | `04_ray_on_vertex.ipynb` | CURRENT | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | `07_scale_review.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
-| `08_run_and_monitor.ipynb` | CURRENT | 2026-08-28 | `serverless_deps=container-image`, `python=3.11` |
+| `08_run_and_monitor.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | `09_review_run.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
 | `model_playground.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
 
@@ -129,9 +165,21 @@ Things that are true today and that no entry above covers. Keep this list short 
   above remain valid pointers *into* the registry, but you can no longer recompute one *from* its
   config to find it. Re-running any of 01–06 will record a new id, at which point the old one
   becomes purely historical.
-  The change that *will* make live results stale is W6, when `profile.mode="auto"` starts actually
-  sizing fleets from measurement. That is a behaviour change, and every performance claim predating
-  it should be re-checked; the correctness claims still stand.
+  The change that *did* make live results stale arrived at W7b/W8, and it was not the one predicted
+  here. This note used to say the staleness event would be W6, "when `profile.mode='auto'` starts
+  actually sizing fleets from measurement." That never happened and now never will in that form —
+  see the next gap. What moved the fleets was the **static** arithmetic W7/W8 wired in with the
+  profile argument left as `None`: no measurement involved, and every Spark fleet reshaped anyway.
+
+- **No live run has ever taken a compute measurement, on any runtime.** The profiler has exactly one
+  production call site — `engines/ray_engine` calls `profiling.resolve_profile` — and it has never
+  fired in a live smoke. `mode` defaults to `"auto"` with `min_cells = 1000`, no smoke config sets
+  `profile`, and the gate compares series × profilable models: smoke 07 offers 300 cells and smoke 08
+  offers 100, so both take the `None` path. Both Spark paths pass `None` unconditionally and
+  structurally must — `spark.executor.cores` and `spark.task.cpus` are fixed at submit or at create,
+  before any of our code runs on the cluster. So `profiling.measure_fit` and `build_profile` are
+  unit-tested against injected measurements and have never measured anything real. Profiler W10–W13
+  is the work that changes this; W12 is where it first executes live.
 
 ## Provenance confidence
 

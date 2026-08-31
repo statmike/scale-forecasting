@@ -127,6 +127,50 @@ plain Python-vs-native split is all that's needed.
 
 ---
 
+## Layer 2½ — compute sizing (how big a fleet, and why)
+
+Layer 2 decides *which* jobs run. This decides **how big each one is** — and it is the one concern
+that cuts across both halves of the stack, because the same arithmetic has to come out as three
+different vocabularies: Spark properties on Dataproc Serverless, Spark properties plus a worker count
+on a Dataproc cluster, and `@ray.remote` resource requests on Vertex.
+
+**One model, three translations.**
+[`resources.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/resources.py) holds the
+shared model: a `ResourceSlot` (what one unit of work needs) and a `UnitShape` (what one billable
+unit provides), turned into a fleet by dividing cells by slots. Three pure translators render it:
+
+| Service | Translator | What it emits | When it is fixed |
+|---|---|---|---|
+| Dataproc Serverless | `translate_serverless` | `spark.executor.cores` / `memoryOverhead`, the `dynamicAllocation` min/initial/max band, `executorAllocationRatio`, thread pins — all snapped to Serverless's legal value tables | **at submit** |
+| Dataproc cluster | `translate_cluster` | one executor per worker minus an ApplicationMaster reserve, `spark.task.cpus` as the density lever, a derived worker count clamped to a spend ceiling | **at create** |
+| Ray on Vertex | `ray_io.plan_pool` / `plan_cluster` | per-pool node counts and per-task `num_cpus` / `num_gpus` | pool **at create**, task resources **in-run** |
+
+**The "when it is fixed" column is the load-bearing one.** Two facts follow from it. First, Ray is
+the only runtime whose per-task shape is decided while the job is running, which is why it is the
+only one where measurement can currently feed back into packing — `engines/ray_engine` calls
+`profiling.resolve_profile` on the head node and repacks its pools from the result. Second, and more
+consequential, **there is nowhere in a Spark run to measure anything that could resize it.** The
+fleet is settled before our code reaches the cluster, and the submit host is kept deliberately lean
+(no model stack — model imports are lazy precisely so a Composer worker can run the submit path). So
+the Spark fleets are sized from arithmetic over the config, not from evidence.
+
+**Where the evidence is meant to come from.** `profiling.py` builds a `ComputeProfile` — measured
+wall time, CPU seconds, effective thread count, absolute process RSS high-water, and peak device
+bytes, aggregated across a stratified sample with an asymmetric margin (max for memory, median for
+time). Every translator already accepts one and reproduces the static arithmetic exactly when given
+`None`, which is the state Spark runs in today. The direction of travel is that a profile becomes an
+**artifact produced by one run and consumed by later ones** — run something small, and the large run
+draws its sizing from that run's measurements or from a baseline shipped with the product.
+
+**What to reach for when a fleet shape is wrong.** `compute.profile.mode = "off"` disables the whole
+derived overlay and returns to platform defaults. Individual knobs (`ray_max_nodes`,
+`max_parallelism`, `bucket_target_cells`, per-family `hardware`) still override it. See
+[`compute.profile`](./configuration_reference.md) for the fields, and the
+[validation ledger](./validation.md) for what has and has not been proven live — as of this writing,
+**none** of the derived Spark arithmetic has run on real infrastructure.
+
+---
+
 ## Layer 3 — engines (fanning out the cells)
 
 Every engine reads the same source panel, fans out cells its own way, and calls the **same** unit of
