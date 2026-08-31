@@ -1,7 +1,9 @@
 """Tests for feature engineering.
 
 Covers: log1p round-trips (apply→invert is identity), holiday parity to the `holidays`
-package, exog pass-through, lag/Fourier/holiday-flag columns, and the (y, X) shape/index.
+package, exog pass-through, lag/Fourier/holiday-flag columns, the (y, X) shape/index,
+level-shift detection, and the forecast-horizon design frame (`build_future_features`) —
+whose whole job is that deterministic columns are recomputed at the *future* dates.
 """
 
 from __future__ import annotations
@@ -16,11 +18,14 @@ import pytest
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.features import (
+    _fourier_terms,
     apply_transform,
     build_features,
+    build_future_features,
     fit_transform_lambda,
     holiday_frame,
     invert_transform,
+    level_shift_step,
 )
 
 
@@ -214,3 +219,164 @@ def test_build_features_missing_target_raises() -> None:
     bad = _series().rename(columns={"y": "value"})
     with pytest.raises(ConfigError, match="missing required columns"):
         build_features(bad, _cfg())
+
+
+# --- level shift ----------------------------------------------------------------
+
+
+def _shifted(n: int = 60, cut: int = 30, jump: float = 50.0) -> pd.Series:
+    """A flat, low-noise series with one abrupt additive jump at ``cut`` — the shape
+    `data_gen.generator` plants via ``level_shift_prob``."""
+    rng = np.random.default_rng(0)
+    values = 100.0 + rng.normal(0.0, 1.0, n)
+    values[cut:] += jump
+    return pd.Series(values, index=pd.date_range("2026-01-01", periods=n, freq="D"))
+
+
+def test_level_shift_step_finds_the_planted_changepoint() -> None:
+    step = level_shift_step(_shifted(cut=30))
+    assert step[:30].sum() == 0.0, "nothing flagged before the jump"
+    assert step[30:].all(), "every observation from the jump onward is in the new regime"
+
+
+def test_level_shift_step_is_a_step_not_a_spike() -> None:
+    """The whole point of the encoding: a regime change persists, an outlier does not."""
+    step = level_shift_step(_shifted())
+    transitions = np.flatnonzero(np.diff(step) != 0)
+    assert transitions.size == 1, f"a step changes value exactly once, saw {transitions.size}"
+
+
+def test_level_shift_step_stays_silent_on_pure_noise() -> None:
+    """A false positive hands a model a spurious regressor on a forecast nobody reviews."""
+    rng = np.random.default_rng(7)
+    quiet = pd.Series(100.0 + rng.normal(0.0, 1.0, 200))
+    assert not level_shift_step(quiet).any()
+
+
+def test_level_shift_step_zero_for_series_too_short_to_split() -> None:
+    assert level_shift_step(pd.Series([1.0, 2.0, 3.0, 4.0])).tolist() == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_level_shift_step_zero_when_series_is_constant() -> None:
+    """Zero noise scale must degrade to 'no shift', not divide by zero."""
+    assert not level_shift_step(pd.Series(np.full(40, 5.0))).any()
+
+
+def test_build_features_level_shift_column_is_opt_in() -> None:
+    frame = pd.DataFrame({"ds": _shifted().index, "y": _shifted().to_numpy()})
+    _, off = build_features(frame, _cfg(features={"fourier": True}))
+    assert off is not None and "level_shift" not in off.columns
+    _, on = build_features(frame, _cfg(features={"level_shift": True}))
+    assert on is not None and on["level_shift"].tolist() == level_shift_step(_shifted()).tolist()
+
+
+# --- the forecast-horizon design frame -------------------------------------------
+
+
+def _future_cfg(features: dict[str, Any], horizon: int = 5) -> RunConfig:
+    return _cfg(features=features, data={"horizon": horizon})
+
+
+def test_build_future_features_none_when_no_features_configured() -> None:
+    cfg = _future_cfg({})
+    y, X = build_features(_series(20), cfg)
+    assert X is None
+    assert build_future_features(y, X, cfg) is None
+
+
+def test_build_future_features_matches_training_columns_exactly() -> None:
+    """Column *order* is load-bearing: `_lag_forecaster.recursive_predict` reads exog
+    positionally, so a reordered frame feeds the wrong column to the wrong coefficient."""
+    cfg = _future_cfg(
+        {"exog": ["price_index"], "holidays": ["US"], "fourier": True, "lags": [1, 3]}
+    )
+    y, X = build_features(_series(30, with_exog=True), cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None and X is not None
+    assert list(future.columns) == list(X.columns)
+
+
+def test_build_future_features_is_indexed_by_the_future() -> None:
+    cfg = _future_cfg({"fourier": True}, horizon=5)
+    y, X = build_features(_series(30), cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None
+    assert len(future) == 5
+    assert future.index[0] == y.index[-1] + pd.Timedelta(days=1)
+    assert (future.index > y.index[-1]).all()
+
+
+def test_build_future_features_continues_the_fourier_phase() -> None:
+    """The bug this frame exists to fix: handing a model the *first* horizon rows of history
+    gave it the seasonal phase of four years ago for the dates it is forecasting."""
+    cfg = _future_cfg({"fourier": True}, horizon=5)
+    y, X = build_features(_series(400), cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None and X is not None
+    expected = _fourier_terms(pd.DatetimeIndex(future.index), cfg.data.freq, order=3)
+    for name, values in expected.items():
+        assert future[name].to_numpy() == pytest.approx(values)
+    assert not np.allclose(future["fourier_sin_1"].to_numpy(), X["fourier_sin_1"].to_numpy()[:5])
+
+
+def test_build_future_features_recomputes_holidays_at_the_future_dates() -> None:
+    # A history ending 2025-12-30 puts New Year's Day inside a 5-day horizon.
+    ds = pd.date_range("2025-11-01", periods=60, freq="D")
+    frame = pd.DataFrame({"ds": ds, "y": np.arange(1.0, 61.0)})
+    cfg = _future_cfg({"holidays": ["US"]}, horizon=5)
+    y, X = build_features(frame, cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None
+    assert future.loc[pd.Timestamp("2026-01-01"), "is_holiday"] == 1.0
+
+
+def test_build_future_features_carries_the_level_shift_forward() -> None:
+    """A regime change is still in force over the horizon — that is what makes it a shift."""
+    series = _shifted(n=60, cut=30)
+    frame = pd.DataFrame({"ds": series.index, "y": series.to_numpy()})
+    cfg = _future_cfg({"level_shift": True}, horizon=5)
+    y, X = build_features(frame, cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None
+    assert (future["level_shift"] == 1.0).all()
+
+
+def test_build_future_features_level_shift_stays_zero_when_none_detected() -> None:
+    rng = np.random.default_rng(3)
+    ds = pd.date_range("2026-01-01", periods=80, freq="D")
+    frame = pd.DataFrame({"ds": ds, "y": 100.0 + rng.normal(0.0, 1.0, 80)})
+    cfg = _future_cfg({"level_shift": True}, horizon=5)
+    y, X = build_features(frame, cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None and X is not None
+    assert not X["level_shift"].any()
+    assert not future["level_shift"].any()
+
+
+def test_build_future_features_lags_are_real_observations_then_persist() -> None:
+    cfg = _future_cfg({"lags": [3]}, horizon=5)
+    y, X = build_features(_series(20), cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None
+    lag3 = future["lag_3"].to_numpy()
+    # Steps 1..3 look back into real history; beyond that the history is persistence-extended.
+    assert lag3[:3] == pytest.approx(y.to_numpy()[-3:])
+    assert lag3[3:] == pytest.approx(np.full(2, float(y.iloc[-1])))
+
+
+def test_build_future_features_exog_falls_back_to_the_most_recent_rows() -> None:
+    """True exog is genuinely unknown; the stand-in should reflect the current regime, not
+    the oldest one in the history."""
+    cfg = _future_cfg({"exog": ["price_index"]}, horizon=5)
+    y, X = build_features(_series(20, with_exog=True), cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None and X is not None
+    assert future["price_index"].to_numpy() == pytest.approx(X["price_index"].to_numpy()[-5:])
+
+
+def test_build_future_features_handles_history_shorter_than_the_horizon() -> None:
+    cfg = _future_cfg({"exog": ["price_index"]}, horizon=10)
+    y, X = build_features(_series(4, with_exog=True), cfg)
+    future = build_future_features(y, X, cfg)
+    assert future is not None
+    assert len(future) == 10, "length follows the horizon, never the history"

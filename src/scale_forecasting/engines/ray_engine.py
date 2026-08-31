@@ -169,8 +169,14 @@ def _read_ray_data(
 
     Kept off by default (``ray_read_mode == "driver_collect"``): this is the Ray-native ingest path,
     the same Storage Read API as the proven reader, but a live Ray run should vet it before it
-    becomes the default. Distributing the panel as ``ray.data`` blocks straight into the fan-out
-    (skipping the driver round-trip) is the documented next step from here — see README / NB04.
+    becomes the default.
+
+    Keeping the panel distributed as ``ray.data`` blocks all the way into the fan-out (never
+    calling ``.to_pandas()``) is the change that would remove the driver as a memory ceiling. It is
+    **not** a small follow-up to this function: it replaces `chunk_cells` with a block-level
+    ``map_groups`` and changes what a worker is handed, so it is gated on a live Ray run at a scale
+    where the driver panel actually binds — which is precisely the scale this deployment sends to
+    Spark. See README / NB04.
     """
     import ray
 

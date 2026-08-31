@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
@@ -291,6 +292,62 @@ def test_the_worker_machine_is_read_from_one_place_by_both_readers() -> None:
     assert dataproc_cluster.worker_machine_type("gpu", "L4") == "g2-standard-8"
     with pytest.raises(ConfigError, match="unsupported gpu_type"):
         dataproc_cluster.worker_machine_type("gpu", "A100")
+
+
+def test_machine_family_selects_the_cpu_worker_and_master_family() -> None:
+    """`compute.machine_family` was declared-but-inert for a long time; this is the wiring."""
+    assert dataproc_cluster.worker_machine_type("cpu", None, "n2") == "n2-standard-8"
+    assert dataproc_cluster.worker_machine_type("cpu", None, "e2") == "e2-standard-8"
+    assert dataproc_cluster.master_machine_type("c2") == "c2-standard-4"
+
+
+def test_machine_family_auto_is_exactly_todays_behaviour() -> None:
+    """The default must render the identical cluster, or every existing config re-shapes."""
+    assert dataproc_cluster.worker_machine_type("cpu", None, "auto") == "n1-standard-8"
+    assert dataproc_cluster.master_machine_type("auto") == dataproc_cluster._DEFAULT_MASTER_MACHINE
+    assert dataproc_cluster.worker_machine_type("cpu") == dataproc_cluster._DEFAULT_WORKER_MACHINE
+
+
+def test_machine_family_is_ignored_on_gpu_because_the_accelerator_dictates_the_machine() -> None:
+    """A T4 only attaches to n1 and an L4 comes bundled in g2 — honouring a family here would ask
+    GCE for a shape it does not sell."""
+    assert dataproc_cluster.worker_machine_type("gpu", "T4", "n2") == "n1-standard-8"
+    assert dataproc_cluster.worker_machine_type("gpu", "L4", "e2") == "g2-standard-8"
+
+
+def test_build_cluster_applies_the_machine_family_to_both_instance_groups() -> None:
+    cluster = dataproc_cluster.build_cluster(
+        infra=_infra(),
+        settings=_settings(),
+        project_id="proj-x",
+        name="sf-cluster-run-abc",
+        machine_family="n2",
+    )
+    assert cluster.config.master_config.machine_type_uri == "n2-standard-4"
+    assert cluster.config.worker_config.machine_type_uri == "n2-standard-8"
+
+
+def test_machine_family_reaches_the_sizing_plan_not_just_the_provisioned_cluster() -> None:
+    """A fleet sized for a machine other than the one created is a silent mis-shape, so the
+    knob has to land in both readers."""
+    unit = {}
+    for family in ("auto", "n2"):
+        _, _, audit = dataproc_cluster.cluster_sizing(
+            _cfg(compute={"machine_family": family}), ["theta"]
+        )
+        unit[family] = audit["plans"][0]["unit"]
+    # Same 8 cores, different memory per core (n1-standard 3.75 GiB vs n2-standard 4.0) — the
+    # sizer costing the machine it will actually get.
+    assert unit["auto"]["cores"] == unit["n2"]["cores"] == 8
+    assert unit["auto"]["memory_bytes"] == 30 * 1024**3
+    assert unit["n2"]["memory_bytes"] == 32 * 1024**3
+
+
+def test_machine_family_rejects_a_family_the_sizer_cannot_price() -> None:
+    """Only families in `resources._MEMORY_PER_CORE_GIB` are offered — otherwise the profiler
+    would silently fall back to a default memory-per-core for a machine it does not know."""
+    with pytest.raises(ValidationError):
+        _cfg(compute={"machine_family": "m1"})
 
 
 def test_profiling_off_sizes_nothing_and_falls_back_to_the_old_cluster() -> None:

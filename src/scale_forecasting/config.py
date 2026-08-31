@@ -396,7 +396,14 @@ class ComputeConfig(BaseModel):
     # separately by spark.dynamicAllocation.maxExecutors). Small keeps frames tiny; large amortizes
     # write_cells over fatter batches. See engines/spark_io.default_bucket_count.
     bucket_target_cells: int = Field(default=8, gt=0)
-    machine_family: str = "auto"
+    # GCE machine family for a **Dataproc cluster's** master and CPU workers (`"auto"` = n1, the
+    # shipped default). Only families `resources._MEMORY_PER_CORE_GIB` can price are offered, so the
+    # profiler's executor sizing stays honest for whatever is picked. Deliberately narrow in two
+    # directions: the *size* is not a knob (the profiler derives cores from the fan-out), and it
+    # does not reach the GPU worker, whose machine type the accelerator dictates (a T4 rides an n1,
+    # an L4 is bundled into a g2). No-op on Serverless, which has no machine concept at all — its
+    # shape is executor cores/memory properties. See dataproc_cluster.worker_machine_type.
+    machine_family: Literal["auto", "n1", "n2", "n2d", "e2", "c2"] = "auto"
     spark_deps: Literal["packed_venv", "container"] = "packed_venv"
     # Persist each fitted model as a GCS artifact (ObjectRef in forecast_metadata.model_artifact,
     # model-artifact lineage). Off by default: at 100k×N cells the object count + write cost is

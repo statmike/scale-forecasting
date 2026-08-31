@@ -91,14 +91,25 @@ above works against both unchanged — they all go through BigQuery's table inte
 API for the Python runtimes, the query API for native), which reads either format transparently. There
 is no per-format read fork to maintain; the same code reads whichever format the deployment provisions.
 
-### Future: direct Iceberg read (not built)
+### Direct Iceberg read — a deliberate non-goal
 
 A managed-Iceberg source could in principle be read **directly** from its Parquet/metadata in object
 storage (e.g. via the Iceberg Java reader or a BigLake external path), bypassing the Storage Read API
-entirely. That could cut read cost for very wide scans, but it would add a second, format-specific
-read path and lose the uniform snapshot/time-travel semantics the current design gets for free. It is
-**documented as a future option, not implemented** — today all reads go through BigQuery's table
-interface.
+entirely. We are **not** building that, and the reason is not effort — it is that the second path
+costs more than it saves:
+
+- **It would fork the read.** Today one code path reads both formats, so there is no per-format
+  branch to keep in sync across three runtimes. A direct reader is native-vs-Iceberg forever.
+- **It would lose the snapshot semantics the design depends on.** Every source read is pinned to one
+  BigQuery time-travel timestamp so a run is reproducible and every family in a multi-runtime DAG
+  sees byte-identical input. Object-storage reads would have to re-derive that from Iceberg snapshot
+  ids — a second, weaker mechanism for a guarantee we already have for free.
+- **The saving is narrow.** It buys read cost on very wide scans. A forecasting run reads the panel
+  **once** and then fits `series × models` models on it, so the read is amortized over the
+  expensive part by construction.
+
+Revisit only if a measured run shows the source read is a material share of wall-clock or spend —
+that would be a change in the facts, not a change of mind. Until then this is closed, not pending.
 
 ---
 
@@ -108,5 +119,3 @@ interface.
   `series_limit`, and the rest of the `data`/`compute` knobs.
 - [architecture.md](./architecture.md) — how a read feeds the engine fan-out and the unit of work.
 - [output_schemas.md](./output_schemas.md) — the tables a run *writes*.
-</content>
-</invoke>

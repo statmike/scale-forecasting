@@ -162,9 +162,14 @@ flowchart TB
   *(The Ray engine reads the source panel two ways, selected by `compute.ray_read_mode`: the
   default `driver_collect` (BigQuery Storage Read API client) and the opt-in `ray_data`
   (`ray.data.read_bigquery`) — both hit the same Storage Read API, so the storage format stays
-  transparent. Distributing the read as `ray.data` blocks straight into the fan-out (skipping
-  the driver round-trip) and Spark-on-Ray (RayDP) are the documented next steps, not yet
-  shipped.)*
+  transparent. Both readers materialize one driver-side panel before the fan-out shards it —
+  a bounded choice, because Ray is the GPU/modest-scale runtime here and Spark is the
+  100k-series one; keeping the panel distributed as `ray.data` blocks all the way into the
+  fan-out is the change that would lift that ceiling, and it is gated on a live Ray run at a
+  scale that makes the driver the bottleneck.)* Spark-on-Ray (RayDP) is **out of scope**, not
+  queued: this deploys Spark and Ray as first-class peer runtimes with their own submitters,
+  so hosting one inside the other adds a third path to maintain for a consolidation benefit a
+  team already gets by choosing a runtime per family — which the config does.
 - **Scale without a bottleneck.** Workers return data, not RPCs; results are written to
   BigQuery in bulk (Storage Write API). Parallelism is bounded by compute, not a tracking
   server's QPS.

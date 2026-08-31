@@ -43,8 +43,17 @@ _DEFAULT_IMAGE_VERSION = "2.2-debian12"
 # Dataproc autoscaling policy behind it, and the honest statement of that is a derived, clamped
 # count rather than a policy we do not have. Kept off the config so the run_id digest is unchanged.
 _DEFAULT_WORKER_COUNT = 2
-_DEFAULT_MASTER_MACHINE = "n1-standard-4"
-_DEFAULT_WORKER_MACHINE = "n1-standard-8"
+
+# Core counts for the two instance groups. Fixed, not config: the profiler derives the *executor*
+# shape from the machine type, and letting a user pick both the machine and the shape gives two
+# knobs that can disagree. `compute.machine_family` picks the family; these pick the size.
+_MASTER_CORES = 4
+_WORKER_CORES = 8
+# What `machine_family="auto"` resolves to — today's shipped behaviour, so an existing config
+# renders the identical cluster (and, since the field's default is unchanged, the identical run_id).
+_AUTO_MACHINE_FAMILY = "n1"
+_DEFAULT_MASTER_MACHINE = f"{_AUTO_MACHINE_FAMILY}-standard-{_MASTER_CORES}"
+_DEFAULT_WORKER_MACHINE = f"{_AUTO_MACHINE_FAMILY}-standard-{_WORKER_CORES}"
 
 # GPU worker machine + Vertex/Compute accelerator enum per short gpu_type. A T4 is an add-on card on
 # an n1 worker; an L4 is bundled into a g2 machine. (Both still declare an AcceleratorConfig so
@@ -181,6 +190,7 @@ def build_cluster(
     gpu_image_uri: str | None = None,
     zone: str | None = None,
     subnetwork_uri: str | None = None,
+    machine_family: str = "auto",
 ) -> object:
     """Assemble the ``dataproc_v1.Cluster`` message for one run (pure — builds the message only).
 
@@ -188,7 +198,9 @@ def build_cluster(
     internal-IP-only networking (the same isolation the batch uses). ``hardware="gpu"`` puts an
     accelerator on each worker (`_GPU_WORKER_MACHINE`/`_GPU_ACCELERATOR_TYPE` by ``gpu_type``) so
     the executor's Python worker can use the device. A CPU cluster attaches no accelerator and runs
-    the default worker machine.
+    the default worker machine. ``machine_family`` (``compute.machine_family``) picks the GCE family
+    for the master and the CPU workers; a GPU worker's machine is fixed by its accelerator (see
+    `worker_machine_type`).
 
     ``zone`` and ``subnetwork_uri`` are the capacity-failover overrides (see `compute_fallback`):
     ``zone=None`` (default) lets Dataproc auto-place within the subnet's region — the pre-failover
@@ -255,7 +267,7 @@ def build_cluster(
 
     master = dataproc.InstanceGroupConfig(
         num_instances=1,
-        machine_type_uri=_DEFAULT_MASTER_MACHINE,
+        machine_type_uri=master_machine_type(machine_family),
         **image_kwargs,
     )
 
@@ -276,7 +288,7 @@ def build_cluster(
                 )
             )
     else:
-        worker_machine, accelerators = _DEFAULT_WORKER_MACHINE, []
+        worker_machine, accelerators = worker_machine_type("cpu", None, machine_family), []
 
     worker = dataproc.InstanceGroupConfig(
         num_instances=worker_count,
@@ -307,16 +319,36 @@ def build_cluster(
     )
 
 
-def worker_machine_type(hardware: str, gpu_type: str | None = None) -> str:
+def master_machine_type(machine_family: str = "auto") -> str:
+    """The GCE machine type for the cluster's master (pure). Always CPU — it schedules."""
+    return f"{_resolve_machine_family(machine_family)}-standard-{_MASTER_CORES}"
+
+
+def _resolve_machine_family(machine_family: str) -> str:
+    """``compute.machine_family`` → a GCE family prefix, with ``"auto"`` resolved (pure)."""
+    return _AUTO_MACHINE_FAMILY if machine_family == "auto" else machine_family
+
+
+def worker_machine_type(
+    hardware: str, gpu_type: str | None = None, machine_family: str = "auto"
+) -> str:
     """The GCE machine type this run's workers get (pure).
 
     The one place the answer lives, because `build_cluster` provisions against it and
     `cluster_sizing` sizes the executor that will run on it — two readings of the same fact,
     and a fleet sized for a machine other than the one created is a silent mis-shape. Raises on
     an unknown ``gpu_type``: a Dataproc cluster supports T4 or L4 (unlike Serverless, L4-only).
+
+    ``machine_family`` (``compute.machine_family``) selects the family for a **CPU** worker; the
+    size stays `_WORKER_CORES`, because the profiler derives the executor shape from the machine
+    rather than the other way round. It is **ignored on GPU**, and that is a platform fact, not an
+    oversight: the accelerator dictates the machine (a T4 is an add-on card that only attaches to
+    n1, an L4 comes bundled inside g2), so honouring a family here would ask for a shape GCE will
+    not sell. A run whose families span both hardware kinds therefore gets its CPU workers on the
+    chosen family and its GPU workers on the accelerator's — the honest answer for each.
     """
     if hardware != "gpu":
-        return _DEFAULT_WORKER_MACHINE
+        return f"{_resolve_machine_family(machine_family)}-standard-{_WORKER_CORES}"
     gt = gpu_type or "T4"
     try:
         return _GPU_WORKER_MACHINE[gt]
@@ -398,7 +430,7 @@ def cluster_sizing(
         profile,
         families,
         default_bucket_count(cfg, executed),
-        machine_type=worker_machine_type(hardware, gpu_type),
+        machine_type=worker_machine_type(hardware, gpu_type, cfg.compute.machine_family),
         # Every GPU cluster we build attaches exactly one card per worker (`_gpu_worker`).
         accelerators=1 if gpu else 0,
         gpu=gpu,
@@ -730,6 +762,7 @@ def submit_cluster_job(
                 "venv_archive_uri": venv_archive_uri,
                 "venv_init_uri": venv_init_uri,
                 "gpu_image_uri": infra.gpu_image_uri,
+                "machine_family": cfg.compute.machine_family,
             },
         )
         region = landed.region
@@ -869,6 +902,7 @@ def provision_shared_cluster(
             "venv_archive_uri": venv_archive_uri,
             "venv_init_uri": venv_init_uri,
             "gpu_image_uri": infra.gpu_image_uri,
+            "machine_family": cfg.compute.machine_family,
         },
     )
     return name, landed.region

@@ -73,7 +73,7 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
 | `exog` | `list[str]` | `[]` | Exogenous driver columns — a **started-but-unexampled** seam: consumed by `sarimax`/`ucm`/`prophet`/`lightgbm`/`xgboost`, but the shipped source is univariate (bring your own table with these columns to use it). |
 | `lags` | `list[int]` | `[]` | Lag features. |
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
-| `level_shift` | `bool` | `false` | *(Reserved — declared but not yet consumed.)* |
+| `level_shift` | `bool` | `false` | Detect one abrupt regime change and add it as a `level_shift` step dummy. |
 
 **What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py)):
 
@@ -93,8 +93,31 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
   signal for the regression-based models.
 - **`exog`** — passes named driver columns straight from the source table through to the models that
   accept exogenous regressors. See the univariate-shipped-data caveat above.
-- **`level_shift`** — reserved config flag; currently inert (declared, not yet wired into feature
-  engineering).
+- **`level_shift`** — detects a single abrupt **regime change** in the series and adds one
+  `level_shift` column: `0` before the changepoint, `1` from it onward, and `1` across the whole
+  forecast horizon. It is a **step, not a spike** — that persistence is exactly what distinguishes a
+  level shift from an outlier, and it lets a regression model absorb the jump as one coefficient
+  instead of fitting the average of two regimes and staying biased for the entire horizon. Detection
+  is a single-changepoint scan standardized by a robust (MAD-based) noise estimate, accepted only
+  above 3σ; below that the column is all zeros, because a spurious regressor on one series in ten
+  thousand is a bad forecast nobody reviews. Worth turning on when your history contains
+  re-baselinings, store openings/closings, or a unit-of-measure change — the shipped example data
+  contains them by construction (`data_gen.generator` plants one per series with archetype-specific
+  probability).
+
+**How these features are valued over the forecast horizon.** A model is fit on history and then
+asked to predict dates it has never seen, so the same feature columns have to exist for those
+dates too (`features.build_future_features`). Most of them are a deterministic function of the
+date and are therefore **recomputed exactly** at the future dates — `is_holiday` reflects the
+holidays that actually fall in the horizon, and the Fourier terms continue the real seasonal
+phase. `level_shift` is carried forward as `1`. Configured `lag_L` columns are genuine
+observations for the first `L` steps and then hold the last observed level.
+
+The one exception is **`exog`**, which is genuinely unknown until the future arrives: those
+columns fall back to the most recent `horizon` observed rows, so an exog-driven forecast is
+*indicative* rather than authoritative. To get a real forward-looking exog path, extend your
+source table past the target cutoff with the driver values (a price plan, a promo calendar, a
+published index) — the read picks them up with no config change.
 
 ## `backtest` — `BacktestConfig`
 
@@ -219,8 +242,8 @@ knobs only matter for a family that runs on Ray.
 | `families` | `dict[family → FamilyCompute]` | `{}` | keys ∈ `statistical`/`ml`/`deep_learning` | Per-family runtime/hardware overrides (see below). |
 | `max_parallelism` | `int` | `1000` | `> 0` | Max parallel tasks. |
 | `bucket_target_cells` | `int` | `8` | `> 0` | Target cells per Spark bucket (shuffle-partition sizing). |
-| `machine_family` | `str` | `"auto"` | — | *(Reserved — declared, not yet consumed.)* |
-| `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | *(Reserved — dependency delivery is currently driven by the submit helpers, not this field.)* |
+| `machine_family` | `"auto"` \| `"n1"` \| `"n2"` \| `"n2d"` \| `"e2"` \| `"c2"` | `"auto"` | — | GCE machine family for a **Dataproc cluster's** master + CPU workers (`"auto"` = `n1`). No-op on Serverless and on GPU workers — see below. |
+| `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | How a **Dataproc cluster** family gets its dependencies. `"container"` raises: it is a Serverless mechanism. See `dataproc_cluster._resolve_cluster_deps`. |
 | `persist_models` | `bool` | `false` | — | Persist each fitted model as a GCS artifact (lineage). |
 | `use_gpu` | `bool` | `false` | — | Enable GPU (Ray). |
 | `gpu_type` | `str` | `"T4"` | — | GPU accelerator type. |
@@ -243,6 +266,26 @@ knobs only matter for a family that runs on Ray.
 | `gpu_safety_margin` | `float` | `1.3` | `> 1.0` | Headroom multiplier on measured peak GPU memory. |
 | `ray_read_mode` | `"driver_collect"` \| `"ray_data"` | `"driver_collect"` | — | Ray source reader: the proven Storage Read client, or `ray.data.read_bigquery` (same Storage Read API, opt-in). |
 | `read_max_streams` | `int` | `0` | `≥ 0` | Max Storage Read streams for the source read, shared by the Spark connector (`maxParallelism`) and Ray's `driver_collect` reader (`max_stream_count`). `0` lets the server size it from the table; a positive value caps read parallelism (e.g. to fit a slot/quota budget). Inert for the `ray_data` path and BigQuery-native models. See [reading_source_data.md](./reading_source_data.md). |
+
+**`machine_family` — one knob, three deliberate boundaries.** It selects the GCE family for a
+**Dataproc cluster's** master and CPU workers (`worker_machine_type` / `master_machine_type`), and
+`"auto"` resolves to `n1` — today's shipped shape, so an existing config renders an identical
+cluster. What it does *not* do is as important:
+
+- **It does not pick a size.** Cores are fixed (master 4, workers 8) because the profiler derives
+  the executor shape *from* the machine; letting you set both gives two knobs that can disagree.
+- **It does not reach GPU workers.** The accelerator dictates the machine — a T4 is an add-on card
+  that only attaches to `n1`, an L4 is bundled inside `g2` — so a family override there would ask
+  GCE for a shape it does not sell. A run spanning both hardware kinds gets its CPU workers on your
+  family and its GPU workers on the accelerator's.
+- **It does nothing on Serverless or Ray.** Serverless has no machine concept at all (its shape is
+  executor cores/memory properties); the Ray pools have their own explicit
+  `ray_*_machine_type` knobs.
+
+The offered families are exactly those `resources` can price (`_MEMORY_PER_CORE_GIB`), so the
+sizing plan stays honest for whichever you pick — choosing `n2` moves the worker from 30 GiB to
+32 GiB and the executor split follows. An unlisted family is rejected at config load rather than at
+cluster create.
 
 **Autoscaling (default):** each Ray worker pool scales between its own `[min, max]`; a `null` pool
 max resolves to `ray_max_nodes`. Config validation requires `min ≤ resolved max` per pool. The

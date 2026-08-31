@@ -24,7 +24,12 @@ import pandas as pd
 
 from .backtest import backtest_cell
 from .errors import ConfigError, get_logger
-from .features import build_features, fit_transform_lambda, holiday_frame
+from .features import (
+    build_features,
+    build_future_features,
+    fit_transform_lambda,
+    holiday_frame,
+)
 from .metrics import METRIC_NAMES
 from .models import get_model
 from .models.base_model import PREDICTION_COLUMNS, BaseModel, ModelContext
@@ -294,11 +299,12 @@ def run_cell(
         y, X = build_features(series, cfg, lam)
         model = model_cls(resolved, ctx)
         model.fit(y, X)
-        # Offline has no *true* future exog (that arrives with a real run). As a
-        # stand-in we hand exog-aware models the first `horizon` rows of the design matrix
-        # so shapes line up; values are historical, so exog-driven forecasts are indicative
-        # only. Tree models ignore any lag_* columns here (see _lag_forecaster).
-        future_exog = X.iloc[: cfg.data.horizon] if X is not None else None
+        # The design frame for the horizon, indexed by the *future* dates: holiday flags and
+        # Fourier phase are recomputed there (exact — they are functions of the date), the
+        # level-shift step is carried forward, and only user-supplied exog falls back to a
+        # recency stand-in because it is genuinely unknown. Tree models ignore any lag_*
+        # columns here (see _lag_forecaster).
+        future_exog = build_future_features(y, X, cfg)
         predictions = model.predict(cfg.data.horizon, future_exog)
 
         # Persist the fitted model as an artifact only when the run opts in (model-artifact
