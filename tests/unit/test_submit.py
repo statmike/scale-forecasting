@@ -14,6 +14,7 @@ import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
+from scale_forecasting.profiling import MeasuredFit, build_profile
 from scale_forecasting.settings import Settings
 from scale_forecasting.submit import (
     BatchInfra,
@@ -597,13 +598,47 @@ def test_the_overlay_pins_native_thread_pools_so_tasks_do_not_thrash() -> None:
     assert props["spark.executorEnv.MKL_NUM_THREADS"] == "1"
 
 
-def test_the_overlay_asks_for_no_memory_because_nothing_measured_it() -> None:
-    # There is no submit-side probe today, so the memory axis is absent and the platform's own
-    # defaults stand — "absence is a value".
+def test_the_overlay_asks_for_no_memory_when_nothing_measured_it() -> None:
+    # There is no submit-side probe — the shape is fixed before any of our code runs on the
+    # cluster — so with no profile handed in, the memory axis is absent and the platform's own
+    # defaults stand. "Absence is a value."
     cfg = _cfg(data={"source_table": "t", "series_limit": 100})
     props = sizing_properties(cfg)
     assert "spark.executor.memory" not in props
     assert "spark.executor.memoryOverhead" not in props
+
+
+def test_a_handed_in_profile_is_what_turns_the_memory_axis_on() -> None:
+    """The consumer half, at the seam that matters: evidence in, a sized executor out.
+
+    `sizing_properties` stays pure — it is *given* a profile (resolved by
+    `profiling.profile_for_run` from `compute.profile.source`), it never goes and finds one. This
+    is the whole payoff of the harvest: a previous run's measurements are the only way this call
+    can know how much memory a fit needs, because the executor's shape is fixed at submit.
+    """
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    profile = build_profile(
+        [
+            MeasuredFit(
+                ts_id=f"s{i}",
+                model_type="theta",
+                family="statistical",
+                n_obs=400,
+                wall_s=2.0,
+                cpu_s=2.0,
+                peak_rss_bytes=0,
+                peak_gpu_bytes=None,
+                ok=True,
+                error=None,
+                intraop_threads=1,
+                process_rss_bytes=3 * 1024**3,
+            )
+            for i in range(4)
+        ]
+    )
+    props = sizing_properties(cfg, profile=profile)
+    assert "spark.executor.memory" in props
+    assert props != sizing_properties(cfg)
 
 
 def test_the_overlay_respects_an_explicit_executor_cap() -> None:

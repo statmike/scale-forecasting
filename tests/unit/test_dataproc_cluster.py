@@ -303,6 +303,40 @@ def test_profiling_off_sizes_nothing_and_falls_back_to_the_old_cluster() -> None
     assert dataproc_cluster.cluster_sizing(cfg) == (None, {})
 
 
+def test_a_handed_in_profile_reshapes_the_cluster_executor() -> None:
+    """The consumer half on the cluster path — same seam, same reason as the batch path.
+
+    A cluster's shape is fixed at *create*, so the only measurement available here is a previous
+    run's. `cluster_sizing` is handed one (by `profiling.profile_for_run`) rather than fetching it,
+    which is what keeps this function pure and offline-testable.
+    """
+    from scale_forecasting.profiling import MeasuredFit, build_profile
+
+    cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 100})
+    profile = build_profile(
+        [
+            MeasuredFit(
+                ts_id=f"s{i}",
+                model_type="theta",
+                family="statistical",
+                n_obs=400,
+                wall_s=2.0,
+                cpu_s=2.0,
+                peak_rss_bytes=0,
+                peak_gpu_bytes=None,
+                ok=True,
+                error=None,
+                intraop_threads=1,
+                process_rss_bytes=6 * 1024**3,
+            )
+            for i in range(4)
+        ]
+    )
+    assert dataproc_cluster.cluster_sizing(cfg, profile=profile) != dataproc_cluster.cluster_sizing(
+        cfg
+    )
+
+
 def test_the_cluster_sizing_shapes_the_executor_to_the_worker_it_will_run_on() -> None:
     cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 100})
     workers, props = dataproc_cluster.cluster_sizing(cfg)

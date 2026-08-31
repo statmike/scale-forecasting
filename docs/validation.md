@@ -202,6 +202,17 @@ Things that are true today and that no entry above covers. Keep this list short 
   its `provenance` block — basis, `run_id`, timestamp, signature, warnings — is the artifact to
   check when that happens.
 
+  **W11b wired it, and it is now reachable on a live run — but still unexercised.** `plan_run` /
+  `stage_run` pin `source: "auto"` to a concrete `run_id` before the digest, both Spark sizing call
+  sites take a resolved profile instead of `None`, and `registry/bq.read_compute_harvest` /
+  `discover_harvest_run` are the two queries behind it. Neither query has ever run against real
+  BigQuery, and neither can return anything until a live run has harvested — so on today's
+  deployment `auto` discovers nothing, pins `"baseline"`, finds no baseline, and sizes from static
+  config: **behaviour identical to before the profiler existed.** The first live campaign therefore
+  has a second-order thing to check beyond the probes themselves — that run A's harvest is
+  discoverable by run B, that the pinned `run_id` lands in the staged config, and that the memory
+  properties B emits actually differ from A's.
+
 ## Provenance confidence
 
 Entries dated before 2026-08-29 were **reconstructed** during a reconciliation on that date, from

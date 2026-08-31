@@ -332,6 +332,13 @@ mismatch is never silent, and never fatal: sizing off drifted evidence still bea
 If BigQuery is unreachable when the source is resolved, the run logs a warning and sizes from static
 config. Evidence is an optimisation; a registry hiccup must not stop a run from submitting.
 
+**What the resolved profile actually changes.** Only the memory axis. The executor cores, the thread
+pins, the warm `initialExecutors`, the device-aware `spark.task.cpus` and the worker/executor counts
+all follow from the fan-out and the machine type alone and are emitted with or without evidence.
+Memory is the one thing that cannot be derived — a Serverless executor's shape is fixed at *submit*
+and a cluster's at *create*, both before any of our code runs — so with no profile the memory
+properties are simply not emitted and the platform's defaults stand, exactly as before.
+
 **Why the two margins differ, and why they apply to different tails.** Over-estimating time buys
 extra slots, which costs money; under-estimating memory OOM-kills the task, which costs the run.
 Asymmetric risk, asymmetric margin — so memory carries the wider one. They also attach to different

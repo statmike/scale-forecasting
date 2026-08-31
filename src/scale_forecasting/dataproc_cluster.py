@@ -28,6 +28,7 @@ from .submit import _ENV_VENV_ARCHIVE, BatchInfra, _stage_code, _stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
+    from .profiling import ComputeProfile
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -344,6 +345,7 @@ def cluster_sizing(
     hardware: str = "cpu",
     gpu_type: str | None = None,
     max_workers: int | None = None,
+    profile: ComputeProfile | None = None,
 ) -> tuple[int | None, dict[str, str]]:
     """``(worker count, job properties)`` this run's shape implies (pure; ``(None, {})`` when off).
 
@@ -358,11 +360,12 @@ def cluster_sizing(
     against cells would ask for that many times more workers than the fan-out can keep busy, and
     on a cluster an idle worker is a billed VM rather than an unclaimed quota slot.
 
-    **No measurement is involved yet, and most of the win does not need any.** There is no
-    submit-side probe (the fleetwide pre-pass runs on the Spark driver, by which point the
-    cluster exists), so the memory *split* is unmeasured — but the executor shape, the
-    thread pins, the device-aware ``spark.task.cpus`` and the worker count all follow from the
-    machine type and the fan-out alone.
+    **Most of the win needs no measurement**: the executor shape, the thread pins, the
+    device-aware ``spark.task.cpus`` and the worker count all follow from the machine type and the
+    fan-out alone. The memory *split* is what a profile buys, and — as on the batch path — it
+    cannot be measured here, because the cluster's shape is fixed at *create*, before any of our
+    code runs on it. So ``profile`` is a previous run's measurement, resolved by
+    `profiling.profile_for_run` and handed in; this function stays pure and never goes looking.
 
     ``max_workers`` is the operator's ceiling; ``compute.profile.mode == "off"`` returns
     ``(None, {})``, the documented escape hatch back to the pre-profiler two-worker cluster.
@@ -387,7 +390,7 @@ def cluster_sizing(
     gpu = hardware == "gpu"
     fraction = cfg.compute.gpu_fraction
     _plan, translation = plan_dataproc_cluster(
-        None,
+        profile,
         families,
         default_bucket_count(cfg, executed),
         machine_type=worker_machine_type(hardware, gpu_type),
@@ -659,6 +662,7 @@ def submit_cluster_job(
     reuse path the count is moot (the cluster exists) but the overlay still applies, which is what
     keeps a family's own shape correct on a cluster sized for the union of several.
     """
+    from .profiling import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
 
@@ -669,7 +673,12 @@ def submit_cluster_job(
     reuse = spark_cluster_name is not None
     venv_archive_uri = _resolve_cluster_deps(cfg, infra)
     derived_workers, job_properties = cluster_sizing(
-        cfg, models, hardware=hardware, gpu_type=gpu_type, max_workers=max_workers
+        cfg,
+        models,
+        hardware=hardware,
+        gpu_type=gpu_type,
+        max_workers=max_workers,
+        profile=profile_for_run(cfg, settings=settings),
     )
     workers = worker_count if worker_count is not None else derived_workers
     workers = workers if workers is not None else _DEFAULT_WORKER_COUNT
@@ -781,6 +790,7 @@ def provision_shared_cluster(
     than the whole run's (a run whose native/Ray families dwarf its Spark ones would otherwise buy
     idle VMs). ``worker_count`` overrides the derivation; ``max_workers`` caps it.
     """
+    from .profiling import profile_for_run
     from .settings import Settings
 
     settings = settings or Settings.resolve()
@@ -794,6 +804,7 @@ def provision_shared_cluster(
         hardware="gpu" if use_gpu else "cpu",
         gpu_type=gpu_type,
         max_workers=max_workers,
+        profile=profile_for_run(cfg, settings=settings),
     )
     workers = worker_count if worker_count is not None else derived_workers
     workers = workers if workers is not None else _DEFAULT_WORKER_COUNT

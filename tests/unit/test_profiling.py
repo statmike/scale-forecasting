@@ -2011,3 +2011,56 @@ def test_the_in_run_pre_pass_stamps_a_measured_provenance() -> None:
     assert profile is not None and profile.provenance is not None
     assert profile.provenance.basis == "measured"
     assert profile.provenance.source == "in-run"
+
+
+# --- the I/O binding: profile_for_run ------------------------------------------
+
+
+def test_profile_for_run_short_circuits_before_importing_the_registry() -> None:
+    """`source="none"` must cost nothing — not even a lazy import of the BigQuery client."""
+    monkey = pytest.MonkeyPatch()
+    with monkey.context() as m:
+        m.setattr(profiling, "_RESOLVED", {})
+        m.setitem(__import__("sys").modules, "scale_forecasting.registry.bq", None)
+        assert profiling.profile_for_run(_sourced("none")) is None
+
+
+def test_profile_for_run_memoizes_so_every_family_job_sizes_off_one_lookup() -> None:
+    """Four family jobs on one submit host must not be four BigQuery round-trips.
+
+    The stronger reason is correctness, not cost: an `auto` that re-discovered between two jobs of
+    the same run could hand them different fleets, and a run whose families disagree about their
+    own sizing is not one run.
+    """
+    calls: list[str] = []
+
+    class _FakeBQ:
+        @staticmethod
+        def discover_harvest_run(**kwargs: Any) -> str:
+            calls.append("discover")
+            return "found-run-0123456789ab"
+
+        @staticmethod
+        def read_compute_harvest(run_id: str, **kwargs: Any) -> Any:
+            calls.append("read")
+            return _harvest_rows(), "source_series_native"
+
+    monkey = pytest.MonkeyPatch()
+    with monkey.context() as m:
+        m.setattr(profiling, "_RESOLVED", {})
+        m.setattr("scale_forecasting.registry.bq", _FakeBQ, raising=False)
+        m.setitem(__import__("sys").modules, "scale_forecasting.registry.bq", _FakeBQ)
+        cfg = _cfg()
+        first = profiling.profile_for_run(cfg)
+        second = profiling.profile_for_run(cfg)
+    assert calls == ["discover", "read"]
+    assert first is second
+
+
+def test_the_shipped_baseline_is_absent_until_it_is_measured_and_committed() -> None:
+    """A baseline whose provenance is a chat message is what the validation ledger exists to stop.
+
+    The loader is real and wired into the chain, so shipping one (W13) is dropping a file in, not
+    rewiring the resolver — but there is nothing to load until a live run produces it.
+    """
+    assert profiling.load_baseline() is None

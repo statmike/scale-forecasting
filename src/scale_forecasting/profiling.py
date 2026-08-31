@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from .config import RunConfig
+    from .settings import Settings
 
 _log = get_logger(__name__)
 
@@ -102,7 +103,9 @@ __all__ = [
     "build_profile",
     "compare_signatures",
     "harvest_profile",
+    "load_baseline",
     "measure_fit",
+    "profile_for_run",
     "resolve_profile",
     "resolve_profile_source",
     "select_profile_sample",
@@ -1863,6 +1866,77 @@ def _measured_at(rows: Iterable[Mapping[str, Any]]) -> str | None:
     """The newest ``created_at`` in a harvest, as a string, or None when the rows carry none."""
     stamps = [str(row["created_at"]) for row in rows if row.get("created_at") is not None]
     return max(stamps) if stamps else None
+
+
+# Resolved profiles, keyed by what determines them. Sizing is consulted once per family job — four
+# jobs on one submit host is four identical BigQuery round-trips otherwise, and (worse) an `auto`
+# that re-discovers between them could hand two jobs of the same run different fleets. Process-local
+# and bounded by the handful of distinct keys a run produces; nothing here outlives the process.
+_RESOLVED: dict[tuple[Any, ...], ComputeProfile | None] = {}
+
+
+def profile_for_run(cfg: RunConfig, *, settings: Settings | None = None) -> ComputeProfile | None:
+    """The profile this run sizes from, with the real registry loaders bound (I/O; memoized).
+
+    The impure half of `resolve_profile_source`: it supplies the BigQuery readers and nothing else.
+    Split that way so the whole precedence chain stays testable with no cloud, and so the four
+    sizing call sites (`submit.sizing_properties`, `dataproc_cluster.cluster_sizing`) each stay a
+    pure function that is *handed* a profile rather than one that goes and finds one.
+
+    Returns ``None`` for "size from declared config" — including whenever the registry is
+    unreachable, which `resolve_profile_source` degrades to rather than raising.
+    """
+    profile_cfg = cfg.compute.profile
+    if not profile_cfg.consumes_evidence:
+        return None
+
+    signature = signature_from_config(cfg)
+    key = (
+        profile_cfg.source,
+        signature.source_table,
+        signature.freq,
+        signature.n_series,
+        profile_cfg.memory_margin,
+        profile_cfg.time_margin,
+    )
+    if key in _RESOLVED:
+        return _RESOLVED[key]
+
+    from .registry import bq
+
+    resolved = resolve_profile_source(
+        cfg,
+        load_run=lambda run_id: bq.read_compute_harvest(run_id, settings=settings),
+        discover=lambda want: bq.discover_harvest_run(
+            source_table=want.source_table, freq=want.freq, settings=settings
+        ),
+        load_baseline=load_baseline,
+    )
+    if resolved is not None and resolved.provenance is not None:
+        for warning in resolved.provenance.warnings:
+            _log.warning("compute profile: %s", warning)
+        _log.info(
+            "sizing from a %s profile (source=%s, run_id=%s, measured %s)",
+            resolved.provenance.basis,
+            resolved.provenance.source,
+            resolved.provenance.run_id,
+            resolved.provenance.measured_at,
+        )
+    _RESOLVED[key] = resolved
+    return resolved
+
+
+def load_baseline() -> ComputeProfile | None:
+    """The shipped, versioned reference profile — ``None`` until one is measured and committed.
+
+    Deliberately a real function with a real caller rather than a ``TODO``: the precedence chain
+    already routes through it, so shipping the baseline is dropping a file in beside this and
+    parsing it, not rewiring the resolver. It is the last artifact in the profiler's arc because it
+    is a *live-proof* claim — committed numbers from a real run, with a version that moves the
+    digest and a row in the validation ledger. A baseline whose provenance is a chat message is the
+    exact failure that ledger exists to prevent, so there is nothing to load yet.
+    """
+    return None
 
 
 def _profilable_models(models: Sequence[str]) -> list[str]:

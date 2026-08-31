@@ -37,6 +37,7 @@ from .staging import stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
+    from .profiling import ComputeProfile
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -291,6 +292,7 @@ def sizing_properties(
     hardware: str = "cpu",
     gpu_type: str | None = None,
     max_executors: int | None = None,
+    profile: ComputeProfile | None = None,
 ) -> dict[str, str]:
     """The ``spark.*`` overlay this batch's shape implies (pure; ``{}`` when profiling is off).
 
@@ -299,12 +301,17 @@ def sizing_properties(
     anything runs. `resources.plan_serverless` does the arithmetic; this only assembles its
     inputs from the config.
 
-    **No measurement is involved yet, and most of the win does not need any.** The executor
-    cores, the thread pins, the warm ``initialExecutors`` and the allocation ratio all follow
-    from the task count and the family list alone. Only the memory sizing needs a profile, and
-    there is no submit-side probe today (the fleetwide pre-pass runs on the Spark driver
-    *inside* the batch, by which point the executors exist) — so the memory properties are
-    simply not emitted and Serverless' own defaults stand, exactly as before.
+    **Most of the win needs no measurement.** The executor cores, the thread pins, the warm
+    ``initialExecutors`` and the allocation ratio all follow from the task count and the family
+    list alone, and they are emitted whether or not a profile arrives.
+
+    **The memory sizing is what a profile buys, and it cannot be measured here.** There is no
+    submit-side probe — the fleetwide pre-pass runs on the Spark driver *inside* the batch, by
+    which point the executor shape is already fixed — so ``profile`` is a measurement of a
+    *previous* run, resolved by `profiling.profile_for_run` from ``compute.profile.source`` and
+    handed in. This function stays pure and is only ever *given* one; it never goes and looks.
+    ``None`` (no evidence, or none wanted) leaves the memory properties unemitted and Serverless'
+    own defaults standing, exactly as before.
 
     **The unit sized against is a task, not a cell.** The engine shuffles cells into buckets and
     runs one task per bucket (`engines.spark_io.default_bucket_count`), each holding
@@ -346,7 +353,7 @@ def sizing_properties(
     fraction = cfg.compute.gpu_fraction
     n_tasks = default_bucket_count(cfg, executed)
     _, translation = plan_serverless(
-        None,
+        profile,
         families,
         n_tasks,
         gpu=gpu,
@@ -523,6 +530,7 @@ def submit_batch(
     ``gpu_type`` names the accelerator (serverless is L4-only). Both default to the CPU batch, so an
     existing caller submits exactly as before.
     """
+    from .profiling import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
 
@@ -546,7 +554,14 @@ def submit_batch(
         hardware=hardware,
         gpu_type=gpu_type,
         properties=sizing_properties(
-            cfg, models, hardware=hardware, gpu_type=gpu_type, max_executors=max_executors
+            cfg,
+            models,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            max_executors=max_executors,
+            # A past run's measurements, if `compute.profile.source` points at any (memoized, so
+            # every family job of one run sizes off the same evidence rather than re-discovering).
+            profile=profile_for_run(cfg, settings=settings),
         ),
     )
 

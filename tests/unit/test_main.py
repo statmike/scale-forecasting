@@ -1449,3 +1449,80 @@ def test_launch_ensemble_job_microbatch_mode(monkeypatch: pytest.MonkeyPatch) ->
     main._launch_ensemble_job(cfg, "run-abc", _SETTINGS)
     assert calls.get("microbatch") is True
     assert "barrier" not in calls
+
+
+# --- lock_profile_source: pinning the reference before the digest ---------------
+
+
+def _lock_cfg(**profile: Any) -> RunConfig:
+    return _cfg(compute={"profile": profile}) if profile else _cfg()
+
+
+def _fake_discover(monkeypatch: pytest.MonkeyPatch, result: Any) -> list[dict[str, Any]]:
+    """Stand in for the BigQuery discovery query; return the kwargs it was called with."""
+    seen: list[dict[str, Any]] = []
+
+    def discover(**kwargs: Any) -> Any:
+        seen.append(kwargs)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr("scale_forecasting.registry.bq.discover_harvest_run", discover)
+    return seen
+
+
+def test_auto_is_pinned_to_the_run_it_resolves_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lockfile trick: what actually sized this run is written in, never re-searched."""
+    seen = _fake_discover(monkeypatch, "prior-run-0123456789ab")
+    locked = main.lock_profile_source(_lock_cfg(), settings=_SETTINGS)
+    assert locked.compute.profile.source == "prior-run-0123456789ab"
+    # Only the identity axes are filtered in SQL; the scale axes are warnings, checked after load.
+    assert set(seen[0]) == {"source_table", "freq", "settings"}
+
+
+def test_pinning_moves_the_run_id_because_the_fleet_moved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run sized off last week's evidence is not the same run — §2.6's rule, applied."""
+    _fake_discover(monkeypatch, "prior-run-0123456789ab")
+    cfg = _lock_cfg()
+    assert make_run_id(main.lock_profile_source(cfg, settings=_SETTINGS)) != make_run_id(cfg)
+
+
+def test_finding_nothing_pins_the_baseline_rather_than_leaving_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rest of the chain is deterministic, so pinning it is what makes the plan reproducible."""
+    _fake_discover(monkeypatch, None)
+    assert main.lock_profile_source(_lock_cfg(), settings=_SETTINGS).compute.profile.source == (
+        "baseline"
+    )
+
+
+@pytest.mark.parametrize("source", ["none", "baseline", "some-run-0123456789ab"])
+def test_an_already_concrete_source_is_never_re_resolved(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """Only `auto` is a search. Anything else is already the operator's answer."""
+    seen = _fake_discover(monkeypatch, "should-not-be-used-0123456789ab")
+    cfg = _lock_cfg(source=source)
+    assert main.lock_profile_source(cfg, settings=_SETTINGS) is cfg
+    assert seen == []
+
+
+def test_profiling_off_is_never_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`mode="off"` is the one switch that makes the whole feature inert, plan time included."""
+    seen = _fake_discover(monkeypatch, "should-not-be-used-0123456789ab")
+    cfg = _lock_cfg(mode="off")
+    assert main.lock_profile_source(cfg, settings=_SETTINGS) is cfg
+    assert seen == []
+
+
+def test_an_unreachable_registry_leaves_the_plan_unpinned_rather_than_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan with no SF_* environment is a preview; it must still produce an id and a fanout."""
+    _fake_discover(monkeypatch, RuntimeError("no credentials"))
+    cfg = _lock_cfg()
+    assert main.lock_profile_source(cfg, settings=_SETTINGS).compute.profile.source == "auto"

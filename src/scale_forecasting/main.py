@@ -43,7 +43,7 @@ artifacts + runnable commands + reproducibility manifest, no submit), and
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -865,6 +865,7 @@ def _assemble_commands(
         )
         return commands
 
+    from .profiling import profile_for_run
     from .submit import BatchInfra, _batch_id, sizing_properties
 
     assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
@@ -880,7 +881,9 @@ def _assemble_commands(
         manage_header=True,
         # The emitted gcloud command has to carry the sizing overlay the SDK path applies, or
         # copy-pasting it would submit a differently-shaped batch than `run` would.
-        properties=sizing_properties(cfg, models_arg),
+        properties=sizing_properties(
+            cfg, models_arg, profile=profile_for_run(cfg, settings=settings)
+        ),
     )
     return commands
 
@@ -934,6 +937,49 @@ def _emit_plan(result: LaunchPlan) -> None:
             _log.info("  [%s:native] %s", name, lc.native)
 
 
+def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> RunConfig:
+    """Replace ``compute.profile.source = "auto"`` with the concrete reference it resolves to.
+
+    The lockfile step, and it has to happen **before** `make_run_id` sees the config, because that
+    resolved reference is part of the run's identity: a run sized off last week's evidence is not
+    the same run as one sized off today's, and §2.6's rule is that a different fleet is a different
+    run. Pinning it here is what makes ``auto`` convenient *and* reproducible — two ``auto`` runs a
+    week apart may legitimately get different ids, but re-running either staged config reproduces
+    exactly, because what actually resolved is written into it.
+
+    What gets pinned is the **pointer**, never the numbers. The rows behind a ``run_id`` are
+    immutable, so the pointer is as good as the values and keeps the config small enough to stay
+    readable. When discovery finds nothing, the pin is ``"baseline"`` rather than ``"auto"``: the
+    remainder of the chain (shipped baseline, then static) is deterministic, so pinning it makes
+    the run reproducible instead of leaving it to re-search later.
+
+    Degrades to the unlocked config when the registry cannot be reached — a plan produced with no
+    ``SF_*`` environment is a preview, and it says so elsewhere too (``commands=None``, verdict
+    unknown). The run still resolves its source at sizing time; it just is not pinned.
+    """
+    if not cfg.compute.profile.needs_source_resolution:
+        return cfg
+
+    from .profiling import signature_from_config
+    from .registry import bq
+
+    want = signature_from_config(cfg)
+    try:
+        found = bq.discover_harvest_run(
+            source_table=want.source_table, freq=want.freq, settings=settings
+        )
+    except Exception as exc:  # noqa: BLE001 - an unpinned plan is a worse plan, not a failed one
+        _log.debug("profile source not pinned (registry unreachable): %r", exc)
+        return cfg
+
+    locked = found or "baseline"
+    _log.info("compute profile source: auto -> %s", locked)
+    profile = cfg.compute.profile.model_copy(update={"source": locked})
+    return cfg.model_copy(
+        update={"compute": cfg.compute.model_copy(update={"profile": profile})}
+    )
+
+
 def plan_run(
     cfg: RunConfig,
     *,
@@ -954,6 +1000,14 @@ def plan_run(
     """
     from .config import estimate_fanout
     from .dag import dag_nodes, plan_dag
+
+    # The infra identity is resolved first and separately, because `lock_profile_source` needs it
+    # and its result is part of the digest — so it has to land before `_plan` computes the run_id.
+    # Best-effort, exactly like everything else in this try: no environment means an unpinned
+    # preview, not a failure.
+    with suppress(Exception):
+        settings = settings or _resolve_settings()
+        cfg = lock_profile_source(cfg, settings=settings)
 
     plan = _plan(cfg)
     fanout = estimate_fanout(cfg)
@@ -1070,10 +1124,14 @@ def stage_run(
     from .dag import dag_nodes, plan_dag
     from .staging import stage_config, stage_manifest
 
+    # Pin `source: "auto"` to what it resolves to *now*, before the digest — the staged config is
+    # the reproducibility artifact, so what actually sized this run has to be written into it.
+    settings = settings or _resolve_settings()
+    cfg = lock_profile_source(cfg, settings=settings)
+
     plan = _plan(cfg)
     fanout = estimate_fanout(cfg)
     nodes = dag_nodes(plan_dag(cfg))
-    settings = settings or _resolve_settings()
     idempotency = _check_idempotency(plan.run_id, settings)
     resolved_infra = _resolve_infra(cfg, infra)
     code_bucket: str = resolved_infra.code_bucket  # type: ignore[attr-defined]
