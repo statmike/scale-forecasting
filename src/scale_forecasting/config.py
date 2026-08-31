@@ -256,6 +256,16 @@ class ProfileConfig(BaseModel):
     shape rather than the numbers a run produces, so it is arguable — but the config *is* the
     experiment record, and a run whose fleet was sized differently is not the same run for
     performance purposes. Silently varying the shape under a stable id would be the worse trade.
+
+    **Not yet connected, and the "pre-pass" framing above is what has to change.** The measurement
+    (`profiling.build_profile`) and all three fleet translations exist and are unit-tested, but no
+    production path calls them: ``submit.sizing_properties`` and ``dataproc_cluster.cluster_sizing``
+    both pass ``None``. A pre-pass cannot work where this is read from — the fleet is already fixed
+    by then (see the note at the ``ComputeConfig.profile`` field). The settled direction is that a
+    profile is produced by one run and consumed by later ones, which will split ``mode`` into a
+    *source* (what evidence to consume) and a *measure* (what evidence to produce). Until that
+    lands, every value of ``mode`` sizes identically; only ``"off"`` is load-bearing, and it also
+    suppresses the static-arithmetic overlay.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -378,9 +388,13 @@ class ComputeConfig(BaseModel):
     gpu_safety_margin: float = Field(default=1.3, gt=1.0)
     # Measured compute profiling — the general form of the two knobs above. Auto-fraction
     # calibration profiles one axis (GPU bytes) for one model on one runtime; this profiles every
-    # axis for every family on all three. The two coexist deliberately: the GPU axis needs a GPU,
-    # so it keeps refining on-cluster after creation, while the CPU/memory/time axes profile on the
-    # driver at submit time, which is when the fleet has to be sized. See `ProfileConfig`.
+    # axis for every family on all three. The two coexist deliberately: auto-fraction refines
+    # on-cluster after creation, because the GPU axis needs a GPU; this one sizes the fleet, which
+    # has to happen before the fleet exists. That ordering is the whole constraint — a fleet is
+    # fixed at submit (Serverless) or at create (cluster, Ray pool), and the submit host is kept
+    # deliberately lean (no model stack, a 2-vCPU Composer worker), so there is nowhere in *this*
+    # run to take the measurement. Measurements therefore come from an earlier run. See
+    # `ProfileConfig`.
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
     # How the Ray driver reads the source panel. Both paths hit the SAME BigQuery Storage Read API
     # (no query slots, matching Spark) and yield the SAME driver-side pandas panel, so the
