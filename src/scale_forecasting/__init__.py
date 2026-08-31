@@ -10,6 +10,9 @@ Public surface — two ways in, one engine underneath:
   `dry_run` / `run`
   / `review`. Thin wrapper over `run`; no logic of its
   own.
+* **The manage path.** `Registry` — the operator surface over the registry a deployment writes
+  to: `doctor` (read-only health), `drop_run`, `sweep_orphans`, `snapshot`, `export`, `init`.
+  Same verbs as ``python -m scale_forecasting.registry.ops``.
 * **The direct path.** Drive Spark or Ray yourself and reuse the *same* model machinery:
   `run_group` (pure, per-bucket), `make_group_runner` / `make_chunk_runner` (the
   writer-attached ``applyInPandas`` / Ray-task closures), `chunk_cells`, and the unit of work
@@ -46,6 +49,7 @@ __version__ = "0.1.0"
 _LAZY: dict[str, tuple[str, str]] = {
     # Easy path.
     "Forecaster": (".sdk", "Forecaster"),
+    "Registry": (".sdk", "Registry"),
     "DryRunResult": (".sdk", "DryRunResult"),
     "RunResult": (".sdk", "RunResult"),
     "ModelResult": (".sdk", "ModelResult"),
@@ -122,6 +126,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         Forecaster,
         JobTrace,
         ModelResult,
+        Registry,
         RunResult,
         build_trace_frame,
         plot_trace,

@@ -1,6 +1,6 @@
 # Using the SDK
 
-There are two ways to use `scale_forecasting` from Python, and they share one engine underneath:
+There are two ways to *run* `scale_forecasting` from Python, and they share one engine underneath:
 
 1. **The easy path** — the `Forecaster` facade. Point it at a config, call `run()`. It wraps the
    exact same orchestration the CLI and Composer run, so an SDK run is byte-for-byte a CLI run.
@@ -9,7 +9,8 @@ There are two ways to use `scale_forecasting` from Python, and they share one en
    `SparkSession` or a Ray cluster and want to embed forecasting into your own job.
 
 Both paths run the identical unit of work (`run_cell`), so results are the same whichever door you
-come in. Everything below imports from the top-level package:
+come in. A third class, `Registry`, doesn't run anything — it manages what runs leave behind.
+Everything below imports from the top-level package:
 
 ```python
 import scale_forecasting as sf
@@ -104,6 +105,34 @@ for job in forecaster.jobs():        # defaults to this config's run_id
 
 ---
 
+## The manage path: `Registry`
+
+`Forecaster` produces runs; `Registry` reads and prunes them. It is keyed on the registry your
+`SF_*` environment resolves to — no config needed, which is exactly right for "what is in here, and
+clean up run X":
+
+```python
+from scale_forecasting import Registry
+
+reg = Registry()                          # or Forecaster.from_file(...).registry()
+print(reg.doctor())                       # row counts, runs stuck RUNNING, orphaned artifacts
+
+reg.drop_run("abc123")                    # PREVIEW — prints the blast radius, deletes nothing
+reg.drop_run("abc123", yes=True)          # artifacts, then BQML models, then rows
+
+reg.snapshot("before_migration", expiration_days=7)
+reg.export("gs://my-bucket/registry-dump", fmt="JSON")
+```
+
+Every method delegates to `registry.ops`, the same code
+`python -m scale_forecasting.registry.ops <verb>` runs, so the notebook, the SDK and the CLI can't
+diverge. The destructive verbs preview by default and refuse a run that is still in flight (check
+with `monitor(probe=True)` first — a `RUNNING` row can also be a dead job — then pass `force=True`).
+There is deliberately no wipe method: a full teardown is `bq rm -r -f <dataset>`. Full verb
+reference: [running_and_reviewing.md §6](./running_and_reviewing.md#6-managing-the-registry).
+
+---
+
 ## The direct path: drive Spark or Ray yourself
 
 When you already have your own Spark or Ray job, you can call the model machinery directly and skip
@@ -184,6 +213,7 @@ uses — appends compose, so per-task writes are safe (results dedupe on read by
 
 - **Just run a config** → `Forecaster` (or the CLI, `python -m scale_forecasting.main`).
 - **Embed forecasting into a Spark/Ray job you already own** → the direct path.
+- **Clean up, inspect or archive what past runs left behind** → `Registry`.
 
 Either way the per-cell logic is identical, so you can prototype with `Forecaster`, then drop down to
 the direct path without changing model behavior. See [architecture.md](./architecture.md) for how the

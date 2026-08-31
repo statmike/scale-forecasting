@@ -83,6 +83,10 @@ _CONFIDENCE_LEVEL = 0.8
 _PREHOLIDAY_DAYS = 1
 _POSTHOLIDAY_DAYS = 1
 
+# Every persisted BQML model object this engine creates starts here — the handle a per-run teardown
+# matches on (`model_object_matches_run`).
+_MODEL_PREFIX = "sf_model_"
+
 # BQML model_type per native model name. TimesFM has no CREATE MODEL (AI.FORECAST is serverless).
 _MODEL_TYPE: dict[str, str] = {
     "arima_plus": "ARIMA_PLUS",
@@ -144,6 +148,26 @@ def _snapshot_clause(snapshot_millis: int | None) -> str:
     return f" FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({snapshot_millis})"
 
 
+def model_object_matches_run(model_id: str, run_id: str) -> bool:
+    """Does a BQML model object name belong to ``run_id`` (the final model or any of its folds)?
+
+    The inverse of `_model_ref`'s naming rule, kept beside it so the two cannot drift. A run's
+    persisted model objects are the fourth thing a per-run teardown has to delete — they are
+    invisible to the registry tables (nothing records their names), so the only way to find them is
+    to list the dataset's models and match the name back to the run. ``model_id`` is the bare object
+    id as BigQuery lists it, not a qualified ref.
+    """
+    if not model_id.startswith(_MODEL_PREFIX):
+        return False
+    tail = f"_{_sanitize_identifier(run_id)}"
+    rest = model_id[len(_MODEL_PREFIX) :]
+    if rest.endswith(tail):
+        return True
+    # A fold object appends _f{k} after the run id.
+    head, sep, fold = rest.rpartition("_f")
+    return bool(sep) and fold.isdigit() and head.endswith(tail)
+
+
 def _registry_of(dataset: str, registry_dataset: str | None) -> str:
     """The dataset that owns a run's *outputs* — ``registry_dataset``, else ``dataset``.
 
@@ -174,7 +198,8 @@ def _model_ref(
     """
     run_id = make_run_id(cfg)
     suffix = f"_f{fold_id}" if fold_id is not None else ""
-    return f"`{registry_dataset}.sf_model_{model_name}_{_sanitize_identifier(run_id)}{suffix}`"
+    stem = f"{_MODEL_PREFIX}{model_name}_{_sanitize_identifier(run_id)}{suffix}"
+    return f"`{registry_dataset}.{stem}`"
 
 
 def _series_filter(

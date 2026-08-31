@@ -2,7 +2,7 @@
 
 The [deploy](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md) and [demo](./workshop.md) runbooks assume a **fresh** setup.
 This doc is the **rework** path: you've already deployed, and now you need to **re-apply Terraform**
-(pick up a code/infra change), **reset the BigQuery output tables** (clean slate for a re-run), or
+(pick up a code/infra change), **clear the BigQuery registry** (clean slate for a re-run), or
 **re-run** a config. Everything here runs from **[Cloud Shell](https://console.cloud.google.com/?cloudshell=true)** —
 short, interactive tasks that fit a thin client. Long, multi-hour runs belong on a persistent VM
 instead ([§4 — Long runs on a persistent VM](#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell)).
@@ -84,12 +84,13 @@ parameters. So a template-only rework is fast and cheap.
 
 ---
 
-## 2. Reset the BigQuery tables
+## 2. Clear the BigQuery registry
 
-There are **two** resets. Pick deliberately — they differ in whether the 100k **source seed**
-survives.
+Three ways to get a clean registry, narrowest first. **None of them touch the 100k source seed** —
+that panel has its own lifetime and no product verb reads or writes it (rebuilding it is a Spark
+job via the Terraform `seed` module or `data_gen.seed_spark`).
 
-### 2a. Output-only reset (keep the seed) — the usual rework
+### 2a. Truncate the output tables (keep the seed) — the usual rework
 
 Truncates only the **four run-output tables** and **keeps `source_series_iceberg`** (the 100k seeded
 panel every run reads), so you get a clean registry **without** paying to reseed 100k series. This is
@@ -106,34 +107,51 @@ TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.backtest_oof`;
 
 > You rarely even need this — the orchestrator writes under a deterministic `run_id` and
 > **dedupes-on-read**, so re-running the same config never double-counts. Truncate only when you want
-> a visibly empty registry (e.g. a clean demo). **Never** truncate `source_series_iceberg` here —
-> that's the seed, and dropping it forces a full reseed (2b).
+> a visibly empty registry (e.g. a clean demo). Note what this *doesn't* do: it leaves every run's
+> GCS artifacts behind with nothing left to attribute them to. Prefer §2b when you know which runs
+> you want gone. **Never** truncate `source_series_iceberg` here — that's the seed, and dropping it
+> forces a full reseed.
 
-### 2b. Full reset (drop everything, incl. the seed) — needs a reseed after
+### 2b. Per-run teardown — the scoped, complete option
 
-`reset.py` drops **all seven tables** (the five outputs **and both source variants**) plus the two
-analyst views, for a clean `ensure_tables` recreate. Use it only when the schema itself changed or you
-want a truly empty dataset — **it forces a 100k reseed afterward** (via the Terraform `seed` module or
-`data_gen.seed_spark`). It reads the `SF_*` env for its target and is a dry run without `--yes`:
+`registry.ops` deletes a named run from **every** tier — GCS artifacts, its BQML `sf_model_*`
+objects, and its registry rows — in that order, so nothing is stranded. Preview by default, and it
+refuses a run that is still in flight. This is the right tool whenever you know which runs you want
+gone; §2a and §2c are the blunt instruments:
 
 ```bash
 # needs the SF_* identity (section 3) so it targets the right deployment:
-uv run python -m scale_forecasting.reset          # DRY RUN — prints what would drop, touches nothing
-uv run python -m scale_forecasting.reset --yes    # actually drops all seven tables + views
+uv run python -m scale_forecasting.registry.ops doctor              # counts, stuck runs, orphans
+uv run python -m scale_forecasting.registry.ops drop-run RUN_ID     # preview — deletes nothing
+uv run python -m scale_forecasting.registry.ops drop-run RUN_ID --yes
+uv run python -m scale_forecasting.registry.ops sweep-orphans --yes # artifacts past resets stranded
 ```
 
-> **Known limitation — reset does not clear GCS.** It drops BigQuery tables only. Run artifacts
-> under `<warehouse>/artifacts/<run_id>/` are left in place, and because the registry rows were the
-> only index of which artifacts belonged to which run, they cannot be traced back afterwards. If you
-> want the storage reclaimed, delete the prefix **before** resetting, while the rows still exist:
->
-> ```bash
-> bq query --nouse_legacy_sql 'SELECT run_id FROM `PROJECT.DATASET.run_registry`'  # note the ids
-> gcloud storage rm -r "$SF_WAREHOUSE_URI/artifacts/<run_id>"                      # per run
-> ```
->
-> A first-class registry-lifecycle surface (scoped `drop-run`, orphan sweep, archive, and a reset
-> that clears both together) is planned; until then this ordering is manual.
+The full verb set (`init` / `doctor` / `drop-run` / `sweep-orphans` / `snapshot` / `export`) and the
+matching `Registry` SDK class are documented in
+[running_and_reviewing.md §6](./running_and_reviewing.md#6-managing-the-registry).
+
+### 2c. Drop the registry tables — schema changed, or you want them gone
+
+`reset.py` drops the **five registry tables** plus the two analyst views, for a clean
+`ensure_tables` (or `registry.ops init`) recreate. Use it when the schema itself changed. It reads
+the `SF_*` env for its target and is a dry run without `--yes`:
+
+```bash
+uv run python -m scale_forecasting.reset          # DRY RUN — prints what would drop, touches nothing
+uv run python -m scale_forecasting.reset --yes    # actually drops the registry tables + views
+```
+
+To discard a whole registry rather than empty it, delete its dataset —
+`bq rm -r -f <project>:<dataset>` — which is also how you retire a registry that had its own
+`SF_REGISTRY_DATASET_ID`.
+
+> **`reset` clears BigQuery only, never GCS.** Run artifacts under
+> `<warehouse>/artifacts/<project>/<registry-dataset>/<run_id>/` survive it, and once the rows are
+> gone nothing says which artifacts belonged to which run. That is why §2b exists and why it deletes
+> artifacts *first*. If you already reset and left artifacts behind, `sweep-orphans` is the cleanup —
+> the artifact path carries the registry key, so a sweep is unambiguously scoped to this registry
+> and can't reach another one sharing the bucket.
 
 ---
 
@@ -282,12 +300,12 @@ orchestrator *what* to talk to.
 **6. Clear the OUTPUT tables only** (optional — do this to reset the registry before a clean run).
 The canonical reset — the output-only `TRUNCATE` that **keeps** the seeded source data
 (`source_series_iceberg`), so you don't pay to reseed 100k series — is
-[§2a above](#2a-output-only-reset-keep-the-seed--the-usual-rework).
+[§2a above](#2a-truncate-the-output-tables-keep-the-seed--the-usual-rework).
 
 > This clears **all** runs — run it only for a clean slate; otherwise skip (the orchestrator
 > dedupes-on-read against the deterministic `run_id`, so re-running never double-counts). Do **not**
-> touch `source_series_iceberg`. To drop the seed too (schema change), see
-> [§2b above](#2b-full-reset-drop-everything-incl-the-seed--needs-a-reseed-after).
+> touch `source_series_iceberg`. To remove specific runs completely (artifacts and models included),
+> use [§2b above](#2b-per-run-teardown--the-scoped-complete-option) instead.
 
 **7. Preflight offline** (resolves the config + estimates the fan-out, touches no GCP):
 

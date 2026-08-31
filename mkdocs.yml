@@ -125,4 +125,5 @@ nav:
       - Spark core: api/engines_spark_io.md
       - Ray core: api/engines_ray_io.md
       - Registry views: api/registry_views.md
+      - Registry operations: api/registry_ops.md
   - Troubleshooting: troubleshooting.md

@@ -262,14 +262,55 @@ python -m scale_forecasting.ensemble_run \
 Learned strategies (`nnls`/`ridge`/`xgb`) need the base run to have had `backtest.enabled` (they fit
 on the OOF); calculated ones (`mean`/`median`/`inverse_error`) don't.
 
-## Resetting the environment (destructive)
+## 6. Managing the registry
 
-`reset` drops the registry + source tables (for a clean reseed). It's a dry run without `--yes`:
+Runs accumulate. `registry.ops` is the operator surface over the one registry your `SF_*`
+environment points at — six verbs, reachable identically from the CLI, the SDK (`Registry`), and a
+notebook:
 
 ```bash
-python -m scale_forecasting.reset            # prints what WOULD be dropped, changes nothing
-python -m scale_forecasting.reset --yes      # actually drops
+python -m scale_forecasting.registry.ops doctor          # read-only: what's in here, what's wrong
+python -m scale_forecasting.registry.ops drop-run RUN_ID # preview — deletes nothing
+python -m scale_forecasting.registry.ops drop-run RUN_ID --yes
 ```
+
+```python
+from scale_forecasting import Registry
+
+reg = Registry()                 # or Forecaster(...).registry()
+print(reg.doctor())
+reg.drop_run("abc123", yes=True)
+```
+
+| Verb | What it does |
+|------|--------------|
+| `init` | Create this registry's five tables + two views (idempotent). Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
+| `doctor` | Read-only report: per-table row counts, runs still marked `RUNNING`, and artifact prefixes with no `run_registry` row. Touches nothing. |
+| `drop-run` | Delete named run(s) from every tier — GCS artifacts, BQML `sf_model_*` objects, then registry rows. Takes as many ids as you like. |
+| `sweep-orphans` | Delete artifact prefixes under *this* registry's root that have no `run_registry` row. |
+| `snapshot` | BigQuery table snapshots of the five registry tables — `--into` another dataset, `--expiration-days` for a TTL. |
+| `export` | Dump the registry to GCS as Parquet (default) or newline-delimited JSON. |
+
+`drop-run` and `sweep-orphans` are **previews by default** — they print the exact runs, object
+counts and byte totals they would touch and change nothing until you add `--yes`. They also refuse
+to touch a run whose header is still `RUNNING` or `PENDING`; check with `monitor(probe=True)` first
+(a `RUNNING` row can also be a dead job), then `--force` if you're sure.
+
+**Order matters, and the verbs enforce it.** A registry row is the only index of which GCS objects
+belong to which run, so every delete goes *artifacts first, rows last*. Dropping the rows first
+would strand the artifacts permanently — which is what makes `sweep-orphans` necessary at all, for
+everything stranded before this surface existed.
+
+Two things you won't find here:
+
+- **No wipe verb.** Deleting a whole registry is `bq rm -r -f <project>:<dataset>` (or the BigQuery
+  console) — a one-liner nobody needs us to wrap, and wrapping it invites the accident. If you want
+  a disposable registry, give it its own dataset via `SF_REGISTRY_DATASET_ID` and delete that.
+- **No source-table verb.** The source panel is a separate lifetime (a Spark seed job over millions
+  of rows); nothing in this surface reads or writes it.
+
+> Just re-running a config? You usually need none of this. Runs land under a deterministic `run_id`
+> and dedupe on read, so re-running the same config never double-counts.
 
 ## Quick reference — entrypoints
 
@@ -280,4 +321,5 @@ python -m scale_forecasting.reset --yes      # actually drops
 | `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
-| `python -m scale_forecasting.reset [--yes]` | Drop registry + source tables. |
+| `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `drop-run` / `sweep-orphans` / `snapshot` / `export`. |
+| `python -m scale_forecasting.reset [--yes]` | Drop the registry tables (a clean slate; leaves the source panel alone). |

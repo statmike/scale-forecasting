@@ -1,0 +1,449 @@
+"""Offline tests for the registry-operations surface (`registry.ops`).
+
+Everything here is the pure half — path arithmetic, set arithmetic, SQL strings, plan formatting,
+and the BQML model-name matcher `drop_run` depends on. The six verbs themselves are GCP I/O and are
+covered by the `@gcp` smokes (the artifact-prefix delete and `snapshot`); what is tested here is
+every decision those verbs make *before* they touch anything.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from scale_forecasting.engines.bigquery_engine import model_object_matches_run
+from scale_forecasting.registry import ops
+from scale_forecasting.registry.ddl import REGISTRY_TABLE_NAMES, SOURCE_TABLE_NAMES
+
+# --- split_gcs_uri ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("gs://bucket/warehouse/artifacts/proj/ds", ("bucket", "warehouse/artifacts/proj/ds")),
+        ("gs://bucket/warehouse/", ("bucket", "warehouse")),
+        ("gs://bucket", ("bucket", "")),
+        ("gs://bucket/", ("bucket", "")),
+    ],
+)
+def test_split_gcs_uri(uri, expected):
+    assert ops.split_gcs_uri(uri) == expected
+
+
+@pytest.mark.parametrize("bad", ["s3://bucket/x", "/local/path", "gs://", "bucket/x"])
+def test_split_gcs_uri_rejects_non_gcs(bad):
+    """A misconfigured warehouse root fails here, not as a confusing 404 from the client."""
+    with pytest.raises(ValueError):
+        ops.split_gcs_uri(bad)
+
+
+# --- run_id_from_blob -------------------------------------------------------------
+
+
+def test_run_id_is_the_first_segment_under_the_root():
+    root = "warehouse/artifacts/proj/registry_ds"
+    assert ops.run_id_from_blob(f"{root}/run_abc/model.pkl", root) == "run_abc"
+    # Nested paths under a run still attribute to that run.
+    assert ops.run_id_from_blob(f"{root}/run_abc/sub/dir/model.pkl", root) == "run_abc"
+
+
+def test_objects_outside_the_root_are_not_attributed():
+    """The scope guard: another registry's artifacts in the same bucket are invisible here."""
+    root = "warehouse/artifacts/proj/registry_a"
+    other = "warehouse/artifacts/proj/registry_b/run_abc/model.pkl"
+    assert ops.run_id_from_blob(other, root) is None
+    # A near-miss prefix must not match either.
+    assert ops.run_id_from_blob("warehouse/artifacts/proj/registry_a2/r/m.pkl", root) is None
+
+
+def test_an_object_directly_in_the_root_has_no_run():
+    """No run segment ⇒ unattributable ⇒ never swept. Guessing here would delete real data."""
+    root = "warehouse/artifacts/proj/ds"
+    assert ops.run_id_from_blob(f"{root}/stray.txt", root) is None
+    assert ops.run_id_from_blob(f"{root}/", root) is None
+
+
+def test_an_empty_root_treats_the_first_segment_as_the_run():
+    assert ops.run_id_from_blob("run_abc/model.pkl", "") == "run_abc"
+
+
+# --- orphan_run_ids / blocking_runs -----------------------------------------------
+
+
+def test_orphans_are_the_gcs_ids_the_registry_does_not_know():
+    seen = ["run_c", "run_a", "run_b", "run_a"]
+    known = ["run_a"]
+    assert ops.orphan_run_ids(seen, known) == ("run_b", "run_c")
+
+
+def test_no_orphans_when_every_prefix_has_a_row():
+    assert ops.orphan_run_ids(["r1", "r2"], ["r1", "r2", "r3"]) == ()
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "PENDING", "running", "pending"])
+def test_live_statuses_block(status):
+    assert ops.blocking_runs({"r1": status}) == ("r1",)
+
+
+@pytest.mark.parametrize("status", ["COMPLETED", "FAILED", "PARTIAL", "CANCELLED"])
+def test_terminal_statuses_do_not_block(status):
+    assert ops.blocking_runs({"r1": status}) == ()
+
+
+def test_an_unknown_run_is_not_blocking():
+    """No header row means the run cannot be in flight; `DropPlan.unknown` reports it instead."""
+    assert ops.blocking_runs({"r1": None, "r2": "RUNNING"}) == ("r2",)
+
+
+# --- render_delete_rows -----------------------------------------------------------
+
+
+def test_delete_covers_every_registry_table_and_no_source_table():
+    sql = ops.render_delete_rows("proj.reg")
+    assert set(sql) == set(REGISTRY_TABLE_NAMES)
+    assert not set(sql) & set(SOURCE_TABLE_NAMES)
+
+
+def test_delete_binds_run_ids_as_a_parameter():
+    """Ids are bound, never interpolated — the statement text carries no run id at all."""
+    sql = ops.render_delete_rows("proj.reg")["run_registry"]
+    assert sql == "DELETE FROM `proj.reg.run_registry` WHERE run_id IN UNNEST(@run_ids);"
+
+
+def test_delete_accepts_a_table_subset():
+    sql = ops.render_delete_rows("proj.reg", tables=["run_jobs"])
+    assert set(sql) == {"run_jobs"}
+
+
+# --- render_snapshot_sql ----------------------------------------------------------
+
+
+def test_snapshot_clones_each_table_with_the_suffix():
+    sql = ops.render_snapshot_sql("proj.reg", "proj.reg", "20260831")
+    assert set(sql) == set(REGISTRY_TABLE_NAMES)
+    assert sql["run_registry"] == (
+        "CREATE SNAPSHOT TABLE IF NOT EXISTS `proj.reg.run_registry_20260831`\n"
+        "CLONE `proj.reg.run_registry`;"
+    )
+
+
+def test_snapshot_can_target_another_dataset():
+    sql = ops.render_snapshot_sql("proj.reg", "proj.archive", "before_migration")
+    assert "`proj.archive.run_jobs_before_migration`" in sql["run_jobs"]
+    assert "CLONE `proj.reg.run_jobs`" in sql["run_jobs"]
+
+
+def test_snapshot_expiration_is_relative_to_creation():
+    sql = ops.render_snapshot_sql("proj.reg", "proj.reg", "tmp", expiration_days=7)
+    assert "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)" in sql["run_registry"]
+
+
+@pytest.mark.parametrize("days", [0, -1])
+def test_snapshot_rejects_a_nonpositive_expiration(days):
+    with pytest.raises(ValueError):
+        ops.render_snapshot_sql("proj.reg", "proj.reg", "tmp", expiration_days=days)
+
+
+# --- render_export_sql ------------------------------------------------------------
+
+
+def test_export_defaults_to_parquet_under_a_per_table_prefix():
+    sql = ops.render_export_sql("proj.reg", "gs://bucket/dump/")
+    assert set(sql) == set(REGISTRY_TABLE_NAMES)
+    body = sql["forecast_predictions"]
+    assert "uri = 'gs://bucket/dump/forecast_predictions/forecast_predictions-*.parquet'" in body
+    assert "format = 'PARQUET'" in body
+    assert "overwrite = true" in body
+    assert body.endswith("SELECT * FROM `proj.reg.forecast_predictions`;")
+
+
+def test_export_json_uses_the_newline_delimited_form():
+    body = ops.render_export_sql("proj.reg", "gs://bucket/dump", fmt="json")["run_registry"]
+    assert "format = 'NEWLINE_DELIMITED_JSON'" in body
+    assert "run_registry-*.json'" in body
+
+
+def test_export_rejects_an_unknown_format():
+    with pytest.raises(ValueError, match="unsupported export format"):
+        ops.render_export_sql("proj.reg", "gs://bucket/dump", fmt="AVRO")
+
+
+# --- plans and formatting ---------------------------------------------------------
+
+
+def _prefix(run_id: str, n: int = 2, b: int = 1024) -> ops.ArtifactPrefix:
+    return ops.ArtifactPrefix(run_id=run_id, object_count=n, byte_total=b)
+
+
+def test_drop_plan_totals_roll_up_its_prefixes():
+    plan = ops.DropPlan(
+        registry="proj.reg",
+        run_ids=("r1", "r2"),
+        prefixes=(_prefix("r1", 3, 100), _prefix("r2", 4, 200)),
+    )
+    assert plan.object_count == 7
+    assert plan.byte_total == 300
+    assert not plan.is_empty
+
+
+def test_a_plan_naming_only_unknown_runs_is_empty():
+    plan = ops.DropPlan(registry="proj.reg", unknown=("nope",))
+    assert plan.is_empty
+
+
+def test_format_plan_names_every_run_and_the_gcs_total():
+    plan = ops.DropPlan(
+        registry="proj.reg",
+        run_ids=("r1",),
+        prefixes=(_prefix("r1", 2, 2048),),
+        models=("sf_model_arima_plus_r1",),
+        unknown=("gone",),
+    )
+    text = ops.format_plan(plan)
+    assert "drop-run against registry proj.reg" in text
+    assert "runs (1): r1" in text
+    assert "sf_model_arima_plus_r1" in text
+    assert "not in this registry (skipped): gone" in text
+    assert "2 objects, 2.0 KiB" in text
+
+
+def test_format_plan_shouts_about_an_in_flight_run():
+    plan = ops.DropPlan(registry="proj.reg", blocked=("r1",))
+    assert "IN FLIGHT — refusing: r1" in ops.format_plan(plan)
+
+
+def test_format_sweep_plan_reports_the_scope_it_searched():
+    plan = ops.SweepPlan(
+        registry="proj.reg",
+        root="gs://b/warehouse/artifacts/proj/reg",
+        prefixes=(_prefix("orphan_1"),),
+        known_runs=12,
+    )
+    text = ops.format_plan(plan)
+    assert "artifact root: gs://b/warehouse/artifacts/proj/reg" in text
+    assert "runs known to the registry: 12" in text
+    assert "orphan prefixes (1): orphan_1" in text
+
+
+def test_format_sweep_plan_with_nothing_to_do():
+    plan = ops.SweepPlan(registry="proj.reg", root="gs://b/r", known_runs=3)
+    assert "orphan prefixes (0): (none)" in ops.format_plan(plan)
+
+
+def test_doctor_report_health_and_missing_tables():
+    stats = tuple(ops.TableStat(t, 0) for t in REGISTRY_TABLE_NAMES)
+    healthy = ops.DoctorReport(registry="proj.reg", artifact_root="gs://b/r", tables=stats)
+    assert healthy.healthy
+    assert healthy.missing_tables == ()
+    assert "healthy" in ops.format_doctor(healthy)
+
+    broken = ops.DoctorReport(
+        registry="proj.reg",
+        artifact_root="gs://b/r",
+        tables=stats[:-1] + (ops.TableStat(stats[-1].table, None),),
+    )
+    assert not broken.healthy
+    assert broken.missing_tables == (stats[-1].table,)
+    assert "MISSING" in ops.format_doctor(broken)
+
+
+def test_doctor_is_unhealthy_with_live_runs_or_orphans():
+    stats = tuple(ops.TableStat(t, 1) for t in REGISTRY_TABLE_NAMES)
+    live = ops.DoctorReport(
+        registry="proj.reg", artifact_root="gs://b/r", tables=stats, live_runs=(("r1", "RUNNING"),)
+    )
+    assert not live.healthy
+    assert "IN FLIGHT (1): r1 (RUNNING)" in ops.format_doctor(live)
+
+    orphaned = ops.DoctorReport(
+        registry="proj.reg", artifact_root="gs://b/r", tables=stats, orphans=(_prefix("x"),)
+    )
+    assert not orphaned.healthy
+    assert "sweep_orphans" in ops.format_doctor(orphaned)
+
+
+@pytest.mark.parametrize(
+    ("n", "expected"), [(0, "0 B"), (512, "512 B"), (1536, "1.5 KiB"), (1024**3, "1.0 GiB")]
+)
+def test_human_bytes(n, expected):
+    assert ops.human_bytes(n) == expected
+
+
+# --- the BQML model matcher (the fourth orphan class) ------------------------------
+
+
+def test_a_final_model_object_matches_its_run():
+    assert model_object_matches_run("sf_model_arima_plus_run_abc", "run_abc")
+
+
+def test_a_fold_model_object_matches_its_run():
+    assert model_object_matches_run("sf_model_arima_plus_run_abc_f0", "run_abc")
+    assert model_object_matches_run("sf_model_timesfm_run_abc_f12", "run_abc")
+
+
+def test_a_model_object_from_another_run_does_not_match():
+    assert not model_object_matches_run("sf_model_arima_plus_run_xyz", "run_abc")
+    assert not model_object_matches_run("sf_model_arima_plus_run_abc2", "run_abc")
+
+
+def test_a_non_product_model_object_never_matches():
+    """Someone else's model in the same dataset must survive a drop-run."""
+    assert not model_object_matches_run("their_model_run_abc", "run_abc")
+    assert not model_object_matches_run("sf_model_arima_plus_run_abc", "run_ab")
+
+
+def test_the_matcher_is_the_inverse_of_the_naming_rule():
+    """Match what `_model_ref` actually renders, so the namer and the matcher cannot drift apart.
+
+    This is the test that matters: `drop_run` finds a run's BQML objects by *name* (nothing records
+    them), so a change to the naming rule that this matcher doesn't follow silently strands every
+    model object a run creates.
+    """
+    from scale_forecasting.config import RunConfig
+    from scale_forecasting.engines.bigquery_engine import _model_ref
+    from scale_forecasting.registry.ids import make_run_id
+
+    cfg = RunConfig(
+        run_name="ops matcher",
+        data={"source_table": "source_series_native", "series_limit": 10},
+        models=["arima_plus"],
+    )
+    other = RunConfig(
+        run_name="ops matcher other",
+        data={"source_table": "source_series_native", "series_limit": 10},
+        models=["arima_plus"],
+    )
+    run_id, other_id = make_run_id(cfg), make_run_id(other)
+    assert run_id != other_id
+
+    for fold_id in (None, 0, 3):
+        ref = _model_ref(cfg, "arima_plus", "proj.reg", fold_id=fold_id)
+        model_id = ref.strip("`").rsplit(".", 1)[-1]
+        assert model_object_matches_run(model_id, run_id)
+        assert not model_object_matches_run(model_id, other_id)
+
+
+# --- the CLI ⇄ SDK ⇄ ops seam ------------------------------------------------------
+#
+# One implementation, three entry points (G1). These tests hold the wiring: that each CLI
+# subcommand reaches the verb it names with the flags the operator typed, and that the SDK class
+# forwards the same way. The verbs' bodies are GCP I/O and are not called here — only the dispatch.
+
+
+@pytest.fixture()
+def spy(monkeypatch):
+    """Replace every ops verb with a recorder, so `main`/`Registry` dispatch can be asserted."""
+    calls: list[tuple[str, tuple, dict]] = []
+
+    def record(name):
+        def fn(*a, **kw):
+            calls.append((name, a, kw))
+            return {} if name in {"snapshot", "export"} else name
+
+        return fn
+
+    for verb in ("init", "doctor", "drop_run", "sweep_orphans", "snapshot", "export"):
+        monkeypatch.setattr(ops, verb, record(verb))
+    monkeypatch.setattr(ops, "format_doctor", lambda report: "ok")
+    return calls
+
+
+def test_cli_drop_run_previews_unless_told_otherwise(spy):
+    ops.main(["drop-run", "r1", "r2"])
+    assert spy == [("drop_run", (["r1", "r2"],), {"yes": False, "force": False})]
+
+
+def test_cli_drop_run_passes_yes_and_force(spy):
+    ops.main(["drop-run", "r1", "--yes", "--force"])
+    assert spy[0][2] == {"yes": True, "force": True}
+
+
+def test_cli_sweep_previews_unless_told_otherwise(spy):
+    ops.main(["sweep-orphans"])
+    assert spy == [("sweep_orphans", (), {"yes": False})]
+    spy.clear()
+    ops.main(["sweep-orphans", "--yes"])
+    assert spy[0][2] == {"yes": True}
+
+
+def test_cli_init_and_doctor(spy):
+    ops.main(["init"])
+    ops.main(["init", "--create-dataset"])
+    ops.main(["doctor"])
+    assert [c[0] for c in spy] == ["init", "init", "doctor"]
+    assert spy[0][2] == {"create_dataset": False}
+    assert spy[1][2] == {"create_dataset": True}
+
+
+def test_cli_snapshot_and_export(spy):
+    ops.main(["snapshot", "20260831", "--into", "proj.archive", "--expiration-days", "7"])
+    ops.main(["export", "gs://bucket/dump", "--format", "JSON"])
+    assert spy[0] == ("snapshot", ("20260831",), {"into": "proj.archive", "expiration_days": 7})
+    assert spy[1] == ("export", ("gs://bucket/dump",), {"fmt": "JSON"})
+
+
+def test_cli_rejects_an_unknown_export_format():
+    """argparse `choices` catches it before any client is built."""
+    with pytest.raises(SystemExit):
+        ops.main(["export", "gs://bucket/dump", "--format", "AVRO"])
+
+
+def test_cli_requires_a_verb():
+    with pytest.raises(SystemExit):
+        ops.main([])
+
+
+def test_cli_has_no_wipe_verb():
+    """Destructive-tier teardown deliberately left the product — it is `bq rm -r -f <dataset>`."""
+    for absent in ("reset", "wipe", "drop-all"):
+        with pytest.raises(SystemExit):
+            ops.main([absent])
+
+
+def test_sdk_registry_forwards_every_verb(spy):
+    from scale_forecasting.sdk import Registry
+
+    reg = Registry()
+    reg.init(create_dataset=True)
+    reg.doctor()
+    reg.drop_run("r1", "r2", yes=True)
+    reg.sweep_orphans()
+    reg.snapshot("s1", expiration_days=3)
+    reg.export("gs://b/d", fmt="JSON")
+
+    assert [c[0] for c in spy] == [
+        "init",
+        "doctor",
+        "drop_run",
+        "sweep_orphans",
+        "snapshot",
+        "export",
+    ]
+    assert spy[2] == ("drop_run", (["r1", "r2"],), {"settings": None, "yes": True, "force": False})
+
+
+def test_forecaster_hands_out_a_registry_on_the_same_settings():
+    """`f.registry()` must carry the Forecaster's injected settings, not re-resolve from env."""
+    from scale_forecasting.config import RunConfig
+    from scale_forecasting.sdk import Forecaster, Registry
+    from scale_forecasting.settings import Settings
+
+    settings = Settings(
+        project_id="proj",
+        connection="proj.us.conn",
+        warehouse_uri="gs://bucket/warehouse",
+        dataset_id="source_ds",
+        registry_dataset_id_override="registry_ds",
+    )
+    f = Forecaster(
+        RunConfig(
+            run_name="reg handle",
+            data={"source_table": "source_series_native", "series_limit": 5},
+            models=["theta"],
+        ),
+        settings=settings,
+    )
+    reg = f.registry()
+    assert isinstance(reg, Registry)
+    assert reg.dataset_ref == "proj.registry_ds"
+    assert repr(reg) == "Registry(proj.registry_ds)"

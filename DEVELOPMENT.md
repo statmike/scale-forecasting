@@ -68,6 +68,25 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- Registry operations (`registry/ops.py`) — the manage-only operator surface, six verbs over the one
+  registry `SF_*` resolves to: `init`, `doctor` (read-only: row counts, runs stuck `RUNNING`,
+  orphaned artifacts), `drop-run`, `sweep-orphans`, `snapshot`, `export`. One implementation, three
+  entry points (`python -m scale_forecasting.registry.ops <verb>`, the `Registry` SDK class,
+  a notebook) — G1 applies to operations too. Deliberately **not** shipped: a wipe verb (a full
+  teardown is `bq rm -r -f <dataset>` — a one-liner nobody needs wrapped, and wrapping it invites the
+  accident) and anything that touches the source panel. The design work was the *ordering*: a
+  registry row is the only index of which GCS objects exist, so every destructive verb enumerates
+  artifact prefixes → deletes objects → deletes rows, never the reverse. Doing it backwards is how
+  the old reset path accumulated an unbounded orphan pile, and `sweep-orphans` is that pile's
+  cleanup — correctly scopeable only because the artifact root now carries the registry key. Two
+  things the registry can't tell you were built out here: BQML `sf_model_*` objects are invisible to
+  it (nothing records their names), so `drop-run` lists the dataset's models and matches names back
+  to runs via `model_object_matches_run`, tested as the exact inverse of `_model_ref` so the namer
+  and the matcher can't drift; and a `RUNNING` header can mean a live job *or* a dead one, so
+  mutating verbs refuse an in-flight run and point at `monitor(probe=True)` rather than guessing
+  (`--force` overrides). Preview-by-default with exact blast radius (runs, objects, bytes), same
+  shape as `reset` and the probe's cancel path. Pure/I-O seam throughout: planners, SQL renderers,
+  and formatters are offline-tested (`test_registry_ops.py`); the six verbs are `@gcp`.
 - A registry now has an **address**. `project.dataset` is a guaranteed-unique registry key — BigQuery
   allows exactly one `run_registry` per dataset — so `SF_REGISTRY_DATASET_ID` (optional, defaults to
   `SF_DATASET_ID`) is all it takes to put the registry somewhere other than the source panel, and the

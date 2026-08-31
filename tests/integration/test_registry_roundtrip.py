@@ -218,7 +218,9 @@ def test_registry_roundtrip(settings: Settings) -> None:
     ).model_artifact
     assert artifact_uri and artifact_uri.startswith("gs://")
     expected_hash = make_model_hash(run_id, "series-0", "theta", cfg)
-    assert artifact_uri.endswith(f"/artifacts/{run_id}/{expected_hash}.pkl")
+    # The artifact path carries the registry key (project/registry-dataset), which is what makes a
+    # per-registry orphan sweep unambiguous — assert the whole root, not just the run segment.
+    assert artifact_uri == f"{settings.artifact_root}/{run_id}/{expected_hash}.pkl"
     from google.cloud import storage
 
     without_scheme = artifact_uri[len("gs://") :]

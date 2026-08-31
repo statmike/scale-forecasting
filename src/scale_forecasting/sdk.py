@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Forecaster",
+    "Registry",
     "DryRunResult",
     "RunResult",
     "ModelResult",
@@ -472,6 +473,103 @@ class Forecaster:
             except ConfigError:
                 return None
         return settings.registry_dataset_ref
+
+    def registry(self) -> Registry:
+        """A `Registry` handle for the registry this config's runs land in.
+
+        The lifecycle verbs (`Registry.doctor`, `Registry.drop_run`, …) are keyed on the *registry*,
+        not on a config, so they live on their own object — but reaching them from the `Forecaster`
+        you already have is the common case (`f.registry().drop_run(f.run_id)`).
+        """
+        return Registry(settings=self._settings)
+
+
+class Registry:
+    """The easy path for **managing** a registry — the operator counterpart to `Forecaster`.
+
+    `Forecaster` produces runs; this reads and prunes them. It is keyed on the registry the ``SF_*``
+    environment resolves to (`Settings.registry_dataset_ref`), not on a config, so it needs no
+    config at all — which is exactly right for "what is in this registry, and clean up run X".
+
+    Like `Forecaster`, it adds no logic: every method delegates to `registry.ops`, the same code
+    ``python -m scale_forecasting.registry.ops`` runs, so the notebook, the SDK, and the CLI can
+    never diverge. The destructive verbs preview by default and execute only on ``yes=True``.
+
+        >>> from scale_forecasting import Registry
+        >>> reg = Registry()
+        >>> print(reg.doctor())                 # read-only: counts, stuck runs, orphans
+        >>> reg.drop_run("abc123")              # preview — deletes nothing
+        >>> reg.drop_run("abc123", yes=True)    # artifacts, then models, then rows
+
+    There is deliberately no wipe-everything method: a full teardown is ``bq rm -r -f <dataset>``.
+    """
+
+    def __init__(self, *, settings: Settings | None = None) -> None:
+        self._settings = settings
+
+    def __repr__(self) -> str:
+        return f"Registry({self.dataset_ref or 'unresolved'})"
+
+    @property
+    def dataset_ref(self) -> str | None:
+        """``project.dataset`` for this registry, or ``None`` when ``SF_*`` can't be resolved."""
+        settings = self._settings
+        if settings is None:
+            from .errors import ConfigError
+            from .settings import Settings
+
+            try:
+                settings = Settings.resolve()
+            except ConfigError:
+                return None
+        return settings.registry_dataset_ref
+
+    def init(self, *, create_dataset: bool = False) -> str:
+        """Create this registry's tables + views (idempotent). See `registry.ops.init`."""
+        from .registry import ops
+
+        return ops.init(settings=self._settings, create_dataset=create_dataset)
+
+    def doctor(self) -> Any:
+        """A read-only `registry.ops.DoctorReport` — row counts, stuck runs, orphaned artifacts."""
+        from .registry import ops
+
+        return ops.doctor(settings=self._settings)
+
+    def drop_run(self, *run_ids: str, yes: bool = False, force: bool = False) -> Any:
+        """Delete named run(s) — artifacts, then BQML models, then rows. Preview unless ``yes``.
+
+        See `registry.ops.drop_run` for the ordering rule and the in-flight refusal ``force``
+        overrides.
+        """
+        from .registry import ops
+
+        return ops.drop_run(list(run_ids), settings=self._settings, yes=yes, force=force)
+
+    def sweep_orphans(self, *, yes: bool = False) -> Any:
+        """Delete artifacts under this registry with no ``run_registry`` row.
+
+        Preview unless ``yes``. See `registry.ops.sweep_orphans`.
+        """
+        from .registry import ops
+
+        return ops.sweep_orphans(settings=self._settings, yes=yes)
+
+    def snapshot(
+        self, suffix: str, *, into: str | None = None, expiration_days: int | None = None
+    ) -> dict[str, str]:
+        """Table-snapshot every registry table; returns ``{table: snapshot ref}``."""
+        from .registry import ops
+
+        return ops.snapshot(
+            suffix, settings=self._settings, into=into, expiration_days=expiration_days
+        )
+
+    def export(self, destination_root: str, *, fmt: str = "PARQUET") -> dict[str, str]:
+        """Export every registry table to GCS; returns ``{table: destination prefix}``."""
+        from .registry import ops
+
+        return ops.export(destination_root, settings=self._settings, fmt=fmt)
 
 
 def _duration_s(start: Any, end: Any, fallback: Any) -> float | None:
