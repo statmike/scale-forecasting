@@ -369,5 +369,3 @@ runs — but paste yours to be sure.)
   for runs that outlast Cloud Shell.
 - [`docs/deploying_on_gcp.md`](./deploying_on_gcp.md#human-users-running-jobs--notebooks) — the human
   IAM roles for running jobs and notebooks.
-</content>
-</invoke>

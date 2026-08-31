@@ -83,4 +83,3 @@ the single Storage-Write-API path avoids.
   column.
 - [reading_source_data.md](./reading_source_data.md) — the read companion (Storage Read API + Arrow).
 - [architecture.md](./architecture.md) — where `write_cells` sits in the engine call tree (Layer 6).
-</content>

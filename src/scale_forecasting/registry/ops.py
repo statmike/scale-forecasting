@@ -504,7 +504,7 @@ def _run_models(
 def init(
     *, settings: Settings | None = None, create_dataset: bool = False
 ) -> str:  # pragma: no cover - GCP I/O, @gcp smoke
-    """Create this registry's five tables + two views in `Settings.registry_dataset_ref`.
+    """Create this registry's five tables + three views in `Settings.registry_dataset_ref`.
 
     Idempotent (``CREATE TABLE IF NOT EXISTS`` + ``CREATE OR REPLACE VIEW``) and **registry-only**:
     the source panel is a separate concern with a separate lifetime and is never created here. Point

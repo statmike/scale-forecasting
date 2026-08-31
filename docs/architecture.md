@@ -450,5 +450,3 @@ everywhere, one job per family, one run" real.
   the next run with no image rebuild (the runtime code-delivery seam).
 - [runtime_dependencies.md](./runtime_dependencies.md) — how each service gets its software and stays
   aligned across three layers (substrate, Python runtime, GPU driver).
-</content>
-</invoke>

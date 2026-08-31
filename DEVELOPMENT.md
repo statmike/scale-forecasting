@@ -62,12 +62,42 @@ Plain-language rationale for the choices that aren't obvious from the code alone
 ### Known limits
 - Live scale has been proven to the 1k–10k series range; larger runs are designed for but not yet
   routinely exercised.
+- The Ray engine materializes one driver-side pandas panel before the fan-out shards it (both
+  readers do). Bounded on purpose — Ray is the GPU/modest-scale runtime here and Spark is the
+  100k-series one — but it is the ceiling that keeping the panel distributed as `ray.data` blocks
+  all the way into the fan-out would lift. Gated on a live Ray run at a scale where the driver
+  actually binds.
+- Forward `features.exog` values are unknown offline, so the horizon's exog columns fall back to
+  the most recent observed rows. Everything else in the design matrix (holidays, Fourier phase, the
+  level-shift step, the first `L` steps of each `lag_L`) is computed exactly at the future dates —
+  see `features.build_future_features`. Supply real forward exog by extending the source table
+  past the cutoff.
 - Long Ray runs (beyond ~60 min) can outlive the submission bearer token; see
   [`docs/troubleshooting.md`](./docs/troubleshooting.md).
 - `neuralprophet` is incompatible with pandas 3.0 and ships as an optional extra that registers but
   skips when unavailable.
 
 ### Recently done
+- **Two reserved-but-inert config fields wired, and a correctness bug they surfaced.**
+  `features.level_shift` and `compute.machine_family` had both been declared, documented as
+  "reserved", and consumed nowhere. `level_shift` now detects a single abrupt regime change
+  (O(n) binary segmentation standardized by a MAD noise estimate, 3σ acceptance) and emits it as a
+  **step** dummy — carried forward as `1` across the whole horizon, which is what distinguishes a
+  level shift from an outlier. That the shipped example data plants exactly this pattern
+  (`data_gen.generator`'s per-archetype `level_shift_prob`) while the flag to model it was inert
+  was the tell. `machine_family` now selects the GCE family for a Dataproc **cluster's** master and
+  CPU workers, restricted to families `resources` can price so the sizing plan stays honest, and
+  deliberately not reaching the GPU worker (the accelerator dictates that machine) or Serverless
+  (no machine concept). `spark_deps` was *also* labelled reserved in the docs and had in fact been
+  consumed all along — a doc bug that under-sold a working feature.
+  Building `level_shift` surfaced the real find: **the horizon design matrix was the first
+  `horizon` rows of history.** Deterministic columns — holiday flags, Fourier phase — are functions
+  of the *date*, so an exog-aware model was being handed the seasonal phase from the start of its
+  history for the dates it was forecasting. Backtesting was never affected (its "future" is
+  in-sample, so it slices the real `X`), which is exactly why it hid: the folds scored on correct
+  features while the shipped forecast did not. `features.build_future_features` now builds the
+  horizon frame properly, with column-order parity by construction because
+  `_lag_forecaster.recursive_predict` reads exog positionally.
 - Registry operations (`registry/ops.py`) — the manage-only operator surface, six verbs over the one
   registry `SF_*` resolves to: `init`, `doctor` (read-only: row counts, runs stuck `RUNNING`,
   orphaned artifacts), `drop-run`, `sweep-orphans`, `snapshot`, `export`. One implementation, three

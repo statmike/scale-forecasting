@@ -201,6 +201,10 @@ tell them apart, and they cost differently:
   enough to be suspicious, not on every poll. An already-terminal run short-circuits and touches no
   runtime at all.
 
+For the full operational picture — the six verdicts and how to read them, cancelling safely, and
+what a cancelled run keeps — see
+[troubleshooting.md § In-flight runs](./troubleshooting.md#in-flight-runs--probe-reconcile-cancel).
+
 ## 4. Review — which model won
 
 ```sql
@@ -284,7 +288,7 @@ reg.drop_run("abc123", yes=True)
 
 | Verb | What it does |
 |------|--------------|
-| `init` | Create this registry's five tables + two views (idempotent). Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
+| `init` | Create this registry's five tables + three views (idempotent). Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
 | `doctor` | Read-only report: per-table row counts, runs still marked `RUNNING`, and artifact prefixes with no `run_registry` row. Touches nothing. |
 | `drop-run` | Delete named run(s) from every tier — GCS artifacts, BQML `sf_model_*` objects, then registry rows. Takes as many ids as you like. |
 | `sweep-orphans` | Delete artifact prefixes under *this* registry's root that have no `run_registry` row. |
