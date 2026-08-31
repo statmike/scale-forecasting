@@ -400,6 +400,24 @@ def test_cli_has_no_wipe_verb():
             ops.main([absent])
 
 
+def test_the_product_ships_no_whole_registry_wipe_anywhere():
+    """The tripwire for the decision, not just for this CLI.
+
+    `reset.py` and `registry.bq.drop_all` were removed when `registry.ops` landed: a whole-registry
+    drop is `bq rm`, and giving it a product verb made it look supported and safe while it silently
+    stranded every artifact it had just orphaned. Re-adding either would restore that trap quietly,
+    so it fails here instead. The *pure* renderer stays — it is strings only and has no side effect.
+    """
+    import importlib
+
+    from scale_forecasting.registry import bq, ddl
+
+    assert not hasattr(bq, "drop_all")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scale_forecasting.reset")
+    assert callable(ddl.render_drop_tables), "the pure renderer is still wanted"
+
+
 def test_sdk_registry_forwards_every_verb(spy):
     from scale_forecasting.sdk import Registry
 

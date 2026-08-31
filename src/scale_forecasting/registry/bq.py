@@ -691,41 +691,12 @@ def ensure_views(
             raise RegistryError(f"ensure_views failed creating {name}: {exc}") from exc
 
 
-def drop_all(
-    *, settings: Settings | None = None
-) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Drop all seven registry + source tables and the analyst views (the reset path).
-
-    **Destructive.** Renders `registry.ddl.render_drop_tables` and executes each
-    ``DROP TABLE IF EXISTS`` (plus ``DROP VIEW IF EXISTS`` for the two analyst views), so a
-    subsequent `ensure_tables` recreates everything in the current native/dual-format
-    shape — the Iceberg→native registry switch is a drop-and-recreate, not an ``ALTER``. Callers
-    are responsible for confirming intent before invoking. Raises `RegistryError` on
-    failure.
-    """
-    from google.cloud import bigquery
-
-    from ..errors import RegistryError
-    from .ddl import REGISTRY_TABLE_NAMES, render_drop_tables
-    from .views import render_create_views
-
-    resolved = _resolve_settings(settings)
-    client = bigquery.Client(project=resolved.project_id)
-
-    # Views depend on the tables — drop them first so the table drops don't trip a dependency.
-    for name in render_create_views(resolved.registry_dataset_ref):
-        statement = f"DROP VIEW IF EXISTS `{resolved.registry_table_ref(name)}`;"
-        try:
-            client.query(statement).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with view context
-            raise RegistryError(f"drop_all failed dropping view {name}: {exc}") from exc
-
-    drops = render_drop_tables(resolved.registry_dataset_ref, tables=REGISTRY_TABLE_NAMES)
-    for name, statement in drops.items():
-        try:
-            client.query(statement).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with table context
-            raise RegistryError(f"drop_all failed dropping {name}: {exc}") from exc
+# There is deliberately no `drop_all` here, and no CLI that calls one. Dropping a registry
+# wholesale is `bq rm -r -f <project>:<dataset>` (or a handful of `bq rm -f -t` when the registry
+# shares a dataset with the source panel) — a one-liner nobody needs us to wrap, and wrapping it
+# invites the accident. What the product does ship is the *scoped* teardown: `registry.ops.drop_run`
+# and `registry.ops.sweep_orphans`, which delete GCS artifacts before the rows that index them.
+# The pure renderer `ddl.render_drop_tables` stays available for callers that want the statements.
 
 
 # run_registry columns that may be set by write_header / update_header, with their BQ types.

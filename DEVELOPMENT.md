@@ -84,9 +84,15 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   to runs via `model_object_matches_run`, tested as the exact inverse of `_model_ref` so the namer
   and the matcher can't drift; and a `RUNNING` header can mean a live job *or* a dead one, so
   mutating verbs refuse an in-flight run and point at `monitor(probe=True)` rather than guessing
-  (`--force` overrides). Preview-by-default with exact blast radius (runs, objects, bytes), same
-  shape as `reset` and the probe's cancel path. Pure/I-O seam throughout: planners, SQL renderers,
-  and formatters are offline-tested (`test_registry_ops.py`); the six verbs are `@gcp`.
+  (`--force` overrides). Preview-by-default with exact blast radius (runs, objects, bytes), the same
+  shape the probe's cancel path uses. Pure/I-O seam throughout: planners, SQL renderers, and
+  formatters are offline-tested (`test_registry_ops.py`); the six verbs are `@gcp`.
+  With this landed, **`reset.py` and `registry.bq.drop_all` are gone** — the destructive tier leaves
+  the product entirely. What replaces them is a `bq rm` one-liner
+  ([operations.md §2c](docs/operations.md)), because the only thing `reset` did that a `bq rm`
+  doesn't was give a whole-registry drop the *appearance* of being a supported, safe operation while
+  silently stranding every artifact it had just orphaned. The pure renderer
+  `ddl.render_drop_tables` stays — it is strings only and snapshot-tested.
 - A registry now has an **address**. `project.dataset` is a guaranteed-unique registry key — BigQuery
   allows exactly one `run_registry` per dataset — so `SF_REGISTRY_DATASET_ID` (optional, defaults to
   `SF_DATASET_ID`) is all it takes to put the registry somewhere other than the source panel, and the
@@ -97,9 +103,10 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   every renderer takes a `tables=` subset, BQML `sf_model_*` objects follow the registry (they are
   run outputs keyed by `run_id`, so a per-run teardown has to find them) while source reads stay on
   `SF_DATASET_ID`, and `--sf-registry-dataset-id` travels to cluster drivers so a split deployment's
-  workers write to the right place. Two defects fell out of it: `reset` no longer drops the two
-  **source** tables (reseeding is a Spark job over millions of rows — a registry clear that silently
-  took the input panel with it was a wipe nobody asked for), and the registry/source distinction is
+  workers write to the right place. Two defects fell out of it: the then-current `reset` was dropping
+  the two **source** tables along with the registry (reseeding is a Spark job over millions of rows —
+  a registry clear that silently took the input panel with it was a wipe nobody asked for; scoped
+  here, and the whole verb retired one item later), and the registry/source distinction is
   now made at every call site rather than being discovered later, because a miss is invisible until
   someone actually splits the datasets. Unset variable ⇒ byte-identical behaviour to before.
 - Runtime-environment standardization: asked whether the three dep-delivery mechanisms could collapse

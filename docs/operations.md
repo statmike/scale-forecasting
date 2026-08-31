@@ -124,34 +124,57 @@ gone; §2a and §2c are the blunt instruments:
 uv run python -m scale_forecasting.registry.ops doctor              # counts, stuck runs, orphans
 uv run python -m scale_forecasting.registry.ops drop-run RUN_ID     # preview — deletes nothing
 uv run python -m scale_forecasting.registry.ops drop-run RUN_ID --yes
-uv run python -m scale_forecasting.registry.ops sweep-orphans --yes # artifacts past resets stranded
+uv run python -m scale_forecasting.registry.ops sweep-orphans --yes # artifacts nothing indexes now
 ```
 
 The full verb set (`init` / `doctor` / `drop-run` / `sweep-orphans` / `snapshot` / `export`) and the
 matching `Registry` SDK class are documented in
 [running_and_reviewing.md §6](./running_and_reviewing.md#6-managing-the-registry).
 
-### 2c. Drop the registry tables — schema changed, or you want them gone
+### 2c. Discard the registry entirely — `bq rm`, and there is no verb for it
 
-`reset.py` drops the **five registry tables** plus the two analyst views, for a clean
-`ensure_tables` (or `registry.ops init`) recreate. Use it when the schema itself changed. It reads
-the `SF_*` env for its target and is a dry run without `--yes`:
+**You probably don't need this.** Schema updates are automatic: every write path calls
+`ensure_tables`, which issues an idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` per table, so a
+repo update that *adds* columns lands on your existing tables with no data loss and no action from
+you. Dropping is for the rare non-additive change (a retyped or removed column) or for retiring a
+registry you're done with.
+
+**Delete the GCS artifacts first — the rows are the only thing that identifies them.** Once the
+tables are gone, nothing says which object belonged to which run. So either scope it with §2b
+(`drop-run` the runs you care about) or, if the registry is going away completely, empty it and then
+sweep — an empty `run_registry` makes *every* prefix an orphan by definition, which is exactly what
+you want here:
 
 ```bash
-uv run python -m scale_forecasting.reset          # DRY RUN — prints what would drop, touches nothing
-uv run python -m scale_forecasting.reset --yes    # actually drops the registry tables + views
+uv run python -m scale_forecasting.registry.ops sweep-orphans        # preview: objects + bytes
+uv run python -m scale_forecasting.registry.ops sweep-orphans --yes
 ```
 
-To discard a whole registry rather than empty it, delete its dataset —
-`bq rm -r -f <project>:<dataset>` — which is also how you retire a registry that had its own
-`SF_REGISTRY_DATASET_ID`.
+Then remove the BigQuery objects. **There is no product verb for this, on purpose** — a full
+teardown is a `bq` one-liner nobody needs us to wrap, and wrapping it invites the accident:
 
-> **`reset` clears BigQuery only, never GCS.** Run artifacts under
-> `<warehouse>/artifacts/<project>/<registry-dataset>/<run_id>/` survive it, and once the rows are
-> gone nothing says which artifacts belonged to which run. That is why §2b exists and why it deletes
-> artifacts *first*. If you already reset and left artifacts behind, `sweep-orphans` is the cleanup —
-> the artifact path carries the registry key, so a sweep is unambiguously scoped to this registry
-> and can't reach another one sharing the bucket.
+```bash
+# The registry has its own dataset (you set SF_REGISTRY_DATASET_ID) — delete the dataset:
+bq rm -r -f <project>:<registry_dataset>
+
+# The registry shares SF_DATASET_ID with the source panel — drop the eight objects by name,
+# because deleting the dataset would take the seeded source panel with it:
+DS=<project>:<dataset>
+for v in v_run_summary v_run_jobs v_model_leaderboard; do bq rm -f -t "$DS.$v"; done
+for t in run_registry run_jobs forecast_metadata forecast_predictions backtest_oof; do
+  bq rm -f -t "$DS.$t"
+done
+```
+
+Drop the views before the tables — they read the tables, so the reverse order trips a dependency.
+Recreate everything with `python -m scale_forecasting.registry.ops init` (or just submit a run;
+`ensure_tables` runs on the way in).
+
+> **Want a disposable registry instead?** Give it its own dataset via `SF_REGISTRY_DATASET_ID` and
+> `registry.ops init` it. Then discarding it is one `bq rm -r -f` that cannot reach the source panel
+> or another registry — the artifact root carries the registry key
+> (`<warehouse>/artifacts/<project>/<registry-dataset>/<run_id>/`), so its GCS side is independently
+> scoped too.
 
 ---
 

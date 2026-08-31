@@ -306,6 +306,9 @@ Two things you won't find here:
 - **No wipe verb.** Deleting a whole registry is `bq rm -r -f <project>:<dataset>` (or the BigQuery
   console) — a one-liner nobody needs us to wrap, and wrapping it invites the accident. If you want
   a disposable registry, give it its own dataset via `SF_REGISTRY_DATASET_ID` and delete that.
+  [operations.md §2c](./operations.md#2c-discard-the-registry-entirely--bq-rm-and-there-is-no-verb-for-it)
+  has the full teardown, including the shared-dataset case (drop the objects by name so the source
+  panel survives) and why you sweep the artifacts *before* the rows that index them.
 - **No source-table verb.** The source panel is a separate lifetime (a Spark seed job over millions
   of rows); nothing in this surface reads or writes it.
 
@@ -322,4 +325,3 @@ Two things you won't find here:
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
 | `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `drop-run` / `sweep-orphans` / `snapshot` / `export`. |
-| `python -m scale_forecasting.reset [--yes]` | Drop the registry tables (a clean slate; leaves the source panel alone). |
