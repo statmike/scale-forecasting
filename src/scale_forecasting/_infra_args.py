@@ -33,6 +33,11 @@ INFRA_ARG_ENV: tuple[tuple[str, str], ...] = (
     ("sf_connection", "SF_CONNECTION"),
     ("sf_warehouse_uri", "SF_WAREHOUSE_URI"),
     ("sf_dataset_id", "SF_DATASET_ID"),
+    # Only emitted when the deployment actually splits the registry from the source panel (the
+    # value is "" otherwise and `infra_args_from` skips empty values), so an existing deployment's
+    # submitted command is byte-identical. It has to travel, though: without it a cluster driver
+    # would re-resolve to the *source* dataset and write the run's rows to the wrong registry.
+    ("sf_registry_dataset_id", "SF_REGISTRY_DATASET_ID"),
     ("sf_region", "SF_REGION"),
 )
 
@@ -75,6 +80,7 @@ def infra_args_from(settings: Settings) -> list[str]:
         "sf_connection": settings.connection,
         "sf_warehouse_uri": settings.warehouse_uri,
         "sf_dataset_id": settings.dataset_id,
+        "sf_registry_dataset_id": settings.registry_dataset_id_override,
         "sf_region": settings.region,
     }
     args: list[str] = []

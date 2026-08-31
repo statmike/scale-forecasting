@@ -488,12 +488,11 @@ def test_run_job_contributor_mode_touches_nothing(monkeypatch: Any) -> None:
 
 
 def test_artifact_uri_is_run_scoped_and_deterministic() -> None:
-    uri = artifacts.artifact_gcs_uri("/tmp/model.pkl", "my-run-abc123", "gs://bucket/warehouse/")
-    assert uri == "gs://bucket/warehouse/artifacts/my-run-abc123/model.pkl"
-    # deterministic
-    assert uri == artifacts.artifact_gcs_uri(
-        "/tmp/model.pkl", "my-run-abc123", "gs://bucket/warehouse"
-    )
+    root = "gs://bucket/warehouse/artifacts/proj/scale_forecasting"
+    uri = artifacts.artifact_gcs_uri("/tmp/model.pkl", "my-run-abc123", root + "/")
+    assert uri == f"{root}/my-run-abc123/model.pkl"
+    # deterministic, and a trailing slash on the root makes no difference
+    assert uri == artifacts.artifact_gcs_uri("/tmp/model.pkl", "my-run-abc123", root)
 
 
 # --- Storage Write API retry-on-transient (_append_via_write_api) ---------------

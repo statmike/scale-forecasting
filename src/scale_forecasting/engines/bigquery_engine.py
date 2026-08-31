@@ -144,8 +144,26 @@ def _snapshot_clause(snapshot_millis: int | None) -> str:
     return f" FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({snapshot_millis})"
 
 
-def _model_ref(cfg: RunConfig, model_name: str, dataset: str, *, fold_id: int | None = None) -> str:
+def _registry_of(dataset: str, registry_dataset: str | None) -> str:
+    """The dataset that owns a run's *outputs* — ``registry_dataset``, else ``dataset``.
+
+    Every builder takes the source ``dataset`` positionally and an optional keyword
+    ``registry_dataset``. They are the same string in every deployment that has not set
+    ``SF_REGISTRY_DATASET_ID``, so the default keeps existing callers and rendered SQL
+    byte-identical — but the *distinction* has to be made at each call site, because which family
+    a name belongs to is not recoverable later. See `settings.Settings.registry_dataset_ref`.
+    """
+    return registry_dataset or dataset
+
+
+def _model_ref(
+    cfg: RunConfig, model_name: str, registry_dataset: str, *, fold_id: int | None = None
+) -> str:
     """The backtick-quoted BQML model object path for one ``(model, run[, fold])`` (persisted).
+
+    The object lives in the **registry** dataset, not the source dataset: a ``sf_model_*_{run_id}``
+    is a run *output*, keyed by ``run_id`` exactly like the registry rows, and a per-run teardown
+    has to be able to enumerate it. Source data is read-only input with a different lifetime.
 
     The object name embeds the config-pinned ``run_id`` so re-running the same config targets the
     *same* model (``CREATE OR REPLACE`` is idempotent) while a different config gets a distinct
@@ -156,7 +174,7 @@ def _model_ref(cfg: RunConfig, model_name: str, dataset: str, *, fold_id: int | 
     """
     run_id = make_run_id(cfg)
     suffix = f"_f{fold_id}" if fold_id is not None else ""
-    return f"`{dataset}.sf_model_{model_name}_{_sanitize_identifier(run_id)}{suffix}`"
+    return f"`{registry_dataset}.sf_model_{model_name}_{_sanitize_identifier(run_id)}{suffix}`"
 
 
 def _series_filter(
@@ -333,6 +351,7 @@ def build_create_model_sql(
     model_name: str,
     dataset: str = "{dataset}",
     *,
+    registry_dataset: str | None = None,
     back_steps: int | None = None,
     fold_id: int | None = None,
     snapshot_millis: int | None = None,
@@ -346,8 +365,11 @@ def build_create_model_sql(
     When holidays are configured the ``AS`` clause takes the named-subquery form
     (``training_data AS (...), custom_holiday AS (...)``); otherwise it is a plain training query.
     TimesFM has no CREATE MODEL — see `build_forecast_insert_sql`.
+
+    The model object goes to ``registry_dataset`` (default: ``dataset``) while the training data is
+    read from ``dataset`` — see `_registry_of`.
     """
-    ref = _model_ref(cfg, model_name, dataset, fold_id=fold_id)
+    ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
     source = _source_ref(cfg, dataset)
     options = _render_options(bqml_options(cfg, model_name))
     training = _training_select(
@@ -367,6 +389,7 @@ def _forecast_source(
     model_name: str,
     dataset: str,
     *,
+    registry_dataset: str | None = None,
     back_steps: int | None = None,
     fold_id: int | None = None,
     horizon: int | None = None,
@@ -406,7 +429,7 @@ def _forecast_source(
             f"    confidence_level => {_CONFIDENCE_LEVEL})"
         )
 
-    ref = _model_ref(cfg, model_name, dataset, fold_id=fold_id)
+    ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
     struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
 
@@ -423,6 +446,7 @@ def build_forecast_insert_sql(
     model_name: str,
     dataset: str = "{dataset}",
     *,
+    registry_dataset: str | None = None,
     snapshot_millis: int | None = None,
 ) -> str:
     """``INSERT INTO forecast_predictions`` the **true beyond-data** forecast for one native model.
@@ -434,8 +458,11 @@ def build_forecast_insert_sql(
     ``yhat_lower`` / ``yhat_upper``;
     ``quantiles`` is NULL (native models emit an interval, not an arbitrary quantile set).
     """
-    dataset_q = f"`{dataset}.forecast_predictions`"
-    forecast = _forecast_source(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
+    dataset_q = f"`{_registry_of(dataset, registry_dataset)}.forecast_predictions`"
+    forecast = _forecast_source(
+        cfg, model_name, dataset, registry_dataset=registry_dataset,
+        snapshot_millis=snapshot_millis,
+    )
     return (
         f"INSERT INTO {dataset_q}\n"
         f"  ({_PRED_COLS})\n"
@@ -452,6 +479,7 @@ def build_eval_query(
     model_name: str,
     dataset: str = "{dataset}",
     *,
+    registry_dataset: str | None = None,
     back_steps: int,
     fold_id: int,
     snapshot_millis: int | None = None,
@@ -467,8 +495,8 @@ def build_eval_query(
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     forecast = _forecast_source(
-        cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id,
-        snapshot_millis=snapshot_millis,
+        cfg, model_name, dataset, registry_dataset=registry_dataset,
+        back_steps=back_steps, fold_id=fold_id, snapshot_millis=snapshot_millis,
     )
     snap = _snapshot_clause(snapshot_millis)
     return (
@@ -528,6 +556,7 @@ def build_setup_statements(
     model_name: str,
     dataset: str = "{dataset}",
     *,
+    registry_dataset: str | None = None,
     snapshot_millis: int | None = None,
 ) -> list[str]:
     """The mutating statements for one native model's **final true-future forecast**, in order.
@@ -540,10 +569,16 @@ def build_setup_statements(
     statements: list[str] = []
     if model_name in _MODEL_TYPE:
         statements.append(
-            build_create_model_sql(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
+            build_create_model_sql(
+                cfg, model_name, dataset, registry_dataset=registry_dataset,
+                snapshot_millis=snapshot_millis,
+            )
         )
     statements.append(
-        build_forecast_insert_sql(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
+        build_forecast_insert_sql(
+            cfg, model_name, dataset, registry_dataset=registry_dataset,
+            snapshot_millis=snapshot_millis,
+        )
     )
     return statements
 
@@ -555,6 +590,7 @@ def build_fold_create_statements(
     fold_id: int,
     back_steps: int,
     *,
+    registry_dataset: str | None = None,
     snapshot_millis: int | None = None,
 ) -> list[str]:
     """The training statements for one backtest fold (``[CREATE MODEL]`` for ARIMA, ``[]`` else).
@@ -565,15 +601,20 @@ def build_fold_create_statements(
     if model_name in _MODEL_TYPE:
         return [
             build_create_model_sql(
-                cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id,
-                snapshot_millis=snapshot_millis,
+                cfg, model_name, dataset, registry_dataset=registry_dataset,
+                back_steps=back_steps, fold_id=fold_id, snapshot_millis=snapshot_millis,
             )
         ]
     return []
 
 
 def build_fold_drop_statements(
-    cfg: RunConfig, model_name: str, dataset: str, fold_id: int
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str,
+    fold_id: int,
+    *,
+    registry_dataset: str | None = None,
 ) -> list[str]:
     """The cleanup statement for one backtest fold (``[DROP MODEL]`` for ARIMA, ``[]`` else).
 
@@ -586,7 +627,8 @@ def build_fold_drop_statements(
     nothing to drop.
     """
     if model_name in _MODEL_TYPE:
-        return [f"DROP MODEL IF EXISTS {_model_ref(cfg, model_name, dataset, fold_id=fold_id)};"]
+        ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
+        return [f"DROP MODEL IF EXISTS {ref};"]
     return []
 
 
@@ -595,11 +637,15 @@ def render_setup_sql(
     model_name: str,
     dataset: str = "{dataset}",
     *,
+    registry_dataset: str | None = None,
     snapshot_millis: int | None = None,
 ) -> str:
     """All of a model's true-future setup statements joined into one script (snapshot + reading)."""
     return "\n\n".join(
-        build_setup_statements(cfg, model_name, dataset, snapshot_millis=snapshot_millis)
+        build_setup_statements(
+            cfg, model_name, dataset, registry_dataset=registry_dataset,
+            snapshot_millis=snapshot_millis,
+        )
     )
 
 
@@ -660,7 +706,10 @@ def run(
     log = get_logger(__name__)
     settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
+    # Source reads resolve against `dataset`; model objects and forecast_predictions land in
+    # `registry_dataset`. Identical strings unless the deployment split them (`_registry_of`).
     dataset = settings.dataset_ref
+    registry_dataset = settings.registry_dataset_ref
     client = bigquery.Client(project=settings.project_id)
     log.info(
         "bigquery run start: run_id=%s models=%s manage_header=%s backtest=%s",
@@ -703,7 +752,8 @@ def run(
             # --- Phase 1: final true-future forecast → forecast_predictions (always) ----------
             for model_name in models:
                 for stmt in build_setup_statements(
-                    cfg, model_name, dataset, snapshot_millis=snapshot_millis
+                    cfg, model_name, dataset, registry_dataset=registry_dataset,
+                    snapshot_millis=snapshot_millis,
                 ):
                     _query(stmt)
 
@@ -723,19 +773,23 @@ def run(
                     for fold_id, back_steps in plan:
                         for stmt in build_fold_create_statements(
                             cfg, model_name, dataset, fold_id, back_steps,
+                            registry_dataset=registry_dataset,
                             snapshot_millis=snapshot_millis,
                         ):
                             _query(stmt)
                         eval_df = _query(
                             build_eval_query(
-                                cfg, model_name, dataset, back_steps=back_steps, fold_id=fold_id,
+                                cfg, model_name, dataset, registry_dataset=registry_dataset,
+                                back_steps=back_steps, fold_id=fold_id,
                                 snapshot_millis=snapshot_millis,
                             )
                         ).to_dataframe()
                         # The fold model has served its forecast — drop it so backtest runs don't
                         # leave orphaned sf_model_*_f{k} objects behind. Best-effort: a failed
                         # cleanup must not sink an otherwise-good run (results already read above).
-                        for stmt in build_fold_drop_statements(cfg, model_name, dataset, fold_id):
+                        for stmt in build_fold_drop_statements(
+                            cfg, model_name, dataset, fold_id, registry_dataset=registry_dataset
+                        ):
                             try:
                                 _query(stmt)
                             except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
@@ -864,7 +918,7 @@ def _append_rows(  # pragma: no cover - GCP I/O, @gcp smoke
     bq._append_via_write_api(
         write_client,
         settings.project_id,
-        settings.dataset_id,
+        settings.registry_dataset_id,
         table,
         proto_descriptor,
         serialized,

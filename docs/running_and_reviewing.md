@@ -16,8 +16,21 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
   | `SF_PROJECT_ID` | yes | — | GCP project. |
   | `SF_CONNECTION` | yes | — | BigLake connection ref, `project.region.name`. |
   | `SF_WAREHOUSE_URI` | yes | — | GCS warehouse root, `gs://<bucket>/warehouse`. |
-  | `SF_DATASET_ID` | no | `scale_forecasting` | Registry dataset. |
+  | `SF_DATASET_ID` | no | `scale_forecasting` | Dataset holding the **source** panel (and, by default, the registry). |
+  | `SF_REGISTRY_DATASET_ID` | no | `SF_DATASET_ID` | Dataset holding the **registry** — set it only to split the two. |
   | `SF_REGION` | no | `us-central1` | Region. |
+
+  `SF_REGISTRY_DATASET_ID` exists because the registry and the source panel have different
+  lifetimes. The registry is churn — you clear it, you keep several of them side by side, you tear
+  one down after an experiment. The source panel is a Spark seed job over millions of rows that you
+  rebuild rarely and never by accident. Leaving the variable unset keeps both in one dataset, which
+  is what every deployment does until it wants otherwise.
+
+  Setting it also fixes the **artifact root**: model objects live under
+  `<warehouse>/artifacts/<project>/<registry-dataset>/<run_id>/`, so two registries can share a
+  warehouse bucket and still be cleaned up independently. `project.dataset` is a
+  guaranteed-unique registry key — BigQuery allows exactly one `run_registry` per dataset — so
+  the path is self-describing: read an object's prefix and you know which registry owns the run.
 
   Every value comes straight from `terraform output` in `terraform/main`. After a fresh apply, wire
   them into your environment directly — no manual copy-paste:

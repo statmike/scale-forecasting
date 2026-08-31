@@ -24,12 +24,21 @@ Schema evolution is additive: when a new NULLABLE column is added to a body belo
 the *same* bodies, so a table created under an older schema can be brought up to date
 without the CREATE and the migration ever drifting apart (``ensure_tables`` runs both).
 
-Public surface: ``TABLE_NAMES``, ``SOURCE_TABLE_ICEBERG``, ``SOURCE_TABLE_NATIVE``,
-``render_deployment_ddl``, ``render_create_tables``, ``render_drop_tables``,
-``additive_columns``, ``render_migrations``.
+**The two families are addressable separately.** ``REGISTRY_TABLE_NAMES`` and
+``SOURCE_TABLE_NAMES`` partition ``TABLE_NAMES``, and every renderer takes an optional ``tables``
+subset plus its own ``dataset``. That is what lets a deployment put its registry in one dataset and
+its source panel in another — the two have separate lifetimes (you redesign source data far less
+often than you clear a registry) and nothing about them requires a shared fate. Renderers stay dumb
+about the policy; ``render_deployment_ddl`` is the one place that knows which family goes where.
+
+Public surface: ``TABLE_NAMES``, ``REGISTRY_TABLE_NAMES``, ``SOURCE_TABLE_NAMES``,
+``SOURCE_TABLE_ICEBERG``, ``SOURCE_TABLE_NATIVE``, ``render_deployment_ddl``,
+``render_create_tables``, ``render_drop_tables``, ``additive_columns``, ``render_migrations``.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 # Table bodies: columns + PARTITION BY + CLUSTER BY.
 # `{d}` is the dataset ref (`project.dataset` or `dataset`). No trailing semicolon —
@@ -136,7 +145,12 @@ CLUSTER BY run_id, ts_id""",
 # native supports the JSON column type (so raw_config/job_telemetry/quantiles/best_params
 # are real JSON, not STRING) and WRITE_TRUNCATE (so a reseed is a clean truncate, not a
 # streaming-buffer-bounded DELETE). No BigLake connection or warehouse bucket is needed for them.
-_REGISTRY_TABLES: tuple[str, ...] = tuple(_TABLE_BODIES)
+#
+# This tuple is PUBLIC because it is the definition of "a registry": these five names, in one
+# dataset. BigQuery's namespace then makes `project.dataset` a guaranteed-unique registry key for
+# free — a dataset can hold exactly one table called `run_registry` — so nothing has to validate
+# uniqueness, and the key is safe to reuse verbatim as a GCS path segment.
+REGISTRY_TABLE_NAMES: tuple[str, ...] = tuple(_TABLE_BODIES)
 
 # The example input table, shipped in BOTH storage formats so a deployment can benchmark the
 # identical series as managed Iceberg vs native BigQuery (the engines read either transparently
@@ -159,11 +173,14 @@ CLUSTER BY ts_id"""
 
 SOURCE_TABLE_ICEBERG = "source_series_iceberg"
 SOURCE_TABLE_NATIVE = "source_series_native"
-_SOURCE_TABLES: tuple[str, ...] = (SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE)
+# Public for the same reason as REGISTRY_TABLE_NAMES: these two are the *input panel*, a separate
+# concern with a separate lifetime. Clearing a registry must never take them with it.
+SOURCE_TABLE_NAMES: tuple[str, ...] = (SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE)
 
-for _src in _SOURCE_TABLES:
+for _src in SOURCE_TABLE_NAMES:
     _TABLE_BODIES[_src] = _SOURCE_BODY_TEMPLATE.format(name=_src)
 
+# Both families. Kept as the default subset for every renderer so existing callers are unchanged.
 TABLE_NAMES: tuple[str, ...] = tuple(_TABLE_BODIES)
 
 
@@ -194,15 +211,19 @@ def additive_columns(table: str) -> list[tuple[str, str]]:
     return cols
 
 
-def render_migrations(dataset: str) -> dict[str, str]:
+def render_migrations(dataset: str, *, tables: Sequence[str] | None = None) -> dict[str, str]:
     """Render ``{table_name: ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...}`` for additive columns.
 
     One idempotent ``ALTER`` per table adds every nullable column if absent, so a table created
     under an older schema is brought current without touching existing rows (they read NULL) and
     without a hand-written migration. Tables with no nullable columns are omitted.
+
+    ``tables`` restricts the output to a subset (default: all of them) — pass
+    `REGISTRY_TABLE_NAMES` or `SOURCE_TABLE_NAMES` when the two families live in different
+    datasets, so each ``ALTER`` is addressed to the dataset that actually holds the table.
     """
     out: dict[str, str] = {}
-    for name in TABLE_NAMES:
+    for name in tables if tables is not None else TABLE_NAMES:
         cols = additive_columns(name)
         if not cols:
             continue
@@ -229,6 +250,7 @@ def render_create_tables(
     connection: str | None = None,
     warehouse_uri: str | None = None,
     iceberg: bool = True,
+    tables: Sequence[str] | None = None,
 ) -> dict[str, str]:
     """Render ``{table_name: CREATE TABLE statement}`` for all tables.
 
@@ -240,6 +262,7 @@ def render_create_tables(
             when ``iceberg`` is True.
         iceberg: when True (default) render managed-Iceberg DDL; when False render
             plain native BigQuery tables (the native-BigQuery fallback, or for a BQ emulator).
+        tables: restrict to a subset (default: all). See `render_migrations`.
 
     Every statement is idempotent (``CREATE TABLE IF NOT EXISTS``).
     """
@@ -247,7 +270,7 @@ def render_create_tables(
         raise ValueError("iceberg=True requires both 'connection' and 'warehouse_uri'")
 
     out: dict[str, str] = {}
-    for name in _TABLE_BODIES:
+    for name in tables if tables is not None else _TABLE_BODIES:
         out[name] = _render_one(name, dataset, connection, warehouse_uri, iceberg=iceberg)
     return out
 
@@ -274,6 +297,7 @@ def render_deployment_ddl(
     *,
     connection: str,
     warehouse_uri: str,
+    source_dataset: str | None = None,
 ) -> dict[str, str]:
     """Render the CREATE DDL for a real deployment: native registry + both source variants.
 
@@ -285,21 +309,33 @@ def render_deployment_ddl(
       ``warehouse_uri``);
     - ``source_series_native`` is a plain native table.
 
+    ``source_dataset`` places the two source tables somewhere other than ``dataset`` (default:
+    alongside the registry, which is every deployment that has never asked for otherwise). This is
+    the only function that knows which family belongs where; the renderers it calls take a plain
+    dataset + table list and have no policy in them.
+
     ``connection``/``warehouse_uri`` are required because the Iceberg source variant is always
     created. Every statement is idempotent (``CREATE TABLE IF NOT EXISTS``).
     """
     out: dict[str, str] = {}
-    for name in TABLE_NAMES:
+    for name in REGISTRY_TABLE_NAMES:
+        out[name] = _render_one(name, dataset, connection, warehouse_uri, iceberg=False)
+    for name in SOURCE_TABLE_NAMES:
         iceberg = name == SOURCE_TABLE_ICEBERG
-        out[name] = _render_one(name, dataset, connection, warehouse_uri, iceberg=iceberg)
+        out[name] = _render_one(
+            name, source_dataset or dataset, connection, warehouse_uri, iceberg=iceberg
+        )
     return out
 
 
-def render_drop_tables(dataset: str) -> dict[str, str]:
-    """Render ``{table_name: DROP TABLE IF EXISTS ...;}`` for all seven tables (reset path).
+def render_drop_tables(dataset: str, *, tables: Sequence[str] | None = None) -> dict[str, str]:
+    """Render ``{table_name: DROP TABLE IF EXISTS ...;}`` for a table family (destructive paths).
 
-    Pure string op (snapshot-testable); the destructive execution lives in ``bq.drop_all``. Used
-    to tear a deployment down to bare metal before a clean ``ensure_tables`` recreates it in the
-    current native/dual-format shape (the Iceberg→native registry switch is not an ``ALTER``).
+    Pure string op (snapshot-testable); the execution lives outside the product, in the control
+    tower's dev-only teardown tools. ``tables`` defaults to all seven for backwards compatibility,
+    but a caller that means "clear the registry" must pass `REGISTRY_TABLE_NAMES` — dropping the
+    source panel as part of a registry clear is a different, much more expensive operation, and
+    conflating the two is exactly the defect this subset argument exists to prevent.
     """
-    return {name: f"DROP TABLE IF EXISTS `{dataset}.{name}`;" for name in TABLE_NAMES}
+    names = tables if tables is not None else TABLE_NAMES
+    return {name: f"DROP TABLE IF EXISTS `{dataset}.{name}`;" for name in names}

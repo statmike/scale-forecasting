@@ -624,13 +624,22 @@ def ensure_tables(
     from google.cloud import bigquery
 
     from ..errors import RegistryError
-    from .ddl import render_deployment_ddl, render_migrations
+    from .ddl import (
+        REGISTRY_TABLE_NAMES,
+        SOURCE_TABLE_NAMES,
+        render_deployment_ddl,
+        render_migrations,
+    )
 
     resolved = _resolve_settings(settings)
+    # Registry tables land in the registry dataset, source tables in the source dataset. These are
+    # the same dataset unless SF_REGISTRY_DATASET_ID says otherwise, so this is a no-op for an
+    # existing deployment — but the two families are now addressed separately all the way down.
     ddl = render_deployment_ddl(
-        resolved.dataset_ref,
+        resolved.registry_dataset_ref,
         connection=resolved.connection,
         warehouse_uri=resolved.warehouse_uri,
+        source_dataset=resolved.dataset_ref,
     )
     client = bigquery.Client(project=resolved.project_id)
     for name, statement in ddl.items():
@@ -642,7 +651,11 @@ def ensure_tables(
     # Additive schema evolution: bring tables created under an older schema up to the current
     # column set (ADD COLUMN IF NOT EXISTS). A fresh CREATE already has every column, so these
     # ALTERs are no-ops on it; on a pre-existing table they back-fill new nullable columns.
-    migrations = render_migrations(resolved.dataset_ref)
+    # Each family is migrated against the dataset that holds it.
+    migrations = {
+        **render_migrations(resolved.registry_dataset_ref, tables=REGISTRY_TABLE_NAMES),
+        **render_migrations(resolved.dataset_ref, tables=SOURCE_TABLE_NAMES),
+    }
     for name, statement in migrations.items():
         try:
             client.query(statement).result()
@@ -669,7 +682,7 @@ def ensure_views(
     from .views import render_create_views
 
     resolved = _resolve_settings(settings)
-    views = render_create_views(resolved.dataset_ref)
+    views = render_create_views(resolved.registry_dataset_ref)
     client = bigquery.Client(project=resolved.project_id)
     for name, statement in views.items():
         try:
@@ -693,21 +706,22 @@ def drop_all(
     from google.cloud import bigquery
 
     from ..errors import RegistryError
-    from .ddl import render_drop_tables
+    from .ddl import REGISTRY_TABLE_NAMES, render_drop_tables
     from .views import render_create_views
 
     resolved = _resolve_settings(settings)
     client = bigquery.Client(project=resolved.project_id)
 
     # Views depend on the tables — drop them first so the table drops don't trip a dependency.
-    for name in render_create_views(resolved.dataset_ref):
-        statement = f"DROP VIEW IF EXISTS `{resolved.table_ref(name)}`;"
+    for name in render_create_views(resolved.registry_dataset_ref):
+        statement = f"DROP VIEW IF EXISTS `{resolved.registry_table_ref(name)}`;"
         try:
             client.query(statement).result()
         except Exception as exc:  # noqa: BLE001 - re-raised with view context
             raise RegistryError(f"drop_all failed dropping view {name}: {exc}") from exc
 
-    for name, statement in render_drop_tables(resolved.dataset_ref).items():
+    drops = render_drop_tables(resolved.registry_dataset_ref, tables=REGISTRY_TABLE_NAMES)
+    for name, statement in drops.items():
         try:
             client.query(statement).result()
         except Exception as exc:  # noqa: BLE001 - re-raised with table context
@@ -800,7 +814,7 @@ def snapshot_millis_for(
 
     resolved = _resolve_settings(settings)
     sql = (
-        f"SELECT snapshot_millis FROM `{resolved.table_ref('run_registry')}` "
+        f"SELECT snapshot_millis FROM `{resolved.registry_table_ref('run_registry')}` "
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
     params = [_header_param("run_id", run_id)]
@@ -847,7 +861,7 @@ def write_header(
     columns = list(row)
     placeholders = ", ".join(f"@{col}" for col in columns)
     sql = (
-        f"INSERT INTO `{resolved.table_ref('run_registry')}` "
+        f"INSERT INTO `{resolved.registry_table_ref('run_registry')}` "
         f"({', '.join(columns)}) VALUES ({placeholders})"
     )
     params = [_header_param(col, row[col]) for col in columns]
@@ -879,7 +893,8 @@ def update_header(
 
     resolved = _resolve_settings(settings)
     set_clause = ", ".join(f"{col} = @{col}" for col in fields)
-    sql = f"UPDATE `{resolved.table_ref('run_registry')}` SET {set_clause} WHERE run_id=@run_id"
+    table = resolved.registry_table_ref("run_registry")
+    sql = f"UPDATE `{table}` SET {set_clause} WHERE run_id=@run_id"
     params = [_header_param(col, value) for col, value in fields.items()]
     params.append(_header_param("run_id", run_id))
     client = bigquery.Client(project=resolved.project_id)
@@ -953,7 +968,7 @@ def merge_header_telemetry(
 
     resolved = _resolve_settings(settings)
     paths = list(patch)
-    sql = render_header_telemetry_merge(resolved.table_ref("run_registry"), paths)
+    sql = render_header_telemetry_merge(resolved.registry_table_ref("run_registry"), paths)
     params: list[Any] = [
         bigquery.ScalarQueryParameter(f"t{i}", "JSON", patch[path]) for i, path in enumerate(paths)
     ]
@@ -982,7 +997,7 @@ def header_status(
 
     resolved = _resolve_settings(settings)
     sql = (
-        f"SELECT status FROM `{resolved.table_ref('run_registry')}` "
+        f"SELECT status FROM `{resolved.registry_table_ref('run_registry')}` "
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
     params = [_header_param("run_id", run_id)]
@@ -1033,7 +1048,7 @@ def read_run_summary(
     from ..errors import RegistryError
 
     resolved = _resolve_settings(settings)
-    sql = f"SELECT * FROM `{resolved.table_ref('v_run_summary')}` WHERE run_id=@run_id"
+    sql = f"SELECT * FROM `{resolved.registry_table_ref('v_run_summary')}` WHERE run_id=@run_id"
     params = [_header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
@@ -1059,7 +1074,7 @@ def read_leaderboard(
 
     resolved = _resolve_settings(settings)
     sql = (
-        f"SELECT * FROM `{resolved.table_ref('v_model_leaderboard')}` "
+        f"SELECT * FROM `{resolved.registry_table_ref('v_model_leaderboard')}` "
         "WHERE run_id=@run_id ORDER BY mean_wape ASC NULLS LAST"
     )
     params = [_header_param("run_id", run_id)]
@@ -1088,7 +1103,8 @@ def read_prediction_counts(
 
     resolved = _resolve_settings(settings)
     sql = (
-        f"SELECT model_type, COUNT(*) AS n FROM `{resolved.table_ref('forecast_predictions')}` "
+        "SELECT model_type, COUNT(*) AS n "
+        f"FROM `{resolved.registry_table_ref('forecast_predictions')}` "
         "WHERE run_id=@run_id GROUP BY model_type"
     )
     params = [_header_param("run_id", run_id)]
@@ -1147,7 +1163,7 @@ def write_job(
     columns = list(row)
     placeholders = ", ".join(f"@{col}" for col in columns)
     sql = (
-        f"INSERT INTO `{resolved.table_ref('run_jobs')}` "
+        f"INSERT INTO `{resolved.registry_table_ref('run_jobs')}` "
         f"({', '.join(columns)}) VALUES ({placeholders})"
     )
     params = [_job_param(col, row[col]) for col in columns]
@@ -1180,7 +1196,8 @@ def update_job(
 
     resolved = _resolve_settings(settings)
     set_clause = ", ".join(f"{col} = @{col}" for col in fields)
-    sql = f"UPDATE `{resolved.table_ref('run_jobs')}` SET {set_clause} WHERE job_id=@job_id"
+    table = resolved.registry_table_ref("run_jobs")
+    sql = f"UPDATE `{table}` SET {set_clause} WHERE job_id=@job_id"
     params = [_job_param(col, value) for col, value in fields.items()]
     params.append(_job_param("job_id", job_id))
     client = bigquery.Client(project=resolved.project_id)
@@ -1205,7 +1222,7 @@ def latest_job_attempt(
 
     resolved = _resolve_settings(settings)
     sql = (
-        f"SELECT MAX(attempt) AS max_attempt FROM `{resolved.table_ref('run_jobs')}` "
+        f"SELECT MAX(attempt) AS max_attempt FROM `{resolved.registry_table_ref('run_jobs')}` "
         "WHERE run_id=@run_id AND family=@family"
     )
     params = [_job_param("run_id", run_id), _job_param("family", family)]
@@ -1249,7 +1266,7 @@ def read_run_jobs(
 
     resolved = _resolve_settings(settings)
     sql = (
-        f"SELECT * FROM `{resolved.table_ref('v_run_jobs')}` "
+        f"SELECT * FROM `{resolved.registry_table_ref('v_run_jobs')}` "
         "WHERE run_id=@run_id ORDER BY family"
     )
     params = [_job_param("run_id", run_id)]
@@ -1285,7 +1302,7 @@ def read_cell_timing(
     resolved = _resolve_settings(settings)
     sql = (
         "SELECT ts_id, model_type, compute_engine, worker_id, cell_started_at, cell_ended_at "
-        f"FROM `{resolved.table_ref('forecast_metadata')}` "
+        f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
         "WHERE run_id=@run_id AND fold_id IS NULL AND cell_started_at IS NOT NULL "
         "QUALIFY ROW_NUMBER() OVER ("
         "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
@@ -1325,7 +1342,7 @@ def read_run_config(
     resolved = _resolve_settings(settings)
     sql = (
         f"SELECT TO_JSON_STRING(raw_config) AS raw_config "
-        f"FROM `{resolved.table_ref('run_registry')}` "
+        f"FROM `{resolved.registry_table_ref('run_registry')}` "
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
     params = [_header_param("run_id", run_id)]
@@ -1391,7 +1408,7 @@ def read_compute_harvest(
     sql = (
         "SELECT ts_id, model_type, fold_id, ensemble_id, fit_seconds, cpu_seconds, "
         "process_rss_bytes, peak_gpu_bytes, intraop_threads, n_obs, created_at "
-        f"FROM `{resolved.table_ref('forecast_metadata')}` "
+        f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
         f"WHERE run_id=@run_id AND {_HARVEST_WHERE} "
         "QUALIFY ROW_NUMBER() OVER ("
         "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
@@ -1467,8 +1484,8 @@ def discover_harvest_run(
         "  AND (@freq IS NULL OR JSON_VALUE(h.raw_config, '$.data.freq') = @freq) "
         "GROUP BY m.run_id ORDER BY measured_at DESC LIMIT 1"
     ).format(
-        registry=resolved.table_ref("run_registry"),
-        metadata=resolved.table_ref("forecast_metadata"),
+        registry=resolved.registry_table_ref("run_registry"),
+        metadata=resolved.registry_table_ref("forecast_metadata"),
         harvest_where=_HARVEST_WHERE.replace("fold_id", "m.fold_id")
         .replace("ensemble_id", "m.ensemble_id")
         .replace("cpu_seconds", "m.cpu_seconds"),
@@ -1507,7 +1524,7 @@ def read_progress(
     resolved = _resolve_settings(settings)
     sql = (
         "WITH deduped AS ("
-        "  SELECT * FROM `" + resolved.table_ref("forecast_metadata") + "`"
+        "  SELECT * FROM `" + resolved.registry_table_ref("forecast_metadata") + "`"
         "  WHERE run_id=@run_id AND fold_id IS NULL"
         "  QUALIFY ROW_NUMBER() OVER ("
         "    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id"
@@ -1555,7 +1572,7 @@ def read_metric_aggregates(
     )
     sql = (
         "WITH deduped AS ("
-        "  SELECT * FROM `" + resolved.table_ref("forecast_metadata") + "`"
+        "  SELECT * FROM `" + resolved.registry_table_ref("forecast_metadata") + "`"
         "  WHERE run_id=@run_id AND fold_id IS NULL"
         "  QUALIFY ROW_NUMBER() OVER ("
         "    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id"
@@ -1595,7 +1612,7 @@ def read_cell_metrics(
     metric_cols = ", ".join(METRIC_COLUMNS)
     sql = (
         "SELECT ts_id, model_type, ensemble_id, compute_engine, fit_seconds, " + metric_cols + " "
-        "FROM `" + resolved.table_ref("forecast_metadata") + "` "
+        "FROM `" + resolved.registry_table_ref("forecast_metadata") + "` "
         "WHERE run_id=@run_id AND fold_id IS NULL "
         "QUALIFY ROW_NUMBER() OVER ("
         "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
@@ -1823,7 +1840,7 @@ def write_cells(
                 result.artifact_bytes,
                 f"{result.model_hash}.pkl",
                 result.run_id,
-                resolved.warehouse_uri,
+                resolved.artifact_root,
             )
         meta_rows.append(assemble_metadata_row(result, created_at, model_artifact=model_artifact))
 
@@ -1849,7 +1866,7 @@ def write_cells(
         _append_via_write_api(
             write_client,
             resolved.project_id,
-            resolved.dataset_id,
+            resolved.registry_dataset_id,
             table,
             proto_descriptor,
             serialized,

@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from scale_forecasting.registry.ddl import (
+    REGISTRY_TABLE_NAMES,
     SOURCE_TABLE_ICEBERG,
+    SOURCE_TABLE_NAMES,
     SOURCE_TABLE_NATIVE,
     TABLE_NAMES,
     additive_columns,
@@ -28,6 +30,8 @@ DROP_SNAPSHOT = Path(__file__).parent / "snapshots" / "ddl_drop.sql"
 _KW = {"connection": "proj.us-central1.sf-conn", "warehouse_uri": "gs://proj-wh/warehouse"}
 
 # The five run-collection tables are always native; the source table ships in both formats.
+# Spelled out literally rather than re-exported, so a rename or a table added to the wrong family
+# fails here instead of being rubber-stamped by the constant it is supposed to be checking.
 _REGISTRY_TABLES = (
     "run_registry",
     "run_jobs",
@@ -48,6 +52,43 @@ def test_all_tables_rendered() -> None:
     assert len(TABLE_NAMES) == 7
     # five registry + two source variants
     assert set(TABLE_NAMES) == {*_REGISTRY_TABLES, SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE}
+
+
+def test_the_two_families_partition_all_tables() -> None:
+    # The split is what lets a deployment address registry and source separately; if the two
+    # families ever overlap or leave a table unclaimed, a subset-scoped drop/migrate silently
+    # misses (or doubles up on) it.
+    assert REGISTRY_TABLE_NAMES == _REGISTRY_TABLES
+    assert SOURCE_TABLE_NAMES == (SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE)
+    assert not set(REGISTRY_TABLE_NAMES) & set(SOURCE_TABLE_NAMES)
+    assert set(REGISTRY_TABLE_NAMES) | set(SOURCE_TABLE_NAMES) == set(TABLE_NAMES)
+
+
+def test_render_deployment_ddl_can_split_the_two_datasets() -> None:
+    # SF_REGISTRY_DATASET_ID: registry in one dataset, source panel in another. The renderer is the
+    # single place that knows which family goes where.
+    stmts = render_deployment_ddl("proj.reg", source_dataset="proj.src", **_KW)
+    for name in REGISTRY_TABLE_NAMES:
+        assert f"`proj.reg.{name}`" in stmts[name]
+        assert "proj.src" not in stmts[name]
+    for name in SOURCE_TABLE_NAMES:
+        assert f"`proj.src.{name}`" in stmts[name]
+        assert "proj.reg." not in stmts[name]
+
+
+def test_render_deployment_ddl_defaults_source_to_the_registry_dataset() -> None:
+    # Zero behaviour change for a deployment that never sets SF_REGISTRY_DATASET_ID.
+    assert render_deployment_ddl("proj.ds", **_KW) == render_deployment_ddl(
+        "proj.ds", source_dataset="proj.ds", **_KW
+    )
+
+
+def test_subset_renderers_restrict_to_the_named_family() -> None:
+    assert set(render_drop_tables("d", tables=REGISTRY_TABLE_NAMES)) == set(REGISTRY_TABLE_NAMES)
+    assert set(render_migrations("d", tables=SOURCE_TABLE_NAMES)) <= set(SOURCE_TABLE_NAMES)
+    assert set(render_create_tables("d", iceberg=False, tables=SOURCE_TABLE_NAMES)) == set(
+        SOURCE_TABLE_NAMES
+    )
 
 
 def test_every_statement_is_idempotent_and_terminated() -> None:

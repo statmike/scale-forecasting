@@ -68,6 +68,21 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- A registry now has an **address**. `project.dataset` is a guaranteed-unique registry key — BigQuery
+  allows exactly one `run_registry` per dataset — so `SF_REGISTRY_DATASET_ID` (optional, defaults to
+  `SF_DATASET_ID`) is all it takes to put the registry somewhere other than the source panel, and the
+  GCS artifact root becomes `<warehouse>/artifacts/<project>/<registry-dataset>/<run_id>/`. That path
+  is what makes cleanup well-defined: an object prefix names the dataset that owns the run, so an
+  orphan sweep has an unambiguous scope and can never touch another registry sharing the bucket.
+  The split runs all the way down — `ddl` exposes `REGISTRY_TABLE_NAMES` / `SOURCE_TABLE_NAMES` and
+  every renderer takes a `tables=` subset, BQML `sf_model_*` objects follow the registry (they are
+  run outputs keyed by `run_id`, so a per-run teardown has to find them) while source reads stay on
+  `SF_DATASET_ID`, and `--sf-registry-dataset-id` travels to cluster drivers so a split deployment's
+  workers write to the right place. Two defects fell out of it: `reset` no longer drops the two
+  **source** tables (reseeding is a Spark job over millions of rows — a registry clear that silently
+  took the input panel with it was a wipe nobody asked for), and the registry/source distinction is
+  now made at every call site rather than being discovered later, because a miss is invisible until
+  someone actually splits the datasets. Unset variable ⇒ byte-identical behaviour to before.
 - Runtime-environment standardization: asked whether the three dep-delivery mechanisms could collapse
   to one, and answered no with reasons rather than preference — the four constraints now open
   [runtime_dependencies.md](docs/runtime_dependencies.md#why-more-than-one-mechanism). The decisive

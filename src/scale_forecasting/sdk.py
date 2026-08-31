@@ -458,7 +458,10 @@ class Forecaster:
 
     def _resolved_dataset_ref(self) -> str | None:
         """``project.dataset`` from the injected/resolved `Settings`, or ``None`` if
-        unresolvable (missing ``SF_*`` env) — keeps `review` graceful offline."""
+        unresolvable (missing ``SF_*`` env) — keeps `review` graceful offline.
+
+        The **registry** dataset: what a `RunResult` points at is the results + views, not the
+        source panel."""
         settings = self._settings
         if settings is None:
             from .errors import ConfigError
@@ -468,7 +471,7 @@ class Forecaster:
                 settings = Settings.resolve()
             except ConfigError:
                 return None
-        return settings.dataset_ref
+        return settings.registry_dataset_ref
 
 
 def _duration_s(start: Any, end: Any, fallback: Any) -> float | None:

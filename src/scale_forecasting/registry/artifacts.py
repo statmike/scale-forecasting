@@ -7,7 +7,7 @@ prediction is traceable back to the exact object that produced it (lineage).
 Split along the pure/I-O seam:
 
 - **Pure** (tested offline): ``artifact_gcs_uri`` builds the deterministic
-  ``gs://.../<run_id>/<basename>`` destination from a local path — no client, no upload.
+  ``<artifact_root>/<run_id>/<basename>`` destination from a local path — no client, no upload.
 - **I/O** (GCP-verified by the ``@gcp`` round-trip test): ``upload_artifact`` streams a
   local file, ``upload_artifact_bytes`` streams in-memory bytes (the executor-side path —
   the fitted model is serialized to bytes in ``run_cell`` and never touches local disk);
@@ -21,30 +21,34 @@ from __future__ import annotations
 from pathlib import PurePath, PurePosixPath
 
 
-def artifact_gcs_uri(local_path: str, run_id: str, warehouse_uri: str) -> str:
+def artifact_gcs_uri(local_path: str, run_id: str, artifact_root: str) -> str:
     """Deterministic GCS destination for one artifact (pure, no I/O).
 
-    Artifacts live under ``<warehouse>/artifacts/<run_id>/<basename>`` so they share the
-    run's lineage and are easy to sweep on cleanup. The basename is taken from the local
-    path; the same ``(local_path, run_id)`` always maps to the same URI (idempotent
-    re-runs overwrite in place).
+    Artifacts live under ``<artifact_root>/<run_id>/<basename>``, where the root is
+    `Settings.artifact_root` — ``<warehouse>/artifacts/<project>/<registry_dataset>``. The
+    registry key in the root is what makes cleanup well-defined: every object under it belongs to
+    exactly one registry, so a sweep can identify orphans (a ``run_id`` prefix with no
+    ``run_registry`` row) without risking another registry's data in the same bucket.
+
+    The basename is taken from the local path; the same ``(local_path, run_id)`` always maps to the
+    same URI (idempotent re-runs overwrite in place).
 
     Args:
         local_path: path to the artifact on the worker's local disk (or a bare basename,
             e.g. ``<model_hash>.pkl`` for the in-memory bytes path).
         run_id: the owning run (path scope).
-        warehouse_uri: GCS warehouse root, e.g. ``gs://bucket/warehouse``.
+        artifact_root: the registry's artifact prefix, i.e. ``Settings.artifact_root``.
     """
     basename = PurePath(local_path).name
     if not basename:
         raise ValueError(f"local_path has no filename component: '{local_path}'")
-    root = warehouse_uri.rstrip("/")
-    rel = PurePosixPath("artifacts") / run_id / basename
+    root = artifact_root.rstrip("/")
+    rel = PurePosixPath(run_id) / basename
     return f"{root}/{rel}"
 
 
 def upload_artifact(
-    local_path: str, run_id: str, warehouse_uri: str
+    local_path: str, run_id: str, artifact_root: str
 ) -> str:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Upload one local artifact to its deterministic GCS destination; return the URI.
 
@@ -56,7 +60,7 @@ def upload_artifact(
 
     from ..errors import RegistryError
 
-    uri = artifact_gcs_uri(local_path, run_id, warehouse_uri)
+    uri = artifact_gcs_uri(local_path, run_id, artifact_root)
     # gs://<bucket>/<blob path> -> (bucket, blob)
     without_scheme = uri[len("gs://") :]
     bucket_name, _, blob_path = without_scheme.partition("/")
@@ -71,7 +75,7 @@ def upload_artifact(
 
 
 def upload_artifact_bytes(
-    data: bytes, basename: str, run_id: str, warehouse_uri: str
+    data: bytes, basename: str, run_id: str, artifact_root: str
 ) -> str:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Upload in-memory artifact bytes to the run-scoped GCS destination; return the URI.
 
@@ -85,7 +89,7 @@ def upload_artifact_bytes(
 
     from ..errors import RegistryError
 
-    uri = artifact_gcs_uri(basename, run_id, warehouse_uri)
+    uri = artifact_gcs_uri(basename, run_id, artifact_root)
     without_scheme = uri[len("gs://") :]
     bucket_name, _, blob_path = without_scheme.partition("/")
     try:

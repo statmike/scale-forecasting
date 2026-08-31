@@ -249,7 +249,7 @@ def _ready_series(
     """
     from google.cloud import bigquery
 
-    dataset = settings.dataset_ref
+    dataset = settings.registry_dataset_ref
     models = list(cfg.models)
     model_list = ", ".join(f"'{m}'" for m in models)
     sql = (
@@ -298,7 +298,9 @@ def _ensemble_batch(
     from .registry.ids import make_model_hash
     from .worker import _rollup_metrics
 
-    dataset = settings.dataset_ref
+    # Every table read here (forecast_predictions / backtest_oof / forecast_metadata) is a registry
+    # table — the ensemble reads run outputs, never the source panel.
+    dataset = settings.registry_dataset_ref
 
     ts_filter = "" if ts_ids is None else " AND ts_id IN UNNEST(@ts_ids)"
 
@@ -351,7 +353,7 @@ def _ensemble_batch(
             pred_rows.append(row)
         artifact_uris[strategy] = upload_artifact_bytes(
             artifacts[strategy], f"ensemble_{ensemble_id}_{strategy}.pkl", run_id,
-            settings.warehouse_uri,
+            settings.artifact_root,
         )
 
     if pred_rows:
