@@ -36,6 +36,7 @@ old value goes stale by definition.
 | `python` | `3.11` | `515ecb0` | mixed per surface |
 | `run_id_inputs` | `+compute.profile.source` | W11a (2026-08-31) | `+compute.profile.measure` (W10) |
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
+| `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not
@@ -56,6 +57,24 @@ autoscale-ceiling derivation only fires when `ray_autoscale` is true and all fou
 `false`, and W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
 because it submits Serverless work alongside its Ray families.
 
+`horizon_features` governs **what an exog-aware model is handed for the forecast horizon**. Until
+`cb7d15f` the horizon's design matrix was the first `horizon` rows of *history*. Holiday flags and
+Fourier phase are functions of the date, so a model was given the seasonal phase from the start of
+its history for the dates it was forecasting. `features.build_future_features` now computes those
+columns at the future dates.
+
+Every smoke config sets `features.holidays: ["US"]`, so every run builds an `X` frame — but only the
+models that *consume* it are affected, which today means the lag forecasters (`xgboost`, `lightgbm`,
+`regression_lags`) plus `sarimax`, `ucm` and `prophet`. Rows whose model list is confined to
+`theta` / `holtwinters` / `neuralprophet` / the BigQuery natives do not declare this axis, because
+nothing in them reads the frame. This is a **forecast-value** change, not a plumbing change: the
+affected runs would produce different numbers today.
+
+It cost one of the three remaining `CURRENT` rows. Smoke 07 (Ray CPU) runs `xgboost`, and so does
+notebook 01. Both are downgraded here rather than argued around — the point of this file is that
+"the mechanism still works" and "the result still stands" are different claims, and only the second
+one is what a `CURRENT` row asserts.
+
 ## Status values
 
 | Status | Meaning |
@@ -72,20 +91,20 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
-| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | STALE | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | STALE | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-08-22 | `smoke-02-bq-native-7b34cfd9eb98` | `python=3.11` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
+| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
+| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `horizon_features=first-rows-of-history` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
-| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11` |
-| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
+| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-08-25 | not recorded | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-08-25 | not recorded | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
+| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
 
 ### Why almost everything Spark is stale
@@ -125,7 +144,7 @@ notebook reflects the current path.
 
 | Notebook | Status | Date | Axes at proof |
 |----------|--------|------|---------------|
-| `01_spark_via_connect.ipynb` | CURRENT | 2026-08-28 | `serverless_deps=container-image`, `python=3.11` |
+| `01_spark_via_connect.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
 | `02_bigquery_native.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
 | `03_combo_and_ensemble.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | `04_ray_on_vertex.ipynb` | CURRENT | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
