@@ -29,9 +29,10 @@ several jobs of one run each record their own sizing without overwriting each ot
 writers/readers (``write_job``, ``update_job``, ``latest_job_attempt``, ``next_job_attempt``,
 ``read_run_jobs``) and ``run_job`` (the per-job lifecycle context manager), the read surface
 (``header_status``, ``read_run_summary``, ``read_leaderboard``, ``read_prediction_counts``,
-``read_cell_timing``, the compute-harvest reads ``read_compute_harvest`` / ``discover_harvest_run``
-(what `compute.profile.source` resolves against), and the review-layer reads ``read_run_config`` /
-``read_progress`` /
+``read_cell_timing``, ``parse_ts`` (the shared registry-timestamp coercion the review/probe age
+arithmetic both read through), the compute-harvest reads ``read_compute_harvest`` /
+``discover_harvest_run`` (what `compute.profile.source` resolves against), and the review-layer
+reads ``read_run_config`` / ``read_progress`` /
 ``read_metric_aggregates`` / ``read_cell_metrics``), plus the pure assemblers used by the writers
 and the tests.
 """
@@ -44,6 +45,7 @@ import re
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, get_args
 
 from ..config import DecisionMetric
@@ -53,7 +55,6 @@ _log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from datetime import datetime
 
     from ..config import RunConfig
     from ..settings import Settings
@@ -993,6 +994,29 @@ def header_status(
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"header_status failed for run {run_id}: {exc}") from exc
     return rows[0]["status"] if rows else None
+
+
+def parse_ts(value: Any) -> datetime | None:
+    """Coerce a registry timestamp to a timezone-aware UTC ``datetime``, or ``None`` if it isn't.
+
+    A registry row's timestamp arrives as a ``datetime`` from the BigQuery client but as an ISO
+    string from a JSON-shaped reader dict (and from every offline test), so both readers that do
+    age arithmetic — `review._assemble_progress`'s quiet-time and `probes._is_stale`'s escalation
+    grace — need the same coercion. Pure and defensive: anything unparseable comes back ``None``
+    rather than raising, so a malformed timestamp costs a *signal*, never a monitor.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def read_run_summary(

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import types
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -586,59 +586,46 @@ def test_bigquery_error_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch) -> 
 
 # --- P3: staleness (_is_stale) ------------------------------------------------
 #
-# _is_stale marks the end of a RUNNING job's startup grace: only a RUNNING row that has gone quiet
-# longer than the threshold is stale (a vanished stale job is LOST; a young one is still-starting →
-# UNKNOWN). Every non-RUNNING status is never stale, and an unparseable timestamp declines rather
-# than raising.
+# _is_stale marks the end of a RUNNING job's startup grace: only a RUNNING family whose
+# `quiet_seconds` exceeds the threshold is stale (a vanished stale job is LOST; a young one is
+# still-starting -> UNKNOWN). Every non-RUNNING status is never stale, and a family with no
+# parseable timestamp (quiet_seconds None) declines rather than raising.
+#
+# The *age* itself is derived once by `review._assemble_progress` (row parsing, latest-signal-wins
+# and the unparseable case are tested there) so the monitor's reported quiet time and the probe's
+# escalation decision can never disagree; what is tested here is the threshold.
 
 _NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
+def _quiet(status: str | None, quiet_seconds: float | None) -> FamilyProgress:
+    """A `FamilyProgress` carrying only what `_is_stale` reads: status + quiet time."""
+    return _fp("statistical", status, quiet_seconds=quiet_seconds)
+
+
 def test_is_stale_fresh_running_is_not_stale() -> None:
-    row = {"status": "RUNNING", "started_at": _NOW - timedelta(seconds=30)}
-    assert _is_stale(row, _NOW, None) is False
+    assert _is_stale(_quiet("RUNNING", 30.0), None) is False
 
 
 def test_is_stale_old_running_is_stale() -> None:
-    row = {"status": "RUNNING", "started_at": _NOW - timedelta(seconds=3600)}
-    assert _is_stale(row, _NOW, None) is True
+    assert _is_stale(_quiet("RUNNING", 3600.0), None) is True
 
 
 def test_is_stale_respects_explicit_threshold() -> None:
-    row = {"status": "RUNNING", "started_at": _NOW - timedelta(seconds=120)}
-    assert _is_stale(row, _NOW, 60.0) is True
-    assert _is_stale(row, _NOW, 600.0) is False
+    fp = _quiet("RUNNING", 120.0)
+    assert _is_stale(fp, 60.0) is True
+    assert _is_stale(fp, 600.0) is False
 
 
-def test_is_stale_terminal_row_is_never_stale() -> None:
-    # An old COMPLETED row must never escalate — this preserves the terminal short-circuit.
-    row = {"status": "COMPLETED", "ended_at": _NOW - timedelta(days=7)}
-    assert _is_stale(row, _NOW, None) is False
+def test_is_stale_terminal_family_is_never_stale() -> None:
+    # An old COMPLETED family must never escalate - this preserves the terminal short-circuit.
+    assert _is_stale(_quiet("COMPLETED", 7 * 86400.0), None) is False
 
 
-def test_is_stale_prefers_latest_signal() -> None:
-    # ended_at wins over the (older) started_at/created_at when present.
-    row = {
-        "status": "RUNNING",
-        "created_at": _NOW - timedelta(seconds=5000),
-        "started_at": _NOW - timedelta(seconds=4000),
-        "ended_at": _NOW - timedelta(seconds=10),
-    }
-    assert _is_stale(row, _NOW, None) is False
-
-
-def test_is_stale_parses_iso_string_timestamp() -> None:
-    row = {"status": "RUNNING", "started_at": "2026-01-01T10:00:00+00:00"}
-    assert _is_stale(row, _NOW, None) is True
-
-
-def test_is_stale_unparseable_timestamp_is_not_stale() -> None:
-    row = {"status": "RUNNING", "started_at": "not-a-timestamp"}
-    assert _is_stale(row, _NOW, None) is False
-
-
-def test_is_stale_missing_timestamp_is_not_stale() -> None:
-    assert _is_stale({"status": "RUNNING"}, _NOW, None) is False
+def test_is_stale_unknown_quiet_time_is_not_stale() -> None:
+    # No job row, or timestamps that did not parse: no evidence of silence, so no escalation.
+    assert _is_stale(_quiet("RUNNING", None), None) is False
+    assert _is_stale(_quiet(None, None), None) is False
 
 
 # --- P3: reconciliation matrix (_assemble_probe_report) -----------------------
@@ -654,6 +641,7 @@ def _fp(
     runtime: str | None = "spark",
     n_done: int = 0,
     n_expected: int | None = None,
+    quiet_seconds: float | None = None,
 ) -> FamilyProgress:
     """A minimal `FamilyProgress` carrying only the fields the reconciliation reads."""
     return FamilyProgress(
@@ -667,6 +655,7 @@ def _fp(
         fraction=None,
         avg_fit_seconds=None,
         runtime_seconds=None,
+        quiet_seconds=quiet_seconds,
     )
 
 

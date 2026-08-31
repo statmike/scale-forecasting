@@ -68,6 +68,17 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- Monitor ⇄ probe convergence: a registry row is written *by the job*, so a job that dies without
+  writing leaves its row `RUNNING` and its bar frozen — indistinguishable from a slow one. Every
+  `FamilyProgress` now carries `last_signal_at` / `quiet_seconds` (derived from rows `monitor_run`
+  already reads — no runtime call, safe in a poll loop) and `plot_progress` prints the age on a
+  running family. `monitor_run(probe=True)` / `Forecaster.monitor(probe=True)` escalate through the
+  probe's single read+reconcile pass and attach the `ProbeReport`, so a suspicious age can be turned
+  into a `LOST` / `RUNNING_CONFIRMED` verdict without a second set of registry queries; the default
+  stays registry-only, because a poll loop must never fan native calls. The age is a *fact* the
+  monitor reports and the escalation *threshold* stays with the probe (`probes._is_stale`, which now
+  reads `quiet_seconds` rather than re-parsing rows), so the two can never disagree about how quiet
+  a family has been. Notebook 08's escalate-on-quiet loop lands with its next live re-execution.
 - Run-inspection layer (`review.py`): keyed on a bare `run_id` (reads the run's own `raw_config`
   back to recover its plan), with the same pure/I-O seam as `sdk`. `monitor_run` → a `RunProgress`
   (per-family job state on its runner, `n_done / n_expected` cells, mean fit time, run-wide fraction)

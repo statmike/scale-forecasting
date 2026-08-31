@@ -243,16 +243,22 @@ class Forecaster:
             run_id=self.run_id, dataset_ref=self._resolved_dataset_ref(), views=VIEW_NAMES
         )
 
-    def monitor(self, run_id: str | None = None) -> Any:
+    def monitor(self, run_id: str | None = None, *, probe: bool = False) -> Any:
         """Live progress of a run: per-family job state + series done vs. expected (`RunProgress`).
 
         Delegates to `review.monitor_run` for ``run_id`` (default: this config's id) — header
-        status, each family's runner and status, and how many cells have landed vs. the expected
-        total. Poll it while a run is in flight; pair with `review.plot_progress` for the bar.
+        status, each family's runner and status, how many cells have landed vs. the expected total,
+        and how long each family has been quiet. Poll it while a run is in flight; pair with
+        `review.plot_progress` for the bar.
+
+        ``probe=True`` also escalates the non-terminal jobs to their runtime and attaches the
+        reconciled `probes.ProbeReport` — use it when a bar has stopped moving and you need to know
+        whether the job is still alive. It is off by default because a poll loop must stay
+        registry-only; `probe` (the drill-down) is the deliberate version of the same read.
         """
         from .review import monitor_run
 
-        return monitor_run(run_id or self.run_id, settings=self._settings)
+        return monitor_run(run_id or self.run_id, probe=probe, settings=self._settings)
 
     def review_run(self, run_id: str | None = None) -> Any:
         """Data-science review of a finished run: bests, metric panel, ensemble lift (`RunReview`).

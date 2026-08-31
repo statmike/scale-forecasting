@@ -640,23 +640,26 @@ def _parse_ts(value: Any) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
-def _is_stale(row: dict[str, Any], now: datetime, stale_after_s: float | None) -> bool:
-    """Whether a ``RUNNING`` job row has gone quiet long enough to be past its startup grace.
+def _is_stale(fp: FamilyProgress, stale_after_s: float | None) -> bool:
+    """Whether a ``RUNNING`` family has gone quiet long enough to be past its startup grace.
 
-    A row is stale when its status is ``RUNNING`` and its last signal (``ended_at`` → ``started_at``
-    → ``created_at``, first present wins) is older than ``stale_after_s`` (default
-    `_DEFAULT_STALE_S`). A stale family whose runtime job has vanished (native NOT_FOUND, artifacts
-    incomplete) is judged LOST; a *young* one is still-starting, so it reads UNKNOWN (the grace that
-    stops a probe crying wolf during a normal launch window). Any non-``RUNNING`` status is never
-    stale. Pure and defensive: an unparseable timestamp is treated as *not* stale, never raising.
+    A family is stale when its status is ``RUNNING`` and its ``quiet_seconds`` — the age of its
+    last registry signal, measured once by `review._assemble_progress` so every family in a report
+    is judged against the same instant — exceeds ``stale_after_s`` (default `_DEFAULT_STALE_S`).
+    A stale family whose runtime job has vanished (native NOT_FOUND, artifacts incomplete) is
+    judged LOST; a *young* one is still-starting, so it reads UNKNOWN (the grace that stops a probe
+    crying wolf during a normal launch window). Any non-``RUNNING`` status is never stale. Pure and
+    defensive: a family whose timestamps didn't parse has no ``quiet_seconds`` and is treated as
+    *not* stale, never raising.
+
+    This is the judgement half of a two-part split: the monitor reports the age (a fact anyone can
+    read off a frozen bar), and the threshold that turns it into an escalation lives here, with the
+    probe that acts on it.
     """
-    if (row.get("status") or "").upper() != _REGISTRY_RUNNING:
+    if (fp.status or "").upper() != _REGISTRY_RUNNING or fp.quiet_seconds is None:
         return False
     threshold = _DEFAULT_STALE_S if stale_after_s is None else stale_after_s
-    ts = _parse_ts(row.get("ended_at") or row.get("started_at") or row.get("created_at"))
-    if ts is None:
-        return False
-    return (now - ts).total_seconds() > threshold
+    return fp.quiet_seconds > threshold
 
 
 def _verdict_for_family(
@@ -766,8 +769,9 @@ def _assemble_probe_report(
 # --- I/O caller ----------------------------------------------------------------
 # The thin reader that turns a run_id into a ProbeReport: read the registry (header + config + job
 # rows + landed-cell counts), escalate only the incomplete/stale jobs to their runtime, then hand
-# the assembled inputs to the pure `_assemble_probe_report`. Mirrors `review.monitor_run`'s
-# read-then-assemble seam; all GCP imports stay lazy inside the function.
+# the assembled inputs to the pure `_assemble_probe_report`. It *is* `review.monitor_run`'s
+# read-then-assemble body plus the escalation, which is why `monitor_run(probe=True)` delegates
+# here rather than reading the registry a second time; all GCP imports stay lazy in the function.
 
 
 def _read_and_probe(
@@ -776,13 +780,15 @@ def _read_and_probe(
     job: str | None,
     settings: Settings,
     stale_after_s: float | None,
-) -> tuple[ProbeReport, list[dict[str, Any]]]:  # pragma: no cover - GCP I/O
-    """Read a run's registry state, escalate the incomplete jobs, and reconcile → `(report, rows)`.
+) -> tuple[RunProgress, ProbeReport, list[dict[str, Any]]]:  # pragma: no cover - GCP I/O
+    """Read the registry, escalate the incomplete jobs, reconcile → `(progress, report, rows)`.
 
-    The shared read+probe body behind both `probe_run` (which returns just the report) and
+    The shared read+probe body behind three callers: `probe_run` (which keeps just the report),
     `cancel_run` (which also needs the ``v_run_jobs`` rows for their ``job_id`` + ``probe_handle``
-    to finalize). ``rows`` is the run's job rows filtered to ``job`` (all families when ``None``);
-    the report is the reconciled `ProbeReport` over the same set.
+    to finalize), and `review.monitor_run` with ``probe=True`` (which keeps the progress and
+    attaches the report) — so a monitor that escalates pays for the native calls, not for a second
+    set of registry queries. ``rows`` is the run's job rows filtered to ``job`` (all families when
+    ``None``); ``progress`` and the reconciled ``report`` cover the same set.
     """
     from .config import RunConfig
     from .registry import bq
@@ -793,7 +799,9 @@ def _read_and_probe(
     cfg = RunConfig.model_validate(raw) if raw else None
     job_rows = bq.read_run_jobs(run_id, settings=settings) if cfg else []
     progress_rows = bq.read_progress(run_id, settings=settings) if cfg else []
-    progress = _assemble_progress(run_id, summary, cfg, job_rows, progress_rows)
+    progress = _assemble_progress(
+        run_id, summary, cfg, job_rows, progress_rows, now=datetime.now(UTC)
+    )
 
     # --job narrows both the escalation and the report; a typo must fail loudly (else it would
     # silently report nothing) — validate against the run's actual families before filtering.
@@ -806,12 +814,13 @@ def _read_and_probe(
         )
 
     rows = [r for r in job_rows if job is None or r["family"] == job]
-    now = datetime.now(UTC)
     # Escalate every non-terminal job to its runtime; terminal rows short-circuit to the registry.
     to_probe = [r for r in rows if r.get("status") not in _TERMINAL]
-    # A RUNNING row quiet longer than the floor is "stale" — past its startup grace, so a vanished
-    # runtime job is judged LOST rather than still-starting (see `_verdict_for_family`).
-    stale = frozenset(r["family"] for r in to_probe if _is_stale(r, now, stale_after_s))
+    # A RUNNING family quiet longer than the floor is "stale" — past its startup grace, so a
+    # vanished runtime job is judged LOST rather than still-starting (see `_verdict_for_family`).
+    # Read off the assembled progress, so the monitor's reported age and the probe's escalation
+    # decision can never disagree about how quiet a family has been.
+    stale = frozenset(f.family for f in progress.families if _is_stale(f, stale_after_s))
     native: dict[str, ProbeResult] = {}
     no_handle: set[str] = set()
     for r in to_probe:
@@ -821,7 +830,7 @@ def _read_and_probe(
             continue
         native[r["family"]] = get_probe(handle.runtime).check(handle, settings=settings)
     report = _assemble_probe_report(progress, native, frozenset(no_handle), stale)
-    return report, rows
+    return progress, report, rows
 
 
 def probe_run(
@@ -846,7 +855,9 @@ def probe_run(
     from .settings import Settings
 
     s = settings if settings is not None else Settings.resolve()
-    report, _rows = _read_and_probe(run_id, job=job, settings=s, stale_after_s=stale_after_s)
+    _progress, report, _rows = _read_and_probe(
+        run_id, job=job, settings=s, stale_after_s=stale_after_s
+    )
     return report
 
 
@@ -1081,7 +1092,9 @@ def cancel_run(
     from .settings import Settings
 
     s = settings if settings is not None else Settings.resolve()
-    report, rows = _read_and_probe(run_id, job=job, settings=s, stale_after_s=stale_after_s)
+    _progress, report, rows = _read_and_probe(
+        run_id, job=job, settings=s, stale_after_s=stale_after_s
+    )
     plan = _assemble_cancel_plan(report)
     if not confirm:
         return CancelReport(

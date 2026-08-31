@@ -8,6 +8,16 @@ layer reads the run's own ``raw_config`` back to recover what it *planned* to do
   the registry has no live per-series counter — cells land when a family's ``write_cells`` runs
   (often at job end), so done-counts step up per job. The per-job status (from ``v_run_jobs``) is
   the primary live signal; landed-cell counts refine it.
+
+  A registry row is *written by the job*, so a job that dies without writing leaves its row
+  ``RUNNING`` forever and the bar simply stops moving. Two things keep that legible. Every family
+  carries ``quiet_seconds`` — how long since its last registry signal — which is derived from rows
+  already read, costs **no** runtime call, and is a fact rather than a judgement (a family that
+  writes its cells at job end is legitimately quiet for its whole run, so a threshold here would
+  cry wolf). And ``probe=True`` escalates the non-terminal families to their runtime via
+  `probes.probe_run`'s reader, attaching a `probes.ProbeReport` that says whether the job is
+  actually still alive. Registry-first is the default deliberately: a fleet poll must never fan
+  native calls, so escalation stays the deliberate per-run drill-down.
 - `review_run` — *how did a finished run do, in data-science detail?* The best model per family and
   overall, the full metric panel aggregated across every series (mean + p10/p50/p90), and each
   ensemble's lift over the best base model.
@@ -23,14 +33,16 @@ For the wall-clock execution timeline, reuse `sdk.build_trace_frame` + `sdk.plot
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .config import RunConfig
 from .dag import group_models_by_family
-from .registry.bq import METRIC_COLUMNS
+from .registry.bq import METRIC_COLUMNS, parse_ts
 
 if TYPE_CHECKING:
+    from .probes import ProbeReport
     from .settings import Settings
 
 __all__ = [
@@ -65,6 +77,13 @@ class FamilyProgress:
     ``n_done`` counts landed full-fit cells; ``fraction`` is their ratio. ``avg_fit_seconds`` is the
     mean per-cell fit time across this family's landed cells; ``runtime_seconds`` is the job's
     wall-clock once it finishes.
+
+    ``last_signal_at`` is the most recent timestamp the job row carries (``ended_at`` →
+    ``started_at`` → ``created_at``, first present wins) and ``quiet_seconds`` is its age at read
+    time — both ``None`` for a family with no job row yet, or an unparseable timestamp. They are
+    reported, never judged: how long a family may legitimately stay quiet depends on the family,
+    and the escalation threshold that *does* judge it lives with the probe
+    (`probes._DEFAULT_STALE_S`), not here.
     """
 
     family: str
@@ -77,6 +96,8 @@ class FamilyProgress:
     fraction: float | None
     avg_fit_seconds: float | None
     runtime_seconds: float | None
+    last_signal_at: datetime | None = None
+    quiet_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +107,10 @@ class RunProgress:
     ``status`` is ``None`` when no run exists for the id yet. ``n_done`` / ``n_expected`` /
     ``fraction`` are the run-wide roll-up across families (``n_expected`` and ``fraction`` are
     ``None`` when the series count — hence the denominator — isn't known).
+
+    ``probe`` carries the reconciled `probes.ProbeReport` when `monitor_run` was called with
+    ``probe=True``, and is ``None`` for the default registry-only read — so a caller can always
+    tell "the runtime agreed the job is alive" apart from "we never asked".
     """
 
     run_id: str
@@ -95,6 +120,7 @@ class RunProgress:
     n_done: int
     n_expected: int | None
     fraction: float | None
+    probe: ProbeReport | None = None
 
 
 @dataclass(frozen=True)
@@ -193,20 +219,41 @@ def family_of(model_type: str, ensemble_id: str | None = None) -> str:
 # --- monitor (live) ------------------------------------------------------------
 
 
+def _last_signal(job_row: dict[str, Any]) -> datetime | None:
+    """The most recent timestamp a ``v_run_jobs`` row carries — the family's last registry signal.
+
+    ``ended_at`` → ``started_at`` → ``created_at``, first present wins (they are written in that
+    order, so the first present one is the latest). ``None`` when the row has none, or none of them
+    parses. Shared by `_assemble_progress`'s ``quiet_seconds`` and, through it, the probe's
+    escalation grace — so "how long has this been quiet" has exactly one definition.
+    """
+    for key in ("ended_at", "started_at", "created_at"):
+        ts = parse_ts(job_row.get(key))
+        if ts is not None:
+            return ts
+    return None
+
+
 def _assemble_progress(
     run_id: str,
     summary: dict[str, Any] | None,
     cfg: RunConfig | None,
     job_rows: list[dict[str, Any]],
     progress_rows: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
 ) -> RunProgress:
     """Compose a `RunProgress` from a run's header, config, job rows, and landed-cell counts (pure).
 
     The config gives the *denominator* (models per family × series count = expected cells); the job
     rows give each family's runner + status; the progress rows give landed counts and mean fit time.
     With no config (run never ran) this is an empty snapshot carrying just the header status.
+    ``now`` is the clock the per-family ``quiet_seconds`` is measured against — injectable so the
+    age arithmetic is deterministic offline, and so a caller that probes in the same pass
+    (`probes._read_and_probe`) reconciles every family against one instant.
     """
     status = (summary or {}).get("status")
+    at = now or datetime.now(UTC)
     if cfg is None:
         return RunProgress(run_id, status, None, (), 0, None, None)
 
@@ -240,6 +287,7 @@ def _assemble_progress(
         n_expected = n_series * len(fam_models) if n_series is not None else None
         n_done = done.get(fam, 0)
         job = jobs_by_family.get(fam, {})
+        signal = _last_signal(job)
         families.append(
             FamilyProgress(
                 family=fam,
@@ -252,6 +300,8 @@ def _assemble_progress(
                 fraction=(n_done / n_expected if n_expected else None),
                 avg_fit_seconds=(fit_num[fam] / fit_den[fam] if fit_den.get(fam) else None),
                 runtime_seconds=_num(job.get("runtime_seconds")),
+                last_signal_at=signal,
+                quiet_seconds=((at - signal).total_seconds() if signal is not None else None),
             )
         )
 
@@ -271,7 +321,11 @@ def _assemble_progress(
 
 
 def monitor_run(
-    run_id: str, *, settings: Settings | None = None
+    run_id: str,
+    *,
+    probe: bool = False,
+    stale_after_s: float | None = None,
+    settings: Settings | None = None,
 ) -> RunProgress:  # pragma: no cover - GCP I/O
     """Read a run's live progress: header status + per-family job state + series done vs. expected.
 
@@ -279,9 +333,28 @@ def monitor_run(
     (`registry.bq.read_run_config`, for the expected-work denominator), its jobs
     (`registry.bq.read_run_jobs`) and its landed-cell counts (`registry.bq.read_progress`), then
     composes them via `_assemble_progress`. Poll it while a run is in flight; returns a status-only
-    snapshot when the run id has never run.
+    snapshot when the run id has never run. Every family carries ``quiet_seconds`` either way —
+    the "is this bar frozen or just coarse" signal, free because it comes off rows already read.
+
+    ``probe=True`` additionally escalates the run's non-terminal jobs to their runtime and attaches
+    the reconciled `probes.ProbeReport` as ``RunProgress.probe`` — the answer to *is this job still
+    alive*, which the registry alone cannot give. It shares one pass of reads with the registry
+    side (`probes._read_and_probe`), so probing costs the native calls and not a second set of
+    queries; an already-terminal run short-circuits and touches no runtime at all.
+    ``stale_after_s`` overrides the probe's startup grace (see `probes.probe_run`) and is ignored
+    when ``probe`` is ``False``.
     """
     from .registry import bq
+
+    if probe:
+        from .probes import _read_and_probe
+        from .settings import Settings as _Settings
+
+        s = settings if settings is not None else _Settings.resolve()
+        progress, report, _rows = _read_and_probe(
+            run_id, job=None, settings=s, stale_after_s=stale_after_s
+        )
+        return replace(progress, probe=report)
 
     summary = bq.read_run_summary(run_id, settings=settings)
     raw = bq.read_run_config(run_id, settings=settings)
@@ -484,6 +557,33 @@ _STATUS_COLORS: dict[str | None, str] = {
 _STATUS_DEFAULT = "#999999"
 
 
+def _human_age(seconds: float) -> str:
+    """A quiet-time as a short human age — ``42s`` / ``22m`` / ``3.1h``, for a bar-end label."""
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _reportable_verdicts(progress: RunProgress) -> dict[str, str]:
+    """``{family: verdict}`` for the probed families whose verdict is worth showing (pure).
+
+    Empty when no probe ran. ``TRUST_REGISTRY`` is dropped: it is what the bar's own status colour
+    already says (terminal, or never launched), so surfacing it would put a word on every row and
+    bury the two that matter — ``LOST`` and ``STALE_REGISTRY``.
+    """
+    if progress.probe is None:
+        return {}
+    from .probes import VERDICT_TRUST_REGISTRY
+
+    return {
+        v.family: v.verdict
+        for v in progress.probe.families
+        if v.verdict != VERDICT_TRUST_REGISTRY
+    }
+
+
 def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = None) -> Any:
     """Render a `RunProgress` as a per-family progress bar chart and return the matplotlib ``Axes``.
 
@@ -492,6 +592,14 @@ def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = 
     status labelled at the bar end (the label doubles as the status's secondary encoding). Families
     keep DAG order, ensemble last. matplotlib imports lazily so it never touches the package import;
     an empty run renders an empty titled axes rather than raising.
+
+    A non-terminal family also gets its ``quiet_seconds`` in the label (``quiet 22m``): the bar of a
+    job that died mid-run stops moving and its status stays ``RUNNING``, so without this a dead run
+    and a slow one are pixel-identical. It is reported as an age, not flagged against a threshold —
+    a family that writes its cells at job end is legitimately quiet the whole time, and a
+    cry-wolf marker teaches the reader to ignore it. When a `probes.ProbeReport` is attached
+    (``monitor_run(probe=True)``), its verdict replaces the age for the families it covers, since a
+    live reading beats an inference from silence.
     """
     import matplotlib.pyplot as plt
 
@@ -512,12 +620,18 @@ def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = 
         height=0.6,
         color=[_STATUS_COLORS.get(f.status, _STATUS_DEFAULT) for f in fams],
     )
+    verdicts = _reportable_verdicts(progress)
     for y, f in zip(ys, fams, strict=True):
         expected = f.n_expected if f.n_expected is not None else "?"
+        label = f"{f.n_done}/{expected} · {f.status or 'pending'}"
+        if (verdict := verdicts.get(f.family)) is not None:
+            label += f" · {verdict.lower().replace('_', ' ')}"
+        elif (f.status or "").upper() == "RUNNING" and f.quiet_seconds is not None:
+            label += f" · quiet {_human_age(f.quiet_seconds)}"
         ax.text(
             (f.fraction if f.fraction is not None else 0.0) + 0.01,
             y,
-            f"{f.n_done}/{expected} · {f.status or 'pending'}",
+            label,
             va="center",
             fontsize=9,
         )

@@ -173,6 +173,21 @@ when a family's writer runs, often at job end), so the per-job `status` is the p
 [`08_run_and_monitor`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_run_and_monitor.ipynb)
 launches a run on a background thread and drives this live-refreshing dashboard until it lands.
 
+**When the bar stops moving.** A registry row is written *by the job*, so a job that dies without
+writing leaves its row `RUNNING` and its bar frozen — visually identical to a slow one. Two things
+tell them apart, and they cost differently:
+
+- **`quiet_seconds`** (free) — every family carries how long it has been since its last registry
+  signal, and `plot_progress` prints it (`5/100 · RUNNING · quiet 22m`). It comes off rows the
+  monitor already reads, so it costs no extra call and is safe in a poll loop. It is an age, not a
+  verdict: a family that writes its cells at job end is legitimately quiet for its whole run.
+- **`monitor_run(run_id, probe=True)`** (a few native calls) — escalates the run's non-terminal
+  jobs to their runtime and attaches a reconciled `ProbeReport`, so the bar says `LOST` or
+  `RUNNING_CONFIRMED` instead of an age. It is the same reconciliation the `--probe` CLI verb (and
+  `Forecaster.probe()`) performs, reached from the monitor — use it when an age has grown long
+  enough to be suspicious, not on every poll. An already-terminal run short-circuits and touches no
+  runtime at all.
+
 ## 4. Review — which model won
 
 ```sql
