@@ -339,6 +339,13 @@ Memory is the one thing that cannot be derived — a Serverless executor's shape
 and a cluster's at *create*, both before any of our code runs — so with no profile the memory
 properties are simply not emitted and the platform's defaults stand, exactly as before.
 
+**Reading back what a run decided.** The whole decision is stamped into the run header's
+`job_telemetry`, one entry per family job under `sizing.<family>`, and surfaced by `v_run_summary`
+as its `sizing` column: the fleet the arithmetic asked for, what that became in platform settings,
+and the profile it was sized off (with the provenance naming whose run supplied the evidence). So
+"why was this run this shape" is a query against the registry rather than a hunt through driver
+logs — see [output_schemas.md](./output_schemas.md).
+
 **Why the two margins differ, and why they apply to different tails.** Over-estimating time buys
 extra slots, which costs money; under-estimating memory OOM-kills the task, which costs the run.
 Asymmetric risk, asymmetric margin — so memory carries the wider one. They also attach to different

@@ -1271,3 +1271,36 @@ def test_a_controlled_measurement_run_can_unpin_them_and_says_so_on_the_plan(pla
     assert {k: v for k, v in unpinned.properties.items() if k not in _INTRAOP_KEYS} == {
         k: v for k, v in pinned.properties.items() if k not in _INTRAOP_KEYS
     }
+
+
+# --- the audit record ----------------------------------------------------------
+
+
+def test_the_sizing_record_carries_the_decision_the_translation_and_the_evidence() -> None:
+    """One blob answers all three audit questions, and survives a JSON round-trip."""
+    profile = _profile(_fit(), _fit(ts_id="s2"))
+    plan, translation = resources.plan_serverless(profile, ["statistical"], 800)
+    record = resources.sizing_telemetry(plan, translation=translation, profile=profile)
+
+    assert record["family"] == "statistical"
+    assert record["plans"] == [plan.to_dict()]
+    assert record["translation"] == translation.to_dict()
+    assert record["profile"] == profile.to_dict()
+    # It is written into a native JSON column, so everything in it has to be JSON-safe.
+    assert json.loads(json.dumps(record)) == record
+
+
+def test_the_sizing_record_keeps_the_pools_it_has_and_drops_the_ones_it_does_not() -> None:
+    """A Ray run spells two pools; a CPU-only one has no GPU plan and records one, not a null."""
+    cpu = resources.plan_serverless(None, ["statistical"], 800)[0]
+    assert len(resources.sizing_telemetry(cpu, None)["plans"]) == 1
+    assert len(resources.sizing_telemetry(cpu, cpu)["plans"]) == 2
+    # Nothing planned at all (profiling off) still yields a record-shaped dict rather than a crash.
+    assert resources.sizing_telemetry()["plans"] == []
+    assert resources.sizing_telemetry()["family"] is None
+
+
+def test_the_record_can_be_filed_under_the_jobs_family_rather_than_a_pools() -> None:
+    """A Ray deep-learning job's CPU pool is labelled "cpu" — filing the job there would bury it."""
+    cpu = resources.plan_serverless(None, ["statistical"], 800)[0]
+    assert resources.sizing_telemetry(cpu, family="deep_learning")["family"] == "deep_learning"

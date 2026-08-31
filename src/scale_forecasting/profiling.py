@@ -1187,6 +1187,12 @@ class ProfileProvenance:
         }
 
 
+# How many contributing series ids `ComputeProfile.to_dict` carries into a telemetry blob. Enough
+# to spot-check which series the evidence came from, few enough that the blob stays readable and
+# bounded no matter how wide the harvest was; the full count travels beside them.
+_TELEMETRY_SAMPLE_IDS = 50
+
+
 @dataclass(frozen=True)
 class ComputeProfile:
     """The measured cost model for one run: per-model and per-family, both tails kept (pure).
@@ -1244,6 +1250,14 @@ class ComputeProfile:
         "what did we measure" and "what did we ask the platform for" without the reader
         re-deriving a margin. Plain ints/floats/strings/None only: ``json.dumps`` must
         succeed with no custom encoder.
+
+        **Bounded by construction**, because this is what lands in a registry JSON column. Every
+        field above is sized by the model list except ``sample_ts_ids``, which is sized by the
+        *panel*: a profile resolved from a harvest (`resolve_profile_source`) can carry tens of
+        thousands of ids, and a telemetry blob that grows with the data is one nobody can read and
+        one that eventually will not write. The count is kept whole (``n_sample_series``) and the
+        ids are truncated to `_TELEMETRY_SAMPLE_IDS`; a reader sees the truncation as
+        ``len(sample_ts_ids) < n_sample_series`` without needing a flag for it.
         """
         return {
             "provenance": self.provenance.to_dict() if self.provenance else None,
@@ -1252,7 +1266,8 @@ class ComputeProfile:
             "n_measurements": self.n_measurements,
             "n_ok": self.n_ok,
             "n_failed": self.n_failed,
-            "sample_ts_ids": list(self.sample_ts_ids),
+            "n_sample_series": len(self.sample_ts_ids),
+            "sample_ts_ids": list(self.sample_ts_ids[:_TELEMETRY_SAMPLE_IDS]),
             "dropped_models": list(self.dropped_models),
             "first_error_by_model": dict(self.first_error_by_model or {}),
             "sample": [spec.to_dict() for spec in self.sample],

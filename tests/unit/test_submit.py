@@ -713,3 +713,85 @@ def test_submit_batch_with_profiling_off_creates_the_pre_profiler_batch(
         compute={"profile": {"mode": "off"}},
     )
     assert _submit_capturing_properties(monkeypatch, cfg) == {}
+
+
+# --- plan_sizing: the same overlay, plus the record of how it was chosen ---------
+
+
+def test_the_sizing_call_hands_back_the_overlay_and_the_audit_record_together() -> None:
+    """One computation, two consumers — the batch gets properties, the header gets the reason.
+
+    Computing them separately would let the record drift from the batch it claims to describe.
+    """
+    from scale_forecasting.submit import plan_sizing
+
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    props, sizing = plan_sizing(cfg)
+    assert props == sizing_properties(cfg)  # the submitting caller's half is unchanged
+    assert sizing["family"] == "statistical+ml"
+    assert sizing["plans"] and sizing["translation"]
+    # No evidence handed in → the record says so rather than omitting the question.
+    assert sizing["profile"] is None
+    assert props["spark.executor.cores"] == str(sizing["translation"]["executor_cores"])
+
+
+def test_profiling_off_records_no_sizing_either() -> None:
+    # Nothing was decided, so there is nothing to file — and an empty record is what the stamp
+    # checks to skip the write entirely.
+    from scale_forecasting.submit import plan_sizing
+
+    cfg = _cfg(
+        data={"source_table": "t", "series_limit": 100},
+        compute={"profile": {"mode": "off"}},
+    )
+    assert plan_sizing(cfg) == ({}, {})
+
+
+def test_the_record_names_the_evidence_it_sized_from() -> None:
+    from scale_forecasting.submit import plan_sizing
+
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    profile = build_profile(
+        [
+            MeasuredFit(
+                ts_id=f"s{i}",
+                model_type="theta",
+                family="statistical",
+                n_obs=400,
+                wall_s=2.0,
+                cpu_s=2.0,
+                peak_rss_bytes=0,
+                peak_gpu_bytes=None,
+                ok=True,
+                error=None,
+                intraop_threads=1,
+                process_rss_bytes=3 * 1024**3,
+            )
+            for i in range(4)
+        ]
+    )
+    _props, sizing = plan_sizing(cfg, profile=profile)
+    assert sizing["profile"] is not None
+    assert sizing["profile"]["n_measurements"] == 4
+    assert sizing["profile"]["models"]["theta"]["n_fits"] == 4
+
+
+def test_the_echoed_telemetry_carries_the_memory_the_batch_was_actually_given() -> None:
+    """The other half of "what shape ran": cores were already echoed, memory was not.
+
+    Read back off the submitted batch rather than off our own plan, so a plan/platform
+    disagreement is visible instead of assumed away.
+    """
+    from scale_forecasting.submit import extract_job_telemetry
+
+    class _RC:
+        version = "2.2"
+        container_image = "img:tag"
+        properties = {"spark.executor.memory": "3891m", "spark.executor.memoryOverhead": "1024m"}
+
+    tel = extract_job_telemetry(type("_B", (), {"runtime_config": _RC()})())
+    assert tel["executor_memory"] == "3891m"
+    assert tel["executor_memory_overhead"] == "1024m"
+    # Absent when the batch left Serverless' own defaults standing — itself the answer to
+    # "what sized this".
+    assert extract_job_telemetry(_FakeBatch())["executor_memory"] is None

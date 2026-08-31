@@ -300,7 +300,7 @@ def test_profiling_off_sizes_nothing_and_falls_back_to_the_old_cluster() -> None
         data={"source_table": "t", "horizon": 7, "series_limit": 100},
         compute={"profile": {"mode": "off"}},
     )
-    assert dataproc_cluster.cluster_sizing(cfg) == (None, {})
+    assert dataproc_cluster.cluster_sizing(cfg) == (None, {}, {})
 
 
 def test_a_handed_in_profile_reshapes_the_cluster_executor() -> None:
@@ -339,7 +339,7 @@ def test_a_handed_in_profile_reshapes_the_cluster_executor() -> None:
 
 def test_the_cluster_sizing_shapes_the_executor_to_the_worker_it_will_run_on() -> None:
     cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 100})
-    workers, props = dataproc_cluster.cluster_sizing(cfg)
+    workers, props, _sizing = dataproc_cluster.cluster_sizing(cfg)
     # One executor per n1-standard-8 worker, minus the core YARN keeps for the AppMaster.
     assert props["spark.executor.cores"] == "7"
     # Unlike the batch overlay, memory is always stated — Dataproc bakes a stale default
@@ -349,6 +349,21 @@ def test_the_cluster_sizing_shapes_the_executor_to_the_worker_it_will_run_on() -
     assert props["spark.dynamicAllocation.maxExecutors"] == str(workers)
 
 
+def test_the_cluster_sizing_also_hands_back_the_record_of_how_it_decided() -> None:
+    """The cluster path had no header telemetry at all before this — a cluster run read blank.
+
+    The third element is what `_stamp_cluster_telemetry` files under ``$.sizing.<family>``, so a
+    worker split someone questions after an OOM is answerable from the registry.
+    """
+    cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 100})
+    workers, props, sizing = dataproc_cluster.cluster_sizing(cfg)
+    assert sizing["family"] == "statistical"
+    assert sizing["profile"] is None  # nothing was handed in; the record says so
+    # The record describes the job that was actually submitted, not a second computation of it.
+    assert sizing["translation"]["properties"] == props
+    assert sizing["translation"]["worker_count"] == workers
+
+
 def test_the_cluster_sizing_sizes_against_tasks_not_cells() -> None:
     # 100 series x 2 models = 200 cells -> ceil(200/8) = 25 buckets. Seven cells at a time per
     # worker x 8 target each = 56, so one worker suffices and Dataproc's own floor of two stands.
@@ -356,7 +371,7 @@ def test_the_cluster_sizing_sizes_against_tasks_not_cells() -> None:
         data={"source_table": "t", "horizon": 7, "series_limit": 100},
         compute={"bucket_target_cells": 8},
     )
-    workers, _props = dataproc_cluster.cluster_sizing(cfg)
+    workers, _props, _sizing = dataproc_cluster.cluster_sizing(cfg)
     assert workers == 2
 
 
@@ -365,8 +380,8 @@ def test_the_cluster_sizing_widens_with_the_fan_out_and_stops_at_the_cap() -> No
         data={"source_table": "t", "horizon": 7, "series_limit": 20_000},
         compute={"bucket_target_cells": 8},
     )
-    wide, _props = dataproc_cluster.cluster_sizing(cfg)
-    capped, _props = dataproc_cluster.cluster_sizing(cfg, max_workers=3)
+    wide, _props, _sizing = dataproc_cluster.cluster_sizing(cfg)
+    capped, _props, _sizing = dataproc_cluster.cluster_sizing(cfg, max_workers=3)
     assert wide > 2
     assert capped == 3
 
@@ -374,8 +389,8 @@ def test_the_cluster_sizing_widens_with_the_fan_out_and_stops_at_the_cap() -> No
 def test_the_cluster_sizing_sizes_to_the_executed_subset_not_the_whole_config() -> None:
     # Below the spend cap on both sides, so the comparison is the arithmetic and not the clamp.
     cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 1_000})
-    full, _props = dataproc_cluster.cluster_sizing(cfg)
-    subset, _props = dataproc_cluster.cluster_sizing(cfg, ["theta"])
+    full, _props, _sizing = dataproc_cluster.cluster_sizing(cfg)
+    subset, _props, _sizing = dataproc_cluster.cluster_sizing(cfg, ["theta"])
     assert 2 < subset < full < 10
 
 
@@ -387,7 +402,7 @@ def test_a_gpu_cluster_bounds_the_cells_that_share_the_card() -> None:
         data={"source_table": "t", "horizon": 7, "series_limit": 100},
         compute={"gpu_fraction": 0.5},
     )
-    _workers, props = dataproc_cluster.cluster_sizing(cfg, hardware="gpu", gpu_type="T4")
+    _workers, props, _sizing = dataproc_cluster.cluster_sizing(cfg, hardware="gpu", gpu_type="T4")
     assert props["spark.task.cpus"] == "3"  # 7 // 3 = 2 cells on the card
     # Withheld deliberately: Dataproc leaves YARN GPU isolation off, so a resource request the
     # NodeManager never advertises fails every executor at launch.

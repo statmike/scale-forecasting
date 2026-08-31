@@ -21,6 +21,8 @@ resolves from ``SF_*`` env vars. GCP client libraries are imported lazily inside
 the pure layer (and its offline tests) never need them installed.
 
 Public surface: ``ensure_tables``, ``ensure_views``, ``write_header``, ``update_header``,
+``merge_header_telemetry`` / ``sizing_telemetry_path`` (the accreting ``job_telemetry`` write —
+several jobs of one run each record their own sizing without overwriting each other),
 ``run_header`` (the header-lifecycle context manager), ``resolve_snapshot_millis`` /
 ``snapshot_millis_for`` (the run's input-data snapshot: resolve once, look up per job),
 ``write_cells``, the ``run_jobs`` per-job
@@ -38,7 +40,9 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, get_args
 
@@ -882,6 +886,82 @@ def update_header(
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"update_header failed for run {run_id}: {exc}") from exc
+
+
+# A `job_telemetry` merge path: dot-separated lower-snake segments, rendered as ``$.a.b``. The
+# charset is enforced rather than escaped because every caller is our own code writing a known
+# key — a path that needs quoting is a bug in the caller, not an input to accommodate.
+_TELEMETRY_PATH_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
+
+
+def render_header_telemetry_merge(table_ref: str, paths: Sequence[str]) -> str:
+    """The ``UPDATE … JSON_SET(…)`` that merges ``paths`` into a header's ``job_telemetry`` (pure).
+
+    Separated from the client call so the SQL is readable and testable offline. ``JSON_SET`` writes
+    each path independently and leaves the rest of the document alone, which is the whole point:
+    the run header's telemetry is written by *several* jobs of one run (a Serverless batch, a
+    cluster job, a Ray job), and a whole-column write means whichever finishes last is the only one
+    that leaves a trace. ``IFNULL(…, JSON '{}')`` covers the first writer, whose column is still
+    NULL; nested paths create their parent objects.
+
+    Parameters are named ``@t0…@tN`` positionally against ``paths``; the caller binds them in the
+    same order.
+    """
+    sets = ", ".join(f"'$.{path}', @t{i}" for i, path in enumerate(paths))
+    return (
+        f"UPDATE `{table_ref}` "
+        f"SET job_telemetry = JSON_SET(IFNULL(job_telemetry, JSON '{{}}'), {sets}) "
+        "WHERE run_id=@run_id"
+    )
+
+
+def sizing_telemetry_path(sizing: Mapping[str, Any]) -> str:
+    """Where one sizing record (`resources.sizing_telemetry`) is filed on the header (pure).
+
+    ``sizing.<family>`` — because a run's families are sized separately, on separate runtimes and
+    separate hardware, and the question "why is the deep-learning job this shape" is not answerable
+    from a field that holds whichever family stamped last. The family label is slugged (it may be a
+    ``+``-joined union when several families share one cluster) so it is a legal path segment;
+    a record with no plan to take a family from files under ``sizing.run``.
+    """
+    family = str(sizing.get("family") or "").lower()
+    slug = re.sub(r"[^a-z0-9_]+", "_", family).strip("_")
+    return f"sizing.{slug or 'run'}"
+
+
+def merge_header_telemetry(
+    run_id: str, patch: Mapping[str, Any], *, settings: Settings | None = None
+) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Merge ``{path: value}`` into a run header's ``job_telemetry``, leaving the rest untouched.
+
+    The accreting counterpart to ``update_header(job_telemetry=…)``, which replaces the column
+    whole. Keys are dotted paths (``"total_wall_s"``, ``"sizing.deep_learning"``); values are any
+    JSON-able object and are bound as ``JSON`` parameters, so a dict lands as an object rather than
+    as a string. A no-op call (empty patch) returns without touching BigQuery; an illegal path
+    raises `RegistryError` rather than being escaped into SQL.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    if not patch:
+        return
+    bad = [path for path in patch if not _TELEMETRY_PATH_RE.match(path)]
+    if bad:
+        raise RegistryError(f"merge_header_telemetry: illegal telemetry path(s): {sorted(bad)}")
+
+    resolved = _resolve_settings(settings)
+    paths = list(patch)
+    sql = render_header_telemetry_merge(resolved.table_ref("run_registry"), paths)
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter(f"t{i}", "JSON", patch[path]) for i, path in enumerate(paths)
+    ]
+    params.append(_header_param("run_id", run_id))
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"merge_header_telemetry failed for run {run_id}: {exc}") from exc
 
 
 def header_status(

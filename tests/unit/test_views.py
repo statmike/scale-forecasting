@@ -46,6 +46,21 @@ def test_run_summary_unpacks_telemetry_and_derives_overhead() -> None:
     assert "overhead_fraction" in stmt
 
 
+def test_run_summary_exposes_the_shape_that_ran_and_the_decision_behind_it() -> None:
+    stmt = render_create_views("d")["v_run_summary"]
+    # The resolved executor shape, as scalars — "how wide, how much memory" without opening JSON.
+    for column in (
+        "executor_cores",
+        "max_executors",
+        "executor_memory",
+        "executor_memory_overhead",
+    ):
+        assert f"AS {column}" in stmt
+    # And the whole decision, per family, left as JSON: its interesting parts are nested, so
+    # unpacking it into columns would pick a family for the reader.
+    assert "JSON_QUERY(job_telemetry, '$.sizing') AS sizing" in stmt
+
+
 def test_run_summary_keeps_one_row_per_run_after_a_forced_rerun() -> None:
     stmt = render_create_views("d")["v_run_summary"]
     # A forced re-run appends a second header under the same run_id; keep only the latest so one

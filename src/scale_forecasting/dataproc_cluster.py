@@ -346,10 +346,10 @@ def cluster_sizing(
     gpu_type: str | None = None,
     max_workers: int | None = None,
     profile: ComputeProfile | None = None,
-) -> tuple[int | None, dict[str, str]]:
-    """``(worker count, job properties)`` this run's shape implies (pure; ``(None, {})`` when off).
+) -> tuple[int | None, dict[str, str], dict[str, Any]]:
+    """``(worker count, job properties, audit record)`` this run's shape implies (pure).
 
-    The cluster analog of `submit.sizing_properties`, and it returns one thing more: a batch's
+    The cluster analog of `submit.plan_sizing`, and it returns one thing more: a batch's
     fleet is entirely a property, while a cluster's ceiling is a physical worker count fixed at
     create — so the caller feeds the count to `build_cluster` and the properties to `build_job`.
     `resources.plan_dataproc_cluster` does the arithmetic; this only assembles its inputs.
@@ -367,18 +367,23 @@ def cluster_sizing(
     code runs on it. So ``profile`` is a previous run's measurement, resolved by
     `profiling.profile_for_run` and handed in; this function stays pure and never goes looking.
 
+    The third element is the audit record (`resources.sizing_telemetry`) — plan, translation and
+    the evidence behind them — stamped onto the run header by `submit_cluster_job` so a cluster
+    run's sizing is as readable after the fact as a batch's.
+
     ``max_workers`` is the operator's ceiling; ``compute.profile.mode == "off"`` returns
-    ``(None, {})``, the documented escape hatch back to the pre-profiler two-worker cluster.
+    ``(None, {}, {})``, the documented escape hatch back to the pre-profiler two-worker cluster —
+    nothing is decided, so there is nothing to record.
     """
     if cfg.compute.profile.mode == "off":
-        return None, {}
+        return None, {}, {}
 
     # `device_memory_bytes` lives with the Ray engine because that is where the device table is
     # maintained; one table, consulted by every runtime, beats a second copy that drifts.
     from .engines.ray_io import device_memory_bytes
     from .engines.spark_io import default_bucket_count
     from .models import get_model
-    from .resources import plan_dataproc_cluster
+    from .resources import plan_dataproc_cluster, sizing_telemetry
 
     executed = models if models is not None else cfg.models
     families: list[str] = []
@@ -389,7 +394,7 @@ def cluster_sizing(
 
     gpu = hardware == "gpu"
     fraction = cfg.compute.gpu_fraction
-    _plan, translation = plan_dataproc_cluster(
+    plan, translation = plan_dataproc_cluster(
         profile,
         families,
         default_bucket_count(cfg, executed),
@@ -405,7 +410,11 @@ def cluster_sizing(
         pin_threads=not cfg.compute.profile.unpins_threads,
     )
     _log.info("cluster sizing: %s", translation.to_dict())
-    return translation.worker_count, translation.properties
+    return (
+        translation.worker_count,
+        translation.properties,
+        sizing_telemetry(plan, translation=translation, profile=profile),
+    )
 
 
 def build_job(
@@ -672,7 +681,7 @@ def submit_cluster_job(
     name = cluster_name(run_id, spark_cluster_name)
     reuse = spark_cluster_name is not None
     venv_archive_uri = _resolve_cluster_deps(cfg, infra)
-    derived_workers, job_properties = cluster_sizing(
+    derived_workers, job_properties, sizing = cluster_sizing(
         cfg,
         models,
         hardware=hardware,
@@ -753,8 +762,39 @@ def submit_cluster_job(
             )
         return final_id, region
     finally:
+        # Stamp the sizing decision even on the failure path: a cluster job that OOM'd is exactly
+        # the one whose executor split someone needs to read, and the header is the only place it
+        # would survive the teardown below. Best-effort, like every other telemetry write.
+        _stamp_cluster_telemetry(run_id, sizing, settings)
         if not reuse:
             _delete_cluster(cluster_client, project_id, region, name)
+
+
+def _stamp_cluster_telemetry(
+    run_id: str, sizing: dict[str, Any], settings: Settings
+) -> None:  # pragma: no cover - GCP I/O
+    """Write a cluster job's sizing record to the run header's ``job_telemetry`` (best-effort).
+
+    The cluster path's answer to `submit._stamp_job_telemetry`. It stamps *less*: a Dataproc job
+    has no ``approximate_usage`` and no runtime-config echo, so there is no DCU figure and no
+    resolved-shape read-back — only what we decided and why. That is still the half of the record
+    nobody could see before, and a cluster run that previously left ``v_run_summary`` blank now
+    at least says what it asked for.
+
+    Wrapped so any failure (API error, header not written) is logged and swallowed: telemetry is
+    an overlay on an already-finished job, never a reason to fail one.
+    """
+    if not sizing:
+        return
+    from .registry import bq
+
+    try:
+        bq.merge_header_telemetry(
+            run_id, {bq.sizing_telemetry_path(sizing): sizing}, settings=settings
+        )
+        _log.info("cluster sizing stamped for run %s", run_id)
+    except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
+        _log.warning("cluster sizing capture failed (non-fatal): %r", exc)
 
 
 def provision_shared_cluster(
@@ -798,7 +838,7 @@ def provision_shared_cluster(
     name = cluster_name(run_id, None)
     venv_archive_uri = _resolve_cluster_deps(cfg, infra)
     venv_init_uri = _stage_cluster_init(infra)
-    derived_workers, _properties = cluster_sizing(
+    derived_workers, _properties, _sizing = cluster_sizing(
         cfg,
         models,
         hardware="gpu" if use_gpu else "cpu",

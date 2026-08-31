@@ -1166,6 +1166,25 @@ def test_profile_is_json_serializable_for_telemetry() -> None:
     assert payload["families"]["deep_learning"]["slot_rss_bytes"] is None
 
 
+def test_the_telemetry_blob_does_not_grow_with_the_panel() -> None:
+    """A harvest-resolved profile can carry tens of thousands of ids; the blob is a JSON column.
+
+    So the ids are truncated and the count is kept whole — a reader sees the truncation as
+    ``len(sample_ts_ids) < n_sample_series`` rather than needing a flag for it.
+    """
+    profile = build_profile([_fit(ts_id=f"s{i:05d}") for i in range(2_000)])
+    payload = profile.to_dict()
+
+    assert payload["n_sample_series"] == 2_000
+    assert len(payload["sample_ts_ids"]) == profiling._TELEMETRY_SAMPLE_IDS
+    # The kept ids are the front of the (sorted) list, not a random slice — same run, same blob.
+    assert payload["sample_ts_ids"] == list(profile.sample_ts_ids[: len(payload["sample_ts_ids"])])
+    # A small profile is untruncated, so nothing about the common case changed.
+    small = build_profile([_fit(ts_id="a"), _fit(ts_id="b")]).to_dict()
+    assert small["sample_ts_ids"] == ["a", "b"]
+    assert small["n_sample_series"] == 2
+
+
 def test_empty_profile_is_also_json_serializable() -> None:
     # The fall-back state is stamped into telemetry too — "we measured nothing" is a result worth
     # recording, not a reason to skip the record.

@@ -59,7 +59,7 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 | `n_series` | `INT64` | Series count actually run. |
 | `n_models` | `INT64` | Model count actually run. |
 | `runtime_seconds` | `FLOAT64` | The engine's own compute time (excludes cluster stand-up). |
-| `job_telemetry` | `JSON` | Dataproc/Ray overlay: `total_wall_s`, executor sizing, `dcu_milli_seconds`, `runtime_version`. Unpacked by `v_run_summary`. |
+| `job_telemetry` | `JSON` | Dataproc/Ray overlay: `total_wall_s`, executor sizing, `dcu_milli_seconds`, `runtime_version`, plus `sizing.<family>` — the whole sizing decision per family job. Unpacked by `v_run_summary`. |
 
 ## `run_jobs` — one row per family job
 
@@ -177,10 +177,32 @@ apply the dedupe-on-read). Full operator loop in
 
 One row per run: the scaling knobs (`n_series`, `n_models`, `python_runtime`) plus the `job_telemetry`
 JSON unpacked into scalars — `total_wall_s`, `overhead_seconds` (`total_wall_s − runtime_seconds`),
-`overhead_fraction`, `executor_instances` / `executor_cores` / `max_executors`, `dcu_milli_seconds`,
-`runtime_version`. This is the run-level scaling-and-efficiency story: how wall-clock and overhead move
-with the series and model counts and the chosen runtime, with provisioning overhead that amortizes at
-scale. The per-family runtime/hardware breakdown that composes each run lives in `v_run_jobs`.
+`overhead_fraction`, `executor_instances` / `executor_cores` / `max_executors` /
+`executor_memory` / `executor_memory_overhead`, `dcu_milli_seconds`, `runtime_version` — and the
+raw `sizing` record. This is the run-level scaling-and-efficiency story: how wall-clock and overhead
+move with the series and model counts and the chosen runtime, with provisioning overhead that
+amortizes at scale. The per-family runtime/hardware breakdown that composes each run lives in
+`v_run_jobs`.
+
+The executor columns are the shape the platform was **told** (echoed back off the submitted job);
+`sizing` is **why** it was that shape. Each family job of a run writes its own entry, so the column
+holds one object per family:
+
+```sql
+SELECT
+  JSON_VALUE(sizing, '$.deep_learning.plans[0].slot.memory_bytes')  AS dl_slot_memory,
+  JSON_VALUE(sizing, '$.deep_learning.profile.provenance.run_id')   AS sized_off_run,
+  JSON_VALUE(sizing, '$.statistical.translation.executor_cores')    AS stat_cores
+FROM `PROJECT.DATASET.v_run_summary`
+WHERE run_id = 'RUN_ID';
+```
+
+Three parts per entry: `plans` (the fleet the arithmetic asked for — one per fleet, so a Ray job
+records its CPU **and** GPU pools), `translation` (what that became in platform settings, and the
+ideals it snapped from — `null` on Ray, which sets task options rather than properties), and
+`profile` (the measurements it was sized off, with the provenance naming whose run they came from —
+`null` when the run sized from declared config alone). Absent for a run submitted before this
+existed, or one that left the platform's own defaults standing.
 
 ### `v_run_jobs` — what jobs ran, on what runtime/hardware, and how did each fare?
 

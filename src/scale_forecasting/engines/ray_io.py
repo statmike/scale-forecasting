@@ -75,6 +75,7 @@ __all__ = [
     "make_chunk_runner",
     "plan_cluster",
     "plan_pool",
+    "pool_families",
     "split_gpu_cpu_models",
 ]
 
@@ -350,7 +351,7 @@ def _sizing_fraction(cfg: RunConfig) -> float:
     return float(fraction) if isinstance(fraction, float) else _NOMINAL_AUTO_FRACTION
 
 
-def _pool_families(models: list[str]) -> list[str]:
+def pool_families(models: list[str]) -> list[str]:
     """The distinct model families landing on one pool, in first-seen order (pure).
 
     A pool is not a family: everything that isn't ``deep_learning`` shares the CPU pool, so its
@@ -412,7 +413,7 @@ def plan_pool(
     ceiling = max_units if max_units is not None else _pool_ceiling(cfg, gpu=gpu)
     floor_nodes = cfg.compute.ray_gpu_min_nodes if gpu else cfg.compute.ray_cpu_min_nodes
 
-    families = _pool_families(models) or [_GPU_FAMILY if gpu else "cpu"]
+    families = pool_families(models) or [_GPU_FAMILY if gpu else "cpu"]
     slots = [
         resource_slot(
             profile,

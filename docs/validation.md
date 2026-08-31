@@ -213,6 +213,20 @@ Things that are true today and that no entry above covers. Keep this list short 
   discoverable by run B, that the pinned `run_id` lands in the staged config, and that the memory
   properties B emits actually differ from A's.
 
+  **W9b made the decision auditable, with one assumption still unproven.** The whole sizing
+  decision — the fleet plan, its translation to platform settings, and the profile behind it — is
+  now stamped into the run header's `job_telemetry` under `sizing.<family>` and surfaced by
+  `v_run_summary`. That write is a BigQuery `JSON_SET` **merge** rather than a whole-column write,
+  so the several family jobs of one run each record their own sizing instead of overwriting one
+  another (previously the last job to finish was the only one that left a trace). Three things
+  about it have never run against real BigQuery and belong in the W12 checklist: that `JSON_SET`
+  auto-creates the parent object for a nested path (`'$.sizing.deep_learning'` written into a
+  document with no `sizing` key), that two families of one run genuinely coexist under `$.sizing`
+  rather than racing, and that the **cluster** path's stamp lands at all — `submit_cluster_job` had
+  never written header telemetry before this, so a cluster run's `v_run_summary` row was blank.
+  Every one of these writes is best-effort (logged and swallowed), so a wrong assumption degrades
+  to "no telemetry", never to a failed run.
+
 ## Provenance confidence
 
 Entries dated before 2026-08-29 were **reconstructed** during a reconciliation on that date, from

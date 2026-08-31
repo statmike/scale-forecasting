@@ -29,9 +29,12 @@ What `submit_ray` does:
    code runs locally and in the cloud), with ``requirements.txt`` for the on-cluster deps.
 5. **Poll to terminal + stamp telemetry** — with ``wait``, block until the job is terminal, stamp a
    Ray analog of Spark's ``job_telemetry`` (cluster name, node counts, machine/accelerator types,
-   calibrated-vs-sizing GPU fraction, wall-clock, job id) into ``run_registry.job_telemetry`` via
-   ``bq.update_header`` — **no schema change** (the STRING column already exists) — and raise on a
-   non-SUCCEEDED terminal state so a failed run never exits 0.
+   calibrated-vs-sizing GPU fraction, wall-clock, job id) **plus the whole sizing decision** (both
+   pool plans and the profile they were sized off, filed under ``$.sizing.<family>``) into
+   ``run_registry.job_telemetry`` via ``bq.merge_header_telemetry`` — **no schema change** (the JSON
+   column already exists), and a merge rather than a whole-column write so the several family jobs
+   of one run don't overwrite each other — and raise on a non-SUCCEEDED terminal state so a failed
+   run never exits 0.
 
 Public surface: ``RayInfra``, ``submit_ray``, ``build_entrypoint``, ``build_runtime_env``,
 ``extract_ray_telemetry``, ``main``.
@@ -50,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 from .commands import build_driver_args
 from .engines import ray_io
 from .errors import ConfigError, EngineError, get_logger
+from .resources import sizing_telemetry
 from .staging import stage_config
 
 if TYPE_CHECKING:
@@ -891,19 +895,34 @@ def _fetch_job_failure_detail(
     return "\n".join(parts)
 
 
-def _stamp_ray_telemetry(telemetry: dict[str, Any], run_id: str, settings: Settings) -> None:
+def _stamp_ray_telemetry(
+    telemetry: dict[str, Any],
+    run_id: str,
+    settings: Settings,
+    *,
+    sizing: dict[str, Any] | None = None,
+) -> None:
     """Write the Ray telemetry dict to the run header's native JSON column (best-effort).
 
-    The pure `extract_ray_telemetry` output → ``update_header(job_telemetry=<dict>)``. The
-    header column is a native ``JSON`` type whose query parameter serializes the value itself, so we
-    pass the telemetry **dict** (not a pre-serialized string, which would double-encode). Wrapped so
-    any failure (API error, header not yet written) is logged and swallowed: telemetry is a
-    nice-to-have overlay on an already-complete run, never a reason to fail it.
+    The pure `extract_ray_telemetry` output, merged into ``job_telemetry`` a key at a time
+    (`registry.bq.merge_header_telemetry`) rather than written whole — several family jobs of one
+    run each land here, and a whole-column write would leave only whichever finished last. The
+    column is a native ``JSON`` type whose query parameter serializes the value itself, so we pass
+    **dicts** (not pre-serialized strings, which would double-encode).
+
+    ``sizing`` (`resources.sizing_telemetry` over the two pool plans) is filed under
+    ``$.sizing.<family>``: what the pools were sized to hold, and off whose measurements.
+
+    Wrapped so any failure (API error, header not yet written) is logged and swallowed: telemetry
+    is a nice-to-have overlay on an already-complete run, never a reason to fail it.
     """
     from .registry import bq
 
+    patch = dict(telemetry)
+    if sizing:
+        patch[bq.sizing_telemetry_path(sizing)] = sizing
     try:
-        bq.update_header(run_id, settings=settings, job_telemetry=telemetry)
+        bq.merge_header_telemetry(run_id, patch, settings=settings)
         _log.info("Ray telemetry stamped for run %s: %s", run_id, telemetry)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("Ray telemetry capture failed (non-fatal): %r", exc)
@@ -934,11 +953,21 @@ def provision_shared_cluster(
     failure-isolated Ray job to the shared cluster) and tears it down once via
     `teardown_shared_cluster` after all families join.
     """
+    from .profiling import profile_for_run
     from .settings import Settings
 
     settings = settings or Settings.resolve()
     infra = infra or RayInfra.resolve()
-    plan = ray_io.plan_cluster(cfg, models, run_id=run_id, use_gpu=use_gpu, gpu_type=gpu_type)
+    plan = ray_io.plan_cluster(
+        cfg,
+        models,
+        run_id=run_id,
+        use_gpu=use_gpu,
+        gpu_type=gpu_type,
+        # Same evidence the per-family `submit_ray` calls will size off (memoized), so the shared
+        # cluster is shaped for the union of families by the same rule each family would apply.
+        profile=profile_for_run(cfg, settings=settings),
+    )
     regions = _resolve_regions(cfg, settings)
     _log.info(
         "provisioning shared Ray cluster %s: %d union models use_gpu=%s cpu_nodes=%d gpu_nodes=%d",
@@ -1025,6 +1054,7 @@ def submit_ray(
     the region a shared ephemeral cluster landed in (which may differ after a capacity hop), so
     every Ray family's job finds the one shared cluster by name in the right region.
     """
+    from .profiling import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
 
@@ -1032,7 +1062,14 @@ def submit_ray(
     infra = infra or RayInfra.resolve()
     cfg = cfg.with_series_limit(n_series)
     run_id = make_run_id(cfg)
-    plan = ray_io.plan_cluster(cfg, models, run_id=run_id, use_gpu=use_gpu, gpu_type=gpu_type)
+    # A past run's measurements, when `compute.profile.source` points at any. The pools are sized
+    # here, before any node exists, so the only evidence available is somebody else's run — the
+    # same position both Spark submit paths are in. The engine's own in-run `resolve_profile` sizes
+    # *tasks* on the cluster this produces; it cannot reach back and change the cluster.
+    profile = profile_for_run(cfg, settings=settings)
+    plan = ray_io.plan_cluster(
+        cfg, models, run_id=run_id, use_gpu=use_gpu, gpu_type=gpu_type, profile=profile
+    )
 
     # Reuse when the config names a standing cluster or the caller overrides the name; else create.
     reuse = plan.reuse or cluster_name is not None
@@ -1089,7 +1126,19 @@ def submit_ray(
                 total_wall_s=wall_s,
                 reuse=reuse,
             )
-            _stamp_ray_telemetry(telemetry, run_id, settings)
+            _stamp_ray_telemetry(
+                telemetry,
+                run_id,
+                settings,
+                sizing=sizing_telemetry(
+                    plan.cpu_pool,
+                    plan.gpu_pool,
+                    profile=profile,
+                    # This job's own label, not a pool's: a deep-learning job still has a (fallback)
+                    # CPU pool, and filing the record under that pool's ``"cpu"`` would bury it.
+                    family="+".join(ray_io.pool_families(models or cfg.models)) or "cpu",
+                ),
+            )
             if status != "SUCCEEDED":
                 # Fold the driver diagnosis (captured before the log stream ages out) into the
                 # raised error so the *cause* — not just "FAILED" — reaches the operator.

@@ -636,3 +636,42 @@ def test_append_response_level_error_fails_fast(monkeypatch: Any) -> None:
     with pytest.raises(RegistryError, match="backtest_oof failed: 7"):
         _append(client)
     assert client.calls == 1
+
+
+# --- accreting job_telemetry writes --------------------------------------------
+
+
+def test_the_telemetry_merge_sets_each_path_against_the_existing_document() -> None:
+    sql = bq.render_header_telemetry_merge("p.d.run_registry", ["total_wall_s", "sizing.ml"])
+    # IFNULL, so the first writer on a header with no telemetry yet merges into {} rather than
+    # into NULL (which would swallow the write).
+    assert sql.startswith("UPDATE `p.d.run_registry` SET job_telemetry = JSON_SET(")
+    assert "IFNULL(job_telemetry, JSON '{}')" in sql
+    assert "'$.total_wall_s', @t0" in sql
+    assert "'$.sizing.ml', @t1" in sql
+    assert sql.endswith("WHERE run_id=@run_id")
+
+
+def test_each_family_files_its_sizing_under_its_own_path() -> None:
+    # The whole point of the merge: two families of one run write different paths, so neither
+    # overwrites the other.
+    assert bq.sizing_telemetry_path({"family": "deep_learning"}) == "sizing.deep_learning"
+    assert bq.sizing_telemetry_path({"family": "statistical"}) == "sizing.statistical"
+    # A Ray CPU pool's merged label is "+"-joined; slugified so it is a legal JSON path.
+    assert bq.sizing_telemetry_path({"family": "statistical+ml"}) == "sizing.statistical_ml"
+    # No family to file under (nothing was planned) still lands somewhere readable.
+    assert bq.sizing_telemetry_path({"family": None}) == "sizing.run"
+    assert bq.sizing_telemetry_path({}) == "sizing.run"
+
+
+def test_an_illegal_telemetry_path_is_a_caller_bug_not_an_escaped_string() -> None:
+    from scale_forecasting.errors import RegistryError
+
+    # Every path is our own code's constant, so a path needing quotes means the caller is wrong.
+    with pytest.raises(RegistryError, match="illegal telemetry path"):
+        bq.merge_header_telemetry("rid", {"sizing.'; DROP": {"x": 1}})
+
+
+def test_merging_nothing_touches_nothing() -> None:
+    # No client is constructed, so this would raise if the empty patch weren't short-circuited.
+    bq.merge_header_telemetry("rid", {})

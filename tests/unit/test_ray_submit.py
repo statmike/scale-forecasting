@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import ray_submit
+from scale_forecasting import profiling, ray_submit
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.errors import ConfigError, EngineError
@@ -389,8 +389,11 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         calls["submission_id"] = submission_id
         return "job-xyz", "SUCCEEDED", ""
 
-    def _fake_stamp(telemetry: dict, run_id: str, settings: Settings) -> None:
+    def _fake_stamp(
+        telemetry: dict, run_id: str, settings: Settings, *, sizing: dict | None = None
+    ) -> None:
         calls["telemetry"] = telemetry
+        calls["sizing"] = sizing
 
     def _fake_init(settings: Settings, region: str) -> None:
         calls["init_project"] = settings.project_id
@@ -408,6 +411,10 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(ray_submit, "_delete_cluster", _fake_delete)
     monkeypatch.setattr(ray_submit, "_submit_and_poll", _fake_submit)
     monkeypatch.setattr(ray_submit, "_stamp_ray_telemetry", _fake_stamp)
+    # No registry to ask for a past run's measurements: submit sizes off declared config here, the
+    # same as an unprofiled deployment. (Left unstubbed, `profile_for_run` would try a real
+    # BigQuery lookup against the fake project and degrade to None the slow way.)
+    monkeypatch.setattr(profiling, "profile_for_run", lambda cfg, settings=None: None)
     return calls
 
 
@@ -431,6 +438,23 @@ def test_submit_ray_ephemeral_creates_submits_and_deletes(
     assert calls["init_project"] == "proj-x"
     # The caller-supplied id is threaded to the Ray job so its own submission id is deterministic.
     assert calls["submission_id"] == "sf-rid-ml-a1"
+
+
+def test_submit_ray_records_both_pool_plans_under_its_own_family(
+    _stubbed_lifecycle: dict[str, Any],
+) -> None:
+    """Ray sizes two pools per job, and the record has to say which job they belong to.
+
+    A deep-learning job still has a (fallback) CPU pool labelled ``"cpu"``; filing the record
+    under a pool's label would bury the job under a name no reader would look for.
+    """
+    calls = _stubbed_lifecycle
+    ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), models=[_GPU], wait=True)
+    sizing = calls["sizing"]
+    assert sizing["family"] == "deep_learning"
+    assert len(sizing["plans"]) == 2  # the CPU pool and the GPU pool, sized separately
+    # Ray sets task options rather than platform properties, so there is nothing to translate.
+    assert sizing["translation"] is None
 
 
 def test_submit_ray_deletes_even_when_job_raises(

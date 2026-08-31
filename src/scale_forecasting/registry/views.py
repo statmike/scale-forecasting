@@ -14,7 +14,14 @@ Three views, matched to the questions a run prompts:
   overhead (``total_wall_s − runtime_seconds``) and its share, cluster sizing, and DCU usage. This
   is the run-level scaling-and-efficiency story as one ``SELECT * ORDER BY n_series`` — how
   wall-clock and overhead move with scale (overhead amortizes as the series count grows); the
-  per-family runtime/hardware breakdown that composes each run lives in ``v_run_jobs``. A forced
+  per-family runtime/hardware breakdown that composes each run lives in ``v_run_jobs``.
+  The executor columns are the shape the platform was *told* (echoed back off the submitted batch),
+  while ``sizing`` is the whole decision behind it — one entry per family under ``$.sizing``, each
+  holding the fleet plan, its translation to platform settings, and the `ComputeProfile` it was
+  sized off (`resources.sizing_telemetry`). Left as raw ``JSON`` rather than unpacked into columns
+  because its interesting parts are per-family and nested: read a run's shape from the scalar
+  columns, read *why* with ``JSON_QUERY(sizing, '$.deep_learning')``. NULL on a run submitted
+  before this existed, or one that left the platform's own defaults standing. A forced
   re-run of an unchanged config appends a second header row under the same ``run_id``; the view
   keeps only the latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one run is
   always one row.
@@ -74,8 +81,11 @@ SELECT
   CAST(JSON_VALUE(job_telemetry, '$.executor_instances') AS INT64) AS executor_instances,
   CAST(JSON_VALUE(job_telemetry, '$.executor_cores') AS INT64) AS executor_cores,
   CAST(JSON_VALUE(job_telemetry, '$.max_executors') AS INT64) AS max_executors,
+  JSON_VALUE(job_telemetry, '$.executor_memory') AS executor_memory,
+  JSON_VALUE(job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
-  JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version
+  JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version,
+  JSON_QUERY(job_telemetry, '$.sizing') AS sizing
 FROM `{d}.run_registry`
 QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1""",
     "v_run_jobs": """\

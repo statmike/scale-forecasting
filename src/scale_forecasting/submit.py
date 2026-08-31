@@ -20,7 +20,7 @@ What `submit_batch` does:
    optionally capping executors (``--max-executors`` → ``spark.dynamicAllocation.maxExecutors``, how
    a run is throttled), and return the batch id.
 
-Public surface: ``BatchInfra``, ``submit_batch``, ``sizing_properties``, ``main``.
+Public surface: ``BatchInfra``, ``submit_batch``, ``sizing_properties``, ``plan_sizing``, ``main``.
 """
 
 from __future__ import annotations
@@ -194,8 +194,11 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
       warm-up + teardown), which amortizes as scale grows — the efficiency half of the scale story.
     - ``dcu_milli_seconds`` / ``shuffle_storage_gb_seconds`` — approximate usage (billing proxy +
       shuffle pressure).
-    - ``driver_cores`` / ``executor_cores`` / ``executor_instances`` / ``max_executors`` — the
-      resolved cluster sizing and the autoscaling cap (the executor throttle shows up here).
+    - ``driver_cores`` / ``executor_cores`` / ``executor_instances`` / ``max_executors`` /
+      ``executor_memory`` / ``executor_memory_overhead`` — the resolved cluster sizing and the
+      autoscaling cap (the executor throttle shows up here). This is the *echoed* shape — what
+      Dataproc says it ran — as against the ``sizing`` record, which is what we asked for and why;
+      the two disagreeing is a finding, so both are kept.
     - ``runtime_version`` / ``container_image`` — what actually ran (reproducibility).
     - ``service_account`` / ``subnetwork_uri`` — the identity + network the batch had access to.
 
@@ -231,6 +234,13 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
     tel["executor_cores"] = _prop_int("spark.executor.cores")
     tel["executor_instances"] = _prop_int("spark.executor.instances")
     tel["max_executors"] = _prop_int("spark.dynamicAllocation.maxExecutors")
+    # The memory half of the resolved shape, and the only half a profile actually moves (§3.10):
+    # cores and the executor counts follow from fan-out with or without evidence. Strings, because
+    # Spark spells them ``"8g"`` / ``"3891m"`` — kept verbatim rather than parsed to bytes so the
+    # record shows what the platform was told, not our reading of it. Absent on a batch that left
+    # Serverless' own defaults standing, which is itself the answer to "what sized this".
+    tel["executor_memory"] = props.get("spark.executor.memory") or None
+    tel["executor_memory_overhead"] = props.get("spark.executor.memoryOverhead") or None
     tel["runtime_version"] = (
         getattr(runtime_config, "version", None) or None if runtime_config else None
     )
@@ -294,7 +304,37 @@ def sizing_properties(
     max_executors: int | None = None,
     profile: ComputeProfile | None = None,
 ) -> dict[str, str]:
-    """The ``spark.*`` overlay this batch's shape implies (pure; ``{}`` when profiling is off).
+    """The ``spark.*`` overlay alone — `plan_sizing` without the audit record (pure).
+
+    The shape every caller that only *submits* wants. A caller that also records the decision
+    (`submit_batch`) calls `plan_sizing` and keeps both halves; a caller that renders a portable
+    command (`main._assemble_commands`) has nowhere to record one and wants only these.
+    """
+    return plan_sizing(
+        cfg,
+        models,
+        hardware=hardware,
+        gpu_type=gpu_type,
+        max_executors=max_executors,
+        profile=profile,
+    )[0]
+
+
+def plan_sizing(
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+    max_executors: int | None = None,
+    profile: ComputeProfile | None = None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """The ``spark.*`` overlay this batch's shape implies, **and** the audit record behind it.
+
+    Returns ``(properties, sizing)`` — pure, and ``({}, {})`` when profiling is off. ``properties``
+    is merged into the batch's ``RuntimeConfig``; ``sizing`` (`resources.sizing_telemetry`) is the
+    plan + translation + evidence, stamped onto the run header so the decision survives the driver
+    log it would otherwise only appear in.
 
     A Serverless executor's shape is fixed at batch *creation*, so unlike Ray — where the
     engine sizes tasks on a cluster that already exists — this has to be decided here, before
@@ -328,19 +368,19 @@ def sizing_properties(
     fraction is passed through; ``"auto"`` cannot be calibrated here (there is no device to
     measure yet, exactly as on the Ray submit path) and falls back to the nominal share.
 
-    ``compute.profile.mode == "off"`` returns ``{}`` — the documented escape hatch back to
+    ``compute.profile.mode == "off"`` returns ``({}, {})`` — the documented escape hatch back to
     the pre-profiler batch, reused rather than adding a field that would move every
-    ``run_id``.
+    ``run_id``. Nothing is decided, so there is nothing to record either.
     """
     if cfg.compute.profile.mode == "off":
-        return {}
+        return {}, {}
 
     # `device_memory_bytes` lives with the Ray engine because that is where the device table is
     # maintained; one table, consulted by both runtimes, beats a second copy that drifts.
     from .engines.ray_io import device_memory_bytes
     from .engines.spark_io import default_bucket_count
     from .models import get_model
-    from .resources import plan_serverless
+    from .resources import plan_serverless, sizing_telemetry
 
     executed = models if models is not None else cfg.models
     families: list[str] = []
@@ -352,7 +392,7 @@ def sizing_properties(
     gpu = hardware == "gpu"
     fraction = cfg.compute.gpu_fraction
     n_tasks = default_bucket_count(cfg, executed)
-    _, translation = plan_serverless(
+    plan, translation = plan_serverless(
         profile,
         families,
         n_tasks,
@@ -365,7 +405,9 @@ def sizing_properties(
         pin_threads=not cfg.compute.profile.unpins_threads,
     )
     _log.info("serverless sizing: %s", translation.to_dict())
-    return translation.properties
+    return translation.properties, sizing_telemetry(
+        plan, translation=translation, profile=profile
+    )
 
 
 def build_batch(
@@ -542,6 +584,16 @@ def submit_batch(
 
     package_uri, launcher_uri = _stage_code(infra)
     config_uri = _stage_config(cfg, run_id, infra)
+    properties, sizing = plan_sizing(
+        cfg,
+        models,
+        hardware=hardware,
+        gpu_type=gpu_type,
+        max_executors=max_executors,
+        # A past run's measurements, if `compute.profile.source` points at any (memoized, so
+        # every family job of one run sizes off the same evidence rather than re-discovering).
+        profile=profile_for_run(cfg, settings=settings),
+    )
     batch = build_batch(
         infra=infra,
         settings=settings,
@@ -553,16 +605,7 @@ def submit_batch(
         manage_header=manage_header,
         hardware=hardware,
         gpu_type=gpu_type,
-        properties=sizing_properties(
-            cfg,
-            models,
-            hardware=hardware,
-            gpu_type=gpu_type,
-            max_executors=max_executors,
-            # A past run's measurements, if `compute.profile.source` points at any (memoized, so
-            # every family job of one run sizes off the same evidence rather than re-discovering).
-            profile=profile_for_run(cfg, settings=settings),
-        ),
+        properties=properties,
     )
 
     client = _batch_client(settings.region)
@@ -580,7 +623,7 @@ def submit_batch(
         # header — before the raise below, so even a FAILED batch (whose on-cluster update_header
         # never ran) still gets its sizing recorded. Best-effort: any failure here is logged and
         # swallowed, never sinking the run (the forecasts + registry rows already landed).
-        _stamp_job_telemetry(client, parent, batch_id, run_id, settings)
+        _stamp_job_telemetry(client, parent, batch_id, run_id, settings, sizing=sizing)
         # A non-SUCCEEDED terminal state must fail loudly — the caller/CLI otherwise exits 0 on a
         # failed batch (the header stays RUNNING and the failure is silent). SUCCEEDED is the one
         # green state; CANCELLED/FAILED and anything else raise with the batch's own status message.
@@ -591,23 +634,39 @@ def submit_batch(
 
 
 def _stamp_job_telemetry(
-    client: Any, parent: str, batch_id: str, run_id: str, settings: Settings
+    client: Any,
+    parent: str,
+    batch_id: str,
+    run_id: str,
+    settings: Settings,
+    *,
+    sizing: dict[str, Any] | None = None,
 ) -> None:
     """Read the finished batch's telemetry and write it to the run header (best-effort).
 
     A fresh ``get_batch`` (the LRO result can carry incomplete ``approximate_usage``) → the pure
-    `extract_job_telemetry` → ``update_header(job_telemetry=<dict>)``. The header column is a
+    `extract_job_telemetry` → the header's ``job_telemetry``. The header column is a
     native ``JSON`` type whose query parameter serializes the value itself, so we pass the telemetry
     **dict** (not a pre-serialized string, which would double-encode). Wrapped so any failure (API
     error, missing field, header not yet written) is logged and swallowed: telemetry is a
     nice-to-have overlay on an already-complete run, never a reason to fail it.
+
+    ``sizing`` (`plan_sizing`'s second half) rides along under ``$.sizing.<family>``. It is decided
+    at *submit* and stamped at *finish* so one write carries both halves, and a batch that never
+    reaches terminal has no telemetry worth reading anyway.
+
+    The write **merges** (`registry.bq.merge_header_telemetry`) rather than replacing the column:
+    several family jobs of one run each land here, and a whole-column write would leave only
+    whichever finished last.
     """
     from .registry import bq
 
     try:
         fetched = client.get_batch(name=f"{parent}/batches/{batch_id}")
         telemetry = extract_job_telemetry(fetched)
-        bq.update_header(run_id, settings=settings, job_telemetry=telemetry)
+        if sizing:
+            telemetry[bq.sizing_telemetry_path(sizing)] = sizing
+        bq.merge_header_telemetry(run_id, telemetry, settings=settings)
         _log.info("batch %s telemetry stamped: %s", batch_id, telemetry)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("batch %s telemetry capture failed (non-fatal): %r", batch_id, exc)

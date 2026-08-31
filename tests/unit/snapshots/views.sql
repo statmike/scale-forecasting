@@ -18,8 +18,11 @@ SELECT
   CAST(JSON_VALUE(job_telemetry, '$.executor_instances') AS INT64) AS executor_instances,
   CAST(JSON_VALUE(job_telemetry, '$.executor_cores') AS INT64) AS executor_cores,
   CAST(JSON_VALUE(job_telemetry, '$.max_executors') AS INT64) AS max_executors,
+  JSON_VALUE(job_telemetry, '$.executor_memory') AS executor_memory,
+  JSON_VALUE(job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
-  JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version
+  JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version,
+  JSON_QUERY(job_telemetry, '$.sizing') AS sizing
 FROM `proj.scale_forecasting.run_registry`
 QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1;
 
