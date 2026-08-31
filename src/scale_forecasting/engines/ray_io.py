@@ -58,6 +58,7 @@ __all__ = [
     "aggregate_status",
     "calibrate_gpu_fraction",
     "chunk_cells",
+    "device_memory_bytes",
     "make_chunk_runner",
     "plan_cluster",
     "split_gpu_cpu_models",
@@ -66,9 +67,17 @@ __all__ = [
 # The model family that benefits from a GPU (only NeuralProphet today). Everything else is CPU work.
 _GPU_FAMILY = "deep_learning"
 
-# T4 device memory (16 GiB). The denominator when auto-calibration turns a measured peak-memory
-# footprint into a GPU fraction. A T4 is the design's GPU (cheap, ubiquitous).
-_T4_MEMORY_BYTES = 16 * 1024**3
+# Device memory per supported accelerator — the denominator when auto-calibration turns a measured
+# peak-memory footprint into a GPU fraction. Per *device*, not per node (a node may carry several,
+# which is `accelerator_count`). Getting this wrong is silently expensive in both directions: too
+# small under-packs the device (paying for GPU we don't use), too large over-packs it (OOM).
+_DEVICE_MEMORY_BYTES = {
+    "T4": 16 * 1024**3,  # NVIDIA Tesla T4 — 16 GiB
+    "L4": 24 * 1024**3,  # NVIDIA L4 — 24 GiB
+}
+# Fallback for an unrecognised accelerator: assume the smallest device we know, so an unknown GPU
+# under-packs (wastes capacity) rather than over-packs (OOMs the run).
+_DEFAULT_DEVICE_MEMORY_BYTES = min(_DEVICE_MEMORY_BYTES.values())
 
 # Accelerator type strings Vertex expects, keyed by the config's short ``gpu_type``.
 _ACCELERATOR_TYPES = {"T4": "NVIDIA_TESLA_T4", "L4": "NVIDIA_L4"}
@@ -140,11 +149,22 @@ def gpu_slots_per_device(fraction: float) -> int:
     return max(1, math.floor(1.0 / fraction))
 
 
+def device_memory_bytes(gpu_type: str | None) -> int:
+    """Device memory for one accelerator of ``gpu_type`` (pure; unknown → the smallest known).
+
+    The denominator of the auto-fraction. Kept a lookup rather than a constant because the two
+    supported devices differ by 50% (T4 16 GiB, L4 24 GiB): sizing an L4 against the T4 constant
+    packs only two-thirds of the tasks the device could actually hold.
+    """
+    return _DEVICE_MEMORY_BYTES.get(gpu_type or "", _DEFAULT_DEVICE_MEMORY_BYTES)
+
+
 def calibrate_gpu_fraction(
     cfg: RunConfig,
     *,
     sample_series: list[pd.DataFrame] | None = None,
     measured_peaks_bytes: list[int] | None = None,
+    gpu_type: str | None = None,
 ) -> float:
     """Resolve the ``num_gpus`` fraction each NeuralProphet task requests.
 
@@ -153,8 +173,13 @@ def calibrate_gpu_fraction(
     * **fixed float** → return it unchanged (the operator pinned it; no profiling).
     * **``"auto"``** → size the fraction to the model's real footprint: fit NeuralProphet on a few
       sample series measuring peak GPU memory, take the worst case, add a safety margin, and divide
-      by the T4's 16 GiB — so ``fraction ≈ peak × margin / 16GiB`` and ``floor(1/fraction)`` tasks
-      pack without an OOM. Clamped to ``[_MIN_FRACTION, 1.0]``.
+      by **the device's** memory — so ``fraction ≈ peak × margin / device_bytes`` and
+      ``floor(1/fraction)`` tasks pack without an OOM. Clamped to ``[_MIN_FRACTION, 1.0]``.
+
+    ``gpu_type`` picks that denominator (`device_memory_bytes`); ``None`` falls back to
+    ``compute.gpu_type``. It is an argument rather than read from ``cfg`` because a family's
+    accelerator is resolved per-job and deliberately kept out of the config (the ``run_id`` digest
+    must stay identical across every family in a run) — the same reason `plan_cluster` takes it.
 
     The measurement is injectable so the sizing math is unit-testable **without a GPU** in the
     offline gate: pass ``measured_peaks_bytes`` to skip the live fit entirely. On a real cluster
@@ -175,7 +200,9 @@ def calibrate_gpu_fraction(
         return _NOMINAL_AUTO_FRACTION
 
     peak = max(measured_peaks_bytes)
-    raw = (peak * cfg.compute.gpu_safety_margin) / _T4_MEMORY_BYTES
+    raw = (peak * cfg.compute.gpu_safety_margin) / device_memory_bytes(
+        gpu_type or cfg.compute.gpu_type
+    )
     return _clamp_fraction(raw)
 
 
@@ -234,9 +261,10 @@ class RayClusterPlan:
     sizing_gpu_fraction: float
     n_gpu_cells: int
     n_cpu_cells: int
-    # Autoscaling spec. ``autoscale`` gates whether the pools carry an
-    # ``AutoscalingSpec``; the resolved per-pool ``[min, max]`` bounds it (max already defaulted
-    # from ``ray_max_nodes`` when unset). All pure products of the config → snapshotted for audit.
+    # Autoscaling spec. ``autoscale`` gates whether the pools carry an ``AutoscalingSpec``; the
+    # resolved per-pool ``[min, max]`` bounds it. The max is derived from this run's fan-out
+    # (`_resolve_pool_max`) unless the pool was explicitly pinned. All pure products of the config
+    # + the run's cell counts → snapshotted for audit.
     autoscale: bool
     cpu_min_nodes: int
     cpu_max_nodes: int
@@ -337,6 +365,33 @@ def _clamp_pool_nodes(nodes: int, min_nodes: int) -> int:
     return max(nodes, min_nodes) if nodes > 0 else 0
 
 
+# Floor on a *derived* autoscaling ceiling. Even a run whose fan-out implies a single node gets
+# room to burst to a second, so a small run isn't accidentally pinned to a fixed pool by an
+# autoscaling spec of [1, 1]. Above this, the run's own size sets the ceiling.
+_AUTOSCALE_MAX_FLOOR = 2
+
+
+def _resolve_pool_max(
+    explicit: int | None, derived_nodes: int, ceiling: int, min_nodes: int
+) -> int:
+    """The autoscaling ceiling for one pool — an explicit pin, else derived from the run (pure).
+
+    * **``explicit`` set** — the operator pinned this pool's ceiling; honour it verbatim.
+      ``ComputeConfig`` has already rejected a pin below the pool's floor, so no check here.
+    * **unset** — derive from the run: the fan-out's own node count (already clamped to ``ceiling``
+      inside `_pool_node_count`), floored at `_AUTOSCALE_MAX_FLOOR` and at ``min_nodes``.
+    * **unused pool** (``derived_nodes == 0``) — the floors still apply, but the value is inert: a
+      zero-node pool is omitted at create, so no ``AutoscalingSpec`` is built from it.
+
+    This is the difference between an elastic pool that can actually absorb its run and one capped
+    at a constant: before, an unset ceiling meant the shared ``ray_max_nodes`` (16) regardless of
+    whether the run implied 2 nodes or 200.
+    """
+    if explicit is not None:
+        return explicit
+    return min(ceiling, max(_AUTOSCALE_MAX_FLOOR, min_nodes, derived_nodes))
+
+
 def plan_cluster(
     cfg: RunConfig,
     models: list[str] | None = None,
@@ -361,8 +416,13 @@ def plan_cluster(
     runs all its backtest folds internally in one `run_cell`, so folds add per-cell time, not
     more tasks.
 
-    Per-pool autoscaling bounds are resolved here (min from config; max from the per-pool override,
-    else the shared ``ray_max_nodes``) and carried on the plan. When ``ray_autoscale`` (default) the
+    Per-pool autoscaling bounds are resolved here and carried on the plan: the floor comes from
+    config (``ray_[cpu|gpu]_min_nodes``), and the **ceiling is derived from this run's own fan-out**
+    — the pool's derived node count, floored at `_AUTOSCALE_MAX_FLOOR` and capped by the hard
+    ceiling (the per-pool override, else the shared ``ray_max_nodes``). An explicitly pinned
+    ``ray_[cpu|gpu]_max_nodes`` is honoured verbatim instead. So a run implying two nodes scales to
+    two, not to a constant 16, while the hard ceiling still guards a runaway fan-out.
+    When ``ray_autoscale`` (default) the
     launcher gives each pool an ``AutoscalingSpec(min, max)`` and it starts at ``min`` and scales to
     ``max`` with Ray's task demand; when False both pools are fixed at the derived ``node_count``.
     Either way the whole spec is a pure product of the config — a bigger ``series_limit`` implies
@@ -386,9 +446,12 @@ def plan_cluster(
     gpu_slots_per_node = cfg.compute.accelerator_count * gpu_slots_per_device(sizing_fraction)
     cpu_slots_per_node = _machine_cores(cfg.compute.ray_cpu_machine_type)
 
-    # Resolve per-pool autoscaling bounds (max defaults to the shared ray_max_nodes when unset).
-    cpu_max = cfg.compute.ray_cpu_max_nodes or cfg.compute.ray_max_nodes
-    gpu_max = cfg.compute.ray_gpu_max_nodes or cfg.compute.ray_max_nodes
+    # Hard ceiling per pool — the explicit per-pool override, else the shared ray_max_nodes. This
+    # bounds the *derived* node count below; the autoscaling ceiling is resolved from that count
+    # afterwards (`_resolve_pool_max`), so an unpinned pool scales to the size of the run rather
+    # than to a constant.
+    cpu_ceiling = cfg.compute.ray_cpu_max_nodes or cfg.compute.ray_max_nodes
+    gpu_ceiling = cfg.compute.ray_gpu_max_nodes or cfg.compute.ray_max_nodes
     cpu_min = cfg.compute.ray_cpu_min_nodes
     gpu_min = cfg.compute.ray_gpu_min_nodes
 
@@ -398,7 +461,7 @@ def plan_cluster(
     gpu_nodes = (
         _clamp_pool_nodes(
             _pool_node_count(
-                n_gpu_cells, gpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, gpu_max
+                n_gpu_cells, gpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, gpu_ceiling
             ),
             gpu_min,
         )
@@ -407,10 +470,14 @@ def plan_cluster(
     )
     cpu_nodes = _clamp_pool_nodes(
         _pool_node_count(
-            n_cpu_cells, cpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, cpu_max
+            n_cpu_cells, cpu_slots_per_node, cfg.compute.ray_target_cells_per_slot, cpu_ceiling
         ),
         cpu_min,
     )
+
+    # The autoscaling ceilings, derived from those node counts unless a pool was explicitly pinned.
+    cpu_max = _resolve_pool_max(cfg.compute.ray_cpu_max_nodes, cpu_nodes, cpu_ceiling, cpu_min)
+    gpu_max = _resolve_pool_max(cfg.compute.ray_gpu_max_nodes, gpu_nodes, gpu_ceiling, gpu_min)
 
     return RayClusterPlan(
         cluster_name=_cluster_name(cfg, run_id),

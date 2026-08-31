@@ -334,7 +334,9 @@ def run(
                 if (gpu_models and cfg.compute.use_gpu and cfg.compute.gpu_fraction == "auto")
                 else None
             )
-            gpu_fraction = ray_io.calibrate_gpu_fraction(cfg, sample_series=sample)
+            gpu_fraction = ray_io.calibrate_gpu_fraction(
+                cfg, sample_series=sample, gpu_type=cfg.compute.gpu_type
+            )
 
             # Chunk counts come from the true cell counts (series in the panel × pool models).
             target = cfg.compute.bucket_target_cells

@@ -298,9 +298,11 @@ class ComputeConfig(BaseModel):
     ray_gpu_machine_type: str = "n1-standard-8"
     # GPUs per GPU worker node. T4 permits 1, 2, or 4 per node (not 3) — validated below.
     accelerator_count: int = Field(default=1, gt=0)
-    # Fixed-pool sizing: how many cells one worker slot should chew through before we add another
-    # node (amortizes per-node warm-up), plus a hard ceiling so a huge fan-out can't request an
-    # unbounded cluster. n_gpu_nodes/n_cpu_nodes are derived, then clamped to [1, ray_max_nodes].
+    # Pool sizing: how many cells one worker slot should chew through before we add another node
+    # (amortizes per-node warm-up), plus a hard ceiling so a huge fan-out can't request an unbounded
+    # cluster. n_gpu_nodes/n_cpu_nodes are derived, then clamped to [1, ray_max_nodes] — and under
+    # autoscaling that derived count is also what sets each pool's ceiling (see the max_nodes
+    # fields), so ray_max_nodes is the guardrail, not the operating point.
     ray_target_cells_per_slot: int = Field(default=8, gt=0)
     ray_max_nodes: int = Field(default=16, gt=0)
     # Autoscaling (default-on). When True each worker pool is created with a Vertex
@@ -314,8 +316,11 @@ class ComputeConfig(BaseModel):
     # the cold 1→N ramp. Inert when ray_autoscale is False.
     ray_cpu_min_nodes: int = Field(default=1, gt=0)
     ray_gpu_min_nodes: int = Field(default=1, gt=0)
-    # Per-pool autoscaling ceiling. None falls back to the shared ray_max_nodes, so a run can give
-    # the (cheap) CPU pool a high ceiling while capping the (expensive) T4 GPU pool independently.
+    # Per-pool autoscaling ceiling — an explicit *pin*. None (default) means the ceiling is DERIVED
+    # from the run's own fan-out (the pool's derived node count, floored at 2 and capped by the hard
+    # ceiling ray_max_nodes), so a small run scales to a small pool and a large one is not stuck at
+    # a constant. Set it to pin a pool instead: e.g. cap the expensive GPU pool while leaving the
+    # cheap CPU pool free to derive. A pin below the pool's min_nodes is rejected at plan time.
     # Inert when ray_autoscale is False (both pools are then fixed at their derived node_count).
     ray_cpu_max_nodes: int | None = Field(default=None, gt=0)
     ray_gpu_max_nodes: int | None = Field(default=None, gt=0)

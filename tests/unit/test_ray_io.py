@@ -109,6 +109,36 @@ def test_calibrate_auto_no_measurements_falls_back_to_nominal() -> None:
     )
 
 
+def test_device_memory_known_and_unknown() -> None:
+    assert ray_io.device_memory_bytes("T4") == 16 * 1024**3
+    assert ray_io.device_memory_bytes("L4") == 24 * 1024**3
+    # An unknown device assumes the smallest known one: under-pack (waste) beats over-pack (OOM).
+    assert ray_io.device_memory_bytes("H100") == 16 * 1024**3
+    assert ray_io.device_memory_bytes(None) == 16 * 1024**3
+
+
+def test_calibrate_auto_sizes_against_the_l4s_larger_memory() -> None:
+    """The same measured peak must yield a smaller fraction on a bigger device.
+
+    An L4 is 24 GiB against a T4's 16 GiB. Sizing an L4 with the T4 denominator packed only two
+    thirds of the tasks the device could hold — a silent 1.5x GPU over-spend.
+    """
+    cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.2))
+    peak = [6 * 1024**3]
+    t4 = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=peak, gpu_type="T4")
+    l4 = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=peak, gpu_type="L4")
+    assert t4 == pytest.approx(0.45)  # 6 x 1.2 / 16 → 2 tasks per device
+    assert l4 == pytest.approx(0.30)  # 6 x 1.2 / 24 → 3 tasks per device
+    assert ray_io.gpu_slots_per_device(l4) > ray_io.gpu_slots_per_device(t4)
+
+
+def test_calibrate_gpu_type_defaults_to_the_config() -> None:
+    # No explicit gpu_type → the flat compute default, so a single-runtime run needs no plumbing.
+    cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.2, gpu_type="L4"))
+    frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[6 * 1024**3])
+    assert frac == pytest.approx(0.30)
+
+
 def test_gpu_slots_per_device() -> None:
     assert ray_io.gpu_slots_per_device(0.25) == 4
     assert ray_io.gpu_slots_per_device(0.5) == 2
@@ -133,18 +163,60 @@ def test_plan_autoscale_default_on_with_resolved_bounds() -> None:
     assert plan.autoscale is True
     assert plan.cpu_min_nodes == 1
     assert plan.gpu_min_nodes == 1
-    # Per-pool max is unset in the config → falls back to the shared ray_max_nodes (default 16).
-    assert plan.cpu_max_nodes == 16
-    assert plan.gpu_max_nodes == 16
+    # 10 series is a one-node run, so each ceiling sits at the burst floor — NOT the shared
+    # ray_max_nodes (16). A small run gets a small elastic pool.
+    assert plan.cpu_max_nodes == ray_io._AUTOSCALE_MAX_FLOOR
+    assert plan.gpu_max_nodes == ray_io._AUTOSCALE_MAX_FLOOR
 
 
-def test_plan_per_pool_max_override_respected() -> None:
-    # A run can cap the (expensive) GPU pool independently of the (cheap) CPU pool.
+def test_plan_autoscale_ceiling_grows_with_the_run() -> None:
+    """The point of the whole change: the ceiling tracks the fan-out, it is not a constant."""
+    small = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 10}, compute=_compute()), run_id="r"
+    )
+    large = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 5000}, compute=_compute()), run_id="r"
+    )
+    assert large.cpu_max_nodes > small.cpu_max_nodes
+
+
+def test_plan_autoscale_ceiling_still_capped_by_the_hard_ceiling() -> None:
+    # ray_max_nodes remains the guardrail against a runaway fan-out requesting an unbounded pool.
+    plan = ray_io.plan_cluster(
+        _cfg(
+            data={"source_table": "s", "series_limit": 1_000_000},
+            compute=_compute(ray_max_nodes=4),
+        ),
+        run_id="r",
+    )
+    assert plan.cpu_max_nodes == 4
+    assert plan.gpu_max_nodes == 4
+
+
+def test_plan_autoscale_ceiling_never_below_the_pool_floor() -> None:
+    # A pre-warmed pool (min 4) can't be handed an AutoscalingSpec whose max is below it.
+    plan = ray_io.plan_cluster(
+        _cfg(data={"source_table": "s", "series_limit": 10}, compute=_compute(ray_cpu_min_nodes=4)),
+        run_id="r",
+    )
+    assert plan.cpu_max_nodes >= plan.cpu_min_nodes == 4
+
+
+def test_plan_per_pool_max_override_is_a_pin_not_a_derivation() -> None:
+    # A run can cap the (expensive) GPU pool independently of the (cheap) CPU pool. An explicit
+    # value is honoured verbatim — this 10-series run would otherwise derive the burst floor.
     plan = ray_io.plan_cluster(
         _cfg(compute=_compute(ray_cpu_max_nodes=20, ray_gpu_max_nodes=4)), run_id="rid"
     )
     assert plan.cpu_max_nodes == 20
     assert plan.gpu_max_nodes == 4
+
+
+def test_plan_pinned_max_below_pool_min_is_rejected_at_config_load() -> None:
+    # An incoherent [min, max] can never reach plan_cluster — ComputeConfig rejects it at load, so
+    # the sizing math never has to defend against an impossible AutoscalingSpec.
+    with pytest.raises(ValueError, match="exceeds the cpu pool max"):
+        _cfg(compute=_compute(ray_cpu_min_nodes=8, ray_cpu_max_nodes=4))
 
 
 def test_plan_per_pool_min_override_respected() -> None:
