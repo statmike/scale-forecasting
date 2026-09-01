@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from scale_forecasting.registry import ops
+from scale_forecasting.registry import artifacts, ops
 
 if TYPE_CHECKING:
     from scale_forecasting.settings import Settings
@@ -49,13 +49,13 @@ def _blob(settings: Settings, run_id: str, name: str) -> Any:
     """A handle on ``<artifact_root>/<run_id>/<name>`` — the exact layout `drop_run` scans."""
     from google.cloud import storage
 
-    bucket_name, root = ops.split_gcs_uri(settings.artifact_root)
+    bucket_name, root = artifacts.split_gcs_uri(settings.artifact_root)
     client = storage.Client(project=settings.project_id)
     return client.bucket(bucket_name).blob(f"{root}/{run_id}/{name}")
 
 
 def test_artifact_prefix_delete_hits_the_named_run_and_nothing_else(settings: Settings) -> None:
-    """`_delete_prefixes` clears one run's prefix and leaves its neighbour untouched.
+    """`artifacts.delete_prefixes` clears one run's prefix and leaves its neighbour untouched.
 
     Two runs, two objects each, delete one. This is the assertion the whole destructive tier rests
     on: scoped to the run, and scoped to *this* registry's artifact root.
@@ -72,15 +72,15 @@ def test_artifact_prefix_delete_hits_the_named_run_and_nothing_else(settings: Se
             blob.upload_from_string(b"live-ops-test")
 
         # 1. Enumerate — the same list pass `plan_drop_run` runs, over the real root.
-        prefixes = ops._list_prefixes(settings)
+        prefixes = artifacts.list_prefixes(settings)
         assert prefixes[target].object_count == 2
         assert prefixes[neighbour].object_count == 2
         assert prefixes[target].byte_total == 2 * len(b"live-ops-test")
 
         # 2. Delete only the target's prefix.
-        assert ops._delete_prefixes(settings, [target]) == 2
+        assert artifacts.delete_prefixes(settings, [target]) == 2
 
-        after = ops._list_prefixes(settings)
+        after = artifacts.list_prefixes(settings)
         assert target not in after
         assert after[neighbour].object_count == 2, "a neighbouring run's artifacts were deleted"
         assert not _blob(settings, target, "nested/second.pkl").exists()
@@ -248,7 +248,7 @@ def test_drop_run_deletes_every_tier_of_a_real_run(settings: Settings) -> None:
 
     ops.drop_run([run_id], settings=settings, yes=True)
 
-    assert run_id not in ops._list_prefixes(settings)
+    assert run_id not in artifacts.list_prefixes(settings)
     for table in ("run_registry", "forecast_metadata", "forecast_predictions"):
         ref = settings.registry_table_ref(table)
         left = client.query(f"SELECT COUNT(*) c FROM `{ref}` WHERE run_id='{run_id}'").result()

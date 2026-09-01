@@ -508,7 +508,7 @@ def test_run_job_contributor_mode_touches_nothing(monkeypatch: Any) -> None:
     assert cap["updates"] == []
 
 
-# --- artifact uri --------------------------------------------------------------
+# --- artifact layout: composing the path, and reading it back -------------------
 
 
 def test_artifact_uri_is_run_scoped_and_deterministic() -> None:
@@ -517,6 +517,72 @@ def test_artifact_uri_is_run_scoped_and_deterministic() -> None:
     assert uri == f"{root}/my-run-abc123/model.pkl"
     # deterministic, and a trailing slash on the root makes no difference
     assert uri == artifacts.artifact_gcs_uri("/tmp/model.pkl", "my-run-abc123", root)
+
+
+# --- split_gcs_uri ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("gs://bucket/warehouse/artifacts/proj/ds", ("bucket", "warehouse/artifacts/proj/ds")),
+        ("gs://bucket/warehouse/", ("bucket", "warehouse")),
+        ("gs://bucket", ("bucket", "")),
+        ("gs://bucket/", ("bucket", "")),
+    ],
+)
+def test_split_gcs_uri(uri, expected):
+    assert artifacts.split_gcs_uri(uri) == expected
+
+
+@pytest.mark.parametrize("bad", ["s3://bucket/x", "/local/path", "gs://", "bucket/x"])
+def test_split_gcs_uri_rejects_non_gcs(bad):
+    """A misconfigured warehouse root fails here, not as a confusing 404 from the client."""
+    with pytest.raises(ValueError):
+        artifacts.split_gcs_uri(bad)
+
+
+# --- run_id_from_blob -------------------------------------------------------------
+
+
+def test_run_id_is_the_first_segment_under_the_root():
+    root = "warehouse/artifacts/proj/registry_ds"
+    assert artifacts.run_id_from_blob(f"{root}/run_abc/model.pkl", root) == "run_abc"
+    # Nested paths under a run still attribute to that run.
+    assert artifacts.run_id_from_blob(f"{root}/run_abc/sub/dir/model.pkl", root) == "run_abc"
+
+
+def test_objects_outside_the_root_are_not_attributed():
+    """The scope guard: another registry's artifacts in the same bucket are invisible here."""
+    root = "warehouse/artifacts/proj/registry_a"
+    other = "warehouse/artifacts/proj/registry_b/run_abc/model.pkl"
+    assert artifacts.run_id_from_blob(other, root) is None
+    # A near-miss prefix must not match either.
+    assert artifacts.run_id_from_blob("warehouse/artifacts/proj/registry_a2/r/m.pkl", root) is None
+
+
+def test_an_object_directly_in_the_root_has_no_run():
+    """No run segment ⇒ unattributable ⇒ never swept. Guessing here would delete real data."""
+    root = "warehouse/artifacts/proj/ds"
+    assert artifacts.run_id_from_blob(f"{root}/stray.txt", root) is None
+    assert artifacts.run_id_from_blob(f"{root}/", root) is None
+
+
+def test_an_empty_root_treats_the_first_segment_as_the_run():
+    assert artifacts.run_id_from_blob("run_abc/model.pkl", "") == "run_abc"
+
+
+# --- orphan_run_ids / blocking_runs -----------------------------------------------
+
+
+def test_orphans_are_the_gcs_ids_the_registry_does_not_know():
+    seen = ["run_c", "run_a", "run_b", "run_a"]
+    known = ["run_a"]
+    assert artifacts.orphan_run_ids(seen, known) == ("run_b", "run_c")
+
+
+def test_no_orphans_when_every_prefix_has_a_row():
+    assert artifacts.orphan_run_ids(["r1", "r2"], ["r1", "r2", "r3"]) == ()
 
 
 # --- Storage Write API retry-on-transient (_append_via_write_api) ---------------

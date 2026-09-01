@@ -37,24 +37,32 @@ object counts, byte totals — that will be touched. A mutating verb also refuse
 registry with an in-flight run unless forced; use `monitor(probe=True)` to tell a live run from a
 dead row still marked ``RUNNING``.
 
+**This module is the policy, not the plumbing.** Step 1 of the ordering rule — reading the GCS
+layout back to find out which objects a run owns — is `artifacts`, which owns that layout in both
+directions (it is the module that composed the paths on the way in). What lives here is the
+decision of *when* to enumerate, *what* the answer blocks, and *in which order* the deletes go.
+
 Split along the pure/I-O seam, like the rest of the registry package: the planners and SQL renderers
 below are pure strings and dataclasses (tested offline, no client), and the six verbs are thin I/O
 wrappers that execute what a planner produced.
 
 Public surface: the verbs ``init``, ``doctor``, ``drop_run``, ``sweep_orphans``, ``snapshot``,
-``export``; the plan/report types ``DropPlan``, ``SweepPlan``, ``DoctorReport``, ``TableStat``,
-``ArtifactPrefix``; and the pure helpers ``split_gcs_uri``, ``run_id_from_blob``,
-``orphan_run_ids``, ``blocking_runs``, ``render_delete_rows``, ``render_snapshot_sql``,
-``render_export_sql``, ``format_plan``, ``format_doctor``.
+``export``; the plan/report types ``DropPlan``, ``SweepPlan``, ``DoctorReport``, ``TableStat``;
+and the pure helpers ``blocking_runs``, ``render_delete_rows``, ``render_snapshot_sql``,
+``render_export_sql``, ``format_plan``, ``format_doctor``. The artifact-prefix helpers the
+destructive verbs run on (``ArtifactPrefix``, ``split_gcs_uri``, ``run_id_from_blob``,
+``orphan_run_ids``, ``list_prefixes``, ``delete_prefixes``) are `artifacts`'.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..errors import get_logger
+from . import artifacts
+from .artifacts import ArtifactPrefix
 from .ddl import REGISTRY_TABLE_NAMES
 
 if TYPE_CHECKING:
@@ -74,15 +82,6 @@ EXPORT_FORMATS: tuple[str, ...] = ("PARQUET", "JSON")
 
 
 # --- pure: types ----------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ArtifactPrefix:
-    """One run's GCS artifact prefix and what is under it."""
-
-    run_id: str
-    object_count: int
-    byte_total: int
 
 
 @dataclass(frozen=True)
@@ -168,46 +167,6 @@ class DoctorReport:
 
 
 # --- pure: helpers ---------------------------------------------------------------
-
-
-def split_gcs_uri(uri: str) -> tuple[str, str]:
-    """``gs://bucket/a/b`` → ``("bucket", "a/b")``. A bare bucket yields an empty prefix.
-
-    Raises `ValueError` on anything that is not a ``gs://`` URI, so a misconfigured warehouse root
-    fails here rather than as a confusing 404 from the storage client.
-    """
-    if not uri.startswith("gs://"):
-        raise ValueError(f"not a GCS URI: {uri!r}")
-    bucket, _, prefix = uri[len("gs://") :].partition("/")
-    if not bucket:
-        raise ValueError(f"GCS URI has no bucket: {uri!r}")
-    return bucket, prefix.strip("/")
-
-
-def run_id_from_blob(blob_name: str, root_prefix: str) -> str | None:
-    """The ``run_id`` owning an artifact object, or ``None`` if it is not under ``root_prefix``.
-
-    The layout is ``<root_prefix>/<run_id>/<basename>``, so the run id is the first path segment
-    after the root. An object sitting directly in the root (no run segment) returns ``None`` rather
-    than claiming a bogus id — a sweep must never delete something it cannot attribute.
-    """
-    root = root_prefix.strip("/")
-    head = f"{root}/" if root else ""
-    if not blob_name.startswith(head):
-        return None
-    rest = blob_name[len(head) :]
-    run_id, sep, _ = rest.partition("/")
-    return run_id if sep and run_id else None
-
-
-def orphan_run_ids(seen: Iterable[str], known: Iterable[str]) -> tuple[str, ...]:
-    """Run ids present in GCS but absent from the registry — sorted, deduplicated.
-
-    Deliberately set arithmetic on the *whole* known set, not a per-id lookup: the caller reads
-    ``run_registry`` once, so a sweep costs one query no matter how many prefixes exist.
-    """
-    known_set = set(known)
-    return tuple(sorted({r for r in seen if r not in known_set}))
 
 
 def blocking_runs(status_by_run: dict[str, str | None]) -> tuple[str, ...]:
@@ -387,52 +346,6 @@ def _resolved(settings: Settings | None) -> Settings:
     return _resolve_settings(settings)
 
 
-def _list_prefixes(
-    settings: Settings, run_ids: Sequence[str] | None = None
-) -> dict[str, ArtifactPrefix]:  # pragma: no cover - GCP I/O, @gcp smoke
-    """Artifact prefixes under this registry's root, with object counts and byte totals.
-
-    Lists ``<warehouse>/artifacts/<project>/<registry_dataset>/`` and buckets by the ``run_id`` path
-    segment. Objects that cannot be attributed to a run are ignored, never deleted.
-
-    ``run_ids`` narrows to those runs' prefixes — one list call each instead of one sweep over the
-    whole root. `plan_drop_run` passes it because it already knows the runs; `sweep_orphans` cannot,
-    since finding the unattributed prefixes *is* the job.
-    """
-    from google.cloud import storage
-
-    bucket_name, root_prefix = split_gcs_uri(settings.artifact_root)
-    client = storage.Client(project=settings.project_id)
-    scans = [f"{root_prefix}/{r}/" for r in run_ids] if run_ids is not None else [f"{root_prefix}/"]
-    counts: dict[str, list[int]] = {}
-    for scan in scans:
-        for blob in client.list_blobs(bucket_name, prefix=scan):
-            run_id = run_id_from_blob(blob.name, root_prefix)
-            if run_id is None:
-                continue
-            acc = counts.setdefault(run_id, [0, 0])
-            acc[0] += 1
-            acc[1] += int(blob.size or 0)
-    return {r: ArtifactPrefix(r, n, b) for r, (n, b) in counts.items()}
-
-
-def _delete_prefixes(
-    settings: Settings, run_ids: Sequence[str]
-) -> int:  # pragma: no cover - GCP I/O, @gcp smoke
-    """Delete every object under the named runs' artifact prefixes; return the object count."""
-    from google.cloud import storage
-
-    bucket_name, root_prefix = split_gcs_uri(settings.artifact_root)
-    client = storage.Client(project=settings.project_id)
-    bucket = client.bucket(bucket_name)
-    deleted = 0
-    for run_id in run_ids:
-        for blob in client.list_blobs(bucket_name, prefix=f"{root_prefix}/{run_id}/"):
-            bucket.blob(blob.name).delete()
-            deleted += 1
-    return deleted
-
-
 def _known_run_ids(settings: Settings) -> set[str]:  # pragma: no cover - GCP I/O, @gcp smoke
     """Every ``run_id`` in this registry's ``run_registry`` (one query)."""
     from google.cloud import bigquery
@@ -590,8 +503,8 @@ def doctor(*, settings: Settings | None = None) -> DoctorReport:  # pragma: no c
         )
         live = tuple((str(r["run_id"]), str(r["status"])) for r in client.query(sql).result())
         known = _known_run_ids(resolved)
-        prefixes = _list_prefixes(resolved)
-        orphans = tuple(prefixes[r] for r in orphan_run_ids(prefixes, known))
+        prefixes = artifacts.list_prefixes(resolved)
+        orphans = tuple(prefixes[r] for r in artifacts.orphan_run_ids(prefixes, known))
     else:
         notes.append("skipped the run/orphan checks — run init first, some tables are missing")
 
@@ -621,7 +534,7 @@ def plan_drop_run(
     live = blocking_runs(statuses)
     targets = tuple(sorted(r for r in run_ids if statuses.get(r) is not None))
 
-    prefixes = _list_prefixes(resolved, targets) if targets else {}
+    prefixes = artifacts.list_prefixes(resolved, targets) if targets else {}
     return DropPlan(
         registry=resolved.registry_dataset_ref,
         run_ids=targets,
@@ -675,7 +588,7 @@ def drop_run(
         return plan
 
     # 1+2. Artifacts first, while the rows still say which objects exist.
-    deleted = _delete_prefixes(resolved, plan.run_ids)
+    deleted = artifacts.delete_prefixes(resolved, plan.run_ids)
     _log.warning("deleted %d artifact objects", deleted)
 
     # 3a. BQML model objects (invisible to the registry — matched by name).
@@ -710,11 +623,11 @@ def plan_sweep_orphans(
     """Artifact prefixes under this registry's root with no ``run_registry`` row."""
     resolved = _resolved(settings)
     known = _known_run_ids(resolved)
-    prefixes = _list_prefixes(resolved)
+    prefixes = artifacts.list_prefixes(resolved)
     return SweepPlan(
         registry=resolved.registry_dataset_ref,
         root=resolved.artifact_root,
-        prefixes=tuple(prefixes[r] for r in orphan_run_ids(prefixes, known)),
+        prefixes=tuple(prefixes[r] for r in artifacts.orphan_run_ids(prefixes, known)),
         known_runs=len(known),
     )
 
@@ -739,7 +652,7 @@ def sweep_orphans(
     if not yes:
         _log.warning("DRY RUN — nothing deleted. Re-run with yes=True to execute.")
         return plan
-    deleted = _delete_prefixes(resolved, [p.run_id for p in plan.prefixes])
+    deleted = artifacts.delete_prefixes(resolved, [p.run_id for p in plan.prefixes])
     _log.warning("swept %d orphan prefixes (%d objects)", len(plan.prefixes), deleted)
     return plan
 

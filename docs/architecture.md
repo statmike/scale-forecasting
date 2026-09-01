@@ -355,8 +355,10 @@ The files:
   digest of the canonical config>` and `make_job_key(run_id, family, attempt)` = the canonical
   per-family job id. Deterministic: the same config always yields the same `run_id`, so re-runs and
   multi-family runs collide by design (idempotency).
-- [`artifacts.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/artifacts.py) — GCS upload for serialized models
-  (lineage).
+- [`artifacts.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/artifacts.py) — the GCS artifact layout
+  `<artifact_root>/<run_id>/<basename>`, in both directions: upload for serialized models (lineage),
+  and reading the layout back — which run owns a blob, which prefixes the registry has no row for,
+  and deleting them. `registry/ops.py`'s destructive verbs run on that second half.
 - [`views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) — the three analyst views: `v_run_summary`
   (per-run scaling/efficiency, unpacking the telemetry JSON), `v_run_jobs` (the per-family-job trace —
   latest attempt per family, its runtime/hardware/system job id/status/telemetry), and

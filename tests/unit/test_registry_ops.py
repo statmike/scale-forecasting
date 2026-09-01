@@ -1,7 +1,9 @@
 """Offline tests for the registry-operations surface (`registry.ops`).
 
-Everything here is the pure half — path arithmetic, set arithmetic, SQL strings, plan formatting,
-and the BQML model-name matcher `drop_run` depends on. The six verbs themselves are GCP I/O and are
+Everything here is the pure half — set arithmetic, SQL strings, plan formatting, and the BQML
+model-name matcher `drop_run` depends on. The artifact-path arithmetic the destructive verbs
+run on moved to `registry.artifacts` with the layout itself; its tests went with it, into
+``test_registry_assembly.py``. The six verbs themselves are GCP I/O and are
 covered by the `@gcp` smokes (the artifact-prefix delete and `snapshot`); what is tested here is
 every decision those verbs make *before* they touch anything.
 """
@@ -11,73 +13,10 @@ from __future__ import annotations
 import pytest
 
 from scale_forecasting.engines.bigquery_names import model_object_matches_run
-from scale_forecasting.registry import ops
+from scale_forecasting.registry import artifacts, ops
 from scale_forecasting.registry.ddl import REGISTRY_TABLE_NAMES, SOURCE_TABLE_NAMES
 
-# --- split_gcs_uri ----------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("uri", "expected"),
-    [
-        ("gs://bucket/warehouse/artifacts/proj/ds", ("bucket", "warehouse/artifacts/proj/ds")),
-        ("gs://bucket/warehouse/", ("bucket", "warehouse")),
-        ("gs://bucket", ("bucket", "")),
-        ("gs://bucket/", ("bucket", "")),
-    ],
-)
-def test_split_gcs_uri(uri, expected):
-    assert ops.split_gcs_uri(uri) == expected
-
-
-@pytest.mark.parametrize("bad", ["s3://bucket/x", "/local/path", "gs://", "bucket/x"])
-def test_split_gcs_uri_rejects_non_gcs(bad):
-    """A misconfigured warehouse root fails here, not as a confusing 404 from the client."""
-    with pytest.raises(ValueError):
-        ops.split_gcs_uri(bad)
-
-
-# --- run_id_from_blob -------------------------------------------------------------
-
-
-def test_run_id_is_the_first_segment_under_the_root():
-    root = "warehouse/artifacts/proj/registry_ds"
-    assert ops.run_id_from_blob(f"{root}/run_abc/model.pkl", root) == "run_abc"
-    # Nested paths under a run still attribute to that run.
-    assert ops.run_id_from_blob(f"{root}/run_abc/sub/dir/model.pkl", root) == "run_abc"
-
-
-def test_objects_outside_the_root_are_not_attributed():
-    """The scope guard: another registry's artifacts in the same bucket are invisible here."""
-    root = "warehouse/artifacts/proj/registry_a"
-    other = "warehouse/artifacts/proj/registry_b/run_abc/model.pkl"
-    assert ops.run_id_from_blob(other, root) is None
-    # A near-miss prefix must not match either.
-    assert ops.run_id_from_blob("warehouse/artifacts/proj/registry_a2/r/m.pkl", root) is None
-
-
-def test_an_object_directly_in_the_root_has_no_run():
-    """No run segment ⇒ unattributable ⇒ never swept. Guessing here would delete real data."""
-    root = "warehouse/artifacts/proj/ds"
-    assert ops.run_id_from_blob(f"{root}/stray.txt", root) is None
-    assert ops.run_id_from_blob(f"{root}/", root) is None
-
-
-def test_an_empty_root_treats_the_first_segment_as_the_run():
-    assert ops.run_id_from_blob("run_abc/model.pkl", "") == "run_abc"
-
-
-# --- orphan_run_ids / blocking_runs -----------------------------------------------
-
-
-def test_orphans_are_the_gcs_ids_the_registry_does_not_know():
-    seen = ["run_c", "run_a", "run_b", "run_a"]
-    known = ["run_a"]
-    assert ops.orphan_run_ids(seen, known) == ("run_b", "run_c")
-
-
-def test_no_orphans_when_every_prefix_has_a_row():
-    assert ops.orphan_run_ids(["r1", "r2"], ["r1", "r2", "r3"]) == ()
+# --- blocking_runs -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize("status", ["RUNNING", "PENDING", "running", "pending"])
@@ -171,8 +110,8 @@ def test_export_rejects_an_unknown_format():
 # --- plans and formatting ---------------------------------------------------------
 
 
-def _prefix(run_id: str, n: int = 2, b: int = 1024) -> ops.ArtifactPrefix:
-    return ops.ArtifactPrefix(run_id=run_id, object_count=n, byte_total=b)
+def _prefix(run_id: str, n: int = 2, b: int = 1024) -> artifacts.ArtifactPrefix:
+    return artifacts.ArtifactPrefix(run_id=run_id, object_count=n, byte_total=b)
 
 
 def test_drop_plan_totals_roll_up_its_prefixes():
