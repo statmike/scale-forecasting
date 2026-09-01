@@ -232,10 +232,10 @@ class SparkProbe:
 class RayProbe:
     """Probe a Ray-on-Vertex job via its cluster's persistent-resource path.
 
-    Checks the cluster first (`ray_submit._get_cluster`): a gone cluster (``NotFound``) is
+    Checks the cluster first (`ray_cluster._get_cluster`): a gone cluster (``NotFound``) is
     NOT_FOUND (``exists=False``, "cluster torn down") — and short-circuits before the dashboard
     connect, which would otherwise retry through its warm-up budget against a dead endpoint. When
-    the cluster is alive it reuses `ray_submit._connect_job_client` + ``get_job_status`` (and
+    the cluster is alive it reuses `ray_jobs._connect_job_client` + ``get_job_status`` (and
     ``get_job_info`` for the failure message). Any error degrades to UNKNOWN.
     """
 
@@ -245,7 +245,8 @@ class RayProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..ray_submit import _connect_job_client, _get_cluster
+            from ..ray_cluster import _get_cluster
+            from ..ray_jobs import _connect_job_client
 
             resource_name = handle.resource_name
             if not resource_name:
@@ -276,7 +277,8 @@ class RayProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..ray_submit import _connect_job_client, _get_cluster
+            from ..ray_cluster import _get_cluster
+            from ..ray_jobs import _connect_job_client
 
             resource_name = handle.resource_name
             if not resource_name:

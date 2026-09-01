@@ -93,7 +93,7 @@ _MAX_REQUEST_ROWS = 10_000
 # backoff — over a multi-hour 100k run we make thousands of appends, so ≥1 blip is likely and must
 # not fail an otherwise-complete run. Safe by construction: the default stream is at-least-once and
 # the registry dedupes-on-read under a deterministic run_id, so re-sending a whole append never
-# double-counts. Naming mirrors ray_submit.py's manual-retry idiom.
+# double-counts. Naming mirrors ray_jobs.py's manual-retry idiom.
 _WRITE_RETRY_ATTEMPTS = 5  # total attempts per append (1 initial + 4 retries)
 _WRITE_RETRY_BACKOFF_SECONDS = 2.0  # exponential base: 2, 4, 8, 16s
 

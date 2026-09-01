@@ -26,7 +26,7 @@ so that's fine — the patch pin is about reproducibility where we build the env
 | **Custom container** | attached to batch + Spark Connect | — | — | **3.11.15** | Spark 3.5.x (from base) | `docker/Dockerfile` — `uv` installs 3.11.15 (from `.python-version`) into `/opt/venv` on `debian:12-slim` |
 | **Dataproc batch** (`explode`) | Serverless | **2.2** (default) | 3.12 | **3.11** ← *container wins* | Spark 3.5.3 | container image attached on **every** submit (`submit.py`), overriding base |
 | **Spark Connect** (nb01, interactive) | Serverless session | **2.3** | 3.11 | **3.11** | Spark 3.5.3 | runtime 2.3 base is already 3.11 **and** container attached |
-| **Ray on Vertex** (nb04) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 | `ray_submit.py` pins `python_version="3.11"`, `ray_version="2.47"` |
+| **Ray on Vertex** (nb04) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 | `ray_infra.py` pins `python_version="3.11"`, `ray_version="2.47"` |
 | **BigQuery-native** (nb02: ARIMA_PLUS, TimesFM) | BigQuery engine | — | — | n/a (SQL) | — | no client Python on the compute path |
 
 > **"Effective Python" is what your code actually executes on.** For batch it's the *container's*
@@ -52,7 +52,7 @@ share a Python **minor** version (3.11 ≠ 3.12 for pickle/`applyInPandas`/cloud
    requires the **client Ray version to equal the cluster's**. Vertex offers Ray only for a fixed set
    (2.9.3 / 2.33.0 / 2.42.0 / 2.47.1), and **on Python 3.11 only 2.42 or 2.47 are available**. A
    version-skewed client doesn't error cleanly — the dashboard proxy **hangs** (→ HTTP 524). So the
-   `[ray]` extra is capped and `ray_submit.py` defaults `ray_version=2.47`, `python_version=3.11`.
+   `[ray]` extra is capped and `ray_infra.py` defaults `ray_version=2.47`, `python_version=3.11`.
 
 4. **Same code locally and under Composer.** The `uv` project itself is `>=3.11,<3.12`, so a developer's
    local kernel, the CI kernel, and the Composer runner all resolve the same interpreter — the code
@@ -90,7 +90,7 @@ Revisit only if Vertex Ray ships a Python 3.12 cluster image; until then 3.11 is
 | Batch default runtime `"2.2"` | `src/scale_forecasting/batch_infra.py` |
 | Container attached on submit | `src/scale_forecasting/submit.py` |
 | Spark Connect session `version = "2.3"` + container | `notebooks/01_spark_via_connect.ipynb` (session cell) |
-| Ray `python_version="3.11"`, `ray_version="2.47"` | `src/scale_forecasting/ray_submit.py` |
+| Ray `python_version="3.11"`, `ray_version="2.47"` | `src/scale_forecasting/ray_infra.py` |
 | Colab template pinned to `py311` (REST PATCH) | `terraform/main/modules/colab/main.tf` |
 
 ## Sources

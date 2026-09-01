@@ -174,7 +174,7 @@ def test_plan_run_mixed_spark_restricts_the_spark_subset() -> None:
 
 
 def test_plan_run_ray_emits_universal_only_ray_command() -> None:
-    from scale_forecasting.ray_submit import RayInfra
+    from scale_forecasting.ray_infra import RayInfra
 
     infra = RayInfra(compute_sa="sf-compute@proj-x.iam", code_bucket="bkt-code")
     result = main.plan_run(
@@ -1081,7 +1081,7 @@ def test_shared_ray_inputs_flags_gpu_from_deep_learning() -> None:
 
 
 def _patch_shared_cluster(monkeypatch: pytest.MonkeyPatch, calls: dict[str, Any]) -> None:
-    from scale_forecasting import ray_submit
+    from scale_forecasting import ray_cluster
 
     def _provision(cfg: RunConfig, **kw: Any) -> tuple[str, str]:
         calls["provision"] = kw
@@ -1090,8 +1090,8 @@ def _patch_shared_cluster(monkeypatch: pytest.MonkeyPatch, calls: dict[str, Any]
     def _teardown(name: str, region: str, settings: Settings) -> None:
         calls["teardown"] = (name, region)
 
-    monkeypatch.setattr(ray_submit, "provision_shared_cluster", _provision)
-    monkeypatch.setattr(ray_submit, "teardown_shared_cluster", _teardown)
+    monkeypatch.setattr(ray_cluster, "provision_shared_cluster", _provision)
+    monkeypatch.setattr(ray_cluster, "teardown_shared_cluster", _teardown)
 
 
 def test_shared_ray_cluster_engages_and_tears_down(monkeypatch: pytest.MonkeyPatch) -> None:

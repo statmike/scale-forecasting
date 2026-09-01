@@ -23,7 +23,7 @@ Your code is delivered **at submit time**, freshly, on every run:
 | Runtime | How your `src/` reaches the workers |
 |---------|-------------------------------------|
 | **Dataproc (Spark)** | `submit_batch` zips `src/` and uploads it to the code bucket, then passes it on the batch's `python_file_uris`. A tiny `gs://` shim is the `__main__`; it imports the in-package logic from the uploaded zip. |
-| **Ray on Vertex** | `ray_submit` ships `src/` as the job's `runtime_env.working_dir`, so every Ray worker imports the code you just submitted. |
+| **Ray on Vertex** | `code_delivery.build_runtime_env` ships `src/` as the job's `runtime_env.working_dir`, so every Ray worker imports the code you just submitted. |
 | **The seed job** | Same pattern — Terraform's `seed` module zips `src/` and ships it on `python_file_uris`. |
 
 In every case the image is the *environment* and `src/` is *cargo*. The two are decoupled on

@@ -201,16 +201,16 @@ def _shared_ray_cluster(
     if inputs is None:
         yield None
         return
-    from . import ray_submit
+    from . import ray_cluster
 
     models, any_gpu, gpu_type = inputs
-    name, region = ray_submit.provision_shared_cluster(
+    name, region = ray_cluster.provision_shared_cluster(
         cfg, models=models, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
     )
     try:
         yield (name, region)
     finally:
-        ray_submit.teardown_shared_cluster(name, region, settings)
+        ray_cluster.teardown_shared_cluster(name, region, settings)
 
 
 def _shared_spark_inputs(
@@ -366,9 +366,11 @@ def _launch_family_job(
     if compute.runtime == "ray":
         resource_name = None
         if ray_cluster_name is not None:
-            from .ray_submit import _resource_name
+            from .ray_cluster import cluster_resource_path
 
-            resource_name = _resource_name(settings, ray_cluster_name, ray_cluster_region)
+            resource_name = cluster_resource_path(
+                settings, ray_cluster_name, ray_cluster_region
+            )
         entry_handle = ProbeHandle(
             "ray",
             native_id=system_job_id,
@@ -810,7 +812,7 @@ def _resolve_infra(cfg: RunConfig, infra: object | None) -> object:
     if infra is not None:
         return infra
     if cfg.python_runtime == "ray":
-        from .ray_submit import RayInfra
+        from .ray_infra import RayInfra
 
         return RayInfra.resolve()
     from .batch_infra import BatchInfra

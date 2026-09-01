@@ -361,7 +361,7 @@ write access to the code bucket the submitter stages the package zip into:
 |------|-----------|-----|
 | `roles/dataproc.editor` | project | Submit Dataproc Serverless batches (`submit.py`, the Spark explode engine). |
 | `roles/aiplatform.user` | project | Submit Ray-on-Vertex jobs (`ray_submit.py`). |
-| **`sfRayClusterManager`** | project | Create + delete the autoscaling Ray cluster `ray_submit` stands up (the same custom role the runner uses). Ray only. |
+| **`sfRayClusterManager`** | project | Create + delete the autoscaling Ray cluster `ray_cluster` stands up (the same custom role the runner uses). Ray only. |
 | `roles/iam.serviceAccountUser` | the **compute** SA | The batch/cluster runs **as** the compute SA; submitting a job that impersonates it requires this. |
 | `roles/storage.objectAdmin` | the **code** bucket | The submitter stages the code zip + launcher to `gs://<project>-code/` before submitting. Bucket-scoped, not project-wide. |
 | `roles/bigquery.jobUser` + `roles/bigquery.dataViewer` | project | Resolve the config and review results (`v_run_summary` / `v_model_leaderboard`) after the run lands. |

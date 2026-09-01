@@ -380,16 +380,17 @@ def _patch_ray(
     client: _FakeRayJobClient | None = None,
     cluster_exc: Exception | None = None,
 ) -> None:
-    import scale_forecasting.ray_submit as ray_mod
+    import scale_forecasting.ray_cluster as ray_cluster
+    import scale_forecasting.ray_jobs as ray_jobs
 
     def _get_cluster(resource_name: str) -> Any:
         if cluster_exc is not None:
             raise cluster_exc
         return types.SimpleNamespace(name=resource_name)
 
-    monkeypatch.setattr(ray_mod, "_get_cluster", _get_cluster)
+    monkeypatch.setattr(ray_cluster, "_get_cluster", _get_cluster)
     if client is not None:
-        monkeypatch.setattr(ray_mod, "_connect_job_client", lambda rn: client)
+        monkeypatch.setattr(ray_jobs, "_connect_job_client", lambda rn: client)
 
 
 @pytest.mark.parametrize(
@@ -436,14 +437,15 @@ def test_ray_missing_resource_name_is_unknown() -> None:
 
 
 def test_ray_connect_error_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.ray_submit as ray_mod
+    import scale_forecasting.ray_cluster as ray_cluster
+    import scale_forecasting.ray_jobs as ray_jobs
 
-    monkeypatch.setattr(ray_mod, "_get_cluster", lambda rn: object())
+    monkeypatch.setattr(ray_cluster, "_get_cluster", lambda rn: object())
 
     def _boom(rn: str) -> Any:
         raise RuntimeError("dashboard 524")
 
-    monkeypatch.setattr(ray_mod, "_connect_job_client", _boom)
+    monkeypatch.setattr(ray_jobs, "_connect_job_client", _boom)
 
     result = RayProbe().check(_ray_handle(), settings=_SETTINGS)
 

@@ -63,7 +63,7 @@ _ALL_MODELS = [*_PYTHON_MODELS, *_NATIVE_MODELS]
 # long pole (a fixed 50-epoch fit per cell, ×[folds + final], plus the GPU calibration fits), so the
 # levers that bound wall-clock are series count, fold count, horizon, and calibration samples — all
 # below. A first cut at series=6/folds=2/horizon=28 ran ~75 min and outlived the Jobs client's OAuth
-# token (a 401 mid-poll — now handled by the client-refresh in ray_submit._submit_and_poll, but the
+# token (a 401 mid-poll — now handled by the client-refresh in ray_jobs._submit_and_poll, but the
 # cheaper shape is still the right smoke). This still proves every invariant: NP scores a real OOF
 # fold on a fractional T4 alongside the natives under one run_id.
 _SERIES_LIMIT = 3

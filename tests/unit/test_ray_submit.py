@@ -1,11 +1,24 @@
-"""Offline tests for the Vertex Ray submit helper (``scale_forecasting.ray_submit``).
+"""Offline tests for the whole Ray-on-Vertex launch path — five modules, one file.
 
-No network: the pure job-spec assembly (:func:`build_entrypoint`, :func:`extract_ray_telemetry`),
-infra resolution (:class:`RayInfra`), and the whole cluster
-lifecycle with ``vertex_ray`` + ``JobSubmissionClient`` monkeypatched — asserting the two load-
-bearing lifecycle properties: **ephemeral creates then deletes (even when the job raises)**, and
-**reuse skips both create and delete**. The live T4 path is the ``@gpu`` smoke in
-``tests/integration/test_ray_gpu_smoke.py``.
+No network: the pure job-spec assembly (:func:`ray_submit.build_entrypoint`,
+:func:`ray_telemetry.extract_ray_telemetry`), infra resolution (:class:`ray_infra.RayInfra`), the
+error classifiers and region fallback in ``ray_cluster``, the dashboard-warmup and token-refresh
+policy in ``ray_jobs``, and the whole cluster lifecycle with ``vertex_ray`` +
+``JobSubmissionClient`` monkeypatched — asserting the two load-bearing lifecycle properties:
+**ephemeral creates then deletes (even when the job raises)**, and **reuse skips both create and
+delete**. The live T4 path is the ``@gpu`` smoke in ``tests/integration/test_ray_gpu_smoke.py``.
+
+Deliberately one file rather than five. The highest-value tests here are *about the seam between*
+modules — that ``submit_ray`` tears an ephemeral cluster down even when ``ray_jobs`` raises, that a
+stockout inside ``ray_cluster``'s fallback loop still yields a job from ``submit_ray``. Filing those
+under one module or the other would hide that they are cross-module assertions. Same precedent as
+``test_submit.py`` and ``test_dataproc_cluster.py``.
+
+**Patch the defining module, always.** Every fake below is installed on the module that *defines*
+the name (``ray_cluster``, ``ray_jobs``, ``ray_telemetry``), never on ``ray_submit`` — which is why
+``ray_submit`` calls its siblings module-qualified (``ray_cluster._get_cluster(...)``) rather than
+importing their symbols. The two exceptions are ``ray_submit``'s own names, ``_stage_config`` and
+``submit_ray``.
 """
 
 from __future__ import annotations
@@ -14,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import ray_submit
+from scale_forecasting import ray_cluster, ray_infra, ray_jobs, ray_submit, ray_telemetry
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.errors import ConfigError, EngineError
@@ -48,14 +61,14 @@ def _settings() -> Settings:
     )
 
 
-def _infra(**over: Any) -> ray_submit.RayInfra:
+def _infra(**over: Any) -> ray_infra.RayInfra:
     base: dict[str, Any] = {
         "network": "projects/proj-x/global/networks/scale-forecasting",
         "compute_sa": "compute@proj-x.iam.gserviceaccount.com",
         "code_bucket": "code-bkt",
     }
     base.update(over)
-    return ray_submit.RayInfra(**base)
+    return ray_infra.RayInfra(**base)
 
 
 # --- build_entrypoint: the on-cluster command ----------------------------------
@@ -90,10 +103,10 @@ def test_ray_infra_resolve_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SF_RAY_NETWORK", "projects/p/global/networks/n")
     monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
     monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
-    infra = ray_submit.RayInfra.resolve()
+    infra = ray_infra.RayInfra.resolve()
     assert infra.network.endswith("/networks/n")
     assert infra.code_bucket == "code-bkt"
-    assert infra.ray_version == ray_submit._DEFAULT_RAY_VERSION
+    assert infra.ray_version == ray_infra._DEFAULT_RAY_VERSION
 
 
 def test_ray_infra_resolve_without_network_is_public_endpoint(
@@ -104,7 +117,7 @@ def test_ray_infra_resolve_without_network_is_public_endpoint(
     monkeypatch.delenv("SF_RAY_NETWORK_ATTACHMENT", raising=False)
     monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
     monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
-    infra = ray_submit.RayInfra.resolve()
+    infra = ray_infra.RayInfra.resolve()
     assert infra.network is None
     assert infra.network_attachment is None
     assert infra.compute_sa == "sa@x.iam"
@@ -119,7 +132,7 @@ def test_ray_infra_resolve_reads_network_attachment(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setenv("SF_COMPUTE_SA", "sa@x.iam")
     monkeypatch.setenv("SF_CODE_BUCKET", "code-bkt")
-    infra = ray_submit.RayInfra.resolve()
+    infra = ray_infra.RayInfra.resolve()
     assert infra.network_attachment.endswith("/networkAttachments/scale-forecasting-ray")
     assert infra.network is None
 
@@ -129,7 +142,7 @@ def test_ray_infra_resolve_missing_var_raises(monkeypatch: pytest.MonkeyPatch) -
         monkeypatch.delenv(var, raising=False)
     # network is optional now, so the first *required* var that's missing is SF_COMPUTE_SA.
     with pytest.raises(ConfigError, match="SF_COMPUTE_SA"):
-        ray_submit.RayInfra.resolve()
+        ray_infra.RayInfra.resolve()
 
 
 def test_ray_infra_from_terraform_outputs_maps_keys() -> None:
@@ -138,7 +151,7 @@ def test_ray_infra_from_terraform_outputs_maps_keys() -> None:
         "compute_sa": "sa@x.iam",
         "code_bucket": "code-bkt",
     }
-    infra = ray_submit.RayInfra.from_terraform_outputs(outputs)
+    infra = ray_infra.RayInfra.from_terraform_outputs(outputs)
     assert infra.network == "projects/p/global/networks/scale-forecasting"
     assert infra.compute_sa == "sa@x.iam"
     assert infra.code_bucket == "code-bkt"
@@ -146,7 +159,7 @@ def test_ray_infra_from_terraform_outputs_maps_keys() -> None:
 
 def test_ray_infra_from_terraform_outputs_without_network_is_public() -> None:
     # network_id is optional (a deployment without private-services access omits it) → public.
-    infra = ray_submit.RayInfra.from_terraform_outputs({"compute_sa": "s", "code_bucket": "b"})
+    infra = ray_infra.RayInfra.from_terraform_outputs({"compute_sa": "s", "code_bucket": "b"})
     assert infra.network is None
     assert infra.network_attachment is None
 
@@ -160,13 +173,13 @@ def test_ray_infra_from_terraform_outputs_reads_network_attachment() -> None:
             "projects/123/regions/us-central1/networkAttachments/scale-forecasting-ray"
         ),
     }
-    infra = ray_submit.RayInfra.from_terraform_outputs(outputs)
+    infra = ray_infra.RayInfra.from_terraform_outputs(outputs)
     assert infra.network_attachment.endswith("/networkAttachments/scale-forecasting-ray")
 
 
 def test_ray_infra_from_terraform_outputs_missing_key_raises() -> None:
     with pytest.raises(ConfigError, match="code_bucket"):
-        ray_submit.RayInfra.from_terraform_outputs({"compute_sa": "s"})
+        ray_infra.RayInfra.from_terraform_outputs({"compute_sa": "s"})
 
 
 # --- extract_ray_telemetry: the header overlay ---------------------------------
@@ -183,7 +196,7 @@ class _FakeCluster:
 def test_extract_ray_telemetry_flattens_plan_and_cluster() -> None:
     cfg = _cfg()
     plan = ray_io.plan_cluster(cfg, run_id="rid")
-    tel = ray_submit.extract_ray_telemetry(
+    tel = ray_telemetry.extract_ray_telemetry(
         plan,
         cluster=_FakeCluster(),
         job_id="job-1",
@@ -212,7 +225,7 @@ def test_extract_ray_telemetry_is_json_serializable() -> None:
     import json
 
     plan = ray_io.plan_cluster(_cfg(), run_id="rid")
-    tel = ray_submit.extract_ray_telemetry(
+    tel = ray_telemetry.extract_ray_telemetry(
         plan,
         cluster=_FakeCluster(),
         job_id="j",
@@ -226,7 +239,7 @@ def test_extract_ray_telemetry_is_json_serializable() -> None:
 def test_extract_ray_telemetry_degrades_on_bare_cluster() -> None:
     # A cluster object missing ray/python/dashboard attrs yields None for them, never a raise.
     plan = ray_io.plan_cluster(_cfg(), run_id="rid")
-    tel = ray_submit.extract_ray_telemetry(
+    tel = ray_telemetry.extract_ray_telemetry(
         plan, cluster=object(), job_id="j", job_status="STOPPED", total_wall_s=None, reuse=True
     )
     assert tel["ray_version"] is None
@@ -272,7 +285,7 @@ def test_worker_resources_attaches_autoscaling_spec_per_pool(_fake_vertex_ray: N
         _cfg(compute={"use_gpu": True, "ray_cpu_max_nodes": 20, "ray_gpu_max_nodes": 4}),
         run_id="rid",
     )
-    workers = ray_submit._worker_resources(plan)
+    workers = ray_cluster._worker_resources(plan)
     assert len(workers) == 2  # CPU + GPU pool
     specs = {}
     for w in workers:
@@ -289,7 +302,7 @@ def test_worker_resources_omits_spec_when_autoscale_off(_fake_vertex_ray: None) 
     plan = ray_io.plan_cluster(
         _cfg(compute={"use_gpu": True, "ray_autoscale": False}), run_id="rid"
     )
-    workers = ray_submit._worker_resources(plan)
+    workers = ray_cluster._worker_resources(plan)
     assert workers  # pools still built
     for w in workers:
         assert w.kwargs["autoscaling_spec"] is None
@@ -314,7 +327,7 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "order": [],
     }
 
-    def _fake_stage(cfg: RunConfig, run_id: str, infra: ray_submit.RayInfra) -> str:
+    def _fake_stage(cfg: RunConfig, run_id: str, infra: ray_infra.RayInfra) -> str:
         return f"gs://code-bkt/runs/{run_id}.json"
 
     def _fake_create(plan: Any, infra: Any, name: str) -> str:
@@ -364,14 +377,14 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         # Default: no resource-side error text (tests that need one override this).
         return calls.get("cluster_error", "")
 
-    monkeypatch.setattr(ray_submit, "_init_vertex", _fake_init)
-    monkeypatch.setattr(ray_submit, "_cluster_error_message", _fake_cluster_error)
+    monkeypatch.setattr(ray_cluster, "_init_vertex", _fake_init)
+    monkeypatch.setattr(ray_cluster, "_cluster_error_message", _fake_cluster_error)
     monkeypatch.setattr(ray_submit, "_stage_config", _fake_stage)
-    monkeypatch.setattr(ray_submit, "_create_cluster", _fake_create)
-    monkeypatch.setattr(ray_submit, "_get_cluster", _fake_get)
-    monkeypatch.setattr(ray_submit, "_delete_cluster", _fake_delete)
-    monkeypatch.setattr(ray_submit, "_submit_and_poll", _fake_submit)
-    monkeypatch.setattr(ray_submit, "_stamp_ray_telemetry", _fake_stamp)
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _fake_create)
+    monkeypatch.setattr(ray_cluster, "_get_cluster", _fake_get)
+    monkeypatch.setattr(ray_cluster, "_delete_cluster", _fake_delete)
+    monkeypatch.setattr(ray_jobs, "_submit_and_poll", _fake_submit)
+    monkeypatch.setattr(ray_telemetry, "_stamp_ray_telemetry", _fake_stamp)
     # No registry to ask for a past run's measurements: submit sizes off declared config here, the
     # same as an unprofiled deployment. (Left unstubbed, `profile_for_run` would try a real
     # BigQuery lookup against the fake project and degrade to None the slow way.)
@@ -437,7 +450,7 @@ def test_submit_ray_deletes_even_when_job_raises(
         detail = "message: boom\ndriver log tail:\nTraceback ... RuntimeError: boom"
         return "job-fail", "FAILED", detail
 
-    monkeypatch.setattr(ray_submit, "_submit_and_poll", _failing_submit)
+    monkeypatch.setattr(ray_jobs, "_submit_and_poll", _failing_submit)
 
     with pytest.raises(EngineError, match="RuntimeError: boom") as excinfo:
         ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), wait=True)
@@ -527,7 +540,7 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
         calls["wait"] = wait
         return "job-nw", "PENDING", ""
 
-    monkeypatch.setattr(ray_submit, "_submit_and_poll", _immediate_submit)
+    monkeypatch.setattr(ray_jobs, "_submit_and_poll", _immediate_submit)
     job_id, _resource_name, _region = ray_submit.submit_ray(
         _cfg(), settings=_settings(), infra=_infra(), wait=False
     )
@@ -549,7 +562,7 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
     ],
 )
 def test_is_capacity_error_true_for_stockout_messages(message: str) -> None:
-    assert ray_submit._is_capacity_error(message) is True
+    assert ray_cluster._is_capacity_error(message) is True
 
 
 @pytest.mark.parametrize(
@@ -562,7 +575,7 @@ def test_is_capacity_error_true_for_stockout_messages(message: str) -> None:
 )
 def test_is_capacity_error_false_for_non_capacity_messages(message: str) -> None:
     # Capacity is a classifier distinct from quota; a bad machine type / permission is neither.
-    assert ray_submit._is_capacity_error(message) is False
+    assert ray_cluster._is_capacity_error(message) is False
 
 
 @pytest.mark.parametrize(
@@ -575,7 +588,7 @@ def test_is_capacity_error_false_for_non_capacity_messages(message: str) -> None
 )
 def test_is_quota_error_true_for_quota_messages(message: str) -> None:
     # Vertex accelerator quota is per-region, so a quota ceiling in one region is worth hopping.
-    assert ray_submit._is_quota_error(message) is True
+    assert ray_cluster._is_quota_error(message) is True
 
 
 @pytest.mark.parametrize(
@@ -587,13 +600,13 @@ def test_is_quota_error_true_for_quota_messages(message: str) -> None:
     ],
 )
 def test_is_quota_error_false_for_non_quota_messages(message: str) -> None:
-    assert ray_submit._is_quota_error(message) is False
+    assert ray_cluster._is_quota_error(message) is False
 
 
 def test_is_generic_cluster_error_matches_sdk_opaque_error() -> None:
     # The SDK's post-provision opaque error → retryable when the reason can't be read.
     msg = "[Ray on Vertex AI]: Cluster projects/.../persistentResources/x returned an error."
-    assert ray_submit._is_generic_cluster_error(msg) is True
+    assert ray_cluster._is_generic_cluster_error(msg) is True
 
 
 @pytest.mark.parametrize(
@@ -601,7 +614,7 @@ def test_is_generic_cluster_error_matches_sdk_opaque_error() -> None:
     ["Permission denied on service account", "some other RuntimeError", "returned successfully"],
 )
 def test_is_generic_cluster_error_false_otherwise(message: str) -> None:
-    assert ray_submit._is_generic_cluster_error(message) is False
+    assert ray_cluster._is_generic_cluster_error(message) is False
 
 
 @pytest.mark.parametrize(
@@ -614,7 +627,7 @@ def test_is_generic_cluster_error_false_otherwise(message: str) -> None:
 )
 def test_region_from_resource_name(resource_name: str, expected: str | None) -> None:
     # The regional endpoint for the error read is derived from the resource path, not assumed.
-    assert ray_submit._region_from_resource_name(resource_name) == expected
+    assert ray_cluster._region_from_resource_name(resource_name) == expected
 
 
 # --- dashboard warm-up classifier: retry the connection race, not real faults ------------------
@@ -633,7 +646,7 @@ def test_region_from_resource_name(resource_name: str, expected: str | None) -> 
 )
 def test_is_dashboard_warmup_error_true_for_transient(message: str) -> None:
     # The dashboard isn't serving through the proxy yet — retrying the connection is right.
-    assert ray_submit._is_dashboard_warmup_error(Exception(message)) is True
+    assert ray_jobs._is_dashboard_warmup_error(Exception(message)) is True
 
 
 @pytest.mark.parametrize(
@@ -646,7 +659,7 @@ def test_is_dashboard_warmup_error_true_for_transient(message: str) -> None:
 )
 def test_is_dashboard_warmup_error_false_for_real_faults(message: str) -> None:
     # Auth / version-mismatch won't fix themselves by waiting — must propagate, not spin.
-    assert ray_submit._is_dashboard_warmup_error(Exception(message)) is False
+    assert ray_jobs._is_dashboard_warmup_error(Exception(message)) is False
 
 
 def test_connect_job_client_uses_resource_name_form(
@@ -663,7 +676,7 @@ def test_connect_job_client_uses_resource_name_form(
             seen.append(address)
 
     monkeypatch.setattr("ray.job_submission.JobSubmissionClient", _FakeJobClient, raising=False)
-    client = ray_submit._connect_job_client(resource_name)
+    client = ray_jobs._connect_job_client(resource_name)
     assert isinstance(client, _FakeJobClient)
     assert seen == [f"vertex_ray://{resource_name}"]
 
@@ -682,7 +695,7 @@ def test_connect_job_client_reraises_non_transient_immediately(
 
     monkeypatch.setattr("ray.job_submission.JobSubmissionClient", _FakeJobClient, raising=False)
     with pytest.raises(Exception, match="403"):
-        ray_submit._connect_job_client(resource_name)
+        ray_jobs._connect_job_client(resource_name)
     assert seen == [f"vertex_ray://{resource_name}"]
 
 
@@ -699,7 +712,7 @@ def test_connect_job_client_reraises_non_transient_immediately(
 )
 def test_is_auth_expiry_error_true_for_401(message: str) -> None:
     # A 401 during the poll loop = the client's OAuth token expired — refresh & retry, not fail.
-    assert ray_submit._is_auth_expiry_error(Exception(message)) is True
+    assert ray_jobs._is_auth_expiry_error(Exception(message)) is True
 
 
 @pytest.mark.parametrize(
@@ -712,7 +725,7 @@ def test_is_auth_expiry_error_true_for_401(message: str) -> None:
 )
 def test_is_auth_expiry_error_false_for_non_401(message: str) -> None:
     # Anything that isn't a 401 is not a recoverable token expiry — must propagate.
-    assert ray_submit._is_auth_expiry_error(Exception(message)) is False
+    assert ray_jobs._is_auth_expiry_error(Exception(message)) is False
 
 
 def test_submit_and_poll_refreshes_client_on_401(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -747,10 +760,10 @@ def test_submit_and_poll_refreshes_client_on_401(monkeypatch: pytest.MonkeyPatch
         connects.append(idx)
         return _FakeClient(idx)
 
-    monkeypatch.setattr(ray_submit, "_connect_job_client", _fake_connect)
-    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(ray_jobs, "_connect_job_client", _fake_connect)
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
 
-    job_id, status, detail = ray_submit._submit_and_poll(
+    job_id, status, detail = ray_jobs._submit_and_poll(
         resource_name, "python -m x", {"working_dir": "/src"}, wait=True
     )
     assert (job_id, status) == ("job-1", "SUCCEEDED")
@@ -785,10 +798,10 @@ def test_submit_and_poll_captures_driver_detail_on_failure(
         def get_job_logs(self, job_id: str) -> str:
             return "line1\nline2\nTraceback (most recent call last):\nValueError: bad series"
 
-    monkeypatch.setattr(ray_submit, "_connect_job_client", lambda _n: _FakeClient())
-    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(ray_jobs, "_connect_job_client", lambda _n: _FakeClient())
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
 
-    job_id, status, detail = ray_submit._submit_and_poll(
+    job_id, status, detail = ray_jobs._submit_and_poll(
         resource_name, "python -m x", {"working_dir": "/src"}, wait=True
     )
     assert (job_id, status) == ("job-1", "FAILED")
@@ -806,7 +819,7 @@ def test_fetch_job_failure_detail_is_defensive(monkeypatch: pytest.MonkeyPatch) 
         def get_job_logs(self, job_id: str) -> str:
             raise RuntimeError("logs endpoint down")
 
-    detail = ray_submit._fetch_job_failure_detail(_BrokenClient(), "job-1")
+    detail = ray_jobs._fetch_job_failure_detail(_BrokenClient(), "job-1")
     assert detail == ""  # both sources failed → empty, no exception escapes
 
 
@@ -826,11 +839,11 @@ def test_submit_and_poll_reraises_non_401_poll_error(monkeypatch: pytest.MonkeyP
         connects.append(len(connects))
         return _FakeClient()
 
-    monkeypatch.setattr(ray_submit, "_connect_job_client", _fake_connect)
-    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(ray_jobs, "_connect_job_client", _fake_connect)
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
 
     with pytest.raises(RuntimeError, match="500"):
-        ray_submit._submit_and_poll(
+        ray_jobs._submit_and_poll(
             resource_name, "python -m x", {"working_dir": "/src"}, wait=True
         )
     assert len(connects) == 1  # no refresh on a non-401
@@ -840,7 +853,7 @@ def test_client_needs_refresh_false_when_fresh() -> None:
     # Still comfortably inside the token TTL → keep the existing client, no rebuild.
     born = 100.0
     assert (
-        ray_submit._client_needs_refresh(born, born + ray_submit._CLIENT_MAX_AGE_SECONDS - 1.0)
+        ray_jobs._client_needs_refresh(born, born + ray_jobs._CLIENT_MAX_AGE_SECONDS - 1.0)
         is False
     )
 
@@ -848,9 +861,9 @@ def test_client_needs_refresh_false_when_fresh() -> None:
 def test_client_needs_refresh_true_at_and_past_ttl() -> None:
     # At the age threshold (and beyond) the cached OAuth token may be near expiry → rebuild.
     born = 100.0
-    assert ray_submit._client_needs_refresh(born, born + ray_submit._CLIENT_MAX_AGE_SECONDS) is True
+    assert ray_jobs._client_needs_refresh(born, born + ray_jobs._CLIENT_MAX_AGE_SECONDS) is True
     assert (
-        ray_submit._client_needs_refresh(born, born + ray_submit._CLIENT_MAX_AGE_SECONDS + 500.0)
+        ray_jobs._client_needs_refresh(born, born + ray_jobs._CLIENT_MAX_AGE_SECONDS + 500.0)
         is True
     )
 
@@ -882,17 +895,17 @@ def test_submit_and_poll_proactively_refreshes_before_ttl(monkeypatch: pytest.Mo
         return _FakeClient(idx)
 
     # Clock: born at 0, fresh on the first poll, aged past the TTL on the second (then steady).
-    aged = ray_submit._CLIENT_MAX_AGE_SECONDS + 1.0
+    aged = ray_jobs._CLIENT_MAX_AGE_SECONDS + 1.0
     ticks = [0.0, 0.0, aged, aged]
 
     def _clock() -> float:
         return ticks.pop(0) if len(ticks) > 1 else ticks[0]
 
-    monkeypatch.setattr(ray_submit, "_connect_job_client", _fake_connect)
-    monkeypatch.setattr(ray_submit.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(ray_submit.time, "monotonic", _clock)
+    monkeypatch.setattr(ray_jobs, "_connect_job_client", _fake_connect)
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(ray_jobs.time, "monotonic", _clock)
 
-    job_id, status, detail = ray_submit._submit_and_poll(
+    job_id, status, detail = ray_jobs._submit_and_poll(
         resource_name, "python -m x", {"working_dir": "/src"}, wait=True
     )
     assert (job_id, status) == ("job-1", "SUCCEEDED")
@@ -902,18 +915,18 @@ def test_submit_and_poll_proactively_refreshes_before_ttl(monkeypatch: pytest.Mo
 
 def test_resolve_regions_defaults_to_settings_region() -> None:
     # No ray_regions configured → just the data-plane region.
-    assert ray_submit._resolve_regions(_cfg(), _settings()) == ["us-central1"]
+    assert ray_cluster._resolve_regions(_cfg(), _settings()) == ["us-central1"]
 
 
 def test_resolve_regions_appends_home_region_last() -> None:
     # A configured list that omits home still ends up trying home as the final fallback.
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
-    assert ray_submit._resolve_regions(cfg, _settings()) == ["us-east1", "us-west1", "us-central1"]
+    assert ray_cluster._resolve_regions(cfg, _settings()) == ["us-east1", "us-west1", "us-central1"]
 
 
 def test_resolve_regions_keeps_order_when_home_already_listed() -> None:
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-central1", "us-east1"]})
-    assert ray_submit._resolve_regions(cfg, _settings()) == ["us-central1", "us-east1"]
+    assert ray_cluster._resolve_regions(cfg, _settings()) == ["us-central1", "us-east1"]
 
 
 def test_submit_ray_falls_back_to_next_region_on_capacity_stockout(
@@ -931,7 +944,7 @@ def test_submit_ray_falls_back_to_next_region_on_capacity_stockout(
         calls["create_name"] = name
         return f"projects/proj-x/locations/us-west1/persistentResources/{name}"
 
-    monkeypatch.setattr(ray_submit, "_create_cluster", _stockout_then_ok)
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _stockout_then_ok)
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
     job_id, _resource_name, region = ray_submit.submit_ray(
         cfg, settings=_settings(), infra=_infra(), wait=True
@@ -967,7 +980,7 @@ def test_submit_ray_falls_back_when_capacity_reason_only_on_resource_error(
         calls["cluster_error"] = ""
         return f"projects/proj-x/locations/us-west1/persistentResources/{name}"
 
-    monkeypatch.setattr(ray_submit, "_create_cluster", _generic_then_ok)
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _generic_then_ok)
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
     job_id, _resource_name, _region = ray_submit.submit_ray(
         cfg, settings=_settings(), infra=_infra(), wait=True
@@ -988,7 +1001,7 @@ def test_submit_ray_fails_fast_on_non_capacity_error_without_trying_more_regions
         calls["created"] += 1
         raise RuntimeError("machine type's memory is too small")
 
-    monkeypatch.setattr(ray_submit, "_create_cluster", _bad_config)
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _bad_config)
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
     with pytest.raises(RuntimeError, match="memory is too small"):
         ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
@@ -1004,7 +1017,7 @@ def test_submit_ray_raises_when_all_regions_stock_out(
         calls["created"] += 1
         raise RuntimeError("Resources are insufficient in region: x. try a different region")
 
-    monkeypatch.setattr(ray_submit, "_create_cluster", _always_stockout)
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _always_stockout)
     cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
     with pytest.raises(EngineError, match="could not be created in any"):
         ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)

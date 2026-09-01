@@ -244,7 +244,7 @@ def create_ray_cluster(config_uri: str) -> list[str]:
     alongside the name because a capacity failover may move the cluster off the deployment region;
     the family tasks and `delete_ray_cluster` read both from this task's XCom.
     """
-    from . import main, ray_submit
+    from . import main, ray_cluster
     from .config import load_config_uri
     from .dag import plan_dag
     from .errors import ConfigError
@@ -258,7 +258,7 @@ def create_ray_cluster(config_uri: str) -> list[str]:
     if inputs is None:
         raise ConfigError(f"create_ray_cluster: run {run_id} has no shared Ray families")
     models, any_gpu, gpu_type = inputs
-    name, region = ray_submit.provision_shared_cluster(
+    name, region = ray_cluster.provision_shared_cluster(
         cfg, models=models, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
     )
     return [name, region]
@@ -271,13 +271,13 @@ def delete_ray_cluster(config_uri: str, ti: Any = None) -> None:
     failure never leaks the cluster. Reads the ``[name, region]`` the create task returned via XCom;
     a no-op when there was none (nothing to tear down).
     """
-    from . import ray_submit
+    from . import ray_cluster
     from .settings import Settings
 
     cluster = _xcom_cluster(ti, "create_ray_cluster")
     if cluster is None:
         return
-    ray_submit.teardown_shared_cluster(cluster[0], cluster[1], Settings.resolve())
+    ray_cluster.teardown_shared_cluster(cluster[0], cluster[1], Settings.resolve())
 
 
 def create_spark_cluster(config_uri: str) -> list[str]:

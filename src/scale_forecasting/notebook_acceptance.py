@@ -20,7 +20,7 @@ and the human-open path validate the *same* thing.
 * **Never** send a custom ``notebookExecutionJobId`` — that also hangs in ``PENDING``; let the API
   mint the id and recover it from the returned operation name.
 * **Refresh the token every call.** NB04 (Ray) can outlive a ~60-min OAuth token; refreshing each
-  poll (mirroring ``ray_submit``'s client-refresh) keeps a long poll from 401-ing.
+  poll (mirroring ``ray_jobs``'s client-refresh) keeps a long poll from 401-ing.
 * The executed notebook lands at ``{gcsOutputUri}/{JOB_ID}/content.ipynb``.
 
 **Tiers** bound cost — most notebooks orchestrate real Dataproc/Ray compute, so the harness
