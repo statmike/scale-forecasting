@@ -4,9 +4,9 @@ Each config under ``configs/smokes/`` exercises one runtime/hardware/ensemble co
 family→runtime DAG at ~100 series. This module drives one such config through the full lifecycle a
 reviewer would run by hand and checks the result end to end:
 
-1. **dry** — `main.plan_run`: resolve the run_id, the per-runtime model split, the fanout, and the
-   exists-vs-new verdict, touching no GCS.
-2. **stage** — `main.stage_run`: upload the config (+ code zip for Spark) and write the
+1. **dry** — `launch_plan.plan_run`: resolve the run_id, the per-runtime model split, the fanout,
+   and the exists-vs-new verdict, touching no GCS.
+2. **stage** — `launch_plan.stage_run`: upload the config (+ code zip for Spark) and write the
    reproducibility manifest ``runs/<run_id>.plan.json``; capture the runnable launch commands.
 3. **run** — `main.run`: submit every family on its runtime under one run_id and block to terminal.
 4. **verify** — read the registry views back (`registry.reads.read_run_summary` / ``read_run_jobs``
@@ -183,6 +183,7 @@ def run_smoke(
     config_path: str, *, force: bool = False, do_rerun: bool = True
 ) -> SmokeResult:  # pragma: no cover - @gcp: submits real jobs
     """Drive one smoke config through dry → stage → run → verify → rerun → trace. Live (@gcp)."""
+    from scale_forecasting import launch_plan
     from scale_forecasting import main as main_mod
     from scale_forecasting.config import load_config
     from scale_forecasting.registry.jobs import read_run_jobs
@@ -197,11 +198,11 @@ def run_smoke(
     settings = Settings.resolve()
 
     # 1. dry — resolve id + verdict, no GCS.
-    dry = main_mod.plan_run(cfg, settings=settings, force=force)
+    dry = launch_plan.plan_run(cfg, settings=settings, force=force)
     verdict = "exists" if dry.idempotency.exists else "new"
 
     # 2. stage — upload artifacts + manifest, capture runnable commands.
-    staged = main_mod.stage_run(cfg, settings=settings, force=force)
+    staged = launch_plan.stage_run(cfg, settings=settings, force=force)
 
     # 3. run — submit every family + block to terminal.
     run_id = main_mod.run(cfg, settings=settings, force=force)

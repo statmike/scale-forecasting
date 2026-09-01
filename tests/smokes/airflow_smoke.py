@@ -135,8 +135,7 @@ def run_airflow_smoke(
         verify_run_jobs,
     )
 
-    from scale_forecasting import airflow_emit
-    from scale_forecasting import main as main_mod
+    from scale_forecasting import airflow_emit, launch_plan
     from scale_forecasting.config import load_config
     from scale_forecasting.registry.jobs import read_run_jobs
     from scale_forecasting.registry.reads import (
@@ -154,8 +153,8 @@ def run_airflow_smoke(
 
     # 1. plan + stage — resolve the run_id and upload the config (+ code zip for Spark), exactly as
     #    a local run does, so the DAG's CONFIG_URI points at real staged artifacts.
-    plan = main_mod.plan_run(cfg, settings=settings)
-    staged = main_mod.stage_run(cfg, settings=settings)
+    plan = launch_plan.plan_run(cfg, settings=settings)
+    staged = launch_plan.stage_run(cfg, settings=settings)
     run_id = plan.run_id
 
     # gcloud composer's run/storage verbs shell into the environment (the `run` verbs spin up a pod

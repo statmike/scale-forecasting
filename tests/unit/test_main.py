@@ -1,10 +1,11 @@
 """Offline tests for the run orchestrator (``scale_forecasting.main``).
 
-No GCP: the pure plan (:func:`main._plan`) — run_id parity and the per-runtime model split — plus
-the ``dry_run`` path and the CLI's dispatch of it. The live parallel
-launch (Spark batch + BigQuery engine under one run_id) is the ``@gcp`` smoke in
-``tests/integration/test_main_orchestration_smoke.py``; here the GCP seams are never reached because
-``dry_run`` returns before them.
+No GCP: the ``dry_run`` path, the fan-out `main.run` drives over the DAG's nodes, the combined
+run status it rolls the per-job outcomes into, and the CLI that dispatches all of it. Resolving a
+config into a plan and staging it are `scale_forecasting.launch_plan`'s and are tested in
+``test_launch_plan.py``. The live parallel launch (Spark batch + BigQuery engine under one run_id)
+is the ``@gcp`` smoke in ``tests/integration/test_main_orchestration_smoke.py``; here the GCP seams
+are either faked or never reached, because ``dry_run`` returns before them.
 """
 
 from __future__ import annotations
@@ -13,9 +14,8 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import dag, job_launch, main
+from scale_forecasting import dag, job_launch, launch_plan, main
 from scale_forecasting.config import RunConfig
-from scale_forecasting.errors import ConfigError
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
 
@@ -51,51 +51,6 @@ def _no_live_header_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
 
 
-# --- _plan: run_id parity + the per-runtime split ------------------------------
-
-
-def test_plan_run_id_matches_full_config_digest() -> None:
-    # Both engines must derive the same id, so the plan's run_id is the digest over the WHOLE cfg
-    # (incl. every model), not over either executed subset.
-    cfg = _cfg()
-    assert main._plan(cfg).run_id == make_run_id(cfg)
-
-
-def test_plan_splits_models_by_runtime() -> None:
-    plan = main._plan(_cfg())
-    assert plan.python_models == [_SPARK]
-    assert plan.bq_models == _NATIVE
-
-
-def test_plan_all_bigquery_has_no_python_models() -> None:
-    plan = main._plan(_cfg(models=_NATIVE))
-    assert plan.python_models == []
-    assert plan.bq_models == _NATIVE
-
-
-def test_plan_all_python_has_no_bq_models() -> None:
-    plan = main._plan(_cfg(models=[_SPARK, "holtwinters"]))
-    assert plan.python_models == [_SPARK, "holtwinters"]
-    assert plan.bq_models == []
-
-
-# --- _plan: ray is accepted ----------------------------------------------------
-
-
-def test_plan_accepts_ray_when_python_models_present() -> None:
-    # The Ray engine is built, so main.run now dispatches ray — _plan must NOT reject it.
-    plan = main._plan(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"))
-    assert plan.python_models == [_SPARK]
-    assert plan.bq_models == _NATIVE
-
-
-def test_plan_allows_ray_config_when_only_bigquery_models() -> None:
-    # An all-native config never uses the Python runtime, so runtime choice doesn't apply.
-    plan = main._plan(_cfg(models=_NATIVE, python_runtime="ray"))
-    assert plan.python_models == []
-    assert plan.bq_models == _NATIVE
-
-
 # --- run(dry_run=True): offline, no GCP ----------------------------------------
 
 
@@ -118,219 +73,6 @@ def test_dry_run_returns_run_id_and_estimates_fanout(monkeypatch: pytest.MonkeyP
     assert called["cfg"] is cfg
 
 
-def test_plan_run_without_env_returns_plan_but_no_commands(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # No SF_* identity → command emission is skipped, but the id/fanout/split still resolve offline.
-    import scale_forecasting.settings as settings_mod
-
-    def _no_env() -> Settings:
-        raise ConfigError("no SF_* env")
-
-    monkeypatch.setattr(settings_mod.Settings, "resolve", staticmethod(_no_env))
-
-    result = main.plan_run(_cfg())
-    assert result.run_id == make_run_id(_cfg())
-    assert result.staged is False
-    assert result.commands is None
-    assert result.config_uri is None
-    assert result.fanout.n_cells > 0
-
-
-def _batch_infra() -> Any:
-    from scale_forecasting.batch_infra import BatchInfra
-
-    return BatchInfra(
-        code_bucket="bkt-code",
-        container_image="us-docker.pkg.dev/proj-x/sf/runtime:tag",
-        compute_sa="sf-compute@proj-x.iam.gserviceaccount.com",
-        subnetwork_uri="projects/proj-x/regions/us-central1/subnetworks/sf",
-    )
-
-
-def test_plan_run_spark_emits_main_and_spark_command_templates() -> None:
-    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
-    assert result.commands is not None
-    assert set(result.commands) == {"main", "spark"}
-    config_uri = f"gs://bkt-code/runs/{result.run_id}.json"
-    assert result.config_uri == config_uri
-    # main = the orchestrator command; spark = native gcloud + universal, both referencing the URI.
-    assert result.commands["main"].universal.endswith(config_uri)
-    assert result.commands["main"].native is None
-    spark = result.commands["spark"]
-    assert spark.native is not None and "gcloud" in spark.native and config_uri in spark.native
-    # A Python-only config emits no --models (the standalone batch runs the whole config).
-    assert "--models" not in spark.native
-
-
-def test_plan_run_mixed_spark_restricts_the_spark_subset() -> None:
-    result = main.plan_run(
-        _cfg(models=[_SPARK, *_NATIVE]), settings=_SETTINGS, infra=_batch_infra()
-    )
-    assert result.commands is not None
-    spark = result.commands["spark"]
-    # A mixed run restricts the Spark batch to just its Python model(s) via --models.
-    assert spark.native is not None and "--models" in spark.native and _SPARK in spark.native
-
-
-def test_plan_run_ray_emits_universal_only_ray_command() -> None:
-    from scale_forecasting.ray_infra import RayInfra
-
-    infra = RayInfra(compute_sa="sf-compute@proj-x.iam", code_bucket="bkt-code")
-    result = main.plan_run(
-        _cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"), settings=_SETTINGS, infra=infra
-    )
-    assert result.commands is not None
-    assert set(result.commands) == {"main", "ray"}
-    ray = result.commands["ray"]
-    assert ray.native is None  # no gcloud verb submits a Ray job
-    assert "ray_submit" in ray.universal and result.run_id in ray.universal
-
-
-def test_plan_run_reports_new_run_when_config_never_ran() -> None:
-    # The autouse fixture makes header_status return None → the config has not run before.
-    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
-    assert result.idempotency.checked is True
-    assert result.idempotency.exists is False
-    assert result.idempotency.prior_status is None
-
-
-def test_plan_run_reports_existing_run_when_config_already_ran(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from scale_forecasting.registry import header
-
-    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
-    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
-    assert result.idempotency.checked is True
-    assert result.idempotency.exists is True
-    assert result.idempotency.prior_status == "COMPLETED"
-
-
-def test_plan_run_verdict_unknown_when_registry_unreachable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A registry read failure (no table yet / unreachable) degrades to an unknown verdict, never
-    # fatal — the plan still returns.
-    from scale_forecasting.errors import RegistryError
-    from scale_forecasting.registry import header
-
-    def _boom(*a: Any, **k: Any) -> str:
-        raise RegistryError("no such table")
-
-    monkeypatch.setattr(header, "header_status", _boom)
-    result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
-    assert result.idempotency.checked is False
-    assert result.idempotency.exists is False
-
-
-def test_plan_run_without_env_leaves_verdict_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No SF_* env → settings never resolve, so the registry is never consulted: verdict unknown.
-    import scale_forecasting.settings as settings_mod
-
-    def _no_env() -> Settings:
-        raise ConfigError("no SF_* env")
-
-    monkeypatch.setattr(settings_mod.Settings, "resolve", staticmethod(_no_env))
-    result = main.plan_run(_cfg())
-    assert result.idempotency.checked is False
-
-
-def test_emit_idempotency_warns_on_existing_and_notes_force(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    from scale_forecasting.registry import header
-
-    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
-
-    with caplog.at_level("WARNING"):
-        main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
-    assert any("already ran" in r.message and "--force" in r.message for r in caplog.records)
-
-    caplog.clear()
-    with caplog.at_level("INFO"):
-        main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True)
-    assert any("re-run (--force)" in r.message for r in caplog.records)
-
-
-def test_stage_run_spark_uploads_and_builds_runnable_commands(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import scale_forecasting.staging as staging_mod
-
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        staging_mod, "stage_config", lambda cfg, rid, bkt: f"gs://{bkt}/runs/{rid}.json"
-    )
-    monkeypatch.setattr(
-        staging_mod,
-        "stage_code",
-        lambda bkt: (f"gs://{bkt}/runs/pkg.zip", f"gs://{bkt}/runs/spark_main.py"),
-    )
-
-    def _fake_manifest(manifest: dict[str, Any], rid: str, bkt: str) -> str:
-        captured["manifest"] = manifest
-        return f"gs://{bkt}/runs/{rid}.plan.json"
-
-    monkeypatch.setattr(staging_mod, "stage_manifest", _fake_manifest)
-
-    result = main.stage_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
-    assert result.staged is True
-    assert result.config_uri == f"gs://bkt-code/runs/{result.run_id}.json"
-    assert result.commands is not None
-    spark = result.commands["spark"]
-    assert spark.native is not None and "gs://bkt-code/runs/pkg.zip" in spark.native
-
-    manifest = captured["manifest"]
-    assert manifest["run_id"] == result.run_id
-    assert manifest["config_uri"] == result.config_uri
-    assert set(manifest["commands"]) == {"main", "spark"}
-    assert manifest["fanout"]["n_cells"] == result.fanout.n_cells
-    assert "created_at" in manifest  # caller-stamped timestamp
-    # The manifest records the re-run intent and the exists-vs-new verdict it was staged under.
-    assert manifest["force"] is False
-    assert manifest["idempotency"]["checked"] is True
-    assert manifest["idempotency"]["exists"] is False
-    # The manifest is a DAG manifest: one node per family job carrying its deterministic job_key.
-    dag = manifest["dag"]
-    assert [n["family"] for n in dag] == ["statistical"]  # a pure-Spark config → one family
-    assert dag[0]["runtime"] == "spark"
-    assert dag[0]["job_key"].endswith("-statistical-a1")
-    assert dag[0]["depends_on"] == []
-
-
-def test_plan_run_resolves_dag_nodes_offline() -> None:
-    # A mixed config plans one node per family + the ensemble node depending on them all.
-    from scale_forecasting.registry.ids import make_job_key
-
-    result = main.plan_run(
-        _cfg(
-            models=[_SPARK, "arima_plus"],
-            backtest={"enabled": True},
-            ensemble={"enabled": True, "strategies": ["mean", "median"]},
-        ),
-        settings=_SETTINGS,
-        infra=_batch_infra(),
-    )
-    families = [n.family for n in result.nodes]
-    assert families == ["statistical", "native", "ensemble"]
-    ensemble = result.nodes[-1]
-    assert ensemble.job_key == make_job_key(result.run_id, "ensemble", 1)
-    assert set(ensemble.depends_on) == {n.job_key for n in result.nodes if n.family != "ensemble"}
-
-
-def test_stage_run_requires_infra(monkeypatch: pytest.MonkeyPatch) -> None:
-    # stage_run touches GCS, so a missing SF_* identity raises rather than degrading (unlike plan).
-    import scale_forecasting.settings as settings_mod
-
-    def _no_env() -> Settings:
-        raise ConfigError("no SF_* env")
-
-    monkeypatch.setattr(settings_mod.Settings, "resolve", staticmethod(_no_env))
-    with pytest.raises(ConfigError):
-        main.stage_run(_cfg())
-
-
 def test_cli_dispatches_stage_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
     from types import SimpleNamespace
@@ -342,7 +84,7 @@ def test_cli_dispatches_stage_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatc
         seen["force"] = force
         return SimpleNamespace(run_id="rid-staged")
 
-    monkeypatch.setattr(main, "stage_run", _fake_stage)
+    monkeypatch.setattr(launch_plan, "stage_run", _fake_stage)
 
     path = tmp_path / "run.json"
     path.write_text(
@@ -781,80 +523,3 @@ def test_cli_requires_exactly_one_config_source() -> None:
         main._main(["--dry-run"])  # neither source
     with pytest.raises(SystemExit):
         main._main(["--config", "a.json", "--config-uri", "gs://b/c.json"])  # both sources
-
-
-# --- lock_profile_source: pinning the reference before the digest ---------------
-
-
-def _lock_cfg(**profile: Any) -> RunConfig:
-    return _cfg(compute={"profile": profile}) if profile else _cfg()
-
-
-def _fake_discover(monkeypatch: pytest.MonkeyPatch, result: Any) -> list[dict[str, Any]]:
-    """Stand in for the BigQuery discovery query; return the kwargs it was called with."""
-    seen: list[dict[str, Any]] = []
-
-    def discover(**kwargs: Any) -> Any:
-        seen.append(kwargs)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    monkeypatch.setattr("scale_forecasting.registry.harvest.discover_harvest_run", discover)
-    return seen
-
-
-def test_auto_is_pinned_to_the_run_it_resolves_to(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The lockfile trick: what actually sized this run is written in, never re-searched."""
-    seen = _fake_discover(monkeypatch, "prior-run-0123456789ab")
-    locked = main.lock_profile_source(_lock_cfg(), settings=_SETTINGS)
-    assert locked.compute.profile.source == "prior-run-0123456789ab"
-    # Only the identity axes are filtered in SQL; the scale axes are warnings, checked after load.
-    assert set(seen[0]) == {"source_table", "freq", "settings"}
-
-
-def test_pinning_moves_the_run_id_because_the_fleet_moved(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run sized off last week's evidence is not the same run — §2.6's rule, applied."""
-    _fake_discover(monkeypatch, "prior-run-0123456789ab")
-    cfg = _lock_cfg()
-    assert make_run_id(main.lock_profile_source(cfg, settings=_SETTINGS)) != make_run_id(cfg)
-
-
-def test_finding_nothing_pins_the_baseline_rather_than_leaving_auto(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The rest of the chain is deterministic, so pinning it is what makes the plan reproducible."""
-    _fake_discover(monkeypatch, None)
-    assert main.lock_profile_source(_lock_cfg(), settings=_SETTINGS).compute.profile.source == (
-        "baseline"
-    )
-
-
-@pytest.mark.parametrize("source", ["none", "baseline", "some-run-0123456789ab"])
-def test_an_already_concrete_source_is_never_re_resolved(
-    monkeypatch: pytest.MonkeyPatch, source: str
-) -> None:
-    """Only `auto` is a search. Anything else is already the operator's answer."""
-    seen = _fake_discover(monkeypatch, "should-not-be-used-0123456789ab")
-    cfg = _lock_cfg(source=source)
-    assert main.lock_profile_source(cfg, settings=_SETTINGS) is cfg
-    assert seen == []
-
-
-def test_profiling_off_is_never_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`mode="off"` is the one switch that makes the whole feature inert, plan time included."""
-    seen = _fake_discover(monkeypatch, "should-not-be-used-0123456789ab")
-    cfg = _lock_cfg(mode="off")
-    assert main.lock_profile_source(cfg, settings=_SETTINGS) is cfg
-    assert seen == []
-
-
-def test_an_unreachable_registry_leaves_the_plan_unpinned_rather_than_failing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A plan with no SF_* environment is a preview; it must still produce an id and a fanout."""
-    _fake_discover(monkeypatch, RuntimeError("no credentials"))
-    cfg = _lock_cfg()
-    assert main.lock_profile_source(cfg, settings=_SETTINGS).compute.profile.source == "auto"

@@ -8,8 +8,8 @@ identically regardless of runtime. This module single-sources that write so the 
 `stage_code` is here for the same reason. The package zip and the launcher shim are *the same two
 objects* on the batch and cluster surfaces — same builder, same md5-named blob, same bucket — and
 three callers want them: `submit.submit_batch`, `cluster_submit.submit_cluster_job`, and
-`main.stage_run` (which stages without submitting anything). It lived on the batch submitter, so the
-cluster path had to import a private name out of it to run a job at all.
+`launch_plan.stage_run` (which stages without submitting anything). It lived on the batch
+submitter, so the cluster path had to import a private name out of it to run a job at all.
 
 Everything here takes a plain ``code_bucket`` string rather than an infra object: the two Dataproc
 surfaces carry a `BatchInfra` and the Ray surface a `RayInfra`, and the only field any of this needs

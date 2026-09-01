@@ -5,7 +5,7 @@ A run's ``cfg.models`` spans up to four families — ``statistical`` / ``ml`` / 
 the three Python families each run on their own resolved runtime (Spark *xor* Ray, chosen per
 family via `config.RunConfig.resolve_family_compute`), while ``native`` runs in BigQuery. When
 ensembling is enabled a downstream ensemble node depends on all of them. This module owns the pure,
-offline plan; `main.run` executes it and `main.plan_run` / `main.stage_run` emit its commands.
+offline plan; `main.run` executes it and `launch_plan.plan_run` / ``stage_run`` emit its commands.
 
 The families run in parallel, so a run's wall-clock is the slowest family's job, not the sum —
 adding a BigQuery-native model to a Spark run costs ``max(spark, bq)``, not ``spark + bq``. The DAG
