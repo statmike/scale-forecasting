@@ -2,7 +2,7 @@
 #
 # NOTE on the table schemas: the six tables' DDL is single-sourced in Python
 # (src/scale_forecasting/registry/ddl.py, snapshot-tested) and created by
-# registry.bq.ensure_tables() at run time. We deliberately do NOT re-declare those schemas
+# registry.tables.ensure_tables() at run time. We deliberately do NOT re-declare those schemas
 # in HCL — two copies of the DDL would drift. Terraform owns the *containers* (dataset,
 # connection, bucket grant); the app owns the *tables* — one source of truth for the DDL, no HCL/Python drift.
 #

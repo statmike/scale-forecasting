@@ -347,11 +347,12 @@ def test_make_group_runner_passes_captured_settings_to_write_cells(
     """The runner closure captures the frozen ``Settings`` directly (no ``sparkContext.broadcast``).
 
     Locks the Spark Connect refactor: ``make_group_runner(cfg, settings, models)`` closes over the
-    picklable ``Settings`` by value and hands that exact object to ``bq.write_cells(settings=...)``,
-    with no ``.value`` broadcast indirection. Driving the returned ``_run`` on a real bucket frame
+    picklable ``Settings`` by value and hands that exact object to
+    ``cells.write_cells(settings=...)``, with no ``.value`` broadcast indirection. Driving the
+    returned ``_run`` on a real bucket frame
     (so ``run_group`` produces results) and capturing the ``write_cells`` kwargs proves the seam.
     """
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import cells
 
     captured: dict[str, Any] = {}
 
@@ -359,7 +360,7 @@ def test_make_group_runner_passes_captured_settings_to_write_cells(
         captured["results"] = results
         captured["settings"] = settings
 
-    monkeypatch.setattr(bq, "write_cells", _fake_write_cells)
+    monkeypatch.setattr(cells, "write_cells", _fake_write_cells)
 
     cfg = _cfg(models=["theta"])
     settings = _settings()
@@ -377,10 +378,12 @@ def test_make_group_runner_passes_captured_settings_to_write_cells(
 
 def test_make_group_runner_skips_write_when_no_results(monkeypatch: Any) -> None:
     """An empty bucket writes nothing but still returns the (empty) status frame."""
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import cells
 
     called = {"n": 0}
-    monkeypatch.setattr(bq, "write_cells", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    monkeypatch.setattr(
+        cells, "write_cells", lambda *a, **k: called.__setitem__("n", called["n"] + 1)
+    )
 
     cfg = _cfg(models=["theta"])
     runner = spark_io.make_group_runner(cfg, _settings(), ["theta"])

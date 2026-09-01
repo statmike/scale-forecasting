@@ -117,7 +117,7 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   (`--force` overrides). Preview-by-default with exact blast radius (runs, objects, bytes), the same
   shape the probe's cancel path uses. Pure/I-O seam throughout: planners, SQL renderers, and
   formatters are offline-tested (`test_registry_ops.py`); the six verbs are `@gcp`.
-  With this landed, **`reset.py` and `registry.bq.drop_all` are gone** — the destructive tier leaves
+  With this landed, **`reset.py` and a whole-registry `drop_all` are gone** — the destructive tier leaves
   the product entirely. What replaces them is a `bq rm` one-liner
   ([operations.md §2c](docs/operations.md)), because the only thing `reset` did that a `bq rm`
   doesn't was give a whole-registry drop the *appearance* of being a supported, safe operation while

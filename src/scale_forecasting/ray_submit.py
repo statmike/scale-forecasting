@@ -31,10 +31,10 @@ What `submit_ray` does:
    Ray analog of Spark's ``job_telemetry`` (cluster name, node counts, machine/accelerator types,
    calibrated-vs-sizing GPU fraction, wall-clock, job id) **plus the whole sizing decision** (both
    pool plans and the profile they were sized off, filed under ``$.sizing.<family>``) into
-   ``run_registry.job_telemetry`` via ``bq.merge_header_telemetry`` — **no schema change** (the JSON
-   column already exists), and a merge rather than a whole-column write so the several family jobs
-   of one run don't overwrite each other — and raise on a non-SUCCEEDED terminal state so a failed
-   run never exits 0.
+   ``run_registry.job_telemetry`` via ``header.merge_header_telemetry`` — **no schema change** (the
+   JSON column already exists), and a merge rather than a whole-column write so the several family
+   jobs of one run don't overwrite each other — and raise on a non-SUCCEEDED terminal state so a
+   failed run never exits 0.
 
 Public surface: ``RayInfra``, ``submit_ray``, ``build_entrypoint``, ``build_runtime_env``,
 ``extract_ray_telemetry``, ``main``.
@@ -905,8 +905,8 @@ def _stamp_ray_telemetry(
     """Write the Ray telemetry dict to the run header's native JSON column (best-effort).
 
     The pure `extract_ray_telemetry` output, merged into ``job_telemetry`` a key at a time
-    (`registry.bq.merge_header_telemetry`) rather than written whole — several family jobs of one
-    run each land here, and a whole-column write would leave only whichever finished last. The
+    (`registry.header.merge_header_telemetry`) rather than written whole — several family jobs of
+    one run each land here, and a whole-column write would leave only whichever finished last. The
     column is a native ``JSON`` type whose query parameter serializes the value itself, so we pass
     **dicts** (not pre-serialized strings, which would double-encode).
 
@@ -916,13 +916,13 @@ def _stamp_ray_telemetry(
     Wrapped so any failure (API error, header not yet written) is logged and swallowed: telemetry
     is a nice-to-have overlay on an already-complete run, never a reason to fail it.
     """
-    from .registry import bq
+    from .registry.header import merge_header_telemetry, sizing_telemetry_path
 
     patch = dict(telemetry)
     if sizing:
-        patch[bq.sizing_telemetry_path(sizing)] = sizing
+        patch[sizing_telemetry_path(sizing)] = sizing
     try:
-        bq.merge_header_telemetry(run_id, patch, settings=settings)
+        merge_header_telemetry(run_id, patch, settings=settings)
         _log.info("Ray telemetry stamped for run %s: %s", run_id, telemetry)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("Ray telemetry capture failed (non-fatal): %r", exc)

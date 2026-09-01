@@ -138,7 +138,12 @@ def run_airflow_smoke(
     from scale_forecasting import airflow_emit
     from scale_forecasting import main as main_mod
     from scale_forecasting.config import load_config
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry.jobs import read_run_jobs
+    from scale_forecasting.registry.reads import (
+        read_leaderboard,
+        read_prediction_counts,
+        read_run_summary,
+    )
     from scale_forecasting.settings import Settings
 
     cfg = load_config(config_path)
@@ -192,16 +197,16 @@ def run_airflow_smoke(
     run_status: str | None = None
     terminal = {"COMPLETED", "FAILED", "PARTIAL"}
     while time.monotonic() < deadline:
-        summary = bq.read_run_summary(run_id, settings=settings)
+        summary = read_run_summary(run_id, settings=settings)
         run_status = str(summary.get("status")) if summary else None
         if run_status in terminal:
             break
         time.sleep(poll_interval_s)
 
     # 5. verify — read the views back and hold the run to the same standard as the direct smoke.
-    job_rows = bq.read_run_jobs(run_id, settings=settings)
-    board = bq.read_leaderboard(run_id, settings=settings)
-    pred_counts = bq.read_prediction_counts(run_id, settings=settings)
+    job_rows = read_run_jobs(run_id, settings=settings)
+    board = read_leaderboard(run_id, settings=settings)
+    pred_counts = read_prediction_counts(run_id, settings=settings)
     problems = (
         verify_run_jobs(job_rows, cfg)
         + verify_leaderboard(board, cfg)

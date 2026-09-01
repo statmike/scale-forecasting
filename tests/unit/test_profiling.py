@@ -2037,7 +2037,7 @@ def test_profile_for_run_short_circuits_before_importing_the_registry() -> None:
     monkey = pytest.MonkeyPatch()
     with monkey.context() as m:
         m.setattr(source, "_RESOLVED", {})
-        m.setitem(__import__("sys").modules, "scale_forecasting.registry.bq", None)
+        m.setitem(__import__("sys").modules, "scale_forecasting.registry.harvest", None)
         assert source.profile_for_run(_sourced("none")) is None
 
 
@@ -2064,8 +2064,8 @@ def test_profile_for_run_memoizes_so_every_family_job_sizes_off_one_lookup() -> 
     monkey = pytest.MonkeyPatch()
     with monkey.context() as m:
         m.setattr(source, "_RESOLVED", {})
-        m.setattr("scale_forecasting.registry.bq", _FakeBQ, raising=False)
-        m.setitem(__import__("sys").modules, "scale_forecasting.registry.bq", _FakeBQ)
+        m.setattr("scale_forecasting.registry.harvest", _FakeBQ, raising=False)
+        m.setitem(__import__("sys").modules, "scale_forecasting.registry.harvest", _FakeBQ)
         cfg = _cfg()
         first = source.profile_for_run(cfg)
         second = source.profile_for_run(cfg)

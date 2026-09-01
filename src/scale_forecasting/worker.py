@@ -6,7 +6,7 @@ they *call* it and *collect* its results — that symmetry is what makes "same c
 everywhere" real.
 
 `CellResult` is defined here because it is the worker's output type; the registry
-writers (``registry/bq.py``) consume it. It carries plain data (frames + scalars), no
+writers (``registry/``) consume it. It carries plain data (frames + scalars), no
 behavior, so it is the clean seam between compute and lineage.
 """
 

@@ -46,9 +46,9 @@ def _cfg(**over: Any) -> RunConfig:
 def _no_live_header_check(monkeypatch: pytest.MonkeyPatch) -> None:
     # The exists-vs-new verdict queries the registry; default it to "new run" so offline plan/stage
     # tests never touch BigQuery. The idempotency tests below override this explicitly.
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
 
 
 # --- _plan: run_id parity + the per-runtime split ------------------------------
@@ -198,9 +198,9 @@ def test_plan_run_reports_new_run_when_config_never_ran() -> None:
 def test_plan_run_reports_existing_run_when_config_already_ran(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
     result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
     assert result.idempotency.checked is True
     assert result.idempotency.exists is True
@@ -213,12 +213,12 @@ def test_plan_run_verdict_unknown_when_registry_unreachable(
     # A registry read failure (no table yet / unreachable) degrades to an unknown verdict, never
     # fatal — the plan still returns.
     from scale_forecasting.errors import RegistryError
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
     def _boom(*a: Any, **k: Any) -> str:
         raise RegistryError("no such table")
 
-    monkeypatch.setattr(bq, "header_status", _boom)
+    monkeypatch.setattr(header, "header_status", _boom)
     result = main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
     assert result.idempotency.checked is False
     assert result.idempotency.exists is False
@@ -239,9 +239,9 @@ def test_plan_run_without_env_leaves_verdict_unknown(monkeypatch: pytest.MonkeyP
 def test_emit_idempotency_warns_on_existing_and_notes_force(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
 
     with caplog.at_level("WARNING"):
         main.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
@@ -390,21 +390,21 @@ def _fake_job_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     from contextlib import contextmanager
 
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs, lifecycle
 
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
-        bq, "next_job_attempt", lambda run_id, family, *, force=False, settings=None: (1, True)
+        jobs, "next_job_attempt", lambda run_id, family, *, force=False, settings=None: (1, True)
     )
 
     @contextmanager
     def _fake_run_job(run_id: str, family: str, attempt: int, **kw: Any) -> Any:
         seen["job"] = {"run_id": run_id, "family": family, "attempt": attempt, **kw}
-        fin = bq.JobFinalizer()
+        fin = lifecycle.JobFinalizer()
         seen["fin"] = fin  # expose it so tests can assert what the body finalized
         yield fin
 
-    monkeypatch.setattr(bq, "run_job", _fake_run_job)
+    monkeypatch.setattr(lifecycle, "run_job", _fake_run_job)
     return seen
 
 
@@ -640,21 +640,21 @@ def _patch_run_seams(
     """
     import scale_forecasting.ensemble_run as ensemble_mod
     from scale_forecasting.engines import bigquery_engine
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header, jobs, lifecycle, tables
 
     seen: dict[str, Any] = {"ensemble_called": False}
 
     monkeypatch.setattr(Settings, "resolve", classmethod(lambda cls: _SETTINGS))
-    monkeypatch.setattr(bq, "ensure_tables", lambda *a, **k: None)
-    monkeypatch.setattr(bq, "write_header", lambda *a, **k: None)
+    monkeypatch.setattr(tables, "ensure_tables", lambda *a, **k: None)
+    monkeypatch.setattr(header, "write_header", lambda *a, **k: None)
     # Default: this config has not run before, so the idempotency guard falls through to launch.
     # A test overrides this to "COMPLETED" to exercise the no-op re-run guard.
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
 
     def _fake_update(run_id: str, *, settings: Any = None, **fields: Any) -> None:
         seen["status"] = fields.get("status")
 
-    monkeypatch.setattr(bq, "update_header", _fake_update)
+    monkeypatch.setattr(header, "update_header", _fake_update)
 
     def _fake_native(cfg: RunConfig, job: Any, run_id: str, settings: Any, *, force: bool = False):
         seen["bq_ran"] = True
@@ -671,13 +671,13 @@ def _patch_run_seams(
     # per-job lifecycle so _launch_ensemble_job runs for real down to the run_ensembles call.
     import contextlib
 
-    monkeypatch.setattr(bq, "next_job_attempt", lambda *a, **k: (1, None))
+    monkeypatch.setattr(jobs, "next_job_attempt", lambda *a, **k: (1, None))
 
     @contextlib.contextmanager
     def _fake_run_job(*a: Any, **k: Any) -> Any:
         yield None
 
-    monkeypatch.setattr(bq, "run_job", _fake_run_job)
+    monkeypatch.setattr(lifecycle, "run_job", _fake_run_job)
 
     def _fake_ensembles(cfg: RunConfig, run_id: str, *, settings: Any, **_: Any) -> None:
         seen["ensemble_called"] = True
@@ -761,10 +761,10 @@ def test_run_noops_when_config_already_completed(monkeypatch: pytest.MonkeyPatch
     # A plain re-run of an already-COMPLETED config is a no-op: it must NOT relaunch any family
     # (relaunching resubmits the deterministic per-family job id and collides), and returns the
     # config-pinned run_id unchanged.
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
     seen = _patch_run_seams(monkeypatch)
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
     cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
     run_id = main.run(cfg)
     assert run_id == dag.plan_dag(cfg).run_id
@@ -777,10 +777,10 @@ def test_run_noops_when_config_already_completed(monkeypatch: pytest.MonkeyPatch
 def test_run_force_reexecutes_even_when_completed(monkeypatch: pytest.MonkeyPatch) -> None:
     # force=True re-executes a COMPLETED config (a fresh, distinctly-keyed attempt) — the guard
     # applies only to unforced re-runs.
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
     seen = _patch_run_seams(monkeypatch)
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
     main.run(_cfg(), force=True)
     assert seen.get("spark_ran") is True
     assert seen["status"] == "COMPLETED"
@@ -789,10 +789,10 @@ def test_run_force_reexecutes_even_when_completed(monkeypatch: pytest.MonkeyPatc
 def test_run_reexecutes_when_prior_run_not_completed(monkeypatch: pytest.MonkeyPatch) -> None:
     # A prior FAILED run is not COMPLETED, so an unforced re-run falls through and launches (a retry
     # path), rather than no-op'ing.
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
     seen = _patch_run_seams(monkeypatch)
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "FAILED")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "FAILED")
     main.run(_cfg())
     assert seen.get("spark_ran") is True
 
@@ -1166,15 +1166,15 @@ def _patch_launch_seams(monkeypatch: pytest.MonkeyPatch, sub: _CapturingSubmitte
     import contextlib
 
     from scale_forecasting import submitters
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs, lifecycle
 
-    monkeypatch.setattr(bq, "next_job_attempt", lambda *a, **k: (1, None))
+    monkeypatch.setattr(jobs, "next_job_attempt", lambda *a, **k: (1, None))
 
     @contextlib.contextmanager
     def _fake_run_job(*a: Any, **k: Any) -> Any:
         yield None
 
-    monkeypatch.setattr(bq, "run_job", _fake_run_job)
+    monkeypatch.setattr(lifecycle, "run_job", _fake_run_job)
     monkeypatch.setattr(submitters, "get_submitter", lambda runtime: sub)
 
 
@@ -1404,16 +1404,16 @@ def _patch_ensemble_seams(monkeypatch: pytest.MonkeyPatch, calls: dict[str, Any]
     import contextlib
 
     from scale_forecasting import ensemble_run
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs, lifecycle
 
-    monkeypatch.setattr(bq, "next_job_attempt", lambda *a, **k: (1, None))
+    monkeypatch.setattr(jobs, "next_job_attempt", lambda *a, **k: (1, None))
 
     @contextlib.contextmanager
     def _fake_run_job(run_id: str, family: str, attempt: int, **k: Any) -> Any:
         calls["run_job"] = {"family": family, "runtime": k.get("runtime")}
         yield None
 
-    monkeypatch.setattr(bq, "run_job", _fake_run_job)
+    monkeypatch.setattr(lifecycle, "run_job", _fake_run_job)
     monkeypatch.setattr(
         ensemble_run, "run_ensembles", lambda *a, **k: calls.__setitem__("barrier", True)
     )
@@ -1464,7 +1464,7 @@ def _fake_discover(monkeypatch: pytest.MonkeyPatch, result: Any) -> list[dict[st
             raise result
         return result
 
-    monkeypatch.setattr("scale_forecasting.registry.bq.discover_harvest_run", discover)
+    monkeypatch.setattr("scale_forecasting.registry.harvest.discover_harvest_run", discover)
     return seen
 
 

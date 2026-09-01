@@ -19,7 +19,7 @@ Two facts hold for all of them:
 The schema below is rendered from a single source of truth,
 [`src/scale_forecasting/registry/ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py); the views from
 [`src/scale_forecasting/registry/views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py).
-`registry/bq.ensure_tables` / `ensure_views` execute exactly what those render.
+`registry.tables.ensure_tables` / `ensure_views` execute exactly what those render.
 
 ## How the tiers link
 

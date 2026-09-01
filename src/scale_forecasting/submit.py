@@ -744,18 +744,18 @@ def _stamp_job_telemetry(
     at *submit* and stamped at *finish* so one write carries both halves, and a batch that never
     reaches terminal has no telemetry worth reading anyway.
 
-    The write **merges** (`registry.bq.merge_header_telemetry`) rather than replacing the column:
-    several family jobs of one run each land here, and a whole-column write would leave only
+    The write **merges** (`registry.header.merge_header_telemetry`) rather than replacing the
+    column: several family jobs of one run each land here, and a whole-column write would leave only
     whichever finished last.
     """
-    from .registry import bq
+    from .registry.header import merge_header_telemetry, sizing_telemetry_path
 
     try:
         fetched = client.get_batch(name=f"{parent}/batches/{batch_id}")
         telemetry = extract_job_telemetry(fetched)
         if sizing:
-            telemetry[bq.sizing_telemetry_path(sizing)] = sizing
-        bq.merge_header_telemetry(run_id, telemetry, settings=settings)
+            telemetry[sizing_telemetry_path(sizing)] = sizing
+        merge_header_telemetry(run_id, telemetry, settings=settings)
         _log.info("batch %s telemetry stamped: %s", batch_id, telemetry)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("batch %s telemetry capture failed (non-fatal): %r", batch_id, exc)

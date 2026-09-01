@@ -276,13 +276,14 @@ class Forecaster:
     def status(self, run_id: str | None = None) -> str | None:
         """The current registry status of a run (``RUNNING``/``COMPLETED``/``FAILED``/``PARTIAL``).
 
-        Reads the run's header (`registry.bq.header_status`); returns ``None`` when this config has
-        never run. ``run_id`` defaults to this config's deterministic id, so ``forecaster.status()``
-        answers "did my config's run finish?" — the reattach path for a ``wait=False`` submit.
+        Reads the run's header (`registry.header.header_status`); returns ``None`` when this config
+        has never run. ``run_id`` defaults to this config's deterministic id, so
+        ``forecaster.status()`` answers "did my config's run finish?" — the reattach path for a
+        ``wait=False`` submit.
         """
-        from .registry import bq
+        from .registry.header import header_status
 
-        return bq.header_status(run_id or self.run_id, settings=self._settings)
+        return header_status(run_id or self.run_id, settings=self._settings)
 
     def wait(
         self, run_id: str | None = None, *, timeout: float = 3600.0, poll_seconds: float = 15.0
@@ -312,13 +313,13 @@ class Forecaster:
     def results(self, run_id: str | None = None) -> list[ModelResult]:
         """The per-model leaderboard for a run — one `ModelResult` each, best (lowest WAPE) first.
 
-        Reads ``v_model_leaderboard`` (`registry.bq.read_leaderboard`) for ``run_id`` (default: this
-        config's id). Returns ``[]`` when the run has produced no scored rows yet. This is the
+        Reads ``v_model_leaderboard`` (`registry.reads.read_leaderboard`) for ``run_id`` (default:
+        this config's id). Returns ``[]`` when the run has produced no scored rows yet. This is the
         first-class "which model won?" read that `RunResult` only pointed at before.
         """
-        from .registry import bq
+        from .registry.reads import read_leaderboard
 
-        rows = bq.read_leaderboard(run_id or self.run_id, settings=self._settings)
+        rows = read_leaderboard(run_id or self.run_id, settings=self._settings)
         return [
             ModelResult(
                 model_type=r["model_type"],
@@ -368,15 +369,15 @@ class Forecaster:
     def jobs(self, run_id: str | None = None) -> list[JobTrace]:
         """The per-job cross-system trace for a run — one `JobTrace` per family, plus the ensemble.
 
-        Reads ``v_run_jobs`` (`registry.bq.read_run_jobs`) for ``run_id`` (default: this config's
+        Reads ``v_run_jobs`` (`registry.jobs.read_run_jobs`) for ``run_id`` (default: this config's
         id): the authoritative map from each family's canonical ``job_key`` to the platform job that
         actually ran it (its ``system_job_id`` on Spark/Ray/BigQuery) and how it fared. Returns
         ``[]`` when the run has no jobs yet. This is the "where did each family run, and can I go
         look at that platform's job?" read — the executed counterpart to the offline `dag`.
         """
-        from .registry import bq
+        from .registry.jobs import read_run_jobs
 
-        rows = bq.read_run_jobs(run_id or self.run_id, settings=self._settings)
+        rows = read_run_jobs(run_id or self.run_id, settings=self._settings)
         return [
             JobTrace(
                 family=r["family"],
@@ -441,7 +442,7 @@ class Forecaster:
         """The run's execution timeline as a long-form frame — per-job spans + per-cell spans.
 
         Reads the per-job trace (``v_run_jobs`` via `jobs`' reader) and the per-cell wall-clock
-        brackets (``forecast_metadata`` via `registry.bq.read_cell_timing`, capped at
+        brackets (``forecast_metadata`` via `registry.reads.read_cell_timing`, capped at
         ``cell_limit``) for ``run_id`` (default: this config's id), then stacks them into one frame
         (columns ``kind``/``lane``/``label``/``start``/``end``/``duration_s``/``status``/
         ``runtime``/``model_type``/``ts_id``) via `build_trace_frame`. Feed it to `plot_trace` for a
@@ -450,11 +451,12 @@ class Forecaster:
         the trace columns existed. This is the "how did this run unfold over wall-clock time, and
         which worker ran what?" read that sits under the per-job `jobs` summary.
         """
-        from .registry import bq
+        from .registry.jobs import read_run_jobs
+        from .registry.reads import read_cell_timing
 
         rid = run_id or self.run_id
-        job_rows = bq.read_run_jobs(rid, settings=self._settings)
-        cell_rows = bq.read_cell_timing(rid, limit=cell_limit, settings=self._settings)
+        job_rows = read_run_jobs(rid, settings=self._settings)
+        cell_rows = read_cell_timing(rid, limit=cell_limit, settings=self._settings)
         return build_trace_frame(job_rows, cell_rows)
 
     def _resolved_dataset_ref(self) -> str | None:
@@ -584,8 +586,8 @@ def build_trace_frame(
 ) -> pd.DataFrame:
     """Stack per-job and per-cell timing rows into one long-form trace frame — pure, no I/O.
 
-    ``job_rows`` are ``v_run_jobs`` rows (see `registry.bq.read_run_jobs`) and ``cell_rows`` are
-    per-cell timing rows (see `registry.bq.read_cell_timing`); this is the pure assembly step
+    ``job_rows`` are ``v_run_jobs`` rows (see `registry.jobs.read_run_jobs`) and ``cell_rows`` are
+    per-cell timing rows (see `registry.reads.read_cell_timing`); this is the pure assembly step
     `Forecaster.trace` calls after reading them, split out so it unit-tests without GCP. Each input
     row becomes one span record with the shared `_TRACE_COLUMNS` schema: a job lands on its
     ``family`` lane, a cell on its ``worker_id`` lane, so a plot can show the DAG over the workers

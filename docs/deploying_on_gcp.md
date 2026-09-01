@@ -14,7 +14,7 @@ the module comment (next to the resource) wins.
 - **One rule to keep in mind:** Terraform owns the *containers* (project, dataset, buckets,
   connection, network, service accounts, roles). The **application** owns the *tables* — the six
   registry/data tables are defined once in `src/scale_forecasting/registry/ddl.py` and created by
-  `registry.bq.ensure_tables()` at run time, so there is a single source of truth for the DDL and no
+  `registry.tables.ensure_tables()` at run time, so there is a single source of truth for the DDL and no
   HCL↔Python drift.
 
 ---

@@ -60,7 +60,7 @@ def _capturing_runner(cfg: RunConfig, settings: Any, sink_dir: str) -> Any:
     This is what gets cloudpickled to the Spark worker, so the write lands in the worker process.
     ``sink_dir`` is a filesystem path both driver and (local) workers can see; each bucket writes a
     uniquely-named file, so concurrent buckets never collide. Mirrors the real runner exactly except
-    the leaf write goes to a file instead of ``bq.write_cells``. ``settings`` is the frozen
+    the leaf write goes to a file instead of ``cells.write_cells``. ``settings`` is the frozen
     :class:`Settings` captured directly (the Connect-safe seam — no ``sparkContext.broadcast``).
     """
     from scale_forecasting.engines.spark_io import run_group
@@ -100,7 +100,7 @@ def _run_engine_locally(
     from pyspark.sql import SparkSession
 
     from scale_forecasting.engines import spark_io
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header, tables
 
     n_series, models = 4, ["theta", "holtwinters"]
     panel = _panel(n_series)
@@ -118,13 +118,13 @@ def _run_engine_locally(
         lambda cfg, settings, models=None: _capturing_runner(cfg, settings, sink),
     )
 
-    header: dict[str, Any] = {}
-    monkeypatch.setattr(bq, "ensure_tables", lambda cfg, *, settings=None: None)
+    closed: dict[str, Any] = {}
+    monkeypatch.setattr(tables, "ensure_tables", lambda cfg, *, settings=None: None)
     monkeypatch.setattr(
-        bq, "write_header", lambda cfg, run_id, *, settings=None: header.update(run_id=run_id)
+        header, "write_header", lambda cfg, run_id, *, settings=None: closed.update(run_id=run_id)
     )
     monkeypatch.setattr(
-        bq, "update_header", lambda run_id, *, settings=None, **fields: header.update(fields)
+        header, "update_header", lambda run_id, *, settings=None, **fields: closed.update(fields)
     )
     monkeypatch.setattr(Settings, "resolve", staticmethod(_settings))
 
@@ -139,13 +139,13 @@ def _run_engine_locally(
     for path in sorted(tmp_path.glob("bucket-*.jsonl")):
         for line in path.read_text().splitlines():
             written.append(json.loads(line))
-    return written, header
+    return written, closed
 
 
 def test_explode_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     from scale_forecasting.engines import spark_explode
 
-    written, header = _run_engine_locally(spark_explode, monkeypatch, tmp_path)
+    written, closed = _run_engine_locally(spark_explode, monkeypatch, tmp_path)
 
     # One row per (series, model) cell — the explode cross-join, through applyInPandas and back
     # across the process boundary.
@@ -155,9 +155,9 @@ def test_explode_run_on_local_spark(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     assert len(cells) == n_series * len(models)
     assert {m for _, m in cells} == models
 
-    assert header["status"] in {"COMPLETED", "PARTIAL"}
-    assert header["n_series"] == n_series
-    assert header["runtime_seconds"] > 0
+    assert closed["status"] in {"COMPLETED", "PARTIAL"}
+    assert closed["n_series"] == n_series
+    assert closed["runtime_seconds"] > 0
 
 
 def test_injected_session_is_used_but_not_stopped(
@@ -175,7 +175,7 @@ def test_injected_session_is_used_but_not_stopped(
     from pyspark.sql import SparkSession
 
     from scale_forecasting.engines import spark_explode, spark_io
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header, tables
 
     n_series, models = 3, ["theta", "holtwinters"]
     panel = _panel(n_series)
@@ -192,13 +192,13 @@ def test_injected_session_is_used_but_not_stopped(
         "make_group_runner",
         lambda cfg, settings, models=None: _capturing_runner(cfg, settings, sink),
     )
-    header: dict[str, Any] = {}
-    monkeypatch.setattr(bq, "ensure_tables", lambda cfg, *, settings=None: None)
+    closed: dict[str, Any] = {}
+    monkeypatch.setattr(tables, "ensure_tables", lambda cfg, *, settings=None: None)
     monkeypatch.setattr(
-        bq, "write_header", lambda cfg, run_id, *, settings=None: header.update(run_id=run_id)
+        header, "write_header", lambda cfg, run_id, *, settings=None: closed.update(run_id=run_id)
     )
     monkeypatch.setattr(
-        bq, "update_header", lambda run_id, *, settings=None, **fields: header.update(fields)
+        header, "update_header", lambda run_id, *, settings=None, **fields: closed.update(fields)
     )
 
     session = SparkSession.builder.master("local[2]").appName("injected-smoke").getOrCreate()
@@ -219,6 +219,6 @@ def test_injected_session_is_used_but_not_stopped(
             for line in path.read_text().splitlines():
                 written.append(json.loads(line))
         assert len(written) == n_series * len(models)
-        assert header["status"] in {"COMPLETED", "PARTIAL"}
+        assert closed["status"] in {"COMPLETED", "PARTIAL"}
     finally:
         session.stop()

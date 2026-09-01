@@ -821,11 +821,11 @@ def _stamp_cluster_telemetry(
     """
     if not sizing:
         return
-    from .registry import bq
+    from .registry.header import merge_header_telemetry, sizing_telemetry_path
 
     try:
-        bq.merge_header_telemetry(
-            run_id, {bq.sizing_telemetry_path(sizing): sizing}, settings=settings
+        merge_header_telemetry(
+            run_id, {sizing_telemetry_path(sizing): sizing}, settings=settings
         )
         _log.info("cluster sizing stamped for run %s", run_id)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal

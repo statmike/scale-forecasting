@@ -24,10 +24,11 @@ layer reads the run's own ``raw_config`` back to recover what it *planned* to do
 
 Same pure/I-O seam as `sdk`: the ``_assemble_*`` functions are pure (turn reader dicts into the
 result dataclasses, unit-tested offline), while `monitor_run` / `review_run` are the thin I/O
-callers that read the registry (`registry.bq`) and hand off. Plotting (`plot_progress`,
-`plot_leaderboard`, `plot_metric_distribution`) is a convenience over the dataclasses, with
-matplotlib imported lazily so it never touches the near-instant ``import scale_forecasting`` path.
-For the wall-clock execution timeline, reuse `sdk.build_trace_frame` + `sdk.plot_trace`.
+callers that read the registry (`registry.reads`, `registry.jobs`) and hand off. Plotting
+(`plot_progress`, `plot_leaderboard`, `plot_metric_distribution`) is a convenience over the
+dataclasses, with matplotlib imported lazily so it never touches the near-instant
+``import scale_forecasting`` path. For the wall-clock execution timeline, reuse
+`sdk.build_trace_frame` + `sdk.plot_trace`.
 """
 
 from __future__ import annotations
@@ -39,7 +40,8 @@ from typing import TYPE_CHECKING, Any
 
 from .config import RunConfig
 from .dag import group_models_by_family
-from .registry.bq import METRIC_COLUMNS, parse_ts
+from .registry.reads import parse_ts
+from .registry.rows import METRIC_COLUMNS
 
 if TYPE_CHECKING:
     from .probes.reconcile import ProbeReport
@@ -329,12 +331,13 @@ def monitor_run(
 ) -> RunProgress:  # pragma: no cover - GCP I/O
     """Read a run's live progress: header status + per-family job state + series done vs. expected.
 
-    Reads the run's header (`registry.bq.read_run_summary`), its config
-    (`registry.bq.read_run_config`, for the expected-work denominator), its jobs
-    (`registry.bq.read_run_jobs`) and its landed-cell counts (`registry.bq.read_progress`), then
-    composes them via `_assemble_progress`. Poll it while a run is in flight; returns a status-only
-    snapshot when the run id has never run. Every family carries ``quiet_seconds`` either way —
-    the "is this bar frozen or just coarse" signal, free because it comes off rows already read.
+    Reads the run's header (`registry.reads.read_run_summary`), its config
+    (`registry.reads.read_run_config`, for the expected-work denominator), its jobs
+    (`registry.jobs.read_run_jobs`) and its landed-cell counts (`registry.reads.read_progress`),
+    then composes them via `_assemble_progress`. Poll it while a run is in flight; returns a
+    status-only snapshot when the run id has never run. Every family carries ``quiet_seconds``
+    either way — the "is this bar frozen or just coarse" signal, free because it comes off rows
+    already read.
 
     ``probe=True`` additionally escalates the run's non-terminal jobs to their runtime and attaches
     the reconciled `probes.reconcile.ProbeReport` as ``RunProgress.probe`` — the answer to *is this
@@ -344,7 +347,8 @@ def monitor_run(
     ``stale_after_s`` overrides the probe's startup grace (see `probes.reconcile.probe_run`) and
     is ignored when ``probe`` is ``False``.
     """
-    from .registry import bq
+    from .registry.jobs import read_run_jobs
+    from .registry.reads import read_progress, read_run_config, read_run_summary
 
     if probe:
         from .probes.reconcile import _read_and_probe
@@ -356,13 +360,13 @@ def monitor_run(
         )
         return replace(progress, probe=report)
 
-    summary = bq.read_run_summary(run_id, settings=settings)
-    raw = bq.read_run_config(run_id, settings=settings)
+    summary = read_run_summary(run_id, settings=settings)
+    raw = read_run_config(run_id, settings=settings)
     cfg = RunConfig.model_validate(raw) if raw else None
     if cfg is None:
         return _assemble_progress(run_id, summary, None, [], [])
-    job_rows = bq.read_run_jobs(run_id, settings=settings)
-    progress_rows = bq.read_progress(run_id, settings=settings)
+    job_rows = read_run_jobs(run_id, settings=settings)
+    progress_rows = read_progress(run_id, settings=settings)
     return _assemble_progress(run_id, summary, cfg, job_rows, progress_rows)
 
 
@@ -420,7 +424,7 @@ def _model_review_from_aggregate(
     lb_row: dict[str, Any],
     prediction_counts: dict[str, int],
 ) -> ModelReview:
-    """Turn one `registry.bq.read_metric_aggregates` row (+ its leaderboard match) into a
+    """Turn one `registry.reads.read_metric_aggregates` row (+ its leaderboard match) into a
     `ModelReview` — the full metric panel plus the leaderboard-only fields (artifact rate,
     median fit time)."""
     ensemble_id = agg.get("ensemble_id")
@@ -515,21 +519,27 @@ def review_run(
 ) -> RunReview:  # pragma: no cover - GCP I/O
     """Read a finished run's data-science review: bests per family/overall + ensemble lift + panel.
 
-    Reads the header (`registry.bq.read_run_summary`), the config (for the decision metric and
-    series count), the leaderboard (`registry.bq.read_leaderboard`), the cross-series aggregates
-    (`registry.bq.read_metric_aggregates`) and per-model prediction counts
-    (`registry.bq.read_prediction_counts`), then composes via `_assemble_review`.
+    Reads the header (`registry.reads.read_run_summary`), the config (for the decision metric and
+    series count), the leaderboard (`registry.reads.read_leaderboard`), the cross-series aggregates
+    (`registry.reads.read_metric_aggregates`) and per-model prediction counts
+    (`registry.reads.read_prediction_counts`), then composes via `_assemble_review`.
     """
-    from .registry import bq
+    from .registry.reads import (
+        read_leaderboard,
+        read_metric_aggregates,
+        read_prediction_counts,
+        read_run_config,
+        read_run_summary,
+    )
 
-    summary = bq.read_run_summary(run_id, settings=settings)
-    raw = bq.read_run_config(run_id, settings=settings)
+    summary = read_run_summary(run_id, settings=settings)
+    raw = read_run_config(run_id, settings=settings)
     cfg = RunConfig.model_validate(raw) if raw else None
     decision_metric = cfg.backtest.decision_metric if cfg else "wape"
     n_series = (summary or {}).get("n_series") or (cfg.data.series_limit if cfg else None)
-    leaderboard_rows = bq.read_leaderboard(run_id, settings=settings)
-    aggregate_rows = bq.read_metric_aggregates(run_id, settings=settings)
-    prediction_counts = bq.read_prediction_counts(run_id, settings=settings)
+    leaderboard_rows = read_leaderboard(run_id, settings=settings)
+    aggregate_rows = read_metric_aggregates(run_id, settings=settings)
+    prediction_counts = read_prediction_counts(run_id, settings=settings)
     return _assemble_review(
         run_id, summary, decision_metric, n_series,
         leaderboard_rows, aggregate_rows, prediction_counts,

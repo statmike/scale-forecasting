@@ -670,11 +670,11 @@ def make_chunk_runner(
     """
 
     def _run(chunk: pd.DataFrame) -> pd.DataFrame:
-        from ..registry import bq
+        from ..registry.cells import write_cells
 
         results, status = run_group(chunk, cfg, models, params_by_model)
         if results:
-            bq.write_cells(results, settings=settings)
+            write_cells(results, settings=settings)
         return status
 
     return _run

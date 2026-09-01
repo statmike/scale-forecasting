@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> None:
     """
     from pyspark.sql import SparkSession
 
-    from ..registry import bq
+    from ..registry.tables import ensure_tables
     from ..settings import Settings
     from .generator import GenConfig, generate_partition
 
@@ -258,7 +258,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # Driver-side: guarantee the tables exist, then clear each target for a clean re-seed.
-    bq.ensure_tables(settings=settings)
+    ensure_tables(settings=settings)
     for name, iceberg in targets:
         _clear_existing(settings, name, iceberg=iceberg)
 

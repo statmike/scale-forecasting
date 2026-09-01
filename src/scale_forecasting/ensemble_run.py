@@ -293,9 +293,9 @@ def _ensemble_batch(
     from .engines import bigquery_engine
     from .ensembler import combine_oof
     from .metrics import METRIC_NAMES, compute_metrics
-    from .registry import bq
     from .registry.artifacts import upload_artifact_bytes
     from .registry.ids import make_model_hash
+    from .registry.write_api import _META_SPEC, _PRED_SPEC
     from .worker import _rollup_metrics
 
     # Every table read here (forecast_predictions / backtest_oof / forecast_metadata) is a registry
@@ -357,7 +357,7 @@ def _ensemble_batch(
         )
 
     if pred_rows:
-        bigquery_engine._append_rows(settings, "forecast_predictions", bq._PRED_SPEC, pred_rows)
+        bigquery_engine._append_rows(settings, "forecast_predictions", _PRED_SPEC, pred_rows)
     log.info(
         "ensemble predictions appended: run_id=%s ensemble_id=%s rows=%d strategies=%s",
         run_id,
@@ -419,7 +419,7 @@ def _ensemble_batch(
                 "created_at": created_at,
             }
         )
-    bigquery_engine._append_rows(settings, "forecast_metadata", bq._META_SPEC, meta_rows)
+    bigquery_engine._append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)
     log.info(
         "ensemble run done: run_id=%s ensemble_id=%s scored=%d models=%s",
         run_id,

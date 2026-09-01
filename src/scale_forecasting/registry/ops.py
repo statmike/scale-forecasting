@@ -382,7 +382,7 @@ def format_doctor(report: DoctorReport) -> str:
 
 def _resolved(settings: Settings | None) -> Settings:
     """The passed settings, or a fresh resolve from the ``SF_*`` environment."""
-    from .bq import _resolve_settings
+    from .tables import _resolve_settings
 
     return _resolve_settings(settings)
 
@@ -518,8 +518,8 @@ def init(
     from google.cloud import bigquery
 
     from ..errors import RegistryError
-    from .bq import ensure_views
     from .ddl import render_create_tables, render_migrations
+    from .tables import ensure_views
 
     resolved = _resolved(settings)
     client = bigquery.Client(project=resolved.project_id)
@@ -531,11 +531,11 @@ def init(
         )
         client.create_dataset(resolved.registry_dataset_ref, exists_ok=True)
 
-    # The registry half of what `bq.ensure_tables` does — CREATE, then the additive ALTERs, so this
-    # both stands up a new registry and brings an older one up to the current column set. The five
-    # run-collection tables are always native BigQuery, hence `iceberg=False` and no connection.
-    # Two passes, not one merged dict: both renderers key on the table name, so merging would drop
-    # a CREATE for every table that also has a migration.
+    # The registry half of what `tables.ensure_tables` does — CREATE, then the additive ALTERs, so
+    # this both stands up a new registry and brings an older one up to the current column set. The
+    # five run-collection tables are always native BigQuery, hence `iceberg=False` and no
+    # connection. Two passes, not one merged dict: both renderers key on the table name, so merging
+    # would drop a CREATE for every table that also has a migration.
     creates = render_create_tables(
         resolved.registry_dataset_ref, iceberg=False, tables=REGISTRY_TABLE_NAMES
     )

@@ -162,7 +162,7 @@ def test_review_is_graceful_when_identity_unresolved(monkeypatch: pytest.MonkeyP
 
 
 def test_status_reads_header_for_this_configs_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
     seen: dict[str, Any] = {}
 
@@ -171,7 +171,7 @@ def test_status_reads_header_for_this_configs_run_id(monkeypatch: pytest.MonkeyP
         seen["settings"] = settings
         return "COMPLETED"
 
-    monkeypatch.setattr(bq, "header_status", _fake_status)
+    monkeypatch.setattr(header, "header_status", _fake_status)
     f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
     assert f.status() == "COMPLETED"
     assert seen["run_id"] == f.run_id  # defaults to this config's id
@@ -179,26 +179,26 @@ def test_status_reads_header_for_this_configs_run_id(monkeypatch: pytest.MonkeyP
 
 
 def test_status_is_none_when_never_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
     assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).status() is None
 
 
 def test_wait_returns_terminal_status_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "COMPLETED")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
     f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
     assert f.wait(timeout=1.0, poll_seconds=0.0) == "COMPLETED"
 
 
 def test_wait_polls_until_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     import scale_forecasting.sdk as sdk_mod
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
     statuses = iter(["RUNNING", "RUNNING", "PARTIAL"])
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: next(statuses))
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: next(statuses))
     slept: list[float] = []
     monkeypatch.setattr(sdk_mod.time, "sleep", lambda s: slept.append(s))
 
@@ -208,9 +208,9 @@ def test_wait_polls_until_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_wait_raises_when_run_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: None)
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
     f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
     with pytest.raises(ConfigError, match="no run found"):
         f.wait(timeout=1.0, poll_seconds=0.0)
@@ -218,9 +218,9 @@ def test_wait_raises_when_run_not_found(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_wait_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     import scale_forecasting.sdk as sdk_mod
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header
 
-    monkeypatch.setattr(bq, "header_status", lambda *a, **k: "RUNNING")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "RUNNING")
     monkeypatch.setattr(sdk_mod.time, "sleep", lambda s: None)
     # monotonic jumps past the deadline on the second read so the loop exits deterministically.
     clock = iter([0.0, 100.0, 200.0, 300.0])
@@ -232,7 +232,7 @@ def test_wait_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_results_maps_leaderboard_rows_to_model_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import reads
 
     seen: dict[str, Any] = {}
 
@@ -261,7 +261,7 @@ def test_results_maps_leaderboard_rows_to_model_results(monkeypatch: pytest.Monk
             },
         ]
 
-    monkeypatch.setattr(bq, "read_leaderboard", _fake_leaderboard)
+    monkeypatch.setattr(reads, "read_leaderboard", _fake_leaderboard)
     f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
     results = f.results()
 
@@ -273,9 +273,9 @@ def test_results_maps_leaderboard_rows_to_model_results(monkeypatch: pytest.Monk
 
 
 def test_results_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import reads
 
-    monkeypatch.setattr(bq, "read_leaderboard", lambda *a, **k: [])
+    monkeypatch.setattr(reads, "read_leaderboard", lambda *a, **k: [])
     assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).results() == []
 
 
@@ -297,7 +297,7 @@ def test_dag_returns_planned_nodes_offline() -> None:
 
 
 def test_jobs_maps_run_jobs_rows_to_job_traces(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs
 
     seen: dict[str, Any] = {}
 
@@ -331,7 +331,7 @@ def test_jobs_maps_run_jobs_rows_to_job_traces(monkeypatch: pytest.MonkeyPatch) 
             },
         ]
 
-    monkeypatch.setattr(bq, "read_run_jobs", _fake_run_jobs)
+    monkeypatch.setattr(jobs, "read_run_jobs", _fake_run_jobs)
     f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
     traces = f.jobs()
 
@@ -346,9 +346,9 @@ def test_jobs_maps_run_jobs_rows_to_job_traces(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_jobs_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs
 
-    monkeypatch.setattr(bq, "read_run_jobs", lambda *a, **k: [])
+    monkeypatch.setattr(jobs, "read_run_jobs", lambda *a, **k: [])
     assert sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).jobs() == []
 
 
@@ -462,7 +462,7 @@ def test_build_trace_frame_empty_inputs_keep_columns() -> None:
 
 
 def test_trace_reads_both_sources_and_builds_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs, reads
 
     seen: dict[str, Any] = {}
 
@@ -478,8 +478,8 @@ def test_trace_reads_both_sources_and_builds_frame(monkeypatch: pytest.MonkeyPat
         seen["limit"] = limit
         return [_cell_row(), _cell_row(ts_id="series-b")]
 
-    monkeypatch.setattr(bq, "read_run_jobs", _fake_jobs)
-    monkeypatch.setattr(bq, "read_cell_timing", _fake_cells)
+    monkeypatch.setattr(jobs, "read_run_jobs", _fake_jobs)
+    monkeypatch.setattr(reads, "read_cell_timing", _fake_cells)
     f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
     frame = f.trace(cell_limit=100)
 

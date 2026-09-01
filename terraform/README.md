@@ -306,6 +306,6 @@ Google Access) that serverless compute requires; `seed` submits the gated Datapr
 batch that materializes the example dataset.
 
 **Table schemas live in Python, not here.** The five registry/data tables are defined once in
-`src/scale_forecasting/registry/ddl.py` and created by `registry.bq.ensure_tables()` at run
+`src/scale_forecasting/registry/ddl.py` and created by `registry.tables.ensure_tables()` at run
 time. Terraform owns the *containers* (dataset, BigLake connection, bucket grants); the app
 owns the *tables* — so there's a single source of truth for the DDL.

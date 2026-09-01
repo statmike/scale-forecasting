@@ -251,14 +251,15 @@ def _read_and_probe(
     families when ``None``); ``progress`` and the reconciled ``report`` cover the same set.
     """
     from ..config import RunConfig
-    from ..registry import bq
+    from ..registry.jobs import read_run_jobs
+    from ..registry.reads import read_progress, read_run_config, read_run_summary
     from ..review import _assemble_progress
 
-    summary = bq.read_run_summary(run_id, settings=settings)
-    raw = bq.read_run_config(run_id, settings=settings)
+    summary = read_run_summary(run_id, settings=settings)
+    raw = read_run_config(run_id, settings=settings)
     cfg = RunConfig.model_validate(raw) if raw else None
-    job_rows = bq.read_run_jobs(run_id, settings=settings) if cfg else []
-    progress_rows = bq.read_progress(run_id, settings=settings) if cfg else []
+    job_rows = read_run_jobs(run_id, settings=settings) if cfg else []
+    progress_rows = read_progress(run_id, settings=settings) if cfg else []
     progress = _assemble_progress(
         run_id, summary, cfg, job_rows, progress_rows, now=datetime.now(UTC)
     )
@@ -302,8 +303,9 @@ def probe_run(
 ) -> ProbeReport:  # pragma: no cover - GCP I/O
     """Reconcile a run's registry state against live runtime state → a `ProbeReport`.
 
-    Reads the run's header + config + job rows + landed-cell counts (`registry.bq`), assembles the
-    registry-side progress (`review._assemble_progress`), then escalates **only** the non-terminal
+    Reads the run's header + config + job rows + landed-cell counts (`registry.reads`,
+    `registry.jobs`), assembles the registry-side progress (`review._assemble_progress`), then
+    escalates **only** the non-terminal
     jobs to their runtime — a routine poll of an already-terminal run touches no runtime (empty
     ``to_probe`` ⇒ ``escalated=False``). ``job`` narrows *both* the escalation and the report to one
     family (the per-family drill-down; an unknown name raises `ConfigError` listing the valid ones);

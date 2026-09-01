@@ -130,8 +130,8 @@ def run(
 
     from pyspark.sql import SparkSession
 
-    from ..registry import bq
     from ..registry.ids import make_run_id
+    from ..registry.lifecycle import run_header
     from ..settings import Settings
 
     settings = settings or Settings.resolve()
@@ -150,7 +150,7 @@ def run(
     # 1. Header first (run_header): write RUNNING on entry so a run is visible even if the Spark job
     #    dies mid-flight, and finalize the collected status on a clean exit. Contributor mode
     #    (main.run owns the shared header) is a no-op wrapper. A crash inside records FAILED first.
-    with bq.run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
+    with run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
         # An injected session (notebook / Spark Connect) is caller-owned — use it, don't stop it.
         # Only a self-created session (the Dataproc batch path) is stopped here.
         owns_session = spark is None

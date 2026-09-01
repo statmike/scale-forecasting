@@ -225,7 +225,7 @@ def _finalize_cancelled(
     goes to the header, not the job row), so we rebuild it from the handle we parsed plus the new
     ``$.cancel`` audit blob — preserving the handle so the cancelled attempt stays reconcilable.
     """
-    from ..registry import bq
+    from ..registry.jobs import update_job
 
     audit = _build_cancel_audit(
         actor=actor,
@@ -241,7 +241,7 @@ def _finalize_cancelled(
     }
     if started is not None:
         fields["runtime_seconds"] = (cancelled_at - started).total_seconds()
-    bq.update_job(row["job_id"], settings=settings, **fields)
+    update_job(row["job_id"], settings=settings, **fields)
 
 
 def cancel_run(
@@ -311,12 +311,13 @@ def cancel_run(
 
     # Re-read every family (not just the --job subset) so the header reflects the true post-cancel
     # state — a per-family cancel makes a multi-family run PARTIAL, a whole-run cancel CANCELLED.
-    from ..registry import bq
+    from ..registry.header import update_header
+    from ..registry.jobs import read_run_jobs
 
-    all_statuses = [r.get("status") for r in bq.read_run_jobs(run_id, settings=s)]
+    all_statuses = [r.get("status") for r in read_run_jobs(run_id, settings=s)]
     header_status = _roll_header_after_cancel(all_statuses)
     if header_status is not None:
-        bq.update_header(run_id, settings=s, status=header_status)
+        update_header(run_id, settings=s, status=header_status)
     return CancelReport(
         run_id=run_id, plan=plan, executed=True, outcomes=tuple(outcomes),
         header_status=header_status, actor=resolved_actor, reason=reason,

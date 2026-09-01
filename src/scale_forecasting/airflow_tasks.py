@@ -12,8 +12,9 @@ The node set mirrors `dag.plan_dag`:
 * ``begin_run`` — ensure the registry tables exist and write the run header (RUNNING).
 * ``run_family`` / ``run_native`` — run one model family on its resolved runtime, each **self-owning
   its own ``run_jobs`` row** (via `main._launch_family_job` / `main._launch_native_job`, which wrap
-  the launch in `registry.bq.run_job`) — so the per-job trace and wall-clock are byte-identical to a
-  live `main.run`, and a concurrent (microbatch) ensemble can watch the rows flip in real time.
+  the launch in `registry.lifecycle.run_job`) — so the per-job trace and wall-clock are
+  byte-identical to a live `main.run`, and a concurrent (microbatch) ensemble can watch the rows
+  flip in real time.
 * ``run_ensemble`` — the ensemble node, ``barrier`` (post-join) or ``microbatch`` (concurrent, its
   cross-process stop-signal polling ``run_jobs`` for base-family completion).
 * ``create_ray_cluster`` / ``delete_ray_cluster`` (and the Dataproc-cluster pair) — the shared
@@ -82,21 +83,23 @@ def combined_run_status(job_statuses: dict[str, str | None], *, ensemble_enabled
 def begin_run(config_uri: str) -> str:
     """Open the run: ensure the registry tables exist, then write the header RUNNING; return run_id.
 
-    The owner-mode entry half of `registry.bq.run_header`, split out so the DAG can write the header
-    up front and finalize it in a separate task process (`finalize_run`). Idempotent: re-running the
+    The owner-mode entry half of `registry.lifecycle.run_header`, split out so the DAG can write
+    the header up front and finalize it in a separate task process (`finalize_run`). Idempotent:
+    re-running the
     same config re-derives the same ``run_id`` and appends a fresh header row (latest wins),
     matching the local re-run behavior.
     """
     from .config import load_config_uri
-    from .registry import bq
+    from .registry.header import write_header
     from .registry.ids import make_run_id
+    from .registry.tables import ensure_tables
     from .settings import Settings
 
     cfg = load_config_uri(config_uri)
     run_id = make_run_id(cfg)
     settings = Settings.resolve()
-    bq.ensure_tables(cfg, settings=settings)
-    bq.write_header(cfg, run_id, settings=settings)
+    ensure_tables(cfg, settings=settings)
+    write_header(cfg, run_id, settings=settings)
     return run_id
 
 
@@ -166,7 +169,7 @@ def run_ensemble(config_uri: str) -> None:
     and blends the base predictions into the consensus pseudo-models. In ``microbatch`` mode the DAG
     runs this task **in parallel** with the base families (gated only on `begin_run`); its
     ``upstream_done`` predicate is the cross-process equivalent of the in-process ``base_done``
-    event — it polls ``run_jobs`` (`registry.bq.read_run_jobs`) and reports the base jobs finished
+    event — it polls ``run_jobs`` (`registry.jobs.read_run_jobs`) and reports the base jobs finished
     once every base family has reached a terminal status, so the drain loop stops after its final
     ready-series pass. ``barrier`` mode ignores the predicate (the task already runs after the
     join).
@@ -174,8 +177,8 @@ def run_ensemble(config_uri: str) -> None:
     from . import main
     from .config import load_config_uri
     from .dag import plan_dag
-    from .registry import bq
     from .registry.ids import make_run_id
+    from .registry.jobs import read_run_jobs
     from .settings import Settings
 
     cfg = load_config_uri(config_uri)
@@ -186,7 +189,7 @@ def run_ensemble(config_uri: str) -> None:
         base_families = plan_dag(cfg).families  # every base family; excludes the ensemble node
 
         def upstream_done() -> bool:
-            rows = bq.read_run_jobs(run_id, settings=settings)
+            rows = read_run_jobs(run_id, settings=settings)
             statuses = {r["family"]: r.get("status") for r in rows}
             return all(statuses.get(family) in _TERMINAL_STATUSES for family in base_families)
 
@@ -199,17 +202,18 @@ def finalize_run(config_uri: str) -> None:
     """Close the run: read every family's ``run_jobs`` outcome and finalize the header status.
 
     The DAG's terminal join (``trigger_rule="all_done"``, so it runs even when a family failed). The
-    owner-mode exit half of `registry.bq.run_header`, split out to a separate task: reads the
-    per-job rows (`registry.bq.read_run_jobs`), rolls them into the combined status
+    owner-mode exit half of `registry.lifecycle.run_header`, split out to a separate task: reads the
+    per-job rows (`registry.jobs.read_run_jobs`), rolls them into the combined status
     (`combined_run_status`), and stamps ``status`` + a whole-run ``runtime_seconds`` (the slowest
     parallel job's wall-clock) + the ``bq_models`` list onto the header
-    (`registry.bq.update_header`). Each family's own row was
+    (`registry.header.update_header`). Each family's own row was
     already finalized by its task, so this only reconciles the header the base jobs run *under*.
     """
     from .config import load_config_uri
     from .dag import plan_dag
-    from .registry import bq
+    from .registry.header import update_header
     from .registry.ids import make_run_id
+    from .registry.jobs import read_run_jobs
     from .settings import Settings
 
     cfg = load_config_uri(config_uri)
@@ -217,12 +221,12 @@ def finalize_run(config_uri: str) -> None:
     settings = Settings.resolve()
     run_dag = plan_dag(cfg)
 
-    rows = bq.read_run_jobs(run_id, settings=settings)
+    rows = read_run_jobs(run_id, settings=settings)
     statuses = {r["family"]: r.get("status") for r in rows}
     status = combined_run_status(statuses, ensemble_enabled=run_dag.ensemble_enabled)
     runtime_seconds = max((r.get("runtime_seconds") or 0.0 for r in rows), default=0.0)
     native = run_dag.native_job
-    bq.update_header(
+    update_header(
         run_id,
         settings=settings,
         status=status,

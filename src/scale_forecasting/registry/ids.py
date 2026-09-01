@@ -188,7 +188,7 @@ def decide_attempt(current_max: int | None, *, force: bool) -> tuple[int, bool]:
     """Resolve which ``attempt`` a submission should use, given the run/family's current max.
 
     The pure core of the re-run policy (the registry read that supplies ``current_max`` lives in
-    ``registry.bq``): returns ``(attempt, is_new_job)``.
+    ``registry.jobs``): returns ``(attempt, is_new_job)``.
 
     - No prior job (``current_max`` is None) → ``(1, True)``: first attempt.
     - A prior job and not ``force`` → ``(current_max, False)``: reuse the existing job (an

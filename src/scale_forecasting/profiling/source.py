@@ -214,12 +214,12 @@ def profile_for_run(cfg: RunConfig, *, settings: Settings | None = None) -> Comp
     if key in _RESOLVED:
         return _RESOLVED[key]
 
-    from ..registry import bq
+    from ..registry.harvest import discover_harvest_run, read_compute_harvest
 
     resolved = resolve_profile_source(
         cfg,
-        load_run=lambda run_id: bq.read_compute_harvest(run_id, settings=settings),
-        discover=lambda want: bq.discover_harvest_run(
+        load_run=lambda run_id: read_compute_harvest(run_id, settings=settings),
+        discover=lambda want: discover_harvest_run(
             source_table=want.source_table, freq=want.freq, settings=settings
         ),
         load_baseline=load_baseline,

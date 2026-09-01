@@ -139,9 +139,10 @@ def _snapshot_clause(snapshot_millis: int | None) -> str:
 
     Appended immediately *after* each backtick-quoted source-table reference so every native SQL
     statement time-travels to the identical instant every other job in the run reads — the same
-    snapshot the Spark and Ray readers pin to (`registry.bq.snapshot_millis_for`). ``None`` renders
-    nothing, so an un-pinned run's SQL is byte-identical to the pre-snapshot behavior (and only the
-    source tables carry it — model objects and the registry tables are never time-travelled).
+    snapshot the Spark and Ray readers pin to (`registry.header.snapshot_millis_for`). ``None``
+    renders nothing, so an un-pinned run's SQL is byte-identical to the pre-snapshot behavior (and
+    only the source tables carry it — model objects and the registry tables are never
+    time-travelled).
     """
     if snapshot_millis is None:
         return ""
@@ -723,8 +724,9 @@ def run(
 
     from ..errors import RegistryError, get_logger
     from ..metrics import METRIC_NAMES, compute_metrics
-    from ..registry import bq
     from ..registry.ids import make_run_id
+    from ..registry.lifecycle import run_header
+    from ..registry.write_api import _META_SPEC, _OOF_SPEC
     from ..settings import Settings
     from ..worker import _rollup_metrics
 
@@ -753,7 +755,7 @@ def run(
     # Header first (run_header): RUNNING on entry, finalized on a clean exit; a crash records FAILED
     # on the owned header before re-raising. Contributor mode (main.run owns the shared header) is a
     # no-op wrapper, so main.run's finalize sees the raised RegistryError and records the status.
-    with bq.run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
+    with run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
         started = time.perf_counter()
         created_at = datetime.now(UTC)
         status = "COMPLETED"
@@ -865,8 +867,8 @@ def run(
                             )
                         )
 
-            _append_rows(settings, "backtest_oof", bq._OOF_SPEC, oof_rows)
-            _append_rows(settings, "forecast_metadata", bq._META_SPEC, meta_rows)
+            _append_rows(settings, "backtest_oof", _OOF_SPEC, oof_rows)
+            _append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)
         except Exception as exc:  # noqa: BLE001 - run_header records FAILED as this propagates
             # Wrap the cause so the failure reads clearly; run_header (owner mode) or main.run's
             # finalize (contributor mode) records the FAILED/PARTIAL header status.
@@ -927,20 +929,20 @@ def _append_rows(  # pragma: no cover - GCP I/O, @gcp smoke
     """Append plain row dicts to a cell table via the registry's Storage Write API path.
 
     Reuses the same ``_proto_for`` / ``_encode_rows`` / ``_append_via_write_api`` machinery that
-    `registry.bq.write_cells` uses — the ``CellResult`` requirement lives only in the
+    `registry.cells.write_cells` uses — the ``CellResult`` requirement lives only in the
     ``assemble_*`` wrappers, not the write path, so the native engine feeds ``_*_SPEC``-shaped dicts
     directly. Empty input is a no-op.
     """
     from google.cloud import bigquery_storage_v1
 
-    from ..registry import bq
+    from ..registry.write_api import _append_via_write_api, _encode_rows, _proto_for
 
     if not rows:
         return
     write_client = bigquery_storage_v1.BigQueryWriteClient()
-    msg_cls, proto_descriptor = bq._proto_for(table, spec)
-    serialized = bq._encode_rows(msg_cls, spec, rows)
-    bq._append_via_write_api(
+    msg_cls, proto_descriptor = _proto_for(table, spec)
+    serialized = _encode_rows(msg_cls, spec, rows)
+    _append_via_write_api(
         write_client,
         settings.project_id,
         settings.registry_dataset_id,

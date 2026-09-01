@@ -102,14 +102,14 @@ def test_run_cell_maps_bad_model_to_error_status() -> None:
 
 
 def test_group_runner_writes_once(monkeypatch: Any) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import cells
 
     calls: list[int] = []
 
     def _fake_write(results: list[CellResult], *, settings: Settings) -> None:
         calls.append(len(results))
 
-    monkeypatch.setattr(bq, "write_cells", _fake_write)
+    monkeypatch.setattr(cells, "write_cells", _fake_write)
 
     runner = make_group_runner(_cfg(), _SETTINGS, models=_MODELS)
     status = runner(_source("series-a", "series-b"))
@@ -118,14 +118,14 @@ def test_group_runner_writes_once(monkeypatch: Any) -> None:
 
 
 def test_chunk_runner_writes_once(monkeypatch: Any) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import cells
 
     calls: list[int] = []
 
     def _fake_write(results: list[CellResult], *, settings: Settings) -> None:
         calls.append(len(results))
 
-    monkeypatch.setattr(bq, "write_cells", _fake_write)
+    monkeypatch.setattr(cells, "write_cells", _fake_write)
 
     cfg = _cfg()
     chunk = chunk_cells(_source("series-a", "series-b"), cfg, _MODELS, n_chunks=1)[0]

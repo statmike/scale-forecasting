@@ -13,10 +13,10 @@ Seven tables are the source of truth for the whole system. Storage format is spl
   on either storage. The engines read both transparently through BigQuery's table interface.
 
 Rendering is a pure string operation (no BigQuery client), so it is snapshot-tested
-offline; ``registry/bq.ensure_tables`` executes what ``render_deployment_ddl`` renders.
+offline; ``registry.tables.ensure_tables`` executes what ``render_deployment_ddl`` renders.
 
 The ``JSON`` columns use the native ``JSON`` type (only the native registry carries them; the
-Iceberg source table has none). The row assemblers in ``bq.py`` serialize JSON text, which a
+Iceberg source table has none). The row assemblers in ``rows.py`` serialize JSON text, which a
 ``JSON`` column parses on ingest; read them back with ``.`` field access or ``JSON_VALUE``.
 
 Schema evolution is additive: when a new NULLABLE column is added to a body below,

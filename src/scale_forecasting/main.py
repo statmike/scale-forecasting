@@ -305,8 +305,8 @@ def _launch_family_job(
 
     Called on a worker thread — one per Python family (statistical / ml / deep_learning), so the
     families run in parallel under one shared header. Resolves this family's attempt
-    (`registry.bq.next_job_attempt`, bumped by ``--force``), opens the per-job lifecycle
-    (`registry.bq.run_job`, which writes the row RUNNING and finalizes its terminal status +
+    (`registry.jobs.next_job_attempt`, bumped by ``--force``), opens the per-job lifecycle
+    (`registry.lifecycle.run_job`, which writes the row RUNNING and finalizes its terminal status +
     wall-clock), then dispatches to the `RuntimeSubmitter` for the family's **resolved** runtime
     (`get_submitter` on ``job.compute.runtime`` — Spark *xor* Ray, chosen per family, not per run)
     with ``manage_header=False`` (this orchestrator owns the single shared header). The submitter
@@ -335,13 +335,14 @@ def _launch_family_job(
     and every other runtime/mode ignores it.
     """
     from .probes.vocabulary import ProbeHandle
-    from .registry import bq
     from .registry.ids import make_job_key
+    from .registry.jobs import next_job_attempt
+    from .registry.lifecycle import run_job
     from .submitters import get_submitter
 
     compute = job.compute
     assert compute is not None  # a Python family always resolves compute (native is handled inline)
-    attempt, _ = bq.next_job_attempt(run_id, job.family, force=force, settings=settings)
+    attempt, _ = next_job_attempt(run_id, job.family, force=force, settings=settings)
     system_job_id = _system_job_id(make_job_key(run_id, job.family, attempt), compute.runtime)
     # A shared Ray cluster (provisioned by the orchestrator for a multi-Ray-family run) is targeted
     # only by Ray families; every other runtime ignores it.
@@ -388,7 +389,7 @@ def _launch_family_job(
             region=settings.region,
             spark_mode="serverless",
         )
-    with bq.run_job(
+    with run_job(
         run_id,
         job.family,
         attempt,
@@ -440,16 +441,17 @@ def _launch_native_job(
     Native models execute as SQL in BigQuery — no Python runtime, no worker thread — so this runs on
     `run`'s main thread, overlapping the Python family jobs. Like `_launch_family_job` it resolves
     the ``native`` attempt, maps the deterministic ``job_key`` to the BigQuery job id
-    (`_system_job_id`), and opens the per-job lifecycle (`registry.bq.run_job`, ``runtime`` fixed to
-    ``"bigquery"``, carrying that id), then runs the engine in contributor mode. Returns the
-    engine's `BqOutcome` so the caller can stamp the observed ``n_series`` onto the header.
+    (`_system_job_id`), and opens the per-job lifecycle (`registry.lifecycle.run_job`, ``runtime``
+    fixed to ``"bigquery"``, carrying that id), then runs the engine in contributor mode. Returns
+    the engine's `BqOutcome` so the caller can stamp the observed ``n_series`` onto the header.
     """
     from .engines import bigquery_engine
     from .probes.vocabulary import ProbeHandle
-    from .registry import bq
     from .registry.ids import make_job_key
+    from .registry.jobs import next_job_attempt
+    from .registry.lifecycle import run_job
 
-    attempt, _ = bq.next_job_attempt(run_id, "native", force=force, settings=settings)
+    attempt, _ = next_job_attempt(run_id, "native", force=force, settings=settings)
     system_job_id = _system_job_id(make_job_key(run_id, "native", attempt), "bigquery")
     # BigQuery coordinates are fully known up front (jobs share the deterministic id prefix), so the
     # entry handle is the only one — there is no stamp-back site for the native family.
@@ -459,7 +461,7 @@ def _launch_native_job(
         region=settings.region,
         id_kind="prefix",
     )
-    with bq.run_job(
+    with run_job(
         run_id,
         "native",
         attempt,
@@ -493,9 +495,9 @@ def _launch_ensemble_job(
     consensus pseudo-models and scores them onto the leaderboard (`ensemble_run`). Like the family
     jobs it gets a deterministic identity — ``job_key`` (`registry.ids.make_job_key` on the
     ``"ensemble"`` family) mapped to its BigQuery job id (`_system_job_id`) — and its own
-    ``run_jobs`` row (`registry.bq.run_job`, ``runtime="bigquery"``: the node reads/writes BigQuery
-    and blends in driver pandas, taking no Spark/Ray cluster), so a run's cross-system trace shows
-    the ensemble beside the base jobs under the shared ``run_id``.
+    ``run_jobs`` row (`registry.lifecycle.run_job`, ``runtime="bigquery"``: the node reads/writes
+    BigQuery and blends in driver pandas, taking no Spark/Ray cluster), so a run's cross-system
+    trace shows the ensemble beside the base jobs under the shared ``run_id``.
 
     ``cfg.compute.ensemble.mode`` selects *when* the consensus is computed: ``"barrier"`` (default)
     blends once over every base prediction; ``"microbatch"`` drains series incrementally as each
@@ -512,10 +514,11 @@ def _launch_ensemble_job(
     """
     from .ensemble_run import run_ensembles, run_ensembles_microbatch
     from .probes.vocabulary import ProbeHandle
-    from .registry import bq
     from .registry.ids import make_job_key
+    from .registry.jobs import next_job_attempt
+    from .registry.lifecycle import run_job
 
-    attempt, _ = bq.next_job_attempt(run_id, "ensemble", force=force, settings=settings)
+    attempt, _ = next_job_attempt(run_id, "ensemble", force=force, settings=settings)
     system_job_id = _system_job_id(make_job_key(run_id, "ensemble", attempt), "bigquery")
     # BigQuery coordinates are fully known up front (jobs share the deterministic id prefix), so the
     # entry handle is the only one — there is no stamp-back site for the ensemble node.
@@ -525,7 +528,7 @@ def _launch_ensemble_job(
         region=settings.region,
         id_kind="prefix",
     )
-    with bq.run_job(
+    with run_job(
         run_id,
         "ensemble",
         attempt,
@@ -604,7 +607,8 @@ def run(
     from concurrent.futures import ThreadPoolExecutor
 
     from .dag import plan_dag
-    from .registry import bq
+    from .registry.header import header_status
+    from .registry.lifecycle import run_header
     from .settings import Settings
 
     # The series-limit override is applied first so it flows into the run_id and every family — a
@@ -628,7 +632,7 @@ def run(
     # (AlreadyExists), and the reused-attempt terminal write would clobber the completed run's job
     # rows. ``force`` re-executes as a fresh attempt (distinct job ids); a run that never completed
     # (never ran, or a prior FAILED/PARTIAL) falls through and runs.
-    if not force and bq.header_status(run_id, settings=settings) == "COMPLETED":
+    if not force and header_status(run_id, settings=settings) == "COMPLETED":
         _log.info("run %s already COMPLETED; skipping relaunch (pass force=True to re-run)", run_id)
         return run_id
 
@@ -660,7 +664,7 @@ def run(
     # job joins, with the combined status computed below. Every job runs with manage_header=False so
     # nothing else touches this row. Per-family errors are captured (not raised through the block)
     # so the finalize records the right status; the first is re-raised after, for a non-zero exit.
-    with bq.run_header(cfg, run_id, settings=settings, manage=True) as hdr:
+    with run_header(cfg, run_id, settings=settings, manage=True) as hdr:
         # Launch each Python family on its own worker thread, and run the BigQuery-native family
         # inline on the main thread, so all families overlap. Each family carries the same
         # contributor-mode contract (its model subset + shared header owned here) and its own
@@ -782,15 +786,15 @@ def _combined_status(
 def _check_idempotency(run_id: str, settings: Settings) -> Idempotency:
     """Best-effort pre-submit existence check: has this exact config already run?
 
-    Queries the registry for ``run_id`` (`registry.bq.header_status`). Any failure — no registry
+    Queries the registry for ``run_id`` (`registry.header.header_status`). Any failure — no registry
     table yet, no reachable BigQuery — degrades to ``checked=False`` (unknown), so a plain offline
     dry-run still returns a plan. The check is advisory: it warns before an accidental duplicate run
     but never blocks one (a re-run is idempotent via dedupe-on-read).
     """
-    from .registry import bq
+    from .registry.header import header_status
 
     try:
-        status = bq.header_status(run_id, settings=settings)
+        status = header_status(run_id, settings=settings)
     except Exception:  # noqa: BLE001 - advisory check; unknown on any failure, never fatal
         return Idempotency(checked=False, exists=False, prior_status=None)
     return Idempotency(checked=True, exists=status is not None, prior_status=status)
@@ -962,11 +966,11 @@ def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> 
         return cfg
 
     from .profiling.signature import signature_from_config
-    from .registry import bq
+    from .registry.harvest import discover_harvest_run
 
     want = signature_from_config(cfg)
     try:
-        found = bq.discover_harvest_run(
+        found = discover_harvest_run(
             source_table=want.source_table, freq=want.freq, settings=settings
         )
     except Exception as exc:  # noqa: BLE001 - an unpinned plan is a worse plan, not a failed one

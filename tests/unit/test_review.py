@@ -2,8 +2,8 @@
 
 Same shape as ``test_sdk.py``: the pure assembly/derivation functions are exercised directly with
 hand-built reader dicts, the I/O entry points (`monitor_run`/`review_run`) are covered by
-monkeypatching the `registry.bq` readers, and the plots get a headless (Agg) smoke check —
-populated and empty. No GCP, no matplotlib display.
+monkeypatching the `registry.reads` / `registry.jobs` readers, and the plots get a headless (Agg)
+smoke check — populated and empty. No GCP, no matplotlib display.
 """
 
 from __future__ import annotations
@@ -257,7 +257,7 @@ def test_assemble_review_falls_back_to_leaderboard_when_no_aggregates() -> None:
 
 
 def test_monitor_run_composes_readers(monkeypatch: Any) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs, reads
 
     cfg = _cfg()
     seen: dict[str, Any] = {}
@@ -267,12 +267,12 @@ def test_monitor_run_composes_readers(monkeypatch: Any) -> None:
         seen["settings"] = settings
         return {"status": "RUNNING", "n_series": 10}
 
-    monkeypatch.setattr(bq, "read_run_summary", _summary)
-    monkeypatch.setattr(bq, "read_run_config", lambda rid, *, settings=None: cfg.model_dump())
-    monkeypatch.setattr(bq, "read_run_jobs", lambda rid, *, settings=None:
+    monkeypatch.setattr(reads, "read_run_summary", _summary)
+    monkeypatch.setattr(reads, "read_run_config", lambda rid, *, settings=None: cfg.model_dump())
+    monkeypatch.setattr(jobs, "read_run_jobs", lambda rid, *, settings=None:
                         [{"family": "statistical", "runtime": "spark", "hardware": "cpu",
                           "status": "RUNNING", "runtime_seconds": None}])
-    monkeypatch.setattr(bq, "read_progress", lambda rid, *, settings=None:
+    monkeypatch.setattr(reads, "read_progress", lambda rid, *, settings=None:
                         [{"model_type": "theta", "ensemble_id": None, "n_cells_done": 5,
                           "mean_fit_seconds": 0.5}])
 
@@ -284,10 +284,12 @@ def test_monitor_run_composes_readers(monkeypatch: Any) -> None:
 
 
 def test_monitor_run_status_only_when_config_missing(monkeypatch: Any) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import reads
 
-    monkeypatch.setattr(bq, "read_run_summary", lambda rid, *, settings=None: {"status": "PENDING"})
-    monkeypatch.setattr(bq, "read_run_config", lambda rid, *, settings=None: None)
+    monkeypatch.setattr(
+        reads, "read_run_summary", lambda rid, *, settings=None: {"status": "PENDING"}
+    )
+    monkeypatch.setattr(reads, "read_run_config", lambda rid, *, settings=None: None)
     rp = R.monitor_run("rid", settings=_SETTINGS)
     assert rp.status == "PENDING" and rp.families == ()
 
@@ -298,10 +300,15 @@ def test_monitor_run_with_probe_reuses_the_probe_reader_and_attaches_the_report(
     # probe=True must not re-read the registry: it delegates to the probe's single read+escalate
     # pass and keeps both halves — the progress it built and the report it reconciled.
     from scale_forecasting.probes import reconcile
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import jobs, reads
 
-    for name in ("read_run_summary", "read_run_config", "read_run_jobs", "read_progress"):
-        monkeypatch.setattr(bq, name, _never_called(name))
+    for module, name in (
+        (reads, "read_run_summary"),
+        (reads, "read_run_config"),
+        (jobs, "read_run_jobs"),
+        (reads, "read_progress"),
+    ):
+        monkeypatch.setattr(module, name, _never_called(name))
 
     progress = R.RunProgress("rid", "RUNNING", 10, (), 0, None, None)
     report = reconcile.ProbeReport("rid", "RUNNING", True, (), False)
@@ -326,16 +333,18 @@ def _never_called(name: str) -> Any:
 
 
 def test_review_run_composes_readers(monkeypatch: Any) -> None:
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import reads
 
     cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "decision_metric": "mae"})
-    monkeypatch.setattr(bq, "read_run_summary", lambda rid, *, settings=None:
+    monkeypatch.setattr(reads, "read_run_summary", lambda rid, *, settings=None:
                         {"status": "COMPLETED", "n_series": 10})
-    monkeypatch.setattr(bq, "read_run_config", lambda rid, *, settings=None: cfg.model_dump())
-    monkeypatch.setattr(bq, "read_leaderboard", lambda rid, *, settings=None: [])
-    monkeypatch.setattr(bq, "read_metric_aggregates", lambda rid, *, settings=None:
+    monkeypatch.setattr(reads, "read_run_config", lambda rid, *, settings=None: cfg.model_dump())
+    monkeypatch.setattr(reads, "read_leaderboard", lambda rid, *, settings=None: [])
+    monkeypatch.setattr(reads, "read_metric_aggregates", lambda rid, *, settings=None:
                         [_agg("theta", None, 0.2, mean_mae=1.5, p50_mae=1.4)])
-    monkeypatch.setattr(bq, "read_prediction_counts", lambda rid, *, settings=None: {"theta": 70})
+    monkeypatch.setattr(
+        reads, "read_prediction_counts", lambda rid, *, settings=None: {"theta": 70}
+    )
 
     rr = R.review_run("rid", settings=_SETTINGS)
     assert rr.decision_metric == "mae"  # taken from the run's own config

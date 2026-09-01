@@ -439,10 +439,10 @@ def _fake_runner(
 ) -> Any:
     """A BigQuery-free stand-in for :func:`ray_io.make_chunk_runner`.
 
-    Ray tasks run in separate processes, so we can't monkeypatch ``bq.write_cells`` inside a worker;
-    instead we swap the whole runner for one that emits a status row per ``(ts_id, model)`` cell
-    without fitting a model or touching BigQuery. Returned closure is cloudpickle-able (Ray ships it
-    to the worker). Every cell reports ``status="ok"`` so the run rolls up COMPLETED. The
+    Ray tasks run in separate processes, so we can't monkeypatch ``cells.write_cells`` inside a
+    worker; instead we swap the whole runner for one that emits a status row per ``(ts_id, model)``
+    cell without fitting a model or touching BigQuery. Returned closure is cloudpickle-able (Ray
+    ships it to the worker). Every cell reports ``status="ok"`` so the run rolls up COMPLETED. The
     ``params_by_model`` arg mirrors the real signature (fleetwide HPO) — ignored here.
     """
 
@@ -468,22 +468,22 @@ def _stubbed_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(ray_io, "make_chunk_runner", _fake_runner)
 
     calls: dict[str, Any] = {"ensure": 0, "write_header": 0, "update_header": None}
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry import header, tables
 
     monkeypatch.setattr(
-        bq,
+        tables,
         "ensure_tables",
         lambda cfg, settings=None: calls.__setitem__("ensure", calls["ensure"] + 1),
     )
     monkeypatch.setattr(
-        bq,
+        header,
         "write_header",
         lambda cfg, run_id, settings=None: calls.__setitem__(
             "write_header", calls["write_header"] + 1
         ),
     )
     monkeypatch.setattr(
-        bq,
+        header,
         "update_header",
         lambda run_id, settings=None, **fields: calls.__setitem__("update_header", fields),
     )

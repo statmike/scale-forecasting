@@ -26,7 +26,7 @@ same Storage Write API path would write it unchanged.)
 ## How results are written
 
 Every engine — Spark, Ray, and the BigQuery-native family — funnels its results through the **same**
-writer, `registry.bq.write_cells`:
+writer, `registry.cells.write_cells`:
 
 - **Workers return data, not RPCs.** A cell returns a `CellResult`; the engine hands a batch of them
   to `write_cells`, which proto-encodes the rows and appends them via the Storage Write API's default

@@ -25,8 +25,10 @@ import pandas as pd
 import pytest
 
 from scale_forecasting.config import RunConfig
-from scale_forecasting.registry import bq
+from scale_forecasting.registry.cells import write_cells
+from scale_forecasting.registry.header import update_header, write_header
 from scale_forecasting.registry.ids import make_model_hash, make_run_id
+from scale_forecasting.registry.tables import ensure_tables
 from scale_forecasting.settings import Settings
 from scale_forecasting.worker import CellResult
 
@@ -168,8 +170,8 @@ def test_registry_roundtrip(settings: Settings) -> None:
     meta = settings.table_ref("forecast_metadata")
 
     # ensure_tables is idempotent — safe to call on an existing dataset.
-    bq.ensure_tables(cfg, settings=settings)
-    bq.ensure_tables(cfg, settings=settings)  # twice: proves IF NOT EXISTS
+    ensure_tables(cfg, settings=settings)
+    ensure_tables(cfg, settings=settings)  # twice: proves IF NOT EXISTS
 
     # Write a fresh RUNNING header. run_registry is a single-row-per-run header written by
     # query-INSERT (no streaming buffer), so a defensive pre-clean is safe here (unlike the
@@ -178,7 +180,7 @@ def test_registry_roundtrip(settings: Settings) -> None:
         f"DELETE FROM `{settings.table_ref('run_registry')}` WHERE run_id=@run_id",
         job_config=_run_id_params(run_id),
     ).result()
-    bq.write_header(cfg, run_id, settings=settings)
+    write_header(cfg, run_id, settings=settings)
     header = next(
         iter(
             client.query(
@@ -198,7 +200,7 @@ def test_registry_roundtrip(settings: Settings) -> None:
         _ok_cell(run_id, "series-1", cfg, base=20.0),
         _error_cell(run_id, "series-2", cfg),
     ]
-    bq.write_cells(results, settings=settings)
+    write_cells(results, settings=settings)
 
     # 2 ok cells × 3 prediction rows = 6; error cell contributes none.
     assert _poll_count(client, preds, run_id, 6) == 6
@@ -230,7 +232,7 @@ def test_registry_roundtrip(settings: Settings) -> None:
 
     # Re-run: append-only (no DELETE — the Write API buffer forbids it). Raw rows may double,
     # but the dedupe-on-read logical count is stable — the idempotency contract.
-    bq.write_cells(results, settings=settings)
+    write_cells(results, settings=settings)
     assert _poll_count(client, preds, run_id, 12) == 12  # raw rows appended
     assert _distinct_count(client, "forecast_predictions", preds, run_id) == 6
     assert _distinct_count(client, "backtest_oof", oof, run_id) == 6
@@ -243,7 +245,7 @@ def test_registry_roundtrip(settings: Settings) -> None:
         {"total_wall_s": 20.0, "executor_instances": 2, "dcu_milli_seconds": 123456},
         sort_keys=True,
     )
-    bq.update_header(
+    update_header(
         run_id,
         settings=settings,
         status=status,

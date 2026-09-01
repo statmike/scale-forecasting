@@ -119,8 +119,8 @@ def test_snapshot_creates_readable_point_in_time_copies(settings: Settings) -> N
     """
     from google.cloud import bigquery
 
-    from scale_forecasting.registry.bq import ensure_tables
     from scale_forecasting.registry.ddl import REGISTRY_TABLE_NAMES
+    from scale_forecasting.registry.tables import ensure_tables
 
     ensure_tables(settings=settings)
     suffix = f"opstest_{uuid.uuid4().hex[:10]}"
@@ -145,8 +145,8 @@ def test_snapshot_creates_readable_point_in_time_copies(settings: Settings) -> N
 
 def test_doctor_reports_the_live_registry(settings: Settings) -> None:
     """`doctor` is read-only and answers about the registry that is actually deployed."""
-    from scale_forecasting.registry.bq import ensure_tables
     from scale_forecasting.registry.ddl import REGISTRY_TABLE_NAMES
+    from scale_forecasting.registry.tables import ensure_tables
 
     ensure_tables(settings=settings)
     report = ops.doctor(settings=settings)
@@ -195,7 +195,8 @@ def test_drop_run_deletes_every_tier_of_a_real_run(settings: Settings) -> None:
     from google.cloud import bigquery
 
     from scale_forecasting.config import RunConfig
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry.cells import write_cells
+    from scale_forecasting.registry.header import update_header, write_header
     from scale_forecasting.registry.ids import make_run_id
     from scale_forecasting.worker import CellResult
 
@@ -205,7 +206,7 @@ def test_drop_run_deletes_every_tier_of_a_real_run(settings: Settings) -> None:
         models=["theta"],
     )
     run_id = make_run_id(cfg)
-    bq.write_header(cfg, run_id, settings=settings)
+    write_header(cfg, run_id, settings=settings)
     cell = CellResult(
         run_id=run_id,
         ts_id="series-0",
@@ -227,8 +228,8 @@ def test_drop_run_deletes_every_tier_of_a_real_run(settings: Settings) -> None:
         fit_seconds=0.5,
         artifact_bytes=b"fake-fitted-model-bytes",
     )
-    bq.write_cells([cell], settings=settings)
-    bq.update_header(run_id, settings=settings, status="COMPLETED", n_series=1)
+    write_cells([cell], settings=settings)
+    update_header(run_id, settings=settings, status="COMPLETED", n_series=1)
 
     client = bigquery.Client(project=settings.project_id)
     header = settings.registry_table_ref("run_registry")

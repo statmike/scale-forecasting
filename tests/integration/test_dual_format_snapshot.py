@@ -55,7 +55,12 @@ import pytest
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import bigquery_engine as be
 from scale_forecasting.engines import ray_engine
-from scale_forecasting.registry import bq, ddl
+from scale_forecasting.registry import ddl
+from scale_forecasting.registry.header import (
+    _SNAPSHOT_SAFETY_MARGIN_MS,
+    snapshot_millis_for,
+    write_header,
+)
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
 
@@ -220,8 +225,8 @@ def _seed_pre_pin_then_append_post(
     """
     _insert_via_staging(client, settings, table, _seed_rows(_N_PRE, seed=21))
     # Pre-rows must be committed before snapshot = now − 2000ms, so wait out the margin (+slack).
-    time.sleep(bq._SNAPSHOT_SAFETY_MARGIN_MS / 1000 + _MARGIN_SLACK_S)
-    bq.write_header(cfg, run_id, settings=settings)  # pins snapshot_millis on the header
+    time.sleep(_SNAPSHOT_SAFETY_MARGIN_MS / 1000 + _MARGIN_SLACK_S)
+    write_header(cfg, run_id, settings=settings)  # pins snapshot_millis on the header
     # Distinct ids so the appended series are genuinely new (seed offset avoids id overlap).
     _insert_via_staging(client, settings, table, _seed_rows(_N_POST, seed=99))
 
@@ -272,7 +277,7 @@ def test_snapshot_pins_native_clause(
         live = next(iter(client.query(f"SELECT COUNT(DISTINCT ts_id) c FROM `{ref}`").result())).c
         assert live == _N_PRE + _N_POST, f"{fmt}: mutation didn't land"
 
-        clause = be._snapshot_clause(bq.snapshot_millis_for(run_id, settings=settings))
+        clause = be._snapshot_clause(snapshot_millis_for(run_id, settings=settings))
         assert clause, f"{fmt}: run recorded no snapshot"
         pinned = next(
             iter(client.query(f"SELECT COUNT(DISTINCT ts_id) c FROM `{ref}`{clause}").result())

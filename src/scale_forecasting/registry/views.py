@@ -4,7 +4,7 @@ The three-tier registry stores raw rows; a data scientist reviewing a run should
 re-derive the same roll-ups every time. These views are the *curated read surface* — the point
 where "rows in BigQuery" become "assets you review". They are pure ``CREATE OR REPLACE VIEW``
 strings (no client), so they render + snapshot-test offline exactly like the table DDL, and
-``registry/bq.ensure_views`` executes what this renders.
+``registry.tables.ensure_views`` executes what this renders.
 
 Three views, matched to the questions a run prompts:
 

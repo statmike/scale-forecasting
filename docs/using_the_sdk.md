@@ -177,12 +177,12 @@ status.show()   # one row per cell: ts_id, model_type, status, fit_seconds
 Prefer to control the write yourself? Call the pure core and the writer separately:
 
 ```python
-from scale_forecasting.registry import bq
+from scale_forecasting.registry.cells import write_cells
 
 def my_runner(pdf):
     results, status = sf.run_group(pdf, cfg, models=cfg.models)
     if results:
-        bq.write_cells(results, settings=settings)   # append-only + dedupe-on-read; safe per-partition
+        write_cells(results, settings=settings)   # append-only + dedupe-on-read; safe per-partition
     return status
 ```
 

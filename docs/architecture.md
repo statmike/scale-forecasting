@@ -45,7 +45,7 @@ statistical    ml         deep_learning       native      (each on its
                          worker.run_cell ◄── THE unit of work
                                          │      │
                                          ▼      ▼
-                    registry.bq.write_cells (Storage Write API)
+                    registry.cells.write_cells (Storage Write API)
        run_registry · run_jobs · forecast_metadata · forecast_predictions · backtest_oof
                                │
                     (all families joined & green)
@@ -74,8 +74,8 @@ There are three ways a run begins, all converging on the same engines.
    [`registry.ids.make_run_id`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ids.py) and resolves the config into
    one `FamilyJob` per present family (each with its resolved per-family compute), plus whether the
    ensemble node runs.
-2. **Write the header** once — `bq.run_header(..., manage=True)` writes one RUNNING row
-   ([`registry/bq.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/bq.py)) and finalizes it once at the end.
+2. **Write the header** once — `lifecycle.run_header(..., manage=True)` writes one RUNNING row
+   ([`registry/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/registry)) and finalizes it once at the end.
 3. **Fan out in parallel** — a `ThreadPoolExecutor` launches each Python family job
    (`_launch_family_job`) on its own thread while the BigQuery-native family runs inline on the main
    thread (`_launch_native_job`). Every family job runs `manage_header=False` so **exactly one**
@@ -177,7 +177,7 @@ derived overlay and returns to platform defaults. Individual knobs (`ray_max_nod
 
 Every engine reads the same source panel, fans out cells its own way, and calls the **same** unit of
 work. The Spark and Ray engines even share the *exact same* per-cell driver — `spark_io.run_group` —
-and the same writer — `bq.write_cells`. The only genuinely Ray-specific code is GPU/CPU routing,
+and the same writer — `cells.write_cells`. The only genuinely Ray-specific code is GPU/CPU routing,
 cluster sizing, and chunking.
 
 ### Spark — the CPU workhorse
@@ -195,7 +195,7 @@ The common Spark shape (see `spark_explode.run`,
 `groupBy(bucket).applyInPandas(group_runner, …)` → `aggregate_status` → `update_header`. The
 `group_runner` closure ([`spark_io.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/spark_io.py)) is what each
 Spark task actually executes: it calls `run_group` (which loops `run_cell` over the cells in the
-bucket) and then `bq.write_cells` to persist them.
+bucket) and then `cells.write_cells` to persist them.
 
 ### Ray — the fractional-GPU path
 
@@ -222,7 +222,7 @@ to it, instead of each family self-provisioning.
 [`bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) runs `arima_plus` /
 `arima_plus_xreg` / `timesfm` entirely inside BigQuery as BQML SQL — no Python compute — and writes
 its metrics and predictions through the **same** Storage Write API path as the Python cells (it
-reuses `bq._proto_for` / `_encode_rows` / `_append_via_write_api`). It honors holidays (for BQML
+reuses `write_api._proto_for` / `_encode_rows` / `_append_via_write_api`). It honors holidays (for BQML
 parity via `features.holiday_frame`) but not the Python target transform. It is the `native` family
 job, running in parallel with the Python family jobs under the same `run_id`.
 
@@ -318,21 +318,21 @@ dedupe-on-read):
 
 | Table | Tier | Written by |
 |-------|------|-----------|
-| `run_registry` | the header — config + telemetry | `bq.run_header` / `update_header` (once per run) |
-| `run_jobs` | per-family-job row — runtime, hardware, system job id, status, telemetry | `bq.run_job` (once per family job + the ensemble) |
-| `forecast_metadata` | per-cell metrics + artifact links | `bq.write_cells` (executor-side) |
-| `forecast_predictions` | the forecast values | `bq.write_cells` |
-| `backtest_oof` | out-of-fold rows for learned ensembling | `bq.write_cells` |
+| `run_registry` | the header — config + telemetry | `lifecycle.run_header` / `update_header` (once per run) |
+| `run_jobs` | per-family-job row — runtime, hardware, system job id, status, telemetry | `lifecycle.run_job` (once per family job + the ensemble) |
+| `forecast_metadata` | per-cell metrics + artifact links | `cells.write_cells` (executor-side) |
+| `forecast_predictions` | the forecast values | `cells.write_cells` |
+| `backtest_oof` | out-of-fold rows for learned ensembling | `cells.write_cells` |
 
 The files:
 
-- [`bq.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/bq.py) — the write path: pure `assemble_*_rows`
+- [`registry/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/registry) — the write path: pure `assemble_*_rows` (`rows.py`)
   functions, the Storage Write API encoder (`_proto_for` / `_encode_rows` / `_append_via_write_api`),
   and the header, `run_job`, and `write_cells` lifecycles. **The reusable seam**: `write_cells` is
   called executor-side by *both* the Spark group-runner and the Ray chunk-runner, so results stream to
   BigQuery in bulk from the workers — parallelism is bounded by compute, not a tracking server's QPS.
 - [`ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py) — the table definitions (single source of truth
-  for the schema), rendered and executed by `bq.ensure_tables` at run time. Terraform owns the
+  for the schema), rendered and executed by `tables.ensure_tables` at run time. Terraform owns the
   *containers*; the app owns the *tables*.
 - [`ids.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ids.py) — `make_run_id(cfg)` = `<run-name-slug>-<12-hex
   digest of the canonical config>` and `make_job_key(run_id, family, attempt)` = the canonical
@@ -359,7 +359,7 @@ identity that ties its platform job, its `run_jobs` row, and its offline plan to
   platform's legal charset/length: `dataproc_job_id` (Spark), `ray_submission_id` (Ray),
   `bigquery_job_id` (native / ensemble). It lands in `run_jobs.system_job_id`, so you can jump from a
   run's trace straight to the platform console.
-- **Attempts** — `bq.next_job_attempt(run_id, family, force=…)` bumps the attempt so a `--force`
+- **Attempts** — `jobs.next_job_attempt(run_id, family, force=…)` bumps the attempt so a `--force`
   re-run is a fresh, distinctly-keyed job under the same `run_id`; `v_run_jobs` surfaces the latest
   attempt per family.
 
@@ -400,19 +400,19 @@ from its GCS URI, and dispatches to the named engine's `run()`. That's the whole
 CLI / notebook / Airflow / SDK
   main.run(cfg)                                            main.py
     dag.plan_dag → make_run_id (ids.py) + group_models_by_family + resolve_family_compute
-    bq.run_header (RUNNING, one shared header)             registry/bq.py   (ddl.py, views.py)
+    lifecycle.run_header (RUNNING, one shared header)             registry/lifecycle.py (ddl.py, views.py)
     ├─ [thread] per Python family — _launch_family_job → get_submitter(runtime).launch
     │    ├─ SparkSubmitter → submit.submit_batch → spark_entry.main → spark_explode.run
     │    │      spark_io: cross_join_models · add_bucket · make_group_runner
-    │    │      applyInPandas → spark_io.run_group → worker.run_cell → bq.write_cells
+    │    │      applyInPandas → spark_io.run_group → worker.run_cell → cells.write_cells
     │    ├─ RaySubmitter → ray_submit.submit_ray → ray_entry.main → ray_engine.run
     │    │      ray_io: split_gpu_cpu_models · plan_cluster · chunk_cells · make_chunk_runner
-    │    │      make_chunk_runner → spark_io.run_group → worker.run_cell → bq.write_cells
+    │    │      make_chunk_runner → spark_io.run_group → worker.run_cell → cells.write_cells
     │    └─ injected Spark session → spark_explode.run   (in-process, e.g. NB01)
-    │        (each family opens its own run_jobs row via bq.run_job)
+    │        (each family opens its own run_jobs row via lifecycle.run_job)
     ├─ [inline] native family — _launch_native_job → bigquery_engine.run   (BQML SQL → bq write-api)
     └─ (all families join & green) ensemble node — _launch_ensemble_job → ensemble_run.run_ensembles
-    hdr.finalize (combined status + wall-clock)            registry/bq.py
+    hdr.finalize (combined status + wall-clock)            registry/lifecycle.py
 
 worker.run_cell  ── THE unit of work ──                     worker.py
     ├─ features.fit_transform_lambda / build_features       features.py
@@ -424,7 +424,7 @@ worker.run_cell  ── THE unit of work ──                     worker.py
 playground.run_model → worker.run_cell                      (local, no cluster, no registry)
 ```
 
-**The reuse seams to notice:** `spark_io.run_group`, `bq.write_cells`, and `aggregate_status` are
+**The reuse seams to notice:** `spark_io.run_group`, `cells.write_cells`, and `aggregate_status` are
 shared **verbatim** by Spark and Ray (`ray_io` re-exports them), and the `manage=True` header opened
 by `main.run` threads `manage_header=False` into every family job so exactly one header row exists per
 `run_id` while each family keeps its own `run_jobs` row. Those facts are what make "same code
@@ -440,7 +440,7 @@ everywhere, one job per family, one run" real.
 4. [`dag.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/dag.py) — how a config becomes a set of parallel family jobs.
 5. [`main.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py) — how it's all orchestrated.
 6. Then one engine — [`spark_explode.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/spark_explode.py) — to see
-   the fan-out, and [`registry/bq.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/bq.py) to see the write path.
+   the fan-out, and [`registry/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/registry) to see the write path.
 
 ## See also
 

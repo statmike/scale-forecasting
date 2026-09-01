@@ -403,16 +403,23 @@ def test_cli_has_no_wipe_verb():
 def test_the_product_ships_no_whole_registry_wipe_anywhere():
     """The tripwire for the decision, not just for this CLI.
 
-    `reset.py` and `registry.bq.drop_all` were removed when `registry.ops` landed: a whole-registry
+    `reset.py` and a `drop_all` writer were removed when `registry.ops` landed: a whole-registry
     drop is `bq rm`, and giving it a product verb made it look supported and safe while it silently
     stranded every artifact it had just orphaned. Re-adding either would restore that trap quietly,
     so it fails here instead. The *pure* renderer stays — it is strings only and has no side effect.
+
+    The sweep is over the whole `registry` package rather than one module, so splitting the writers
+    up (or adding a new one) cannot smuggle the verb back in through a file the test never named.
     """
     import importlib
+    import pkgutil
 
-    from scale_forecasting.registry import bq, ddl
+    from scale_forecasting import registry
+    from scale_forecasting.registry import ddl
 
-    assert not hasattr(bq, "drop_all")
+    for mod in pkgutil.iter_modules(registry.__path__):
+        loaded = importlib.import_module(f"scale_forecasting.registry.{mod.name}")
+        assert not hasattr(loaded, "drop_all"), f"{mod.name} ships a whole-registry wipe"
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scale_forecasting.reset")
     assert callable(ddl.render_drop_tables), "the pure renderer is still wanted"

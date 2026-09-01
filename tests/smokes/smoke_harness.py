@@ -9,8 +9,8 @@ reviewer would run by hand and checks the result end to end:
 2. **stage** — `main.stage_run`: upload the config (+ code zip for Spark) and write the
    reproducibility manifest ``runs/<run_id>.plan.json``; capture the runnable launch commands.
 3. **run** — `main.run`: submit every family on its runtime under one run_id and block to terminal.
-4. **verify** — read the registry views back (`registry.bq.read_run_summary` / ``read_run_jobs`` /
-   ``read_leaderboard``) and assert the run reached COMPLETED, every expected family ran and
+4. **verify** — read the registry views back (`registry.reads.read_run_summary` / ``read_run_jobs``
+   / ``read_leaderboard``) and assert the run reached COMPLETED, every expected family ran and
    succeeded with a real platform job id, and every configured model (plus the ensembles when
    enabled) scored onto the leaderboard.
 5. **rerun / collision** — re-run the same config with no ``--force``: it must resolve the *same*
@@ -105,7 +105,7 @@ def verify_predictions(pred_counts: dict[str, int], cfg: RunConfig) -> list[str]
     shows there with ``n_cells`` set — but writes zero rows to ``forecast_predictions``. This is the
     guard that turns that silent failure into a FAIL: each configured model must have a non-zero
     prediction count (``pred_counts`` is ``model_type -> row count`` from
-    `bq.read_prediction_counts`).
+    `reads.read_prediction_counts`).
     """
     problems: list[str] = []
     for model in cfg.models:
@@ -185,7 +185,12 @@ def run_smoke(
     """Drive one smoke config through dry → stage → run → verify → rerun → trace. Live (@gcp)."""
     from scale_forecasting import main as main_mod
     from scale_forecasting.config import load_config
-    from scale_forecasting.registry import bq
+    from scale_forecasting.registry.jobs import read_run_jobs
+    from scale_forecasting.registry.reads import (
+        read_leaderboard,
+        read_prediction_counts,
+        read_run_summary,
+    )
     from scale_forecasting.settings import Settings
 
     cfg = load_config(config_path)
@@ -202,11 +207,11 @@ def run_smoke(
     run_id = main_mod.run(cfg, settings=settings, force=force)
 
     # 4. verify — read the views back.
-    summary = bq.read_run_summary(run_id, settings=settings)
+    summary = read_run_summary(run_id, settings=settings)
     run_status = str(summary.get("status")) if summary else None
-    job_rows = bq.read_run_jobs(run_id, settings=settings)
-    board = bq.read_leaderboard(run_id, settings=settings)
-    pred_counts = bq.read_prediction_counts(run_id, settings=settings)
+    job_rows = read_run_jobs(run_id, settings=settings)
+    board = read_leaderboard(run_id, settings=settings)
+    pred_counts = read_prediction_counts(run_id, settings=settings)
     problems = (
         verify_run_jobs(job_rows, cfg)
         + verify_leaderboard(board, cfg)
@@ -223,7 +228,7 @@ def run_smoke(
         if run_id2 != run_id:
             problems.append(f"rerun resolved a different run_id: {run_id} -> {run_id2}")
         else:
-            problems += verify_rerun(board, bq.read_leaderboard(run_id2, settings=settings))
+            problems += verify_rerun(board, read_leaderboard(run_id2, settings=settings))
 
     # 6. reverse-trace — id → service per family.
     trace = format_trace(job_rows)

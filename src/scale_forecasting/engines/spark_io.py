@@ -267,13 +267,13 @@ def _snapshot_millis(cfg: RunConfig, settings: Settings) -> int | None:
 
     Shared by every reader (this Spark path and the Ray engine's): derive the ``run_id`` from the
     config (`registry.ids.make_run_id`, pure) and fetch the snapshot the run recorded on its header
-    (`registry.bq.snapshot_millis_for`), so all family jobs time-travel to the identical instant.
-    Best-effort — a missing/NULL snapshot returns ``None`` and the read stays unpinned.
+    (`registry.header.snapshot_millis_for`), so all family jobs time-travel to the identical
+    instant. Best-effort — a missing/NULL snapshot returns ``None`` and the read stays unpinned.
     """
-    from ..registry import bq
+    from ..registry.header import snapshot_millis_for
     from ..registry.ids import make_run_id
 
-    return bq.snapshot_millis_for(make_run_id(cfg), settings=settings)
+    return snapshot_millis_for(make_run_id(cfg), settings=settings)
 
 
 def _needed_columns(cfg: RunConfig) -> list[str]:
@@ -454,11 +454,11 @@ def make_group_runner(
     """
 
     def _run(pdf: pd.DataFrame) -> pd.DataFrame:
-        from ..registry import bq
+        from ..registry.cells import write_cells
 
         results, status = run_group(pdf, cfg, models, params_by_model)
         if results:
-            bq.write_cells(results, settings=settings)
+            write_cells(results, settings=settings)
         return status
 
     return _run

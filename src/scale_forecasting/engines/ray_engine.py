@@ -303,8 +303,8 @@ def run(
     import pandas as pd
     import ray
 
-    from ..registry import bq
     from ..registry.ids import make_run_id
+    from ..registry.lifecycle import run_header
     from ..settings import Settings
 
     settings = settings or Settings.resolve()
@@ -323,7 +323,7 @@ def run(
     # 1. Header first (run_header): RUNNING on entry so a run is visible even if the cluster dies
     #    mid-flight, finalized on a clean exit; a crash records FAILED first. Contributor mode
     #    (main.run owns the shared header) is a no-op wrapper.
-    with bq.run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
+    with run_header(cfg, run_id, settings=settings, manage=manage_header) as hdr:
         owns_ray = not ray.is_initialized()
         if owns_ray:
             ray.init()
