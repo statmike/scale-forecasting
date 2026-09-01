@@ -34,7 +34,7 @@ old value goes stale by definition.
 | `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
-| `run_id_inputs` | `authored-config-only` | 2026-09-01, after the fork below | `+compute.profile.source` (W11a) |
+| `run_id_inputs` | `authored-config-only` | `a22e94c` (2026-09-01), after the fork below | `+compute.profile.source` (W11a) |
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 
@@ -91,7 +91,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
-| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-01 | `smoke-01-serverless-cpu-439b5350249b` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates` |
+| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-01 | `smoke-01-serverless-cpu-5af5de1accf2` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
@@ -243,9 +243,11 @@ Things that are true today and that no entry above covers. Keep this list short 
   and W11a a third by adding `compute.profile.source`; the same reasoning applies unchanged to both,
   and no row is stale for either. **The 2026-09-01 fix moved them a fourth and final time**, by
   *removing* `compute.profile.source` again — so the ids recorded that same day for smokes 01 and
-  02 (`…-439b5350249b`, `…-0ffcc1f22d54`) are already in this category, hours after being written.
-  They remain valid pointers into the registry and the results they point at are unaffected; they
-  are simply no longer recomputable from their configs. Unlike the three before it, this move makes
+  02 (`…-439b5350249b`, `…-0ffcc1f22d54`) joined this category hours after being written. They
+  remain valid pointers into the registry and the results they point at are unaffected; they are
+  simply no longer recomputable from their configs. Smoke 01's row has since been re-earned by a
+  post-fix run and carries a recomputable id again (`…-5af5de1accf2`); smoke 02's has not, and its
+  id stays a pointer-only. Unlike the three before it, this move makes
   identity *stop* drifting rather than start: `run_id_inputs` is now `authored-config-only` and
   there is no resolved value left in the digest to move it again.
   The change that *did* make live results stale arrived at W7b/W8, and it was not the one predicted
@@ -254,10 +256,10 @@ Things that are true today and that no entry above covers. Keep this list short 
   see the next gap. What moved the fleets was the **static** arithmetic W7/W8 wired in with the
   profile argument left as `None`: no measurement involved, and every Spark fleet reshaped anyway.
 
-- **`compute.profile.source` in the digest forked run identity two different ways. Fixed
-  2026-09-01; live confirmation pending.** Both halves were found live, in the campaign's first two
-  waves, and neither had an offline analogue — the offline suite contained a test asserting the
-  *forking* behaviour was correct.
+- **`compute.profile.source` in the digest forked run identity two different ways. Fixed and
+  confirmed live 2026-09-01.** Kept here rather than deleted, because how it was found is the
+  point: both halves were found live, in the campaign's first two waves, and neither had an offline
+  analogue — the offline suite contained a test asserting the *forking* behaviour was correct.
 
   - **On failure.** Smoke 02 resolved `smoke-02-bq-native-d2d37cd657e8`, and an immediate re-run
     resolved `…-0ffcc1f22d54` from a byte-identical config. The discovery query ran a moment before
@@ -282,10 +284,15 @@ Things that are true today and that no entry above covers. Keep this list short 
   user, so it belongs to the second. That also disposes of the failure half — if the field cannot
   move the id when discovery succeeds, it cannot move it when discovery raises either.
 
-  Offline-proven only so far: the inverted test plus a new one asserting the id is identical whether
-  or not discovery reached the registry. **The live confirmation is a re-run of smoke 01 passing its
-  `verify_rerun` check**, which is the exact assertion that failed. Until that happens this stays a
-  gap rather than a closed item.
+  **Confirmed live the same day, on the exact assertion that failed.** Smoke 01 re-ran post-fix as
+  `smoke-01-serverless-cpu-5af5de1accf2` and reported `rerun: checked (same id, board unchanged)` —
+  `RESULT: PASS`. The re-run resolved the same id, deduped on read, and submitted no second pair of
+  batches (the Dataproc batch list for that config shows two for run 1 and none for the re-run,
+  against four for the pre-fix invocation). Discovery was *working* during that run, not silently
+  degraded: it found run `…-8f602110b7ea`'s harvest and pinned it, and the id still did not move.
+  That is the case that matters — an exclusion is only proven by a config whose resolved value is
+  non-trivial. Offline, this is held by the inverted test plus one asserting the id is identical
+  whether or not discovery reached the registry.
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
   ended that in a single wave, and did it twice over. Run 1 harvested; run 2 was sized from run 1.
@@ -345,6 +352,20 @@ Things that are true today and that no entry above covers. Keep this list short 
   `assumed` list, against run 1's `basis: "static"`, `measured: []`,
   `assumed: ["cores", "memory_bytes"]`. The audit trail distinguishes the two, which is the point of
   having one.
+
+  A third measured run (`…-5af5de1accf2`, the post-fix re-run) added the observation the first two
+  could not, because they moved only one family's memory: **the two families in one run derive
+  different slot shapes from the same profile, and the overlay follows.** From one harvest,
+  `statistical` resolved `slot_cores=2` → `spark.task.cpus=2`, thread pins at `2`, and a
+  `maxExecutors=13` band; `ml` resolved `slot_cores=1` → no `spark.task.cpus` at all, thread pins at
+  `1`, `maxExecutors=4`, and `memoryOverhead=3834m`. Per-family sizing is real rather than a
+  per-run constant wearing a family label, and the two overlays were written under one `run_id`
+  without either clobbering the other.
+
+  One thing to watch, recorded as an observation and not a defect: `statistical` measured
+  `max_effective_cores` of **1.05** and was sized to a **2-core** slot. The ceiling is doing what it
+  was written to do, but at 100k series a 2× slot from a 5% overshoot is the kind of rounding that
+  is cheap here and expensive there. Wave 10 is where that becomes measurable.
 
   One wrinkle to know about before relying on discovery: the recorded signature has `freq: null`,
   because these configs do not set a frequency. Discovery matches on the signature, so a manual
