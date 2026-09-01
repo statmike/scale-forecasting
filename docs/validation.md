@@ -92,7 +92,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
 | 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | STALE | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
-| 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-08-22 | `smoke-02-bq-native-7b34cfd9eb98` | `python=3.11` |
+| 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
@@ -143,17 +143,18 @@ Configs live in `configs/`; these are what a *user* runs — the demo path on da
 here exactly as it does for the smokes. `compute_fallback.json` is excluded: it is a zone-failover
 map consumed at submit time, not a run config.
 
-**Every row starts `NEVER_RUN`, and that is a deliberate reading of the evidence, not a claim that
-none of these has ever executed.** Several of them certainly did, during the demo and build work
-that produced the figures quoted in `docs/workshop.md`. But no run of any of them recorded a
-`run_id`, a date, or the architecture it ran on — and this file's first rule is that an unrecorded
-run is not a result. So the demonstration surface enters the ledger empty, which is the honest
-starting position and the reason for adding the table at all: it is the surface with the *widest*
-gap between what we believe works and what we can cite.
+**Every row started `NEVER_RUN` when this table was added, and that was a deliberate reading of the
+evidence, not a claim that none of these had ever executed.** Several of them certainly had, during
+the demo and build work that produced the figures quoted in `docs/workshop.md`. But no run of any of
+them recorded a `run_id`, a date, or the architecture it ran on — and this file's first rule is that
+an unrecorded run is not a result. So the demonstration surface entered the ledger empty, which is
+the honest starting position and the reason for adding the table at all: it is the surface with the
+*widest* gap between what we believe works and what we can cite. Rows fill in as the live campaign
+([`docs/smoke_testing.md`](smoke_testing.md) for how each is run) reaches them.
 
 | Config | Proves | Status | Date | run_id | Axes at proof |
 |--------|--------|--------|------|--------|---------------|
-| `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | NEVER_RUN | — | — | — |
+| `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | CURRENT | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11` |
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | NEVER_RUN | — | — | — |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | NEVER_RUN | — | — | — |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | NEVER_RUN | — | — | — |
@@ -237,6 +238,21 @@ Things that are true today and that no entry above covers. Keep this list short 
   see the next gap. What moved the fleets was the **static** arithmetic W7/W8 wired in with the
   profile argument left as `None`: no measurement involved, and every Spark fleet reshaped anyway.
 
+- **A transient registry error silently forks a run's identity.** Found live on 2026-09-01, on the
+  first run of the campaign. Smoke 02 resolved `smoke-02-bq-native-d2d37cd657e8`, and the immediate
+  re-run resolved `smoke-02-bq-native-0ffcc1f22d54` from a byte-identical config. The cause is
+  benign and one-off — on the first resolve the harvest columns did not yet exist on the deployed
+  `forecast_metadata`, so `discover_harvest_run` raised, `lock_profile_source` took its
+  `except Exception: return cfg` branch, and the digest was computed from a config still carrying
+  `source: "auto"` (confirmed in that run's staged manifest) instead of the pinned `"baseline"`.
+  Run 1's own `ensure_tables` then applied the ALTER, and the id has been stable across every
+  resolve since. **The mechanism is not one-off.** `lock_profile_source`'s docstring frames that
+  degradation as the no-`SF_*` preview case, where nothing is submitted and an unpinned plan is
+  harmless. But the same branch catches a timeout, a quota error or a permissions blip on a fully
+  configured run, and there the consequence is a *different `run_id` for the same config* — the one
+  thing run identity is supposed to rule out, arriving quietly, with only a `debug`-level line. No
+  fix is proposed here; it is recorded because it is now an observed behaviour rather than a
+  hypothetical, and because the campaign's re-run/idempotency checks rest on ids being stable.
 - **No live run has ever taken a compute measurement, on any runtime.** The profiler has exactly one
   production call site — `engines/ray_engine` calls `profiling.source.resolve_profile` — and it has never
   fired in a live smoke. `mode` defaults to `"auto"` with `min_cells = 1000`, no smoke config sets
@@ -249,12 +265,15 @@ Things that are true today and that no entry above covers. Keep this list short 
   **W10 changed what the next live run will do, but not this gap.** Harvest is now on by default:
   every cell records its CPU time, absolute process memory, peak device bytes, thread cap and
   `n_obs` onto `forecast_metadata`, and `profiling.cost.harvest_profile` aggregates those rows into the
-  same `ComputeProfile` the pre-pass would have built. All of it is offline-proven only. Nothing has
-  yet run on a real executor, so three things stay unverified until a live run: that the probes
-  return sane numbers on Dataproc and Vertex rather than zeros or nulls, that the five columns
-  auto-migrate onto the existing deployed `forecast_metadata`, and that the per-cell overhead is
-  genuinely negligible at 100k scale. W12 is where that is settled; W13 (shipping a baseline)
-  depends on it.
+  same `ComputeProfile` the pre-pass would have built. Nothing has yet run on a real executor, so
+  two of the three things this listed stay unverified: that the probes return sane numbers on
+  Dataproc and Vertex rather than zeros or nulls, and that the per-cell overhead is genuinely
+  negligible at 100k scale. The third is now **settled live**: on 2026-09-01 the first run of the
+  campaign (`smoke-02-bq-native-0ffcc1f22d54`) drove `ensure_tables` against the deployed
+  `forecast_metadata`, and all five nullable harvest columns — `cpu_seconds`, `process_rss_bytes`,
+  `peak_gpu_bytes`, `intraop_threads`, `n_obs` — were added by the additive ALTER without touching
+  the existing rows. The self-migration works on a table that predates it. W12 settles the rest;
+  W13 (shipping a baseline) depends on it.
 
   **W11a built the consumer against the same unproven evidence.** `compute.profile.source` defaults
   to `"auto"`, and `profiling.source.resolve_profile_source` implements the whole precedence chain —
