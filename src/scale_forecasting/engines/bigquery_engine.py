@@ -37,10 +37,13 @@ across runtimes.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from ..config import RunConfig
     from ..settings import Settings
 
@@ -105,7 +108,7 @@ def run(
     from google.cloud import bigquery
 
     from ..errors import RegistryError, get_logger
-    from ..metrics import METRIC_NAMES, compute_metrics
+    from ..metrics import METRIC_NAMES
     from ..registry.ids import make_run_id
     from ..registry.lifecycle import run_header
     from ..registry.write_api import _META_SPEC, _OOF_SPEC
@@ -229,28 +232,16 @@ def run(
                                     fold_id,
                                     exc,
                                 )
-                        for ts_id, g in eval_df.groupby("ts_id"):
-                            g = g.sort_values("forecast_date")
-                            for _, r in g.iterrows():
-                                oof_rows.append(
-                                    {
-                                        "run_id": run_id,
-                                        "ts_id": ts_id,
-                                        "model_type": model_name,
-                                        "fold_id": fold_id,
-                                        "forecast_date": r["forecast_date"],
-                                        "y_true": r["y_true"],
-                                        "yhat": r["yhat"],
-                                    }
-                                )
-                            panel = compute_metrics(
-                                g["y_true"].to_numpy(),
-                                g["yhat"].to_numpy(),
-                                y_train=hist_by_id.get(ts_id),
-                                lower=g["yhat_lower"].to_numpy(),
-                                upper=g["yhat_upper"].to_numpy(),
-                            )
-                            panels_by_ts.setdefault(str(ts_id), []).append(panel)
+                        fold_oof, fold_panels = _score_fold(
+                            eval_df,
+                            hist_by_id,
+                            run_id=run_id,
+                            model_name=model_name,
+                            fold_id=fold_id,
+                        )
+                        oof_rows.extend(fold_oof)
+                        for ts_id, panel in fold_panels.items():
+                            panels_by_ts.setdefault(ts_id, []).append(panel)
                     for ts_id, panels in panels_by_ts.items():
                         rolled = _rollup_metrics(panels)
                         meta_rows.append(
@@ -295,7 +286,75 @@ def run(
     return BqOutcome(status=status, n_series=n_series, models=list(models))
 
 
-def _meta_row(  # pragma: no cover - GCP I/O helper, exercised by the @gcp smoke
+# --- the native row shapes (pure) ----------------------------------------------
+# `_append_rows` encodes by walking the *spec*, so a key these builders emit that the spec does not
+# name is dropped in silence — no error anywhere, just a column that reads NULL for native models
+# only. That makes the row shapes a contract worth asserting with no cloud, which is why these two
+# are plain functions rather than dict literals inside `run`'s GCP body.
+
+
+def _score_fold(
+    eval_df: pd.DataFrame,
+    hist_by_id: Mapping[str, Any],
+    *,
+    run_id: str,
+    model_name: str,
+    fold_id: int,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+    """One fold's eval frame → its ``backtest_oof`` rows and one metric panel per series (pure).
+
+    This is where a native model *earns its leaderboard number*, so it is worth having out of the
+    GCP body. Three things it has to get right, none of which a live run would complain about if it
+    got them wrong — it would just report different metrics:
+
+    * the rows are sorted by ``forecast_date`` before scoring, so a horizon-weighted metric sees the
+      horizon in order;
+    * ``y_train`` comes from the series' own history (the scale denominator MASE and RMSSE divide
+      by), looked up per series rather than shared;
+    * the interval bounds are passed through, so ``coverage`` and ``pinball`` are real numbers here
+      rather than the NaNs the Python worker's OOF path produces.
+
+    Panels are keyed by ``str(ts_id)`` to match `_meta_row`'s key type — the caller accumulates one
+    list per series across folds and rolls them up exactly as `worker._rollup_metrics` does.
+    """
+    from ..metrics import compute_metrics
+
+    oof_rows: list[dict[str, Any]] = []
+    panels: dict[str, dict[str, float]] = {}
+    for ts_id, g in eval_df.groupby("ts_id"):
+        g = g.sort_values("forecast_date")
+        for _, row in g.iterrows():
+            oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, row))
+        panels[str(ts_id)] = compute_metrics(
+            g["y_true"].to_numpy(),
+            g["yhat"].to_numpy(),
+            y_train=hist_by_id.get(ts_id),
+            lower=g["yhat_lower"].to_numpy(),
+            upper=g["yhat_upper"].to_numpy(),
+        )
+    return oof_rows, panels
+
+
+def _oof_row(
+    run_id: str, ts_id: str, model_name: str, fold_id: int, row: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Assemble one ``backtest_oof`` row from a fold's eval-query result row (pure).
+
+    ``row`` is one record of `bigquery_sql.build_eval_query`'s output — the fold forecast joined to
+    actuals — so this is the seam where that query's column names become table columns.
+    """
+    return {
+        "run_id": run_id,
+        "ts_id": ts_id,
+        "model_type": model_name,
+        "fold_id": fold_id,
+        "forecast_date": row["forecast_date"],
+        "y_true": row["y_true"],
+        "yhat": row["yhat"],
+    }
+
+
+def _meta_row(
     run_id: str,
     ts_id: str,
     model_name: str,
@@ -304,7 +363,13 @@ def _meta_row(  # pragma: no cover - GCP I/O helper, exercised by the @gcp smoke
     created_at: Any,
     cfg: RunConfig,
 ) -> dict[str, Any]:
-    """Assemble one ``forecast_metadata`` row (``fold_id=NULL``) for a native model."""
+    """Assemble one ``forecast_metadata`` row (``fold_id=NULL``) for a native model (pure).
+
+    The per-cell lanes a Python worker fills — ``worker_id``, the cell timestamps, the harvested
+    ``cpu_seconds``/RSS/thread counts — are deliberately absent: a native family has no per-cell
+    worker and traces at the ``run_jobs`` grain instead, so those columns are NULL by design rather
+    than by omission.
+    """
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_model_hash
 

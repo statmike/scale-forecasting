@@ -13,12 +13,14 @@ CANCELLED status and the cell counts, never removed. A cancelled run stays reada
 runtime state was at the moment of the stop, merged into ``job_telemetry.$.cancel`` alongside the
 handle that addressed the job — so a cancelled attempt stays reconcilable afterwards.
 
-The pure pieces — plan, audit blob, header roll-up — are unit-tested per row; `cancel_run` is the
-I/O orchestrator that sequences them.
+The pure pieces — plan, audit blob, header roll-up, and the plan→rows join (`_cancel_steps`) that
+decides which families a confirmed cancel actually addresses — are unit-tested per row; `cancel_run`
+is the I/O orchestrator that sequences them.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -206,6 +208,59 @@ def _roll_header_after_cancel(statuses: list[str | None]) -> str | None:
     return "PARTIAL"
 
 
+@dataclass(frozen=True)
+class _CancelTarget:
+    """One family a confirmed cancel will actually stop: its plan line, job row and handle."""
+
+    item: CancelPlanItem
+    row: dict[str, Any]
+    handle: ProbeHandle
+
+
+def _cancel_steps(
+    plan: CancelPlan, rows: Sequence[Mapping[str, Any]]
+) -> tuple[_CancelTarget | CancelOutcome, ...]:
+    """Join the blast-radius plan to the run's job rows → what to stop, in plan order (pure).
+
+    The plan is derived from the run's *families* and the rows from ``v_run_jobs``; they are two
+    independently-assembled collections that this join has to reconcile before anything destructive
+    happens, which is why it lives out here where it can be checked with no cloud. Each element is
+    either a `_CancelTarget` (address the runtime, then finalize the row) or a ready-made
+    `CancelOutcome` for a family that cannot be addressed at all — interleaved in plan order, so the
+    report reads in the same order as the preview the operator just approved.
+
+    Three families are deliberately *not* targets. A non-cancellable one is already terminal. One
+    with no job row never launched, so there is no runtime job to stop — it is skipped silently, and
+    the caller's re-read of every family is what settles the header afterwards. One whose row has no
+    parseable handle (a pre-feature or malformed blob) yields the ``requested=False`` outcome: we
+    know it is live and we are saying plainly that we could not reach it, rather than dropping it.
+    """
+    rows_by_family = {r["family"]: dict(r) for r in rows}
+    steps: list[_CancelTarget | CancelOutcome] = []
+    for item in plan.items:
+        if not item.cancellable:
+            continue
+        row = rows_by_family.get(item.family)
+        if row is None:
+            continue
+        handle = ProbeHandle.from_job_row(row)
+        if handle is None:
+            steps.append(
+                CancelOutcome(
+                    family=item.family,
+                    job_key=row["job_id"],
+                    requested=False,
+                    cancelled=False,
+                    stopped=False,
+                    already_gone=False,
+                    detail="no handle recorded; cannot address the runtime job",
+                )
+            )
+            continue
+        steps.append(_CancelTarget(item=item, row=row, handle=handle))
+    return tuple(steps)
+
+
 # --- cancel I/O orchestrator ---------------------------------------------------
 
 
@@ -288,35 +343,19 @@ def cancel_run(
 
     resolved_actor = actor if actor is not None else resolve_principal(s)
     cancelled_at = datetime.now(UTC)
-    rows_by_family = {r["family"]: r for r in rows}
     outcomes: list[CancelOutcome] = []
-    for item in plan.items:
-        if not item.cancellable:
+    # Which families this actually addresses is decided out here, in the open — see `_cancel_steps`.
+    for step in _cancel_steps(plan, rows):
+        if isinstance(step, CancelOutcome):  # unaddressable; nothing to stop, but say so
+            outcomes.append(step)
             continue
-        r = rows_by_family.get(item.family)
-        if r is None:
-            continue
-        handle = ProbeHandle.from_job_row(r)
-        if handle is None:
-            outcomes.append(
-                CancelOutcome(
-                    family=item.family,
-                    job_key=r["job_id"],
-                    requested=False,
-                    cancelled=False,
-                    stopped=False,
-                    already_gone=False,
-                    detail="no handle recorded; cannot address the runtime job",
-                )
-            )
-            continue
-        result = get_probe(handle.runtime).cancel(handle, settings=s)
+        result = get_probe(step.handle.runtime).cancel(step.handle, settings=s)
         finalized = result.stopped or result.already_gone
         if finalized:
             _finalize_cancelled(
-                r,
-                handle,
-                item,
+                step.row,
+                step.handle,
+                step.item,
                 actor=resolved_actor,
                 cancelled_at=cancelled_at,
                 reason=reason,
@@ -324,8 +363,8 @@ def cancel_run(
             )
         outcomes.append(
             CancelOutcome(
-                family=item.family,
-                job_key=r["job_id"],
+                family=step.item.family,
+                job_key=step.row["job_id"],
                 requested=True,
                 cancelled=finalized,
                 stopped=result.stopped,

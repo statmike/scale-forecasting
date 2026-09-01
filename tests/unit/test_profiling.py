@@ -35,7 +35,7 @@ import json
 import math
 import os
 import random
-from dataclasses import replace
+from dataclasses import fields, replace
 from typing import Any
 
 import pandas as pd
@@ -1864,6 +1864,48 @@ def test_an_axis_neither_side_can_see_is_skipped_rather_than_warned_on() -> None
     want = signature.DataSignature(source_table="t", n_series=1000)
     have = signature.DataSignature(source_table=None, n_series=None, median_n_obs=400, freq="W")
     assert signature.compare_signatures(want, have) == ()
+
+
+# --- the axis-drift guard -----------------------------------------------------
+#
+# A signature axis that nothing compares is worse than no axis at all: it is recorded, stamped on
+# the provenance, and reads as though it were checked. The guard is derived from the dataclass
+# rather than a hand-kept list, so *adding* a field is what fails it — the author then either
+# teaches `compare_signatures` to judge the new axis or names it in `_UNCOMPARED_AXES` with a
+# reason, and either way the decision is explicit and reviewed.
+
+
+# Axes deliberately recorded but never compared. Empty today; an entry here is a claim that the
+# axis is for humans reading the telemetry, not for the drift verdict.
+_UNCOMPARED_AXES: dict[str, str] = {}
+
+
+def _differing_pair(field_type: str) -> tuple[Any, Any]:
+    """Two values of this axis' type that any honest comparison must call different."""
+    if "str" in field_type:
+        return "one", "another"
+    if "int" in field_type:
+        return 1, 1_000_000  # far past `_SIGNATURE_DRIFT_FACTOR`, so a band cannot excuse it
+    raise AssertionError(f"the axis-drift guard has no differing pair for {field_type!r}")
+
+
+@pytest.mark.parametrize("axis", [f.name for f in fields(signature.DataSignature)])
+def test_every_signature_axis_is_both_stamped_and_compared(axis: str) -> None:
+    field_type = next(f.type for f in fields(signature.DataSignature) if f.name == axis)
+    mine, theirs = _differing_pair(str(field_type))
+
+    assert axis in signature.DataSignature().to_dict()  # recorded on the provenance
+
+    warnings = signature.compare_signatures(
+        signature.DataSignature(**{axis: mine}), signature.DataSignature(**{axis: theirs})
+    )
+    if axis in _UNCOMPARED_AXES:
+        assert warnings == (), f"{axis} is listed as uncompared but produced {warnings}"
+        return
+    assert warnings, (
+        f"{axis} drifted from {mine!r} to {theirs!r} and compare_signatures said nothing -- "
+        "either compare it or record why not in _UNCOMPARED_AXES"
+    )
 
 
 def test_a_different_table_or_frequency_always_warns() -> None:

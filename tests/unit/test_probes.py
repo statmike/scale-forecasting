@@ -20,11 +20,17 @@ import pytest
 
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.probes.cancel import (
+    CancelOutcome,
     _assemble_cancel_plan,
     _build_cancel_audit,
+    _cancel_steps,
     _roll_header_after_cancel,
 )
-from scale_forecasting.probes.reconcile import _assemble_probe_report, _is_stale
+from scale_forecasting.probes.reconcile import (
+    _assemble_probe_report,
+    _is_stale,
+    _narrow_to_job,
+)
 from scale_forecasting.probes.runtimes import (
     _BQ_MAX_JOBS_SCAN,
     BigQueryProbe,
@@ -1081,3 +1087,159 @@ def test_cancel_error_degrades_without_raising(monkeypatch: pytest.MonkeyPatch) 
     result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
     assert result.stopped is False and result.already_gone is False
     assert "transport down" in result.detail
+
+
+# --- --job narrowing (_narrow_to_job) -----------------------------------------
+#
+# The report an operator reads and the rows `cancel_run` actually stops come out of the same
+# filter. If they could disagree, `--job statistical` would preview one family and cancel every
+# family in the run, so these tests assert the two move together — including in the untouched
+# `job=None` case, where the pair must be the full run on both sides.
+
+
+def _job_rows() -> list[dict[str, Any]]:
+    return [
+        {"family": "statistical", "job_id": "j-stat", "status": "RUNNING"},
+        {"family": "ml", "job_id": "j-ml", "status": "RUNNING"},
+        {"family": "native", "job_id": "j-native", "status": "COMPLETED"},
+    ]
+
+
+def _both_families() -> RunProgress:
+    return _progress(
+        _fp("statistical", "RUNNING"), _fp("ml", "RUNNING"), _fp("native", "COMPLETED")
+    )
+
+
+def test_narrow_to_job_filters_the_report_and_the_rows_together() -> None:
+    progress, rows = _narrow_to_job(_both_families(), _job_rows(), "ml", "sf-run-abc")
+    assert [f.family for f in progress.families] == ["ml"]
+    assert [r["job_id"] for r in rows] == ["j-ml"]
+
+
+def test_narrow_to_job_none_touches_neither_side() -> None:
+    progress, rows = _narrow_to_job(_both_families(), _job_rows(), None, "sf-run-abc")
+    assert [f.family for f in progress.families] == ["statistical", "ml", "native"]
+    assert [r["family"] for r in rows] == ["statistical", "ml", "native"]
+
+
+def test_narrow_to_job_rejects_a_family_this_run_does_not_have() -> None:
+    # A typo must fail loudly: filtering to nothing would report an empty, healthy-looking run --
+    # and on the cancel path, a plan with no items reads as "nothing to do".
+    with pytest.raises(ConfigError, match="unknown family 'statistcal'"):
+        _narrow_to_job(_both_families(), _job_rows(), "statistcal", "sf-run-abc")
+
+
+def test_narrow_to_job_names_the_runs_actual_families_in_the_error() -> None:
+    with pytest.raises(ConfigError, match=r"\['ml', 'native', 'statistical'\]"):
+        _narrow_to_job(_both_families(), _job_rows(), "deep_learning", "sf-run-abc")
+
+
+def test_narrow_to_job_copies_rows_rather_than_aliasing_them() -> None:
+    # The rows go on to be mutated into audit blobs; the caller's list must not be reached through.
+    source = _job_rows()
+    _, rows = _narrow_to_job(_both_families(), source, None, "sf-run-abc")
+    rows[0]["status"] = "CANCELLED"
+    assert source[0]["status"] == "RUNNING"
+
+
+# --- what a confirmed cancel addresses (_cancel_steps) ------------------------
+#
+# The join between the blast-radius plan (built from the run's families) and the job rows (from
+# `v_run_jobs`) decides which runtime jobs a confirmed cancel actually stops. It sits on the
+# destructive path, so every skip in it is asserted here rather than inferred from the live run:
+# a terminal family, a never-launched one, and an unaddressable one each have to behave the way
+# the preview implied, and in the order the operator just approved.
+
+
+def _handle_row(family: str, job_id: str, *, handle: dict[str, Any] | None) -> dict[str, Any]:
+    row: dict[str, Any] = {"family": family, "job_id": job_id, "status": "RUNNING"}
+    if handle is not None:
+        row["probe_handle"] = handle
+    return row
+
+
+_SPARK_BLOB = {
+    "runtime": "spark",
+    "native_id": "b1",
+    "region": "us-central1",
+    "spark_mode": "serverless",
+}
+
+
+def test_cancel_steps_targets_every_cancellable_family_that_has_a_handle() -> None:
+    plan = _assemble_cancel_plan(_report(_fp("statistical", "RUNNING"), _fp("ml", "RUNNING")))
+    steps = _cancel_steps(
+        plan,
+        [
+            _handle_row("statistical", "j-stat", handle=_SPARK_BLOB),
+            _handle_row("ml", "j-ml", handle=_SPARK_BLOB),
+        ],
+    )
+    assert [s.item.family for s in steps] == ["statistical", "ml"]
+    assert all(s.handle.runtime == "spark" for s in steps)
+
+
+def test_cancel_steps_never_targets_a_terminal_family() -> None:
+    # The row is present and perfectly addressable -- it is the plan's `cancellable` flag, not the
+    # row, that keeps a COMPLETED family from being stopped.
+    report = _assemble_probe_report(
+        _progress(_fp("native", "COMPLETED", runtime="bigquery"), status="COMPLETED"),
+        {},
+        frozenset(),
+    )
+    steps = _cancel_steps(
+        _assemble_cancel_plan(report), [_handle_row("native", "j-native", handle=_SPARK_BLOB)]
+    )
+    assert steps == ()
+
+
+def test_cancel_steps_skips_a_planned_family_that_never_launched() -> None:
+    # A family the config plans but that has no `run_jobs` row yet has no runtime job to stop, so
+    # it is skipped outright -- the header re-read after the loop is what settles its status.
+    plan = _assemble_cancel_plan(_report(_fp("statistical", "RUNNING"), _fp("ml", None)))
+    steps = _cancel_steps(plan, [_handle_row("statistical", "j-stat", handle=_SPARK_BLOB)])
+    assert [s.item.family for s in steps] == ["statistical"]
+
+
+def test_cancel_steps_reports_a_live_family_it_cannot_address() -> None:
+    # No handle (a pre-feature or malformed row) is the one skip that must be *visible*: the job is
+    # live and we failed to reach it, which is not the same as there being nothing to stop.
+    plan = _assemble_cancel_plan(_report(_fp("ml", "RUNNING")))
+    (step,) = _cancel_steps(plan, [_handle_row("ml", "j-ml", handle=None)])
+    assert isinstance(step, CancelOutcome)
+    assert step.requested is False and step.cancelled is False
+    assert step.job_key == "j-ml"
+    assert "no handle" in step.detail
+
+
+def test_cancel_steps_interleaves_outcomes_in_plan_order() -> None:
+    # The report has to read in the order of the preview the operator approved, so an unaddressable
+    # family keeps its position rather than being collected at one end.
+    plan = _assemble_cancel_plan(
+        _report(
+            _fp("statistical", "RUNNING"), _fp("ml", "RUNNING"), _fp("deep_learning", "RUNNING")
+        )
+    )
+    steps = _cancel_steps(
+        plan,
+        [
+            _handle_row("statistical", "j-stat", handle=_SPARK_BLOB),
+            _handle_row("ml", "j-ml", handle=None),
+            _handle_row("deep_learning", "j-dl", handle=_SPARK_BLOB),
+        ],
+    )
+    assert [type(s) is CancelOutcome for s in steps] == [False, True, False]
+    assert [s.family if isinstance(s, CancelOutcome) else s.item.family for s in steps] == [
+        "statistical",
+        "ml",
+        "deep_learning",
+    ]
+
+
+def test_cancel_steps_copies_the_row_it_hands_to_the_finalizer() -> None:
+    plan = _assemble_cancel_plan(_report(_fp("ml", "RUNNING")))
+    source = [_handle_row("ml", "j-ml", handle=_SPARK_BLOB)]
+    (step,) = _cancel_steps(plan, source)
+    step.row["status"] = "CANCELLED"
+    assert source[0]["status"] == "RUNNING"

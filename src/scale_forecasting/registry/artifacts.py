@@ -133,10 +133,11 @@ def upload_artifact(
     from ..errors import RegistryError
 
     uri = artifact_gcs_uri(local_path, run_id, artifact_root)
-    # gs://<bucket>/<blob path> -> (bucket, blob)
-    without_scheme = uri[len("gs://") :]
-    bucket_name, _, blob_path = without_scheme.partition("/")
     try:
+        # Parsed by the shared splitter, not inline: a malformed ``artifact_root`` then fails here
+        # (as a `RegistryError` naming the URI) instead of silently uploading to a bucket named
+        # after whatever the first path segment happened to be.
+        bucket_name, blob_path = split_gcs_uri(uri)
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
@@ -162,9 +163,11 @@ def upload_artifact_bytes(
     from ..errors import RegistryError
 
     uri = artifact_gcs_uri(basename, run_id, artifact_root)
-    without_scheme = uri[len("gs://") :]
-    bucket_name, _, blob_path = without_scheme.partition("/")
     try:
+        # Parsed by the shared splitter, not inline: a malformed ``artifact_root`` then fails here
+        # (as a `RegistryError` naming the URI) instead of silently uploading to a bucket named
+        # after whatever the first path segment happened to be.
+        bucket_name, blob_path = split_gcs_uri(uri)
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)

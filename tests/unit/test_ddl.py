@@ -258,3 +258,40 @@ def test_ddl_snapshot() -> None:
         SNAPSHOT.write_text(rendered)
     assert SNAPSHOT.exists(), "snapshot missing; run with SF_UPDATE_SNAPSHOTS=1 to create"
     assert rendered == SNAPSHOT.read_text()
+
+
+# --- the migration is total over the nullable columns ---------------------------
+#
+# The per-column tests above name the columns that mattered at the time they were written. This
+# one is the standing property: for EVERY table, every nullable column reaches the ALTER and no
+# NOT NULL column does. A column added to a table body months from now is migrated onto existing
+# deployments without anyone remembering to add a test — which is the whole point of deriving the
+# migration from the CREATE, and is untrue the moment the derivation gets a special case.
+
+
+@pytest.mark.parametrize("table", TABLE_NAMES)
+def test_every_nullable_column_reaches_the_migration(table: str) -> None:
+    cols = additive_columns(table)
+    statements = render_migrations("proj.ds")
+    if not cols:  # a table of nothing but keys is legitimately omitted
+        assert table not in statements
+        return
+    stmt = statements[table]
+    for name, col_type in cols:
+        assert f"ADD COLUMN IF NOT EXISTS {name} {col_type}" in stmt
+
+
+@pytest.mark.parametrize("table", TABLE_NAMES)
+def test_no_not_null_column_is_ever_offered_to_an_existing_table(table: str) -> None:
+    # BigQuery rejects ADD COLUMN on a REQUIRED field, so one leaking in would fail `ensure_tables`
+    # for every already-deployed registry — and only for those, which is the worst way to find out.
+    stmt = render_migrations("proj.ds").get(table, "")
+    body = render_create_tables("proj.ds", tables=[table], **_KW)[table]
+    required = [
+        line.split()[0]
+        for line in body.splitlines()
+        if "NOT NULL" in line and line.strip() and not line.strip().startswith(("(", ")"))
+    ]
+    assert required, f"{table} has no NOT NULL column; this guard would be vacuous"
+    for name in required:
+        assert f"ADD COLUMN IF NOT EXISTS {name} " not in stmt

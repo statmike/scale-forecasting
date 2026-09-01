@@ -768,3 +768,161 @@ def test_an_illegal_telemetry_path_is_a_caller_bug_not_an_escaped_string() -> No
 def test_merging_nothing_touches_nothing() -> None:
     # No client is constructed, so this would raise if the empty patch weren't short-circuited.
     merge_header_telemetry("rid", {})
+
+
+# --- the native engine writes into the same specs, from its own builders --------
+#
+# `_encode_rows` walks the column *spec*, so a key a row builder emits that the spec does not name
+# is dropped with no error -- the column simply reads NULL, and only for the engine that emitted it.
+# The BigQuery-native family assembles its rows in `engines.bigquery_engine` rather than through
+# `registry.rows`, so it is the one path where that can happen without any Python-worker test
+# noticing. These pin both native builders against the specs they feed.
+
+
+def _spec_columns(spec: tuple[tuple[str, str], ...]) -> set[str]:
+    return {col for col, _ in spec}
+
+
+def test_the_native_metadata_row_emits_no_column_the_spec_would_drop() -> None:
+    from scale_forecasting.engines.bigquery_engine import _meta_row
+
+    row = _meta_row(
+        "my-run-abc123def456",
+        "series-7",
+        "arima_plus",
+        dict.fromkeys(METRIC_COLUMNS, 0.5),
+        '{"horizon": 28}',
+        _CREATED,
+        _cfg(),
+    )
+    assert set(row) <= _spec_columns(_META_SPEC), set(row) - _spec_columns(_META_SPEC)
+    # The identity columns the leaderboard joins on have to be present *and* set, not merely legal.
+    for col in ("run_id", "ts_id", "model_type", "compute_engine", "model_hash", "created_at"):
+        assert row[col] is not None, col
+    assert row["compute_engine"] == "bigquery"
+    assert row["fold_id"] is None  # the rolled-up panel, not a per-fold row
+
+
+def test_the_native_metadata_row_carries_every_metric_the_table_has() -> None:
+    # The native engine fills the panel from `metrics.METRIC_NAMES` while the spec is generated from
+    # `registry.rows.METRIC_COLUMNS`; a metric in one and not the other is a silently-NULL column.
+    from scale_forecasting.engines.bigquery_engine import _meta_row
+
+    panel = {name: float(i) for i, name in enumerate(METRIC_COLUMNS)}
+    row = _meta_row("r", "s", "timesfm", panel, "{}", _CREATED, _cfg())
+    assert {m: row[m] for m in METRIC_COLUMNS} == panel
+
+
+def test_the_two_metric_vocabularies_are_the_same_vocabulary() -> None:
+    # `metrics.METRIC_NAMES` is hand-written; `METRIC_COLUMNS` is derived from the config's
+    # DecisionMetric literal. Nothing forces them to agree, and the native path spans both.
+    from scale_forecasting.metrics import METRIC_NAMES
+
+    assert METRIC_NAMES == METRIC_COLUMNS
+
+
+def test_the_native_oof_row_emits_no_column_the_spec_would_drop() -> None:
+    from scale_forecasting.engines.bigquery_engine import _oof_row
+
+    row = _oof_row(
+        "my-run-abc123def456",
+        "series-7",
+        "arima_plus",
+        3,
+        {"forecast_date": "2026-02-01", "y_true": 9.0, "yhat": 8.5, "yhat_lower": 7.0},
+    )
+    assert set(row) <= _spec_columns(_OOF_SPEC), set(row) - _spec_columns(_OOF_SPEC)
+    assert row["fold_id"] == 3  # a real fold id, not the metadata row's NULL
+    # The eval query returns interval columns too; backtest_oof does not carry them.
+    assert "yhat_lower" not in row
+
+
+def test_the_ensemble_metadata_row_emits_no_column_the_spec_would_drop() -> None:
+    # The third independent producer of forecast_metadata rows, after registry.rows (Python worker)
+    # and bigquery_engine (native). Same encoder, same silent-drop exposure.
+    from scale_forecasting.ensemble_run import _ensemble_meta_row
+
+    row = _ensemble_meta_row(
+        run_id="my-run-abc123def456",
+        ts_id="series-7",
+        model_type="ensemble_nnls",
+        panel=dict.fromkeys(METRIC_COLUMNS, 0.25),
+        ensemble_id="ens-abc123",
+        weights={"theta": 0.6, "sarimax": 0.4},
+        artifact_uri="gs://bkt/warehouse/artifacts/p/d/r/ensemble_ens-abc123_nnls.pkl",
+        created_at=_CREATED,
+        cfg=_cfg(),
+    )
+    assert set(row) <= _spec_columns(_META_SPEC), set(row) - _spec_columns(_META_SPEC)
+    assert row["compute_engine"] == "ensemble"
+    assert row["ensemble_id"] == "ens-abc123"
+    assert row["best_params"] == '{"sarimax": 0.4, "theta": 0.6}'  # sorted, so it is comparable
+    assert {m: row[m] for m in METRIC_COLUMNS} == dict.fromkeys(METRIC_COLUMNS, 0.25)
+
+
+def test_a_calculated_ensemble_is_distinguishable_from_one_that_fitted_nothing() -> None:
+    # mean/median/inverse_error have no fitted parameters (weights=None -> best_params NULL); a
+    # learned strategy that fitted an empty weight map is a different thing and must not read the
+    # same. The truthiness shortcut would collapse them.
+    from scale_forecasting.ensemble_run import _ensemble_meta_row
+
+    common: dict[str, Any] = {
+        "run_id": "r",
+        "ts_id": "s",
+        "model_type": "ensemble_mean",
+        "panel": dict.fromkeys(METRIC_COLUMNS, 1.0),
+        "ensemble_id": "e",
+        "artifact_uri": None,
+        "created_at": _CREATED,
+        "cfg": _cfg(),
+    }
+    assert _ensemble_meta_row(weights=None, **common)["best_params"] is None
+    assert _ensemble_meta_row(weights={}, **common)["best_params"] == "{}"
+
+
+def test_all_three_metadata_producers_agree_on_the_identity_columns() -> None:
+    # forecast_metadata is one table fed by three engines. The columns the leaderboard groups and
+    # joins on have to be set by every one of them, or a whole engine drops off the comparison.
+    from scale_forecasting.engines.bigquery_engine import _meta_row
+    from scale_forecasting.ensemble_run import _ensemble_meta_row
+
+    panel = dict.fromkeys(METRIC_COLUMNS, 1.0)
+    rows = [
+        assemble_metadata_row(_result(), _CREATED),
+        _meta_row("r", "s", "arima_plus", panel, "{}", _CREATED, _cfg()),
+        _ensemble_meta_row(
+            run_id="r",
+            ts_id="s",
+            model_type="ensemble_mean",
+            panel=panel,
+            ensemble_id="e",
+            weights=None,
+            artifact_uri=None,
+            created_at=_CREATED,
+            cfg=_cfg(),
+        ),
+    ]
+    for row in rows:
+        for col in ("run_id", "ts_id", "model_type", "compute_engine", "model_hash", "created_at"):
+            assert row.get(col) is not None, (col, row.get("compute_engine"))
+        assert row["fold_id"] is None  # every producer's summary row is the fold_id=NULL one
+    assert {r["compute_engine"] for r in rows} == {"spark", "bigquery", "ensemble"}
+
+
+def test_both_native_builders_survive_the_encoder_they_feed() -> None:
+    # The end of the contract: assemble a row, encode it against its spec, and get bytes back --
+    # which is where a wrong *type* (as opposed to a wrong key) would surface.
+    from scale_forecasting.engines.bigquery_engine import _meta_row, _oof_row
+
+    meta = _meta_row(
+        "r", "s", "arima_plus", dict.fromkeys(METRIC_COLUMNS, 1.0), "{}", _CREATED, _cfg()
+    )
+    oof = _oof_row(
+        "r", "s", "arima_plus", 0, {"forecast_date": "2026-02-01", "y_true": 1.0, "yhat": 2.0}
+    )
+    for table, spec, rows in (
+        ("forecast_metadata", _META_SPEC, [meta]),
+        ("backtest_oof", _OOF_SPEC, [oof]),
+    ):
+        msg_cls, _ = _proto_for(table, spec)
+        assert len(_encode_rows(msg_cls, spec, rows)) == 1

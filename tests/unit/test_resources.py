@@ -1302,3 +1302,81 @@ def test_the_record_can_be_filed_under_the_jobs_family_rather_than_a_pools() -> 
     """A Ray deep-learning job's CPU pool is labelled "cpu" — filing the job there would bury it."""
     cpu = serverless.plan_serverless(None, ["statistical"], 800)[0]
     assert audit.sizing_telemetry(cpu, family="deep_learning")["family"] == "deep_learning"
+
+
+# --- the legal-value sweep ----------------------------------------------------
+#
+# The tests above check the interesting *cases*; this checks the *property*, over a grid wide
+# enough to include measurements no real fit would produce. An illegal `(cores, memory)` pair is
+# not caught by anything we run — it is caught by Dataproc, as an INVALID_ARGUMENT, minutes into a
+# run the operator has already walked away from. So the claim under test is total: whatever the
+# probe measured, the emitted properties are a shape the service accepts.
+#
+# Each assertion below names the table it enforces (`serverless._SERVERLESS_*`), so a future
+# platform change moves one constant and this sweep re-derives against it rather than going stale.
+
+_SWEEP_CORES = (1, 2, 3, 4, 5, 7, 8, 12, 16, 17, 33, 64)
+_SWEEP_MEMORY = (None, 1, 64 * _MIB, 512 * _MIB, _GIB, 4 * _GIB, 10 * _GIB, 96 * _GIB)
+
+
+def _assert_legal_cpu_properties(out: serverless.ServerlessTranslation, tier: str) -> None:
+    props = out.properties
+    cores = int(props["spark.executor.cores"])
+    assert cores in serverless._SERVERLESS_CPU_CORES
+    assert int(props["spark.driver.cores"]) in serverless._SERVERLESS_CPU_CORES
+    # spark.task.cpus may never exceed the executor's width — Spark would never schedule a task.
+    assert int(props.get("spark.task.cpus", 1)) <= cores
+    if "spark.executor.memory" in props:
+        total = int(props["spark.executor.memory"].rstrip("m")) + int(
+            props["spark.executor.memoryOverhead"].rstrip("m")
+        )
+        per_core = total / cores
+        ceiling = serverless._SERVERLESS_MAX_MB_PER_CORE[tier]
+        assert serverless._SERVERLESS_MIN_MB_PER_CORE <= per_core <= ceiling, (
+            f"{per_core:.0f}m per core is outside the {tier} band at {cores} cores"
+        )
+    else:  # absence propagates: no measurement, no request, no half-specified pair
+        assert "spark.executor.memoryOverhead" not in props
+
+
+@pytest.mark.parametrize("tier", ["standard", "premium"])
+@pytest.mark.parametrize("cores", _SWEEP_CORES)
+@pytest.mark.parametrize("memory_bytes", _SWEEP_MEMORY)
+def test_every_cpu_shape_the_probe_can_measure_translates_to_a_legal_batch(
+    tier: str, cores: int, memory_bytes: int | None
+) -> None:
+    _assert_legal_cpu_properties(
+        _serverless(cores=cores, memory_bytes=memory_bytes, tier=tier), tier
+    )
+
+
+@pytest.mark.parametrize("cores", _SWEEP_CORES)
+@pytest.mark.parametrize("memory_bytes", [m for m in _SWEEP_MEMORY if m])
+@pytest.mark.parametrize("gpu_fraction", [0.05, 0.25, 0.5, 1.0])
+def test_every_gpu_shape_the_probe_can_measure_translates_to_a_legal_batch(
+    cores: int, memory_bytes: int, gpu_fraction: float
+) -> None:
+    out = _serverless(cores=cores, memory_bytes=memory_bytes, gpu_fraction=gpu_fraction)
+    props = out.properties
+    granted = int(props["spark.executor.cores"])
+    assert granted in serverless._SERVERLESS_L4_CORES
+    assert int(props.get("spark.task.cpus", 1)) <= granted
+    # The GPU path may not set memoryOverhead at all — the service owns it — and executor.memory
+    # is bounded by the extrapolated per-config maximum on both sides.
+    assert "spark.executor.memoryOverhead" not in props
+    memory_mb = int(props["spark.executor.memory"].rstrip("m"))
+    assert granted * serverless._SERVERLESS_MIN_MB_PER_CORE <= memory_mb
+    assert memory_mb <= granted * serverless._SERVERLESS_L4_MB_PER_CORE
+
+
+@pytest.mark.parametrize("max_units", [1, 2, 3, 50, 10_000])
+@pytest.mark.parametrize("n_cells", [1, 100, 10_000_000])
+def test_every_fleet_size_lands_inside_the_platforms_executor_bounds(
+    max_units: int, n_cells: int
+) -> None:
+    props = _serverless(cores=1, memory_bytes=_GIB, max_units=max_units, n_cells=n_cells).properties
+    lo = int(props["spark.dynamicAllocation.minExecutors"])
+    initial = int(props["spark.dynamicAllocation.initialExecutors"])
+    hi = int(props["spark.dynamicAllocation.maxExecutors"])
+    assert serverless._SERVERLESS_MIN_EXECUTORS <= lo <= initial <= hi
+    assert hi <= serverless._SERVERLESS_MAX_EXECUTORS

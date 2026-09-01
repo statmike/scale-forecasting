@@ -5,9 +5,10 @@ source's alone. A ``run_jobs`` row records a last-written status that a crashed 
 to update; the landed-cell counts say what work survived; the runtime says whether the job still
 exists. One `FamilyVerdict` per family is what you get from fusing all three.
 
-Split pure from I/O, as the rest of this codebase is: `_verdict_for_family` and
-`_assemble_probe_report` are pure and unit-tested per matrix row, and `_read_and_probe` is the one
-function that reads BigQuery and calls the probes before handing the assembled inputs over.
+Split pure from I/O, as the rest of this codebase is: `_verdict_for_family`,
+`_assemble_probe_report` and `_narrow_to_job` are pure and unit-tested per matrix row, and
+`_read_and_probe` is the one function that reads BigQuery and calls the probes before handing the
+assembled inputs over.
 
 **Escalation is the cost control.** A terminal family is never probed — the registry is
 authoritative once the work is done — so a routine poll of a finished run makes zero native calls.
@@ -18,6 +19,7 @@ cry wolf.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -242,6 +244,30 @@ def _assemble_probe_report(
     )
 
 
+def _narrow_to_job(
+    progress: RunProgress, job_rows: Sequence[Mapping[str, Any]], job: str | None, run_id: str
+) -> tuple[RunProgress, list[dict[str, Any]]]:
+    """Narrow a run's progress **and** its job rows to one family — or both untouched (pure).
+
+    Extracted from `_read_and_probe`'s GCP body precisely because the two filters have to agree.
+    They feed different consumers: the narrowed ``progress`` becomes the `ProbeReport` an operator
+    reads, while the narrowed ``rows`` are what `cancel.cancel_run` stops and finalizes. Filtering
+    one and not the other would let ``--job statistical`` print a one-family preview and then cancel
+    every family in the run, so the agreement is a data-integrity property, not tidiness — and this
+    is the seam that makes it checkable with no cloud.
+
+    An unknown ``job`` raises `errors.ConfigError` naming the run's actual families. A typo has to
+    fail loudly: filtering to nothing would otherwise report an empty, healthy-looking run.
+    """
+    if job is None:
+        return progress, [dict(r) for r in job_rows]
+    known = {f.family for f in progress.families}
+    if job not in known:
+        raise ConfigError(f"unknown family {job!r}; run {run_id} has: {sorted(known)}")
+    narrowed = replace(progress, families=tuple(f for f in progress.families if f.family == job))
+    return narrowed, [dict(r) for r in job_rows if r["family"] == job]
+
+
 # --- I/O caller ----------------------------------------------------------------
 # The thin reader that turns a run_id into a ProbeReport: read the registry (header + config + job
 # rows + landed-cell counts), escalate only the incomplete/stale jobs to their runtime, then hand
@@ -280,17 +306,8 @@ def _read_and_probe(
         run_id, summary, cfg, job_rows, progress_rows, now=datetime.now(UTC)
     )
 
-    # --job narrows both the escalation and the report; a typo must fail loudly (else it would
-    # silently report nothing) — validate against the run's actual families before filtering.
-    if job is not None:
-        known = {f.family for f in progress.families}
-        if job not in known:
-            raise ConfigError(f"unknown family {job!r}; run {run_id} has: {sorted(known)}")
-        progress = replace(
-            progress, families=tuple(f for f in progress.families if f.family == job)
-        )
-
-    rows = [r for r in job_rows if job is None or r["family"] == job]
+    # --job narrows the report and the rows together, or neither — see `_narrow_to_job`.
+    progress, rows = _narrow_to_job(progress, job_rows, job, run_id)
     # Escalate every non-terminal job to its runtime; terminal rows short-circuit to the registry.
     to_probe = [r for r in rows if r.get("status") not in _TERMINAL]
     # A RUNNING family quiet longer than the floor is "stale" — past its startup grace, so a

@@ -291,16 +291,14 @@ def _ensemble_batch(
     pseudo-model into ``forecast_metadata`` — identical logic and rows whether the caller passes one
     ready series (microbatch) or all of them (barrier).
     """
-    import json
 
     from google.cloud import bigquery
 
     from .engines import bigquery_engine
     from .engines.bigquery_sql import build_history_query
     from .ensembler import combine_oof
-    from .metrics import METRIC_NAMES, compute_metrics
+    from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
-    from .registry.ids import make_model_hash
     from .registry.write_api import _META_SPEC, _PRED_SPEC
     from .worker import _rollup_metrics
 
@@ -405,27 +403,19 @@ def _ensemble_batch(
                     y_train=hist_by_id.get(ts_id),
                 )
             )
-        panel = _rollup_metrics(fold_panels)
         strategy = str(model_type).removeprefix("ensemble_")
         meta_rows.append(
-            {
-                "run_id": run_id,
-                "ts_id": ts_id,
-                "model_type": model_type,
-                "compute_engine": "ensemble",
-                "model_hash": make_model_hash(run_id, str(ts_id), str(model_type), cfg),
-                "ensemble_id": ensemble_id,
-                "fold_id": None,
-                **{name: panel[name] for name in METRIC_NAMES},
-                "fit_seconds": None,
-                "best_params": (
-                    json.dumps(learned_weights[strategy], sort_keys=True)
-                    if strategy in learned_weights
-                    else None
-                ),
-                "model_artifact": artifact_uris.get(strategy),
-                "created_at": created_at,
-            }
+            _ensemble_meta_row(
+                run_id=run_id,
+                ts_id=str(ts_id),
+                model_type=str(model_type),
+                panel=_rollup_metrics(fold_panels),
+                ensemble_id=ensemble_id,
+                weights=learned_weights.get(strategy),
+                artifact_uri=artifact_uris.get(strategy),
+                created_at=created_at,
+                cfg=cfg,
+            )
         )
     bigquery_engine._append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)
     log.info(
@@ -435,6 +425,52 @@ def _ensemble_batch(
         len(meta_rows),
         sorted(ens_oof["model_type"].unique()),
     )
+
+
+def _ensemble_meta_row(
+    *,
+    run_id: str,
+    ts_id: str,
+    model_type: str,
+    panel: dict[str, float],
+    ensemble_id: str,
+    weights: dict[str, float] | None,
+    artifact_uri: str | None,
+    created_at: Any,
+    cfg: RunConfig,
+) -> dict[str, Any]:
+    """Assemble one ``forecast_metadata`` row for an ``ensemble_<strategy>`` pseudo-model (pure).
+
+    The third independent producer of ``forecast_metadata`` rows, alongside `registry.rows`'s
+    Python-worker path and `engines.bigquery_engine._meta_row`. `write_api._encode_rows` walks the
+    column spec rather than the row, so a key here that ``_META_SPEC`` does not name is dropped in
+    silence — which is why this is a function with its own offline assertion rather than a literal
+    inside the GCP body.
+
+    ``weights`` is the fitted weight map for a *learned* strategy and ``None`` for a calculated one
+    (mean/median/inverse_error have no fitted parameters); the distinction is what ``best_params``
+    and ``model_artifact`` record. An empty-but-present weight map still serializes, so a strategy
+    that legitimately fitted to nothing is distinguishable from one that never fitted at all.
+    """
+    import json
+
+    from .metrics import METRIC_NAMES
+    from .registry.ids import make_model_hash
+
+    return {
+        "run_id": run_id,
+        "ts_id": ts_id,
+        "model_type": model_type,
+        "compute_engine": "ensemble",
+        "model_hash": make_model_hash(run_id, ts_id, model_type, cfg),
+        "ensemble_id": ensemble_id,
+        "fold_id": None,
+        **{name: panel[name] for name in METRIC_NAMES},
+        "fit_seconds": None,
+        "best_params": None if weights is None else json.dumps(weights, sort_keys=True),
+        "model_artifact": artifact_uri,
+        "created_at": created_at,
+    }
 
 
 def _apply_weights(
