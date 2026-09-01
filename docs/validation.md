@@ -110,12 +110,25 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 ### Smoke 08 is blocked on quota, not broken — and finding that out took two fixes
 
-**T4 on Vertex Ray is unavailable to this project in every region the config lists.** Smoke 08 was
-attempted five times on 2026-09-01 and never provisioned: `us-central1` and `us-west1` answered
-*"An internal error occurred on your cluster"*, `us-east1` answered *"The following quotas are
-exceeded: `CustomModelTrainingT4GPUsPerProjectPerRegion`"*. The row is `NEEDS_RECHECK` rather than
-`STALE` — nothing suggests the code is wrong, but 2026-08-28's pass recorded no `run_id`, and now it
-cannot be re-earned to fix that.
+**GPU on Vertex Ray is unavailable to this project — in every region, on either accelerator.** On
+2026-09-01, smoke 08 was attempted six times across `us-central1`, `us-east1` and `us-west1`, first
+on T4 and then on L4 (`g2-standard-8`), and never once provisioned. `us-east1` on T4 gave the only
+message that named anything: *"The following quotas are exceeded:
+`CustomModelTrainingT4GPUsPerProjectPerRegion`"*. The rest were *"An internal error occurred on your
+cluster"* and *"Unexpected response."* — which, given the one region that did explain itself, are
+almost certainly the same ceiling wearing different masks.
+
+The row is `NEEDS_RECHECK` rather than `STALE`: nothing here suggests the code is wrong, but
+2026-08-28's pass recorded no `run_id`, and it now cannot be re-earned to fix that. **This is a
+project-entitlement blocker, not an architecture one** — it needs a Vertex GPU quota grant, and
+until then every Ray-GPU config in this repo (`ray_gpu_demo`, `all_families_100k`,
+`all_families_100k_full`) fails at provisioning.
+
+There is a config-level route around it, and it is worth stating because it is the product's own
+answer: **deep learning does not have to run on Ray.** Smoke 03 passed the same day on Dataproc
+Serverless L4, and `14_full_dag.json` already puts the DL family there. A deployment without Vertex
+Ray GPU entitlement can run every family by pointing `compute.families.deep_learning` at
+`runtime: spark`, which is a config edit, not a code change.
 
 The trap worth carrying: **Compute Engine quota does not tell you whether a Ray GPU run can start.**
 `NVIDIA_T4_GPUS` reads 4-of-4 free in `us-central1`. The quota a Vertex Ray cluster actually spends
@@ -210,6 +223,13 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | NEVER_RUN | — | — | — |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
+
+**Four demonstration configs are blocked on the same thing, and it is not the code.**
+`ray_gpu_demo`, `per_family_runtimes_demo`, `all_families_100k` and `all_families_100k_full` all
+put a family on Vertex Ray GPU, which this project cannot provision in any region on either
+accelerator (see smoke 08 above). They stay `NEVER_RUN` rather than being quietly re-pointed at
+Serverless: the whole point of `per_family_runtimes_demo` is the *split*, and a version of it that
+runs everything on Spark would prove something else while keeping the name.
 
 The three Spark demo rows landed together on 2026-09-01, and two of them are worth reading past the
 `CURRENT`:

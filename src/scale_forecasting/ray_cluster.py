@@ -418,9 +418,10 @@ def _create_cluster_across_regions(
                 detail or exc,
             )
             last_exc = exc
+    # Deliberately does not name a cause. Since the walk continues on anything it cannot rule out,
+    # exhausting the list means only that no region worked — often Vertex never said why.
     raise EngineError(
-        f"Ray cluster {name} could not be created in any of {regions} "
-        f"(no capacity or quota available): last error {last_exc!r}"
+        f"Ray cluster {name} could not be created in any of {regions}: last error {last_exc!r}"
     )
 
 
