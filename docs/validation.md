@@ -95,8 +95,8 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-01 | `smoke-01-serverless-cpu-5af5de1accf2` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-01 | `smoke-03-serverless-gpu-a918f22d7970` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
-| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
+| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | CURRENT | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | NEEDS_RECHECK | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
@@ -107,6 +107,23 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-08-25 | not recorded | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
+
+### The cluster path re-proved itself on 2026-09-01, and the reuse smoke checks the thing that matters
+
+Smokes 04 and 05 both passed under the derived fleet-sizing overlay. What makes 05 worth running
+separately from 04 is not that it forecasts — 04 already did — but the **lifecycle asymmetry**: an
+ephemeral cluster must be deleted when its run ends, a named one must not. Both halves held. After
+04, `sf-cluster-smoke-04-…` was gone; after 05 submitted two family jobs to `sf-smoke-cluster` and
+reached `COMPLETED`, that cluster was still `RUNNING`. A reuse path that tore down a cluster it did
+not create would pass every leaderboard assertion in the harness and still be badly wrong, so the
+survival check is the assertion, and it is made against `clusters list`, outside the harness.
+
+The standing cluster is a **campaign fixture, not infrastructure**: created here for smoke 05 and
+deleted at teardown. It is built through `dataproc_cluster.build_cluster` with the same
+`_resolve_cluster_deps` / `_stage_cluster_init` pair `provision_shared_cluster` uses, so it is shaped
+like an ephemeral cluster in every respect but its name. Standing it up with a hand-written
+`gcloud dataproc clusters create` would have made smoke 05 a test of *that command's* fidelity to
+the product rather than of the reuse path.
 
 ### Smoke 08 is blocked on quota, not broken — and finding that out took two fixes
 
@@ -525,11 +542,25 @@ Things that are true today and that no entry above covers. Keep this list short 
   of the three things listed here as never having run against real BigQuery ran on 2026-09-01, in
   smoke 01: `JSON_SET` **did** auto-create the parent object for a nested path, and the run's two
   families **do** coexist — `sizing.ml` and `sizing.statistical` are both present and complete under
-  one header, with no sign of a race. The third is untouched, because smoke 01 is a Serverless run:
-  whether the **cluster** path's stamp lands at all is still unknown — `submit_cluster_job` had
-  never written header telemetry before W9b, so a cluster run's `v_run_summary` row was blank. Wave
-  5 answers it. Every one of these writes is best-effort (logged and swallowed), so a wrong
-  assumption degrades to "no telemetry", never to a failed run.
+  one header, with no sign of a race. The third — whether the **cluster** path's stamp lands at all,
+  which smoke 01 could not answer because it is a Serverless run — closed on 2026-09-01 in smoke 04:
+  `smoke-04-cluster-cpu-c5b992778fd1`'s header carries `sizing.ml` and `sizing.statistical`, both
+  complete, both with `plans[].runtime = "cluster"` and a full `translation` block (7 executor cores,
+  `maxExecutors` 2, a derived `worker_count` of 2, and the thread pins). `submit_cluster_job` had
+  never written header telemetry before W9b, so this row used to be blank. **All three of W9b's
+  assumptions now hold against real BigQuery.** Every one of these writes is best-effort (logged and
+  swallowed), so a wrong assumption degrades to "no telemetry", never to a failed run.
+
+  **The same payload is the clearest evidence yet for the `discover_harvest_run` defect**, listed
+  below as an unfixed observation and until now only reasoned about. Smoke 04 runs `statistical` and
+  `ml`; the profile it picked up is from `smoke-03-serverless-gpu-a918f22d7970`, the most recent
+  harvest, which measured **only** `deep_learning` (neuralprophet, 100 fits). So the sizing that
+  actually shaped the run fell back to `slot.basis = "static"` with `cores`/`memory_bytes` under
+  `assumed` and `measured` empty — a harvest was found, carried, and stamped, and it contributed
+  nothing. The run is not wrong (static is the documented fallback and 100 series is trivially
+  sized), but "a profile was discovered" reads as "the fleet was sized from measurements" in the
+  telemetry, and here it was not. Selecting the most recent harvest instead of the best-matched one
+  is what produces that gap.
 
 ## Provenance confidence
 
