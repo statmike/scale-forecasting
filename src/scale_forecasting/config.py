@@ -392,6 +392,22 @@ class ComputeConfig(BaseModel):
     # separately by spark.dynamicAllocation.maxExecutors). Small keeps frames tiny; large amortizes
     # write_cells over fatter batches. See engines/spark_io.default_bucket_count.
     bucket_target_cells: int = Field(default=8, gt=0)
+    # The operator's *infrastructure* ceiling on the Spark fleet: the most executors a batch may
+    # scale to (spark.dynamicAllocation.maxExecutors), or the most workers a cluster may hold.
+    # None (default) = no operator ceiling, and the fleet arithmetic sizes to the fan-out alone.
+    #
+    # This exists because the derived sizing has no idea what the project can actually be given.
+    # It answers "how wide would this run like to be", which at 100k series is hundreds of
+    # executors; a regional CPU quota answers "how wide may it be", and the two had no way to meet.
+    # Live, that gap is not a slow run but a dead one — Dataproc rejects the batch outright
+    # ("Insufficient 'CPUS' quota. Requested 380.0, available 200.0") before any work starts.
+    #
+    # It lives on the config rather than only on `submit`/`--max-executors` because every job the
+    # DAG launches is launched *from a config*: a ceiling reachable only through a CLI flag is a
+    # ceiling an orchestrated run can never set. Budget for concurrency when picking one — the
+    # families of a single run submit at the same time, so a two-family run at N executors of C
+    # cores wants roughly 2 x N x C cores of headroom, plus a driver each.
+    max_executors: int | None = Field(default=None, gt=0)
     # GCE machine family for a **Dataproc cluster's** master and CPU workers (`"auto"` = n1, the
     # shipped default). Only families `resources.catalog._MEMORY_PER_CORE_GIB` can price are
     # offered, so the profiler's executor sizing stays honest for whatever is picked. Deliberately

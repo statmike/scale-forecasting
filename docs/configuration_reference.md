@@ -242,6 +242,7 @@ knobs only matter for a family that runs on Ray.
 | `families` | `dict[family → FamilyCompute]` | `{}` | keys ∈ `statistical`/`ml`/`deep_learning` | Per-family runtime/hardware overrides (see below). |
 | `max_parallelism` | `int` | `1000` | `> 0` | Max parallel tasks. |
 | `bucket_target_cells` | `int` | `8` | `> 0` | Target cells per Spark bucket (shuffle-partition sizing). |
+| `max_executors` | `int \| null` | `null` | `> 0` | Operator ceiling on the Spark fleet — most executors a batch may scale to, most workers a cluster may hold. `null` sizes to the fan-out alone, which at 100k series asks for hundreds and is rejected outright by a regional CPU quota. Budget for concurrency: a run's families submit together. |
 | `machine_family` | `"auto"` \| `"n1"` \| `"n2"` \| `"n2d"` \| `"e2"` \| `"c2"` | `"auto"` | — | GCE machine family for a **Dataproc cluster's** master + CPU workers (`"auto"` = `n1`). No-op on Serverless and on GPU workers — see below. |
 | `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | How a **Dataproc cluster** family gets its dependencies. `"container"` raises: it is a Serverless mechanism. See `cluster_deps._resolve_cluster_deps`. |
 | `persist_models` | `bool` | `false` | — | Persist each fitted model as a GCS artifact (lineage). |

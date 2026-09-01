@@ -329,7 +329,8 @@ def cluster_sizing(
     and the evidence behind them — stamped onto the run header by `submit_cluster_job` so a cluster
     run's sizing is as readable after the fact as a batch's.
 
-    ``max_workers`` is the operator's ceiling; ``compute.profile.mode == "off"`` returns
+    ``max_workers`` is the operator's ceiling, defaulting to ``compute.max_executors`` so an
+    orchestrated run can set one at all; ``compute.profile.mode == "off"`` returns
     ``(None, {}, {})``, the documented escape hatch back to the pre-profiler two-worker cluster —
     nothing is decided, so there is nothing to record.
     """
@@ -363,7 +364,9 @@ def cluster_sizing(
         gpu=gpu,
         device_bytes=device_memory_bytes(gpu_type or cfg.compute.gpu_type) if gpu else None,
         static_gpu_fraction=float(fraction) if isinstance(fraction, float) else None,
-        max_workers=max_workers,
+        # As on the batch path: an explicit argument wins over `compute.max_executors`, which is
+        # the same ceiling expressed where an orchestrated run can actually reach it.
+        max_workers=max_workers if max_workers is not None else cfg.compute.max_executors,
         # See the same call in `submit.sizing_properties`: a controlled-measurement run
         # unpins the native thread pools so `effective_cores` measures the library, not the cap.
         pin_threads=not cfg.compute.profile.unpins_threads,

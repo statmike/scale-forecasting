@@ -13,6 +13,7 @@
   },
   "compute": {
     "persist_models": false,
-    "bucket_target_cells": 200
+    "bucket_target_cells": 200,
+    "max_executors": 20
   }
 }

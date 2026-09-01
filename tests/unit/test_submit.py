@@ -760,6 +760,38 @@ def test_the_overlay_respects_an_explicit_executor_cap() -> None:
     assert props["spark.dynamicAllocation.maxExecutors"] == "4"
 
 
+def test_the_overlay_respects_a_ceiling_set_in_the_config() -> None:
+    """The same cap, reachable without a CLI flag — which is the only way an orchestrated run can.
+
+    Found live (`explode_100k`, 2026-09-01): the fan-out sized a fleet of 380 cores against a
+    200-core regional quota and Dataproc rejected the batch outright. `--max-executors` already
+    existed, but every job the DAG launches is launched from a config, so nothing in an
+    orchestrated run could reach it.
+    """
+    cfg = _cfg(
+        data={"source_table": "t", "series_limit": 100_000},
+        compute={"max_executors": 4},
+    )
+    assert sizing_properties(cfg)["spark.dynamicAllocation.maxExecutors"] == "4"
+
+
+def test_an_explicit_argument_wins_over_the_configs_ceiling() -> None:
+    cfg = _cfg(
+        data={"source_table": "t", "series_limit": 100_000},
+        compute={"max_executors": 4},
+    )
+    assert sizing_properties(cfg, max_executors=7)["spark.dynamicAllocation.maxExecutors"] == "7"
+
+
+def test_without_a_ceiling_the_fanout_still_decides() -> None:
+    # The default must stay None-as-before: a ceiling nobody set must not quietly appear.
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100_000})
+    capped = _cfg(data={"source_table": "t", "series_limit": 100_000}, compute={"max_executors": 4})
+    assert int(sizing_properties(cfg)["spark.dynamicAllocation.maxExecutors"]) > int(
+        sizing_properties(capped)["spark.dynamicAllocation.maxExecutors"]
+    )
+
+
 def test_the_overlay_sizes_to_the_executed_subset_not_the_whole_config() -> None:
     cfg = _cfg(data={"source_table": "t", "series_limit": 100})
     full = sizing_properties(cfg)

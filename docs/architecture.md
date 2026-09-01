@@ -179,10 +179,11 @@ draws its sizing from that run's measurements or from a baseline shipped with th
 
 **What to reach for when a fleet shape is wrong.** `compute.profile.mode = "off"` disables the whole
 derived overlay and returns to platform defaults. Individual knobs (`ray_max_nodes`,
-`max_parallelism`, `bucket_target_cells`, per-family `hardware`) still override it. See
+`max_executors`, `bucket_target_cells`, per-family `hardware`) still override it. `max_executors` is
+the one to reach for when the fleet is not the wrong *shape* but the wrong *size for the project*:
+the arithmetic sizes to the fan-out, which has no idea what a regional quota will grant. See
 [`compute.profile`](./configuration_reference.md) for the fields, and the
-[validation ledger](./validation.md) for what has and has not been proven live — as of this writing,
-**none** of the derived Spark arithmetic has run on real infrastructure.
+[validation ledger](./validation.md) for what has and has not been proven live.
 
 ---
 

@@ -97,7 +97,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `horizon_features=first-rows-of-history` |
+| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
@@ -304,6 +304,36 @@ Things that are true today and that no entry above covers. Keep this list short 
   That is the case that matters — an exclusion is only proven by a config whose resolved value is
   non-trivial. Offline, this is held by the inverted test plus one asserting the id is identical
   whether or not discovery reached the registry.
+- **The derived fleet had no infrastructure ceiling, and at 100k that was fatal rather than slow.
+  Fixed 2026-09-01; the capped run is the live confirmation and is still pending.** `explode_100k`'s
+  statistical batch was rejected at submit: *"Insufficient 'CPUS' quota. Requested 380.0, available
+  200.0."* Nothing was mis-sized — the arithmetic correctly answered *how wide would this run like
+  to be*, which at 400,000 cells is 95 executors. It has no way to know *how wide may it be*, and
+  the two never met.
+
+  What made this a product defect rather than a small project's quota problem is where the existing
+  ceiling lived. `--max-executors` / `submit(max_executors=…)` has always existed, but **every job
+  the DAG launches is launched from a config**, so a ceiling reachable only through a CLI flag is
+  one an orchestrated run can never set. `ComputeConfig` had `max_parallelism` — documented as a
+  cost guardrail, and named as an override in `architecture.md` — but it only ever fed bucket
+  sizing and Ray's fallback basis, and never reached the Spark fleet. The fix adds
+  `compute.max_executors`, defaulted to `None` (unchanged behaviour) and consulted by both the
+  Serverless and the cluster sizing paths, with an explicit argument still winning over it.
+
+  Worth noting for anyone reading the arithmetic: this is not a scale wall. 400,000 cells at the
+  ~0.5 s/cell the same campaign measured is about 200,000 CPU-seconds, or ~20 minutes across a
+  200-core quota. The fleet wanted to be twice the size of the project, not twice the size of the
+  problem. Budget for concurrency when setting the knob — a run's families submit simultaneously, so
+  the two-family `explode_100k` at 20 executors × 4 cores needs ~168 cores including drivers.
+
+  A second-order observation from the same failure, recorded rather than fixed: **`discover_harvest_run`
+  selects the most recent harvest, not the best-matched one.** The 100k run discovered the 10-series
+  demo harvest that had just been written and warned `10000x (10 measured vs 100000 planned)`, when a
+  100-series harvest from smoke 01 was sitting in the same table. The degradation to
+  `basis: "reference"` behaved correctly, so this cost accuracy rather than correctness — but
+  "most recent" is a weak selector once more than one run has harvested, and the signature it already
+  computes is the obvious thing to rank on.
+
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
   ended that in a single wave, and did it twice over. Run 1 harvested; run 2 was sized from run 1.

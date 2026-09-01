@@ -205,7 +205,8 @@ def plan_sizing(
         gpu=gpu,
         device_bytes=device_memory_bytes(gpu_type or cfg.compute.gpu_type) if gpu else None,
         static_gpu_fraction=float(fraction) if isinstance(fraction, float) else None,
-        max_executors=max_executors,
+        # An explicit argument wins over the config's ceiling; absent both, the fan-out decides.
+        max_executors=max_executors if max_executors is not None else cfg.compute.max_executors,
         # A controlled-measurement run wants the native thread pools uncapped, because a pinned
         # fit can only ever report the pin back as its `effective_cores` (see resources).
         pin_threads=not cfg.compute.profile.unpins_threads,
