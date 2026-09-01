@@ -94,12 +94,12 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 |---|--------|--------|--------|------|--------|---------------|
 | 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-01 | `smoke-01-serverless-cpu-5af5de1accf2` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11` |
-| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-01 | `smoke-03-serverless-gpu-a918f22d7970` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-08-23 | `smoke-05-cluster-reuse-2a7edf806a52` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
+| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | NEEDS_RECHECK | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
@@ -107,6 +107,40 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-08-25 | not recorded | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
+
+### Smoke 08 is blocked on quota, not broken — and finding that out took two fixes
+
+**T4 on Vertex Ray is unavailable to this project in every region the config lists.** Smoke 08 was
+attempted five times on 2026-09-01 and never provisioned: `us-central1` and `us-west1` answered
+*"An internal error occurred on your cluster"*, `us-east1` answered *"The following quotas are
+exceeded: `CustomModelTrainingT4GPUsPerProjectPerRegion`"*. The row is `NEEDS_RECHECK` rather than
+`STALE` — nothing suggests the code is wrong, but 2026-08-28's pass recorded no `run_id`, and now it
+cannot be re-earned to fix that.
+
+The trap worth carrying: **Compute Engine quota does not tell you whether a Ray GPU run can start.**
+`NVIDIA_T4_GPUS` reads 4-of-4 free in `us-central1`. The quota a Vertex Ray cluster actually spends
+is `CustomModelTrainingT4GPUsPerProjectPerRegion`, a different meter, and it is the one that says no.
+Checking the former before a run is worse than not checking — it gives a green light that means
+nothing.
+
+Two defects in the region fallback surfaced only because a region actually ran out, and both were
+fixed and confirmed live the same day. They are the same defect twice: **an error the classifier
+cannot parse was treated as an error it had diagnosed.**
+
+- **An opaque failure disabled the fallback that exists for it.** `_is_generic_cluster_error`
+  already reasoned that the SDK's contentless *exception* means "hop", but it only applied when the
+  resource carried no message — and `"An internal error occurred on your cluster"` *is* a message.
+  So a config listing three regions tried exactly one and re-raised. Vertex's own advice for that
+  string is "try recreating"; hopping is a strictly better version of it.
+- **A real quota error went unrecognised because of word order.** `us-east1` said "quotas **are**
+  exceeded" and the marker list held `"quota exceeded"`, `"exceeds quota"`, `"exceeded quota"`,
+  `"quota limit"` — the textbook hoppable case, misread as a config fault. The classifier now
+  composes ("quota" near a word of exhaustion) instead of enumerating phrasings.
+
+Neither is visible offline for the usual reason: the unit tests asserted the classifiers correctly
+matched the strings someone had thought of. Only a live region running out produces a string nobody
+thought of. The fallback now walks all three and raises an `EngineError` naming them, which is what
+the plan's abort path expects — a defer, not a block.
 
 ### Why almost everything Spark is stale
 

@@ -128,18 +128,20 @@ def _is_capacity_error(message: str) -> bool:
     return any(marker in low for marker in _CAPACITY_ERROR_MARKERS)
 
 
-# Substrings that mark a *regional quota* ceiling. GPU/accelerator quota on Vertex is granted
+# What marks a *regional quota* ceiling. GPU/accelerator quota on Vertex is granted
 # per-region, so a region that is over its quota says nothing about the next region's ceiling — the
 # fallback advances on these just as it does on capacity stockouts. A quota error is distinct from a
 # capacity stockout (the region has room, this project is simply not allowed more), so it gets its
 # own classifier rather than widening the capacity markers.
-_QUOTA_ERROR_MARKERS = (
-    "quota exceeded",
-    "exceeds quota",
-    "exceed quota",
-    "exceeded quota",
-    "quota limit",
-)
+#
+# Matched *compositionally* — "quota" near a word of exhaustion — rather than as fixed phrases.
+# Every phrase the fixed list once held ("quota exceeded", "exceeds quota", "quota limit", …) says
+# quota and says exceed-or-limit, so nothing is lost; what is gained is the wordings nobody
+# enumerated. Found live 2026-09-01: `us-east1` answered "The following quotas are exceeded:
+# CustomModelTrainingT4GPUsPerProjectPerRegion" — plural, and in an order no marker matched — so a
+# textbook hoppable quota ceiling was misread as a config fault and the third region never tried.
+_QUOTA_WORDS = ("quota", "quotas")
+_EXHAUSTION_WORDS = ("exceed", "exceeds", "exceeded", "limit", "limits")
 
 
 def _is_quota_error(message: str) -> bool:
@@ -148,9 +150,39 @@ def _is_quota_error(message: str) -> bool:
     Vertex accelerator quota is per-region, so a quota-exhausted region is worth retrying elsewhere:
     another region carries its own independent ceiling. (A capacity stockout is a different reason
     with the same remedy — hop — and is classified by `_is_capacity_error`.)
+
+    Note that the relevant ceiling is often *not* the Compute Engine one. `NVIDIA_T4_GPUS` can read
+    4-of-4 free in a region while `CustomModelTrainingT4GPUsPerProjectPerRegion` — the Vertex-side
+    quota a Ray cluster actually spends — is zero. Checking Compute Engine quota before a Ray GPU
+    run tells you nothing.
     """
     low = message.lower()
-    return any(marker in low for marker in _QUOTA_ERROR_MARKERS)
+    return any(q in low for q in _QUOTA_WORDS) and any(e in low for e in _EXHAUSTION_WORDS)
+
+
+# Substrings marking Vertex's *opaque* provisioning failure — the resource carries an error message,
+# but the message says nothing. This is the resource-side twin of `_is_generic_cluster_error`'s
+# exception-side string, and it earns its own markers because a non-empty `detail` is exactly what
+# switches that classifier off.
+#
+# Found live 2026-09-01: a T4 Ray cluster in `us-central1` failed twice with "An internal error
+# occurred on your cluster." The config listed three `ray_regions` and none but the first was ever
+# tried, because a non-empty-but-contentless detail read as a config fault.
+_OPAQUE_PROVISION_MARKERS = ("an internal error occurred",)
+
+
+def _is_opaque_provision_error(message: str) -> bool:
+    """True if the cluster's own error message is present but carries no diagnosis (pure).
+
+    Hoppable, on the same reasoning as `_is_generic_cluster_error`: the text appears only *after* a
+    cluster provisioned and then failed, and it names nothing about the config, so it is no evidence
+    of a config fault. Vertex's own remedy for it is "try recreating one in a few minutes", and
+    trying the next region is a strictly better version of that — a fresh attempt somewhere the
+    hardware may actually be there. If it really is a config fault, every region fails and the
+    caller still gets an `EngineError` naming all of them.
+    """
+    low = message.lower()
+    return any(marker in low for marker in _OPAQUE_PROVISION_MARKERS)
 
 
 def _is_generic_cluster_error(message: str) -> bool:
@@ -306,9 +338,10 @@ def _create_cluster_across_regions(
     """Create the cluster, walking ``regions`` in order until one can provision it.
 
     Returns ``(cluster_resource_name, region)`` for the region that succeeded. On a *regional
-    capacity* failure (`_is_capacity_error`) or a *regional quota* ceiling (`_is_quota_error`) the
-    failed attempt's (deterministic) resource is torn down and the next region tried — both are
-    per-region conditions another region may not share. Any *other* error (bad machine type,
+    capacity* failure (`_is_capacity_error`), a *regional quota* ceiling (`_is_quota_error`) or an
+    *opaque* provisioning failure (`_is_opaque_provision_error`) the failed attempt's
+    (deterministic) resource is torn down and the next region tried — none of the three is evidence
+    of a condition the next region shares. Any error that *does* name a cause (bad machine type,
     permission, bad config) is re-raised at once because another region won't fix it. Exhausting
     every region raises `EngineError` naming the regions tried.
 
@@ -345,10 +378,16 @@ def _create_cluster_across_regions(
             # config/permission fault: another region won't help, so re-raise.
             capacity = _is_capacity_error(message)
             quota = _is_quota_error(message)
+            opaque = _is_opaque_provision_error(message)
             generic_provision_error = not detail and _is_generic_cluster_error(str(exc))
-            if not (capacity or quota or generic_provision_error):
+            if not (capacity or quota or opaque or generic_provision_error):
                 raise
-            reason = "quota ceiling" if quota and not capacity else "insufficient capacity"
+            if quota and not capacity:
+                reason = "quota ceiling"
+            elif opaque and not (capacity or quota):
+                reason = "an opaque provisioning failure"
+            else:
+                reason = "insufficient capacity"
             _log.warning(
                 "region %s hit %s (%s); trying next region",
                 region,

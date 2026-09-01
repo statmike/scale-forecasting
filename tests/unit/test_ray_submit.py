@@ -582,6 +582,9 @@ def test_is_capacity_error_false_for_non_capacity_messages(message: str) -> None
         "Quota exceeded for quota metric 'Nvidia T4 GPUs' of service 'aiplatform.googleapis.com'",
         "The request exceeds quota for the region",
         "resource creation would exceed quota limit for NVIDIA_T4_GPUS",
+        # Verbatim from a live wave-4 failure (`us-east1`, 2026-09-01). Plural, and in an order no
+        # fixed marker matched — which is why the classifier composes instead of enumerating.
+        "The following quotas are exceeded: CustomModelTrainingT4GPUsPerProjectPerRegion",
     ],
 )
 def test_is_quota_error_true_for_quota_messages(message: str) -> None:
@@ -613,6 +616,32 @@ def test_is_generic_cluster_error_matches_sdk_opaque_error() -> None:
 )
 def test_is_generic_cluster_error_false_otherwise(message: str) -> None:
     assert ray_cluster._is_generic_cluster_error(message) is False
+
+
+def test_an_opaque_provisioning_failure_is_hoppable() -> None:
+    """Verbatim from a live wave-4 failure (T4 Ray cluster, `us-central1`, 2026-09-01, twice).
+
+    The resource carried an error message, which is precisely what switched
+    `_is_generic_cluster_error` off — so a config listing three `ray_regions` tried exactly one.
+    """
+    msg = (
+        "An internal error occurred on your cluster. Please try recreating one in a few minutes. "
+        "If you still experience errors, contact Cloud AI Platform."
+    )
+    assert ray_cluster._is_opaque_provision_error(msg) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Each of these names a cause, so another region is not the remedy — do not hop.
+        "Permission denied on service account",
+        "machine type's memory is too small",
+        "Resources are insufficient in region: us-central1",  # hoppable, but as *capacity*
+    ],
+)
+def test_a_named_cause_is_not_an_opaque_failure(message: str) -> None:
+    assert ray_cluster._is_opaque_provision_error(message) is False
 
 
 @pytest.mark.parametrize(
