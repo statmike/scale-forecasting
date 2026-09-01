@@ -58,21 +58,35 @@ def dags_import_command(
 ) -> list[str]:
     """``gcloud`` argv to copy a rendered DAG file into a Composer environment's DAG folder."""
     return [
-        "gcloud", "composer", "environments", "storage", "dags", "import",
-        "--environment", env,
-        "--location", location,
+        "gcloud",
+        "composer",
+        "environments",
+        "storage",
+        "dags",
+        "import",
+        "--environment",
+        env,
+        "--location",
+        location,
         *_project_flag(project),
-        "--source", local_dag_path,
+        "--source",
+        local_dag_path,
     ]
 
 
 def dags_list_command(env: str, location: str, project: str | None = None) -> list[str]:
     """``gcloud`` argv to list the DAGs Airflow has parsed (to confirm the upload was picked up)."""
     return [
-        "gcloud", "composer", "environments", "run", env,
-        "--location", location,
+        "gcloud",
+        "composer",
+        "environments",
+        "run",
+        env,
+        "--location",
+        location,
         *_project_flag(project),
-        "dags", "list",
+        "dags",
+        "list",
     ]
 
 
@@ -81,10 +95,19 @@ def dags_trigger_command(
 ) -> list[str]:
     """``gcloud`` argv to trigger one run of ``dag_id`` (tokens after ``--`` go to Airflow)."""
     return [
-        "gcloud", "composer", "environments", "run", env,
-        "--location", location,
+        "gcloud",
+        "composer",
+        "environments",
+        "run",
+        env,
+        "--location",
+        location,
         *_project_flag(project),
-        "dags", "trigger", "--", "-d", dag_id,
+        "dags",
+        "trigger",
+        "--",
+        "-d",
+        dag_id,
     ]
 
 
@@ -184,7 +207,8 @@ def run_airflow_smoke(
     while time.monotonic() < deadline:
         listed = subprocess.run(
             dags_list_command(composer_env, location, project),
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if listed.returncode == 0 and dag_id in listed.stdout:
             break

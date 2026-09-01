@@ -217,7 +217,7 @@ def test_build_batch_gpu_rejects_non_l4_on_serverless() -> None:
         build_batch(
             infra=_infra(),
             settings=_settings(),
-                package_uri="gs://c/p.zip",
+            package_uri="gs://c/p.zip",
             launcher_uri="gs://c/e.py",
             config_uri="gs://c/r.json",
             hardware="gpu",
@@ -498,9 +498,7 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
         def create_batch(self, *, parent: str, batch: Any, batch_id: str) -> _FakeOp:
             return _FakeOp()
 
-    monkeypatch.setattr(
-        submit, "stage_code", lambda bkt: ("gs://c/p.zip", "gs://c/spark_main.py")
-    )
+    monkeypatch.setattr(submit, "stage_code", lambda bkt: ("gs://c/p.zip", "gs://c/spark_main.py"))
     monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
     monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
     # Telemetry is stamped even on a FAILED batch (so its sizing is recorded), before the raise —
@@ -510,7 +508,7 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
     with pytest.raises(EngineError, match="FAILED"):
         submit.submit_batch(
             _cfg(models=["theta"]),
-                settings=_settings(),
+            settings=_settings(),
             infra=_infra(),
             wait=True,
         )

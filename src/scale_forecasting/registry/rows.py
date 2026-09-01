@@ -264,9 +264,7 @@ def _as_json(value: Any) -> str | None:
         return value
     if isinstance(value, dict):
         clean = {
-            k: v
-            for k, v in value.items()
-            if not (isinstance(v, float) and not math.isfinite(v))
+            k: v for k, v in value.items() if not (isinstance(v, float) and not math.isfinite(v))
         }
         if not clean:
             return None

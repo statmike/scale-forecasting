@@ -52,7 +52,7 @@ class AutoETS(BaseModel):
         for trend in (None, "add"):
             damped_opts = (False, True) if (trend and allow_damped) else (False,)
             for damped in damped_opts:
-                for seasonal in ((None, "add") if can_season else (None,)):
+                for seasonal in (None, "add") if can_season else (None,):
                     try:
                         candidate = ExponentialSmoothing(
                             vals,

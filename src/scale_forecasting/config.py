@@ -200,9 +200,7 @@ class FamilyCompute(BaseModel):
         if self.runtime == "ray" and (
             self.spark_mode is not None or self.spark_cluster_name is not None
         ):
-            raise ValueError(
-                "spark_mode/spark_cluster_name are only valid when runtime is 'spark'"
-            )
+            raise ValueError("spark_mode/spark_cluster_name are only valid when runtime is 'spark'")
         if self.spark_cluster_name is not None and self.spark_mode not in (None, "cluster"):
             raise ValueError("spark_cluster_name requires spark_mode='cluster'")
         if self.spark_mode == "serverless" and self.gpu_type == "T4":
@@ -241,9 +239,7 @@ class EnsembleCompute(BaseModel):
         if self.runtime == "ray" and (
             self.spark_mode is not None or self.spark_cluster_name is not None
         ):
-            raise ValueError(
-                "spark_mode/spark_cluster_name are only valid when runtime is 'spark'"
-            )
+            raise ValueError("spark_mode/spark_cluster_name are only valid when runtime is 'spark'")
         if self.spark_cluster_name is not None and self.spark_mode not in (None, "cluster"):
             raise ValueError("spark_cluster_name requires spark_mode='cluster'")
         return self

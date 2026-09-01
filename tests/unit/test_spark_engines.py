@@ -137,9 +137,7 @@ def test_an_unset_ceiling_leaves_the_policy_count_untouched() -> None:
 
 
 def test_the_widened_count_still_respects_the_safety_ceiling() -> None:
-    raised = spark_io.reachable_bucket_count(
-        40, max_executors=2000, executor_cores=96, task_cpus=1
-    )
+    raised = spark_io.reachable_bucket_count(40, max_executors=2000, executor_cores=96, task_cpus=1)
     assert raised == spark_io._MAX_BUCKETS
 
 
@@ -223,9 +221,7 @@ def test_widen_fanout_raises_the_count_and_pins_the_shuffle_to_the_raised_one() 
 def test_widen_fanout_still_pins_the_shuffle_when_the_count_is_already_wide_enough() -> None:
     # The raise and the pin are independent: a fan-out that needs no widening still needs its
     # tasks to exist.
-    spark = _SessionStub(
-        {"spark.dynamicAllocation.maxExecutors": "2", "spark.executor.cores": "4"}
-    )
+    spark = _SessionStub({"spark.dynamicAllocation.maxExecutors": "2", "spark.executor.cores": "4"})
     assert spark_explode._widen_fanout(_fanout_cfg(), spark, 500) == 500
     assert spark.conf.get("spark.sql.shuffle.partitions") == "500"
 

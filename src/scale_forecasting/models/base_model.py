@@ -182,13 +182,7 @@ class BaseModel(ABC):
         # whose values are all non-finite serializes to "{}". (The scalar median/bounds columns are
         # nulled independently at the write boundary by _as_float.)
         quantiles_json = [
-            json.dumps(
-                {
-                    str(q): fv
-                    for q in qs
-                    if math.isfinite(fv := float(quantile_map[q][i]))
-                }
-            )
+            json.dumps({str(q): fv for q in qs if math.isfinite(fv := float(quantile_map[q][i]))})
             for i in range(n)
         ]
         # The contract requires datetime64[ns]; pandas 2.x may infer coarser units.

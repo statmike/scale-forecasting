@@ -79,6 +79,7 @@ _SERVERLESS_MAX_EXECUTORS = 2000
 _SERVERLESS_DEFAULT_ALLOCATION_RATIO = 0.3
 _SERVERLESS_FAST_ALLOCATION_RATIO = 1.0
 
+
 def snap_to_legal(value: float, choices: Sequence[int], *, up: bool) -> int:
     """Nearest legal value to ``value`` in the given direction (pure).
 
@@ -365,9 +366,7 @@ def plan_serverless(
             family=label,
         )
 
-    widest = serverless_unit(
-        (_SERVERLESS_L4_CORES if gpu else _SERVERLESS_CPU_CORES)[-1], gpu=gpu
-    )
+    widest = serverless_unit((_SERVERLESS_L4_CORES if gpu else _SERVERLESS_CPU_CORES)[-1], gpu=gpu)
     first = translate_serverless(
         plan_fleet(sized_for(widest), runtime="serverless", n_cells=n_cells, unit=widest),
         tier=tier,

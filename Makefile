@@ -35,9 +35,16 @@ sync:
 	uv sync --frozen --all-extras
 
 ## test: the offline test gate (no GCP / Spark / Ray required).
+## `format --check` is a gate, not a suggestion: layout is machine-decided so review reads diffs of
+## meaning. Run `make format` to fix.
 test:
+	uv run ruff format --check src tests
 	uv run ruff check src tests
 	uv run pytest -m "not gcp and not spark and not ray" -q
+
+## format: apply the canonical layout in place (the fix for a `make test` format failure).
+format:
+	uv run ruff format src tests
 
 ## docs: build the documentation site (strict — fails on any broken nav/link/xref).
 docs:

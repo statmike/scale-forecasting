@@ -131,16 +131,12 @@ def combine_oof(
     if not present_models:
         return empty
     vals = wide.reindex(columns=present_models).to_numpy(dtype=float)
-    truth = (
-        oof_df.drop_duplicates(keys).set_index(keys)["y_true"].reindex(wide.index).to_numpy()
-    )
+    truth = oof_df.drop_duplicates(keys).set_index(keys)["y_true"].reindex(wide.index).to_numpy()
     ts_ids = wide.index.get_level_values("ts_id").to_numpy()
 
     parts: list[pd.DataFrame] = []
     for strategy in cfg.ensemble.strategies:
-        yhat = _blend_oof_strategy(
-            strategy, vals, present_models, ts_ids, truth, learned_weights
-        )
+        yhat = _blend_oof_strategy(strategy, vals, present_models, ts_ids, truth, learned_weights)
         if yhat is None:
             continue
         part = pd.DataFrame(
@@ -154,9 +150,7 @@ def combine_oof(
             }
         )
         parts.append(part[~part["yhat"].isna()].reset_index(drop=True))
-    return (
-        pd.concat(parts, ignore_index=True)[list(_OOF_BLEND_COLS)] if parts else empty
-    )
+    return pd.concat(parts, ignore_index=True)[list(_OOF_BLEND_COLS)] if parts else empty
 
 
 def _blend_oof_strategy(
@@ -337,9 +331,7 @@ def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
     return [m for m in models if not (mean_by_model.get(m, float("nan")) > threshold)]
 
 
-def _calc_blend(
-    strategy: str, vals: np.ndarray, weights: np.ndarray | None
-) -> np.ndarray:
+def _calc_blend(strategy: str, vals: np.ndarray, weights: np.ndarray | None) -> np.ndarray:
     """Blend an ``(n_rows, n_models)`` value matrix by one calculated strategy (pure).
 
     ``mean``/``median`` are unweighted (``median`` robust to a wild base forecast);

@@ -100,9 +100,7 @@ def _stamp_cluster_telemetry(
     from .registry.header import merge_header_telemetry, sizing_telemetry_path
 
     try:
-        merge_header_telemetry(
-            run_id, {sizing_telemetry_path(sizing): sizing}, settings=settings
-        )
+        merge_header_telemetry(run_id, {sizing_telemetry_path(sizing): sizing}, settings=settings)
         _log.info("cluster sizing stamped for run %s", run_id)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("cluster sizing capture failed (non-fatal): %r", exc)

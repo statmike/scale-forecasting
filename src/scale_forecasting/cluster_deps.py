@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from .config import RunConfig
 
 
-
 # Packed-venv delivery: a Dataproc cluster can't use the Serverless custom container, so the locked
 # dependency env is shipped as a self-contained venv archive and unpacked to a fixed absolute path
 # on every node by a cluster **init action** (below). Job ``archive_uris`` are localized only to the

@@ -35,11 +35,17 @@ def _cfg(**over: Any) -> RunConfig:
     return RunConfig.model_validate(base)
 
 
-def _model(model_type: str, family: str, *, ens: str | None = None, score: float | None = 0.2,
-           **over: Any) -> R.ModelReview:
+def _model(
+    model_type: str, family: str, *, ens: str | None = None, score: float | None = 0.2, **over: Any
+) -> R.ModelReview:
     base: dict[str, Any] = dict(
-        model_type=model_type, family=family, ensemble_id=ens, is_ensemble=ens is not None,
-        compute_engine="spark", n_series=10, score=score,
+        model_type=model_type,
+        family=family,
+        ensemble_id=ens,
+        is_ensemble=ens is not None,
+        compute_engine="spark",
+        n_series=10,
+        score=score,
     )
     base.update(over)
     return R.ModelReview(**base)
@@ -102,10 +108,20 @@ def test_assemble_progress_rolls_cells_up_to_families_against_expected() -> None
     cfg = _cfg()  # 10 series; statistical=[theta], ml=[xgboost], native=[arima_plus], ensemble x2
     summary = {"status": "RUNNING", "n_series": 10}
     jobs = [
-        {"family": "statistical", "runtime": "spark", "hardware": "cpu",
-         "status": "COMPLETED", "runtime_seconds": 12.0},
-        {"family": "ml", "runtime": "spark", "hardware": "cpu", "status": "RUNNING",
-         "runtime_seconds": None},
+        {
+            "family": "statistical",
+            "runtime": "spark",
+            "hardware": "cpu",
+            "status": "COMPLETED",
+            "runtime_seconds": 12.0,
+        },
+        {
+            "family": "ml",
+            "runtime": "spark",
+            "hardware": "cpu",
+            "status": "RUNNING",
+            "runtime_seconds": None,
+        },
     ]
     progress = [
         {"model_type": "theta", "ensemble_id": None, "n_cells_done": 10, "mean_fit_seconds": 0.5},
@@ -130,8 +146,12 @@ def test_assemble_progress_cell_weighted_mean_fit_across_models_in_a_family() ->
     cfg = _cfg(models=["theta", "holtwinters"], ensemble={"enabled": False})
     progress = [
         {"model_type": "theta", "ensemble_id": None, "n_cells_done": 10, "mean_fit_seconds": 1.0},
-        {"model_type": "holtwinters", "ensemble_id": None, "n_cells_done": 30,
-         "mean_fit_seconds": 2.0},
+        {
+            "model_type": "holtwinters",
+            "ensemble_id": None,
+            "n_cells_done": 30,
+            "mean_fit_seconds": 2.0,
+        },
     ]
     rp = R._assemble_progress("rid", {"n_series": 10}, cfg, [], progress)
     stat = next(f for f in rp.families if f.family == "statistical")
@@ -209,9 +229,15 @@ def test_quiet_seconds_is_none_when_unknown() -> None:
 
 def _agg(model_type: str, ens: str | None, wape: float, **over: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
-        "model_type": model_type, "ensemble_id": ens, "compute_engine": "spark",
-        "n_series": 10, "mean_fit_seconds": 1.0,
-        "mean_wape": wape, "p10_wape": wape - 0.05, "p50_wape": wape, "p90_wape": wape + 0.05,
+        "model_type": model_type,
+        "ensemble_id": ens,
+        "compute_engine": "spark",
+        "n_series": 10,
+        "mean_fit_seconds": 1.0,
+        "mean_wape": wape,
+        "p10_wape": wape - 0.05,
+        "p50_wape": wape,
+        "p90_wape": wape + 0.05,
     }
     base.update(over)
     return base
@@ -223,10 +249,17 @@ def test_assemble_review_from_aggregates_sorts_and_derives() -> None:
         _agg("theta", None, 0.20),
         _agg("ensemble_mean", "d", 0.15),
     ]
-    lb = [{"model_type": "theta", "ensemble_id": None, "median_fit_seconds": 1.1,
-           "no_artifact_rate": 0.0}]
-    rr = R._assemble_review("rid", {"status": "COMPLETED"}, "wape", 10, lb, aggs,
-                            {"theta": 1400, "xgboost": 0})
+    lb = [
+        {
+            "model_type": "theta",
+            "ensemble_id": None,
+            "median_fit_seconds": 1.1,
+            "no_artifact_rate": 0.0,
+        }
+    ]
+    rr = R._assemble_review(
+        "rid", {"status": "COMPLETED"}, "wape", 10, lb, aggs, {"theta": 1400, "xgboost": 0}
+    )
 
     assert [m.model_type for m in rr.models] == ["ensemble_mean", "theta", "xgboost"]  # best first
     assert rr.best_overall.model_type == "theta"  # best *base* (ensemble excluded)
@@ -242,10 +275,24 @@ def test_assemble_review_from_aggregates_sorts_and_derives() -> None:
 
 def test_assemble_review_falls_back_to_leaderboard_when_no_aggregates() -> None:
     lb = [
-        {"model_type": "theta", "ensemble_id": None, "compute_engine": "spark", "n_cells": 10,
-         "mean_wape": 0.22, "median_fit_seconds": 1.0, "no_artifact_rate": 0.0},
-        {"model_type": "naive_mean", "ensemble_id": None, "compute_engine": "spark", "n_cells": 10,
-         "mean_wape": None, "median_fit_seconds": 0.1, "no_artifact_rate": 0.0},
+        {
+            "model_type": "theta",
+            "ensemble_id": None,
+            "compute_engine": "spark",
+            "n_cells": 10,
+            "mean_wape": 0.22,
+            "median_fit_seconds": 1.0,
+            "no_artifact_rate": 0.0,
+        },
+        {
+            "model_type": "naive_mean",
+            "ensemble_id": None,
+            "compute_engine": "spark",
+            "n_cells": 10,
+            "mean_wape": None,
+            "median_fit_seconds": 0.1,
+            "no_artifact_rate": 0.0,
+        },
     ]
     rr = R._assemble_review("rid", {"status": "COMPLETED"}, "wape", 10, lb, [], {})
     assert [m.model_type for m in rr.models] == ["theta", "naive_mean"]  # unscored sorts last
@@ -269,12 +316,26 @@ def test_monitor_run_composes_readers(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(reads, "read_run_summary", _summary)
     monkeypatch.setattr(reads, "read_run_config", lambda rid, *, settings=None: cfg.model_dump())
-    monkeypatch.setattr(jobs, "read_run_jobs", lambda rid, *, settings=None:
-                        [{"family": "statistical", "runtime": "spark", "hardware": "cpu",
-                          "status": "RUNNING", "runtime_seconds": None}])
-    monkeypatch.setattr(reads, "read_progress", lambda rid, *, settings=None:
-                        [{"model_type": "theta", "ensemble_id": None, "n_cells_done": 5,
-                          "mean_fit_seconds": 0.5}])
+    monkeypatch.setattr(
+        jobs,
+        "read_run_jobs",
+        lambda rid, *, settings=None: [
+            {
+                "family": "statistical",
+                "runtime": "spark",
+                "hardware": "cpu",
+                "status": "RUNNING",
+                "runtime_seconds": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        reads,
+        "read_progress",
+        lambda rid, *, settings=None: [
+            {"model_type": "theta", "ensemble_id": None, "n_cells_done": 5, "mean_fit_seconds": 0.5}
+        ],
+    )
 
     rp = R.monitor_run("rid", settings=_SETTINGS)
     assert seen == {"run_id": "rid", "settings": _SETTINGS}  # readers get id + injected settings
@@ -336,12 +397,18 @@ def test_review_run_composes_readers(monkeypatch: Any) -> None:
     from scale_forecasting.registry import reads
 
     cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "decision_metric": "mae"})
-    monkeypatch.setattr(reads, "read_run_summary", lambda rid, *, settings=None:
-                        {"status": "COMPLETED", "n_series": 10})
+    monkeypatch.setattr(
+        reads,
+        "read_run_summary",
+        lambda rid, *, settings=None: {"status": "COMPLETED", "n_series": 10},
+    )
     monkeypatch.setattr(reads, "read_run_config", lambda rid, *, settings=None: cfg.model_dump())
     monkeypatch.setattr(reads, "read_leaderboard", lambda rid, *, settings=None: [])
-    monkeypatch.setattr(reads, "read_metric_aggregates", lambda rid, *, settings=None:
-                        [_agg("theta", None, 0.2, mean_mae=1.5, p50_mae=1.4)])
+    monkeypatch.setattr(
+        reads,
+        "read_metric_aggregates",
+        lambda rid, *, settings=None: [_agg("theta", None, 0.2, mean_mae=1.5, p50_mae=1.4)],
+    )
     monkeypatch.setattr(
         reads, "read_prediction_counts", lambda rid, *, settings=None: {"theta": 70}
     )
@@ -354,14 +421,20 @@ def test_review_run_composes_readers(monkeypatch: Any) -> None:
 
 def test_forecaster_monitor_and_review_run_delegate(monkeypatch: Any) -> None:
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(R, "monitor_run",
-                        lambda rid, *, probe=False, settings=None:
-                        seen.setdefault("mon", (rid, probe, settings)))
-    monkeypatch.setattr(R, "review_run",
-                        lambda rid, *, settings=None: seen.setdefault("rev", (rid, settings)))
+    monkeypatch.setattr(
+        R,
+        "monitor_run",
+        lambda rid, *, probe=False, settings=None: seen.setdefault("mon", (rid, probe, settings)),
+    )
+    monkeypatch.setattr(
+        R, "review_run", lambda rid, *, settings=None: seen.setdefault("rev", (rid, settings))
+    )
     f = sf.Forecaster.from_dict(
-        {"run_name": "x", "data": {"source_table": "source_series_native", "horizon": 7},
-         "models": ["theta"]},
+        {
+            "run_name": "x",
+            "data": {"source_table": "source_series_native", "horizon": 7},
+            "models": ["theta"],
+        },
         settings=_SETTINGS,
     )
     f.monitor()
@@ -372,12 +445,17 @@ def test_forecaster_monitor_and_review_run_delegate(monkeypatch: Any) -> None:
 
 def test_forecaster_monitor_passes_probe_through(monkeypatch: Any) -> None:
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(R, "monitor_run",
-                        lambda rid, *, probe=False, settings=None:
-                        seen.setdefault("mon", (rid, probe)))
+    monkeypatch.setattr(
+        R,
+        "monitor_run",
+        lambda rid, *, probe=False, settings=None: seen.setdefault("mon", (rid, probe)),
+    )
     f = sf.Forecaster.from_dict(
-        {"run_name": "x", "data": {"source_table": "source_series_native", "horizon": 7},
-         "models": ["theta"]},
+        {
+            "run_name": "x",
+            "data": {"source_table": "source_series_native", "horizon": 7},
+            "models": ["theta"],
+        },
         settings=_SETTINGS,
     )
     f.monitor(probe=True)
@@ -396,8 +474,13 @@ def _use_agg() -> None:
 def test_plot_progress_one_bar_per_family() -> None:
     _use_agg()
     cfg = _cfg(models=["theta", "xgboost"], ensemble={"enabled": False})
-    rp = R._assemble_progress("rid", {"status": "RUNNING", "n_series": 10}, cfg,
-                              [{"family": "statistical", "status": "RUNNING"}], [])
+    rp = R._assemble_progress(
+        "rid",
+        {"status": "RUNNING", "n_series": 10},
+        cfg,
+        [{"family": "statistical", "status": "RUNNING"}],
+        [],
+    )
     ax = R.plot_progress(rp)
     assert len(ax.get_yticklabels()) == 2  # statistical + ml
     assert "rid" in ax.get_title()
@@ -413,11 +496,19 @@ def test_plot_progress_labels_a_running_family_with_its_quiet_time() -> None:
     _use_agg()
     cfg = _cfg(models=["theta", "xgboost"], ensemble={"enabled": False})
     rp = R._assemble_progress(
-        "rid", {"status": "RUNNING", "n_series": 10}, cfg,
-        [{"family": "statistical", "status": "RUNNING",
-          "started_at": _AT - timedelta(seconds=1320)},
-         {"family": "ml", "status": "COMPLETED", "ended_at": _AT - timedelta(seconds=1320)}],
-        [], now=_AT,
+        "rid",
+        {"status": "RUNNING", "n_series": 10},
+        cfg,
+        [
+            {
+                "family": "statistical",
+                "status": "RUNNING",
+                "started_at": _AT - timedelta(seconds=1320),
+            },
+            {"family": "ml", "status": "COMPLETED", "ended_at": _AT - timedelta(seconds=1320)},
+        ],
+        [],
+        now=_AT,
     )
     labels = _bar_labels(R.plot_progress(rp))
     assert any("quiet 22m" in t for t in labels)
@@ -432,11 +523,19 @@ def test_plot_progress_prefers_a_probe_verdict_over_the_quiet_time() -> None:
 
     cfg = _cfg(models=["theta", "xgboost"], ensemble={"enabled": False})
     rp = R._assemble_progress(
-        "rid", {"status": "RUNNING", "n_series": 10}, cfg,
-        [{"family": "statistical", "status": "RUNNING",
-          "started_at": _AT - timedelta(seconds=1320)},
-         {"family": "ml", "status": "RUNNING", "started_at": _AT - timedelta(seconds=1320)}],
-        [], now=_AT,
+        "rid",
+        {"status": "RUNNING", "n_series": 10},
+        cfg,
+        [
+            {
+                "family": "statistical",
+                "status": "RUNNING",
+                "started_at": _AT - timedelta(seconds=1320),
+            },
+            {"family": "ml", "status": "RUNNING", "started_at": _AT - timedelta(seconds=1320)},
+        ],
+        [],
+        now=_AT,
     )
     verdicts = (
         _verdict("statistical", vocabulary.VERDICT_LOST),
@@ -457,9 +556,18 @@ def test_plot_progress_drops_a_trust_registry_verdict_as_noise() -> None:
 
     cfg = _cfg(models=["theta"], ensemble={"enabled": False})
     rp = R._assemble_progress(
-        "rid", {"status": "COMPLETED", "n_series": 10}, cfg,
-        [{"family": "statistical", "status": "COMPLETED",
-          "ended_at": _AT - timedelta(seconds=1320)}], [], now=_AT,
+        "rid",
+        {"status": "COMPLETED", "n_series": 10},
+        cfg,
+        [
+            {
+                "family": "statistical",
+                "status": "COMPLETED",
+                "ended_at": _AT - timedelta(seconds=1320),
+            }
+        ],
+        [],
+        now=_AT,
     )
     verdict = (_verdict("statistical", vocabulary.VERDICT_TRUST_REGISTRY),)
     rp = replace(rp, probe=reconcile.ProbeReport("rid", "COMPLETED", False, verdict, False))
@@ -472,8 +580,16 @@ def _verdict(family: str, verdict: str) -> Any:
     from scale_forecasting.probes import reconcile
 
     return reconcile.FamilyVerdict(
-        family=family, runtime="spark", registry_status="RUNNING", native_state=None,
-        exists=None, verdict=verdict, disagreement=False, n_done=0, n_expected=None, detail="",
+        family=family,
+        runtime="spark",
+        registry_status="RUNNING",
+        native_state=None,
+        exists=None,
+        verdict=verdict,
+        disagreement=False,
+        n_done=0,
+        n_expected=None,
+        detail="",
     )
 
 
@@ -500,6 +616,13 @@ def test_plots_handle_empty_inputs() -> None:
 
 
 def test_review_surface_is_exported_from_package() -> None:
-    for name in ("monitor_run", "review_run", "RunProgress", "RunReview",
-                 "plot_progress", "plot_leaderboard", "plot_metric_distribution"):
+    for name in (
+        "monitor_run",
+        "review_run",
+        "RunProgress",
+        "RunReview",
+        "plot_progress",
+        "plot_leaderboard",
+        "plot_metric_distribution",
+    ):
         assert hasattr(sf, name), name

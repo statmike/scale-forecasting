@@ -101,6 +101,7 @@ class ProbeReport:
     families: tuple[FamilyVerdict, ...]
     disagreement: bool
 
+
 def _is_stale(fp: FamilyProgress, stale_after_s: float | None) -> bool:
     """Whether a ``RUNNING`` family has gone quiet long enough to be past its startup grace.
 
@@ -146,21 +147,33 @@ def _verdict_for_family(
     # Terminal → the registry is authoritative; the family was never probed (short-circuit).
     if (fp.status or "") in _TERMINAL:
         return FamilyVerdict(
-            **common, native_state=None, exists=None,
-            verdict=VERDICT_TRUST_REGISTRY, disagreement=False, detail="",
+            **common,
+            native_state=None,
+            exists=None,
+            verdict=VERDICT_TRUST_REGISTRY,
+            disagreement=False,
+            detail="",
         )
     # Non-terminal but escalated with no usable handle (pre-feature / malformed blob) → can't tell.
     if fp.family in no_handle:
         return FamilyVerdict(
-            **common, native_state=None, exists=None,
-            verdict=VERDICT_UNKNOWN, disagreement=False, detail="no handle recorded",
+            **common,
+            native_state=None,
+            exists=None,
+            verdict=VERDICT_UNKNOWN,
+            disagreement=False,
+            detail="no handle recorded",
         )
     result = native.get(fp.family)
     # Non-terminal and not escalated (no job row yet — never launched) → nothing to reconcile.
     if result is None:
         return FamilyVerdict(
-            **common, native_state=None, exists=None,
-            verdict=VERDICT_TRUST_REGISTRY, disagreement=False, detail="",
+            **common,
+            native_state=None,
+            exists=None,
+            verdict=VERDICT_TRUST_REGISTRY,
+            disagreement=False,
+            detail="",
         )
     ns = result.native_state
     artifacts_complete = fp.n_expected is not None and fp.n_done >= fp.n_expected
@@ -195,9 +208,13 @@ def _verdict_for_family(
     else:  # NATIVE_UNKNOWN — the probe degraded; don't overrule the registry.
         verdict, disagreement = VERDICT_UNKNOWN, False
     return FamilyVerdict(
-        **common, native_state=ns, exists=result.exists,
-        verdict=verdict, disagreement=disagreement,
-        detail=detail, telemetry=result.telemetry,
+        **common,
+        native_state=ns,
+        exists=result.exists,
+        verdict=verdict,
+        disagreement=disagreement,
+        detail=detail,
+        telemetry=result.telemetry,
     )
 
 
@@ -215,9 +232,7 @@ def _assemble_probe_report(
     family reconciles from the registry alone. ``escalated`` reflects whether any family was probed;
     ``disagreement`` rolls up the per-family flags.
     """
-    families = tuple(
-        _verdict_for_family(fp, native, no_handle, stale) for fp in progress.families
-    )
+    families = tuple(_verdict_for_family(fp, native, no_handle, stale) for fp in progress.families)
     return ProbeReport(
         run_id=progress.run_id,
         status=progress.status,
@@ -225,6 +240,7 @@ def _assemble_probe_report(
         families=families,
         disagreement=any(f.disagreement for f in families),
     )
+
 
 # --- I/O caller ----------------------------------------------------------------
 # The thin reader that turns a run_id into a ProbeReport: read the registry (header + config + job

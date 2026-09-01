@@ -76,9 +76,7 @@ _GPU_ACCELERATOR_TYPE = {"T4": "nvidia-tesla-t4", "L4": "nvidia-l4"}
 
 # The stock Dataproc GPU-driver install action — installs the NVIDIA driver on each node at create,
 # so the executor's Python worker can use the GPU for the torch fit inside the pandas UDF.
-_GPU_INIT_ACTION = (
-    "gs://goog-dataproc-initialization-actions-us-central1/gpu/install_gpu_driver.sh"
-)
+_GPU_INIT_ACTION = "gs://goog-dataproc-initialization-actions-us-central1/gpu/install_gpu_driver.sh"
 # The stock driver install compiles the NVIDIA kernel modules from source, which exceeds Dataproc's
 # 10-minute default per-init-action timeout. Give it a generous ceiling so the build finishes (still
 # well under the client-side create wait below).

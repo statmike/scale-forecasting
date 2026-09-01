@@ -171,7 +171,10 @@ def run(
             # --- Phase 1: final true-future forecast → forecast_predictions (always) ----------
             for model_name in models:
                 for stmt in build_setup_statements(
-                    cfg, model_name, dataset, registry_dataset=registry_dataset,
+                    cfg,
+                    model_name,
+                    dataset,
+                    registry_dataset=registry_dataset,
                     snapshot_millis=snapshot_millis,
                 ):
                     _query(stmt)
@@ -191,15 +194,23 @@ def run(
                     panels_by_ts: dict[str, list[dict[str, float]]] = {}
                     for fold_id, back_steps in plan:
                         for stmt in build_fold_create_statements(
-                            cfg, model_name, dataset, fold_id, back_steps,
+                            cfg,
+                            model_name,
+                            dataset,
+                            fold_id,
+                            back_steps,
                             registry_dataset=registry_dataset,
                             snapshot_millis=snapshot_millis,
                         ):
                             _query(stmt)
                         eval_df = _query(
                             build_eval_query(
-                                cfg, model_name, dataset, registry_dataset=registry_dataset,
-                                back_steps=back_steps, fold_id=fold_id,
+                                cfg,
+                                model_name,
+                                dataset,
+                                registry_dataset=registry_dataset,
+                                back_steps=back_steps,
+                                fold_id=fold_id,
                                 snapshot_millis=snapshot_millis,
                             )
                         ).to_dataframe()

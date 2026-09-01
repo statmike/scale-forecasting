@@ -211,9 +211,7 @@ def plan_sizing(
         pin_threads=not cfg.compute.profile.unpins_threads,
     )
     _log.info("serverless sizing: %s", translation.to_dict())
-    return translation.properties, sizing_telemetry(
-        plan, translation=translation, profile=profile
-    )
+    return translation.properties, sizing_telemetry(plan, translation=translation, profile=profile)
 
 
 def build_batch(

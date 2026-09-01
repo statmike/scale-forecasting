@@ -113,9 +113,7 @@ def test_first_candidate_is_home_auto_zone() -> None:
         infra=_Infra(_HOME_SUBNET),
         catalog={"us-central1": {"zones": ["us-central1-a"], "subnetwork_uri": None}},
     )
-    assert cands[0] == cf.Candidate(
-        region="us-central1", zone=None, subnetwork_uri=_HOME_SUBNET
-    )
+    assert cands[0] == cf.Candidate(region="us-central1", zone=None, subnetwork_uri=_HOME_SUBNET)
 
 
 def test_home_region_zones_use_home_subnet() -> None:

@@ -419,9 +419,7 @@ def test_job_row_wraps_probe_handle_into_job_telemetry() -> None:
         "id_kind": "exact",
         "spark_mode": "serverless",
     }
-    row = assemble_job_row(
-        "rid-0123456789ab", "statistical", 1, _CREATED, probe_handle=handle
-    )
+    row = assemble_job_row("rid-0123456789ab", "statistical", 1, _CREATED, probe_handle=handle)
     assert row["job_telemetry"] == {"probe_handle": handle}
 
 
@@ -456,8 +454,13 @@ def _capture_job_io(monkeypatch: Any) -> dict[str, Any]:
 def test_run_job_writes_running_then_completes(monkeypatch: Any) -> None:
     cap = _capture_job_io(monkeypatch)
     with run_job(
-        "my-run-0123456789ab", "deep_learning", 1, runtime="spark", spark_mode="cluster",
-        hardware="gpu", gpu_type="T4",
+        "my-run-0123456789ab",
+        "deep_learning",
+        1,
+        runtime="spark",
+        spark_mode="cluster",
+        hardware="gpu",
+        gpu_type="T4",
     ) as job:
         job.finalize(system_job_id="dp-batch-xyz", job_telemetry={"total_wall_s": 12.0})
 
@@ -465,7 +468,10 @@ def test_run_job_writes_running_then_completes(monkeypatch: Any) -> None:
     assert row["job_id"] == "sf-my-run-0123456789ab-deep_learning-a1"
     assert row["status"] == "RUNNING"
     assert (row["runtime"], row["spark_mode"], row["hardware"], row["gpu_type"]) == (
-        "spark", "cluster", "gpu", "T4",
+        "spark",
+        "cluster",
+        "gpu",
+        "T4",
     )
     # one terminal update: COMPLETED + measured runtime + the finalizer's extras
     assert len(cap["updates"]) == 1
@@ -658,9 +664,7 @@ def test_append_transient_exhausts_attempts_and_raises(monkeypatch: Any) -> None
     from scale_forecasting.errors import RegistryError
 
     monkeypatch.setattr(write_api.time, "sleep", lambda *_a, **_k: None)
-    client = _FakeWriteClient(
-        [ServiceUnavailable("503") for _ in range(_WRITE_RETRY_ATTEMPTS)]
-    )
+    client = _FakeWriteClient([ServiceUnavailable("503") for _ in range(_WRITE_RETRY_ATTEMPTS)])
     with pytest.raises(RegistryError, match="after 5 attempts"):
         _append(client)
     assert client.calls == _WRITE_RETRY_ATTEMPTS

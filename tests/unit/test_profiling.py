@@ -1010,9 +1010,7 @@ def test_an_even_number_of_values_medians_the_two_middles() -> None:
 
 def test_repeat_measurements_of_the_same_series_both_contribute() -> None:
     # A legitimate repeat measurement of one (ts_id, model) is evidence, not a duplicate to dedupe.
-    cost = build_profile(
-        [_fit(ts_id="a", wall_s=2.0), _fit(ts_id="a", wall_s=4.0)]
-    ).models["theta"]
+    cost = build_profile([_fit(ts_id="a", wall_s=2.0), _fit(ts_id="a", wall_s=4.0)]).models["theta"]
     assert cost.n_fits == 2
     assert cost.median_wall_s == pytest.approx(3.0)
 
@@ -1533,10 +1531,7 @@ def _recording_measure(
 
 def _profilable_panel(n_series: int = 6, n_obs: int = 40) -> pd.DataFrame:
     return _panel(
-        *(
-            _frame(f"s{i:02d}", [float(i + j) for j in range(n_obs)])
-            for i in range(n_series)
-        )
+        *(_frame(f"s{i:02d}", [float(i + j) for j in range(n_obs)]) for i in range(n_series))
     )
 
 
@@ -1661,9 +1656,7 @@ def test_per_series_hpo_is_short_circuited_so_the_pre_pass_stays_a_pre_pass() ->
         backtest={"enabled": True},
         hpo={"enabled": True, "granularity": "per_series"},
     )
-    source.resolve_profile(
-        _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
-    )
+    source.resolve_profile(_profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls))
     assert calls and all(params == {} for _, _, params in calls)
 
 
@@ -1671,9 +1664,7 @@ def test_without_hpo_the_probe_defers_to_the_cells_own_resolution() -> None:
     """No tuning in play → params=None, so the probe resolves exactly as run_cell would."""
     calls: list[tuple[str, str, Any]] = []
     cfg = _cfg(compute={"profile": {"mode": "always", "samples": 2}})
-    source.resolve_profile(
-        _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
-    )
+    source.resolve_profile(_profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls))
     assert calls and all(params is None for _, _, params in calls)
 
 
@@ -1682,18 +1673,13 @@ def test_an_undescribable_panel_falls_back_to_static_config_rather_than_guessing
     calls: list[tuple[str, str, Any]] = []
     cfg = _cfg(compute={"profile": {"mode": "always"}})
     empty = pd.DataFrame({"ts_id": [], "ds": [], "y": []})
-    assert (
-        source.resolve_profile(empty, cfg, ["theta"], measure=_recording_measure(calls))
-        is None
-    )
+    assert source.resolve_profile(empty, cfg, ["theta"], measure=_recording_measure(calls)) is None
     assert calls == []
 
 
 def test_the_profile_carries_the_configured_margins_not_the_module_defaults() -> None:
     """The margins are a config decision; a profile that forgot them is not re-derivable."""
-    cfg = _cfg(
-        compute={"profile": {"mode": "always", "memory_margin": 1.75, "time_margin": 1.5}}
-    )
+    cfg = _cfg(compute={"profile": {"mode": "always", "memory_margin": 1.75, "time_margin": 1.5}})
     profile = source.resolve_profile(
         _profilable_panel(6), cfg, ["theta"], measure=_recording_measure([])
     )
@@ -1702,7 +1688,7 @@ def test_the_profile_carries_the_configured_margins_not_the_module_defaults() ->
 
 
 def test_the_sample_travels_with_the_profile_for_audit() -> None:
-    """"What did this cost" and "measured on which series, and why" from one object."""
+    """ "What did this cost" and "measured on which series, and why" from one object."""
     cfg = _cfg(compute={"profile": {"mode": "always", "samples": 3}})
     profile = source.resolve_profile(
         _profilable_panel(8), cfg, ["theta"], measure=_recording_measure([])
@@ -1905,7 +1891,7 @@ def test_scale_axes_warn_only_past_an_order_of_magnitude(
 
 
 def test_source_none_consults_nothing_at_all() -> None:
-    """"none" is an opt-out, not a lookup that happens to fail: no loader may be called."""
+    """ "none" is an opt-out, not a lookup that happens to fail: no loader may be called."""
 
     def explode(*_: Any) -> Any:
         raise AssertionError("source='none' must not reach a loader")
@@ -1979,7 +1965,7 @@ def test_the_resolved_profile_is_the_harvest_of_those_rows() -> None:
 
 
 def test_the_measurement_timestamp_comes_from_the_rows() -> None:
-    """"When was this measured" is the question an operator asks of a suspicious profile."""
+    """ "When was this measured" is the question an operator asks of a suspicious profile."""
     rows = _harvest_rows(2)
     rows[1]["created_at"] = "2026-09-01T00:00:00Z"
     profile = source.resolve_profile_source(

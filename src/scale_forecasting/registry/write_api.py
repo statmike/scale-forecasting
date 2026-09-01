@@ -270,9 +270,7 @@ def _append_via_write_api(
             # Non-retryable API error (real bad schema/data) — same behavior as before the retry
             # loop existed: fail fast with the real error attached.
             if not _is_retryable(exc):
-                raise RegistryError(
-                    f"Storage Write API append to {table} failed: {exc}"
-                ) from exc
+                raise RegistryError(f"Storage Write API append to {table} failed: {exc}") from exc
             if attempt == _WRITE_RETRY_ATTEMPTS:
                 raise RegistryError(
                     f"Storage Write API append to {table} failed after {attempt} attempts: {exc}"

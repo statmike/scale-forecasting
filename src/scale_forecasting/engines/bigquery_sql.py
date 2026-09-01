@@ -60,9 +60,11 @@ _FREQ_MAP: dict[str, tuple[str, str]] = {
     "A": ("YEARLY", "YEAR"),
 }
 
+
 def _freq(cfg: RunConfig) -> tuple[str, str]:
     """Return ``(data_frequency, interval_unit)`` for the run's cadence (defaults to daily)."""
     return _FREQ_MAP.get(cfg.data.freq.upper(), ("DAILY", "DAY"))
+
 
 def _snapshot_clause(snapshot_millis: int | None) -> str:
     """The ``FOR SYSTEM_TIME AS OF`` clause pinning a source read to the run's snapshot (else "").
@@ -77,6 +79,7 @@ def _snapshot_clause(snapshot_millis: int | None) -> str:
     if snapshot_millis is None:
         return ""
     return f" FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({snapshot_millis})"
+
 
 def _series_filter(
     cfg: RunConfig, source: str, id_expr: str, *, snapshot_millis: int | None = None
@@ -97,6 +100,7 @@ def _series_filter(
         f"GROUP BY {idc} ORDER BY {idc} LIMIT {limit})"
     )
 
+
 def _cutoff_expr(
     cfg: RunConfig, source: str, back_steps: int, *, snapshot_millis: int | None = None
 ) -> str:
@@ -114,6 +118,7 @@ def _cutoff_expr(
         f"FROM `{source}`{snap})"
     )
 
+
 def fold_plan(cfg: RunConfig) -> list[tuple[int, int]]:
     """The backtest folds as ``[(fold_id, back_steps)]`` — pure, mirrors ``backtest.make_folds``.
 
@@ -129,7 +134,9 @@ def fold_plan(cfg: RunConfig) -> list[tuple[int, int]]:
     bt = cfg.backtest
     return [(k, bt.horizon + (bt.n_folds - 1 - k) * bt.step) for k in range(bt.n_folds)]
 
+
 # --- statements ----------------------------------------------------------------
+
 
 def bqml_options(cfg: RunConfig, model_name: str) -> dict[str, Any]:
     """The resolved model parameters, as an ordered dict — one source of truth for two uses.
@@ -160,6 +167,7 @@ def bqml_options(cfg: RunConfig, model_name: str) -> dict[str, Any]:
     }
     return opts
 
+
 def _render_options(opts: dict[str, Any]) -> str:
     """Render an options dict to the ``OPTIONS(...)`` body (strings quoted, numbers bare)."""
     lines = []
@@ -167,6 +175,7 @@ def _render_options(opts: dict[str, Any]) -> str:
         rendered = f"'{value}'" if isinstance(value, str) else str(value)
         lines.append(f"  {key} = {rendered}")
     return "OPTIONS(\n" + ",\n".join(lines) + "\n)"
+
 
 def build_custom_holiday_cte(cfg: RunConfig) -> str:
     """Render the ``custom_holiday`` CTE from `features.holiday_frame`, or ``""`` if none.
@@ -196,6 +205,7 @@ def build_custom_holiday_cte(cfg: RunConfig) -> str:
         )
     return "custom_holiday AS (\n  SELECT * FROM UNNEST([\n" + ",\n".join(rows) + "\n  ])\n)"
 
+
 def _train_window_where(
     cfg: RunConfig, source: str, back_steps: int | None, *, snapshot_millis: int | None = None
 ) -> list[str]:
@@ -217,6 +227,7 @@ def _train_window_where(
         conds.append(f"{datec} > {lower}")
     return conds
 
+
 def _training_select(
     cfg: RunConfig,
     source: str,
@@ -237,6 +248,7 @@ def _training_select(
     clause = f"\n  WHERE {' AND '.join(where)}" if where else ""
     snap = _snapshot_clause(snapshot_millis)
     return f"SELECT {', '.join(cols)}\n  FROM `{source}`{snap}{clause}"
+
 
 def build_create_model_sql(
     cfg: RunConfig,
@@ -264,9 +276,7 @@ def build_create_model_sql(
     ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
     source = _source_ref(cfg, dataset)
     options = _render_options(bqml_options(cfg, model_name))
-    training = _training_select(
-        cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis
-    )
+    training = _training_select(cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis)
     holiday_cte = build_custom_holiday_cte(cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
@@ -274,6 +284,7 @@ def build_create_model_sql(
     else:
         as_clause = f"AS (\n  {training}\n)"
     return f"CREATE OR REPLACE MODEL {ref}\n{options}\n{as_clause};"
+
 
 def _forecast_source(
     cfg: RunConfig,
@@ -324,11 +335,13 @@ def _forecast_source(
     struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
 
+
 # Columns written to forecast_predictions, in DDL order (shared by the INSERT).
 _PRED_COLS = (
     "run_id, ts_id, model_type, compute_engine, forecast_date, "
     "yhat, yhat_lower, yhat_upper, quantiles"
 )
+
 
 def build_forecast_insert_sql(
     cfg: RunConfig,
@@ -349,7 +362,10 @@ def build_forecast_insert_sql(
     """
     dataset_q = f"`{_registry_of(dataset, registry_dataset)}.forecast_predictions`"
     forecast = _forecast_source(
-        cfg, model_name, dataset, registry_dataset=registry_dataset,
+        cfg,
+        model_name,
+        dataset,
+        registry_dataset=registry_dataset,
         snapshot_millis=snapshot_millis,
     )
     return (
@@ -361,6 +377,7 @@ def build_forecast_insert_sql(
         f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL\n"
         f"FROM {forecast};"
     )
+
 
 def build_eval_query(
     cfg: RunConfig,
@@ -383,8 +400,13 @@ def build_eval_query(
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     forecast = _forecast_source(
-        cfg, model_name, dataset, registry_dataset=registry_dataset,
-        back_steps=back_steps, fold_id=fold_id, snapshot_millis=snapshot_millis,
+        cfg,
+        model_name,
+        dataset,
+        registry_dataset=registry_dataset,
+        back_steps=back_steps,
+        fold_id=fold_id,
+        snapshot_millis=snapshot_millis,
     )
     snap = _snapshot_clause(snapshot_millis)
     return (
@@ -398,6 +420,7 @@ def build_eval_query(
         f"  ON s.{idc} = f.{idc} AND s.{datec} = DATE(f.forecast_timestamp)\n"
         f"ORDER BY ts_id, forecast_date;"
     )
+
 
 def build_history_query(
     cfg: RunConfig, dataset: str = "{dataset}", *, snapshot_millis: int | None = None
@@ -420,6 +443,7 @@ def build_history_query(
         f"ORDER BY ts_id, ds;"
     )
 
+
 def build_series_ids_query(
     cfg: RunConfig, dataset: str = "{dataset}", *, snapshot_millis: int | None = None
 ) -> str:
@@ -435,6 +459,7 @@ def build_series_ids_query(
     clause = f"\nWHERE {sfilter}" if sfilter else ""
     snap = _snapshot_clause(snapshot_millis)
     return f"SELECT DISTINCT {idc} AS ts_id\nFROM `{source}`{snap}{clause}\nORDER BY ts_id;"
+
 
 def build_setup_statements(
     cfg: RunConfig,
@@ -455,17 +480,24 @@ def build_setup_statements(
     if model_name in _MODEL_TYPE:
         statements.append(
             build_create_model_sql(
-                cfg, model_name, dataset, registry_dataset=registry_dataset,
+                cfg,
+                model_name,
+                dataset,
+                registry_dataset=registry_dataset,
                 snapshot_millis=snapshot_millis,
             )
         )
     statements.append(
         build_forecast_insert_sql(
-            cfg, model_name, dataset, registry_dataset=registry_dataset,
+            cfg,
+            model_name,
+            dataset,
+            registry_dataset=registry_dataset,
             snapshot_millis=snapshot_millis,
         )
     )
     return statements
+
 
 def build_fold_create_statements(
     cfg: RunConfig,
@@ -485,11 +517,17 @@ def build_fold_create_statements(
     if model_name in _MODEL_TYPE:
         return [
             build_create_model_sql(
-                cfg, model_name, dataset, registry_dataset=registry_dataset,
-                back_steps=back_steps, fold_id=fold_id, snapshot_millis=snapshot_millis,
+                cfg,
+                model_name,
+                dataset,
+                registry_dataset=registry_dataset,
+                back_steps=back_steps,
+                fold_id=fold_id,
+                snapshot_millis=snapshot_millis,
             )
         ]
     return []
+
 
 def build_fold_drop_statements(
     cfg: RunConfig,
@@ -514,6 +552,7 @@ def build_fold_drop_statements(
         return [f"DROP MODEL IF EXISTS {ref};"]
     return []
 
+
 def render_setup_sql(
     cfg: RunConfig,
     model_name: str,
@@ -525,7 +564,10 @@ def render_setup_sql(
     """All of a model's true-future setup statements joined into one script (snapshot + reading)."""
     return "\n\n".join(
         build_setup_statements(
-            cfg, model_name, dataset, registry_dataset=registry_dataset,
+            cfg,
+            model_name,
+            dataset,
+            registry_dataset=registry_dataset,
             snapshot_millis=snapshot_millis,
         )
     )

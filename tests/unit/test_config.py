@@ -327,8 +327,9 @@ def test_an_unknown_measurement_mode_is_rejected_at_load() -> None:
         RunConfig(**_minimal_dict(compute={"profile": {"measure": "sometimes"}}))
 
 
-def test_measurement_is_on_by_default_because_a_run_you_forgot_to_profile_is_the_common_case()\
-        -> None:
+def test_measurement_is_on_by_default_because_a_run_you_forgot_to_profile_is_the_common_case() -> (
+    None
+):
     """Harvest costs three probes per cell; needing it and not having it costs a whole run."""
     assert RunConfig(**_minimal_dict()).compute.profile.records_measurements is True
 

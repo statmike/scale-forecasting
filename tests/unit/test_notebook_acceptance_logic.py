@@ -111,9 +111,9 @@ def test_first_cell_error_empty_on_clean_notebook() -> None:
 
 
 def _nb_json(cells: list[dict[str, object]]) -> bytes:
-    return json.dumps(
-        {"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
-    ).encode("utf-8")
+    return json.dumps({"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}).encode(
+        "utf-8"
+    )
 
 
 def _code(source: str, execution_count: int | None, outputs: list[dict] | None = None) -> dict:

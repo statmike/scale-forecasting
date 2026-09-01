@@ -234,9 +234,7 @@ def test_drop_run_deletes_every_tier_of_a_real_run(settings: Settings) -> None:
     client = bigquery.Client(project=settings.project_id)
     header = settings.registry_table_ref("run_registry")
     for _ in range(10):  # Write API rows are async-visible.
-        rows = client.query(
-            f"SELECT COUNT(*) c FROM `{header}` WHERE run_id='{run_id}'"
-        ).result()
+        rows = client.query(f"SELECT COUNT(*) c FROM `{header}` WHERE run_id='{run_id}'").result()
         if int(next(iter(rows)).c) > 0:
             break
         time.sleep(2)

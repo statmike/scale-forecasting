@@ -140,9 +140,7 @@ def launch_family_job(
         if ray_cluster_name is not None:
             from .ray_cluster import cluster_resource_path
 
-            resource_name = cluster_resource_path(
-                settings, ray_cluster_name, ray_cluster_region
-            )
+            resource_name = cluster_resource_path(settings, ray_cluster_name, ray_cluster_region)
         entry_handle = ProbeHandle(
             "ray",
             native_id=system_job_id,

@@ -405,8 +405,9 @@ def test_a_shared_cpu_pool_is_sized_for_the_heaviest_family_that_lands_on_it() -
         memory_margin=1.0,
         time_margin=1.0,
     )
-    plan = ray_io.plan_pool(_cfg(compute=_compute()), [_CPU, "xgboost"], 1000, gpu=False,
-                            profile=profile)
+    plan = ray_io.plan_pool(
+        _cfg(compute=_compute()), [_CPU, "xgboost"], 1000, gpu=False, profile=profile
+    )
     assert plan.slot.memory_bytes == 5 * _GIB
     assert plan.family == "statistical+ml"
     assert plan.task_options["memory"] == 5 * _GIB

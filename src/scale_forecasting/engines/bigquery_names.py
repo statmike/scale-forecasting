@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 # matches on (`model_object_matches_run`).
 _MODEL_PREFIX = "sf_model_"
 
+
 def _sanitize_identifier(text: str) -> str:
     """Coerce arbitrary text into a valid BigQuery identifier fragment.
 
@@ -35,6 +36,7 @@ def _sanitize_identifier(text: str) -> str:
     out = "".join(ch if ch.isalnum() else "_" for ch in text)
     return out.strip("_") or "x"
 
+
 def _source_ref(cfg: RunConfig, dataset: str) -> str:
     """Fully-qualify the source table: pass through a dotted name, else qualify against ``dataset``.
 
@@ -42,6 +44,7 @@ def _source_ref(cfg: RunConfig, dataset: str) -> str:
     """
     src = cfg.data.source_table
     return src if "." in src else f"{dataset}.{src}"
+
 
 def model_object_matches_run(model_id: str, run_id: str) -> bool:
     """Does a BQML model object name belong to ``run_id`` (the final model or any of its folds)?
@@ -62,6 +65,7 @@ def model_object_matches_run(model_id: str, run_id: str) -> bool:
     head, sep, fold = rest.rpartition("_f")
     return bool(sep) and fold.isdigit() and head.endswith(tail)
 
+
 def _registry_of(dataset: str, registry_dataset: str | None) -> str:
     """The dataset that owns a run's *outputs* — ``registry_dataset``, else ``dataset``.
 
@@ -72,6 +76,7 @@ def _registry_of(dataset: str, registry_dataset: str | None) -> str:
     a name belongs to is not recoverable later. See `settings.Settings.registry_dataset_ref`.
     """
     return registry_dataset or dataset
+
 
 def _model_ref(
     cfg: RunConfig, model_name: str, registry_dataset: str, *, fold_id: int | None = None

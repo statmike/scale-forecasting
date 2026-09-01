@@ -261,9 +261,7 @@ def test_series_ids_query_lists_the_subset() -> None:
 def test_series_limit_subset_present_and_omitted() -> None:
     limited = build_create_model_sql(_cfg(["arima_plus"], series_limit=100), "arima_plus", _DS)
     assert "ORDER BY ts_id LIMIT 100" in limited
-    unlimited = build_create_model_sql(
-        _cfg(["arima_plus"], series_limit=None), "arima_plus", _DS
-    )
+    unlimited = build_create_model_sql(_cfg(["arima_plus"], series_limit=None), "arima_plus", _DS)
     assert "LIMIT" not in unlimited
 
 
@@ -384,8 +382,6 @@ def test_snapshot_clause_pins_eval_join_actuals() -> None:
 def test_snapshot_clause_threads_through_setup_and_fold_builders() -> None:
     cfg = _cfg(["arima_plus"], series_limit=100)
     setup = build_setup_statements(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
-    fold = build_fold_create_statements(
-        cfg, "arima_plus", _DS, 0, 28, snapshot_millis=_SNAP_MS
-    )
+    fold = build_fold_create_statements(cfg, "arima_plus", _DS, 0, 28, snapshot_millis=_SNAP_MS)
     assert any("FOR SYSTEM_TIME AS OF" in s for s in setup)
     assert any(f"`{_SRC}{_SNAP}" in s for s in fold)

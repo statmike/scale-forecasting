@@ -492,7 +492,9 @@ def _assemble_review(
     if aggregate_rows:
         models = [
             _model_review_from_aggregate(
-                agg, decision_metric, lb.get((agg["model_type"], agg.get("ensemble_id")), {}),
+                agg,
+                decision_metric,
+                lb.get((agg["model_type"], agg.get("ensemble_id")), {}),
                 prediction_counts,
             )
             for agg in aggregate_rows
@@ -541,8 +543,13 @@ def review_run(
     aggregate_rows = read_metric_aggregates(run_id, settings=settings)
     prediction_counts = read_prediction_counts(run_id, settings=settings)
     return _assemble_review(
-        run_id, summary, decision_metric, n_series,
-        leaderboard_rows, aggregate_rows, prediction_counts,
+        run_id,
+        summary,
+        decision_metric,
+        n_series,
+        leaderboard_rows,
+        aggregate_rows,
+        prediction_counts,
     )
 
 
@@ -588,9 +595,7 @@ def _reportable_verdicts(progress: RunProgress) -> dict[str, str]:
     from .probes.vocabulary import VERDICT_TRUST_REGISTRY
 
     return {
-        v.family: v.verdict
-        for v in progress.probe.families
-        if v.verdict != VERDICT_TRUST_REGISTRY
+        v.family: v.verdict for v in progress.probe.families if v.verdict != VERDICT_TRUST_REGISTRY
     }
 
 

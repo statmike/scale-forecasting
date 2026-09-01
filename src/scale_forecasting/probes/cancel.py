@@ -237,7 +237,9 @@ def _finalize_cancelled(
     telemetry: dict[str, Any] = {"probe_handle": handle.to_blob(), "cancel": audit}
     started = _parse_ts(row.get("started_at"))
     fields: dict[str, Any] = {
-        "status": _CANCELLED, "ended_at": cancelled_at, "job_telemetry": telemetry
+        "status": _CANCELLED,
+        "ended_at": cancelled_at,
+        "job_telemetry": telemetry,
     }
     if started is not None:
         fields["runtime_seconds"] = (cancelled_at - started).total_seconds()
@@ -275,8 +277,13 @@ def cancel_run(
     plan = _assemble_cancel_plan(report)
     if not confirm:
         return CancelReport(
-            run_id=run_id, plan=plan, executed=False, outcomes=(),
-            header_status=None, actor=None, reason=reason,
+            run_id=run_id,
+            plan=plan,
+            executed=False,
+            outcomes=(),
+            header_status=None,
+            actor=None,
+            reason=reason,
         )
 
     resolved_actor = actor if actor is not None else resolve_principal(s)
@@ -291,23 +298,41 @@ def cancel_run(
             continue
         handle = ProbeHandle.from_job_row(r)
         if handle is None:
-            outcomes.append(CancelOutcome(
-                family=item.family, job_key=r["job_id"], requested=False, cancelled=False,
-                stopped=False, already_gone=False,
-                detail="no handle recorded; cannot address the runtime job",
-            ))
+            outcomes.append(
+                CancelOutcome(
+                    family=item.family,
+                    job_key=r["job_id"],
+                    requested=False,
+                    cancelled=False,
+                    stopped=False,
+                    already_gone=False,
+                    detail="no handle recorded; cannot address the runtime job",
+                )
+            )
             continue
         result = get_probe(handle.runtime).cancel(handle, settings=s)
         finalized = result.stopped or result.already_gone
         if finalized:
             _finalize_cancelled(
-                r, handle, item, actor=resolved_actor,
-                cancelled_at=cancelled_at, reason=reason, settings=s,
+                r,
+                handle,
+                item,
+                actor=resolved_actor,
+                cancelled_at=cancelled_at,
+                reason=reason,
+                settings=s,
             )
-        outcomes.append(CancelOutcome(
-            family=item.family, job_key=r["job_id"], requested=True, cancelled=finalized,
-            stopped=result.stopped, already_gone=result.already_gone, detail=result.detail,
-        ))
+        outcomes.append(
+            CancelOutcome(
+                family=item.family,
+                job_key=r["job_id"],
+                requested=True,
+                cancelled=finalized,
+                stopped=result.stopped,
+                already_gone=result.already_gone,
+                detail=result.detail,
+            )
+        )
 
     # Re-read every family (not just the --job subset) so the header reflects the true post-cancel
     # state — a per-family cancel makes a multi-family run PARTIAL, a whole-run cancel CANCELLED.
@@ -319,6 +344,11 @@ def cancel_run(
     if header_status is not None:
         update_header(run_id, settings=s, status=header_status)
     return CancelReport(
-        run_id=run_id, plan=plan, executed=True, outcomes=tuple(outcomes),
-        header_status=header_status, actor=resolved_actor, reason=reason,
+        run_id=run_id,
+        plan=plan,
+        executed=True,
+        outcomes=tuple(outcomes),
+        header_status=header_status,
+        actor=resolved_actor,
+        reason=reason,
     )

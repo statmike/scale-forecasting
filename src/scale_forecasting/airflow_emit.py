@@ -207,15 +207,23 @@ def emit_airflow_dag(cfg: RunConfig, config_uri: str, *, dag_id: str | None = No
         out.append("\n    # --- shared ephemeral Ray cluster (>=2 Ray families) -----------------")
         out.append(_op("create_ray_cluster", "create_ray_cluster", "create_ray_cluster"))
         out.append(
-            _op("delete_ray_cluster", "delete_ray_cluster", "delete_ray_cluster",
-                trigger_rule="all_done")
+            _op(
+                "delete_ray_cluster",
+                "delete_ray_cluster",
+                "delete_ray_cluster",
+                trigger_rule="all_done",
+            )
         )
     if spark_families:
         out.append("\n    # --- shared ephemeral Dataproc cluster (>=2 cluster families) --------")
         out.append(_op("create_spark_cluster", "create_spark_cluster", "create_spark_cluster"))
         out.append(
-            _op("delete_spark_cluster", "delete_spark_cluster", "delete_spark_cluster",
-                trigger_rule="all_done")
+            _op(
+                "delete_spark_cluster",
+                "delete_spark_cluster",
+                "delete_spark_cluster",
+                trigger_rule="all_done",
+            )
         )
 
     if ensemble_enabled:

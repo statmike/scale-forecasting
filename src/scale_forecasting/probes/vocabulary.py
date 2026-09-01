@@ -60,6 +60,7 @@ VERDICT_LIKELY_COMPLETED = "LIKELY_COMPLETED"  # job gone + expected artifacts a
 VERDICT_LOST = "LOST"  # job gone with artifacts missing / denominator unknown
 VERDICT_UNKNOWN = "UNKNOWN"  # couldn't tell (no handle, or the probe itself degraded)
 
+
 @dataclass(frozen=True)
 class ProbeHandle:
     """The runtime coordinates for one family's job — the write-blob and read-parse shared type.
@@ -183,6 +184,7 @@ class RuntimeProbe(Protocol):
     def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult: ...
 
     def cancel(self, handle: ProbeHandle, *, settings: Settings) -> CancelResult: ...
+
 
 def _parse_ts(value: Any) -> datetime | None:
     """Coerce a registry timestamp (a ``datetime`` from the BigQuery client, or an ISO string) to a

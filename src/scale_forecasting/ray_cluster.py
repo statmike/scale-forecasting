@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+
 def _worker_resources(plan: ray_io.RayClusterPlan) -> list[Any]:
     """Build the worker ``Resources`` list — one entry per non-empty pool.
 

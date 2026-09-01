@@ -52,7 +52,6 @@ def _no_live_header_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
 
 
-
 # --- _plan: run_id parity + the per-runtime split ------------------------------
 
 

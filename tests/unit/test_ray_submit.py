@@ -275,9 +275,7 @@ def _fake_vertex_ray(monkeypatch: pytest.MonkeyPatch) -> None:
     res_mod.AutoscalingSpec = _FakeAutoscalingSpec  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "google.cloud.aiplatform.vertex_ray", vr_mod)
-    monkeypatch.setitem(
-        sys.modules, "google.cloud.aiplatform.vertex_ray.util.resources", res_mod
-    )
+    monkeypatch.setitem(sys.modules, "google.cloud.aiplatform.vertex_ray.util.resources", res_mod)
 
 
 def test_worker_resources_attaches_autoscaling_spec_per_pool(_fake_vertex_ray: None) -> None:
@@ -843,9 +841,7 @@ def test_submit_and_poll_reraises_non_401_poll_error(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
 
     with pytest.raises(RuntimeError, match="500"):
-        ray_jobs._submit_and_poll(
-            resource_name, "python -m x", {"working_dir": "/src"}, wait=True
-        )
+        ray_jobs._submit_and_poll(resource_name, "python -m x", {"working_dir": "/src"}, wait=True)
     assert len(connects) == 1  # no refresh on a non-401
 
 
@@ -853,8 +849,7 @@ def test_client_needs_refresh_false_when_fresh() -> None:
     # Still comfortably inside the token TTL → keep the existing client, no rebuild.
     born = 100.0
     assert (
-        ray_jobs._client_needs_refresh(born, born + ray_jobs._CLIENT_MAX_AGE_SECONDS - 1.0)
-        is False
+        ray_jobs._client_needs_refresh(born, born + ray_jobs._CLIENT_MAX_AGE_SECONDS - 1.0) is False
     )
 
 

@@ -505,9 +505,7 @@ def run_acceptance(
         if state == "JOB_STATE_FAILED" and is_capacity_unavailable(detail):
             state = JOB_STATE_CAPACITY_UNAVAILABLE
 
-        results.append(
-            AcceptanceResult(spec.name, job_id, state, n_errors, detail, executed_uri)
-        )
+        results.append(AcceptanceResult(spec.name, job_id, state, n_errors, detail, executed_uri))
         _log.info("%s → %s (%d cell errors)", spec.name, state, n_errors)
     return results
 

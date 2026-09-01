@@ -352,9 +352,7 @@ def run(
             # Measure what the models actually cost before deciding what to ask Ray for. Driver-side
             # and short (`compute.profile` gates it; "off" and a too-small fan-out both return
             # None), and it never enters cfg — the run_id must not move because a probe ran.
-            profile = resolve_profile(
-                source, cfg, executed, params_by_model=params_by_model
-            )
+            profile = resolve_profile(source, cfg, executed, params_by_model=params_by_model)
             cpu_plan, gpu_plan = _pool_plans(
                 source, cfg, run_id, cpu_models, gpu_models, profile, gpu_fraction
             )
@@ -363,12 +361,8 @@ def run(
             # Chunk counts come from the true cell counts (series in the panel × pool models),
             # floored so the pool can actually reach its autoscaling ceiling (`tasks_for_ceiling`).
             target = cfg.compute.bucket_target_cells
-            gpu_chunks = ray_io.chunk_cells(
-                source, cfg, gpu_models, _pool_chunks(gpu_plan, target)
-            )
-            cpu_chunks = ray_io.chunk_cells(
-                source, cfg, cpu_models, _pool_chunks(cpu_plan, target)
-            )
+            gpu_chunks = ray_io.chunk_cells(source, cfg, gpu_models, _pool_chunks(gpu_plan, target))
+            cpu_chunks = ray_io.chunk_cells(source, cfg, cpu_models, _pool_chunks(cpu_plan, target))
 
             # One Ray task per chunk. The remote closes over the picklable runner (cloudpickle
             # handles the cfg/settings closure — the single local/cloud seam, no second env path).

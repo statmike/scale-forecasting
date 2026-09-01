@@ -184,14 +184,14 @@ class _FakeBatchClient:
 
 def _serverless_handle() -> ProbeHandle:
     return ProbeHandle(
-        "spark", native_id="sf-run-abc-statistical-a1", region="us-central1",
+        "spark",
+        native_id="sf-run-abc-statistical-a1",
+        region="us-central1",
         spark_mode="serverless",
     )
 
 
-def _patch_batch_client(
-    monkeypatch: pytest.MonkeyPatch, client: _FakeBatchClient
-) -> None:
+def _patch_batch_client(monkeypatch: pytest.MonkeyPatch, client: _FakeBatchClient) -> None:
     import scale_forecasting.batch_telemetry as telemetry_mod
 
     monkeypatch.setattr(telemetry_mod, "_batch_client", lambda region: client)
@@ -404,9 +404,7 @@ def _patch_ray(
         ("WEIRD", NATIVE_UNKNOWN),
     ],
 )
-def test_ray_maps_job_status(
-    monkeypatch: pytest.MonkeyPatch, status: str, expected: str
-) -> None:
+def test_ray_maps_job_status(monkeypatch: pytest.MonkeyPatch, status: str, expected: str) -> None:
     _patch_ray(monkeypatch, client=_FakeRayJobClient(status, message="driver msg"))
 
     result = RayProbe().check(_ray_handle(), settings=_SETTINGS)
@@ -479,9 +477,7 @@ class _FakeBqClient:
 
 
 def _bq_handle() -> ProbeHandle:
-    return ProbeHandle(
-        "bigquery", native_id="sf-run-abc-native-a1-", region="us", id_kind="prefix"
-    )
+    return ProbeHandle("bigquery", native_id="sf-run-abc-native-a1-", region="us", id_kind="prefix")
 
 
 def _patch_bq(monkeypatch: pytest.MonkeyPatch, client: _FakeBqClient) -> None:
@@ -560,7 +556,10 @@ def test_bigquery_scan_lower_bounded_by_handle_created_at(monkeypatch: pytest.Mo
 
     started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     handle = ProbeHandle(
-        "bigquery", native_id="sf-run-abc-native-a1-", region="us", id_kind="prefix",
+        "bigquery",
+        native_id="sf-run-abc-native-a1-",
+        region="us",
+        id_kind="prefix",
         created_at=started,
     )
     client = _FakeBqClient([_FakeBqJob("sf-run-abc-native-a1-0", "DONE")])
@@ -867,7 +866,8 @@ def test_cancel_plan_marks_running_family_cancellable() -> None:
 def test_cancel_plan_terminal_family_untouched() -> None:
     report = _assemble_probe_report(
         _progress(_fp("native", "COMPLETED", runtime="bigquery"), status="COMPLETED"),
-        {}, frozenset(),
+        {},
+        frozenset(),
     )
     plan = _assemble_cancel_plan(report)
     assert plan.items[0].cancellable is False
@@ -901,9 +901,7 @@ def test_cancel_plan_suppresses_ensemble_when_base_cancelled() -> None:
 
 
 def test_cancel_plan_no_ensemble_not_suppressed() -> None:
-    report = _report(
-        _fp("ml", "RUNNING"), native={"ml": ProbeResult(NATIVE_RUNNING, exists=True)}
-    )
+    report = _report(_fp("ml", "RUNNING"), native={"ml": ProbeResult(NATIVE_RUNNING, exists=True)})
     assert _assemble_cancel_plan(report).ensemble_suppressed is False
 
 
@@ -952,8 +950,11 @@ def test_roll_header_empty_is_none() -> None:
 def test_build_cancel_audit_shape() -> None:
     ts = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
     audit = _build_cancel_audit(
-        actor="sa@proj.iam", cancelled_at=ts, reason="stuck job",
-        native_state=NATIVE_RUNNING, n_done=7,
+        actor="sa@proj.iam",
+        cancelled_at=ts,
+        reason="stuck job",
+        native_state=NATIVE_RUNNING,
+        n_done=7,
     )
     assert audit == {
         "cancelled_by": "sa@proj.iam",
@@ -1015,7 +1016,9 @@ def test_spark_cluster_cancel_calls_cancel_job(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.stopped is True
     assert seen == {
-        "region": "us-west1", "job_id": "real-dataproc-job-id", "timeout": pytest.approx(20.0),
+        "region": "us-west1",
+        "job_id": "real-dataproc-job-id",
+        "timeout": pytest.approx(20.0),
     }
 
 
@@ -1065,9 +1068,7 @@ def test_bigquery_cancel_cancels_live_statements(monkeypatch: pytest.MonkeyPatch
 
 
 def test_bigquery_cancel_no_live_jobs_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_bq(
-        monkeypatch, _FakeBqClient([_FakeBqJob("sf-run-abc-native-a1-0", "DONE")])
-    )
+    _patch_bq(monkeypatch, _FakeBqClient([_FakeBqJob("sf-run-abc-native-a1-0", "DONE")]))
 
     result = BigQueryProbe().cancel(_bq_handle(), settings=_SETTINGS)
 

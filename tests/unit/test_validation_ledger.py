@@ -68,10 +68,7 @@ def ledger() -> str:
 @pytest.fixture(scope="module")
 def current_axes(ledger: str) -> dict[str, str]:
     """The architecture-axes table as ``{axis: current_value}``."""
-    return {
-        row[0].strip("`"): row[1].strip("`")
-        for row in _table_rows(ledger, "Axis ")
-    }
+    return {row[0].strip("`"): row[1].strip("`") for row in _table_rows(ledger, "Axis ")}
 
 
 @pytest.fixture(scope="module")

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+
 def extract_ray_telemetry(
     plan: ray_io.RayClusterPlan,
     *,
@@ -70,6 +71,7 @@ def extract_ray_telemetry(
         "python_version": getattr(cluster, "python_version", None) or None,
         "dashboard_address": getattr(cluster, "dashboard_address", None) or None,
     }
+
 
 def _stamp_ray_telemetry(
     telemetry: dict[str, Any],

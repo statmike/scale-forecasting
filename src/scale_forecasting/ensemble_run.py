@@ -127,8 +127,13 @@ def run_ensembles(
 
 
 def run_ensembles_microbatch(
-    cfg: RunConfig, run_id: str, *, settings: Settings, poll_interval_s: float = 15.0,
-    max_polls: int = 960, upstream_done: Callable[[], bool] | None = None,
+    cfg: RunConfig,
+    run_id: str,
+    *,
+    settings: Settings,
+    poll_interval_s: float = 15.0,
+    max_polls: int = 960,
+    upstream_done: Callable[[], bool] | None = None,
     job_id_prefix: str | None = None,
 ) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
     """Execute + score ensembles for ``run_id`` **incrementally, per series as it completes**.
@@ -353,7 +358,9 @@ def _ensemble_batch(
             row["ensemble_id"] = ensemble_id
             pred_rows.append(row)
         artifact_uris[strategy] = upload_artifact_bytes(
-            artifacts[strategy], f"ensemble_{ensemble_id}_{strategy}.pkl", run_id,
+            artifacts[strategy],
+            f"ensemble_{ensemble_id}_{strategy}.pkl",
+            run_id,
             settings.artifact_root,
         )
 

@@ -36,9 +36,7 @@ _HARVEST_LOOKBACK_DAYS = 90
 # already covers them and ensemble rows are arithmetic rather than fits, so both would corrupt a
 # cost model; `cpu_seconds IS NOT NULL` is what distinguishes a measured cell from one written
 # before the columns existed or under `measure="off"`.
-_HARVEST_WHERE = (
-    "fold_id IS NULL AND ensemble_id IS NULL AND cpu_seconds IS NOT NULL"
-)
+_HARVEST_WHERE = "fold_id IS NULL AND ensemble_id IS NULL AND cpu_seconds IS NOT NULL"
 
 
 def read_compute_harvest(

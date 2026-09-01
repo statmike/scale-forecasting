@@ -96,9 +96,15 @@ def test_run_delegates_to_main_run_and_wraps_result(monkeypatch: pytest.MonkeyPa
 
     calls: dict[str, Any] = {}
 
-    def _spy(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None,
-             settings: Settings | None = None, n_series: int | None = None,
-             max_executors: int | None = None) -> str:
+    def _spy(
+        cfg: RunConfig,
+        *,
+        dry_run: bool = False,
+        spark: object | None = None,
+        settings: Settings | None = None,
+        n_series: int | None = None,
+        max_executors: int | None = None,
+    ) -> str:
         calls["cfg"] = cfg
         calls["spark"] = spark
         calls["settings"] = settings
@@ -124,9 +130,15 @@ def test_run_threads_scale_knobs_to_main_run(monkeypatch: pytest.MonkeyPatch) ->
 
     calls: dict[str, Any] = {}
 
-    def _spy(cfg: RunConfig, *, dry_run: bool = False, spark: object | None = None,
-             settings: Settings | None = None, n_series: int | None = None,
-             max_executors: int | None = None) -> str:
+    def _spy(
+        cfg: RunConfig,
+        *,
+        dry_run: bool = False,
+        spark: object | None = None,
+        settings: Settings | None = None,
+        n_series: int | None = None,
+        max_executors: int | None = None,
+    ) -> str:
         calls["n_series"] = n_series
         calls["max_executors"] = max_executors
         return make_run_id(cfg)
@@ -360,9 +372,7 @@ def test_probe_delegates_to_probe_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
     seen: dict[str, Any] = {}
 
-    def _fake_probe_run(
-        run_id: str, *, job: str | None = None, settings: Any = None
-    ) -> str:
+    def _fake_probe_run(run_id: str, *, job: str | None = None, settings: Any = None) -> str:
         seen["run_id"] = run_id
         seen["job"] = job
         seen["settings"] = settings
@@ -428,8 +438,16 @@ def _cell_row(**over: Any) -> dict[str, Any]:
 def test_build_trace_frame_stacks_jobs_and_cells() -> None:
     frame = sf.build_trace_frame([_job_row()], [_cell_row()])
     assert list(frame.columns) == [
-        "kind", "lane", "label", "start", "end",
-        "duration_s", "status", "runtime", "model_type", "ts_id",
+        "kind",
+        "lane",
+        "label",
+        "start",
+        "end",
+        "duration_s",
+        "status",
+        "runtime",
+        "model_type",
+        "ts_id",
     ]
     job = frame[frame["kind"] == "job"].iloc[0]
     assert job["lane"] == "statistical" and job["label"] == "statistical"

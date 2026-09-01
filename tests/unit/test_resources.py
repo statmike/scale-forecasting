@@ -334,7 +334,7 @@ def test_an_axis_is_measured_only_if_the_family_that_won_it_measured_it() -> Non
 
 
 def test_a_family_that_measured_nothing_is_named_in_a_note() -> None:
-    """"Measured" would over-claim if a family on the pool contributed no evidence."""
+    """ "Measured" would over-claim if a family on the pool contributed no evidence."""
     merged = merge_slots(
         [
             _slot("statistical", cores=2, memory_bytes=6 * _GIB, measured=_HOST_AXES),
@@ -373,10 +373,15 @@ def test_a_gpu_pool_keeps_the_largest_fraction_and_its_device() -> None:
     """Two DL families on one card: the pool packs for whichever cell needs the most of it."""
     merged = merge_slots(
         [
-            _slot("deep_learning", gpu_fraction=0.25, device_bytes=16 * _GIB,
-                  measured=("gpu_fraction",)),
-            _slot("foundation", gpu_fraction=0.5, device_bytes=16 * _GIB,
-                  measured=("gpu_fraction",)),
+            _slot(
+                "deep_learning",
+                gpu_fraction=0.25,
+                device_bytes=16 * _GIB,
+                measured=("gpu_fraction",),
+            ),
+            _slot(
+                "foundation", gpu_fraction=0.5, device_bytes=16 * _GIB, measured=("gpu_fraction",)
+            ),
         ],
         family="pool",
     )
@@ -476,6 +481,7 @@ def test_an_unmeasured_gpu_slot_packs_by_device_alone_exactly_as_before() -> Non
 
 def test_the_fleet_widens_with_the_load_and_stops_at_the_ceiling() -> None:
     """derived = ceil(cells / (slots x target)), clamped — the engine's own arithmetic."""
+
     def units(n_cells: int, max_units: int = 100) -> int:
         return plan_resources(
             _profile(_fit()),
@@ -519,7 +525,7 @@ def test_the_record_shows_when_the_ceiling_and_not_the_work_bounded_the_run() ->
 
 
 def test_a_run_must_produce_enough_tasks_for_its_autoscaler_to_reach_the_ceiling() -> None:
-    """"We enabled autoscaling and nothing scaled" is arithmetic, not a platform problem."""
+    """ "We enabled autoscaling and nothing scaled" is arithmetic, not a platform problem."""
     plan = plan_resources(
         _profile(_fit()),
         "statistical",
@@ -579,9 +585,7 @@ def test_a_gpu_plan_requests_a_fraction_and_lets_ray_default_the_cpu() -> None:
 
 def test_the_plan_is_json_serializable_for_telemetry() -> None:
     """The sizing decision is stamped into job_telemetry; it must survive json.dumps as-is."""
-    plan = plan_resources(
-        _profile(_fit()), "statistical", "ray", n_cells=100, unit=_N1_STANDARD_8
-    )
+    plan = plan_resources(_profile(_fit()), "statistical", "ray", n_cells=100, unit=_N1_STANDARD_8)
     payload: dict[str, Any] = json.loads(json.dumps(plan.to_dict()))
     assert payload["runtime"] == "ray"
     assert payload["slot"]["basis"] == "measured"
@@ -836,9 +840,7 @@ def test_planning_with_no_profile_reproduces_the_unmeasured_translation() -> Non
 def test_the_second_pass_plans_against_the_executor_the_first_pass_chose() -> None:
     # A 5-core family snaps up to an 8-core executor; the fleet is then packed into *that*
     # shape, not into the 4-core one the first pass had to start from.
-    profile = build_profile(
-        [_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=10.0)] * 5
-    )
+    profile = build_profile([_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=10.0)] * 5)
     plan, translation = serverless.plan_serverless(profile, ["ml"], 400)
     assert translation.executor_cores == 8
     assert plan.unit.cores == 8
@@ -1239,9 +1241,7 @@ def test_both_spark_translators_pin_native_threads_by_default() -> None:
     for translation in (on_serverless, on_cluster):
         exported = _intraop(translation.properties)
         assert exported, "the pin is the default, on both Spark paths"
-        assert set(exported.values()) == {
-            translation.properties.get("spark.task.cpus", "1")
-        }
+        assert set(exported.values()) == {translation.properties.get("spark.task.cpus", "1")}
 
 
 @pytest.mark.parametrize(

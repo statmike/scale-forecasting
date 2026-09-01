@@ -50,7 +50,6 @@ from .errors import get_logger
 from .registry.ids import make_run_id
 
 if TYPE_CHECKING:
-
     from .config import RunConfig
     from .dag import RunDag
     from .probes.cancel import CancelReport
@@ -186,9 +185,7 @@ def run(
         max_workers = max(1, len(python_jobs)) + (1 if ensemble_concurrent else 0)
         with (
             shared_clusters.shared_ray_cluster(cfg, run_dag, run_id, settings) as ray_cluster,
-            shared_clusters.shared_spark_cluster(
-                cfg, run_dag, run_id, settings
-            ) as spark_cluster,
+            shared_clusters.shared_spark_cluster(cfg, run_dag, run_id, settings) as spark_cluster,
             ThreadPoolExecutor(max_workers=max_workers) as pool,
         ):
             futures = {
@@ -365,10 +362,7 @@ def _print_cancel_report(report: CancelReport) -> None:
     row_fmt = "  %-14s %-16s %-10s %s"
     print(row_fmt % ("family", "runtime", "status", "effect"))
     for item in plan.items:
-        print(
-            row_fmt
-            % (item.family, item.runtime or "-", item.registry_status or "-", item.note)
-        )
+        print(row_fmt % (item.family, item.runtime or "-", item.registry_status or "-", item.note))
     if plan.ensemble_suppressed:
         print("  note: the ensemble node is suppressed because a base family is cancelled")
     if not report.executed:

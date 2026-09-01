@@ -152,9 +152,7 @@ class SparkSubmitter:
                 # both rather than a second flag that means the same thing.
                 max_workers=max_executors,
             )
-            return ProbeHandle(
-                "spark", native_id=real_id, region=region, spark_mode="cluster"
-            )
+            return ProbeHandle("spark", native_id=real_id, region=region, spark_mode="cluster")
         from .submit import submit_batch
 
         submit_batch(

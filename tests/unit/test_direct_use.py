@@ -66,8 +66,10 @@ def test_run_group_untagged_runs_every_model_per_series() -> None:
     assert len(results) == 4
     assert all(isinstance(r, CellResult) for r in results)
     assert {(r.ts_id, r.model_type) for r in results} == {
-        ("series-a", "theta"), ("series-a", "holtwinters"),
-        ("series-b", "theta"), ("series-b", "holtwinters"),
+        ("series-a", "theta"),
+        ("series-a", "holtwinters"),
+        ("series-b", "theta"),
+        ("series-b", "holtwinters"),
     }
     assert list(status.columns) == ["ts_id", "model_type", "status", "fit_seconds"]
     assert len(status) == 4
@@ -83,8 +85,10 @@ def test_run_group_tagged_via_chunk_cells() -> None:
     results, _status = run_group(chunks[0], cfg)  # models come from the tag column, not the arg
     assert len(results) == 4
     assert {(r.ts_id, r.model_type) for r in results} == {
-        ("series-a", "theta"), ("series-a", "holtwinters"),
-        ("series-b", "theta"), ("series-b", "holtwinters"),
+        ("series-a", "theta"),
+        ("series-a", "holtwinters"),
+        ("series-b", "theta"),
+        ("series-b", "holtwinters"),
     }
 
 

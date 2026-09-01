@@ -148,8 +148,7 @@ def resource_slot(
         measured.append("memory_bytes")
         if max_memory_bytes is not None and memory_bytes > max_memory_bytes:
             notes.append(
-                f"memory {memory_bytes} exceeded the unit's schedulable "
-                f"{max_memory_bytes}; clamped"
+                f"memory {memory_bytes} exceeded the unit's schedulable {max_memory_bytes}; clamped"
             )
             memory_bytes = max_memory_bytes
 

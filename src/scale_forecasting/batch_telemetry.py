@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+
 def _batch_client(region: str) -> object:
     """A regional `BatchControllerClient` (Dataproc batches are a regional resource)."""
     from google.api_core.client_options import ClientOptions

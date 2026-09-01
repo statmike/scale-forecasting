@@ -307,9 +307,7 @@ def format_plan(plan: DropPlan | SweepPlan) -> str:
             f"  orphan prefixes ({len(plan.prefixes)}): "
             f"{', '.join(p.run_id for p in plan.prefixes) or '(none)'}"
         )
-    lines.append(
-        f"  GCS: {plan.object_count} objects, {human_bytes(plan.byte_total)}"
-    )
+    lines.append(f"  GCS: {plan.object_count} objects, {human_bytes(plan.byte_total)}")
     return "\n".join(lines)
 
 
@@ -406,9 +404,7 @@ def _run_models(
     except Exception as exc:  # noqa: BLE001 - a dataset with no models is fine; a real error is not
         _log.warning("could not list BQML models in %s: %s", settings.registry_dataset_ref, exc)
         return ()
-    return tuple(
-        sorted(m for m in listed if any(model_object_matches_run(m, r) for r in run_ids))
-    )
+    return tuple(sorted(m for m in listed if any(model_object_matches_run(m, r) for r in run_ids)))
 
 
 # --- verbs -------------------------------------------------------------------------

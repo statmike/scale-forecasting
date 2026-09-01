@@ -30,12 +30,16 @@ def test_mixed_families_is_partial() -> None:
 
 def test_missing_or_running_family_counts_as_failed() -> None:
     # a family row still RUNNING (its task died before finalizing) or absent is not COMPLETED
-    assert airflow_tasks.combined_run_status(
-        {"statistical": "COMPLETED", "ml": "RUNNING"}, ensemble_enabled=False
-    ) == "PARTIAL"
-    assert airflow_tasks.combined_run_status(
-        {"statistical": "RUNNING"}, ensemble_enabled=False
-    ) == "FAILED"
+    assert (
+        airflow_tasks.combined_run_status(
+            {"statistical": "COMPLETED", "ml": "RUNNING"}, ensemble_enabled=False
+        )
+        == "PARTIAL"
+    )
+    assert (
+        airflow_tasks.combined_run_status({"statistical": "RUNNING"}, ensemble_enabled=False)
+        == "FAILED"
+    )
 
 
 def test_no_base_families_is_completed() -> None:

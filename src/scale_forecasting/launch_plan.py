@@ -324,9 +324,7 @@ def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> 
     locked = found or "baseline"
     _log.info("compute profile source: auto -> %s", locked)
     profile = cfg.compute.profile.model_copy(update={"source": locked})
-    return cfg.model_copy(
-        update={"compute": cfg.compute.model_copy(update={"profile": profile})}
-    )
+    return cfg.model_copy(update={"compute": cfg.compute.model_copy(update={"profile": profile})})
 
 
 def plan_run(

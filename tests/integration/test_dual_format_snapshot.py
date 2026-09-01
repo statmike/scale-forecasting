@@ -133,8 +133,7 @@ def _insert_via_staging(client: Any, settings: Settings, dest: str, rows: Any) -
     try:
         cols = "ts_id, ds, y, archetype, is_holiday"
         client.query(
-            f"INSERT INTO `{settings.table_ref(dest)}` ({cols}) "
-            f"SELECT {cols} FROM `{staging_ref}`"
+            f"INSERT INTO `{settings.table_ref(dest)}` ({cols}) SELECT {cols} FROM `{staging_ref}`"
         ).result()
     finally:
         client.delete_table(staging_ref, not_found_ok=True)
@@ -231,9 +230,7 @@ def _seed_pre_pin_then_append_post(
     _insert_via_staging(client, settings, table, _seed_rows(_N_POST, seed=99))
 
 
-def test_snapshot_pins_driver_collect(
-    settings: Settings, scratch_source: tuple[str, str]
-) -> None:
+def test_snapshot_pins_driver_collect(settings: Settings, scratch_source: tuple[str, str]) -> None:
     """The ``BigQueryReadClient`` reader pins to the run snapshot — post-header appends unseen."""
     from google.cloud import bigquery
 
@@ -260,9 +257,7 @@ def test_snapshot_pins_driver_collect(
         ).result()
 
 
-def test_snapshot_pins_native_clause(
-    settings: Settings, scratch_source: tuple[str, str]
-) -> None:
+def test_snapshot_pins_native_clause(settings: Settings, scratch_source: tuple[str, str]) -> None:
     """The BigQuery-native family's ``FOR SYSTEM_TIME AS OF`` clause pins to the same snapshot."""
     from google.cloud import bigquery
 

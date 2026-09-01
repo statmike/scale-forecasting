@@ -257,9 +257,7 @@ class RayProbe:
             try:
                 _get_cluster(resource_name)
             except NotFound:
-                return ProbeResult(
-                    NATIVE_NOT_FOUND, exists=False, detail="ray cluster torn down"
-                )
+                return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="ray cluster torn down")
             client = _connect_job_client(resource_name)
             status = str(client.get_job_status(handle.native_id))
             native = _RAY_JOB_STATES.get(status, NATIVE_UNKNOWN)
@@ -337,9 +335,7 @@ class BigQueryProbe:
                     NATIVE_NOT_FOUND, exists=False, detail="no matching bigquery jobs"
                 )
             native = _rollup_bigquery_states(matched)
-            return ProbeResult(
-                native, exists=True, telemetry={"statement_count": len(matched)}
-            )
+            return ProbeResult(native, exists=True, telemetry={"statement_count": len(matched)})
         except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
             return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
 
