@@ -226,6 +226,13 @@ reuses `write_api._proto_for` / `_encode_rows` / `_append_via_write_api`). It ho
 parity via `features.holiday_frame`) but not the Python target transform. It is the `native` family
 job, running in parallel with the Python family jobs under the same `run_id`.
 
+The SQL itself is not written there. [`bigquery_sql.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_sql.py)
+holds every statement builder as a pure string function — snapshot-testable with no BigQuery — and
+[`bigquery_names.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_names.py) holds the naming rule
+for a run's model objects. That last one is split out because it has a consumer outside the engine:
+per-run teardown (`registry.ops.drop_run`) finds a run's BQML objects **by name**, since nothing in
+the registry records them, so the namer and its inverse matcher must live together and never drift.
+
 ### The pure / I-O split
 
 Both `spark_io.py` and `ray_io.py` are deliberately split so the *interesting* logic is

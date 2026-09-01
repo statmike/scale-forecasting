@@ -18,7 +18,9 @@ Each entry: **Status** · **Context / limitation** · **Decision** · **Impact**
 ## C1 — BigQuery-native models read the source un-pinned (no snapshot time-travel)
 
 - **Status:** Active workaround — adopted 2026-08-22; broadened to all source types 2026-08-25.
-- **Area:** `src/scale_forecasting/engines/bigquery_engine.py` (`run`).
+- **Area:** `src/scale_forecasting/engines/bigquery_engine.py` (`run` — where `snapshot_millis`
+  is fixed to `None`) and `engines/bigquery_sql.py` (`_snapshot_clause`, which renders the pin the
+  native path therefore never passes).
 
 **Context / limitation.**
 Every run pins a single input snapshot so all runtimes read the *identical* source state: the run

@@ -481,11 +481,11 @@ def _run_models(
     """The BQML model object ids in this registry belonging to any of ``run_ids``.
 
     Nothing records these names, so the only way to find them is to list the dataset's models and
-    match each back to a run (`bigquery_engine.model_object_matches_run`).
+    match each back to a run (`bigquery_names.model_object_matches_run`).
     """
     from google.cloud import bigquery
 
-    from ..engines.bigquery_engine import model_object_matches_run
+    from ..engines.bigquery_names import model_object_matches_run
 
     client = bigquery.Client(project=settings.project_id)
     try:

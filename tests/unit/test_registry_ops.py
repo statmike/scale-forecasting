@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from scale_forecasting.engines.bigquery_engine import model_object_matches_run
+from scale_forecasting.engines.bigquery_names import model_object_matches_run
 from scale_forecasting.registry import ops
 from scale_forecasting.registry.ddl import REGISTRY_TABLE_NAMES, SOURCE_TABLE_NAMES
 
@@ -300,7 +300,7 @@ def test_the_matcher_is_the_inverse_of_the_naming_rule():
     model object a run creates.
     """
     from scale_forecasting.config import RunConfig
-    from scale_forecasting.engines.bigquery_engine import _model_ref
+    from scale_forecasting.engines.bigquery_names import _model_ref
     from scale_forecasting.registry.ids import make_run_id
 
     cfg = RunConfig(

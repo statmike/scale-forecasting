@@ -1,4 +1,4 @@
-"""Tests for the BigQuery-native SQL builders.
+"""Tests for the BigQuery-native SQL builders (`engines.bigquery_sql`).
 
 Pure-string assertions on the rendered CREATE MODEL / forecast INSERT / eval / history SQL plus a
 full-script snapshot. No GCP — the ``run`` engine path is exercised live by the ``@gcp`` smoke test.
@@ -14,7 +14,21 @@ from pathlib import Path
 from typing import Any
 
 from scale_forecasting.config import RunConfig
-from scale_forecasting.engines import bigquery_engine as be
+from scale_forecasting.engines.bigquery_names import _model_ref
+from scale_forecasting.engines.bigquery_sql import (
+    bqml_options,
+    build_create_model_sql,
+    build_custom_holiday_cte,
+    build_eval_query,
+    build_fold_create_statements,
+    build_fold_drop_statements,
+    build_forecast_insert_sql,
+    build_history_query,
+    build_series_ids_query,
+    build_setup_statements,
+    fold_plan,
+    render_setup_sql,
+)
 
 SNAPSHOT = Path(__file__).parent / "snapshots" / "bigquery_native.sql"
 
@@ -46,7 +60,7 @@ def _cfg(
 
 
 def test_create_model_arima_plus_options_and_id_col() -> None:
-    sql = be.build_create_model_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
+    sql = build_create_model_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
     assert "CREATE OR REPLACE MODEL" in sql
     assert "model_type = 'ARIMA_PLUS'" in sql
     # The one-statement-all-series lever: a time_series_id_col trains every series at once.
@@ -59,7 +73,7 @@ def test_create_model_arima_plus_options_and_id_col() -> None:
 def test_create_model_final_trains_on_all_history() -> None:
     # The final (true-future) model trains on ALL history — no held-out cutoff — so
     # its ML.FORECAST(horizon) lands beyond MAX(ds), parity with the Spark final fit.
-    sql = be.build_create_model_sql(_cfg(["arima_plus"], series_limit=None), "arima_plus", _DS)
+    sql = build_create_model_sql(_cfg(["arima_plus"], series_limit=None), "arima_plus", _DS)
     assert "DATE_SUB(MAX(ds)" not in sql
     assert "ds <=" not in sql
     assert "WHERE" not in sql  # no date bound, no series filter → no WHERE at all
@@ -68,7 +82,7 @@ def test_create_model_final_trains_on_all_history() -> None:
 def test_create_model_backtest_fold_trains_pre_cutoff() -> None:
     # A backtest fold trains on ds <= cutoff (MAX(ds) - back_steps) into a fold-suffixed object.
     cfg = _cfg(["arima_plus"], series_limit=None)
-    sql = be.build_create_model_sql(cfg, "arima_plus", _DS, back_steps=28, fold_id=0)
+    sql = build_create_model_sql(cfg, "arima_plus", _DS, back_steps=28, fold_id=0)
     assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in sql
     # Fold-suffixed model object so folds + the final model never clobber each other.
     assert "_f0`" in sql
@@ -88,7 +102,7 @@ def test_create_model_sliding_fold_has_fixed_window() -> None:
             "step": 28,
         },
     )
-    sql = be.build_create_model_sql(cfg, "arima_plus", _DS, back_steps=28, fold_id=0)
+    sql = build_create_model_sql(cfg, "arima_plus", _DS, back_steps=28, fold_id=0)
     assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in sql
     # lower bound = cutoff - min_train = MAX(ds) - (28 + 180)
     assert "ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 208 DAY)" in sql
@@ -96,7 +110,7 @@ def test_create_model_sliding_fold_has_fixed_window() -> None:
 
 def test_create_model_name_embeds_run_id_and_is_sanitized() -> None:
     cfg = _cfg(["arima_plus"])
-    sql = be.build_create_model_sql(cfg, "arima_plus", _DS)
+    sql = build_create_model_sql(cfg, "arima_plus", _DS)
     # Model object name embeds the config-pinned run_id, hyphens folded to underscores.
     assert "`proj.scale_forecasting.sf_model_arima_plus_" in sql
     assert "-" not in sql.split("sf_model_arima_plus_")[1].split("`")[0]
@@ -106,7 +120,7 @@ def test_create_model_name_embeds_run_id_and_is_sanitized() -> None:
 
 
 def test_custom_holiday_cte_present_when_configured() -> None:
-    cte = be.build_custom_holiday_cte(_cfg(["arima_plus"], holidays=["US"]))
+    cte = build_custom_holiday_cte(_cfg(["arima_plus"], holidays=["US"]))
     assert cte.startswith("custom_holiday AS (")
     assert "UNNEST([" in cte
     assert "AS region" in cte and "AS holiday_name" in cte and "AS primary_date" in cte
@@ -114,7 +128,7 @@ def test_custom_holiday_cte_present_when_configured() -> None:
 
 
 def test_custom_holiday_names_are_valid_identifiers() -> None:
-    cte = be.build_custom_holiday_cte(_cfg(["arima_plus"], holidays=["US"]))
+    cte = build_custom_holiday_cte(_cfg(["arima_plus"], holidays=["US"]))
     # Every holiday_name literal must be space-free (valid column name for ML.EXPLAIN_FORECAST).
     import re
 
@@ -123,9 +137,9 @@ def test_custom_holiday_names_are_valid_identifiers() -> None:
 
 
 def test_custom_holiday_cte_absent_without_holidays() -> None:
-    assert be.build_custom_holiday_cte(_cfg(["arima_plus"], holidays=[])) == ""
+    assert build_custom_holiday_cte(_cfg(["arima_plus"], holidays=[])) == ""
     # And the CREATE MODEL then uses the plain training query, no named subqueries.
-    sql = be.build_create_model_sql(_cfg(["arima_plus"], holidays=[]), "arima_plus", _DS)
+    sql = build_create_model_sql(_cfg(["arima_plus"], holidays=[]), "arima_plus", _DS)
     assert "custom_holiday" not in sql
     assert "training_data AS" not in sql
 
@@ -134,7 +148,7 @@ def test_custom_holiday_cte_absent_without_holidays() -> None:
 
 
 def test_forecast_insert_aliases_and_engine_literal() -> None:
-    sql = be.build_forecast_insert_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
+    sql = build_forecast_insert_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
     assert "INSERT INTO `proj.scale_forecasting.forecast_predictions`" in sql
     assert "@run_id" in sql  # run_id column bound as a parameter, not interpolated
     assert "'arima_plus'" in sql
@@ -147,7 +161,7 @@ def test_forecast_insert_aliases_and_engine_literal() -> None:
 
 
 def test_forecast_insert_timesfm_uses_ai_forecast_no_model() -> None:
-    sql = be.build_forecast_insert_sql(_cfg(["timesfm"]), "timesfm", _DS)
+    sql = build_forecast_insert_sql(_cfg(["timesfm"]), "timesfm", _DS)
     assert "AI.FORECAST(" in sql
     assert "ML.FORECAST" not in sql  # TimesFM is serverless — no trained model object
     assert "data_col => 'y'" in sql
@@ -160,10 +174,10 @@ def test_forecast_insert_is_true_future_not_held_out() -> None:
     # The final forecast INSERT reads from the all-history model — no held-out cutoff — so it
     # extrapolates beyond MAX(ds). ARIMA_PLUS owns its time axis (ML.FORECAST(horizon) suffices);
     # no future-dates input table is needed for the univariate natives.
-    sql = be.build_forecast_insert_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
+    sql = build_forecast_insert_sql(_cfg(["arima_plus"]), "arima_plus", _DS)
     assert "DATE_SUB(MAX(ds)" not in sql
     # TimesFM forecasts from all history too (no ds <= cutoff bound on its inline history).
-    tsql = be.build_forecast_insert_sql(_cfg(["timesfm"]), "timesfm", _DS)
+    tsql = build_forecast_insert_sql(_cfg(["timesfm"]), "timesfm", _DS)
     assert "DATE_SUB(MAX(ds)" not in tsql
 
 
@@ -179,17 +193,17 @@ def test_fold_plan_mirrors_make_folds_geometry() -> None:
         models=["arima_plus"],
         backtest={"enabled": True, "n_folds": 3, "horizon": 28, "step": 28},
     )
-    assert be.fold_plan(cfg) == [(0, 84), (1, 56), (2, 28)]
+    assert fold_plan(cfg) == [(0, 84), (1, 56), (2, 28)]
 
 
 def test_fold_create_and_drop_target_the_same_object() -> None:
     # Every fold trains a fold-suffixed object; the matching DROP must name that exact object so
     # backtest runs leave no orphaned sf_model_*_f{k} models behind.
     cfg = _cfg(["arima_plus"])
-    create = be.build_fold_create_statements(cfg, "arima_plus", _DS, fold_id=1, back_steps=56)
-    drop = be.build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=1)
+    create = build_fold_create_statements(cfg, "arima_plus", _DS, fold_id=1, back_steps=56)
+    drop = build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=1)
     assert len(create) == 1 and len(drop) == 1
-    obj = be._model_ref(cfg, "arima_plus", _DS, fold_id=1)
+    obj = _model_ref(cfg, "arima_plus", _DS, fold_id=1)
     assert obj in create[0] and obj in drop[0]
     assert drop[0].startswith("DROP MODEL IF EXISTS ")  # safe if the fold CREATE failed
 
@@ -198,9 +212,9 @@ def test_fold_drop_never_targets_the_final_model() -> None:
     # The final true-future model (fold_id=None) backs forecast_predictions and must survive; only
     # fold-suffixed objects are dropped.
     cfg = _cfg(["arima_plus"])
-    final_obj = be._model_ref(cfg, "arima_plus", _DS)  # no fold suffix
+    final_obj = _model_ref(cfg, "arima_plus", _DS)  # no fold suffix
     for k in range(3):
-        drop = be.build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=k)
+        drop = build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=k)
         assert final_obj not in drop[0]
         assert f"_f{k}`" in drop[0]
 
@@ -209,15 +223,15 @@ def test_timesfm_has_no_fold_create_or_drop() -> None:
     # TimesFM trains no model object (AI.FORECAST reads history directly), so it has neither a fold
     # CREATE nor a DROP — nothing to clean up.
     cfg = _cfg(["timesfm"])
-    assert be.build_fold_create_statements(cfg, "timesfm", _DS, fold_id=0, back_steps=28) == []
-    assert be.build_fold_drop_statements(cfg, "timesfm", _DS, fold_id=0) == []
+    assert build_fold_create_statements(cfg, "timesfm", _DS, fold_id=0, back_steps=28) == []
+    assert build_fold_drop_statements(cfg, "timesfm", _DS, fold_id=0) == []
 
 
 # --- eval + history read-back --------------------------------------------------
 
 
 def test_eval_query_joins_fold_forecast_to_actuals_with_intervals() -> None:
-    sql = be.build_eval_query(_cfg(["arima_plus"]), "arima_plus", _DS, back_steps=28, fold_id=0)
+    sql = build_eval_query(_cfg(["arima_plus"]), "arima_plus", _DS, back_steps=28, fold_id=0)
     assert "AS y_true" in sql
     assert "AS yhat" in sql
     assert "AS yhat_lower" in sql and "AS yhat_upper" in sql
@@ -230,13 +244,13 @@ def test_eval_query_joins_fold_forecast_to_actuals_with_intervals() -> None:
 def test_history_query_is_all_history() -> None:
     # MASE/RMSSE scale comes from the full series history (natives train on all of it), so the
     # history read is no longer clipped to a pre-cutoff window.
-    sql = be.build_history_query(_cfg(["arima_plus"], series_limit=None), _DS)
+    sql = build_history_query(_cfg(["arima_plus"], series_limit=None), _DS)
     assert "AS ts_id" in sql and "AS y" in sql
     assert "DATE_SUB(MAX(ds)" not in sql
 
 
 def test_series_ids_query_lists_the_subset() -> None:
-    sql = be.build_series_ids_query(_cfg(["arima_plus"], series_limit=100), _DS)
+    sql = build_series_ids_query(_cfg(["arima_plus"], series_limit=100), _DS)
     assert "SELECT DISTINCT ts_id AS ts_id" in sql
     assert "ORDER BY ts_id LIMIT 100" in sql
 
@@ -245,9 +259,9 @@ def test_series_ids_query_lists_the_subset() -> None:
 
 
 def test_series_limit_subset_present_and_omitted() -> None:
-    limited = be.build_create_model_sql(_cfg(["arima_plus"], series_limit=100), "arima_plus", _DS)
+    limited = build_create_model_sql(_cfg(["arima_plus"], series_limit=100), "arima_plus", _DS)
     assert "ORDER BY ts_id LIMIT 100" in limited
-    unlimited = be.build_create_model_sql(
+    unlimited = build_create_model_sql(
         _cfg(["arima_plus"], series_limit=None), "arima_plus", _DS
     )
     assert "LIMIT" not in unlimited
@@ -257,7 +271,7 @@ def test_series_limit_subset_present_and_omitted() -> None:
 
 
 def test_bqml_options_maps_columns() -> None:
-    opts = be.bqml_options(_cfg(["arima_plus"]), "arima_plus")
+    opts = bqml_options(_cfg(["arima_plus"]), "arima_plus")
     assert opts["model_type"] == "ARIMA_PLUS"
     assert opts["time_series_id_col"] == "ts_id"
     assert opts["time_series_timestamp_col"] == "ds"
@@ -268,7 +282,7 @@ def test_bqml_options_maps_columns() -> None:
 def test_bqml_options_timesfm_returns_ai_forecast_params() -> None:
     # TimesFM has no CREATE MODEL, but run() still stamps best_params for every model — so
     # bqml_options must resolve for it (not KeyError) and describe the AI.FORECAST call instead.
-    opts = be.bqml_options(_cfg(["timesfm"]), "timesfm")
+    opts = bqml_options(_cfg(["timesfm"]), "timesfm")
     assert "TimesFM" in opts["model_type"]
     assert opts["id_cols"] == ["ts_id"]
     assert opts["horizon"] == 28
@@ -285,7 +299,7 @@ def test_setup_sql_snapshot() -> None:
         series_limit=100,
     )
     rendered = "\n\n-- ===== next model =====\n\n".join(
-        be.render_setup_sql(cfg, m, _DS) for m in cfg.models
+        render_setup_sql(cfg, m, _DS) for m in cfg.models
     )
     if os.environ.get("SF_UPDATE_SNAPSHOTS") == "1":
         SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
@@ -310,11 +324,11 @@ def test_snapshot_clause_absent_by_default() -> None:
     # No snapshot passed → SQL is byte-identical to the pre-snapshot behavior (no time-travel).
     cfg = _cfg(["arima_plus", "timesfm"], series_limit=100)
     for sql in (
-        be.build_series_ids_query(cfg, _DS),
-        be.build_history_query(cfg, _DS),
-        be.build_create_model_sql(cfg, "arima_plus", _DS),
-        be.build_forecast_insert_sql(cfg, "timesfm", _DS),
-        be.build_eval_query(cfg, "arima_plus", _DS, back_steps=28, fold_id=0),
+        build_series_ids_query(cfg, _DS),
+        build_history_query(cfg, _DS),
+        build_create_model_sql(cfg, "arima_plus", _DS),
+        build_forecast_insert_sql(cfg, "timesfm", _DS),
+        build_eval_query(cfg, "arima_plus", _DS, back_steps=28, fold_id=0),
     ):
         assert "FOR SYSTEM_TIME AS OF" not in sql
 
@@ -322,15 +336,15 @@ def test_snapshot_clause_absent_by_default() -> None:
 def test_snapshot_clause_pins_series_ids_and_history_reads() -> None:
     cfg = _cfg(["arima_plus"], series_limit=100)
     # Both builders read the source twice with a limit (outer scan + the series-filter subquery).
-    ids = be.build_series_ids_query(cfg, _DS, snapshot_millis=_SNAP_MS)
-    hist = be.build_history_query(cfg, _DS, snapshot_millis=_SNAP_MS)
+    ids = build_series_ids_query(cfg, _DS, snapshot_millis=_SNAP_MS)
+    hist = build_history_query(cfg, _DS, snapshot_millis=_SNAP_MS)
     assert ids.count(f"`{_SRC}{_SNAP}") == 2
     assert hist.count(f"`{_SRC}{_SNAP}") == 2
 
 
 def test_snapshot_clause_pins_create_model_but_not_the_model_object() -> None:
     cfg = _cfg(["arima_plus"], series_limit=100)
-    sql = be.build_create_model_sql(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
+    sql = build_create_model_sql(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
     # Training scan + series-filter subquery both time-travel the source...
     assert sql.count(f"`{_SRC}{_SNAP}") == 2
     # ...and nothing else does: exactly those two source reads carry the clause, so the persisted
@@ -342,7 +356,7 @@ def test_snapshot_clause_pins_create_model_but_not_the_model_object() -> None:
 def test_snapshot_clause_pins_timesfm_forecast_source() -> None:
     # TimesFM reads history at forecast time (no CREATE MODEL), so its insert pins the source.
     cfg = _cfg(["timesfm"], series_limit=100)
-    sql = be.build_forecast_insert_sql(cfg, "timesfm", _DS, snapshot_millis=_SNAP_MS)
+    sql = build_forecast_insert_sql(cfg, "timesfm", _DS, snapshot_millis=_SNAP_MS)
     assert sql.count(f"`{_SRC}{_SNAP}") == 2  # inner history SELECT + series-filter subquery
     # The registry output table is never time-travelled — the clause follows the source only.
     assert "`proj.scale_forecasting.forecast_predictions` FOR SYSTEM_TIME" not in sql
@@ -352,13 +366,13 @@ def test_snapshot_clause_pins_arima_insert_reads_via_model_only() -> None:
     # ARIMA's final forecast reads from the (already-snapshotted) model object, not the source, so
     # its insert has no source read to pin — parity with the pre-snapshot SQL.
     cfg = _cfg(["arima_plus"], series_limit=100)
-    sql = be.build_forecast_insert_sql(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
+    sql = build_forecast_insert_sql(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
     assert "FOR SYSTEM_TIME AS OF" not in sql
 
 
 def test_snapshot_clause_pins_eval_join_actuals() -> None:
     cfg = _cfg(["arima_plus"], series_limit=100)
-    sql = be.build_eval_query(
+    sql = build_eval_query(
         cfg, "arima_plus", _DS, back_steps=28, fold_id=0, snapshot_millis=_SNAP_MS
     )
     # The actuals join reads the source and must time-travel with the rest of the run.
@@ -369,8 +383,8 @@ def test_snapshot_clause_pins_eval_join_actuals() -> None:
 
 def test_snapshot_clause_threads_through_setup_and_fold_builders() -> None:
     cfg = _cfg(["arima_plus"], series_limit=100)
-    setup = be.build_setup_statements(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
-    fold = be.build_fold_create_statements(
+    setup = build_setup_statements(cfg, "arima_plus", _DS, snapshot_millis=_SNAP_MS)
+    fold = build_fold_create_statements(
         cfg, "arima_plus", _DS, 0, 28, snapshot_millis=_SNAP_MS
     )
     assert any("FOR SYSTEM_TIME AS OF" in s for s in setup)

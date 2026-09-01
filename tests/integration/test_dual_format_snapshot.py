@@ -22,7 +22,7 @@ coverage before:
 * ``ray_engine._read_ray_data`` — the ``ray.data.read_bigquery`` path, snapshot-pinned via a
   ``FOR SYSTEM_TIME AS OF`` query (needs the ``[ray]`` extra → additionally ``@ray``-gated).
 * the BigQuery-native family's ``FOR SYSTEM_TIME AS OF`` clause
-  (``bigquery_engine._snapshot_clause``), exercised as a direct ``SELECT``.
+  (``bigquery_sql._snapshot_clause``), exercised as a direct ``SELECT``.
 
 The Spark connector reader (``spark_io.read_source_series``) needs a live Spark session and is
 covered by ``test_spark_connect_smoke``; its option wiring is unit-tested in ``test_spark_engines``.
@@ -53,8 +53,8 @@ from typing import Any
 import pytest
 
 from scale_forecasting.config import RunConfig
-from scale_forecasting.engines import bigquery_engine as be
 from scale_forecasting.engines import ray_engine
+from scale_forecasting.engines.bigquery_sql import _snapshot_clause
 from scale_forecasting.registry import ddl
 from scale_forecasting.registry.header import (
     _SNAPSHOT_SAFETY_MARGIN_MS,
@@ -277,7 +277,7 @@ def test_snapshot_pins_native_clause(
         live = next(iter(client.query(f"SELECT COUNT(DISTINCT ts_id) c FROM `{ref}`").result())).c
         assert live == _N_PRE + _N_POST, f"{fmt}: mutation didn't land"
 
-        clause = be._snapshot_clause(snapshot_millis_for(run_id, settings=settings))
+        clause = _snapshot_clause(snapshot_millis_for(run_id, settings=settings))
         assert clause, f"{fmt}: run recorded no snapshot"
         pinned = next(
             iter(client.query(f"SELECT COUNT(DISTINCT ts_id) c FROM `{ref}`{clause}").result())

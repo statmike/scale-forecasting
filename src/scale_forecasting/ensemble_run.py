@@ -291,6 +291,7 @@ def _ensemble_batch(
     from google.cloud import bigquery
 
     from .engines import bigquery_engine
+    from .engines.bigquery_sql import build_history_query
     from .ensembler import combine_oof
     from .metrics import METRIC_NAMES, compute_metrics
     from .registry.artifacts import upload_artifact_bytes
@@ -381,7 +382,7 @@ def _ensemble_batch(
 
     # y_train (for MASE/RMSSE scale) is per-series history; the base OOF has no in-sample rows, so
     # read the full series history once, matching the natives' history read.
-    history = _query(bigquery_engine.build_history_query(cfg, dataset)).to_dataframe()
+    history = _query(build_history_query(cfg, dataset)).to_dataframe()
     hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
 
     meta_rows: list[dict[str, Any]] = []
