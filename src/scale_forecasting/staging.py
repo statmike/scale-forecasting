@@ -1,19 +1,32 @@
 """Stage a run's artifacts to GCS — the shared submission-prep seam.
 
-Both launchers (Dataproc Serverless batch and Ray on Vertex) stage the validated run config to
-``gs://<code>/runs/<run_id>.json`` in exactly the same way: the JSON is the lossless
+Every launcher (Dataproc Serverless batch, Dataproc cluster, Ray on Vertex) stages the validated run
+config to ``gs://<code>/runs/<run_id>.json`` in exactly the same way: the JSON is the lossless
 reproducibility record, and its digest is the shared ``run_id``, so a mixed run stages one config
-identically regardless of runtime. This module single-sources that write so the two paths cannot
-drift.
+identically regardless of runtime. This module single-sources that write so the paths cannot drift.
+
+`stage_code` is here for the same reason. The package zip and the launcher shim are *the same two
+objects* on the batch and cluster surfaces — same builder, same md5-named blob, same bucket — and
+three callers want them: `submit.submit_batch`, `cluster_submit.submit_cluster_job`, and
+`main.stage_run` (which stages without submitting anything). It lived on the batch submitter, so the
+cluster path had to import a private name out of it to run a job at all.
+
+Everything here takes a plain ``code_bucket`` string rather than an infra object: the two Dataproc
+surfaces carry a `BatchInfra` and the Ray surface a `RayInfra`, and the only field any of this needs
+is the bucket. Keeping the seam infra-agnostic is what lets all three share it.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .config import RunConfig
+
+# The repo's ``src/`` — the parent of this package, where the standalone launcher shim lives.
+_SRC_DIR = Path(__file__).resolve().parent.parent
 
 
 def stage_config(cfg: RunConfig, run_id: str, code_bucket: str) -> str:
@@ -32,6 +45,42 @@ def stage_config(cfg: RunConfig, run_id: str, code_bucket: str) -> str:
         payload, content_type="application/json"
     )
     return f"gs://{code_bucket}/{name}"
+
+
+def stage_code(code_bucket: str) -> tuple[str, str]:
+    """Zip ``src/`` + upload it and the standalone launcher shim to the code bucket.
+
+    Returns ``(package_uri, launcher_uri)``. The zip name carries an md5 so a code change is a new
+    object (no in-place overwrite races), matching the seed module's runtime-delivery contract. The
+    launcher is ``src/spark_main.py`` — a top-level shim (absolute import), *not* the in-package
+    ``spark_entry`` module: Dataproc runs the main file as ``__main__`` with no package context, so
+    a file with relative imports would ``ImportError``. The zip supplies the package it imports.
+
+    The zip itself is built by `build_package_zip` — the SAME builder the
+    interactive Spark Connect path (notebook 01) uses to ship code to its workers, so worker code
+    can't drift between the batch and Connect delivery mechanisms.
+    """
+    from google.cloud import storage
+
+    from .code_delivery import build_package_zip
+
+    # Build the zip in memory (deterministic walk) and hash it for the object name — shared with the
+    # Connect path so both deliver byte-identical package code.
+    data, code_hash = build_package_zip()
+
+    client = storage.Client()
+    bucket = client.bucket(code_bucket)
+    pkg_name = f"runs/scale_forecasting-{code_hash}.zip"
+    bucket.blob(pkg_name).upload_from_string(data, content_type="application/zip")
+
+    launcher_name = "runs/spark_main.py"
+    launcher_local = _SRC_DIR / "spark_main.py"
+    bucket.blob(launcher_name).upload_from_filename(str(launcher_local))
+
+    return (
+        f"gs://{code_bucket}/{pkg_name}",
+        f"gs://{code_bucket}/{launcher_name}",
+    )
 
 
 def stage_dag(dag_source: str, run_id: str, code_bucket: str) -> str:

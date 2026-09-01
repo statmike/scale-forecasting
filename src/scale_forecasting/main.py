@@ -827,7 +827,7 @@ def _template_uris(
     package/launcher URIs are set only for a Spark run with Python models (Ray delivers code via its
     ``runtime_env`` working dir, not a staged zip). The package name carries the code hash from
     `code_delivery.build_package_zip` — a deterministic local build, no network — so the template is
-    byte-faithful to what `submit._stage_code` would upload.
+    byte-faithful to what `staging.stage_code` would upload.
     """
     config_uri = f"gs://{code_bucket}/runs/{plan.run_id}.json"
     if cfg.python_runtime == "ray" or not plan.python_models:
@@ -1147,10 +1147,10 @@ def stage_run(
     launcher_uri: str | None = None
     if cfg.python_runtime != "ray" and plan.python_models:
         from .batch_infra import BatchInfra
-        from .submit import _stage_code
+        from .staging import stage_code
 
         assert isinstance(resolved_infra, BatchInfra)  # spark runtime → BatchInfra
-        package_uri, launcher_uri = _stage_code(resolved_infra)
+        package_uri, launcher_uri = stage_code(resolved_infra.code_bucket)
 
     commands = _assemble_commands(
         cfg,

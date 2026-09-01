@@ -9,7 +9,7 @@ top-level shim the batch actually points at, doing only an **absolute** import +
 
 This mirrors the seed job's ``seed_entry.py`` shim exactly. It sits at ``src/`` root (outside the
 ``scale_forecasting`` package, so it is never zipped as a submodule) and is uploaded on its own as
-the batch's main file by :func:`scale_forecasting.submit._stage_code`.
+the batch's main file by :func:`scale_forecasting.staging.stage_code`.
 """
 
 from scale_forecasting.spark_entry import main

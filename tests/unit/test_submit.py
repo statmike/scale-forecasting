@@ -431,7 +431,7 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
 
     staged: dict[str, Any] = {}
 
-    def _fake_stage_code(infra: BatchInfra) -> tuple[str, str]:
+    def _fake_stage_code(code_bucket: str) -> tuple[str, str]:
         return ("gs://code-bkt/runs/pkg.zip", "gs://code-bkt/runs/spark_main.py")
 
     def _fake_stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
@@ -455,7 +455,7 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
             staged["get_batch_name"] = name
             return type("B", (), {})()
 
-    monkeypatch.setattr(submit, "_stage_code", _fake_stage_code)
+    monkeypatch.setattr(submit, "stage_code", _fake_stage_code)
     monkeypatch.setattr(submit, "_stage_config", _fake_stage_config)
     monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
     # Telemetry stamping calls the live update_header; stub it so this stays offline. (It's
@@ -499,7 +499,7 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
             return _FakeOp()
 
     monkeypatch.setattr(
-        submit, "_stage_code", lambda infra: ("gs://c/p.zip", "gs://c/spark_main.py")
+        submit, "stage_code", lambda bkt: ("gs://c/p.zip", "gs://c/spark_main.py")
     )
     monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
     monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
@@ -801,7 +801,7 @@ def _submit_capturing_properties(
         def get_batch(self, *, name: str) -> Any:
             return type("B", (), {})()
 
-    monkeypatch.setattr(submit, "_stage_code", lambda infra: ("gs://c/p.zip", "gs://c/e.py"))
+    monkeypatch.setattr(submit, "stage_code", lambda bkt: ("gs://c/p.zip", "gs://c/e.py"))
     monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
     monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
     monkeypatch.setattr(batch_telemetry, "_stamp_job_telemetry", lambda *a, **k: None)

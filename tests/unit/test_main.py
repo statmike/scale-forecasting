@@ -257,19 +257,15 @@ def test_stage_run_spark_uploads_and_builds_runnable_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import scale_forecasting.staging as staging_mod
-    import scale_forecasting.submit as submit_mod
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         staging_mod, "stage_config", lambda cfg, rid, bkt: f"gs://{bkt}/runs/{rid}.json"
     )
     monkeypatch.setattr(
-        submit_mod,
-        "_stage_code",
-        lambda infra: (
-            f"gs://{infra.code_bucket}/runs/pkg.zip",
-            f"gs://{infra.code_bucket}/runs/spark_main.py",
-        ),
+        staging_mod,
+        "stage_code",
+        lambda bkt: (f"gs://{bkt}/runs/pkg.zip", f"gs://{bkt}/runs/spark_main.py"),
     )
 
     def _fake_manifest(manifest: dict[str, Any], rid: str, bkt: str) -> str:

@@ -31,13 +31,12 @@ Public surface: ``submit_batch``, ``build_batch``, ``sizing_properties``, ``plan
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
 from .commands import build_driver_args
 from .errors import ConfigError, EngineError, get_logger
-from .staging import stage_config
+from .staging import stage_code, stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -45,10 +44,6 @@ if TYPE_CHECKING:
     from .settings import Settings
 
 _log = get_logger(__name__)
-
-# The package root that gets zipped + uploaded (contains only scale_forecasting/, so it sits at the
-# zip root and is importable once on sys.path — same layout the Terraform seed module relies on).
-_SRC_DIR = Path(__file__).resolve().parent.parent
 
 # Dataproc Serverless offers L4 only (no T4 on serverless — the config resolver forces L4 there and
 # rejects a T4). A single accelerator per executor is attached; the deep-learning fit runs inside
@@ -299,42 +294,6 @@ def build_batch(
 # --- I/O: staging + submit -----------------------------------------------------
 
 
-def _stage_code(infra: BatchInfra) -> tuple[str, str]:
-    """Zip ``src/`` + upload it and the standalone launcher shim to the code bucket.
-
-    Returns ``(package_uri, launcher_uri)``. The zip name carries an md5 so a code change is a new
-    object (no in-place overwrite races), matching the seed module's runtime-delivery contract. The
-    launcher is ``src/spark_main.py`` — a top-level shim (absolute import), *not* the in-package
-    ``spark_entry`` module: Dataproc runs the main file as ``__main__`` with no package context, so
-    a file with relative imports would ``ImportError``. The zip supplies the package it imports.
-
-    The zip itself is built by `build_package_zip` — the SAME builder the
-    interactive Spark Connect path (notebook 01) uses to ship code to its workers, so worker code
-    can't drift between the batch and Connect delivery mechanisms.
-    """
-    from google.cloud import storage
-
-    from .code_delivery import build_package_zip
-
-    # Build the zip in memory (deterministic walk) and hash it for the object name — shared with the
-    # Connect path so both deliver byte-identical package code.
-    data, code_hash = build_package_zip()
-
-    client = storage.Client()
-    bucket = client.bucket(infra.code_bucket)
-    pkg_name = f"runs/scale_forecasting-{code_hash}.zip"
-    bucket.blob(pkg_name).upload_from_string(data, content_type="application/zip")
-
-    launcher_name = "runs/spark_main.py"
-    launcher_local = _SRC_DIR / "spark_main.py"
-    bucket.blob(launcher_name).upload_from_filename(str(launcher_local))
-
-    return (
-        f"gs://{infra.code_bucket}/{pkg_name}",
-        f"gs://{infra.code_bucket}/{launcher_name}",
-    )
-
-
 def _stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
     """Stage the run config to GCS and return its URI (see `staging.stage_config`)."""
     return stage_config(cfg, run_id, infra.code_bucket)
@@ -393,7 +352,7 @@ def submit_batch(
     run_id = make_run_id(cfg)
     batch_id = batch_id or _batch_id(run_id)
 
-    package_uri, launcher_uri = _stage_code(infra)
+    package_uri, launcher_uri = stage_code(infra.code_bucket)
     config_uri = _stage_config(cfg, run_id, infra)
     properties, sizing = plan_sizing(
         cfg,

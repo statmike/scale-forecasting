@@ -25,7 +25,7 @@ from .batch_infra import _ENV_VENV_ARCHIVE, BatchInfra
 from .commands import build_driver_args
 from .compute_fallback import Candidate, is_capacity_error, resolve_candidates
 from .errors import ConfigError, EngineError, get_logger
-from .submit import _stage_code, _stage_config
+from .staging import stage_code, stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -156,7 +156,7 @@ def _resolve_cluster_deps(cfg: RunConfig, infra: BatchInfra) -> str:
 def _stage_cluster_init(infra: BatchInfra) -> str:
     """Upload the venv init-action script to the code bucket; return its ``gs://`` URI.
 
-    Mirrors `submit._stage_code`'s staging pattern. The object name carries the script's md5 so an
+    Mirrors `staging.stage_code`'s staging pattern. The object name carries the script's md5 so an
     edit to the script is a new object (no in-place-overwrite races) and an unchanged script re-uses
     the same URI across runs. `build_cluster` points a `NodeInitializationAction` at the returned
     URI.
@@ -727,8 +727,8 @@ def submit_cluster_job(
     workers = worker_count if worker_count is not None else derived_workers
     workers = workers if workers is not None else _DEFAULT_WORKER_COUNT
 
-    package_uri, launcher_uri = _stage_code(infra)
-    config_uri = _stage_config(cfg, run_id, infra)
+    package_uri, launcher_uri = stage_code(infra.code_bucket)
+    config_uri = stage_config(cfg, run_id, infra.code_bucket)
     # The venv init-action script is only needed when we create the cluster; a reuse target already
     # carries the init action (it was created with one), so skip the upload on the reuse path.
     venv_init_uri = None if reuse else _stage_cluster_init(infra)
