@@ -285,12 +285,14 @@ def test_run_noops_when_config_already_completed(monkeypatch: pytest.MonkeyPatch
     assert "status" not in seen  # header never re-finalized
 
 
-def test_every_verb_locks_the_profile_source_to_the_same_id(
+def test_every_verb_resolves_the_same_id_whether_or_not_it_locks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # `profile.source: "auto"` is part of the digest, so whichever verb resolves it has to resolve
-    # it the same way: if `run` skipped the lock, `--dry-run` would print an id the real run then
-    # never used. Discovery finds a prior run here, so the locked id is *not* the unlocked one.
+    # Four entry points, one id — that is the contract, and it used to hold only because three of
+    # them locked identically. `plan_dag` never locked, so its id was the odd one out; discovery
+    # finding a prior run was enough to make `--dry-run` print an id the real run then never used.
+    # With the resolved source out of the digest, agreement no longer depends on every verb
+    # remembering to lock, which is why `plan_dag` is asserted equal here rather than unequal.
     from scale_forecasting.registry import harvest, header
 
     _patch_run_seams(monkeypatch)
@@ -301,7 +303,7 @@ def test_every_verb_locks_the_profile_source_to_the_same_id(
     run_id = main.run(cfg)
     assert run_id == main.run(cfg, dry_run=True)
     assert run_id == launch_plan.plan_run(cfg).run_id
-    assert run_id != dag.plan_dag(cfg).run_id  # the lock really did move it
+    assert run_id == dag.plan_dag(cfg).run_id
 
 
 def test_run_refuses_a_pinned_profile_source_whose_data_moved(

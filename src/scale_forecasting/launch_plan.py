@@ -12,10 +12,12 @@ Two things make the plan trustworthy rather than merely informative:
   the id a live run would use. That is what lets the CLI's ``--dry-run`` report an *existence
   verdict* (`Idempotency`) — this exact config has already run, and here is its status — and what
   makes `stage_run`'s uploads land at the paths the launch will read.
-* **The digest is pinned first.** `lock_profile_source` rewrites ``profile.source: "auto"`` to the
-  concrete run it resolves to, *before* the digest is taken. Left as ``"auto"``, two runs a week
-  apart would share a run_id while sizing against different fleets. Pinning is why plan, stage and
-  run all agree.
+* **The source is pinned, but not into the digest.** `lock_profile_source` rewrites
+  ``profile.source: "auto"`` to the concrete run it resolves to, so a staged config reproduces its
+  original fleet instead of re-searching. `registry.ids` then excludes that field from the digest:
+  it is resolved, not authored, and a config whose identity depended on what had been run before it
+  never converged. Two runs a week apart share a run_id and dedupe on read; their manifests and
+  sizing provenance record the different evidence each was sized from.
 
 `LaunchPlan` is the one return type for both, distinguished by ``staged``: `plan_run` returns URI
 *templates* (where artifacts would go) and `stage_run` returns the real ones (where they now are),
@@ -289,12 +291,16 @@ def _emit_plan(result: LaunchPlan) -> None:
 def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> RunConfig:
     """Replace ``compute.profile.source = "auto"`` with the concrete reference it resolves to.
 
-    The lockfile step, and it has to happen **before** `make_run_id` sees the config, because that
-    resolved reference is part of the run's identity: a run sized off last week's evidence is not
-    the same run as one sized off today's, and §2.6's rule is that a different fleet is a different
-    run. Pinning it here is what makes ``auto`` convenient *and* reproducible — two ``auto`` runs a
-    week apart may legitimately get different ids, but re-running either staged config reproduces
-    exactly, because what actually resolved is written into it.
+    The lockfile step. Pinning is what makes ``auto`` convenient *and* reproducible: re-running a
+    staged config reproduces the original fleet exactly, because what actually resolved is written
+    into it rather than re-searched.
+
+    It deliberately does **not** move the ``run_id``. ``registry.ids`` excludes this field from the
+    digest, because it is resolved rather than authored — see ``_canonical_config``, which explains
+    what went wrong when it was included. Two ``auto`` runs a week apart therefore share an id and
+    dedupe on read, while their staged manifests and sizing provenance record the different
+    evidence each was sized from. That is the distinction: a run's *identity* is what was asked
+    for; its *provenance* is what answered.
 
     What gets pinned is the **pointer**, never the numbers. The rows behind a ``run_id`` are
     immutable, so the pointer is as good as the values and keeps the config small enough to stay

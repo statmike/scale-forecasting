@@ -34,7 +34,7 @@ old value goes stale by definition.
 | `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
-| `run_id_inputs` | `+compute.profile.source` | W11a (2026-08-31) | `+compute.profile.measure` (W10) |
+| `run_id_inputs` | `authored-config-only` | 2026-09-01, after the fork below | `+compute.profile.source` (W11a) |
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 
@@ -241,52 +241,51 @@ Things that are true today and that no entry above covers. Keep this list short 
   config to find it. Re-running any of 01–06 will record a new id, at which point the old one
   becomes purely historical. W10 moved every id a second time by adding `compute.profile.measure`,
   and W11a a third by adding `compute.profile.source`; the same reasoning applies unchanged to both,
-  and no row is stale for either.
+  and no row is stale for either. **The 2026-09-01 fix moved them a fourth and final time**, by
+  *removing* `compute.profile.source` again — so the ids recorded that same day for smokes 01 and
+  02 (`…-439b5350249b`, `…-0ffcc1f22d54`) are already in this category, hours after being written.
+  They remain valid pointers into the registry and the results they point at are unaffected; they
+  are simply no longer recomputable from their configs. Unlike the three before it, this move makes
+  identity *stop* drifting rather than start: `run_id_inputs` is now `authored-config-only` and
+  there is no resolved value left in the digest to move it again.
   The change that *did* make live results stale arrived at W7b/W8, and it was not the one predicted
   here. This note used to say the staleness event would be W6, "when `profile.mode='auto'` starts
   actually sizing fleets from measurement." That never happened and now never will in that form —
   see the next gap. What moved the fleets was the **static** arithmetic W7/W8 wired in with the
   profile argument left as `None`: no measurement involved, and every Spark fleet reshaped anyway.
 
-- **A transient registry error silently forks a run's identity.** Found live on 2026-09-01, on the
-  first run of the campaign. Smoke 02 resolved `smoke-02-bq-native-d2d37cd657e8`, and the immediate
-  re-run resolved `smoke-02-bq-native-0ffcc1f22d54` from a byte-identical config. The cause is
-  benign and one-off — on the first resolve the harvest columns did not yet exist on the deployed
-  `forecast_metadata`, so `discover_harvest_run` raised, `lock_profile_source` took its
-  `except Exception: return cfg` branch, and the digest was computed from a config still carrying
-  `source: "auto"` (confirmed in that run's staged manifest) instead of the pinned `"baseline"`.
-  Run 1's own `ensure_tables` then applied the ALTER, and the id has been stable across every
-  resolve since. **The mechanism is not one-off.** `lock_profile_source`'s docstring frames that
-  degradation as the no-`SF_*` preview case, where nothing is submitted and an unpinned plan is
-  harmless. But the same branch catches a timeout, a quota error or a permissions blip on a fully
-  configured run, and there the consequence is a *different `run_id` for the same config* — the one
-  thing run identity is supposed to rule out, arriving quietly, with only a `debug`-level line. No
-  fix is proposed here; it is recorded because it is now an observed behaviour rather than a
-  hypothetical, and because the campaign's re-run/idempotency checks rest on ids being stable.
-- **`profile.source: "auto"` makes a config's `run_id` change every time it is run.** Found live on
-  2026-09-01 by smoke 01, which reported `FAIL` for this and nothing else. Run 1
-  (`…-439b5350249b`) completed and harvested. The harness's no-`--force` re-run then resolved
-  `…-8f602110b7ea`, because `discover_harvest_run` now *found* run 1 and `lock_profile_source` duly
-  pinned `source: "smoke-01-serverless-cpu-439b5350249b"` into the digest (confirmed in run 2's
-  staged manifest). Run 2 harvested in turn, so run 3 would pin run 2, and so on: with harvest on by
-  default and `source` defaulting to `auto`, **the identity of a config never converges.**
+- **`compute.profile.source` in the digest forked run identity two different ways. Fixed
+  2026-09-01; live confirmation pending.** Both halves were found live, in the campaign's first two
+  waves, and neither had an offline analogue — the offline suite contained a test asserting the
+  *forking* behaviour was correct.
 
-  This is the documented behaviour working as designed — §2.6's rule is that a different fleet is a
-  different run, and run 2's fleet genuinely was different (see below). What it collides with is the
-  *other* guarantee: append-only writes deduped on read under a stable id. Two concrete consequences,
-  both now observed rather than predicted:
+  - **On failure.** Smoke 02 resolved `smoke-02-bq-native-d2d37cd657e8`, and an immediate re-run
+    resolved `…-0ffcc1f22d54` from a byte-identical config. The discovery query ran a moment before
+    its own schema migration and raised; `lock_profile_source` caught it and returned the config
+    still carrying `source: "auto"` (confirmed in that run's staged manifest) rather than the
+    `"baseline"` it would otherwise have pinned. The trigger was one-off, the mechanism was not: the
+    same branch catches a timeout, a quota error or a permissions blip, and forks the id with only
+    a `debug`-level line to show for it.
+  - **On success.** Smoke 01 reported `FAIL` for this and nothing else. Run 1 (`…-439b5350249b`)
+    harvested; the re-run found that harvest, pinned
+    `source: "smoke-01-serverless-cpu-439b5350249b"`, and resolved `…-8f602110b7ea`. Run 2 harvested
+    in turn, so run 3 would have pinned run 2. **Identity never converged.** A "re-run" submitted
+    two more Dataproc batches and wrote a second complete result set, so every Spark smoke would
+    have reported the same FAIL — and the rerun guard, dedupe-on-read, and any retried Airflow task
+    all rest on the id being stable.
 
-  - **A re-run is a full second run, not a no-op.** `main.run` on an unchanged config submitted two
-    more Dataproc batches and wrote a second complete result set. Anything that relies on re-running
-    being cheap — the smoke harness's own `verify_rerun`, the rerun guard, a retried Airflow task —
-    gets a new run instead of a dedupe.
-  - **Every Spark smoke will now report this same FAIL**, since the harness re-runs by default and
-    the harvest that triggers it is written by the run under test.
+  The fix is one exclusion: `registry.ids._canonical_config` drops `compute.profile.source` before
+  hashing. Pinning still happens and is still written into the staged manifest, and the sizing
+  telemetry still records the full provenance block naming the run the measurements came from. What
+  changes is the principle, which is worth stating once: **a run's identity is what was asked for;
+  its provenance is what answered.** `source` is resolved by the launcher, not authored by the
+  user, so it belongs to the second. That also disposes of the failure half — if the field cannot
+  move the id when discovery succeeds, it cannot move it when discovery raises either.
 
-  It also compounds the entry above: that one is an *error* forking the id, this one is *success*
-  forking it. Recorded here rather than fixed, because the fix is a design choice — exclude the
-  resolved source from the digest, pin it per-config, or teach the re-run path to reuse the staged
-  config — and picking one is not a validation decision.
+  Offline-proven only so far: the inverted test plus a new one asserting the id is identical whether
+  or not discovery reached the registry. **The live confirmation is a re-run of smoke 01 passing its
+  `verify_rerun` check**, which is the exact assertion that failed. Until that happens this stays a
+  gap rather than a closed item.
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
   ended that in a single wave, and did it twice over. Run 1 harvested; run 2 was sized from run 1.

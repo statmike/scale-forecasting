@@ -109,9 +109,11 @@ def run(
 
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
     the same config lands byte-identical rows. ``compute.profile.source: "auto"`` is locked to what
-    it resolves to (`launch_plan.lock_profile_source`) before the id is computed, exactly as the
-    plan/stage verbs do it, so all three agree on a run's identity; a source an operator pinned by
-    hand is checked for drift first (`profiling.source.check_pinned_source`) and fails the run.
+    it resolves to (`launch_plan.lock_profile_source`), exactly as the plan/stage verbs do it, but
+    that resolved pointer is excluded from the id (`registry.ids`) — otherwise a re-run sized from
+    newer evidence would land under a new id and the dedupe above would never fire. A source an
+    operator pinned by hand is checked for drift first (`profiling.source.check_pinned_source`) and
+    fails the run.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor

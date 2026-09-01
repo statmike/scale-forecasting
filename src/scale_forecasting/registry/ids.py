@@ -53,13 +53,40 @@ def _slug(text: str) -> str:
     return _SLUG_RE.sub("-", text.lower()).strip("-")
 
 
+# Config fields that are *resolved* rather than *authored*, and so must not reach the digest. Each
+# is a path from the config root. See ``_canonical_config``.
+_NOT_IDENTITY: tuple[tuple[str, ...], ...] = (("compute", "profile", "source"),)
+
+
 def _canonical_config(cfg: RunConfig) -> str:
     """Serialize a config to a stable, order-independent JSON string.
 
     ``sort_keys`` makes the bytes insensitive to field ordering, so the hash depends
     only on the config's *content*.
+
+    ``compute.profile.source`` is dropped first, and that exclusion is load-bearing. It is the one
+    field the launcher *resolves* rather than the user authoring: ``lock_profile_source`` rewrites
+    ``"auto"`` to whichever harvested run it discovered. Left in the digest, a config's identity
+    depends on what has been run before it — run N pins run N-1's harvest, so re-running the same
+    file forever yields new ids and never converges. That was observed live (smoke 01, 2026-09-01):
+    the re-run resolved a different id and executed a whole second run instead of deduping.
+
+    So identity stays a function of what was *asked for*, and the resolved pointer is recorded
+    where provenance belongs — the staged manifest keeps the pinned ``source``, and the sizing
+    telemetry keeps the full ``provenance`` block naming the run the measurements came from. A
+    re-run therefore lands on the same ``run_id`` even if it is sized from newer evidence, which is
+    what append-only-plus-dedupe-on-read requires.
     """
-    return json.dumps(cfg.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    payload = cfg.model_dump(mode="json")
+    for *parents, leaf in _NOT_IDENTITY:
+        node = payload
+        for key in parents:
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict):
+            node.pop(leaf, None)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def make_run_id(cfg: RunConfig) -> str:

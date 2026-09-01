@@ -343,13 +343,33 @@ def test_auto_is_pinned_to_the_run_it_resolves_to(monkeypatch: pytest.MonkeyPatc
     assert set(seen[0]) == {"source_table", "freq", "settings"}
 
 
-def test_pinning_moves_the_run_id_because_the_fleet_moved(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A run sized off last week's evidence is not the same run — §2.6's rule, applied."""
+def test_pinning_does_not_move_the_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity is what was asked for; the resolved source is provenance, and is excluded.
+
+    The regression this guards was seen live (smoke 01, 2026-09-01) rather than reasoned about:
+    with the source in the digest, run N pinned run N-1's harvest, so re-running one config
+    produced a new id every time and a "re-run" executed a whole second run instead of deduping.
+    """
     _fake_discover(monkeypatch, "prior-run-0123456789ab")
     cfg = _lock_cfg()
-    assert make_run_id(launch_plan.lock_profile_source(cfg, settings=_SETTINGS)) != make_run_id(cfg)
+    assert make_run_id(launch_plan.lock_profile_source(cfg, settings=_SETTINGS)) == make_run_id(cfg)
+
+
+def test_the_id_is_the_same_whether_or_not_discovery_reached_the_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: a transient registry error must not fork identity either.
+
+    Discovery failing leaves the config unpinned (the test below), so before the exclusion a
+    timeout or a permissions blip silently produced a *different* `run_id` for the same file —
+    which is exactly how smoke 02 forked on 2026-09-01, when the discovery query ran a moment
+    before its own schema migration.
+    """
+    _fake_discover(monkeypatch, RuntimeError("no credentials"))
+    unreachable = make_run_id(launch_plan.lock_profile_source(_lock_cfg(), settings=_SETTINGS))
+    _fake_discover(monkeypatch, "prior-run-0123456789ab")
+    reachable = make_run_id(launch_plan.lock_profile_source(_lock_cfg(), settings=_SETTINGS))
+    assert unreachable == reachable
 
 
 def test_finding_nothing_pins_the_baseline_rather_than_leaving_auto(
