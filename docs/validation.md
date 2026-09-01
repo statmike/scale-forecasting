@@ -91,7 +91,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
-| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | STALE | 2026-08-22 | `smoke-01-serverless-cpu-2ca2c0f48bd0` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
+| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-01 | `smoke-01-serverless-cpu-439b5350249b` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-08-22 | `smoke-03-serverless-gpu-a1adfc48d5d3` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-08-23 | `smoke-04-cluster-cpu-88fddc72b8a1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
@@ -130,10 +130,19 @@ that a different executor shape cannot break them. It can. W7 pins `spark.execut
 an illegal or unsatisfiable pair fails the batch at submit rather than degrading quietly; W8's
 whole-worker executor is the shape that made YARN's `DominantResourceCalculator` leave the
 ApplicationMaster unplaceable until an AM reserve was carved out. Those are exactly the failures
-that only appear live. **None of the new arithmetic has run on real infrastructure even once** — the
-offline gate proves it is self-consistent, not that Dataproc accepts it.
+that only appear live. The offline gate proves the arithmetic is self-consistent, not that Dataproc
+accepts it.
 
-The campaign that re-earns these rows is profiler **W12**, which also does the `off`-vs-profiled A/B
+**Dataproc accepts it.** On 2026-09-01 smoke 01 was re-run and is the first row back
+(`smoke-01-serverless-cpu-439b5350249b`). The batch was submitted with an explicit
+`spark.executor.cores=4`, a `2 / 2 / 7` dynamic-allocation band, and all four thread-pin
+`executorEnv` variables at 1, and it was accepted and ran to `SUCCEEDED`. The pin is verifiable from
+the other end too: every harvested cell of that run reports `intraop_threads=1`, so the property the
+overlay submitted is the one the model actually fitted under. That is the single most load-bearing
+untested mechanism in the suite cleared; the remaining Spark rows are stale for want of a re-run,
+not for want of a working overlay.
+
+The campaign that re-earns the rest is profiler **W12**, which also does the `off`-vs-profiled A/B
 and captures the measurements the shipped baseline will carry.
 
 ## Demonstration and scale configs
@@ -205,7 +214,8 @@ notebook reflects the current path.
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
 | RuntimeProbe read path (P1–P4) | NEVER_RUN | Offline only, against fakes. No probe has called a live Dataproc/Ray/BigQuery status API. |
 | RuntimeProbe cancel (P5) | NEVER_RUN | Offline only. No cancel has stopped a real job. |
-| Run audit + IAM roles (P6) | NEVER_RUN | `identity.resolve_principal` is `pragma: no cover` — its ADC and userinfo paths have never executed. The two custom roles are `validate`-clean but never `apply`-ed. |
+| Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
+| Run audit principal (P6) | NEVER_RUN | `identity.resolve_principal` is `pragma: no cover` — its ADC and userinfo paths have never executed. |
 
 ## Known validation gaps
 
@@ -253,62 +263,109 @@ Things that are true today and that no entry above covers. Keep this list short 
   thing run identity is supposed to rule out, arriving quietly, with only a `debug`-level line. No
   fix is proposed here; it is recorded because it is now an observed behaviour rather than a
   hypothetical, and because the campaign's re-run/idempotency checks rest on ids being stable.
-- **No live run has ever taken a compute measurement, on any runtime.** The profiler has exactly one
-  production call site — `engines/ray_engine` calls `profiling.source.resolve_profile` — and it has never
-  fired in a live smoke. `mode` defaults to `"auto"` with `min_cells = 1000`, no smoke config sets
-  `profile`, and the gate compares series × profilable models: smoke 07 offers 300 cells and smoke 08
-  offers 100, so both take the `None` path. Both Spark paths pass `None` unconditionally and
-  structurally must — `spark.executor.cores` and `spark.task.cpus` are fixed at submit or at create,
-  before any of our code runs on the cluster. So `profiling.measure.measure_fit` and `build_profile` are
-  unit-tested against injected measurements and have never measured anything real.
+- **`profile.source: "auto"` makes a config's `run_id` change every time it is run.** Found live on
+  2026-09-01 by smoke 01, which reported `FAIL` for this and nothing else. Run 1
+  (`…-439b5350249b`) completed and harvested. The harness's no-`--force` re-run then resolved
+  `…-8f602110b7ea`, because `discover_harvest_run` now *found* run 1 and `lock_profile_source` duly
+  pinned `source: "smoke-01-serverless-cpu-439b5350249b"` into the digest (confirmed in run 2's
+  staged manifest). Run 2 harvested in turn, so run 3 would pin run 2, and so on: with harvest on by
+  default and `source` defaulting to `auto`, **the identity of a config never converges.**
 
-  **W10 changed what the next live run will do, but not this gap.** Harvest is now on by default:
+  This is the documented behaviour working as designed — §2.6's rule is that a different fleet is a
+  different run, and run 2's fleet genuinely was different (see below). What it collides with is the
+  *other* guarantee: append-only writes deduped on read under a stable id. Two concrete consequences,
+  both now observed rather than predicted:
+
+  - **A re-run is a full second run, not a no-op.** `main.run` on an unchanged config submitted two
+    more Dataproc batches and wrote a second complete result set. Anything that relies on re-running
+    being cheap — the smoke harness's own `verify_rerun`, the rerun guard, a retried Airflow task —
+    gets a new run instead of a dedupe.
+  - **Every Spark smoke will now report this same FAIL**, since the harness re-runs by default and
+    the harvest that triggers it is written by the run under test.
+
+  It also compounds the entry above: that one is an *error* forking the id, this one is *success*
+  forking it. Recorded here rather than fixed, because the fix is a design choice — exclude the
+  resolved source from the digest, pin it per-config, or teach the re-run path to reuse the staged
+  config — and picking one is not a validation decision.
+- **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
+  entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
+  ended that in a single wave, and did it twice over. Run 1 harvested; run 2 was sized from run 1.
+
+  The measured fleet is not a cosmetic difference. Run 1's statistical batch was submitted with
+  `spark.executor.memory=9600m` and no explicit overhead — the static arithmetic's answer. Run 2's
+  was submitted with `spark.executor.memory=2048m` and `spark.executor.memoryOverhead=4093m`,
+  derived from run 1's harvested `process_rss_bytes` under the 1.3 memory margin. **That is the
+  first fleet in this product's history whose shape came from a measurement rather than a
+  constant**, and it ran to `SUCCEEDED` on the same work, producing an identical leaderboard
+  (`theta`, `holtwinters`, `xgboost`, 100 cells each). Sizing from evidence is not merely emitted;
+  it is sufficient.
+
+  The probes return sane numbers on a real Dataproc executor, which was the other open question:
+  per cell, `cpu_seconds` 0.48–0.86 by model, `process_rss_bytes` ≈ 750 MiB (absolute, as intended,
+  not a delta), `n_obs` 1460 matching the seeded history, `peak_gpu_bytes` NULL on CPU, and
+  `intraop_threads` 1 — agreeing with the `executorEnv` pins the same run submitted.
+
+  **What is still unproven** is smaller than it was and worth keeping separate: the probes have not
+  run on **Vertex Ray** (only Dataproc), the `measure: "controlled"` A/B has not been done, and the
+  per-cell overhead has not been checked at 100k, where it is the only place it could matter. The
+  Ray pre-pass call site remains unfired for the reason below.
+
+  The Ray pre-pass has exactly one production call site — `engines/ray_engine` calls
+  `profiling.source.resolve_profile` — and it has still never fired in a live smoke. `mode` defaults to
+  `"auto"` with `min_cells = 1000`, no smoke config sets `profile`, and the gate compares series ×
+  profilable models: smoke 07 offers 300 cells and smoke 08 offers 100, so both take the `None`
+  path. Both Spark paths pass `None` to the *pre-pass* and structurally must — `spark.executor.cores`
+  and `spark.task.cpus` are fixed at submit or at create, before any of our code runs on the cluster.
+  What smoke 01 proved is the harvest route to the same `ComputeProfile`, not the pre-pass route.
+
+  **W10's harvest is what made that possible.** Harvest is on by default:
   every cell records its CPU time, absolute process memory, peak device bytes, thread cap and
   `n_obs` onto `forecast_metadata`, and `profiling.cost.harvest_profile` aggregates those rows into the
-  same `ComputeProfile` the pre-pass would have built. Nothing has yet run on a real executor, so
-  two of the three things this listed stay unverified: that the probes return sane numbers on
-  Dataproc and Vertex rather than zeros or nulls, and that the per-cell overhead is genuinely
-  negligible at 100k scale. The third is now **settled live**: on 2026-09-01 the first run of the
-  campaign (`smoke-02-bq-native-0ffcc1f22d54`) drove `ensure_tables` against the deployed
+  same `ComputeProfile` the pre-pass would have built. The schema question it raised is also
+  **settled live**: on 2026-09-01 the first run of the campaign
+  (`smoke-02-bq-native-0ffcc1f22d54`) drove `ensure_tables` against the deployed
   `forecast_metadata`, and all five nullable harvest columns — `cpu_seconds`, `process_rss_bytes`,
   `peak_gpu_bytes`, `intraop_threads`, `n_obs` — were added by the additive ALTER without touching
-  the existing rows. The self-migration works on a table that predates it. W12 settles the rest;
-  W13 (shipping a baseline) depends on it.
+  the existing rows. The self-migration works on a table that predates it. W13 (shipping a baseline)
+  now has real measurements to be built from.
 
-  **W11a built the consumer against the same unproven evidence.** `compute.profile.source` defaults
-  to `"auto"`, and `profiling.source.resolve_profile_source` implements the whole precedence chain —
-  named run, discovered run, shipped baseline, static config — with every loader injected, so the
-  chain is tested offline end to end with no BigQuery. It cannot yet change a live run: nothing
-  calls it (that is W11b), there is no baseline to load (W13), and there is no harvested run
-  anywhere to discover, because of the gap above. The consequence worth stating plainly: **the first
-  live run that resolves a source will be the first one whose sizing came from a measurement**, and
-  its `provenance` block — basis, `run_id`, timestamp, signature, warnings — is the artifact to
-  check when that happens.
+  **W11a's precedence chain and W11b's wiring both executed.** `compute.profile.source` defaults to
+  `"auto"`; `profiling.source.resolve_profile_source` walks named run → discovered run → shipped
+  baseline → static config; `plan_run` / `stage_run` pin the result before the digest; and
+  `registry/bq.read_compute_harvest` / `discover_harvest_run` are the two queries behind it. All of
+  that was offline-only until smoke 01, and all three of the second-order checks this section asked
+  for came back green in one run: **run A's harvest was discoverable by run B**, **the pinned
+  `run_id` landed in the staged config** (`source: "smoke-01-serverless-cpu-439b5350249b"` in
+  `runs/smoke-01-serverless-cpu-8f602110b7ea.json`), and **the memory properties B emitted differed
+  from A's**. The chain is no longer hypothetical.
 
-  **W11b wired it, and it is now reachable on a live run — but still unexercised.** `plan_run` /
-  `stage_run` pin `source: "auto"` to a concrete `run_id` before the digest, both Spark sizing call
-  sites take a resolved profile instead of `None`, and `registry/bq.read_compute_harvest` /
-  `discover_harvest_run` are the two queries behind it. Neither query has ever run against real
-  BigQuery, and neither can return anything until a live run has harvested — so on today's
-  deployment `auto` discovers nothing, pins `"baseline"`, finds no baseline, and sizes from static
-  config: **behaviour identical to before the profiler existed.** The first live campaign therefore
-  has a second-order thing to check beyond the probes themselves — that run A's harvest is
-  discoverable by run B, that the pinned `run_id` lands in the staged config, and that the memory
-  properties B emits actually differ from A's.
+  Run 2's `provenance` block has been read, and it is complete: `basis: "measured"`, `source` and
+  `run_id` both naming run 1, a `measured_at` timestamp, a signature of
+  `{source_table: source_series_iceberg, n_series: 100, median_n_obs: 1460}`, and no warnings. The
+  `slot` it produced records `basis: "measured"`, `measured: ["cores", "memory_bytes"]` and an empty
+  `assumed` list, against run 1's `basis: "static"`, `measured: []`,
+  `assumed: ["cores", "memory_bytes"]`. The audit trail distinguishes the two, which is the point of
+  having one.
 
-  **W9b made the decision auditable, with one assumption still unproven.** The whole sizing
-  decision — the fleet plan, its translation to platform settings, and the profile behind it — is
-  now stamped into the run header's `job_telemetry` under `sizing.<family>` and surfaced by
-  `v_run_summary`. That write is a BigQuery `JSON_SET` **merge** rather than a whole-column write,
-  so the several family jobs of one run each record their own sizing instead of overwriting one
-  another (previously the last job to finish was the only one that left a trace). Three things
-  about it have never run against real BigQuery and belong in the W12 checklist: that `JSON_SET`
-  auto-creates the parent object for a nested path (`'$.sizing.deep_learning'` written into a
-  document with no `sizing` key), that two families of one run genuinely coexist under `$.sizing`
-  rather than racing, and that the **cluster** path's stamp lands at all — `submit_cluster_job` had
-  never written header telemetry before this, so a cluster run's `v_run_summary` row was blank.
-  Every one of these writes is best-effort (logged and swallowed), so a wrong assumption degrades
-  to "no telemetry", never to a failed run.
+  One wrinkle to know about before relying on discovery: the recorded signature has `freq: null`,
+  because these configs do not set a frequency. Discovery matches on the signature, so a manual
+  `discover_harvest_run(..., freq="D")` finds nothing for these runs even though `auto` resolves
+  them correctly. It is a query-argument trap, not a defect — but it will mislead anyone probing by
+  hand.
+
+  **W9b's merge works; one of its three assumptions is still open.** The whole sizing decision — the
+  fleet plan, its translation to platform settings, and the profile behind it — is stamped into the
+  run header's `job_telemetry` under `sizing.<family>` and surfaced by `v_run_summary`. That write
+  is a BigQuery `JSON_SET` **merge** rather than a whole-column write, so the several family jobs of
+  one run each record their own sizing instead of the last one to finish overwriting the rest. Two
+  of the three things listed here as never having run against real BigQuery ran on 2026-09-01, in
+  smoke 01: `JSON_SET` **did** auto-create the parent object for a nested path, and the run's two
+  families **do** coexist — `sizing.ml` and `sizing.statistical` are both present and complete under
+  one header, with no sign of a race. The third is untouched, because smoke 01 is a Serverless run:
+  whether the **cluster** path's stamp lands at all is still unknown — `submit_cluster_job` had
+  never written header telemetry before W9b, so a cluster run's `v_run_summary` row was blank. Wave
+  5 answers it. Every one of these writes is best-effort (logged and swallowed), so a wrong
+  assumption degrades to "no telemetry", never to a failed run.
 
 ## Provenance confidence
 
