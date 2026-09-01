@@ -54,7 +54,8 @@ claim about a machine shape that no longer exists.
 Two runtimes do *not* declare it. **BigQuery-native** work has no fleet of ours to shape. **Ray** is
 unmoved in practice: `plan_pool(profile=None)` reproduces the pre-profiler arithmetic exactly, W1's
 autoscale-ceiling derivation only fires when `ray_autoscale` is true and all four Ray smokes pin it
-`false`, and W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
+`false` (the demonstration surface covers that path — see `ray_autoscale_demo`, which reached the
+derived ceiling of 8), and W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
 because it submits Serverless work alongside its Ray families.
 
 `horizon_features` governs **what an exog-aware model is handed for the forecast horizon**. Until
@@ -170,7 +171,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | NEVER_RUN | — | — | — |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | NEVER_RUN | — | — | — |
-| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | NEVER_RUN | — | — | — |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | NEVER_RUN | — | — | — |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
@@ -202,10 +203,25 @@ times faster, and that comparison is exactly what wave 8's A/B is for. What this
 the claim the product actually makes — 100k series, four models, one run, one leaderboard, and it
 finishes.
 
+**`ray_autoscale_demo` proved the shipped default, and the proof is in the audit log rather than the
+leaderboard.** `ray_autoscale=true` is what every config gets unless it says otherwise, and until
+this run nothing had ever exercised it: all four Ray smokes pin it `false`. The cluster came up with
+`autoscalingSpec {minReplicaCount: 1, maxReplicaCount: 8}` and Vertex drove it to **8 worker
+replicas** — six `UpdatePersistentResource` events over twenty minutes are the scale-up. 3 models ×
+10,000 series, `COMPLETED`, re-run same id and board unchanged, cluster deleted cleanly at the end.
+
+Three operational numbers worth carrying out of it. Cluster provisioning took **10 min 10 s**
+(create 19:47:51 → start 19:58:01) — the Ray equivalent of the ~30-minute fixed Serverless batch
+overhead, and it is charged before any work starts. The job itself ran ~79 minutes and **did not hit
+the bearer-token expiry** that a Ray run over ~60 minutes is documented to risk; that limit is
+narrower than assumed, but one run is not enough to call it closed. And `wape` is `None` across the
+board because this config does not backtest — the row proves autoscaling and scale, not accuracy.
+
 ### What this surface will exercise that the smoke suite cannot
 
 - **`ray_autoscale=true`.** Every Ray *smoke* pins it `false`; five configs here leave it `true`,
-  which is the shipped default. See the gap below.
+  which is the shipped default. Proven once, by `ray_autoscale_demo` above; the gap below is now a
+  narrower one about the four smokes still pinning it off.
 - **Scale.** The smokes run 100 series. The fleet arithmetic W7b/W8 introduced is only under real
   pressure at 100k, and `explode_100k.json` is the one config that overrides the bucket sizing
   (`bucket_target_cells: 200`) because the default OOM'd at that scale.
@@ -249,11 +265,13 @@ Things that are true today and that no entry above covers. Keep this list short 
 
 - **`ray_autoscale` defaults to `True` (`config.py`) but all four Ray smokes pin it `false`.**
   Introduced by `4c988bc`, when a per-pool `AutoscalingSpec` crashed the Vertex Ray head at
-  provisioning. The shipped default has therefore never passed a live smoke. That crash may have
-  been the custom image — since deleted — so autoscaling may simply work now, but nobody has
-  checked. The smoke suite cannot close this on its own: five of the configs in the demonstration
-  table leave the default `true` (`ray_autoscale_demo`, `ray_gpu_demo`, and all three Ray-runtime
-  scale configs), so proving it is a demonstration-surface result, not a smoke result.
+  provisioning. **Resolved on the demonstration surface 2026-09-01**, and the suspected cause was
+  right: `ray_autoscale_demo` scaled 1→8 workers and completed, so the `4c988bc` crash was the
+  custom image — since deleted — not the autoscaling spec. What remains is smaller and is a
+  *hygiene* gap rather than an unknown: the four Ray smokes still pin `false`, so the cheap
+  fifteen-minute path does not cover the shipped default, and a regression in it would only surface
+  on a demonstration run. Unpinning them is the fix; it is not urgent, because the default is now
+  proven at 10,000 series, which is a harder case than any smoke poses.
 - **No `run_id` was recorded for smokes 07–14.** Smokes 01–06 have them. Without one there is no
   reverse-trace from the ledger to the platform job, which is the whole point of recording a
   result. Any re-run must capture it.
