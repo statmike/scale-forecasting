@@ -174,13 +174,43 @@ def test_spark_batch_ships_the_package_via_python_file_uris() -> None:
     assert "scale" not in batch.runtime_config.container_image.rsplit("/", 1)[-1]
 
 
-def test_ray_runtime_env_ships_the_package_via_working_dir() -> None:
-    from scale_forecasting.ray_submit import build_runtime_env
+def test_ray_runtime_env_ships_src_and_uv_deps() -> None:
+    import os
+    import re
 
+    from scale_forecasting.code_delivery import build_runtime_env
+
+    # Ray always runs on Vertex's prebuilt image, which lacks our deps, so the runtime_env carries
+    # the requirements list, installed by uv (byte-aligned with the container's own build).
     env = build_runtime_env()
-    # working_dir is the real on-disk src/ (uploaded by Ray at submit) — code ships with the job.
+    # working_dir is the package root (so `python -m scale_forecasting.ray_entry` resolves) — a real
+    # local dir that exists for the upload to succeed.
     assert env["working_dir"].endswith("/src")
-    assert Path(env["working_dir"]).is_dir()
+    assert os.path.isdir(env["working_dir"])
+    # No pip key on the uv path: Ray's runtime_env uv plugin owns the install.
+    assert "pip" not in env
+    uv = env["uv"]
+    # packages is the locked deps as a LIST (pinned "name==version" specs), not a file path, so we
+    # can drop cluster-provided packages from it.
+    packages = uv["packages"]
+    assert isinstance(packages, list) and packages
+    assert all("==" in spec for spec in packages)
+    # neuralprophet (a real [models] dep) is shipped; Ray is NOT (the cluster image provides it, and
+    # a pin could clash with the version Vertex booted).
+    names = {re.split(r"[<>=!~;\[ ]", spec, maxsplit=1)[0].lower() for spec in packages}
+    assert "neuralprophet" in names
+    assert "ray" not in names
+    # The install options carry the PyTorch CUDA extra index + unsafe-best-match (mirrors
+    # docker/Dockerfile) so the x86_64 torch "+cu126" pin resolves on the cluster instead of
+    # 404-ing the whole job at env setup. --no-cache is re-listed (it replaces the plugin default).
+    opts = uv["uv_pip_install_options"]
+    assert "--no-cache" in opts
+    assert "https://download.pytorch.org/whl/cu126" in opts
+    i = opts.index("--extra-index-url")
+    assert opts[i + 1] == "https://download.pytorch.org/whl/cu126"
+    assert "--index-strategy" in opts and "unsafe-best-match" in opts
+    # uv_check runs `uv pip check` after install so dependency drift fails loudly at env setup.
+    assert uv["uv_check"] is True
 
 
 # --- the Terraform submit paths zip src/ and deliver it at runtime -------------

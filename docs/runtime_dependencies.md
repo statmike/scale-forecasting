@@ -36,7 +36,7 @@ image and the archive both rebuild only when the locked deps change, never on a 
 |---------|-----------|-----------------------|--------|
 | **Dataproc Serverless** (`explode` / `multi` batches) | **Custom container** | the shared runtime image, attached on every submit | `submit.py` (`runtime_config.container_image`) |
 | **Spark Connect** (interactive, nb01) — *the same Serverless product, session API not batch API* | **Custom container** + artifacts | the same image, pinned on the session; code via `addArtifacts`. Covers the **executors only** — the driver is your local process | notebook session cell |
-| **Ray on Vertex** (nb04) | **`uv` runtime_env** | `uv` installs the frozen lock into the per-job venv on Vertex's **prebuilt** Ray image | `ray_submit.py` (`build_runtime_env`) |
+| **Ray on Vertex** (nb04) | **`uv` runtime_env** | `uv` installs the frozen lock into the per-job venv on Vertex's **prebuilt** Ray image | `code_delivery.py` (`build_runtime_env`) |
 | **Dataproc cluster** (`spark_mode="cluster"`) | **Self-contained venv archive** | a tar of the image's `/opt/venv` (interpreter bundled) attached to the job (`#env`) | `cluster_deps.py` + `compute.spark_deps` |
 | **Colab Enterprise** (all notebooks) | **`uv`-from-lock install** | `uv` installs the frozen lock in the runtime (bootstrap or post-startup) | notebook bootstrap cell / template |
 | **Local dev** | **`uv` project env** | `uv sync --frozen` installs the same lock | `uv.lock` |
@@ -176,7 +176,7 @@ detail lives in [notebook_runtimes.md](./notebook_runtimes.md#per-notebook-mappi
 
 A Vertex Ray cluster **could** take a custom worker image, but ours does not: a custom node image
 fails Vertex Ray **GPU-node** provisioning ("An internal error occurred on your cluster"), so the Ray
-path runs on Vertex's **prebuilt** Ray image and `ray_submit.py`'s `build_runtime_env` installs the
+path runs on Vertex's **prebuilt** Ray image and `code_delivery.py`'s `build_runtime_env` installs the
 deps at job submit via Ray's `runtime_env` **`uv`** plugin. `uv` installs the same pinned
 `requirements.txt` export (the container is built from) into a per-job virtualenv, so a Ray task
 imports the identical stack a Spark task does — byte-aligned, no second resolve. The CUDA-12.6 torch

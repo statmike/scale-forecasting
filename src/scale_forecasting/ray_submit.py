@@ -36,8 +36,10 @@ What `submit_ray` does:
    jobs of one run don't overwrite each other — and raise on a non-SUCCEEDED terminal state so a
    failed run never exits 0.
 
-Public surface: ``RayInfra``, ``submit_ray``, ``build_entrypoint``, ``build_runtime_env``,
-``extract_ray_telemetry``, ``main``.
+Public surface: ``RayInfra``, ``submit_ray``, ``build_entrypoint``, ``extract_ray_telemetry``,
+``main``. The job's ``runtime_env`` — current ``src/`` plus the on-cluster deps — is built by
+`code_delivery.build_runtime_env`, alongside the zip the two Spark surfaces ship, so all three
+code-delivery mechanisms read one ``src/``.
 """
 
 from __future__ import annotations
@@ -47,9 +49,9 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .code_delivery import build_runtime_env
 from .commands import build_driver_args
 from .engines import ray_io
 from .errors import ConfigError, EngineError, get_logger
@@ -62,27 +64,12 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-# The package root shipped as the Ray job's runtime_env working dir (contains scale_forecasting/, so
-# `python -m scale_forecasting.ray_entry` resolves on the cluster). The locked cluster deps live at
-# docker/requirements.txt (the same file the container image pins) — reused for the on-cluster pip.
-_SRC_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _SRC_DIR.parent
-_REQUIREMENTS = _REPO_ROOT / "docker" / "requirements.txt"
-
-# torch's x86_64/linux pin is the CUDA-12.6 local build (``torch==2.13.0+cu126``) for the Vertex T4
-# driver — that ``+cuXXX`` local version exists ONLY on the PyTorch index, never on PyPI. The
-# on-cluster runtime_env pip install must therefore add the SAME ``--extra-index-url`` the image
-# build uses (docker/Dockerfile), or the pin 404s ("No matching distribution for torch==…+cu126")
-# and the whole Ray job fails at env setup. ``--extra-index-url`` (not ``--index-url``) keeps PyPI
-# primary for every other package; pip honors the option line when it appears in the requirements
-# list Ray materializes. Source of truth for the URL is docker/Dockerfile — keep them in lockstep.
-_TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
-
 # Ray-cluster infra env vars (beyond the SF_* identity Settings resolves). Kept together so the
 # docstring, resolve(), and any tooling agree. code_bucket + compute_sa are shared with the Spark
 # batch; network (optional) is a VPC for a private endpoint. There is deliberately no custom-image
 # var: Ray always runs on Vertex's prebuilt image + a uv runtime_env (a custom node image fails
-# Vertex Ray GPU-node provisioning — see build_runtime_env). SF_CONTAINER_IMAGE stays Spark-only.
+# Vertex Ray GPU-node provisioning — see `code_delivery.build_runtime_env`). SF_CONTAINER_IMAGE
+# stays Spark-only.
 _ENV_NETWORK = "SF_RAY_NETWORK"
 _ENV_NETWORK_ATTACHMENT = "SF_RAY_NETWORK_ATTACHMENT"
 _ENV_COMPUTE_SA = "SF_COMPUTE_SA"
@@ -141,7 +128,7 @@ class RayInfra:
     ``compute_sa`` is the runtime SA the cluster runs as; ``code_bucket`` where the run config JSON
     is staged. There is no custom-image field: Ray always runs on Vertex's prebuilt image and the
     uv ``runtime_env`` installs the deps on top. Unlike the Spark path, Ray never uses a custom node
-    image — one fails Vertex Ray GPU-node provisioning (see ``build_runtime_env``), so
+    image — one fails Vertex Ray GPU-node provisioning (see `code_delivery.build_runtime_env`), so
     ``SF_CONTAINER_IMAGE`` stays Spark-only and is never read here.
     """
 
@@ -226,74 +213,6 @@ def build_entrypoint(
     return " ".join(parts)
 
 
-# Packages the cluster already provides — never reinstall these via runtime_env or a pip-installed
-# version would fight the one baked into the Vertex Ray image (the cluster's Ray is pinned at create
-# via ``ray_version``, and requirements.txt may pin a newer Ray than Vertex supports, so swapping it
-# out from under the running head/workers breaks the job). Matched on the PEP-508 project name.
-_CLUSTER_PROVIDED = frozenset({"ray"})
-
-
-def _requirements_packages() -> list[str]:
-    """Parse ``docker/requirements.txt`` into a package-spec list, dropping cluster-provided deps.
-
-    The uv-exported file is ``name==version [; marker]`` lines interleaved with ``# via`` comment
-    blocks; we keep only the requirement lines and skip anything whose project name is in
-    `_CLUSTER_PROVIDED` (see its note — Ray must come from the image, not pip).
-    """
-    packages: list[str] = []
-    for raw in _REQUIREMENTS.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        # Project name = everything before the first version/extra/marker delimiter.
-        name = re.split(r"[<>=!~;\[ ]", line, maxsplit=1)[0].lower()
-        if name in _CLUSTER_PROVIDED:
-            continue
-        packages.append(line)
-    return packages
-
-
-def build_runtime_env() -> dict[str, Any]:
-    """The Ray ``runtime_env``: current ``src/`` + on-cluster deps installed by uv (pure).
-
-    Delivers code at RUNTIME the way the Spark path uploads a ``src/`` zip: ``working_dir`` is the
-    package root, so ``python -m scale_forecasting.ray_entry`` imports the code that was just
-    submitted, not anything baked into the image — the "same code local and in the cloud" seam.
-
-    Ray always runs on Vertex's prebuilt image (a custom node image fails Vertex Ray GPU-node
-    provisioning), which lacks our deps — so **uv** installs the requirements package **list minus
-    Ray** into the per-job virtualenv (`_requirements_packages` — Ray stays the image's pinned
-    version rather than being swapped by a conflicting pin). uv resolves from the same pinned
-    requirements export the container is built from, so the on-cluster env is byte-aligned with
-    every other surface, and it installs markedly faster than pip; Ray 2.47's runtime_env uv plugin
-    self-bootstraps uv into the prebuilt image if absent, so nothing has to preinstall it.
-    ``--extra-index-url`` adds the PyTorch CUDA wheels (`_TORCH_CUDA_INDEX`, mirroring
-    docker/Dockerfile): the x86_64/linux torch pin is a ``+cu126`` local build that only resolves
-    from that index, and ``--index-strategy unsafe-best-match`` lets uv pick it from the extra index
-    even though the same name exists on PyPI (uv's default first-index strategy would stop at PyPI
-    and never find the ``+cu126`` build). PyPI stays the primary index.
-    """
-    return {
-        "working_dir": str(_SRC_DIR),
-        "uv": {
-            "packages": _requirements_packages(),
-            # Passed through to ``uv pip install`` — this REPLACES the plugin default
-            # ``["--no-cache"]``, so re-list it. See the docstring for why the extra index +
-            # unsafe-best-match are needed for the ``+cu126`` torch build.
-            "uv_pip_install_options": [
-                "--no-cache",
-                "--extra-index-url",
-                _TORCH_CUDA_INDEX,
-                "--index-strategy",
-                "unsafe-best-match",
-            ],
-            # Run ``uv pip check`` after install so dependency drift fails loudly at env setup
-            # rather than as a confusing runtime import error — the byte-alignment guarantee.
-            "uv_check": True,
-        },
-    }
-
-
 def extract_ray_telemetry(
     plan: ray_io.RayClusterPlan,
     *,
@@ -371,7 +290,7 @@ def _worker_resources(plan: ray_io.RayClusterPlan) -> list[Any]:
     is False both pools are fixed at their derived ``node_count`` with **no** ``autoscaling_spec``
     (a deterministic fixed-size path). A pool with zero planned nodes is omitted (Vertex rejects
     a zero-node worker type). No ``custom_image`` is set — Ray runs on Vertex's prebuilt image and
-    the uv ``runtime_env`` delivers the deps (see ``build_runtime_env``).
+    the uv ``runtime_env`` delivers the deps (see `code_delivery.build_runtime_env`).
     """
     from google.cloud.aiplatform import vertex_ray
     from google.cloud.aiplatform.vertex_ray.util.resources import AutoscalingSpec
