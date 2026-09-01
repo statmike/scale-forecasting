@@ -347,6 +347,13 @@ def plan_run(
     """
     from .config import estimate_fanout
     from .dag import dag_nodes, plan_dag
+    from .profiling.source import check_pinned_source
+
+    # Before the lock, so this only ever judges what a *person* pinned (see `check_pinned_source`),
+    # and outside the try, because a rotted pin is the one thing here that is *not* best-effort.
+    # It degrades on its own when the registry is unreachable — no drift is visible, so none is
+    # reported.
+    check_pinned_source(cfg, settings=settings, force=force)
 
     # The infra identity is resolved first and separately, because `lock_profile_source` needs it
     # and its result is part of the digest — so it has to land before `_plan` computes the run_id.
@@ -469,11 +476,14 @@ def stage_run(
 
     from .config import estimate_fanout
     from .dag import dag_nodes, plan_dag
+    from .profiling.source import check_pinned_source
     from .staging import stage_config, stage_manifest
 
     # Pin `source: "auto"` to what it resolves to *now*, before the digest — the staged config is
     # the reproducibility artifact, so what actually sized this run has to be written into it.
     settings = settings or _resolve_settings()
+    # Before the lock, so this only ever judges what a *person* pinned (see `check_pinned_source`).
+    check_pinned_source(cfg, settings=settings, force=force)
     cfg = lock_profile_source(cfg, settings=settings)
 
     plan = _plan(cfg)

@@ -108,12 +108,16 @@ def run(
     a remote Spark batch's dynamic-allocation ceiling (ignored by the in-process/Ray paths).
 
     Idempotent: the config-pinned run_id + append-only/dedupe-on-read cell writes mean re-running
-    the same config lands byte-identical rows.
+    the same config lands byte-identical rows. ``compute.profile.source: "auto"`` is locked to what
+    it resolves to (`launch_plan.lock_profile_source`) before the id is computed, exactly as the
+    plan/stage verbs do it, so all three agree on a run's identity; a source an operator pinned by
+    hand is checked for drift first (`profiling.source.check_pinned_source`) and fails the run.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
     from .dag import plan_dag
+    from .profiling.source import check_pinned_source
     from .registry.header import header_status
     from .registry.lifecycle import run_header
     from .settings import Settings
@@ -128,10 +132,21 @@ def run(
         # so this contract is unchanged.
         return launch_plan.plan_run(cfg, settings=settings, force=force).run_id
 
+    settings = settings or Settings.resolve()
+
+    # A pinned ``compute.profile.source`` is a human assertion that one specific run's measurements
+    # apply here; if the data has moved under it, say so once, now, rather than six times from
+    # inside each family's launch. Before the lock below, which would otherwise turn the system's
+    # own ``auto`` choice into something that looks pinned. ``force`` overrides, as it does the
+    # idempotency guard.
+    check_pinned_source(cfg, settings=settings, force=force)
+    # Lock `source: "auto"` before the digest — the same step `launch_plan.plan_run` / ``stage_run``
+    # take, and it has to happen here too or the three verbs would disagree about this run's
+    # identity: ``--dry-run`` would report an id the real run then never uses.
+    cfg = launch_plan.lock_profile_source(cfg, settings=settings)
+
     run_dag = plan_dag(cfg)
     run_id = run_dag.run_id
-
-    settings = settings or Settings.resolve()
 
     # Idempotency guard: the run_id is config-pinned, so re-running the same config is a no-op once
     # it has COMPLETED — return without relaunching. Relaunching would resubmit each family's

@@ -16,6 +16,7 @@ import pytest
 
 from scale_forecasting import dag, job_launch, launch_plan, main
 from scale_forecasting.config import RunConfig
+from scale_forecasting.errors import ConfigError
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
 
@@ -23,6 +24,18 @@ from scale_forecasting.settings import Settings
 # BigQuery-native models (runtime == "bigquery").
 _SPARK = "theta"
 _NATIVE = ["arima_plus", "timesfm"]
+
+# One ``forecast_metadata`` measurement row, enough for a pinned profile source to resolve to a
+# real profile (and so to a real signature comparison). The full harvest arithmetic is
+# ``test_profiling.py``'s; here it only has to load.
+_HARVEST_ROW = {
+    "ts_id": "series-a",
+    "model_type": "theta",
+    "fit_seconds": 2.0,
+    "cpu_seconds": 2.0,
+    "process_rss_bytes": 1024**3,
+    "n_obs": 400,
+}
 
 # A resolved Settings for the dispatch tests (never used to touch GCP — the submit fns are faked).
 _SETTINGS = Settings(
@@ -46,9 +59,13 @@ def _cfg(**over: Any) -> RunConfig:
 def _no_live_header_check(monkeypatch: pytest.MonkeyPatch) -> None:
     # The exists-vs-new verdict queries the registry; default it to "new run" so offline plan/stage
     # tests never touch BigQuery. The idempotency tests below override this explicitly.
-    from scale_forecasting.registry import header
+    from scale_forecasting.registry import harvest, header
 
     monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
+    # Locking `profile.source: "auto"` before the digest is also a registry query, on every verb.
+    # Offline there is nothing to discover, so it pins "baseline" — the deterministic remainder of
+    # the chain — and every id in this file is the id of a baseline-pinned config.
+    monkeypatch.setattr(harvest, "discover_harvest_run", lambda **k: None)
 
 
 # --- run(dry_run=True): offline, no GCP ----------------------------------------
@@ -261,11 +278,49 @@ def test_run_noops_when_config_already_completed(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")
     cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
     run_id = main.run(cfg)
-    assert run_id == dag.plan_dag(cfg).run_id
+    assert run_id == main.run(cfg, dry_run=True)  # and the three verbs agree on the id
     assert "spark_ran" not in seen
     assert "bq_ran" not in seen
     assert seen["ensemble_called"] is False
     assert "status" not in seen  # header never re-finalized
+
+
+def test_every_verb_locks_the_profile_source_to_the_same_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `profile.source: "auto"` is part of the digest, so whichever verb resolves it has to resolve
+    # it the same way: if `run` skipped the lock, `--dry-run` would print an id the real run then
+    # never used. Discovery finds a prior run here, so the locked id is *not* the unlocked one.
+    from scale_forecasting.registry import harvest, header
+
+    _patch_run_seams(monkeypatch)
+    monkeypatch.setattr(harvest, "discover_harvest_run", lambda **k: "prior-run-0123456789ab")
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "COMPLETED")  # return early
+    cfg = _cfg()
+
+    run_id = main.run(cfg)
+    assert run_id == main.run(cfg, dry_run=True)
+    assert run_id == launch_plan.plan_run(cfg).run_id
+    assert run_id != dag.plan_dag(cfg).run_id  # the lock really did move it
+
+
+def test_run_refuses_a_pinned_profile_source_whose_data_moved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A hand-pinned source is an assertion that that run's measurements apply here. When they no
+    # longer do, the run stops at the entry point rather than sizing the whole fleet off evidence
+    # the operator did not mean to use.
+    from scale_forecasting.registry import harvest
+
+    _patch_run_seams(monkeypatch)
+    monkeypatch.setattr(
+        harvest, "read_compute_harvest", lambda run_id, **k: ([_HARVEST_ROW], "another_table")
+    )
+    cfg = _cfg(compute={"profile": {"source": "prior-run-0123456789ab"}})
+
+    with pytest.raises(ConfigError, match="prior-run-0123456789ab"):
+        main.run(cfg)
+    main.run(cfg, force=True)  # the documented override
 
 
 def test_run_force_reexecutes_even_when_completed(monkeypatch: pytest.MonkeyPatch) -> None:

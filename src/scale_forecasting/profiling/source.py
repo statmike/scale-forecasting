@@ -13,6 +13,10 @@ it came from. `resolve_profile` produces **fresh** evidence by sampling the pane
 running real fits. Both return ``None`` for "no evidence", which is a decision rather than a
 failure: sizing from declared config is the floor under every path here.
 
+One case does *not* get the graceful floor: an operator who pinned ``profile.source`` to a
+specific run id asserted that that evidence applies here, and `check_pinned_source` fails the
+run at the entry point when the data has since moved out from under that assertion.
+
 Every loader — and the measurement function itself — is injected, so the whole precedence
 chain and the whole pre-pass are exercised offline against deterministic stand-ins.
 """
@@ -23,7 +27,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from ..errors import DataError, get_logger
+from ..errors import ConfigError, DataError, get_logger
 from .cost import ComputeProfile, ProfileProvenance, build_profile, harvest_profile
 from .measure import MeasuredFit, measure_fit
 from .sampling import select_profile_sample
@@ -158,6 +162,65 @@ def resolve_profile_source(
                 ),
             )
     return None
+
+
+def pinned_source_drift(
+    cfg: RunConfig, *, load_run: RunHarvestLoader | None = None
+) -> tuple[str, ...]:
+    """Signature drift on an **explicitly pinned** ``profile.source``, or ``()`` (pure + injected).
+
+    Only an explicit ``source: "<run_id>"`` is checked. ``auto``, ``baseline`` and ``none`` are the
+    system choosing, and the system has a fallback; a pinned run id is a *person* asserting that
+    this specific evidence applies to this run. When the signature says the data has moved out from
+    under it, that assertion is false, and this is what `check_pinned_source` turns into an error.
+
+    Returns the same warning strings `resolve_profile_source` would have stamped on the provenance
+    — computed by calling it, so the two can never disagree about what "drifted" means. A pin that
+    cannot be loaded at all returns ``()``: an unreachable registry is not evidence of drift, and
+    the sizing path already degrades to config for it.
+    """
+    profile_cfg = cfg.compute.profile
+    if not profile_cfg.consumes_evidence or profile_cfg.source in ("auto", "baseline", "none"):
+        return ()
+    resolved = resolve_profile_source(cfg, load_run=load_run)
+    if resolved is None or resolved.provenance is None:
+        return ()
+    return tuple(resolved.provenance.warnings)
+
+
+def check_pinned_source(
+    cfg: RunConfig, *, settings: Settings | None = None, force: bool = False
+) -> None:
+    """Raise `errors.ConfigError` when a pinned ``profile.source`` has silently rotted (I/O).
+
+    The asymmetry with ``auto`` is deliberate and is about who made the claim. ``auto`` warns and
+    degrades — it is a hint, it has a fallback, and hard-failing would make an unattended run
+    brittle for no safety gain. An explicit run id is a human assertion; sizing off evidence that
+    no longer describes this data is exactly the failure the provenance machinery exists to
+    prevent, so it fails loudly and names both sides. ``force=True`` overrides — the same verb that
+    already overrides the idempotency guard, so there is no second escape hatch to learn.
+
+    Called once at the entry points (`main.run`, `launch_plan.plan_run` / ``stage_run``) rather than
+    at each of the sizing sites: the operator should hear about this before anything is submitted,
+    once, not six times from inside a launch.
+    """
+    if force:
+        return
+    from ..registry.harvest import read_compute_harvest
+
+    warnings = pinned_source_drift(
+        cfg, load_run=lambda run_id: read_compute_harvest(run_id, settings=settings)
+    )
+    if not warnings:
+        return
+
+    detail = "; ".join(warnings)
+    raise ConfigError(
+        f"compute.profile.source is pinned to {cfg.compute.profile.source!r}, but that run's "
+        f"measurements no longer describe this run's data: {detail}. Sizing from it would be "
+        "sizing off evidence you did not mean to use. Re-pin to a current run, switch to "
+        '"auto"/"baseline", or pass --force to size from it anyway.'
+    )
 
 
 def _try(load: Callable[[], Any]) -> Any:

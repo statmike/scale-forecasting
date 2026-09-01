@@ -42,7 +42,7 @@ import pandas as pd
 import pytest
 
 from scale_forecasting.config import RunConfig
-from scale_forecasting.errors import DataError
+from scale_forecasting.errors import ConfigError, DataError
 from scale_forecasting.profiling import cost, measure, sampling, signature, source
 from scale_forecasting.profiling.cost import build_profile
 from scale_forecasting.profiling.measure import MeasuredFit
@@ -2000,6 +2000,97 @@ def test_a_registry_hiccup_falls_back_instead_of_sinking_the_run() -> None:
         raise RuntimeError("bigquery unavailable")
 
     assert source.resolve_profile_source(_sourced("auto"), discover=boom, load_run=boom) is None
+
+
+# --- a pinned source that rotted: the one case that fails instead of degrading ---
+
+_PIN = "my-run-abc123def456"
+
+
+def _drifted(_: str) -> Any:
+    """A pin that loads fine but was measured against a different table."""
+    return _harvest_rows(), "somewhere_else"
+
+
+def test_a_pin_whose_data_moved_under_it_reports_drift() -> None:
+    """The signal `check_pinned_source` acts on — the same warnings the provenance would carry."""
+    warnings = source.pinned_source_drift(_sourced(_PIN), load_run=_drifted)
+    assert warnings
+    assert (
+        warnings
+        == source.resolve_profile_source(  # type: ignore[union-attr]
+            _sourced(_PIN), load_run=_drifted
+        ).provenance.warnings
+    )
+
+
+@pytest.mark.parametrize("configured", ["auto", "baseline", "none"])
+def test_only_a_person_can_rot_a_pin(configured: str) -> None:
+    """`auto`/`baseline` are the system choosing and have a fallback; they warn, never fail."""
+    assert source.pinned_source_drift(_sourced(configured), load_run=_drifted) == ()
+
+
+def test_a_pin_that_still_matches_is_not_drift() -> None:
+    """The healthy case must be silent, or the check is noise operators learn to `--force` past."""
+    cfg = _cfg(
+        data={"source_table": "source_series_native", "series_limit": 4},
+        compute={"profile": {"source": _PIN}},
+    )
+    assert (
+        source.pinned_source_drift(cfg, load_run=lambda _: (_harvest_rows(), cfg.data.source_table))
+        == ()
+    )
+
+
+def test_an_unreachable_pin_is_not_evidence_of_drift() -> None:
+    """A registry outage must not be reported as "your data moved" — nothing was compared."""
+    assert source.pinned_source_drift(_sourced(_PIN), load_run=lambda _: None) == ()
+    assert source.pinned_source_drift(_sourced(_PIN)) == ()
+
+
+def test_a_rotted_pin_fails_the_run_and_names_both_sides(monkeypatch: Any) -> None:
+    """Sizing off evidence the operator did not mean to use is the failure this exists to stop."""
+    monkeypatch.setattr(
+        "scale_forecasting.registry.harvest.read_compute_harvest", lambda run_id, **_: _drifted("")
+    )
+    with pytest.raises(ConfigError) as caught:
+        source.check_pinned_source(_sourced(_PIN))
+    message = str(caught.value)
+    assert _PIN in message  # which pin
+    assert "different table" in message  # and why it is wrong
+    assert "--force" in message  # and the way out
+
+
+def test_force_sizes_from_a_rotted_pin_without_even_looking(monkeypatch: Any) -> None:
+    """The same override verb as the idempotency guard — and it short-circuits the registry read."""
+    monkeypatch.setattr(
+        "scale_forecasting.registry.harvest.read_compute_harvest",
+        lambda *_, **__: pytest.fail("force must not query the registry"),
+    )
+    source.check_pinned_source(_sourced(_PIN), force=True)
+
+
+def test_a_healthy_pin_passes_the_check(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "scale_forecasting.registry.harvest.read_compute_harvest",
+        lambda run_id, **_: (_harvest_rows(), "source_series_native"),
+    )
+    source.check_pinned_source(
+        _cfg(
+            data={"source_table": "source_series_native", "series_limit": 4},
+            compute={"profile": {"source": _PIN}},
+        )
+    )
+
+
+def test_the_check_degrades_when_the_registry_is_unreachable(monkeypatch: Any) -> None:
+    """No drift is *visible*, so none is reported: an outage cannot fail a run at the entrypoint."""
+
+    def boom(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("bigquery unavailable")
+
+    monkeypatch.setattr("scale_forecasting.registry.harvest.read_compute_harvest", boom)
+    source.check_pinned_source(_sourced(_PIN))
 
 
 def test_the_in_run_pre_pass_stamps_a_measured_provenance() -> None:
