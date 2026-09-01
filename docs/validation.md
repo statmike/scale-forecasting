@@ -168,10 +168,10 @@ the honest starting position and the reason for adding the table at all: it is t
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | CURRENT | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | NEVER_RUN | — | — | — |
-| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | NEVER_RUN | — | — | — |
+| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | NEVER_RUN | — | — | — |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | NEVER_RUN | — | — | — |
-| `explode_100k.json` | The headline: Spark `explode` over 100,000 series | NEVER_RUN | — | — | — |
+| `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | NEVER_RUN | — | — | — |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
@@ -186,6 +186,21 @@ The three Spark demo rows landed together on 2026-09-01, and two of them are wor
   rank *inside* the same board: `inverse_error` 0.408, `mean` 0.411, `median` 0.413 — all three
   beating both `arima_plus` and `theta`, none beating `timesfm` at 0.391. Recorded as-is. The claim
   the product makes is that ensembles are produced, ranked and comparable, not that they win.
+
+**`explode_100k` is the headline claim, and it is now a citation.** 100,000 series × 4 models =
+**400,000 cells**, `COMPLETED`, all four models on the board at `n_cells=100000` each, and the
+re-run resolved the same `run_id` and deduped — dedupe-on-read holds at scale, not just at 100
+series. Two families, one `run_id`: `statistical` (theta / holtwinters / sarimax) ran 117.6 min,
+`ml` (xgboost) 55.5 min.
+
+Read the wall time with the ceiling in mind. This run was deliberately capped at
+`max_executors: 20` — 80 cores per family against a 200-core project — so ~2 hours is what 400k
+cells cost *on a fifth of the fleet the arithmetic asked for*, not what the architecture costs.
+`sarimax` is the long pole by a wide margin; the ~0.5 s/cell measured for theta/holtwinters/xgboost
+does not describe it. A project with quota to spare should expect the uncapped fleet to be several
+times faster, and that comparison is exactly what wave 8's A/B is for. What this row establishes is
+the claim the product actually makes — 100k series, four models, one run, one leaderboard, and it
+finishes.
 
 ### What this surface will exercise that the smoke suite cannot
 
@@ -305,7 +320,7 @@ Things that are true today and that no entry above covers. Keep this list short 
   non-trivial. Offline, this is held by the inverted test plus one asserting the id is identical
   whether or not discovery reached the registry.
 - **The derived fleet had no infrastructure ceiling, and at 100k that was fatal rather than slow.
-  Fixed 2026-09-01; the capped run is the live confirmation and is still pending.** `explode_100k`'s
+  Fixed and confirmed live 2026-09-01.** `explode_100k`'s
   statistical batch was rejected at submit: *"Insufficient 'CPUS' quota. Requested 380.0, available
   200.0."* Nothing was mis-sized — the arithmetic correctly answered *how wide would this run like
   to be*, which at 400,000 cells is 95 executors. It has no way to know *how wide may it be*, and
@@ -325,6 +340,12 @@ Things that are true today and that no entry above covers. Keep this list short 
   200-core quota. The fleet wanted to be twice the size of the project, not twice the size of the
   problem. Budget for concurrency when setting the knob — a run's families submit simultaneously, so
   the two-family `explode_100k` at 20 executors × 4 cores needs ~168 cores including drivers.
+
+  **Confirmed live the same day.** The capped `explode_100k` was accepted at submit, peaked at 152
+  of the project's 200 cores, and ran to `COMPLETED`; the batch carries
+  `spark.dynamicAllocation.maxExecutors: "20"` from the config alone, with no CLI flag anywhere in
+  the path. The uncapped attempt is the control: its ML batch, which *was* accepted, held 192 of
+  200 cores by itself — the whole project — which is the same defect seen from the other side.
 
   A second-order observation from the same failure, recorded rather than fixed: **`discover_harvest_run`
   selects the most recent harvest, not the best-matched one.** The 100k run discovered the 10-series
