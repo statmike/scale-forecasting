@@ -604,44 +604,39 @@ def test_is_quota_error_false_for_non_quota_messages(message: str) -> None:
     assert ray_cluster._is_quota_error(message) is False
 
 
-def test_is_generic_cluster_error_matches_sdk_opaque_error() -> None:
-    # The SDK's post-provision opaque error → retryable when the reason can't be read.
-    msg = "[Ray on Vertex AI]: Cluster projects/.../persistentResources/x returned an error."
-    assert ray_cluster._is_generic_cluster_error(msg) is True
-
-
 @pytest.mark.parametrize(
     "message",
-    ["Permission denied on service account", "some other RuntimeError", "returned successfully"],
+    [
+        # All three verbatim from live failures on 2026-09-01, and all three were misread as
+        # diagnosed config faults by the allowlist-to-continue the fallback used to run.
+        "An internal error occurred on your cluster. Please try recreating one in a few minutes.",
+        "Unexpected response.",
+        "[Ray on Vertex AI]: Cluster projects/.../persistentResources/x returned an error.",
+        # And the ones it did recognise, which must keep hopping.
+        "Resources are insufficient in region: us-central1",
+        "The following quotas are exceeded: CustomModelTrainingT4GPUsPerProjectPerRegion",
+    ],
 )
-def test_is_generic_cluster_error_false_otherwise(message: str) -> None:
-    assert ray_cluster._is_generic_cluster_error(message) is False
-
-
-def test_an_opaque_provisioning_failure_is_hoppable() -> None:
-    """Verbatim from a live wave-4 failure (T4 Ray cluster, `us-central1`, 2026-09-01, twice).
-
-    The resource carried an error message, which is precisely what switched
-    `_is_generic_cluster_error` off — so a config listing three `ray_regions` tried exactly one.
-    """
-    msg = (
-        "An internal error occurred on your cluster. Please try recreating one in a few minutes. "
-        "If you still experience errors, contact Cloud AI Platform."
-    )
-    assert ray_cluster._is_opaque_provision_error(msg) is True
+def test_a_failure_that_names_no_region_invariant_cause_keeps_walking(message: str) -> None:
+    """The walk continues by default. Only a cause that travels with the *request* stops it."""
+    assert ray_cluster._is_region_invariant_error(message) is False
 
 
 @pytest.mark.parametrize(
     "message",
     [
-        # Each of these names a cause, so another region is not the remedy — do not hop.
-        "Permission denied on service account",
-        "machine type's memory is too small",
-        "Resources are insufficient in region: us-central1",  # hoppable, but as *capacity*
+        "Permission denied on service account scale-forecasting-compute@example",
+        "The caller does not have permission",
+        "PERMISSION_DENIED: missing iam role",
+        "INVALID_ARGUMENT: g2-standard-9 is not a valid machine type",
+        "unsupported accelerator NVIDIA_H100 for this machine type",
+        "Cloud Quotas API has not been used in project 1234 before or it is disabled",
+        "billing account is not open",
     ],
 )
-def test_a_named_cause_is_not_an_opaque_failure(message: str) -> None:
-    assert ray_cluster._is_opaque_provision_error(message) is False
+def test_a_cause_that_travels_with_the_request_stops_the_walk(message: str) -> None:
+    # Another region cannot fix who is asking, what they asked for, or whether the API is on.
+    assert ray_cluster._is_region_invariant_error(message) is True
 
 
 @pytest.mark.parametrize(
@@ -1015,10 +1010,11 @@ def test_submit_ray_falls_back_when_capacity_reason_only_on_resource_error(
     assert calls["init_regions"][:2] == ["us-east1", "us-west1"]
 
 
-def test_submit_ray_fails_fast_on_non_capacity_error_without_trying_more_regions(
+def test_submit_ray_fails_fast_on_a_region_invariant_error_without_trying_more_regions(
     _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A non-capacity error (e.g. bad machine type) must NOT hop regions — fail on the first attempt.
+    # A cause that travels with the request (here, the machine type) must NOT hop — another region
+    # asks for the same machine type and gets the same answer. Fail on the first attempt.
     calls = _stubbed_lifecycle
 
     def _bad_config(plan: Any, infra: Any, name: str) -> str:
@@ -1030,6 +1026,30 @@ def test_submit_ray_fails_fast_on_non_capacity_error_without_trying_more_regions
     with pytest.raises(RuntimeError, match="memory is too small"):
         ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
     assert calls["created"] == 1  # did not try the second region
+
+
+def test_a_stockout_that_mentions_the_machine_type_still_hops(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Capacity wins the tie: this names a machine type but is plainly about the *place*."""
+    calls = _stubbed_lifecycle
+
+    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+        calls["created"] += 1
+        if calls["created"] == 1:
+            raise RuntimeError(
+                "machine type g2-standard-8: resources are insufficient in region us-east1"
+            )
+        calls["cluster_error"] = ""
+        return f"projects/proj-x/locations/us-west1/persistentResources/{name}"
+
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _stockout_then_ok)
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    job_id, _resource_name, _region = ray_submit.submit_ray(
+        cfg, settings=_settings(), infra=_infra(), wait=True
+    )
+    assert job_id == "job-xyz"
+    assert calls["created"] == 2
 
 
 def test_submit_ray_raises_when_all_regions_stock_out(

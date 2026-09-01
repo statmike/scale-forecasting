@@ -14,6 +14,11 @@ the ``PersistentResource.error`` field (`_cluster_error_message`), and that read
 *regional* endpoint or the reason is silently lost. Misclassifying here means either burning every
 region on a config typo or giving up on the first stockout.
 
+Those two costs are not symmetric, and the walk is biased accordingly: it continues by default and
+stops only on a cause that is the same everywhere. Vertex frequently fails a provision without
+saying why at all, so a classifier that had to *recognise* a reason before continuing spent most of
+its life not continuing.
+
 Only the cluster hops. The data plane — config staging, registry writes — stays pinned to
 ``settings.region``, which is why `cluster_resource_path` takes an explicit region rather than
 assuming one.
@@ -160,41 +165,56 @@ def _is_quota_error(message: str) -> bool:
     return any(q in low for q in _QUOTA_WORDS) and any(e in low for e in _EXHAUSTION_WORDS)
 
 
-# Substrings marking Vertex's *opaque* provisioning failure — the resource carries an error message,
-# but the message says nothing. This is the resource-side twin of `_is_generic_cluster_error`'s
-# exception-side string, and it earns its own markers because a non-empty `detail` is exactly what
-# switches that classifier off.
+# Substrings marking a cause that is the *same in every region*, and so the only reason to stop
+# walking. Everything here names something about the request rather than the place: who is asking,
+# what they asked for, whether the API is even on. Trying `us-east1` will not change any of them.
 #
-# Found live 2026-09-01: a T4 Ray cluster in `us-central1` failed twice with "An internal error
-# occurred on your cluster." The config listed three `ray_regions` and none but the first was ever
-# tried, because a non-empty-but-contentless detail read as a config fault.
-_OPAQUE_PROVISION_MARKERS = ("an internal error occurred",)
+# This list is the *whole* stop condition — see `_is_region_invariant_error` for why the fallback is
+# an allowlist of reasons to give up rather than an allowlist of reasons to continue.
+_REGION_INVARIANT_MARKERS = (
+    "permission denied",
+    "permission_denied",
+    "does not have permission",
+    "not authorized",
+    "unauthorized",
+    "iam",
+    "service account",
+    "invalid argument",
+    "invalid_argument",
+    # Broad on purpose: any complaint *about the machine type* is a complaint about what was asked
+    # for. Guarded below by the capacity/quota check, which wins — "machine type X is unavailable in
+    # this zone" is about the place, and reads as capacity.
+    "machine type",
+    "unsupported accelerator",
+    "has not been used in project",  # API disabled
+    "api is not enabled",
+    "billing",
+)
 
 
-def _is_opaque_provision_error(message: str) -> bool:
-    """True if the cluster's own error message is present but carries no diagnosis (pure).
+def _is_region_invariant_error(message: str) -> bool:
+    """True if the failure would recur identically in every region, so walking is pointless (pure).
 
-    Hoppable, on the same reasoning as `_is_generic_cluster_error`: the text appears only *after* a
-    cluster provisioned and then failed, and it names nothing about the config, so it is no evidence
-    of a config fault. Vertex's own remedy for it is "try recreating one in a few minutes", and
-    trying the next region is a strictly better version of that — a fresh attempt somewhere the
-    hardware may actually be there. If it really is a config fault, every region fails and the
-    caller still gets an `EngineError` naming all of them.
+    **This is the stop condition, and it is deliberately an allowlist of reasons to give up.** The
+    fallback used to work the other way — hop only on reasons we recognised, re-raise on everything
+    else — and that inverted default cost the feature three times in one afternoon (2026-09-01),
+    each time to a different contentless string: "An internal error occurred on your cluster",
+    "Unexpected response.", and a quota message phrased in an order no marker matched. Each read as
+    a diagnosed config fault and re-raised in the first region, so a config naming three regions
+    tried one.
+
+    The asymmetry justifies the inversion. Hopping when we should not have costs a few minutes of
+    provisioning per extra region, and the caller still ends up with an `EngineError` naming every
+    region tried and carrying the last error — the diagnosis is not lost, only delayed. Not hopping
+    when we should have costs the entire feature, silently, and only shows up as a live failure in a
+    region that ran out. So: give up only when the message names a cause that travels with the
+    *request*, not with the *place*.
+
+    Capacity and quota keep their own classifiers (`_is_capacity_error`, `_is_quota_error`) — no
+    longer to decide whether to continue, but to say *why* in the log, which is worth keeping.
     """
     low = message.lower()
-    return any(marker in low for marker in _OPAQUE_PROVISION_MARKERS)
-
-
-def _is_generic_cluster_error(message: str) -> bool:
-    """True for the SDK's opaque post-provision "Cluster ... returned an error." (pure).
-
-    The Vertex SDK raises exactly this after polling a create to ERROR state, with the real reason
-    only on the resource (not the exception). When the resource read also fails we can't see the
-    reason — but this string only appears *after* a cluster provisioned and then failed, which in
-    practice is a capacity stockout, so the fallback treats it as retryable rather than fatal.
-    """
-    low = message.lower()
-    return "returned an error" in low and "cluster" in low
+    return any(marker in low for marker in _REGION_INVARIANT_MARKERS)
 
 
 def _resolve_regions(cfg: RunConfig, settings: Settings) -> list[str]:
@@ -338,12 +358,13 @@ def _create_cluster_across_regions(
     """Create the cluster, walking ``regions`` in order until one can provision it.
 
     Returns ``(cluster_resource_name, region)`` for the region that succeeded. On a *regional
-    capacity* failure (`_is_capacity_error`), a *regional quota* ceiling (`_is_quota_error`) or an
-    *opaque* provisioning failure (`_is_opaque_provision_error`) the failed attempt's
-    (deterministic) resource is torn down and the next region tried — none of the three is evidence
-    of a condition the next region shares. Any error that *does* name a cause (bad machine type,
-    permission, bad config) is re-raised at once because another region won't fix it. Exhausting
-    every region raises `EngineError` naming the regions tried.
+    **The default is to keep walking.** The failed attempt's (deterministic) resource is torn down
+    and the next region tried unless the message names a cause that travels with the request rather
+    than the place — permission, a bad machine type, an API that isn't on — for which
+    `_is_region_invariant_error` re-raises at once. Capacity and quota are still recognised, but now
+    only to say *why* in the log. Exhausting every region raises `EngineError` naming the regions
+    tried and carrying the last error. See `_is_region_invariant_error` for why the stop condition
+    is an allowlist rather than the continue condition.
 
     The failure signal is read from the failed resource's ``error.message`` (via
     `_cluster_error_message`) *and* the raised exception string — the SDK's exception is a
@@ -376,18 +397,20 @@ def _create_cluster_across_regions(
             # post-provision "returned an error" (which only fires after polling to ERROR state — in
             # practice a stockout). A specific exception with none of those signals is a real
             # config/permission fault: another region won't help, so re-raise.
-            capacity = _is_capacity_error(message)
-            quota = _is_quota_error(message)
-            opaque = _is_opaque_provision_error(message)
-            generic_provision_error = not detail and _is_generic_cluster_error(str(exc))
-            if not (capacity or quota or opaque or generic_provision_error):
+            # Capacity and quota win the tie. A message can name a machine type *and* say the
+            # region ran out of it ("machine type X unavailable in zone Y"); that is about the
+            # place, and hopping is exactly right.
+            regional = _is_capacity_error(message) or _is_quota_error(message)
+            if _is_region_invariant_error(message) and not regional:
                 raise
-            if quota and not capacity:
+            if _is_quota_error(message) and not _is_capacity_error(message):
                 reason = "quota ceiling"
-            elif opaque and not (capacity or quota):
-                reason = "an opaque provisioning failure"
-            else:
+            elif _is_capacity_error(message):
                 reason = "insufficient capacity"
+            else:
+                # The common case, and the one the old allowlist kept getting wrong: Vertex
+                # failed and would not say why. Name it as unexplained rather than guessing.
+                reason = "an unexplained provisioning failure"
             _log.warning(
                 "region %s hit %s (%s); trying next region",
                 region,
