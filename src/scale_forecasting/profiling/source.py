@@ -82,7 +82,7 @@ def resolve_profile_source(
     """The profile this run should size from, per ``compute.profile.source`` (pure + injected I/O).
 
     Returns ``None`` for "no evidence" — the static-config case every consumer already handles
-    (`resources.resource_slot` takes ``profile=None`` as its identity case). ``None`` is a
+    (`resources.slot.resource_slot` takes ``profile=None`` as its identity case). ``None`` is a
     *decision*, not a failure: sizing from declared config is the behaviour this product shipped
     with, and it stays the floor under every path here.
 
@@ -289,7 +289,7 @@ def resolve_profile(
     Returns ``None`` when no measurement was taken: profiling is off, the fan-out is below
     ``min_cells``, nothing profilable is in the model list, or the panel yields no usable
     statistics. ``None`` is the signal to size from static config, and every consumer already
-    treats it that way (`resources.resource_slot` takes ``profile=None`` as its
+    treats it that way (`resources.slot.resource_slot` takes ``profile=None`` as its
     identity case). A profile that *was* taken but measured nothing usable comes back as an empty
     ``ComputeProfile`` rather than ``None`` — the distinction is "we did not look" versus "we
     looked and found nothing", and only the second is worth an audit record.

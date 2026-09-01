@@ -344,8 +344,9 @@ def test_machine_family_reaches_the_sizing_plan_not_just_the_provisioned_cluster
 
 
 def test_machine_family_rejects_a_family_the_sizer_cannot_price() -> None:
-    """Only families in `resources._MEMORY_PER_CORE_GIB` are offered — otherwise the profiler
-    would silently fall back to a default memory-per-core for a machine it does not know."""
+    """Only families in `resources.catalog._MEMORY_PER_CORE_GIB` are offered — otherwise the
+    profiler would silently fall back to a default memory-per-core for a machine it does not
+    know."""
     with pytest.raises(ValidationError):
         _cfg(compute={"machine_family": "m1"})
 
@@ -401,7 +402,7 @@ def test_the_cluster_sizing_shapes_the_executor_to_the_worker_it_will_run_on() -
     # One executor per n1-standard-8 worker, minus the core YARN keeps for the AppMaster.
     assert props["spark.executor.cores"] == "7"
     # Unlike the batch overlay, memory is always stated — Dataproc bakes a stale default
-    # otherwise (see resources.translate_cluster).
+    # otherwise (see resources.cluster.translate_cluster).
     assert props["spark.executor.memory"] == "3584m"
     assert props["spark.executorEnv.OMP_NUM_THREADS"] == "1"
     assert props["spark.dynamicAllocation.maxExecutors"] == str(workers)

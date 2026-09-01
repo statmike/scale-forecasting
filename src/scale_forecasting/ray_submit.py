@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Any
 from .commands import build_driver_args
 from .engines import ray_io
 from .errors import ConfigError, EngineError, get_logger
-from .resources import sizing_telemetry
+from .resources.audit import sizing_telemetry
 from .staging import stage_config
 
 if TYPE_CHECKING:
@@ -910,7 +910,7 @@ def _stamp_ray_telemetry(
     column is a native ``JSON`` type whose query parameter serializes the value itself, so we pass
     **dicts** (not pre-serialized strings, which would double-encode).
 
-    ``sizing`` (`resources.sizing_telemetry` over the two pool plans) is filed under
+    ``sizing`` (`resources.audit.sizing_telemetry` over the two pool plans) is filed under
     ``$.sizing.<family>``: what the pools were sized to hold, and off whose measurements.
 
     Wrapped so any failure (API error, header not yet written) is logged and swallowed: telemetry

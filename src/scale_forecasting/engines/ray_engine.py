@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 from ..errors import get_logger
 from ..profiling.source import resolve_profile
-from ..resources import RuntimeResourcePlan, tasks_for_ceiling
+from ..resources.fleet import RuntimeResourcePlan, tasks_for_ceiling
 from . import ray_io
 from .spark_io import STATUS_COLUMNS, _needed_columns, _resolve_source_table, _snapshot_millis
 

@@ -42,16 +42,14 @@ from typing import TYPE_CHECKING, Any
 
 # The measured-profile → runtime-knobs translation. It lives at the top level rather than under
 # ``engines/`` and depends on no engine, so importing it here cannot cycle.
-from ..resources import (
+from ..resources.catalog import machine_cores, machine_memory_bytes
+from ..resources.fleet import (
     RuntimeResourcePlan,
     UnitShape,
-    machine_cores,
-    machine_memory_bytes,
-    merge_slots,
     plan_fleet,
-    resource_slot,
     schedulable_memory_bytes,
 )
+from ..resources.slot import merge_slots, resource_slot
 
 # The pure Spark core is engine-agnostic — reuse it verbatim rather than duplicating.
 # ``_MODEL_COL`` is the internal per-cell model tag ``run_group`` reads to take its
@@ -390,7 +388,7 @@ def plan_pool(
     **``profile=None`` reproduces the pre-profiler arithmetic exactly**, which is the property
     that lets this replace the old inline sizing rather than sit beside it. With no measurement a
     slot is one core, no memory request, and — on the GPU pool — `_sizing_fraction`, so
-    ``slots_per_unit`` collapses to `resources.machine_cores` on the CPU side and to
+    ``slots_per_unit`` collapses to `resources.catalog.machine_cores` on the CPU side and to
     ``accelerator_count x gpu_slots_per_device(fraction)`` on the GPU side: the two expressions
     `plan_cluster` used to compute inline.
 

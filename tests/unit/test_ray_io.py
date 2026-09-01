@@ -18,13 +18,13 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from scale_forecasting import resources
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.engines.spark_io import _MODEL_COL
 from scale_forecasting.profiling.cost import build_profile
 from scale_forecasting.profiling.measure import MeasuredFit
 from scale_forecasting.registry.ids import make_run_id
+from scale_forecasting.resources import catalog
 
 # theta/holtwinters = CPU (statistical); xgboost = CPU (ml); neuralprophet = GPU (deep_learning).
 _CPU = "theta"
@@ -387,7 +387,7 @@ def test_an_unprofiled_pool_reproduces_the_constants_the_engine_used_inline() ->
     cfg = _cfg(compute=_compute())
     cpu = ray_io.plan_pool(cfg, [_CPU, "xgboost"], 1000, gpu=False)
     gpu = ray_io.plan_pool(cfg, [_GPU], 1000, gpu=True, gpu_type="T4")
-    assert cpu.slots_per_unit == resources.machine_cores(cfg.compute.ray_cpu_machine_type)
+    assert cpu.slots_per_unit == catalog.machine_cores(cfg.compute.ray_cpu_machine_type)
     assert gpu.slots_per_unit == cfg.compute.accelerator_count * ray_io.gpu_slots_per_device(
         ray_io._sizing_fraction(cfg)
     )

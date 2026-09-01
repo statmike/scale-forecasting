@@ -135,9 +135,10 @@ different vocabularies: Spark properties on Dataproc Serverless, Spark propertie
 on a Dataproc cluster, and `@ray.remote` resource requests on Vertex.
 
 **One model, three translations.**
-[`resources.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/resources.py) holds the
-shared model: a `ResourceSlot` (what one unit of work needs) and a `UnitShape` (what one billable
-unit provides), turned into a fleet by dividing cells by slots. Three pure translators render it:
+The [`resources`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/resources)
+package holds the shared model: a `ResourceSlot` (what one unit of work needs) and a `UnitShape`
+(what one billable unit provides), turned into a fleet by dividing cells by slots. Three pure
+translators render it:
 
 | Service | Translator | What it emits | When it is fixed |
 |---|---|---|---|

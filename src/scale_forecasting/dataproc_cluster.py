@@ -384,7 +384,7 @@ def cluster_sizing(
     The cluster analog of `submit.plan_sizing`, and it returns one thing more: a batch's
     fleet is entirely a property, while a cluster's ceiling is a physical worker count fixed at
     create — so the caller feeds the count to `build_cluster` and the properties to `build_job`.
-    `resources.plan_dataproc_cluster` does the arithmetic; this only assembles its inputs.
+    `resources.cluster.plan_dataproc_cluster` does the arithmetic; this only assembles its inputs.
 
     **The unit sized against is a task, not a cell** — the bucket count
     (`engines.spark_io.default_bucket_count`), each bucket holding
@@ -400,8 +400,8 @@ def cluster_sizing(
     `profiling.source.profile_for_run` and handed in; this function stays pure and never goes
     looking.
 
-    The third element is the audit record (`resources.sizing_telemetry`) — plan, translation and
-    the evidence behind them — stamped onto the run header by `submit_cluster_job` so a cluster
+    The third element is the audit record (`resources.audit.sizing_telemetry`) — plan, translation
+    and the evidence behind them — stamped onto the run header by `submit_cluster_job` so a cluster
     run's sizing is as readable after the fact as a batch's.
 
     ``max_workers`` is the operator's ceiling; ``compute.profile.mode == "off"`` returns
@@ -416,7 +416,8 @@ def cluster_sizing(
     from .engines.ray_io import device_memory_bytes
     from .engines.spark_io import default_bucket_count
     from .models import get_model
-    from .resources import plan_dataproc_cluster, sizing_telemetry
+    from .resources.audit import sizing_telemetry
+    from .resources.cluster import plan_dataproc_cluster
 
     executed = models if models is not None else cfg.models
     families: list[str] = []

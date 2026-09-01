@@ -415,14 +415,14 @@ def plan_sizing(
     """The ``spark.*`` overlay this batch's shape implies, **and** the audit record behind it.
 
     Returns ``(properties, sizing)`` — pure, and ``({}, {})`` when profiling is off. ``properties``
-    is merged into the batch's ``RuntimeConfig``; ``sizing`` (`resources.sizing_telemetry`) is the
-    plan + translation + evidence, stamped onto the run header so the decision survives the driver
-    log it would otherwise only appear in.
+    is merged into the batch's ``RuntimeConfig``; ``sizing`` (`resources.audit.sizing_telemetry`) is
+    the plan + translation + evidence, stamped onto the run header so the decision survives the
+    driver log it would otherwise only appear in.
 
-    A Serverless executor's shape is fixed at batch *creation*, so unlike Ray — where the
-    engine sizes tasks on a cluster that already exists — this has to be decided here, before
-    anything runs. `resources.plan_serverless` does the arithmetic; this only assembles its
-    inputs from the config.
+    A Serverless executor's shape is fixed at batch *creation*, so unlike Ray — where the engine
+    sizes tasks on a cluster that already exists — this has to be decided here, before anything
+    runs. `resources.serverless.plan_serverless` does the arithmetic; this only assembles its inputs
+    from the config.
 
     **Most of the win needs no measurement.** The executor cores, the thread pins, the warm
     ``initialExecutors`` and the allocation ratio all follow from the task count and the family
@@ -463,7 +463,8 @@ def plan_sizing(
     from .engines.ray_io import device_memory_bytes
     from .engines.spark_io import default_bucket_count
     from .models import get_model
-    from .resources import plan_serverless, sizing_telemetry
+    from .resources.audit import sizing_telemetry
+    from .resources.serverless import plan_serverless
 
     executed = models if models is not None else cfg.models
     families: list[str] = []
@@ -524,7 +525,7 @@ def build_batch(
     L4-only; the resolver already forces this). A CPU batch adds no accelerator properties, so its
     message is unchanged.
 
-    ``properties`` is the sizing overlay — `resources.translate_serverless` spelled as
+    ``properties`` is the sizing overlay — `resources.serverless.translate_serverless` spelled as
     ``spark.*`` — applied *first*, so the two things a caller states explicitly still win over
     it: an explicit ``max_executors`` and the GPU attachment. Omitted (the default) the message
     is byte-identical to the pre-profiler one.

@@ -18,13 +18,12 @@ Three views, matched to the questions a run prompts:
   The executor columns are the shape the platform was *told* (echoed back off the submitted batch),
   while ``sizing`` is the whole decision behind it — one entry per family under ``$.sizing``, each
   holding the fleet plan, its translation to platform settings, and the `ComputeProfile` it was
-  sized off (`resources.sizing_telemetry`). Left as raw ``JSON`` rather than unpacked into columns
-  because its interesting parts are per-family and nested: read a run's shape from the scalar
-  columns, read *why* with ``JSON_QUERY(sizing, '$.deep_learning')``. NULL on a run submitted
-  before this existed, or one that left the platform's own defaults standing. A forced
-  re-run of an unchanged config appends a second header row under the same ``run_id``; the view
-  keeps only the latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one run is
-  always one row.
+  sized off (`resources.audit.sizing_telemetry`). Left as raw ``JSON`` rather than unpacked into
+  columns because its interesting parts are per-family and nested: read a run's shape from the
+  scalar columns, read *why* with ``JSON_QUERY(sizing, '$.deep_learning')``. NULL on a run submitted
+  before this existed, or one that left the platform's own defaults standing. A forced re-run of an
+  unchanged config appends a second header row under the same ``run_id``; the view keeps only the
+  latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one run is always one row.
 
 - ``v_run_jobs`` — *what jobs ran for this run, on what runtime/hardware, and how did each fare?*
   One row per ``(run_id, family)`` = the run's DAG as executed: the deterministic ``job_id``, the

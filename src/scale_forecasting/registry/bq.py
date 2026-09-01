@@ -903,7 +903,7 @@ def render_header_telemetry_merge(table_ref: str, paths: Sequence[str]) -> str:
 
 
 def sizing_telemetry_path(sizing: Mapping[str, Any]) -> str:
-    """Where one sizing record (`resources.sizing_telemetry`) is filed on the header (pure).
+    """Where one sizing record (`resources.audit.sizing_telemetry`) is filed on the header (pure).
 
     ``sizing.<family>`` — because a run's families are sized separately, on separate runtimes and
     separate hardware, and the question "why is the deep-learning job this shape" is not answerable

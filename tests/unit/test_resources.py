@@ -32,23 +32,20 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import resources
 from scale_forecasting.engines import ray_io
 from scale_forecasting.profiling.cost import ComputeProfile, build_profile
 from scale_forecasting.profiling.measure import MeasuredFit
-from scale_forecasting.resources import (
-    ResourceSlot,
+from scale_forecasting.resources import audit, catalog, cluster, fleet, serverless
+from scale_forecasting.resources.catalog import machine_memory_bytes
+from scale_forecasting.resources.fleet import (
     UnitShape,
-    machine_memory_bytes,
-    merge_slots,
     plan_fleet,
     plan_resources,
-    resource_slot,
     slots_per_unit,
-    snap_to_legal,
     tasks_for_ceiling,
-    translate_serverless,
 )
+from scale_forecasting.resources.serverless import snap_to_legal, translate_serverless
+from scale_forecasting.resources.slot import ResourceSlot, merge_slots, resource_slot
 
 _GIB = 1024**3
 _MIB = 1024**2
@@ -241,7 +238,7 @@ def test_an_unmeasured_device_falls_back_to_the_operators_pin_then_the_nominal()
     assert pinned.gpu_fraction == 0.25
     assert "gpu_fraction" in pinned.assumed
     nominal = resource_slot(None, "deep_learning", use_gpu=True)
-    assert nominal.gpu_fraction == resources._NOMINAL_GPU_FRACTION
+    assert nominal.gpu_fraction == catalog._NOMINAL_GPU_FRACTION
 
 
 def test_the_fraction_is_clamped_into_the_schedulable_band() -> None:
@@ -255,8 +252,8 @@ def test_the_fraction_is_clamped_into_the_schedulable_band() -> None:
 
 def test_the_gpu_band_matches_the_engine_it_replaces() -> None:
     """Drift test: two modules cannot each own the clamp band and disagree about it."""
-    assert resources._MIN_GPU_FRACTION == ray_io._MIN_FRACTION
-    assert resources._NOMINAL_GPU_FRACTION == ray_io._NOMINAL_AUTO_FRACTION
+    assert catalog._MIN_GPU_FRACTION == ray_io._MIN_FRACTION
+    assert catalog._NOMINAL_GPU_FRACTION == ray_io._NOMINAL_AUTO_FRACTION
 
 
 # --- merging: one pool, several families ---------------------------------------
@@ -639,7 +636,7 @@ def _serverless(
     n_cells: int = 1000,
     tier: str = "standard",
     notes: tuple[str, ...] = (),
-) -> resources.ServerlessTranslation:
+) -> serverless.ServerlessTranslation:
     """Translate a hand-built slot straight through `plan_fleet` into properties."""
     slot = _slot(
         "statistical",
@@ -814,21 +811,21 @@ def test_the_translation_serializes_for_telemetry() -> None:
 
 
 def test_the_executor_shape_is_the_one_the_snapped_core_count_buys() -> None:
-    unit = resources.serverless_unit(8, gpu=False)
+    unit = serverless.serverless_unit(8, gpu=False)
     assert unit.cores == 8
     assert unit.accelerators == 0
     # The standard tier's per-core ceiling is what an 8-core executor can be given at most.
-    assert unit.memory_bytes == 8 * resources._SERVERLESS_MAX_MB_PER_CORE["standard"] * _MIB
+    assert unit.memory_bytes == 8 * serverless._SERVERLESS_MAX_MB_PER_CORE["standard"] * _MIB
 
 
 def test_a_gpu_executor_shape_carries_its_cards_and_the_narrower_memory_band() -> None:
-    unit = resources.serverless_unit(24, gpu=True)
+    unit = serverless.serverless_unit(24, gpu=True)
     assert (unit.cores, unit.accelerators) == (24, 2)
-    assert unit.memory_bytes == 24 * resources._SERVERLESS_L4_MB_PER_CORE * _MIB
+    assert unit.memory_bytes == 24 * serverless._SERVERLESS_L4_MB_PER_CORE * _MIB
 
 
 def test_planning_with_no_profile_reproduces_the_unmeasured_translation() -> None:
-    plan, translation = resources.plan_serverless(None, ["statistical"], 800)
+    plan, translation = serverless.plan_serverless(None, ["statistical"], 800)
     assert plan.runtime == "serverless"
     assert plan.family == "statistical"
     # Nothing was measured, so nothing about memory is requested — the platform defaults stand.
@@ -842,7 +839,7 @@ def test_the_second_pass_plans_against_the_executor_the_first_pass_chose() -> No
     profile = build_profile(
         [_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=10.0)] * 5
     )
-    plan, translation = resources.plan_serverless(profile, ["ml"], 400)
+    plan, translation = serverless.plan_serverless(profile, ["ml"], 400)
     assert translation.executor_cores == 8
     assert plan.unit.cores == 8
 
@@ -850,7 +847,7 @@ def test_the_second_pass_plans_against_the_executor_the_first_pass_chose() -> No
 def test_the_ceiling_saturates_the_work_so_the_fan_out_can_reach_it() -> None:
     # 800 tasks, 4 per executor (a 1-core family on a 4-core executor) → 200 executors is the
     # widest fleet that has anything to do.
-    plan, translation = resources.plan_serverless(None, ["statistical"], 800)
+    plan, translation = serverless.plan_serverless(None, ["statistical"], 800)
     assert plan.slots_per_unit == 4
     assert plan.max_units == 200
     assert translation.properties["spark.dynamicAllocation.maxExecutors"] == "200"
@@ -859,19 +856,19 @@ def test_the_ceiling_saturates_the_work_so_the_fan_out_can_reach_it() -> None:
 
 
 def test_an_explicit_operator_cap_wins_over_the_saturating_count() -> None:
-    _, translation = resources.plan_serverless(None, ["statistical"], 800, max_executors=3)
+    _, translation = serverless.plan_serverless(None, ["statistical"], 800, max_executors=3)
     assert translation.properties["spark.dynamicAllocation.maxExecutors"] == "3"
 
 
 def test_a_cap_below_the_platform_floor_is_raised_to_it() -> None:
-    _, translation = resources.plan_serverless(None, ["statistical"], 800, max_executors=1)
+    _, translation = serverless.plan_serverless(None, ["statistical"], 800, max_executors=1)
     props = translation.properties
     assert props["spark.dynamicAllocation.minExecutors"] == "2"
     assert props["spark.dynamicAllocation.maxExecutors"] == "2"
 
 
 def test_an_empty_batch_provisions_the_floor_and_nothing_more() -> None:
-    plan, translation = resources.plan_serverless(None, ["statistical"], 0)
+    plan, translation = serverless.plan_serverless(None, ["statistical"], 0)
     assert plan.derived_units == 0
     assert translation.properties["spark.dynamicAllocation.initialExecutors"] == "2"
 
@@ -881,7 +878,7 @@ def test_several_families_share_one_executor_shape_sized_for_the_heaviest() -> N
         [_fit(wall_s=2.0, cpu_s=2.0)] * 5
         + [_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=12.0)] * 5
     )
-    plan, translation = resources.plan_serverless(profile, ["statistical", "ml"], 400)
+    plan, translation = serverless.plan_serverless(profile, ["statistical", "ml"], 400)
     assert plan.family == "statistical+ml"
     # One executor has to hold whichever cell arrives, so the 6-core ML family sets the shape.
     assert translation.executor_cores == 8
@@ -899,12 +896,12 @@ def test_a_gpu_batch_plans_against_l4_executors() -> None:
         ]
         * 5
     )
-    plan, translation = resources.plan_serverless(
+    plan, translation = serverless.plan_serverless(
         profile, ["deep_learning"], 200, gpu=True, device_bytes=24 * _GIB
     )
     assert plan.unit.accelerators >= 1
     assert translation.tasks_per_device is not None
-    assert translation.executor_cores in resources._SERVERLESS_L4_CORES
+    assert translation.executor_cores in serverless._SERVERLESS_L4_CORES
 
 
 def test_the_gpu_fleet_is_sized_off_the_packing_the_core_table_grants() -> None:
@@ -915,7 +912,7 @@ def test_the_gpu_fleet_is_sized_off_the_packing_the_core_table_grants() -> None:
     profile = build_profile(
         [_fit(family="deep_learning", model_type="neuralprophet", peak_gpu_bytes=4 * _GIB)] * 5
     )
-    plan, translation = resources.plan_serverless(
+    plan, translation = serverless.plan_serverless(
         profile, ["deep_learning"], 240, gpu=True, device_bytes=24 * _GIB
     )
     granted = plan.unit.accelerators * (translation.tasks_per_device or 1)
@@ -928,21 +925,21 @@ def test_the_gpu_fleet_is_sized_off_the_packing_the_core_table_grants() -> None:
 def test_the_serverless_density_is_the_executors_task_slots_not_its_devices() -> None:
     # floor(1/0.1) = 10 cells per card by arithmetic; a 1-core task on an 8-core executor runs 8.
     slot = _slot("deep_learning", cores=1, gpu_fraction=0.1)
-    assert resources.spark_tasks_per_executor(slot, 8) == 8
+    assert serverless.spark_tasks_per_executor(slot, 8) == 8
 
 
 def test_a_threaded_family_takes_whole_task_slots_at_a_time() -> None:
     slot = _slot("ml", cores=6)
-    assert resources.spark_tasks_per_executor(slot, 8) == 1
-    assert resources.spark_tasks_per_executor(slot, 16) == 2
+    assert serverless.spark_tasks_per_executor(slot, 8) == 1
+    assert serverless.spark_tasks_per_executor(slot, 16) == 2
 
 
 def test_an_explicit_density_overrides_what_the_slot_arithmetic_would_derive() -> None:
     slot = _slot("cpu", cores=1)
-    unit = resources.UnitShape(cores=16, memory_bytes=64 * _GIB)
-    derived = resources.plan_fleet(slot, runtime="serverless", n_cells=64, unit=unit)
+    unit = fleet.UnitShape(cores=16, memory_bytes=64 * _GIB)
+    derived = fleet.plan_fleet(slot, runtime="serverless", n_cells=64, unit=unit)
     assert derived.slots_per_unit == 16  # what the cores alone would say
-    forced = resources.plan_fleet(
+    forced = fleet.plan_fleet(
         slot, runtime="serverless", n_cells=64, unit=unit, max_units=99, density=4
     )
     assert forced.slots_per_unit == 4
@@ -962,7 +959,7 @@ def _cluster(
     n_cells: int = 1000,
     max_units: int = 10,
     notes: tuple[str, ...] = (),
-) -> resources.ClusterTranslation:
+) -> cluster.ClusterTranslation:
     """Translate a hand-built slot straight through `plan_fleet` into cluster properties."""
     slot = _slot(
         "statistical",
@@ -972,7 +969,7 @@ def _cluster(
         measured=_HOST_AXES,
         notes=notes,
     )
-    unit = resources.cluster_unit(machine_type, accelerators=accelerators)
+    unit = cluster.cluster_unit(machine_type, accelerators=accelerators)
     plan = plan_fleet(
         slot,
         runtime="cluster",
@@ -980,22 +977,22 @@ def _cluster(
         unit=unit,
         min_units=2,
         max_units=max_units,
-        density=resources._cluster_density(slot, unit)[2],
+        density=cluster._cluster_density(slot, unit)[2],
     )
-    return resources.translate_cluster(plan)
+    return cluster.translate_cluster(plan)
 
 
 def test_the_worker_is_read_straight_off_its_machine_name() -> None:
     """No legal-value table and no tier band on a cluster — the name is the whole shape."""
-    unit = resources.cluster_unit("n1-standard-8", accelerators=1)
+    unit = cluster.cluster_unit("n1-standard-8", accelerators=1)
     assert (unit.cores, unit.memory_bytes, unit.accelerators) == (8, 30 * _GIB, 1)
 
 
 def test_an_unparseable_machine_name_still_yields_a_countable_worker() -> None:
     """Cores have no "unknown" answer — every caller divides by them, and 0 holds no cells."""
-    assert resources.machine_cores("n1-standard-16") == 16
-    assert resources.machine_cores("n1-custom-8-16384") == 8  # not 16384 MiB read as cores
-    assert resources.machine_cores("some-alias") == 8
+    assert catalog.machine_cores("n1-standard-16") == 16
+    assert catalog.machine_cores("n1-custom-8-16384") == 8  # not 16384 MiB read as cores
+    assert catalog.machine_cores("some-alias") == 8
 
 
 def test_the_executor_leaves_the_application_master_room_to_land() -> None:
@@ -1005,8 +1002,8 @@ def test_the_executor_leaves_the_application_master_room_to_land() -> None:
     assert out.properties["spark.executor.cores"] == "7"
     heap = int(out.properties["spark.executor.memory"].removesuffix("m"))
     overhead = int(out.properties["spark.executor.memoryOverhead"].removesuffix("m"))
-    schedulable_mb = int(30 * _GIB * resources._SCHEDULABLE_MEMORY_FRACTION) // _MIB
-    assert heap + overhead == schedulable_mb - resources._CLUSTER_AM_RESERVE_MB
+    schedulable_mb = int(30 * _GIB * catalog._SCHEDULABLE_MEMORY_FRACTION) // _MIB
+    assert heap + overhead == schedulable_mb - cluster._CLUSTER_AM_RESERVE_MB
 
 
 def test_a_cluster_states_its_memory_even_when_nothing_was_measured() -> None:
@@ -1082,7 +1079,7 @@ def test_the_native_thread_pools_are_pinned_to_the_task_width() -> None:
     """Same rule as the batch path: a task owning N cores may use N threads, no more."""
     single = _cluster()
     wide = _cluster(cores=4)
-    for name in resources._INTRAOP_ENV_VARS:
+    for name in catalog._INTRAOP_ENV_VARS:
         assert single.properties[f"spark.executorEnv.{name}"] == "1"
         assert wide.properties[f"spark.executorEnv.{name}"] == "4"
     assert "spark.task.cpus" not in single.properties  # 1 is Spark's own default
@@ -1126,7 +1123,7 @@ def test_the_cluster_translation_serializes_for_telemetry() -> None:
 
 
 def test_planning_a_cluster_needs_no_second_pass_because_the_machine_is_given() -> None:
-    plan, translation = resources.plan_dataproc_cluster(
+    plan, translation = cluster.plan_dataproc_cluster(
         None, ["statistical"], 25, machine_type="n1-standard-8"
     )
     assert plan.runtime == "cluster"
@@ -1137,7 +1134,7 @@ def test_planning_a_cluster_needs_no_second_pass_because_the_machine_is_given() 
 
 def test_planning_with_no_profile_still_shapes_the_executor_to_the_worker() -> None:
     """No measurement anywhere, and the executor/AM split and thread pins are still right."""
-    _plan, translation = resources.plan_dataproc_cluster(
+    _plan, translation = cluster.plan_dataproc_cluster(
         None, ["statistical", "ml"], 100, machine_type="n1-standard-8"
     )
     assert translation.properties["spark.executor.cores"] == "7"
@@ -1150,7 +1147,7 @@ def test_several_families_share_one_worker_shape_sized_for_the_heaviest() -> Non
         [_fit(wall_s=2.0, cpu_s=2.0)] * 5
         + [_fit(family="ml", model_type="xgboost", wall_s=2.0, cpu_s=12.0)] * 5
     )
-    plan, translation = resources.plan_dataproc_cluster(
+    plan, translation = cluster.plan_dataproc_cluster(
         profile, ["statistical", "ml"], 400, machine_type="n1-standard-8"
     )
     assert plan.family == "statistical+ml"
@@ -1162,7 +1159,7 @@ def test_a_gpu_cluster_plans_against_the_card_its_machine_type_carries() -> None
     profile = build_profile(
         [_fit(family="deep_learning", model_type="neuralprophet", peak_gpu_bytes=4 * _GIB)] * 5
     )
-    plan, translation = resources.plan_dataproc_cluster(
+    plan, translation = cluster.plan_dataproc_cluster(
         profile,
         ["deep_learning"],
         200,
@@ -1182,7 +1179,7 @@ def test_the_cluster_fleet_is_sized_off_the_density_the_properties_spell() -> No
     profile = build_profile(
         [_fit(family="deep_learning", model_type="neuralprophet", peak_gpu_bytes=4 * _GIB)] * 5
     )
-    plan, translation = resources.plan_dataproc_cluster(
+    plan, translation = cluster.plan_dataproc_cluster(
         profile,
         ["deep_learning"],
         480,
@@ -1196,11 +1193,11 @@ def test_the_cluster_fleet_is_sized_off_the_density_the_properties_spell() -> No
 
 
 def test_an_operator_cap_replaces_the_default_spend_ceiling() -> None:
-    _plan, tight = resources.plan_dataproc_cluster(
+    _plan, tight = cluster.plan_dataproc_cluster(
         None, ["statistical"], 1000, machine_type="n1-standard-8", max_workers=4
     )
     assert tight.worker_count == 4
-    _plan, wide = resources.plan_dataproc_cluster(
+    _plan, wide = cluster.plan_dataproc_cluster(
         None, ["statistical"], 1000, machine_type="n1-standard-8", max_workers=40
     )
     assert wide.worker_count == wide.ideal_workers == 18
@@ -1209,14 +1206,14 @@ def test_an_operator_cap_replaces_the_default_spend_ceiling() -> None:
 
 def test_a_cap_below_the_dataproc_floor_is_raised_to_it() -> None:
     """Two workers is Dataproc's own floor for a standard cluster — not ours to undercut."""
-    _plan, out = resources.plan_dataproc_cluster(
+    _plan, out = cluster.plan_dataproc_cluster(
         None, ["statistical"], 1000, machine_type="n1-standard-8", max_workers=1
     )
     assert out.worker_count == 2
 
 
 def test_an_empty_cluster_run_provisions_the_floor_and_nothing_more() -> None:
-    _plan, out = resources.plan_dataproc_cluster(
+    _plan, out = cluster.plan_dataproc_cluster(
         None, ["statistical"], 0, machine_type="n1-standard-8"
     )
     assert (out.worker_count, out.ideal_workers) == (2, 0)
@@ -1225,7 +1222,7 @@ def test_an_empty_cluster_run_provisions_the_floor_and_nothing_more() -> None:
 # --- the thread pin, and the one run that has to turn it off ---------------------
 
 
-_INTRAOP_KEYS = frozenset(f"spark.executorEnv.{n}" for n in resources._INTRAOP_ENV_VARS)
+_INTRAOP_KEYS = frozenset(f"spark.executorEnv.{n}" for n in catalog._INTRAOP_ENV_VARS)
 
 
 def _intraop(properties: dict[str, str]) -> dict[str, str]:
@@ -1235,11 +1232,11 @@ def _intraop(properties: dict[str, str]) -> dict[str, str]:
 
 def test_both_spark_translators_pin_native_threads_by_default() -> None:
     """Unpinned, N python workers each grab the whole executor and it thrashes."""
-    serverless = resources.plan_serverless(None, ["statistical"], 800)[1]
-    cluster = resources.plan_dataproc_cluster(
+    on_serverless = serverless.plan_serverless(None, ["statistical"], 800)[1]
+    on_cluster = cluster.plan_dataproc_cluster(
         None, ["statistical"], 800, machine_type="n1-standard-8"
     )[1]
-    for translation in (serverless, cluster):
+    for translation in (on_serverless, on_cluster):
         exported = _intraop(translation.properties)
         assert exported, "the pin is the default, on both Spark paths"
         assert set(exported.values()) == {
@@ -1250,8 +1247,8 @@ def test_both_spark_translators_pin_native_threads_by_default() -> None:
 @pytest.mark.parametrize(
     "plan",
     [
-        lambda pin: resources.plan_serverless(None, ["statistical"], 800, pin_threads=pin)[1],
-        lambda pin: resources.plan_dataproc_cluster(
+        lambda pin: serverless.plan_serverless(None, ["statistical"], 800, pin_threads=pin)[1],
+        lambda pin: cluster.plan_dataproc_cluster(
             None, ["statistical"], 800, machine_type="n1-standard-8", pin_threads=pin
         )[1],
     ],
@@ -1280,8 +1277,8 @@ def test_a_controlled_measurement_run_can_unpin_them_and_says_so_on_the_plan(pla
 def test_the_sizing_record_carries_the_decision_the_translation_and_the_evidence() -> None:
     """One blob answers all three audit questions, and survives a JSON round-trip."""
     profile = _profile(_fit(), _fit(ts_id="s2"))
-    plan, translation = resources.plan_serverless(profile, ["statistical"], 800)
-    record = resources.sizing_telemetry(plan, translation=translation, profile=profile)
+    plan, translation = serverless.plan_serverless(profile, ["statistical"], 800)
+    record = audit.sizing_telemetry(plan, translation=translation, profile=profile)
 
     assert record["family"] == "statistical"
     assert record["plans"] == [plan.to_dict()]
@@ -1293,15 +1290,15 @@ def test_the_sizing_record_carries_the_decision_the_translation_and_the_evidence
 
 def test_the_sizing_record_keeps_the_pools_it_has_and_drops_the_ones_it_does_not() -> None:
     """A Ray run spells two pools; a CPU-only one has no GPU plan and records one, not a null."""
-    cpu = resources.plan_serverless(None, ["statistical"], 800)[0]
-    assert len(resources.sizing_telemetry(cpu, None)["plans"]) == 1
-    assert len(resources.sizing_telemetry(cpu, cpu)["plans"]) == 2
+    cpu = serverless.plan_serverless(None, ["statistical"], 800)[0]
+    assert len(audit.sizing_telemetry(cpu, None)["plans"]) == 1
+    assert len(audit.sizing_telemetry(cpu, cpu)["plans"]) == 2
     # Nothing planned at all (profiling off) still yields a record-shaped dict rather than a crash.
-    assert resources.sizing_telemetry()["plans"] == []
-    assert resources.sizing_telemetry()["family"] is None
+    assert audit.sizing_telemetry()["plans"] == []
+    assert audit.sizing_telemetry()["family"] is None
 
 
 def test_the_record_can_be_filed_under_the_jobs_family_rather_than_a_pools() -> None:
     """A Ray deep-learning job's CPU pool is labelled "cpu" — filing the job there would bury it."""
-    cpu = resources.plan_serverless(None, ["statistical"], 800)[0]
-    assert resources.sizing_telemetry(cpu, family="deep_learning")["family"] == "deep_learning"
+    cpu = serverless.plan_serverless(None, ["statistical"], 800)[0]
+    assert audit.sizing_telemetry(cpu, family="deep_learning")["family"] == "deep_learning"
