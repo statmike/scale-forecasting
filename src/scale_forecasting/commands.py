@@ -30,8 +30,8 @@ from typing import TYPE_CHECKING
 from ._infra_args import infra_args_from
 
 if TYPE_CHECKING:
+    from .batch_infra import BatchInfra
     from .settings import Settings
-    from .submit import BatchInfra
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ def build_spark_commands(
     """
     driver = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
 
-    from .submit import serverless_dep_properties
+    from .batch_infra import serverless_dep_properties
 
     # The dependency envelope, from the same resolver `submit.build_batch` uses — so the printed
     # command and the submitted batch can never disagree about how deps reach the job. The default

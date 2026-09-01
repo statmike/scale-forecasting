@@ -21,10 +21,11 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from .batch_infra import _ENV_VENV_ARCHIVE, BatchInfra
 from .commands import build_driver_args
 from .compute_fallback import Candidate, is_capacity_error, resolve_candidates
 from .errors import ConfigError, EngineError, get_logger
-from .submit import _ENV_VENV_ARCHIVE, BatchInfra, _stage_code, _stage_config
+from .submit import _stage_code, _stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig

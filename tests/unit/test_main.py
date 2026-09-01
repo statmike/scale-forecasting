@@ -138,7 +138,7 @@ def test_plan_run_without_env_returns_plan_but_no_commands(
 
 
 def _batch_infra() -> Any:
-    from scale_forecasting.submit import BatchInfra
+    from scale_forecasting.batch_infra import BatchInfra
 
     return BatchInfra(
         code_bucket="bkt-code",

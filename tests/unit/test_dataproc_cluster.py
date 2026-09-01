@@ -12,10 +12,10 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from scale_forecasting.batch_infra import BatchInfra
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.settings import Settings
-from scale_forecasting.submit import BatchInfra
 
 # build_cluster/build_job assemble google.cloud.dataproc_v1 messages — skip the module cleanly when
 # the [spark] extra is absent (parity with test_submit).

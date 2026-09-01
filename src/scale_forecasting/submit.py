@@ -20,22 +20,21 @@ What `submit_batch` does:
    optionally capping executors (``--max-executors`` → ``spark.dynamicAllocation.maxExecutors``, how
    a run is throttled), and return the batch id.
 
-Dependencies reach the batch in one of two envelopes around the same locked environment — the
-shared runtime image (default) or the packed-venv archive — resolved by `serverless_dep_properties`
-and switched with ``SF_SERVERLESS_DEPS``. See the note above that function.
+The two neighbours this leans on: `batch_infra` answers *what infrastructure we have* (including
+which of the two dependency envelopes delivers the locked environment), and `batch_telemetry`
+answers *what the batch did* once it is terminal. Both have consumers that never submit anything,
+which is why they are not folded in here.
 
-Public surface: ``BatchInfra``, ``submit_batch``, ``serverless_dep_properties``,
-``sizing_properties``, ``plan_sizing``, ``main``.
+Public surface: ``submit_batch``, ``build_batch``, ``sizing_properties``, ``plan_sizing``, ``main``.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
 from .commands import build_driver_args
 from .errors import ConfigError, EngineError, get_logger
 from .staging import stage_config
@@ -51,66 +50,11 @@ _log = get_logger(__name__)
 # zip root and is importable once on sys.path — same layout the Terraform seed module relies on).
 _SRC_DIR = Path(__file__).resolve().parent.parent
 
-# Batch-submission infra env vars (beyond the SF_* identity Settings resolves). Kept together so the
-# docstring, resolve(), and any tooling agree.
-_ENV_CODE_BUCKET = "SF_CODE_BUCKET"
-_ENV_CONTAINER_IMAGE = "SF_CONTAINER_IMAGE"
-_ENV_COMPUTE_SA = "SF_COMPUTE_SA"
-_ENV_SUBNETWORK = "SF_SUBNETWORK_URI"
-# Optional: the packed-venv archive URI (gs://…/envs/<hash>.tar.gz). The Dataproc-cluster runtime's
-# dependency-delivery mechanism — clusters can't use the custom container, so a cluster job attaches
-# this archive instead (see dataproc_cluster.build_job). Unset for serverless/Ray-only deployments.
-_ENV_VENV_ARCHIVE = "SF_VENV_ARCHIVE"
-# Optional: the custom GPU cluster image URI (a Compute image with the NVIDIA driver pre-baked,
-# built from the same 2.2 line). GPU Dataproc *clusters* boot from it so the driver is already
-# present at create time instead of being compiled on every node. Unset → GPU clusters install the
-# driver at create via the stock init action (the fallback). CPU clusters, serverless, Ray ignore.
-_ENV_GPU_IMAGE = "SF_GPU_IMAGE"
-
-_DEFAULT_RUNTIME_VERSION = "2.2"
-
-# How a Dataproc SERVERLESS batch gets its dependencies. Two envelopes around the *same* locked
-# environment:
-#   "container"   (default) — the shared runtime image. Nothing installs at launch, and the batch's
-#                             Python is ours regardless of which Python the runtime version ships.
-#   "packed_venv"           — the self-contained venv archive the Dataproc-*cluster* path uses,
-#                             attached via ``spark.archives``. Lets a deployment with no Artifact
-#                             Registry run Spark, at the cost of a per-node fetch of the archive.
-#
-# This is deployment infrastructure, NOT a run parameter, so it lives on `BatchInfra` (env-resolved,
-# like the archive URI itself) and deliberately not in `ComputeConfig`: both envelopes deliver the
-# byte-identical uv.lock environment, so the science of a run is the same either way, and folding
-# the choice into the config would fold it into the ``run_id`` — making one experiment two runs.
-# ``compute.spark_deps`` stays what it has always been: the Dataproc-*cluster* knob.
-#
-# ⚠️ ``packed_venv`` on serverless is UNPROVEN and is the reason this switch exists. Job archives are
-# localized to the *executors'* working dirs; whether the serverless *driver* gets one is the open
-# question (on a cluster it does not — see ``dataproc_cluster._VENV_DIR``, where an init action
-# lands the venv at an absolute path instead, a fix serverless has no equivalent of). Default stays
-# "container" until a live batch says otherwise.
-_ENV_SERVERLESS_DEPS = "SF_SERVERLESS_DEPS"
-_SERVERLESS_DEPS_CONTAINER = "container"
-_SERVERLESS_DEPS_PACKED_VENV = "packed_venv"
-
-# Where ``spark.archives``' ``#env`` fragment unpacks, and the interpreter inside it — relative to
-# the working directory Spark localizes into.
-_VENV_UNPACK_DIR = "env"
-_VENV_ARCHIVE_PYTHON = f"./{_VENV_UNPACK_DIR}/bin/python"
-
 # Dataproc Serverless offers L4 only (no T4 on serverless — the config resolver forces L4 there and
 # rejects a T4). A single accelerator per executor is attached; the deep-learning fit runs inside
 # the pandas UDF (torch/NeuralProphet), so the GPU just needs to be visible to the executor's Python
 # worker — we don't enable the RAPIDS SQL plugin (our SQL isn't the GPU workload).
 _SERVERLESS_GPU_TYPE = "L4"
-
-# Batch max-runtime cap (``ExecutionConfig.ttl``). Dataproc Serverless applies a DEFAULT ttl of 4h
-# when none is set — which silently CANCELS a longer-running batch mid-flight (a full 100k explode
-# run can exceed 4h, and the cancel kills it before it writes its run_registry summary row, so the
-# efficiency views render blank). We set an explicit, generous 24h so a full-scale run finishes on
-# its own. Override per-submit with ``--ttl``. This bounds the batch's lifetime, NOT the client wait
-# (that's _WAIT_TIMEOUT_SECONDS): a serverless batch bills only for what it uses, so a high ceiling
-# costs nothing extra — it just stops the platform from guillotining a healthy long run.
-_DEFAULT_TTL_SECONDS = 86400
 
 # How long ``wait=True`` blocks on the batch LRO before giving up. The google-api-core polling
 # default is 900s (15 min) — shorter than a 100k forecast batch, so the bare ``operation.result()``
@@ -121,224 +65,7 @@ _DEFAULT_TTL_SECONDS = 86400
 _WAIT_TIMEOUT_SECONDS = 7200.0
 
 
-@dataclass(frozen=True)
-class BatchInfra:
-    """Dataproc-batch infra identity — what submitting a batch needs beyond `Settings`.
-
-    Resolved from ``SF_*`` env (parity with ``Settings``) or ``terraform output``. Frozen and
-    passed down so a run's batch targets the resolved infra.
-    """
-
-    code_bucket: str  # bucket the package zip + launcher + config JSON are staged to
-    container_image: str  # full runtime image incl. tag
-    compute_sa: str  # runtime SA the batch runs as (scale-forecasting-compute)
-    subnetwork_uri: str  # subnet with Private Google Access + internal-ingress firewall
-    runtime_version: str = _DEFAULT_RUNTIME_VERSION
-    ttl_seconds: int = _DEFAULT_TTL_SECONDS  # batch max-runtime cap; > default 4h so 100k finishes
-    # Packed-venv archive URI for the Dataproc-*cluster* path (clusters can't use the container).
-    # Optional: only cluster families with spark_deps="packed_venv" need it; serverless/Ray ignore.
-    venv_archive_uri: str | None = None
-    # Custom GPU cluster image URI (NVIDIA driver pre-baked). Optional: only GPU cluster families
-    # use it; when unset a GPU cluster installs the driver at create. CPU/serverless/Ray ignore it.
-    gpu_image_uri: str | None = None
-    # Which envelope delivers deps to a SERVERLESS batch — see `_ENV_SERVERLESS_DEPS`. Clusters and
-    # Ray ignore it (they have exactly one mechanism each).
-    serverless_deps: str = _SERVERLESS_DEPS_CONTAINER
-
-    @classmethod
-    def resolve(cls) -> BatchInfra:
-        """Build from the ``SF_*`` batch-infra environment; raise naming the first missing var.
-
-        ``SF_CONTAINER_IMAGE`` is required for the default ``container`` envelope and *not* required
-        under ``SF_SERVERLESS_DEPS=packed_venv`` — a deployment that delivers deps by archive has no
-        Artifact Registry to name, which is the point of the switch.
-        """
-        serverless_deps = os.environ.get(_ENV_SERVERLESS_DEPS) or _SERVERLESS_DEPS_CONTAINER
-        required = {
-            "code_bucket": _ENV_CODE_BUCKET,
-            "compute_sa": _ENV_COMPUTE_SA,
-            "subnetwork_uri": _ENV_SUBNETWORK,
-        }
-        if serverless_deps == _SERVERLESS_DEPS_CONTAINER:
-            required["container_image"] = _ENV_CONTAINER_IMAGE
-        values: dict[str, str] = {"container_image": os.environ.get(_ENV_CONTAINER_IMAGE) or ""}
-        for field_name, env_name in required.items():
-            raw = os.environ.get(env_name)
-            if not raw:
-                raise ConfigError(
-                    f"missing required environment variable {env_name} "
-                    f"(set it, or use BatchInfra.from_terraform_outputs for local dev)"
-                )
-            values[field_name] = raw
-        return cls(
-            code_bucket=values["code_bucket"],
-            container_image=values["container_image"],
-            compute_sa=values["compute_sa"],
-            subnetwork_uri=values["subnetwork_uri"],
-            runtime_version=os.environ.get("SF_RUNTIME_VERSION") or _DEFAULT_RUNTIME_VERSION,
-            venv_archive_uri=os.environ.get(_ENV_VENV_ARCHIVE) or None,
-            gpu_image_uri=os.environ.get(_ENV_GPU_IMAGE) or None,
-            serverless_deps=serverless_deps,
-        )
-
-    @classmethod
-    def from_terraform_outputs(
-        cls, outputs: dict[str, str], image_tag: str = "latest"
-    ) -> BatchInfra:
-        """Build from a ``terraform output -json`` value map (local dev/tests).
-
-        Reads the keys the ``terraform/main`` stage emits — ``code_bucket``, ``runtime_image_repo``
-        (a base path; ``image_tag`` is appended), ``compute_sa``, ``subnetwork_uri``, the optional
-        ``venv_archive_uri`` (the packed-venv archive for the cluster path), and the optional
-        ``gpu_image_uri`` (the pre-baked GPU cluster image).
-        """
-        try:
-            return cls(
-                code_bucket=outputs["code_bucket"],
-                container_image=f"{outputs['runtime_image_repo']}:{image_tag}",
-                compute_sa=outputs["compute_sa"],
-                subnetwork_uri=outputs["subnetwork_uri"],
-                venv_archive_uri=outputs.get("venv_archive_uri") or None,
-                gpu_image_uri=outputs.get("gpu_image_uri") or None,
-            )
-        except KeyError as exc:
-            raise ConfigError(f"terraform outputs missing key: {exc.args[0]}") from exc
-
-
 # --- pure: batch spec assembly (no network) ------------------------------------
-
-
-def serverless_dep_properties(infra: BatchInfra) -> tuple[str, dict[str, str]]:
-    """Resolve serverless dependency delivery → ``(container_image, extra properties)`` (pure).
-
-    The one place the two envelopes are spelled out, shared by `build_batch` and the ``gcloud``
-    emitter so the submitted batch and the printed command can't disagree about how deps arrive:
-
-    - ``container`` (default) — the image, no properties.
-    - ``packed_venv`` — no image, and three properties: ``spark.archives`` attaches the
-      self-contained venv archive under ``#env``, and ``PYSPARK_PYTHON`` is repointed at the
-      interpreter inside it for **both** sides (``spark.dataproc.driverEnv.*`` for the driver,
-      ``spark.executorEnv.*`` for the executors — the driver-side prefix is Dataproc-specific).
-
-    Raises `ConfigError` on an unknown mode, and on ``packed_venv`` with no archive URI resolved:
-    a batch submitted without either envelope would run against the stock runtime's Python and fail
-    deep inside a model fit, long after the point where the mistake was fixable.
-    """
-    if infra.serverless_deps == _SERVERLESS_DEPS_CONTAINER:
-        return infra.container_image, {}
-    if infra.serverless_deps != _SERVERLESS_DEPS_PACKED_VENV:
-        raise ConfigError(
-            f"unknown {_ENV_SERVERLESS_DEPS}={infra.serverless_deps!r}; expected "
-            f"{_SERVERLESS_DEPS_CONTAINER!r} or {_SERVERLESS_DEPS_PACKED_VENV!r}"
-        )
-    if not infra.venv_archive_uri:
-        raise ConfigError(
-            f"{_ENV_SERVERLESS_DEPS}={_SERVERLESS_DEPS_PACKED_VENV!r} needs the packed-venv "
-            f"archive; set {_ENV_VENV_ARCHIVE} (terraform output venv_archive_uri)"
-        )
-    return "", {
-        "spark.archives": f"{infra.venv_archive_uri}#{_VENV_UNPACK_DIR}",
-        "spark.dataproc.driverEnv.PYSPARK_PYTHON": _VENV_ARCHIVE_PYTHON,
-        "spark.executorEnv.PYSPARK_PYTHON": _VENV_ARCHIVE_PYTHON,
-    }
-
-
-def _rfc3339_seconds(a: object, b: object) -> float | None:
-    """Whole seconds between two Dataproc timestamp fields (``b - a``), or None.
-
-    Dataproc stamps ``create_time``/``state_time`` as ``google.protobuf.Timestamp``; both expose
-    ``.timestamp()`` (via the proto's datetime helper). Returns None if either is missing so a
-    partial batch object degrades cleanly rather than raising.
-    """
-    ts_a = getattr(a, "timestamp", None)
-    ts_b = getattr(b, "timestamp", None)
-    if not callable(ts_a) or not callable(ts_b):
-        return None
-    try:
-        return round(ts_b() - ts_a(), 1)
-    except Exception:  # noqa: BLE001 - telemetry is best-effort, never fatal
-        return None
-
-
-def extract_job_telemetry(batch: object) -> dict[str, Any]:
-    """Flatten a Dataproc ``Batch`` into the JSON-able telemetry dict stamped on the run header.
-
-    Pure (no network): reads only fields already on the ``batch`` object that ``get_batch`` returns.
-    Answers the operability questions the registry couldn't before — *how big was the cluster, did
-    it autoscale, how much did it cost, and where did the wall-clock go* (provision + startup +
-    closeout vs. our own ``runtime_seconds``):
-
-    - ``total_wall_s`` — ``state_time − create_time``: the full provision→terminal wall-clock. The
-      gap between this and the engine's ``runtime_seconds`` is Dataproc overhead (autoscaling
-      warm-up + teardown), which amortizes as scale grows — the efficiency half of the scale story.
-    - ``dcu_milli_seconds`` / ``shuffle_storage_gb_seconds`` — approximate usage (billing proxy +
-      shuffle pressure).
-    - ``driver_cores`` / ``executor_cores`` / ``executor_instances`` / ``max_executors`` /
-      ``executor_memory`` / ``executor_memory_overhead`` — the resolved cluster sizing and the
-      autoscaling cap (the executor throttle shows up here). This is the *echoed* shape — what
-      Dataproc says it ran — as against the ``sizing`` record, which is what we asked for and why;
-      the two disagreeing is a finding, so both are kept.
-    - ``runtime_version`` / ``container_image`` — what actually ran (reproducibility).
-    - ``service_account`` / ``subnetwork_uri`` — the identity + network the batch had access to.
-
-    Every field is individually optional: a missing sub-message yields None for its keys, never a
-    raise, so this is safe to call on any batch object the API returns.
-    """
-    tel: dict[str, Any] = {}
-
-    tel["total_wall_s"] = _rfc3339_seconds(
-        getattr(batch, "create_time", None), getattr(batch, "state_time", None)
-    )
-
-    runtime_info = getattr(batch, "runtime_info", None)
-    usage = getattr(runtime_info, "approximate_usage", None) if runtime_info else None
-    tel["dcu_milli_seconds"] = (
-        int(getattr(usage, "milli_dcu_seconds", 0)) or None if usage else None
-    )
-    tel["shuffle_storage_gb_seconds"] = (
-        int(getattr(usage, "shuffle_storage_gb_seconds", 0)) or None if usage else None
-    )
-
-    runtime_config = getattr(batch, "runtime_config", None)
-    props = dict(getattr(runtime_config, "properties", {}) or {}) if runtime_config else {}
-
-    def _prop_int(key: str) -> int | None:
-        raw = props.get(key)
-        try:
-            return int(raw) if raw is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    tel["driver_cores"] = _prop_int("spark.driver.cores")
-    tel["executor_cores"] = _prop_int("spark.executor.cores")
-    tel["executor_instances"] = _prop_int("spark.executor.instances")
-    tel["max_executors"] = _prop_int("spark.dynamicAllocation.maxExecutors")
-    # The memory half of the resolved shape, and the only half a profile actually moves (§3.10):
-    # cores and the executor counts follow from fan-out with or without evidence. Strings, because
-    # Spark spells them ``"8g"`` / ``"3891m"`` — kept verbatim rather than parsed to bytes so the
-    # record shows what the platform was told, not our reading of it. Absent on a batch that left
-    # Serverless' own defaults standing, which is itself the answer to "what sized this".
-    tel["executor_memory"] = props.get("spark.executor.memory") or None
-    tel["executor_memory_overhead"] = props.get("spark.executor.memoryOverhead") or None
-    tel["runtime_version"] = (
-        getattr(runtime_config, "version", None) or None if runtime_config else None
-    )
-    tel["container_image"] = (
-        getattr(runtime_config, "container_image", None) or None if runtime_config else None
-    )
-    # The other way a batch can get its dependencies (`serverless_dep_properties`). Exactly one of
-    # these two is set on any batch, so the pair reads as "which envelope delivered the env" — and a
-    # batch with neither is one running against the stock runtime's Python, which is a finding.
-    tel["venv_archive"] = props.get("spark.archives") or None
-
-    env = getattr(batch, "environment_config", None)
-    exec_cfg = getattr(env, "execution_config", None) if env else None
-    tel["service_account"] = (
-        getattr(exec_cfg, "service_account", None) or None if exec_cfg else None
-    )
-    tel["subnetwork_uri"] = getattr(exec_cfg, "subnetwork_uri", None) or None if exec_cfg else None
-
-    return tel
 
 
 def _batch_id(run_id: str) -> str:
@@ -613,16 +340,6 @@ def _stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
     return stage_config(cfg, run_id, infra.code_bucket)
 
 
-def _batch_client(region: str) -> object:
-    """A regional `BatchControllerClient` (Dataproc batches are a regional resource)."""
-    from google.api_core.client_options import ClientOptions
-    from google.cloud import dataproc_v1 as dataproc
-
-    return dataproc.BatchControllerClient(
-        client_options=ClientOptions(api_endpoint=f"{region}-dataproc.googleapis.com:443")
-    )
-
-
 def submit_batch(
     cfg: RunConfig,
     *,
@@ -645,7 +362,8 @@ def submit_batch(
     because it changes the config it yields a distinct ``run_id``/header per scale (each scale is
     its own queryable run). With ``wait`` the call blocks until the batch is terminal (parity with
     the Terraform seed apply) and then stamps Dataproc job telemetry onto the header
-    (`_stamp_job_telemetry`, best-effort); otherwise it returns once submitted (no telemetry).
+    (`batch_telemetry._stamp_job_telemetry`, best-effort); otherwise it returns once submitted (no
+    telemetry).
 
     ``models`` / ``manage_header`` carry the on-cluster contract. The **full** ``cfg`` is
     always staged (so its ``run_id`` matches `main.run`'s), while ``models`` restricts the
@@ -661,6 +379,10 @@ def submit_batch(
     ``gpu_type`` names the accelerator (serverless is L4-only). Both default to the CPU batch, so an
     existing caller submits exactly as before.
     """
+    # `batch_telemetry`'s two names are bound per call, not at module load. They are what a test
+    # substitutes to run this function without a network, and a module-level import would freeze
+    # the originals here where `monkeypatch.setattr(batch_telemetry, ...)` can no longer reach them.
+    from .batch_telemetry import _batch_client, _stamp_job_telemetry
     from .profiling.source import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -720,45 +442,6 @@ def submit_batch(
             detail = getattr(result, "state_message", "") or "(no state_message)"
             raise EngineError(f"batch {batch_id} terminal state {state_name}: {detail}")
     return batch_id
-
-
-def _stamp_job_telemetry(
-    client: Any,
-    parent: str,
-    batch_id: str,
-    run_id: str,
-    settings: Settings,
-    *,
-    sizing: dict[str, Any] | None = None,
-) -> None:
-    """Read the finished batch's telemetry and write it to the run header (best-effort).
-
-    A fresh ``get_batch`` (the LRO result can carry incomplete ``approximate_usage``) → the pure
-    `extract_job_telemetry` → the header's ``job_telemetry``. The header column is a
-    native ``JSON`` type whose query parameter serializes the value itself, so we pass the telemetry
-    **dict** (not a pre-serialized string, which would double-encode). Wrapped so any failure (API
-    error, missing field, header not yet written) is logged and swallowed: telemetry is a
-    nice-to-have overlay on an already-complete run, never a reason to fail it.
-
-    ``sizing`` (`plan_sizing`'s second half) rides along under ``$.sizing.<family>``. It is decided
-    at *submit* and stamped at *finish* so one write carries both halves, and a batch that never
-    reaches terminal has no telemetry worth reading anyway.
-
-    The write **merges** (`registry.header.merge_header_telemetry`) rather than replacing the
-    column: several family jobs of one run each land here, and a whole-column write would leave only
-    whichever finished last.
-    """
-    from .registry.header import merge_header_telemetry, sizing_telemetry_path
-
-    try:
-        fetched = client.get_batch(name=f"{parent}/batches/{batch_id}")
-        telemetry = extract_job_telemetry(fetched)
-        if sizing:
-            telemetry[sizing_telemetry_path(sizing)] = sizing
-        merge_header_telemetry(run_id, telemetry, settings=settings)
-        _log.info("batch %s telemetry stamped: %s", batch_id, telemetry)
-    except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
-        _log.warning("batch %s telemetry capture failed (non-fatal): %r", batch_id, exc)
 
 
 def main(argv: list[str] | None = None) -> None:

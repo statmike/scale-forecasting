@@ -12,18 +12,13 @@ from typing import Any
 
 import pytest
 
+from scale_forecasting.batch_infra import BatchInfra, serverless_dep_properties
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.profiling.cost import build_profile
 from scale_forecasting.profiling.measure import MeasuredFit
 from scale_forecasting.settings import Settings
-from scale_forecasting.submit import (
-    BatchInfra,
-    _batch_id,
-    build_batch,
-    serverless_dep_properties,
-    sizing_properties,
-)
+from scale_forecasting.submit import _batch_id, build_batch, sizing_properties
 
 # pyspark is not needed here, but google-cloud-dataproc (the [spark] extra) is — build_batch
 # imports dataproc_v1. Skip the whole module cleanly when the extra is absent (parity with @spark).
@@ -102,7 +97,7 @@ def test_build_batch_sets_explicit_ttl_over_dataproc_default() -> None:
     # long 100k run mid-flight (before it writes its run_registry summary). Default is 24h.
     from datetime import timedelta
 
-    from scale_forecasting import submit
+    from scale_forecasting import batch_infra
 
     batch = build_batch(
         infra=_infra(),
@@ -112,7 +107,7 @@ def test_build_batch_sets_explicit_ttl_over_dataproc_default() -> None:
         config_uri="gs://c/r.json",
     )
     ec = batch.environment_config.execution_config
-    assert ec.ttl == timedelta(seconds=submit._DEFAULT_TTL_SECONDS)
+    assert ec.ttl == timedelta(seconds=batch_infra._DEFAULT_TTL_SECONDS)
     assert ec.ttl > timedelta(hours=4)  # the point: strictly beyond the platform default
 
 
@@ -375,7 +370,7 @@ def test_build_batch_carries_the_packed_venv_envelope_onto_the_wire() -> None:
 
 
 def test_the_envelope_shows_up_in_the_telemetry_so_a_run_records_which_one_ran() -> None:
-    from scale_forecasting.submit import extract_job_telemetry
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
 
     tel = extract_job_telemetry(
         build_batch(
@@ -432,7 +427,7 @@ def test_resolve_defaults_to_the_container_envelope(monkeypatch: pytest.MonkeyPa
 
 def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """submit_batch overrides series_limit, stages code+config, and calls create_batch once."""
-    from scale_forecasting import submit
+    from scale_forecasting import batch_telemetry, submit
 
     staged: dict[str, Any] = {}
 
@@ -462,10 +457,10 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(submit, "_stage_code", _fake_stage_code)
     monkeypatch.setattr(submit, "_stage_config", _fake_stage_config)
-    monkeypatch.setattr(submit, "_batch_client", lambda region: _FakeClient())
+    monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
     # Telemetry stamping calls the live update_header; stub it so this stays offline. (It's
     # best-effort and would be swallowed anyway, but stubbing keeps the test off BigQuery.)
-    monkeypatch.setattr(submit, "_stamp_job_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(batch_telemetry, "_stamp_job_telemetry", lambda *a, **k: None)
 
     batch_id = submit.submit_batch(
         _cfg(models=["theta"]),
@@ -485,7 +480,7 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
 
 def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """A FAILED batch must raise (not exit 0) — else the header stays RUNNING, failure silent."""
-    from scale_forecasting import submit
+    from scale_forecasting import batch_telemetry, submit
     from scale_forecasting.errors import EngineError
 
     class _State:
@@ -507,10 +502,10 @@ def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.Monkey
         submit, "_stage_code", lambda infra: ("gs://c/p.zip", "gs://c/spark_main.py")
     )
     monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
-    monkeypatch.setattr(submit, "_batch_client", lambda region: _FakeClient())
+    monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
     # Telemetry is stamped even on a FAILED batch (so its sizing is recorded), before the raise —
     # stub it out so this stays offline and the raise is what the test observes.
-    monkeypatch.setattr(submit, "_stamp_job_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(batch_telemetry, "_stamp_job_telemetry", lambda *a, **k: None)
 
     with pytest.raises(EngineError, match="FAILED"):
         submit.submit_batch(
@@ -574,7 +569,7 @@ class _FakeBatch:
 
 
 def test_extract_job_telemetry_full_batch() -> None:
-    from scale_forecasting.submit import extract_job_telemetry
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
 
     tel = extract_job_telemetry(_FakeBatch())
     assert tel["total_wall_s"] == 562.0
@@ -593,7 +588,7 @@ def test_extract_job_telemetry_full_batch() -> None:
 def test_extract_job_telemetry_is_json_serializable() -> None:
     import json
 
-    from scale_forecasting.submit import extract_job_telemetry
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
 
     # The header stores it as a JSON STRING (Iceberg rejects native JSON) — it must round-trip.
     tel = extract_job_telemetry(_FakeBatch())
@@ -602,7 +597,7 @@ def test_extract_job_telemetry_is_json_serializable() -> None:
 
 def test_extract_job_telemetry_degrades_on_empty_batch() -> None:
     # A batch object missing every sub-message must yield all-None keys, never raise (best-effort).
-    from scale_forecasting.submit import extract_job_telemetry
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
 
     tel = extract_job_telemetry(type("Empty", (), {})())
     assert tel["total_wall_s"] is None
@@ -614,7 +609,7 @@ def test_extract_job_telemetry_degrades_on_empty_batch() -> None:
 
 def test_extract_job_telemetry_no_executor_cap_when_unset() -> None:
     # No dynamicAllocation.maxExecutors property (unthrottled explode) → max_executors is None.
-    from scale_forecasting.submit import extract_job_telemetry
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
 
     class _RC:
         version = "2.2"
@@ -790,7 +785,7 @@ def _submit_capturing_properties(
     monkeypatch: pytest.MonkeyPatch, cfg: RunConfig, **kwargs: Any
 ) -> dict[str, str]:
     """Run ``submit_batch`` against stubbed staging/client and return the batch's properties."""
-    from scale_forecasting import submit
+    from scale_forecasting import batch_telemetry, submit
 
     captured: dict[str, str] = {}
 
@@ -808,8 +803,8 @@ def _submit_capturing_properties(
 
     monkeypatch.setattr(submit, "_stage_code", lambda infra: ("gs://c/p.zip", "gs://c/e.py"))
     monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
-    monkeypatch.setattr(submit, "_batch_client", lambda region: _FakeClient())
-    monkeypatch.setattr(submit, "_stamp_job_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
+    monkeypatch.setattr(batch_telemetry, "_stamp_job_telemetry", lambda *a, **k: None)
     submit.submit_batch(cfg, settings=_settings(), infra=_infra(), **kwargs)
     return captured
 
@@ -902,7 +897,7 @@ def test_the_echoed_telemetry_carries_the_memory_the_batch_was_actually_given() 
     Read back off the submitted batch rather than off our own plan, so a plan/platform
     disagreement is visible instead of assumed away.
     """
-    from scale_forecasting.submit import extract_job_telemetry
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
 
     class _RC:
         version = "2.2"

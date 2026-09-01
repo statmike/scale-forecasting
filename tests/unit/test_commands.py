@@ -27,8 +27,9 @@ from scale_forecasting.settings import Settings
 # the [spark] extra is absent (parity with test_submit).
 pytest.importorskip("google.cloud.dataproc_v1")
 
+from scale_forecasting.batch_infra import BatchInfra  # noqa: E402
 from scale_forecasting.ray_submit import build_entrypoint  # noqa: E402
-from scale_forecasting.submit import BatchInfra, build_batch  # noqa: E402
+from scale_forecasting.submit import build_batch  # noqa: E402
 
 
 def _cfg(**over: Any) -> RunConfig:

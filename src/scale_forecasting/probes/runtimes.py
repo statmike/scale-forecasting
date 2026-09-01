@@ -118,7 +118,8 @@ def _cancel_failure(exc: Exception) -> CancelResult:
 class SparkProbe:
     """Probe a Dataproc Spark job — a Serverless batch xor a cluster job, by ``handle.spark_mode``.
 
-    Serverless reuses `submit._batch_client` + ``get_batch`` (with `submit.extract_job_telemetry`
+    Serverless reuses `batch_telemetry._batch_client` + ``get_batch`` (with
+    `batch_telemetry.extract_job_telemetry`
     for the usage overlay); cluster reuses the new `dataproc_cluster.get_cluster_job` non-blocking
     read. A missing batch/job (``NotFound``) is NOT_FOUND (``exists=False``); any other error
     degrades to UNKNOWN.
@@ -135,7 +136,7 @@ class SparkProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..submit import _batch_client, extract_job_telemetry
+            from ..batch_telemetry import _batch_client, extract_job_telemetry
 
             client = _batch_client(handle.region)
             parent = f"projects/{settings.project_id}/locations/{handle.region}"
@@ -190,7 +191,7 @@ class SparkProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..submit import _batch_client
+            from ..batch_telemetry import _batch_client
 
             client = _batch_client(handle.region)
             parent = f"projects/{settings.project_id}/locations/{handle.region}"

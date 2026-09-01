@@ -35,8 +35,8 @@ from typing import TYPE_CHECKING
 from .errors import get_logger
 
 if TYPE_CHECKING:
+    from .batch_infra import BatchInfra
     from .settings import Settings
-    from .submit import BatchInfra
 
 _log = get_logger(__name__)
 

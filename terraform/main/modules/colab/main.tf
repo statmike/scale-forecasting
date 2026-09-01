@@ -196,7 +196,7 @@ locals {
 
   # SF_* run identity baked into sf-main's software_config.env. Settings.resolve() reads the first
   # five (SF_PROJECT_ID/REGION/CONNECTION/WAREHOUSE_URI/DATASET_ID); sf-main also carries the batch +
-  # Ray infra vars (submit.py:BatchInfra, ray_submit.py:RayInfra) AND the Dataproc-Connect vars NB01
+  # Ray infra vars (batch_infra.py:BatchInfra, ray_submit.py:RayInfra) AND the Dataproc-Connect vars NB01
   # reads (SF_DATAPROC_REGION/SUBNET) — one template serves every notebook. Note the subnet ALIAS:
   # submit.py wants SF_SUBNETWORK_URI in ABSOLUTE form; NB01 wants SF_DATAPROC_SUBNET in RELATIVE
   # form (same strip the network_spec uses). SF_RUNTIME_VERSION / SF_RAY_VERSION / SF_RAY_NETWORK are

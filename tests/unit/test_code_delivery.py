@@ -145,8 +145,9 @@ def test_spark_batch_ships_the_package_via_python_file_uris() -> None:
     import pytest
 
     pytest.importorskip("google.cloud.dataproc_v1")  # the [spark] extra; parity with test_submit
+    from scale_forecasting.batch_infra import BatchInfra
     from scale_forecasting.settings import Settings
-    from scale_forecasting.submit import BatchInfra, build_batch
+    from scale_forecasting.submit import build_batch
 
     infra = BatchInfra(
         code_bucket="code-bkt",

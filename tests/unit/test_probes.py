@@ -192,9 +192,9 @@ def _serverless_handle() -> ProbeHandle:
 def _patch_batch_client(
     monkeypatch: pytest.MonkeyPatch, client: _FakeBatchClient
 ) -> None:
-    import scale_forecasting.submit as submit_mod
+    import scale_forecasting.batch_telemetry as telemetry_mod
 
-    monkeypatch.setattr(submit_mod, "_batch_client", lambda region: client)
+    monkeypatch.setattr(telemetry_mod, "_batch_client", lambda region: client)
 
 
 @pytest.mark.parametrize(

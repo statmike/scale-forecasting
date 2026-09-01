@@ -813,7 +813,7 @@ def _resolve_infra(cfg: RunConfig, infra: object | None) -> object:
         from .ray_submit import RayInfra
 
         return RayInfra.resolve()
-    from .submit import BatchInfra
+    from .batch_infra import BatchInfra
 
     return BatchInfra.resolve()
 
@@ -870,8 +870,9 @@ def _assemble_commands(
         )
         return commands
 
+    from .batch_infra import BatchInfra
     from .profiling.source import profile_for_run
-    from .submit import BatchInfra, _batch_id, sizing_properties
+    from .submit import _batch_id, sizing_properties
 
     assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
     models_arg = plan.python_models if plan.bq_models else None
@@ -1145,7 +1146,8 @@ def stage_run(
     package_uri: str | None = None
     launcher_uri: str | None = None
     if cfg.python_runtime != "ray" and plan.python_models:
-        from .submit import BatchInfra, _stage_code
+        from .batch_infra import BatchInfra
+        from .submit import _stage_code
 
         assert isinstance(resolved_infra, BatchInfra)  # spark runtime → BatchInfra
         package_uri, launcher_uri = _stage_code(resolved_infra)
