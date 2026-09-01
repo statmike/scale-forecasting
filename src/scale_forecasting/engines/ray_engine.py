@@ -25,8 +25,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from .. import profiling
 from ..errors import get_logger
+from ..profiling.source import resolve_profile
 from ..resources import RuntimeResourcePlan, tasks_for_ceiling
 from . import ray_io
 from .spark_io import STATUS_COLUMNS, _needed_columns, _resolve_source_table, _snapshot_millis
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from ..config import RunConfig
-    from ..profiling import ComputeProfile
+    from ..profiling.cost import ComputeProfile
     from ..settings import Settings
 
 _log = get_logger(__name__)
@@ -274,7 +274,7 @@ def run(
     2. Read the source panel to the driver, split the executed models into GPU/CPU pools
        (`split_gpu_cpu_models`), calibrate the per-task GPU fraction
        (`calibrate_gpu_fraction` — live NeuralProphet memory profiling when ``auto``),
-       measure what the models cost (`profiling.resolve_profile`) and size each pool from
+       measure what the models cost (`profiling.source.resolve_profile`) and size each pool from
        that measurement (`_pool_plans`), chunk each pool's cells (`chunk_cells`),
        and dispatch one Ray task per chunk — GPU chunks as ``@ray.remote(num_gpus=fraction)``
        (packed onto T4s), CPU chunks as ``num_cpus=1`` plus, when it was measured, the host
@@ -352,7 +352,7 @@ def run(
             # Measure what the models actually cost before deciding what to ask Ray for. Driver-side
             # and short (`compute.profile` gates it; "off" and a too-small fan-out both return
             # None), and it never enters cfg — the run_id must not move because a probe ran.
-            profile = profiling.resolve_profile(
+            profile = resolve_profile(
                 source, cfg, executed, params_by_model=params_by_model
             )
             cpu_plan, gpu_plan = _pool_plans(

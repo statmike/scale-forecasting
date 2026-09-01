@@ -14,7 +14,8 @@ import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
-from scale_forecasting.profiling import MeasuredFit, build_profile
+from scale_forecasting.profiling.cost import build_profile
+from scale_forecasting.profiling.measure import MeasuredFit
 from scale_forecasting.settings import Settings
 from scale_forecasting.submit import (
     BatchInfra,

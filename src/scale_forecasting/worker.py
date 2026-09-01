@@ -80,8 +80,8 @@ class CellResult:
     cpu_seconds: float | None = None  # time.process_time delta — sums across threads
     # The worker process's ABSOLUTE RSS high-water, not this cell's increment. Deliberate: a slot
     # must hold the interpreter, the libraries and the fit together, and the increment swings 17x
-    # on the order cells happened to run in (see profiling.MeasuredFit). Monotone within a worker,
-    # so MAX across a family's cells is exactly the slot size that family needs.
+    # on the order cells happened to run in (see `profiling.measure.MeasuredFit`). Monotone within
+    # a worker, so MAX across a family's cells is exactly the slot size that family needs.
     process_rss_bytes: int | None = None
     peak_gpu_bytes: int | None = None  # torch.cuda high-water; None == NOT MEASURED, never zero
     # The native-thread cap in force while this cell ran (OMP_NUM_THREADS). Without it
@@ -123,7 +123,7 @@ def _process_rss_bytes() -> int | None:
     *this* module (``measure_fit`` drives ``run_cell``) — a module-level import would be a cycle.
     The lazy call is a ``sys.modules`` hit after the first cell.
     """
-    from .profiling import _rss_bytes
+    from .profiling.measure import _rss_bytes
 
     return _rss_bytes()
 
@@ -146,7 +146,7 @@ def _peak_gpu_bytes() -> int | None:
     global _gpu_probe_useful
     if _gpu_probe_useful is False:
         return None
-    from .profiling import _peak_gpu_bytes as probe
+    from .profiling.measure import _peak_gpu_bytes as probe
 
     peak = probe()
     _gpu_probe_useful = peak is not None

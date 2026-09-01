@@ -42,7 +42,7 @@ from .staging import stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
-    from .profiling import ComputeProfile
+    from .profiling.cost import ComputeProfile
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -431,8 +431,8 @@ def plan_sizing(
     **The memory sizing is what a profile buys, and it cannot be measured here.** There is no
     submit-side probe — the fleetwide pre-pass runs on the Spark driver *inside* the batch, by
     which point the executor shape is already fixed — so ``profile`` is a measurement of a
-    *previous* run, resolved by `profiling.profile_for_run` from ``compute.profile.source`` and
-    handed in. This function stays pure and is only ever *given* one; it never goes and looks.
+    *previous* run, resolved by `profiling.source.profile_for_run` from ``compute.profile.source``
+    and handed in. This function stays pure and is only ever *given* one; it never goes and looks.
     ``None`` (no evidence, or none wanted) leaves the memory properties unemitted and Serverless'
     own defaults standing, exactly as before.
 
@@ -660,7 +660,7 @@ def submit_batch(
     ``gpu_type`` names the accelerator (serverless is L4-only). Both default to the CPU batch, so an
     existing caller submits exactly as before.
     """
-    from .profiling import profile_for_run
+    from .profiling.source import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
 

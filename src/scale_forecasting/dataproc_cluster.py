@@ -28,7 +28,7 @@ from .submit import _ENV_VENV_ARCHIVE, BatchInfra, _stage_code, _stage_config
 
 if TYPE_CHECKING:
     from .config import RunConfig
-    from .profiling import ComputeProfile
+    from .profiling.cost import ComputeProfile
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -397,7 +397,8 @@ def cluster_sizing(
     fan-out alone. The memory *split* is what a profile buys, and — as on the batch path — it
     cannot be measured here, because the cluster's shape is fixed at *create*, before any of our
     code runs on it. So ``profile`` is a previous run's measurement, resolved by
-    `profiling.profile_for_run` and handed in; this function stays pure and never goes looking.
+    `profiling.source.profile_for_run` and handed in; this function stays pure and never goes
+    looking.
 
     The third element is the audit record (`resources.sizing_telemetry`) — plan, translation and
     the evidence behind them — stamped onto the run header by `submit_cluster_job` so a cluster
@@ -703,7 +704,7 @@ def submit_cluster_job(
     reuse path the count is moot (the cluster exists) but the overlay still applies, which is what
     keeps a family's own shape correct on a cluster sized for the union of several.
     """
-    from .profiling import profile_for_run
+    from .profiling.source import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
 
@@ -863,7 +864,7 @@ def provision_shared_cluster(
     than the whole run's (a run whose native/Ray families dwarf its Spark ones would otherwise buy
     idle VMs). ``worker_count`` overrides the derivation; ``max_workers`` caps it.
     """
-    from .profiling import profile_for_run
+    from .profiling.source import profile_for_run
     from .settings import Settings
 
     settings = settings or Settings.resolve()

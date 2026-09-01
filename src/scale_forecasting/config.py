@@ -272,9 +272,9 @@ class ProfileConfig(BaseModel):
     performance purposes. Silently varying the shape under a stable id would be the worse trade.
 
     **Connected on one runtime out of three, and the "pre-pass" framing is what has to change.**
-    ``engines/ray_engine`` calls `profiling.resolve_profile` and sizes its pools from the result —
-    that works, because a Ray task's ``num_cpus``/``num_gpus`` is a request made in-run against an
-    autoscaling pool. Both Spark paths pass ``None`` (``submit.sizing_properties``,
+    ``engines/ray_engine`` calls `profiling.source.resolve_profile` and sizes its pools from the
+    result — that works, because a Ray task's ``num_cpus``/``num_gpus`` is a request made in-run
+    against an autoscaling pool. Both Spark paths pass ``None`` (``submit.sizing_properties``,
     ``dataproc_cluster.cluster_sizing``) and structurally must: ``spark.executor.cores`` and
     ``spark.task.cpus`` are fixed at submit (Serverless) or at create (cluster), before any of our
     code runs out there. So on Spark the measurement is sized from static arithmetic, and on Ray it
@@ -296,15 +296,15 @@ class ProfileConfig(BaseModel):
     #          on runs far too small for `auto` to trigger on.
     mode: ProfileMode = "auto"
     # Series to fit in the pre-pass, spread across length/complexity strata (see
-    # `profiling.select_profile_sample`). The floor is set by wanting more than one point per
-    # stratum; the ceiling by the pre-pass being pure overhead that every run pays.
+    # `profiling.sampling.select_profile_sample`). The floor is set by wanting more than one point
+    # per stratum; the ceiling by the pre-pass being pure overhead that every run pays.
     samples: int = Field(default=8, gt=0)
     # `mode="auto"` profiles only at or above this many cells. Below it the pre-pass costs a
     # meaningful fraction of the run it is sizing, and a small run's mis-sizing is cheap anyway.
     min_cells: int = Field(default=1000, gt=0)
     # Headroom on measured peaks (memory) and medians (time). Must exceed 1.0: a margin of exactly
     # 1.0 sizes a slot at the largest value that was *observed to fit*, with nothing left for the
-    # series that was not sampled. Kept in step with `profiling._DEFAULT_MEMORY_MARGIN` /
+    # series that was not sampled. Kept in step with `profiling.cost._DEFAULT_MEMORY_MARGIN` /
     # `_DEFAULT_TIME_MARGIN` by a unit test rather than by an import, so this module stays free of
     # pandas — see `test_config_profile_defaults_match_profiling`.
     memory_margin: float = Field(default=1.3, gt=1.0)
@@ -317,9 +317,9 @@ class ProfileConfig(BaseModel):
     #           `forecast_metadata` row. Every run already performs these fits, so the marginal
     #           cost is three cheap probes per cell and four scalars per row — no sample, no
     #           pre-pass, no extra infrastructure. A completed run is then itself a profile:
-    #           `profiling.harvest_profile` aggregates those rows into the same `ComputeProfile`
-    #           the translators already consume, which is what makes "size this run like run X"
-    #           a query rather than an artifact store.
+    #           `profiling.cost.harvest_profile` aggregates those rows into the same
+    #           `ComputeProfile` the translators already consume, which is what makes "size this run
+    #           like run X" a query rather than an artifact store.
     # controlled — harvest, and additionally do not pin the native thread pools, so
     #           `effective_cores` measures what a model's threading actually wants instead of
     #           reading back the pin the fleet imposed. This *changes how the run executes* and

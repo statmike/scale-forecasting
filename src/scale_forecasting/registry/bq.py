@@ -154,7 +154,7 @@ def assemble_metadata_row(
         "cell_ended_at": result.cell_ended_at,
         # Harvested compute measurement (compute.profile.measure). All None when measurement is
         # off, which is also how rows written before these columns existed read back — so
-        # `profiling.harvest_profile` needs no version check, only a NULL check.
+        # `profiling.cost.harvest_profile` needs no version check, only a NULL check.
         "cpu_seconds": _as_float(result.cpu_seconds),
         "process_rss_bytes": result.process_rss_bytes,
         "peak_gpu_bytes": result.peak_gpu_bytes,
@@ -381,7 +381,7 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("cell_ended_at", "S"),
     # What the fit cost, harvested from the fit the run was doing anyway (compute.profile.measure).
     # `fit_seconds` above is the wall-clock half; together these let a completed run be read back
-    # as a `ComputeProfile` that sizes a later one — see profiling.harvest_profile.
+    # as a `ComputeProfile` that sizes a later one — see profiling.cost.harvest_profile.
     ("cpu_seconds", "D"),
     ("process_rss_bytes", "I"),
     ("peak_gpu_bytes", "I"),
@@ -1356,14 +1356,14 @@ def read_compute_harvest(
     """Return ``(harvest rows, the table the run read)`` for ``run_id``, or ``None`` if unmeasured.
 
     The read half of "a profile is a query over a `run_id`". Pulls the per-cell measurements
-    `worker.run_cell` recorded — `profiling.harvest_profile` aggregates them into the same
+    `worker.run_cell` recorded — `profiling.cost.harvest_profile` aggregates them into the same
     `ComputeProfile` the in-run pre-pass builds, so there is one aggregation and this is only a
     reader. ``None`` (rather than an empty list) means the run has no measurements at all, which is
     what lets the caller fall through to the next source instead of sizing off nothing.
 
     ``source_table`` comes back alongside because ``forecast_metadata`` does not record one — the
-    run header's ``raw_config`` does — and it is the axis `profiling.compare_signatures` cares most
-    about: the same fits on a different table are not evidence about this run.
+    run header's ``raw_config`` does — and it is the axis `profiling.signature.compare_signatures`
+    cares most about: the same fits on a different table are not evidence about this run.
 
     Writes are append-only and at-least-once, so the rows are deduped to one per cell (latest write
     wins) before returning, the same grain ``v_model_leaderboard`` serves. Ordering is by a
@@ -1425,8 +1425,9 @@ def discover_harvest_run(
     What ``compute.profile.source = "auto"`` resolves against. Only the two *identity* axes are
     filtered here — same table, same frequency — because those are the ones where a mismatch means
     "not evidence about this run at all". The scale axes (series count, history length) are checked
-    after the rows are loaded, by `profiling.compare_signatures`, where a mismatch is a warning
-    rather than a disqualification: a 1k-series run is imperfect but usable evidence for a 100k one,
+    after the rows are loaded, by `profiling.signature.compare_signatures`, where a mismatch is a
+    warning rather than a disqualification: a 1k-series run is imperfect but usable evidence for a
+    100k one,
     and preferring nothing over it would leave the common case unsized.
 
     Restricted to ``COMPLETED`` runs. A run that died partway measured only the cells that finished,

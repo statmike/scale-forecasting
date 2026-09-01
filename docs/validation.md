@@ -193,17 +193,17 @@ Things that are true today and that no entry above covers. Keep this list short 
   profile argument left as `None`: no measurement involved, and every Spark fleet reshaped anyway.
 
 - **No live run has ever taken a compute measurement, on any runtime.** The profiler has exactly one
-  production call site — `engines/ray_engine` calls `profiling.resolve_profile` — and it has never
+  production call site — `engines/ray_engine` calls `profiling.source.resolve_profile` — and it has never
   fired in a live smoke. `mode` defaults to `"auto"` with `min_cells = 1000`, no smoke config sets
   `profile`, and the gate compares series × profilable models: smoke 07 offers 300 cells and smoke 08
   offers 100, so both take the `None` path. Both Spark paths pass `None` unconditionally and
   structurally must — `spark.executor.cores` and `spark.task.cpus` are fixed at submit or at create,
-  before any of our code runs on the cluster. So `profiling.measure_fit` and `build_profile` are
+  before any of our code runs on the cluster. So `profiling.measure.measure_fit` and `build_profile` are
   unit-tested against injected measurements and have never measured anything real.
 
   **W10 changed what the next live run will do, but not this gap.** Harvest is now on by default:
   every cell records its CPU time, absolute process memory, peak device bytes, thread cap and
-  `n_obs` onto `forecast_metadata`, and `profiling.harvest_profile` aggregates those rows into the
+  `n_obs` onto `forecast_metadata`, and `profiling.cost.harvest_profile` aggregates those rows into the
   same `ComputeProfile` the pre-pass would have built. All of it is offline-proven only. Nothing has
   yet run on a real executor, so three things stay unverified until a live run: that the probes
   return sane numbers on Dataproc and Vertex rather than zeros or nulls, that the five columns
@@ -212,7 +212,7 @@ Things that are true today and that no entry above covers. Keep this list short 
   depends on it.
 
   **W11a built the consumer against the same unproven evidence.** `compute.profile.source` defaults
-  to `"auto"`, and `profiling.resolve_profile_source` implements the whole precedence chain —
+  to `"auto"`, and `profiling.source.resolve_profile_source` implements the whole precedence chain —
   named run, discovered run, shipped baseline, static config — with every loader injected, so the
   chain is tested offline end to end with no BigQuery. It cannot yet change a live run: nothing
   calls it (that is W11b), there is no baseline to load (W13), and there is no harvested run

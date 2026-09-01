@@ -953,7 +953,7 @@ def provision_shared_cluster(
     failure-isolated Ray job to the shared cluster) and tears it down once via
     `teardown_shared_cluster` after all families join.
     """
-    from .profiling import profile_for_run
+    from .profiling.source import profile_for_run
     from .settings import Settings
 
     settings = settings or Settings.resolve()
@@ -1054,7 +1054,7 @@ def submit_ray(
     the region a shared ephemeral cluster landed in (which may differ after a capacity hop), so
     every Ray family's job finds the one shared cluster by name in the right region.
     """
-    from .profiling import profile_for_run
+    from .profiling.source import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
 

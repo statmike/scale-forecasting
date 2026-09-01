@@ -865,7 +865,7 @@ def _assemble_commands(
         )
         return commands
 
-    from .profiling import profile_for_run
+    from .profiling.source import profile_for_run
     from .submit import BatchInfra, _batch_id, sizing_properties
 
     assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
@@ -960,7 +960,7 @@ def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> 
     if not cfg.compute.profile.needs_source_resolution:
         return cfg
 
-    from .profiling import signature_from_config
+    from .profiling.signature import signature_from_config
     from .registry import bq
 
     want = signature_from_config(cfg)

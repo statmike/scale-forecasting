@@ -116,7 +116,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 
 The last five columns are the **compute harvest**. Every cell records what it cost, on the
 hardware it really ran on, so a completed `run_id` doubles as a measured cost model: point
-`profiling.harvest_profile` at those rows and it aggregates them into the same `ComputeProfile` the
+`profiling.cost.harvest_profile` at those rows and it aggregates them into the same `ComputeProfile` the
 deliberate pre-pass produces, which the fleet translators then size from. Nothing extra is stored
 and nothing extra is versioned — the profile is a query over a run.
 

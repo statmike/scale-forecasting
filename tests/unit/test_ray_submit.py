@@ -15,10 +15,11 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import profiling, ray_submit
+from scale_forecasting import ray_submit
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.errors import ConfigError, EngineError
+from scale_forecasting.profiling import source as profiling_source
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
 
@@ -414,7 +415,7 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     # No registry to ask for a past run's measurements: submit sizes off declared config here, the
     # same as an unprofiled deployment. (Left unstubbed, `profile_for_run` would try a real
     # BigQuery lookup against the fake project and degrade to None the slow way.)
-    monkeypatch.setattr(profiling, "profile_for_run", lambda cfg, settings=None: None)
+    monkeypatch.setattr(profiling_source, "profile_for_run", lambda cfg, settings=None: None)
     return calls
 
 

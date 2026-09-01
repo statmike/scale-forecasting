@@ -274,11 +274,11 @@ def test_config_profile_defaults_match_profiling() -> None:
     default and this fails rather than the two silently disagreeing, which would show up as a
     profile whose margins do not match the config that requested it.
     """
-    from scale_forecasting import profiling
+    from scale_forecasting.profiling import cost
 
     profile = RunConfig(**_minimal_dict()).compute.profile
-    assert profile.memory_margin == profiling._DEFAULT_MEMORY_MARGIN
-    assert profile.time_margin == profiling._DEFAULT_TIME_MARGIN
+    assert profile.memory_margin == cost._DEFAULT_MEMORY_MARGIN
+    assert profile.time_margin == cost._DEFAULT_TIME_MARGIN
 
 
 @pytest.mark.parametrize("mode", ["off", "auto", "always"])

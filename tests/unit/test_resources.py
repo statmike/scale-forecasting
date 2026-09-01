@@ -34,7 +34,8 @@ import pytest
 
 from scale_forecasting import resources
 from scale_forecasting.engines import ray_io
-from scale_forecasting.profiling import ComputeProfile, MeasuredFit, build_profile
+from scale_forecasting.profiling.cost import ComputeProfile, build_profile
+from scale_forecasting.profiling.measure import MeasuredFit
 from scale_forecasting.resources import (
     ResourceSlot,
     UnitShape,

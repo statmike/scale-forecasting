@@ -148,13 +148,14 @@ unit provides), turned into a fleet by dividing cells by slots. Three pure trans
 **The "when it is fixed" column is the load-bearing one.** Two facts follow from it. First, Ray is
 the only runtime whose per-task shape is decided while the job is running, which is why it is the
 only one where measurement can currently feed back into packing — `engines/ray_engine` calls
-`profiling.resolve_profile` on the head node and repacks its pools from the result. Second, and more
+`profiling.source.resolve_profile` on the head node and repacks its pools from the result. Second, and more
 consequential, **there is nowhere in a Spark run to measure anything that could resize it.** The
 fleet is settled before our code reaches the cluster, and the submit host is kept deliberately lean
 (no model stack — model imports are lazy precisely so a Composer worker can run the submit path). So
 the Spark fleets are sized from arithmetic over the config, not from evidence.
 
-**Where the evidence is meant to come from.** `profiling.py` builds a `ComputeProfile` — measured
+**Where the evidence is meant to come from.** The `profiling` package builds a `ComputeProfile` —
+measured
 wall time, CPU seconds, effective thread count, absolute process RSS high-water, and peak device
 bytes, aggregated across a stratified sample with an asymmetric margin (max for memory, median for
 time). Every translator already accepts one and reproduces the static arithmetic exactly when given

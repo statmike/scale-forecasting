@@ -41,16 +41,13 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from scale_forecasting import profiling
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import DataError
-from scale_forecasting.profiling import (
-    MeasuredFit,
-    SeriesStats,
-    build_profile,
-    select_profile_sample,
-    series_stats,
-)
+from scale_forecasting.profiling import cost, measure, sampling, signature, source
+from scale_forecasting.profiling.cost import build_profile
+from scale_forecasting.profiling.measure import MeasuredFit
+from scale_forecasting.profiling.sampling import select_profile_sample
+from scale_forecasting.profiling.stats import SeriesStats, series_stats
 
 _GIB = 1024**3
 
@@ -581,7 +578,7 @@ def test_sample_size_is_capped_by_the_panel_and_by_the_hard_ceiling() -> None:
     # turned a sizing pre-pass into the run, so the ceiling clamps silently — it is a budget cap,
     # not bad input.
     stats = [_stats(f"s{i:03d}", n_obs=5 + i) for i in range(200)]
-    assert len(select_profile_sample(stats, samples=500)) == profiling._MAX_PROFILE_SAMPLES
+    assert len(select_profile_sample(stats, samples=500)) == sampling._MAX_PROFILE_SAMPLES
     assert len(select_profile_sample(stats, samples=5)) == 5
     assert len(select_profile_sample(stats[:2], samples=5)) == 2
 
@@ -720,7 +717,7 @@ def test_sample_carries_the_stats_it_was_chosen_from() -> None:
     assert spec.stats == stat
     assert spec.n_obs == 40
     assert 0.0 <= spec.complexity <= 1.0
-    assert spec.stratum_label in profiling._LENGTH_LABELS
+    assert spec.stratum_label in sampling._LENGTH_LABELS
 
 
 # --- MeasuredFit.effective_cores (constructed records, no fit) -------------------
@@ -738,9 +735,9 @@ def test_effective_cores_floors_at_one_and_detects_threading() -> None:
 def test_effective_cores_of_an_untimeable_fit_is_one_not_a_division_error() -> None:
     # A trivially fast statistical fit can genuinely read 0.0 wall seconds. No ZeroDivisionError and
     # no absurd ratio — the reading is simply meaningless below the clock's resolution.
-    assert _fit(wall_s=0.0, cpu_s=0.0).effective_cores == profiling._MIN_EFFECTIVE_CORES
-    assert _fit(wall_s=0.0, cpu_s=5.0).effective_cores == profiling._MIN_EFFECTIVE_CORES
-    assert _fit(wall_s=1e-12, cpu_s=1.0).effective_cores == profiling._MIN_EFFECTIVE_CORES
+    assert _fit(wall_s=0.0, cpu_s=0.0).effective_cores == measure._MIN_EFFECTIVE_CORES
+    assert _fit(wall_s=0.0, cpu_s=5.0).effective_cores == measure._MIN_EFFECTIVE_CORES
+    assert _fit(wall_s=1e-12, cpu_s=1.0).effective_cores == measure._MIN_EFFECTIVE_CORES
 
 
 # --- build_profile: the two tails ------------------------------------------------
@@ -958,7 +955,7 @@ def test_derived_properties_are_none_exactly_when_their_raw_basis_is_none() -> N
     for raw, derived in pairs:
         assert (raw is None) == (derived is None)
     assert family.slot_rss_bytes is None  # the RSS axis had no evidence
-    assert family.planning_wall_s == pytest.approx(4.0 * profiling._DEFAULT_TIME_MARGIN)
+    assert family.planning_wall_s == pytest.approx(4.0 * cost._DEFAULT_TIME_MARGIN)
 
 
 @pytest.mark.parametrize("margin", [0.9, 0.0, -1.0, float("inf"), float("nan")])
@@ -986,13 +983,13 @@ def test_default_margins_are_recorded_on_the_profile_it_built() -> None:
     # A sizing decision that cannot be re-derived from its own record is not auditable, so the
     # margins ride along with the numbers rather than living only in the caller.
     profile = build_profile([_fit()])
-    assert profile.memory_margin == profiling._DEFAULT_MEMORY_MARGIN
-    assert profile.time_margin == profiling._DEFAULT_TIME_MARGIN
+    assert profile.memory_margin == cost._DEFAULT_MEMORY_MARGIN
+    assert profile.time_margin == cost._DEFAULT_TIME_MARGIN
     family = profile.for_family("statistical")
     assert family is not None
     assert (family.memory_margin, family.time_margin) == (
-        profiling._DEFAULT_MEMORY_MARGIN,
-        profiling._DEFAULT_TIME_MARGIN,
+        cost._DEFAULT_MEMORY_MARGIN,
+        cost._DEFAULT_TIME_MARGIN,
     )
 
 
@@ -1176,7 +1173,7 @@ def test_the_telemetry_blob_does_not_grow_with_the_panel() -> None:
     payload = profile.to_dict()
 
     assert payload["n_sample_series"] == 2_000
-    assert len(payload["sample_ts_ids"]) == profiling._TELEMETRY_SAMPLE_IDS
+    assert len(payload["sample_ts_ids"]) == cost._TELEMETRY_SAMPLE_IDS
     # The kept ids are the front of the (sorted) list, not a random slice — same run, same blob.
     assert payload["sample_ts_ids"] == list(profile.sample_ts_ids[: len(payload["sample_ts_ids"])])
     # A small profile is untruncated, so nothing about the common case changed.
@@ -1454,10 +1451,10 @@ def test_the_thread_pin_sets_and_restores_every_native_pool_variable(monkeypatch
     monkeypatch.setenv("OMP_NUM_THREADS", "8")  # pre-existing: must be restored to "8"
     monkeypatch.delenv("MKL_NUM_THREADS", raising=False)  # unset: must go back to unset
 
-    with profiling._pinned_intraop_threads(1):
-        inside = {name: os.environ.get(name) for name in profiling._INTRAOP_ENV_VARS}
+    with measure._pinned_intraop_threads(1):
+        inside = {name: os.environ.get(name) for name in measure._INTRAOP_ENV_VARS}
 
-    assert inside == dict.fromkeys(profiling._INTRAOP_ENV_VARS, "1"), "every pool must be capped"
+    assert inside == dict.fromkeys(measure._INTRAOP_ENV_VARS, "1"), "every pool must be capped"
     assert os.environ["OMP_NUM_THREADS"] == "8"
     assert "MKL_NUM_THREADS" not in os.environ
 
@@ -1467,7 +1464,7 @@ def test_the_thread_pin_restores_the_environment_even_when_the_fit_raises():
     monkeypatch_free_before = os.environ.get("OMP_NUM_THREADS")
 
     with pytest.raises(RuntimeError, match="fit exploded"):
-        with profiling._pinned_intraop_threads(1):
+        with measure._pinned_intraop_threads(1):
             raise RuntimeError("fit exploded")
 
     assert os.environ.get("OMP_NUM_THREADS") == monkeypatch_free_before
@@ -1490,7 +1487,7 @@ def test_an_environment_that_cannot_be_pinned_reports_none_rather_than_claiming_
 
     monkeypatch.setattr(builtins, "__import__", no_threadpoolctl)
 
-    with profiling._pinned_intraop_threads(1) as pinned:
+    with measure._pinned_intraop_threads(1) as pinned:
         assert pinned is None, "a half-applied pin is reported as no pin"
         assert os.environ["OMP_NUM_THREADS"] == "1", "the half we can still do, we still do"
 
@@ -1548,17 +1545,17 @@ def test_the_mode_gate_is_the_only_thing_that_decides_whether_to_measure() -> No
     off = _cfg(compute={"profile": {"mode": "off", "min_cells": 1}})
     always = _cfg(compute={"profile": {"mode": "always", "min_cells": 10**9}})
     auto = _cfg(compute={"profile": {"mode": "auto", "min_cells": 1000}})
-    assert not profiling.should_profile(off, 10**9)
-    assert profiling.should_profile(always, 0)
-    assert not profiling.should_profile(auto, 999)
-    assert profiling.should_profile(auto, 1000)
+    assert not source.should_profile(off, 10**9)
+    assert source.should_profile(always, 0)
+    assert not source.should_profile(auto, 999)
+    assert source.should_profile(auto, 1000)
 
 
 def test_the_gate_counts_cells_not_series() -> None:
     """100 series x 6 models is the same work as 600 x 1; the fleet is sized for the work."""
     cfg = _cfg(compute={"profile": {"mode": "auto", "min_cells": 600}})
-    assert profiling.should_profile(cfg, 100 * 6)
-    assert not profiling.should_profile(cfg, 100 * 5)
+    assert source.should_profile(cfg, 100 * 6)
+    assert not source.should_profile(cfg, 100 * 5)
 
 
 def test_profiling_off_takes_no_measurement_at_all() -> None:
@@ -1566,7 +1563,7 @@ def test_profiling_off_takes_no_measurement_at_all() -> None:
     calls: list[tuple[str, str, Any]] = []
     cfg = _cfg(compute={"profile": {"mode": "off"}})
     assert (
-        profiling.resolve_profile(
+        source.resolve_profile(
             _profilable_panel(), cfg, ["theta"], measure=_recording_measure(calls)
         )
         is None
@@ -1578,7 +1575,7 @@ def test_a_small_fan_out_under_auto_is_not_worth_the_pre_pass() -> None:
     calls: list[tuple[str, str, Any]] = []
     cfg = _cfg(compute={"profile": {"mode": "auto", "min_cells": 1000}})
     assert (
-        profiling.resolve_profile(
+        source.resolve_profile(
             _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
         )
         is None
@@ -1593,7 +1590,7 @@ def test_every_model_is_measured_on_every_sampled_series() -> None:
         models=["theta", "holtwinters"],
         compute={"profile": {"mode": "always", "samples": 3}},
     )
-    profile = profiling.resolve_profile(
+    profile = source.resolve_profile(
         _profilable_panel(6), cfg, ["theta", "holtwinters"], measure=_recording_measure(calls)
     )
     assert profile is not None
@@ -1608,7 +1605,7 @@ def test_a_model_measured_late_still_reaches_the_family_max() -> None:
         models=["theta", "holtwinters"],
         compute={"profile": {"mode": "always", "samples": 4}},
     )
-    profile = profiling.resolve_profile(
+    profile = source.resolve_profile(
         _profilable_panel(6),
         cfg,
         ["theta", "holtwinters"],
@@ -1624,7 +1621,7 @@ def test_bigquery_native_models_are_never_profiled() -> None:
     """There is no process to measure and no slot to size; measuring one would issue a write."""
     calls: list[tuple[str, str, Any]] = []
     cfg = _cfg(models=["theta", "arima_plus"], compute={"profile": {"mode": "always"}})
-    profiling.resolve_profile(
+    source.resolve_profile(
         _profilable_panel(6), cfg, ["theta", "arima_plus"], measure=_recording_measure(calls)
     )
     assert {model for _, model, _ in calls} == {"theta"}
@@ -1634,7 +1631,7 @@ def test_a_model_list_with_nothing_profilable_takes_no_pre_pass() -> None:
     cfg = _cfg(models=["arima_plus"], compute={"profile": {"mode": "always"}})
     calls: list[tuple[str, str, Any]] = []
     assert (
-        profiling.resolve_profile(
+        source.resolve_profile(
             _profilable_panel(6), cfg, ["arima_plus"], measure=_recording_measure(calls)
         )
         is None
@@ -1646,7 +1643,7 @@ def test_tuned_parameters_are_measured_rather_than_defaults() -> None:
     """Measuring an untuned fit for a tuned run sizes the fleet for different work."""
     calls: list[tuple[str, str, Any]] = []
     cfg = _cfg(compute={"profile": {"mode": "always", "samples": 2}})
-    profiling.resolve_profile(
+    source.resolve_profile(
         _profilable_panel(6),
         cfg,
         ["theta"],
@@ -1664,7 +1661,7 @@ def test_per_series_hpo_is_short_circuited_so_the_pre_pass_stays_a_pre_pass() ->
         backtest={"enabled": True},
         hpo={"enabled": True, "granularity": "per_series"},
     )
-    profiling.resolve_profile(
+    source.resolve_profile(
         _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
     )
     assert calls and all(params == {} for _, _, params in calls)
@@ -1674,7 +1671,7 @@ def test_without_hpo_the_probe_defers_to_the_cells_own_resolution() -> None:
     """No tuning in play → params=None, so the probe resolves exactly as run_cell would."""
     calls: list[tuple[str, str, Any]] = []
     cfg = _cfg(compute={"profile": {"mode": "always", "samples": 2}})
-    profiling.resolve_profile(
+    source.resolve_profile(
         _profilable_panel(6), cfg, ["theta"], measure=_recording_measure(calls)
     )
     assert calls and all(params is None for _, _, params in calls)
@@ -1686,7 +1683,7 @@ def test_an_undescribable_panel_falls_back_to_static_config_rather_than_guessing
     cfg = _cfg(compute={"profile": {"mode": "always"}})
     empty = pd.DataFrame({"ts_id": [], "ds": [], "y": []})
     assert (
-        profiling.resolve_profile(empty, cfg, ["theta"], measure=_recording_measure(calls))
+        source.resolve_profile(empty, cfg, ["theta"], measure=_recording_measure(calls))
         is None
     )
     assert calls == []
@@ -1697,7 +1694,7 @@ def test_the_profile_carries_the_configured_margins_not_the_module_defaults() ->
     cfg = _cfg(
         compute={"profile": {"mode": "always", "memory_margin": 1.75, "time_margin": 1.5}}
     )
-    profile = profiling.resolve_profile(
+    profile = source.resolve_profile(
         _profilable_panel(6), cfg, ["theta"], measure=_recording_measure([])
     )
     assert profile is not None
@@ -1707,7 +1704,7 @@ def test_the_profile_carries_the_configured_margins_not_the_module_defaults() ->
 def test_the_sample_travels_with_the_profile_for_audit() -> None:
     """"What did this cost" and "measured on which series, and why" from one object."""
     cfg = _cfg(compute={"profile": {"mode": "always", "samples": 3}})
-    profile = profiling.resolve_profile(
+    profile = source.resolve_profile(
         _profilable_panel(8), cfg, ["theta"], measure=_recording_measure([])
     )
     assert profile is not None
@@ -1739,7 +1736,7 @@ def _row(**over: Any) -> dict[str, Any]:
 def test_harvest_reaches_the_same_profile_as_the_pre_pass_from_the_same_evidence() -> None:
     """A harvested profile is not a second kind of object; it is the same aggregation."""
     rows = [_row(ts_id=f"s{i}", fit_seconds=1.0 + i) for i in range(4)]
-    harvested = profiling.harvest_profile(rows)
+    harvested = cost.harvest_profile(rows)
     equivalent = build_profile(
         [
             MeasuredFit(
@@ -1769,13 +1766,13 @@ def test_harvest_is_a_pure_function_of_the_row_set() -> None:
     rows = [_row(ts_id=f"s{i}", fit_seconds=1.0 + i, model_type="theta") for i in range(6)]
     shuffled = list(rows)
     random.Random(11).shuffle(shuffled)
-    assert profiling.harvest_profile(shuffled) == profiling.harvest_profile(rows)
+    assert cost.harvest_profile(shuffled) == cost.harvest_profile(rows)
 
 
 def test_harvest_skips_backtest_folds_because_the_full_fit_row_already_brackets_them() -> None:
     """``fit_seconds`` on the full-fit row covers the folds; counting both double-counts."""
     rows = [_row(), *[_row(fold_id=i, fit_seconds=99.0) for i in range(5)]]
-    profile = profiling.harvest_profile(rows)
+    profile = cost.harvest_profile(rows)
     assert profile.n_measurements == 1
     assert profile.models["theta"].median_wall_s == 2.0
 
@@ -1783,14 +1780,14 @@ def test_harvest_skips_backtest_folds_because_the_full_fit_row_already_brackets_
 def test_harvest_skips_ensemble_rows_because_arithmetic_is_not_a_fit() -> None:
     """An ensemble combines predictions; its cost never sizes a model's slot."""
     rows = [_row(), _row(model_type="ensemble_mean", ensemble_id="abc", fit_seconds=50.0)]
-    profile = profiling.harvest_profile(rows)
+    profile = cost.harvest_profile(rows)
     assert set(profile.models) == {"theta"}
 
 
 def test_a_row_with_no_wall_time_is_read_as_a_failed_fit_and_still_counted() -> None:
     """``forecast_metadata`` has no status column: an error cell lands with zero elapsed."""
     rows = [_row(), _row(ts_id="bad", fit_seconds=0.0, cpu_seconds=None, n_obs=None)]
-    profile = profiling.harvest_profile(rows)
+    profile = cost.harvest_profile(rows)
     assert (profile.n_measurements, profile.n_ok) == (2, 1)
     assert profile.sample_ts_ids == ("series-a",)
     assert profile.models["theta"].median_wall_s == 2.0
@@ -1802,7 +1799,7 @@ def test_a_run_that_recorded_nothing_still_sizes_on_the_wall_clock_it_always_had
         {"ts_id": "s1", "model_type": "theta", "fit_seconds": 3.0},
         {"ts_id": "s2", "model_type": "theta", "fit_seconds": 5.0},
     ]
-    profile = profiling.harvest_profile(rows)
+    profile = cost.harvest_profile(rows)
     assert profile.models["theta"].median_wall_s == 4.0
     assert profile.models["theta"].max_process_rss_bytes is None
     assert profile.models["theta"].max_peak_gpu_bytes is None
@@ -1810,26 +1807,26 @@ def test_a_run_that_recorded_nothing_still_sizes_on_the_wall_clock_it_always_had
 
 def test_a_missing_device_reading_stays_absent_rather_than_becoming_zero_bytes() -> None:
     """``0`` device bytes is a plan — to pack unlimited tasks onto one card. NULL is not."""
-    profile = profiling.harvest_profile([_row(peak_gpu_bytes=None)])
+    profile = cost.harvest_profile([_row(peak_gpu_bytes=None)])
     assert profile.models["theta"].max_peak_gpu_bytes is None
     assert profile.models["theta"].max_process_rss_bytes == _GIB
 
 
 def test_a_model_deleted_since_the_run_lands_in_unknown_rather_than_sinking_the_read() -> None:
     """Family is resolved from today's registry, so a stale name must degrade quietly."""
-    profile = profiling.harvest_profile([_row(model_type="no_such_model_ever")])
+    profile = cost.harvest_profile([_row(model_type="no_such_model_ever")])
     assert set(profile.families) == {"unknown"}
 
 
 def test_harvest_carries_the_margins_it_was_given() -> None:
     """The margins are the caller's decision, exactly as on the pre-pass path."""
-    profile = profiling.harvest_profile([_row()], memory_margin=1.75, time_margin=1.5)
+    profile = cost.harvest_profile([_row()], memory_margin=1.75, time_margin=1.5)
     assert (profile.memory_margin, profile.time_margin) == (1.75, 1.5)
 
 
 def test_non_finite_and_junk_readings_read_as_no_evidence_rather_than_raising() -> None:
     """A NaN that reached the table must not become a fleet size."""
-    profile = profiling.harvest_profile(
+    profile = cost.harvest_profile(
         [_row(fit_seconds=float("nan")), _row(ts_id="s2", fit_seconds="oops")]
     )
     assert profile.n_ok == 0
@@ -1853,7 +1850,7 @@ def _harvest_rows(n: int = 4, **over: Any) -> list[dict[str, Any]]:
 
 def test_a_config_signature_leaves_history_length_unknown_rather_than_guessing() -> None:
     """At plan time nobody has read the data; an invented length would compare as if it had."""
-    sig = profiling.signature_from_config(_cfg(data={"source_table": "t", "series_limit": 500}))
+    sig = signature.signature_from_config(_cfg(data={"source_table": "t", "series_limit": 500}))
     assert (sig.source_table, sig.n_series, sig.freq) == ("t", 500, "D")
     assert sig.median_n_obs is None
 
@@ -1861,33 +1858,33 @@ def test_a_config_signature_leaves_history_length_unknown_rather_than_guessing()
 def test_a_row_signature_counts_distinct_series_not_rows() -> None:
     """One series fitted by five models is one series, not five."""
     rows = [_row(ts_id="a", model_type=m) for m in ("theta", "ets", "croston")] + [_row(ts_id="b")]
-    assert profiling.signature_from_rows(rows).n_series == 2
+    assert signature.signature_from_rows(rows).n_series == 2
 
 
 def test_a_row_signature_ignores_fold_and_ensemble_rows_like_the_harvest_does() -> None:
     """Backtest folds and ensembles are not fits; counting them would inflate the panel."""
     rows = [_row(ts_id="a"), _row(ts_id="b", fold_id=0), _row(ts_id="c", ensemble_id="mean")]
-    assert profiling.signature_from_rows(rows).n_series == 1
+    assert signature.signature_from_rows(rows).n_series == 1
 
 
 def test_a_row_signature_takes_the_median_history_length() -> None:
     """The typical series, not the longest — this axis is about "is this the same panel"."""
     rows = [_row(ts_id="a", n_obs=100), _row(ts_id="b", n_obs=400), _row(ts_id="c", n_obs=4000)]
-    assert profiling.signature_from_rows(rows).median_n_obs == 400
+    assert signature.signature_from_rows(rows).median_n_obs == 400
 
 
 def test_an_axis_neither_side_can_see_is_skipped_rather_than_warned_on() -> None:
     """An unchecked axis is honest; an axis compared against a placeholder is not."""
-    want = profiling.DataSignature(source_table="t", n_series=1000)
-    have = profiling.DataSignature(source_table=None, n_series=None, median_n_obs=400, freq="W")
-    assert profiling.compare_signatures(want, have) == ()
+    want = signature.DataSignature(source_table="t", n_series=1000)
+    have = signature.DataSignature(source_table=None, n_series=None, median_n_obs=400, freq="W")
+    assert signature.compare_signatures(want, have) == ()
 
 
 def test_a_different_table_or_frequency_always_warns() -> None:
     """No tolerance band on an identity axis: a different table is different data, full stop."""
-    warnings = profiling.compare_signatures(
-        profiling.DataSignature(source_table="t", freq="D"),
-        profiling.DataSignature(source_table="u", freq="W"),
+    warnings = signature.compare_signatures(
+        signature.DataSignature(source_table="t", freq="D"),
+        signature.DataSignature(source_table="u", freq="W"),
     )
     assert len(warnings) == 2
     assert "different table" in warnings[0] and "different frequency" in warnings[1]
@@ -1901,8 +1898,8 @@ def test_scale_axes_warn_only_past_an_order_of_magnitude(
     planned: int, measured: int, warns: bool
 ) -> None:
     """A band tight enough to fire every week trains operators to ignore the warning."""
-    got = profiling.compare_signatures(
-        profiling.DataSignature(n_series=planned), profiling.DataSignature(n_series=measured)
+    got = signature.compare_signatures(
+        signature.DataSignature(n_series=planned), signature.DataSignature(n_series=measured)
     )
     assert bool(got) is warns
 
@@ -1913,7 +1910,7 @@ def test_source_none_consults_nothing_at_all() -> None:
     def explode(*_: Any) -> Any:
         raise AssertionError("source='none' must not reach a loader")
 
-    resolved = profiling.resolve_profile_source(
+    resolved = source.resolve_profile_source(
         _sourced("none"), load_run=explode, load_baseline=explode, discover=explode
     )
     assert resolved is None
@@ -1922,7 +1919,7 @@ def test_source_none_consults_nothing_at_all() -> None:
 def test_profiling_off_wins_over_any_source() -> None:
     """`mode` stays the master switch; a source setting cannot re-enable a disabled profiler."""
     cfg = _sourced("auto", mode="off")
-    assert profiling.resolve_profile_source(cfg, load_run=lambda _: ([], None)) is None
+    assert source.resolve_profile_source(cfg, load_run=lambda _: ([], None)) is None
 
 
 def test_a_named_run_is_loaded_directly_without_a_discovery_query() -> None:
@@ -1933,7 +1930,7 @@ def test_a_named_run_is_loaded_directly_without_a_discovery_query() -> None:
         seen.append(run_id)
         return _harvest_rows(), "source_series_native"
 
-    profile = profiling.resolve_profile_source(
+    profile = source.resolve_profile_source(
         _sourced("my-run-abc123def456"),
         load_run=load,
         discover=lambda _: pytest.fail("a named run must not be re-discovered"),
@@ -1947,10 +1944,10 @@ def test_matching_evidence_is_measured_and_drifted_evidence_is_reference() -> No
     """The third basis is the whole point: "measured, but not on your data" must be visible."""
     cfg = _cfg(data={"source_table": "source_series_native", "series_limit": 4})
     rows = _harvest_rows()
-    matched = profiling.resolve_profile_source(
+    matched = source.resolve_profile_source(
         cfg, load_run=lambda _: (rows, "source_series_native"), discover=lambda _: "r-1"
     )
-    drifted = profiling.resolve_profile_source(
+    drifted = source.resolve_profile_source(
         cfg, load_run=lambda _: (rows, "somewhere_else"), discover=lambda _: "r-1"
     )
     assert matched is not None and matched.provenance is not None
@@ -1963,7 +1960,7 @@ def test_matching_evidence_is_measured_and_drifted_evidence_is_reference() -> No
 
 def test_drifted_evidence_is_still_used_rather_than_discarded() -> None:
     """A warning is not a veto: sizing off old evidence still beats sizing off none."""
-    profile = profiling.resolve_profile_source(
+    profile = source.resolve_profile_source(
         _sourced("my-run-abc123def456"), load_run=lambda _: (_harvest_rows(), "another_table")
     )
     assert profile is not None
@@ -1973,10 +1970,10 @@ def test_drifted_evidence_is_still_used_rather_than_discarded() -> None:
 def test_the_resolved_profile_is_the_harvest_of_those_rows() -> None:
     """The resolver routes evidence; it must never become a second aggregation."""
     rows = _harvest_rows()
-    resolved = profiling.resolve_profile_source(
+    resolved = source.resolve_profile_source(
         _sourced("my-run-abc123def456"), load_run=lambda _: (rows, None)
     )
-    direct = profiling.harvest_profile(rows)
+    direct = cost.harvest_profile(rows)
     assert resolved is not None
     assert replace(resolved, provenance=None).to_dict() == direct.to_dict()
 
@@ -1985,7 +1982,7 @@ def test_the_measurement_timestamp_comes_from_the_rows() -> None:
     """"When was this measured" is the question an operator asks of a suspicious profile."""
     rows = _harvest_rows(2)
     rows[1]["created_at"] = "2026-09-01T00:00:00Z"
-    profile = profiling.resolve_profile_source(
+    profile = source.resolve_profile_source(
         _sourced("my-run-abc123def456"), load_run=lambda _: (rows, None)
     )
     assert profile is not None and profile.provenance is not None
@@ -1994,8 +1991,8 @@ def test_the_measurement_timestamp_comes_from_the_rows() -> None:
 
 def test_auto_falls_through_to_the_baseline_when_nothing_matches() -> None:
     """Step 4 of the chain: no prior run is a reason to reach for reference numbers, not to stop."""
-    baseline = profiling.build_profile([])
-    profile = profiling.resolve_profile_source(
+    baseline = cost.build_profile([])
+    profile = source.resolve_profile_source(
         _sourced("auto"), discover=lambda _: None, load_baseline=lambda: baseline
     )
     assert profile is not None and profile.provenance is not None
@@ -2005,8 +2002,8 @@ def test_auto_falls_through_to_the_baseline_when_nothing_matches() -> None:
 
 def test_no_evidence_anywhere_resolves_to_static_config() -> None:
     """The floor under every path: `None` means "size from what you declared", not "fail"."""
-    assert profiling.resolve_profile_source(_sourced("auto")) is None
-    empty = profiling.resolve_profile_source(_sourced("baseline"), load_baseline=lambda: None)
+    assert source.resolve_profile_source(_sourced("auto")) is None
+    empty = source.resolve_profile_source(_sourced("baseline"), load_baseline=lambda: None)
     assert empty is None
 
 
@@ -2016,12 +2013,12 @@ def test_a_registry_hiccup_falls_back_instead_of_sinking_the_run() -> None:
     def boom(*_: Any) -> Any:
         raise RuntimeError("bigquery unavailable")
 
-    assert profiling.resolve_profile_source(_sourced("auto"), discover=boom, load_run=boom) is None
+    assert source.resolve_profile_source(_sourced("auto"), discover=boom, load_run=boom) is None
 
 
 def test_the_in_run_pre_pass_stamps_a_measured_provenance() -> None:
     """The one path that measures your data on your hardware, in-run, says so unconditionally."""
-    profile = profiling.resolve_profile(
+    profile = source.resolve_profile(
         _profilable_panel(),
         _cfg(compute={"profile": {"min_cells": 1, "samples": 2}}),
         ["theta"],
@@ -2039,9 +2036,9 @@ def test_profile_for_run_short_circuits_before_importing_the_registry() -> None:
     """`source="none"` must cost nothing — not even a lazy import of the BigQuery client."""
     monkey = pytest.MonkeyPatch()
     with monkey.context() as m:
-        m.setattr(profiling, "_RESOLVED", {})
+        m.setattr(source, "_RESOLVED", {})
         m.setitem(__import__("sys").modules, "scale_forecasting.registry.bq", None)
-        assert profiling.profile_for_run(_sourced("none")) is None
+        assert source.profile_for_run(_sourced("none")) is None
 
 
 def test_profile_for_run_memoizes_so_every_family_job_sizes_off_one_lookup() -> None:
@@ -2066,12 +2063,12 @@ def test_profile_for_run_memoizes_so_every_family_job_sizes_off_one_lookup() -> 
 
     monkey = pytest.MonkeyPatch()
     with monkey.context() as m:
-        m.setattr(profiling, "_RESOLVED", {})
+        m.setattr(source, "_RESOLVED", {})
         m.setattr("scale_forecasting.registry.bq", _FakeBQ, raising=False)
         m.setitem(__import__("sys").modules, "scale_forecasting.registry.bq", _FakeBQ)
         cfg = _cfg()
-        first = profiling.profile_for_run(cfg)
-        second = profiling.profile_for_run(cfg)
+        first = source.profile_for_run(cfg)
+        second = source.profile_for_run(cfg)
     assert calls == ["discover", "read"]
     assert first is second
 
@@ -2082,4 +2079,4 @@ def test_the_shipped_baseline_is_absent_until_it_is_measured_and_committed() -> 
     The loader is real and wired into the chain, so shipping one (W13) is dropping a file in, not
     rewiring the resolver — but there is nothing to load until a live run produces it.
     """
-    assert profiling.load_baseline() is None
+    assert source.load_baseline() is None

@@ -22,7 +22,7 @@ decision and the evidence for it.
 
 **What measurement actually changed, honestly.** Of the three slot axes, the interesting
 result is that **cores is usually 1, and that is a finding rather than a null one.** The
-probe pins every native thread pool to one thread (`profiling._pinned_intraop_threads`),
+probe pins every native thread pool to one thread (`profiling.measure._pinned_intraop_threads`),
 which is exactly the environment a Ray task runs in — Ray exports ``OMP_NUM_THREADS`` =
 the task's ``num_cpus``. So the measurement says the hardcoded ``num_cpus=1`` was right,
 and now says it from evidence instead of from assumption. The axes that move a run are the
@@ -73,7 +73,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .profiling import ComputeProfile
+    from .profiling.cost import ComputeProfile
 
 __all__ = [
     "ClusterTranslation",
@@ -791,7 +791,7 @@ _MIB = 1024**2
 # Native thread-pool caps. A Ray task inherits ``OMP_NUM_THREADS = num_cpus`` for free; a
 # Spark executor pins nothing, so N concurrent Python workers each grab the whole executor
 # and the machine thrashes on N x cores threads. The profile was measured with these pinned
-# to one (`profiling._pinned_intraop_threads`), so exporting them is also what makes the
+# to one (`profiling.measure._pinned_intraop_threads`), so exporting them is also what makes the
 # measurement describe the environment it is being used to size.
 #
 # The ``pin_threads=False`` escape hatch on both translators exists for exactly one caller: a

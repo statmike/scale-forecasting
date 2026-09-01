@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from ..config import RunConfig
-    from ..profiling import ComputeProfile
+    from ..profiling.cost import ComputeProfile
     from ..settings import Settings
 
 __all__ = [
@@ -511,7 +511,7 @@ def plan_cluster(
     sizing decision, logged and stamped to the run for audit.
 
     ``profile`` is an optional `ComputeProfile` from the driver-side measurement pre-pass
-    (`profiling.resolve_profile`). When given, each pool's slot is sized from what the models
+    (`profiling.source.resolve_profile`). When given, each pool's slot is sized from what the models
     actually cost — cores, host memory, and the GPU fraction — instead of from the constants this
     function used to inline; ``None`` reproduces those constants exactly, so an unprofiled run is
     byte-identical to one planned before any of this existed. It is an argument rather than a config

@@ -22,7 +22,8 @@ from scale_forecasting import resources
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.engines.spark_io import _MODEL_COL
-from scale_forecasting.profiling import MeasuredFit, build_profile
+from scale_forecasting.profiling.cost import build_profile
+from scale_forecasting.profiling.measure import MeasuredFit
 from scale_forecasting.registry.ids import make_run_id
 
 # theta/holtwinters = CPU (statistical); xgboost = CPU (ml); neuralprophet = GPU (deep_learning).

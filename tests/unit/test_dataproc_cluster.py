@@ -367,7 +367,8 @@ def test_a_handed_in_profile_reshapes_the_cluster_executor() -> None:
     run's. `cluster_sizing` is handed one (by `profiling.profile_for_run`) rather than fetching it,
     which is what keeps this function pure and offline-testable.
     """
-    from scale_forecasting.profiling import MeasuredFit, build_profile
+    from scale_forecasting.profiling.cost import build_profile
+    from scale_forecasting.profiling.measure import MeasuredFit
 
     cfg = _cfg(data={"source_table": "t", "horizon": 7, "series_limit": 100})
     profile = build_profile(

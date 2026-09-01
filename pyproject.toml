@@ -28,10 +28,10 @@ dependencies = [
     # Caps the native BLAS/OpenMP thread pools around a profiling probe fit, so the measured
     # cpu/wall ratio describes the model rather than the core count of whatever machine ran the
     # pre-pass (unpinned, that ratio read 19.7 on a 32-core box; pinned it reads 1.0). A
-    # transitive dep of scikit-learn above, pinned explicit because profiling.py imports it
+    # transitive dep of scikit-learn above, pinned explicit because `profiling.measure` imports it
     # directly (the same rule protobuf follows below). It is half the fix, not the whole one:
     # it re-sizes the pools of libraries already loaded, while OMP_NUM_THREADS and friends cap
-    # the pool of a library loaded later, during the fit itself. profiling.py sets both.
+    # the pool of a library loaded later, during the fit itself. `profiling.measure` sets both.
     "threadpoolctl>=3.1",
     "optuna>=3.6",
     "holidays>=0.50",
