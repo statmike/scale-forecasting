@@ -164,9 +164,9 @@ the honest starting position and the reason for adding the table at all: it is t
 | Config | Proves | Status | Date | run_id | Axes at proof |
 |--------|--------|--------|------|--------|---------------|
 | `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | CURRENT | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11` |
-| `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | NEVER_RUN | — | — | — |
-| `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | NEVER_RUN | — | — | — |
-| `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | NEVER_RUN | — | — | — |
+| `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | CURRENT | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | NEVER_RUN | — | — | — |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | NEVER_RUN | — | — | — |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | NEVER_RUN | — | — | — |
@@ -175,6 +175,17 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | NEVER_RUN | — | — | — |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
+
+The three Spark demo rows landed together on 2026-09-01, and two of them are worth reading past the
+`CURRENT`:
+
+- **`mixed_demo` is the cross-runtime comparability claim, live.** One `run_id`, one leaderboard,
+  `theta` from a Dataproc Serverless batch ranked against `arima_plus` and `timesfm` from a BigQuery
+  job on backtested WAPE (0.451 / 0.418 / 0.391). Two runtimes, one ranking, no manual join.
+- **`ensemble_demo` adds the ensemble node as a third job** (BigQuery), and its three strategies
+  rank *inside* the same board: `inverse_error` 0.408, `mean` 0.411, `median` 0.413 — all three
+  beating both `arima_plus` and `theta`, none beating `timesfm` at 0.391. Recorded as-is. The claim
+  the product makes is that ensembles are produced, ranked and comparable, not that they win.
 
 ### What this surface will exercise that the smoke suite cannot
 
@@ -361,6 +372,16 @@ Things that are true today and that no entry above covers. Keep this list short 
   `1`, `maxExecutors=4`, and `memoryOverhead=3834m`. Per-family sizing is real rather than a
   per-run constant wearing a family label, and the two overlays were written under one `run_id`
   without either clobbering the other.
+
+  **The signature check fired live too, and it degraded rather than lied.** The three demo configs
+  run 10 series and discovered smoke 01's 100-series harvest. `explode-demo-d1b57690dc96`'s
+  provenance records `basis: "reference"` — *not* `"measured"` — with
+  `warnings: ["series count differs by 10x (100 measured vs 10 planned)"]`, while still naming the
+  source run and its signature. That is the designed path for a profile that is *informative but
+  not representative*, and it had never executed before. Two things make it worth a paragraph: the
+  warning reached the **audit trail**, not just the driver log, so a reader of the registry a month
+  later can see the fleet was sized from mismatched evidence; and the demotion is visible in a
+  field (`basis`) that distinguishes three states now rather than two.
 
   One thing to watch, recorded as an observation and not a defect: `statistical` measured
   `max_effective_cores` of **1.05** and was sized to a **2-core** slot. The ceiling is doing what it
