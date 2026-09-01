@@ -64,6 +64,7 @@ There are three ways a run begins, all converging on the same engines.
 | Entrypoint | File | What it is |
 |-----------|------|------------|
 | `main.run(cfg)` | [`main.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py) | **The spine.** In-process orchestrator — owns the `run_id` and the header, plans the DAG, launches every family job in parallel, then runs the ensemble node. |
+| `job_launch` | [`job_launch.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/job_launch.py) | **One DAG node, launched.** `launch_family_job` / `launch_native_job` / `launch_ensemble_job` — three variants of one recipe: resolve the attempt, derive the deterministic job identity, open the node's own `run_jobs` row, dispatch in contributor mode. Both drivers call these — `main.run` in-process, and an emitted Airflow DAG's task callables under Composer — which is where "same code local ↔ Composer" is literally true. |
 | `submit` | [`submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/submit.py) | Submit-side launcher for a **Spark** family: zip the code, stage the config to GCS, build + submit a Dataproc Serverless batch. |
 | `batch_infra` | [`batch_infra.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/batch_infra.py) | The resolved Dataproc deployment envelope (`BatchInfra`) — code bucket, image, SA, subnet, and which of the two dependency envelopes delivers the locked environment. Read by the serverless *and* cluster paths, the command emitter and the fallback check, most of which never submit a batch. |
 | `batch_telemetry` | [`batch_telemetry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/batch_telemetry.py) | Reach a batch and read what it says — the regional client, the pure wall/DCU/sizing extraction, and the merge onto the run header. Used by `submit` at finish and by `probes.runtimes` mid-flight. |
@@ -87,15 +88,15 @@ There are three ways a run begins, all converging on the same engines.
 2. **Write the header** once — `lifecycle.run_header(..., manage=True)` writes one RUNNING row
    ([`registry/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/registry)) and finalizes it once at the end.
 3. **Fan out in parallel** — a `ThreadPoolExecutor` launches each Python family job
-   (`_launch_family_job`) on its own thread while the BigQuery-native family runs inline on the main
-   thread (`_launch_native_job`). Every family job runs `manage_header=False` so **exactly one**
+   (`job_launch.launch_family_job`) on its own thread while the BigQuery-native family runs inline on the main
+   thread (`job_launch.launch_native_job`). Every family job runs `manage_header=False` so **exactly one**
    header row exists per `run_id`, and each opens **its own** `run_jobs` row (contributor mode).
 4. **Ensemble node** (if enabled, and only if every family job succeeded) —
-   `_launch_ensemble_job(...)`, the run's final DAG node.
+   `job_launch.launch_ensemble_job(...)`, the run's final DAG node.
 5. **Finalize** — `hdr.finalize(...)` writes the combined terminal status + wall-clock.
 
-Each Python family's runtime dispatch lives in `_launch_family_job`
-([`main.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py)): it looks up the family's **resolved**
+Each Python family's runtime dispatch lives in `launch_family_job`
+([`job_launch.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/job_launch.py)): it looks up the family's **resolved**
 runtime (`job.compute.runtime` — Spark *xor* Ray, chosen per family) and calls
 `get_submitter(runtime).launch(...)` (Layer 1½). An injected Spark session (e.g. notebook 01's Spark
 Connect) makes a Spark family run **in-process** against that session instead of a remote batch,
@@ -106,7 +107,7 @@ using the identical engine code.
 [`submitters.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/submitters.py) captures "how do I launch a Python family on
 its runtime" as a `RuntimeSubmitter` protocol with one implementation per runtime — `SparkSubmitter`
 (→ `submit.submit_batch`, a Dataproc batch) and `RaySubmitter` (→ `ray_submit.submit_ray`, a Vertex
-Ray job). `get_submitter(runtime)` returns the right one, so `_launch_family_job` is a single dispatch
+Ray job). `get_submitter(runtime)` returns the right one, so `launch_family_job` is a single dispatch
 line — the family doesn't know how its runtime is provisioned.
 
 ---
@@ -374,7 +375,7 @@ identity that ties its platform job, its `run_jobs` row, and its offline plan to
 - **The canonical key** — `registry.ids.make_job_key(run_id, family, attempt)` →
   `sf-<run_id>-<family>-a<n>`. This is the one name the DAG plans (`dag_nodes`), the executor stamps,
   and a trace keys on. It lands in `run_jobs.job_id`.
-- **The system id** — `main._system_job_id(job_key, runtime)` maps the canonical key to each
+- **The system id** — `job_launch._system_job_id(job_key, runtime)` maps the canonical key to each
   platform's legal charset/length: `dataproc_job_id` (Spark), `ray_submission_id` (Ray),
   `bigquery_job_id` (native / ensemble). It lands in `run_jobs.system_job_id`, so you can jump from a
   run's trace straight to the platform console.
@@ -420,7 +421,7 @@ CLI / notebook / Airflow / SDK
   main.run(cfg)                                            main.py
     dag.plan_dag → make_run_id (ids.py) + group_models_by_family + resolve_family_compute
     lifecycle.run_header (RUNNING, one shared header)             registry/lifecycle.py (ddl.py, views.py)
-    ├─ [thread] per Python family — _launch_family_job → get_submitter(runtime).launch
+    ├─ [thread] per Python family — job_launch.launch_family_job → get_submitter(runtime).launch
     │    ├─ SparkSubmitter → submit.submit_batch → spark_entry.main → spark_explode.run
     │    │      spark_io: cross_join_models · add_bucket · make_group_runner
     │    │      applyInPandas → spark_io.run_group → worker.run_cell → cells.write_cells
@@ -429,8 +430,8 @@ CLI / notebook / Airflow / SDK
     │    │      make_chunk_runner → spark_io.run_group → worker.run_cell → cells.write_cells
     │    └─ injected Spark session → spark_explode.run   (in-process, e.g. NB01)
     │        (each family opens its own run_jobs row via lifecycle.run_job)
-    ├─ [inline] native family — _launch_native_job → bigquery_engine.run   (BQML SQL → bq write-api)
-    └─ (all families join & green) ensemble node — _launch_ensemble_job → ensemble_run.run_ensembles
+    ├─ [inline] native family — job_launch.launch_native_job → bigquery_engine.run  (BQML SQL)
+    └─ (all families join & green) ensemble node — job_launch.launch_ensemble_job → run_ensembles
     hdr.finalize (combined status + wall-clock)            registry/lifecycle.py
 
 worker.run_cell  ── THE unit of work ──                     worker.py

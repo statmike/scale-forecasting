@@ -10,11 +10,11 @@ logic).
 The node set mirrors `dag.plan_dag`:
 
 * ``begin_run`` — ensure the registry tables exist and write the run header (RUNNING).
-* ``run_family`` / ``run_native`` — run one model family on its resolved runtime, each **self-owning
-  its own ``run_jobs`` row** (via `main._launch_family_job` / `main._launch_native_job`, which wrap
-  the launch in `registry.lifecycle.run_job`) — so the per-job trace and wall-clock are
-  byte-identical to a live `main.run`, and a concurrent (microbatch) ensemble can watch the rows
-  flip in real time.
+* ``run_family`` / ``run_native`` — run one model family on its resolved runtime, each
+  **self-owning its own ``run_jobs`` row** (via `job_launch.launch_family_job` /
+  `job_launch.launch_native_job`, which wrap the launch in `registry.lifecycle.run_job`) — so the
+  per-job trace and wall-clock are byte-identical to a live `main.run`, and a concurrent
+  (microbatch) ensemble can watch the rows flip in real time.
 * ``run_ensemble`` — the ensemble node, ``barrier`` (post-join) or ``microbatch`` (concurrent, its
   cross-process stop-signal polling ``run_jobs`` for base-family completion).
 * ``create_ray_cluster`` / ``delete_ray_cluster`` (and the Dataproc-cluster pair) — the shared
@@ -107,14 +107,14 @@ def run_family(config_uri: str, family: str, ti: Any = None) -> None:
     """Run one Python family's job on its resolved runtime (the call `main.run` makes per family).
 
     Re-plans the run's DAG from the staged config (`dag.plan_dag`), selects this ``family``'s
-    `dag.FamilyJob`, and dispatches through `main._launch_family_job` — which opens the family's
-    ``run_jobs`` row (RUNNING → terminal + wall-clock), maps its deterministic ``job_key`` to the
-    platform job id, and submits to the family's runtime submitter in contributor mode (the shared
-    header is owned by `begin_run`/`finalize_run`). When the run shares an ephemeral cluster, the
-    ``(name, region)`` is pulled from the create-cluster task's XCom and threaded in; a family that
-    does not share one self-provisions.
+    `dag.FamilyJob`, and dispatches through `job_launch.launch_family_job` — which opens the
+    family's ``run_jobs`` row (RUNNING → terminal + wall-clock), maps its deterministic ``job_key``
+    to the platform job id, and submits to the family's runtime submitter in contributor mode (the
+    shared header is owned by `begin_run`/`finalize_run`). When the run shares an ephemeral cluster,
+    the ``(name, region)`` is pulled from the create-cluster task's XCom and threaded in; a family
+    that does not share one self-provisions.
     """
-    from . import main
+    from . import job_launch
     from .config import load_config_uri
     from .dag import plan_dag
     from .errors import ConfigError
@@ -128,7 +128,7 @@ def run_family(config_uri: str, family: str, ti: Any = None) -> None:
     job = next((j for j in run_dag.python_jobs if j.family == family), None)
     if job is None:
         raise ConfigError(f"run_family: no Python family {family!r} in run {run_id}")
-    main._launch_family_job(
+    job_launch.launch_family_job(
         cfg,
         job,
         run_id,
@@ -141,12 +141,12 @@ def run_family(config_uri: str, family: str, ti: Any = None) -> None:
 def run_native(config_uri: str) -> None:
     """Run the BigQuery-native family's job inline (the same call `main.run` makes for native).
 
-    Selects the run's native `dag.FamilyJob` and dispatches through `main._launch_native_job`, which
-    opens the native ``run_jobs`` row and runs the BigQuery engine in contributor mode under the
-    shared header. Raises `errors.ConfigError` if the config has no native models (the DAG would not
-    have emitted this task).
+    Selects the run's native `dag.FamilyJob` and dispatches through `job_launch.launch_native_job`,
+    which opens the native ``run_jobs`` row and runs the BigQuery engine in contributor mode under
+    the shared header. Raises `errors.ConfigError` if the config has no native models (the DAG would
+    not have emitted this task).
     """
-    from . import main
+    from . import job_launch
     from .config import load_config_uri
     from .dag import plan_dag
     from .errors import ConfigError
@@ -159,22 +159,22 @@ def run_native(config_uri: str) -> None:
     job = plan_dag(cfg).native_job
     if job is None:
         raise ConfigError(f"run_native: run {run_id} has no BigQuery-native family")
-    main._launch_native_job(cfg, job, run_id, settings)
+    job_launch.launch_native_job(cfg, job, run_id, settings)
 
 
 def run_ensemble(config_uri: str) -> None:
     """Run the ensemble node — ``barrier`` (post-join) or ``microbatch`` (concurrent) per config.
 
-    Dispatches through `main._launch_ensemble_job`, which opens the ensemble's own ``run_jobs`` row
-    and blends the base predictions into the consensus pseudo-models. In ``microbatch`` mode the DAG
-    runs this task **in parallel** with the base families (gated only on `begin_run`); its
+    Dispatches through `job_launch.launch_ensemble_job`, which opens the ensemble's own ``run_jobs``
+    row and blends the base predictions into the consensus pseudo-models. In ``microbatch`` mode the
+    DAG runs this task **in parallel** with the base families (gated only on `begin_run`); its
     ``upstream_done`` predicate is the cross-process equivalent of the in-process ``base_done``
     event — it polls ``run_jobs`` (`registry.jobs.read_run_jobs`) and reports the base jobs finished
     once every base family has reached a terminal status, so the drain loop stops after its final
     ready-series pass. ``barrier`` mode ignores the predicate (the task already runs after the
     join).
     """
-    from . import main
+    from . import job_launch
     from .config import load_config_uri
     from .dag import plan_dag
     from .registry.ids import make_run_id
@@ -193,9 +193,9 @@ def run_ensemble(config_uri: str) -> None:
             statuses = {r["family"]: r.get("status") for r in rows}
             return all(statuses.get(family) in _TERMINAL_STATUSES for family in base_families)
 
-        main._launch_ensemble_job(cfg, run_id, settings, upstream_done=upstream_done)
+        job_launch.launch_ensemble_job(cfg, run_id, settings, upstream_done=upstream_done)
     else:
-        main._launch_ensemble_job(cfg, run_id, settings)
+        job_launch.launch_ensemble_job(cfg, run_id, settings)
 
 
 def finalize_run(config_uri: str) -> None:
