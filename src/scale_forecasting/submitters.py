@@ -133,7 +133,7 @@ class SparkSubmitter:
             # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named). Its
             # id is server-assigned, so the handle carries the real id (differs from system_job_id)
             # for the caller to record (reverse-trace), plus the region the job actually ran in.
-            from .dataproc_cluster import submit_cluster_job
+            from .cluster_submit import submit_cluster_job
 
             real_id, region = submit_cluster_job(
                 cfg,

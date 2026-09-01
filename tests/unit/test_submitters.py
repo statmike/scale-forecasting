@@ -123,7 +123,7 @@ def test_spark_launch_threads_gpu_to_batch(monkeypatch: pytest.MonkeyPatch) -> N
 def test_spark_launch_cluster_mode_submits_cluster_job(monkeypatch: pytest.MonkeyPatch) -> None:
     # spark_mode="cluster" routes to the Dataproc cluster submitter (not the Serverless batch),
     # threading the per-family id, the GPU sizing, and the reuse target through.
-    import scale_forecasting.dataproc_cluster as cluster_mod
+    import scale_forecasting.cluster_submit as cluster_mod
 
     seen: dict[str, Any] = {}
     # The fake returns (server-assigned id, landed region); the id is distinct from the

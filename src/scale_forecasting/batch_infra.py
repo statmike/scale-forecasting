@@ -31,7 +31,7 @@ _ENV_SUBNETWORK = "SF_SUBNETWORK_URI"
 
 # Optional: the packed-venv archive URI (gs://…/envs/<hash>.tar.gz). The Dataproc-cluster runtime's
 # dependency-delivery mechanism — clusters can't use the custom container, so a cluster job attaches
-# this archive instead (see dataproc_cluster.build_job). Unset for serverless/Ray-only deployments.
+# this archive instead (see cluster_deps). Unset for serverless/Ray-only deployments.
 _ENV_VENV_ARCHIVE = "SF_VENV_ARCHIVE"
 
 # Optional: the custom GPU cluster image URI (a Compute image with the NVIDIA driver pre-baked,
@@ -58,7 +58,7 @@ _DEFAULT_RUNTIME_VERSION = "2.2"
 #
 # ⚠️ ``packed_venv`` on serverless is UNPROVEN and is the reason this switch exists. Job archives are
 # localized to the *executors'* working dirs; whether the serverless *driver* gets one is the open
-# question (on a cluster it does not — see ``dataproc_cluster._VENV_DIR``, where an init action
+# question (on a cluster it does not — see ``cluster_deps._VENV_DIR``, where an init action
 # lands the venv at an absolute path instead, a fix serverless has no equivalent of). Default stays
 # "container" until a live batch says otherwise.
 _ENV_SERVERLESS_DEPS = "SF_SERVERLESS_DEPS"

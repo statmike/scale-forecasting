@@ -120,7 +120,7 @@ class SparkProbe:
 
     Serverless reuses `batch_telemetry._batch_client` + ``get_batch`` (with
     `batch_telemetry.extract_job_telemetry`
-    for the usage overlay); cluster reuses the new `dataproc_cluster.get_cluster_job` non-blocking
+    for the usage overlay); cluster reuses `cluster_telemetry.get_cluster_job`, the non-blocking
     read. A missing batch/job (``NotFound``) is NOT_FOUND (``exists=False``); any other error
     degrades to UNKNOWN.
     """
@@ -168,7 +168,7 @@ class SparkProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..dataproc_cluster import get_cluster_job
+            from ..cluster_telemetry import get_cluster_job
 
             try:
                 state_name, detail = get_cluster_job(
@@ -214,7 +214,7 @@ class SparkProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..dataproc_cluster import cancel_cluster_job
+            from ..cluster_telemetry import cancel_cluster_job
 
             try:
                 cancel_cluster_job(

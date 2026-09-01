@@ -243,7 +243,7 @@ knobs only matter for a family that runs on Ray.
 | `max_parallelism` | `int` | `1000` | `> 0` | Max parallel tasks. |
 | `bucket_target_cells` | `int` | `8` | `> 0` | Target cells per Spark bucket (shuffle-partition sizing). |
 | `machine_family` | `"auto"` \| `"n1"` \| `"n2"` \| `"n2d"` \| `"e2"` \| `"c2"` | `"auto"` | — | GCE machine family for a **Dataproc cluster's** master + CPU workers (`"auto"` = `n1`). No-op on Serverless and on GPU workers — see below. |
-| `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | How a **Dataproc cluster** family gets its dependencies. `"container"` raises: it is a Serverless mechanism. See `dataproc_cluster._resolve_cluster_deps`. |
+| `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | How a **Dataproc cluster** family gets its dependencies. `"container"` raises: it is a Serverless mechanism. See `cluster_deps._resolve_cluster_deps`. |
 | `persist_models` | `bool` | `false` | — | Persist each fitted model as a GCS artifact (lineage). |
 | `use_gpu` | `bool` | `false` | — | Enable GPU (Ray). |
 | `gpu_type` | `str` | `"T4"` | — | GPU accelerator type. |

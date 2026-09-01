@@ -37,7 +37,7 @@ image and the archive both rebuild only when the locked deps change, never on a 
 | **Dataproc Serverless** (`explode` / `multi` batches) | **Custom container** | the shared runtime image, attached on every submit | `submit.py` (`runtime_config.container_image`) |
 | **Spark Connect** (interactive, nb01) — *the same Serverless product, session API not batch API* | **Custom container** + artifacts | the same image, pinned on the session; code via `addArtifacts`. Covers the **executors only** — the driver is your local process | notebook session cell |
 | **Ray on Vertex** (nb04) | **`uv` runtime_env** | `uv` installs the frozen lock into the per-job venv on Vertex's **prebuilt** Ray image | `ray_submit.py` (`build_runtime_env`) |
-| **Dataproc cluster** (`spark_mode="cluster"`) | **Self-contained venv archive** | a tar of the image's `/opt/venv` (interpreter bundled) attached to the job (`#env`) | `dataproc_cluster.py` + `compute.spark_deps` |
+| **Dataproc cluster** (`spark_mode="cluster"`) | **Self-contained venv archive** | a tar of the image's `/opt/venv` (interpreter bundled) attached to the job (`#env`) | `cluster_deps.py` + `compute.spark_deps` |
 | **Colab Enterprise** (all notebooks) | **`uv`-from-lock install** | `uv` installs the frozen lock in the runtime (bootstrap or post-startup) | notebook bootstrap cell / template |
 | **Local dev** | **`uv` project env** | `uv sync --frozen` installs the same lock | `uv.lock` |
 
@@ -207,7 +207,7 @@ How it is produced and consumed:
    the image is intentionally pip-less). Building the archive *from the image* guarantees it is the
    exact same environment — no second resolve, no drift. (See `docker/cloudbuild.yaml`; Terraform runs
    this automatically on apply and exposes the URI as the `venv_archive_uri` output.)
-2. **Attach (submit time).** `dataproc_cluster.py` attaches the archive to the PySpark job with
+2. **Attach (submit time).** `cluster_submit.py` attaches the archive to the PySpark job with
    `--archives=<uri>#env` and points Spark at the unpacked interpreter via
    `spark.pyspark.python` / `spark.pyspark.driver.python = ./env/bin/python`. Dataproc unpacks the
    tarball into `./env` on every node before the job starts; `./env/bin/python` resolves through the
@@ -241,7 +241,8 @@ create is fast and repeatable, and CPU clusters keep using the stock `2.2-debian
 The custom image is produced by a **separate** Cloud Build (`docker/cloudbuild-gpu-image.yaml`) with
 its own content-addressing — the customization script + the base Dataproc version, *not* the lock.
 That is deliberate: it carries a kernel driver, not our packages, so it must **not** rebuild when a
-dependency changes. `dataproc_cluster.py` selects it for GPU clusters via the image URI (a Terraform output);
+dependency changes. `dataproc_cluster.py` selects it for GPU clusters via the image URI (a Terraform
+output);
 when no custom GPU image is configured, the cluster falls back to installing the driver at create time.
 
 ## Colab Enterprise — `uv`-from-lock install

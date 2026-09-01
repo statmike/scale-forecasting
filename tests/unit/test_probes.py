@@ -273,7 +273,7 @@ def _cluster_handle() -> ProbeHandle:
 def test_spark_cluster_maps_job_state(
     monkeypatch: pytest.MonkeyPatch, state_name: str, expected: str
 ) -> None:
-    import scale_forecasting.dataproc_cluster as cluster_mod
+    import scale_forecasting.cluster_telemetry as telemetry_mod
 
     seen: dict[str, Any] = {}
 
@@ -283,7 +283,7 @@ def test_spark_cluster_maps_job_state(
         seen["timeout"] = kw.get("timeout")
         return state_name, "detail-msg"
 
-    monkeypatch.setattr(cluster_mod, "get_cluster_job", _fake_get_cluster_job)
+    monkeypatch.setattr(telemetry_mod, "get_cluster_job", _fake_get_cluster_job)
 
     result = SparkProbe().check(_cluster_handle(), settings=_SETTINGS)
 
@@ -299,12 +299,12 @@ def test_spark_cluster_maps_job_state(
 def test_spark_cluster_not_found_sets_exists_false(monkeypatch: pytest.MonkeyPatch) -> None:
     from google.api_core.exceptions import NotFound
 
-    import scale_forecasting.dataproc_cluster as cluster_mod
+    import scale_forecasting.cluster_telemetry as telemetry_mod
 
     def _raise(*a: Any, **kw: Any) -> tuple[str, str]:
         raise NotFound("no such job")
 
-    monkeypatch.setattr(cluster_mod, "get_cluster_job", _raise)
+    monkeypatch.setattr(telemetry_mod, "get_cluster_job", _raise)
 
     result = SparkProbe().check(_cluster_handle(), settings=_SETTINGS)
 
@@ -313,12 +313,12 @@ def test_spark_cluster_not_found_sets_exists_false(monkeypatch: pytest.MonkeyPat
 
 
 def test_spark_cluster_error_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.dataproc_cluster as cluster_mod
+    import scale_forecasting.cluster_telemetry as telemetry_mod
 
     def _raise(*a: Any, **kw: Any) -> tuple[str, str]:
         raise RuntimeError("transport down")
 
-    monkeypatch.setattr(cluster_mod, "get_cluster_job", _raise)
+    monkeypatch.setattr(telemetry_mod, "get_cluster_job", _raise)
 
     result = SparkProbe().check(_cluster_handle(), settings=_SETTINGS)
 
@@ -330,12 +330,12 @@ def test_spark_cluster_empty_native_id_is_unknown(monkeypatch: pytest.MonkeyPatc
     # A cluster job's id is server-assigned and only stamped back after submission, so the entry
     # handle carries native_id="" for the launch window. The probe must NOT call get_cluster_job("")
     # (that would 404 → a false NOT_FOUND/LOST); it reports UNKNOWN(exists=True) without any I/O.
-    import scale_forecasting.dataproc_cluster as cluster_mod
+    import scale_forecasting.cluster_telemetry as telemetry_mod
 
     def _must_not_call(*a: Any, **kw: Any) -> tuple[str, str]:
         raise AssertionError("get_cluster_job must not be called for an empty native_id")
 
-    monkeypatch.setattr(cluster_mod, "get_cluster_job", _must_not_call)
+    monkeypatch.setattr(telemetry_mod, "get_cluster_job", _must_not_call)
     handle = ProbeHandle("spark", native_id="", region="us-west1", spark_mode="cluster")
 
     result = SparkProbe().check(handle, settings=_SETTINGS)
@@ -1000,14 +1000,14 @@ def test_spark_serverless_cancel_permission_denied_gives_iam_hint(
 
 
 def test_spark_cluster_cancel_calls_cancel_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.dataproc_cluster as cluster_mod
+    import scale_forecasting.cluster_telemetry as telemetry_mod
 
     seen: dict[str, Any] = {}
 
     def _fake_cancel(region: str, job_id: str, **kw: Any) -> None:
         seen.update(region=region, job_id=job_id, timeout=kw.get("timeout"))
 
-    monkeypatch.setattr(cluster_mod, "cancel_cluster_job", _fake_cancel)
+    monkeypatch.setattr(telemetry_mod, "cancel_cluster_job", _fake_cancel)
 
     result = SparkProbe().cancel(_cluster_handle(), settings=_SETTINGS)
 

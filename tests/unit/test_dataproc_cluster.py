@@ -1,4 +1,11 @@
-"""Offline tests for the Dataproc cluster submitter (``scale_forecasting.dataproc_cluster``).
+"""Offline tests for the Dataproc **cluster** path — all four of its modules.
+
+One file, because the four are one story: `dataproc_cluster` (the cluster's shape, size and
+lifetime), `cluster_deps` (how the locked venv reaches it), `cluster_submit` (the job placed on it)
+and `cluster_telemetry` (reading that job back). Several tests here are about exactly the seam
+*between* two of them — the interpreter the init action lands vs. the one the job asks Spark for,
+or the machine `build_cluster` provisions vs. the one `cluster_sizing` shapes an executor for — and
+those are the tests worth having, so they are not split apart by module.
 
 No network: the pure spec builders (`cluster_name`, `build_cluster`, `_gpu_worker`, `build_job`) are
 exercised against real ``RunConfig``/``Settings``/``BatchInfra`` objects. The create→submit→delete
@@ -21,7 +28,12 @@ from scale_forecasting.settings import Settings
 # the [spark] extra is absent (parity with test_submit).
 pytest.importorskip("google.cloud.dataproc_v1")
 
-from scale_forecasting import dataproc_cluster  # noqa: E402
+from scale_forecasting import (  # noqa: E402
+    cluster_deps,
+    cluster_submit,
+    cluster_telemetry,
+    dataproc_cluster,
+)
 
 
 def _cfg(**over: Any) -> RunConfig:
@@ -473,7 +485,7 @@ def test_a_gpu_cluster_bounds_the_cells_that_share_the_card() -> None:
 
 
 def test_build_job_places_pyspark_job_on_cluster_with_contract() -> None:
-    job = dataproc_cluster.build_job(
+    job = cluster_submit.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://code-bkt/runs/spark_main.py",
         package_uri="gs://code-bkt/runs/pkg-1234.zip",
@@ -494,7 +506,7 @@ def test_build_job_places_pyspark_job_on_cluster_with_contract() -> None:
 
 
 def test_build_job_defaults_omit_oncluster_flags() -> None:
-    job = dataproc_cluster.build_job(
+    job = cluster_submit.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://c/spark_main.py",
         package_uri="gs://c/pkg.zip",
@@ -510,7 +522,7 @@ def test_build_job_defaults_omit_oncluster_flags() -> None:
 
 
 def test_build_job_use_venv_points_python_at_absolute_venv() -> None:
-    job = dataproc_cluster.build_job(
+    job = cluster_submit.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://c/spark_main.py",
         package_uri="gs://c/pkg.zip",
@@ -528,7 +540,7 @@ def test_build_job_use_venv_points_python_at_absolute_venv() -> None:
 
 
 def test_build_job_carries_the_sizing_overlay() -> None:
-    job = dataproc_cluster.build_job(
+    job = cluster_submit.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://c/spark_main.py",
         package_uri="gs://c/pkg.zip",
@@ -543,7 +555,7 @@ def test_build_job_carries_the_sizing_overlay() -> None:
 
 def test_the_venv_interpreter_pins_win_over_any_sizing_overlay() -> None:
     """A shape decision must never displace the interpreter — that would run bare Python."""
-    job = dataproc_cluster.build_job(
+    job = cluster_submit.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://c/spark_main.py",
         package_uri="gs://c/pkg.zip",
@@ -558,7 +570,7 @@ def test_the_venv_interpreter_pins_win_over_any_sizing_overlay() -> None:
 
 
 def test_build_job_without_venv_stays_bare() -> None:
-    job = dataproc_cluster.build_job(
+    job = cluster_submit.build_job(
         cluster="sf-cluster-run-abc",
         launcher_uri="gs://c/spark_main.py",
         package_uri="gs://c/pkg.zip",
@@ -583,7 +595,7 @@ def _infra_with_venv() -> BatchInfra:
 def test_resolve_cluster_deps_returns_archive_for_packed_venv() -> None:
     cfg = _cfg(compute={"spark_deps": "packed_venv"})
     assert (
-        dataproc_cluster._resolve_cluster_deps(cfg, _infra_with_venv())
+        cluster_deps._resolve_cluster_deps(cfg, _infra_with_venv())
         == "gs://code-bkt/envs/deadbeef.tar.gz"
     )
 
@@ -591,14 +603,14 @@ def test_resolve_cluster_deps_returns_archive_for_packed_venv() -> None:
 def test_resolve_cluster_deps_rejects_container_on_cluster() -> None:
     cfg = _cfg(compute={"spark_deps": "container"})
     with pytest.raises(ConfigError, match="Serverless mechanism"):
-        dataproc_cluster._resolve_cluster_deps(cfg, _infra_with_venv())
+        cluster_deps._resolve_cluster_deps(cfg, _infra_with_venv())
 
 
 def test_resolve_cluster_deps_requires_archive_uri() -> None:
     cfg = _cfg(compute={"spark_deps": "packed_venv"})
     # infra without a venv archive configured — a cluster forecast job can't run bare.
     with pytest.raises(ConfigError, match="packed-venv archive"):
-        dataproc_cluster._resolve_cluster_deps(cfg, _infra())
+        cluster_deps._resolve_cluster_deps(cfg, _infra())
 
 
 # --- get_cluster_job: non-blocking state read (probe path) ---------------------
@@ -629,9 +641,9 @@ class _FakeJobClient:
 
 def test_get_cluster_job_returns_state_and_detail(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _FakeJobClient(result=_FakeJobResult("RUNNING", details="in progress"))
-    monkeypatch.setattr(dataproc_cluster, "_job_client", lambda region: client)
+    monkeypatch.setattr(cluster_telemetry, "_job_client", lambda region: client)
 
-    state, detail = dataproc_cluster.get_cluster_job(
+    state, detail = cluster_telemetry.get_cluster_job(
         "us-west1", "job-abc", settings=_settings(), timeout=20.0
     )
 
@@ -647,9 +659,9 @@ def test_get_cluster_job_returns_state_and_detail(monkeypatch: pytest.MonkeyPatc
 
 def test_get_cluster_job_missing_detail_is_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _FakeJobClient(result=_FakeJobResult("DONE"))
-    monkeypatch.setattr(dataproc_cluster, "_job_client", lambda region: client)
+    monkeypatch.setattr(cluster_telemetry, "_job_client", lambda region: client)
 
-    state, detail = dataproc_cluster.get_cluster_job("us-central1", "j", settings=_settings())
+    state, detail = cluster_telemetry.get_cluster_job("us-central1", "j", settings=_settings())
 
     assert state == "DONE"
     assert detail == ""
@@ -660,19 +672,19 @@ def test_get_cluster_job_propagates_not_found(monkeypatch: pytest.MonkeyPatch) -
     from google.api_core.exceptions import NotFound
 
     monkeypatch.setattr(
-        dataproc_cluster, "_job_client", lambda region: _FakeJobClient(exc=NotFound("gone"))
+        cluster_telemetry, "_job_client", lambda region: _FakeJobClient(exc=NotFound("gone"))
     )
 
     with pytest.raises(NotFound):
-        dataproc_cluster.get_cluster_job("us-central1", "j", settings=_settings())
+        cluster_telemetry.get_cluster_job("us-central1", "j", settings=_settings())
 
 
 def test_cluster_init_script_reads_metadata_and_unpacks_to_absolute_dir() -> None:
-    script = dataproc_cluster._CLUSTER_INIT_SCRIPT
+    script = cluster_deps._CLUSTER_INIT_SCRIPT
     # Reads both metadata keys the cluster carries, and unpacks to the absolute venv dir the job's
     # Python points at — so driver + executors resolve the same interpreter.
     assert "attributes/sf-venv-archive-uri" in script
     assert "attributes/sf-venv-dir" in script
     assert 'tar xzf /tmp/sf-venv.tar.gz -C "${VENV_DIR}"' in script
     assert "set -euo pipefail" in script  # a fetch/unpack failure fails the node, not silently bare
-    assert dataproc_cluster._VENV_PYTHON == "/opt/sf-venv/bin/python"
+    assert cluster_deps._VENV_PYTHON == "/opt/sf-venv/bin/python"
