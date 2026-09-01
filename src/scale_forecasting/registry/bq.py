@@ -987,9 +987,10 @@ def parse_ts(value: Any) -> datetime | None:
 
     A registry row's timestamp arrives as a ``datetime`` from the BigQuery client but as an ISO
     string from a JSON-shaped reader dict (and from every offline test), so both readers that do
-    age arithmetic — `review._assemble_progress`'s quiet-time and `probes._is_stale`'s escalation
-    grace — need the same coercion. Pure and defensive: anything unparseable comes back ``None``
-    rather than raising, so a malformed timestamp costs a *signal*, never a monitor.
+    age arithmetic — `review._assemble_progress`'s quiet-time and
+    `probes.reconcile._is_stale`'s escalation grace — need the same coercion. Pure and defensive:
+    anything unparseable comes back ``None`` rather than raising, so a malformed timestamp costs
+    a *signal*, never a monitor.
     """
     if value is None:
         return None

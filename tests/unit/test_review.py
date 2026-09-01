@@ -158,7 +158,8 @@ def test_assemble_progress_no_config_is_status_only_snapshot() -> None:
 #
 # The age of a family's last registry signal, derived from rows the monitor already reads — no
 # runtime call. It is the only thing that distinguishes a dead job from a slow one on a frozen bar,
-# and it is what `probes._is_stale` thresholds, so the row-parsing lives here and only here.
+# and it is what `probes.reconcile._is_stale` thresholds, so the row-parsing lives here and only
+# here.
 
 _AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -296,21 +297,21 @@ def test_monitor_run_with_probe_reuses_the_probe_reader_and_attaches_the_report(
 ) -> None:
     # probe=True must not re-read the registry: it delegates to the probe's single read+escalate
     # pass and keeps both halves — the progress it built and the report it reconciled.
-    from scale_forecasting import probes
+    from scale_forecasting.probes import reconcile
     from scale_forecasting.registry import bq
 
     for name in ("read_run_summary", "read_run_config", "read_run_jobs", "read_progress"):
         monkeypatch.setattr(bq, name, _never_called(name))
 
     progress = R.RunProgress("rid", "RUNNING", 10, (), 0, None, None)
-    report = probes.ProbeReport("rid", "RUNNING", True, (), False)
+    report = reconcile.ProbeReport("rid", "RUNNING", True, (), False)
     seen: dict[str, Any] = {}
 
     def _read_and_probe(rid: str, *, job: Any, settings: Any, stale_after_s: Any) -> Any:
         seen.update(run_id=rid, job=job, settings=settings, stale_after_s=stale_after_s)
         return progress, report, []
 
-    monkeypatch.setattr(probes, "_read_and_probe", _read_and_probe)
+    monkeypatch.setattr(reconcile, "_read_and_probe", _read_and_probe)
 
     rp = R.monitor_run("rid", probe=True, stale_after_s=60.0, settings=_SETTINGS)
     assert rp.probe is report and rp.status == "RUNNING"
@@ -418,7 +419,7 @@ def test_plot_progress_prefers_a_probe_verdict_over_the_quiet_time() -> None:
     # Both families have been quiet 22m; the probe says one is dead and the other is alive. A live
     # reading supersedes the inference from silence, so neither bar reports its age.
     _use_agg()
-    from scale_forecasting import probes
+    from scale_forecasting.probes import reconcile, vocabulary
 
     cfg = _cfg(models=["theta", "xgboost"], ensemble={"enabled": False})
     rp = R._assemble_progress(
@@ -429,10 +430,10 @@ def test_plot_progress_prefers_a_probe_verdict_over_the_quiet_time() -> None:
         [], now=_AT,
     )
     verdicts = (
-        _verdict("statistical", probes.VERDICT_LOST),
-        _verdict("ml", probes.VERDICT_RUNNING),
+        _verdict("statistical", vocabulary.VERDICT_LOST),
+        _verdict("ml", vocabulary.VERDICT_RUNNING),
     )
-    rp = replace(rp, probe=probes.ProbeReport("rid", "RUNNING", True, verdicts, True))
+    rp = replace(rp, probe=reconcile.ProbeReport("rid", "RUNNING", True, verdicts, True))
     labels = _bar_labels(R.plot_progress(rp))
     assert any("lost" in t for t in labels)
     assert any("running confirmed" in t for t in labels)
@@ -443,7 +444,7 @@ def test_plot_progress_drops_a_trust_registry_verdict_as_noise() -> None:
     # TRUST_REGISTRY is what the bar's status colour already says (terminal, or never launched).
     # Printing it on every row would bury the two verdicts that matter.
     _use_agg()
-    from scale_forecasting import probes
+    from scale_forecasting.probes import reconcile, vocabulary
 
     cfg = _cfg(models=["theta"], ensemble={"enabled": False})
     rp = R._assemble_progress(
@@ -451,17 +452,17 @@ def test_plot_progress_drops_a_trust_registry_verdict_as_noise() -> None:
         [{"family": "statistical", "status": "COMPLETED",
           "ended_at": _AT - timedelta(seconds=1320)}], [], now=_AT,
     )
-    verdict = (_verdict("statistical", probes.VERDICT_TRUST_REGISTRY),)
-    rp = replace(rp, probe=probes.ProbeReport("rid", "COMPLETED", False, verdict, False))
+    verdict = (_verdict("statistical", vocabulary.VERDICT_TRUST_REGISTRY),)
+    rp = replace(rp, probe=reconcile.ProbeReport("rid", "COMPLETED", False, verdict, False))
     labels = _bar_labels(R.plot_progress(rp))
     assert not any("trust registry" in t for t in labels)
     assert not any("quiet" in t for t in labels)  # a finished family is not waiting on anything
 
 
 def _verdict(family: str, verdict: str) -> Any:
-    from scale_forecasting import probes
+    from scale_forecasting.probes import reconcile
 
-    return probes.FamilyVerdict(
+    return reconcile.FamilyVerdict(
         family=family, runtime="spark", registry_status="RUNNING", native_state=None,
         exists=None, verdict=verdict, disagreement=False, n_done=0, n_expected=None, detail="",
     )

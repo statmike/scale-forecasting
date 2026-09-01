@@ -57,7 +57,8 @@ if TYPE_CHECKING:
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
     from .dag import DagNode, FamilyJob, RunDag
-    from .probes import CancelReport, ProbeReport
+    from .probes.cancel import CancelReport
+    from .probes.reconcile import ProbeReport
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -333,7 +334,7 @@ def _launch_family_job(
     region — with no per-family create/delete); a family naming its own standing cluster keeps that,
     and every other runtime/mode ignores it.
     """
-    from .probes import ProbeHandle
+    from .probes.vocabulary import ProbeHandle
     from .registry import bq
     from .registry.ids import make_job_key
     from .submitters import get_submitter
@@ -444,7 +445,7 @@ def _launch_native_job(
     engine's `BqOutcome` so the caller can stamp the observed ``n_series`` onto the header.
     """
     from .engines import bigquery_engine
-    from .probes import ProbeHandle
+    from .probes.vocabulary import ProbeHandle
     from .registry import bq
     from .registry.ids import make_job_key
 
@@ -510,7 +511,7 @@ def _launch_ensemble_job(
     the concurrent node produces nothing — preserving the "no ensembles for a failed run" contract.
     """
     from .ensemble_run import run_ensembles, run_ensembles_microbatch
-    from .probes import ProbeHandle
+    from .probes.vocabulary import ProbeHandle
     from .registry import bq
     from .registry.ids import make_job_key
 
@@ -1336,13 +1337,13 @@ def _main(argv: list[str] | None = None) -> None:
         _log.info("staged: %s", result.run_id)
         return
     if ns.probe:
-        from .probes import probe_run
+        from .probes.reconcile import probe_run
 
         report = probe_run(make_run_id(cfg), job=ns.job)
         _print_probe_report(report)
         return
     if ns.cancel:
-        from .probes import cancel_run
+        from .probes.cancel import cancel_run
 
         # --force is the cancel confirmation gate: without it, cancel_run only previews the blast
         # radius and stops nothing (the "never implicit" rule, §7.1).

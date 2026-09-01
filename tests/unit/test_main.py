@@ -466,7 +466,7 @@ def test_launch_family_job_stamps_real_id_when_submitter_returns_one(
     """A cluster submitter returns a handle with a server-assigned id → it's finalized onto the row,
     and the entry handle is refreshed with the post-submit truths."""
     import scale_forecasting.submitters as submitters_mod
-    from scale_forecasting.probes import ProbeHandle
+    from scale_forecasting.probes.vocabulary import ProbeHandle
 
     seen = _fake_job_lifecycle(monkeypatch)
 
@@ -904,7 +904,7 @@ def test_cli_dispatches_dry_run(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) 
 def test_cli_dispatches_probe(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 
-    import scale_forecasting.probes as probes_mod
+    import scale_forecasting.probes.reconcile as probes_mod
     from scale_forecasting.config import load_config_uri
 
     seen: dict[str, Any] = {}
@@ -937,12 +937,8 @@ def test_cli_dispatches_probe(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_print_probe_report_formats_header_and_rows(capsys: pytest.CaptureFixture[str]) -> None:
-    from scale_forecasting.probes import (
-        VERDICT_RUNNING,
-        VERDICT_STALE_REGISTRY,
-        FamilyVerdict,
-        ProbeReport,
-    )
+    from scale_forecasting.probes.reconcile import FamilyVerdict, ProbeReport
+    from scale_forecasting.probes.vocabulary import VERDICT_RUNNING, VERDICT_STALE_REGISTRY
 
     report = ProbeReport(
         run_id="sf-run-xyz",

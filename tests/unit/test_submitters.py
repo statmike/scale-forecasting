@@ -14,7 +14,7 @@ import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
-from scale_forecasting.probes import ProbeHandle
+from scale_forecasting.probes.vocabulary import ProbeHandle
 from scale_forecasting.settings import Settings
 from scale_forecasting.submitters import (
     RaySubmitter,

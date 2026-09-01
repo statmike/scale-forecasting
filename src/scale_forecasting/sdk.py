@@ -253,9 +253,9 @@ class Forecaster:
         `review.plot_progress` for the bar.
 
         ``probe=True`` also escalates the non-terminal jobs to their runtime and attaches the
-        reconciled `probes.ProbeReport` — use it when a bar has stopped moving and you need to know
-        whether the job is still alive. It is off by default because a poll loop must stay
-        registry-only; `probe` (the drill-down) is the deliberate version of the same read.
+        reconciled `probes.reconcile.ProbeReport` — use it when a bar has stopped moving and you
+        need to know whether the job is still alive. It is off by default because a poll loop must
+        stay registry-only; `probe` (the drill-down) is the deliberate version of the same read.
         """
         from .review import monitor_run
 
@@ -396,14 +396,14 @@ class Forecaster:
     def probe(self, run_id: str | None = None, job: str | None = None) -> Any:
         """Reconcile a run against its runtime: per-family verdict + a disagreement flag.
 
-        Delegates to `probes.probe_run` for ``run_id`` (default: this config's id): the
+        Delegates to `probes.reconcile.probe_run` for ``run_id`` (default: this config's id): the
         registry-first drill-down that fuses the header + landed artifacts with, **only for the
         incomplete or stale jobs**, their live native state (Spark / Ray / BigQuery) — flagging each
         row where the runtime contradicts the registry. ``job`` narrows the escalation to one family
         (``statistical``/``ml``/``deep_learning``/``native``/``ensemble``). A run that is already
         terminal short-circuits and touches no runtime; for the fleet-wide view use `monitor`.
         """
-        from .probes import probe_run
+        from .probes.reconcile import probe_run
 
         return probe_run(run_id or self.run_id, job=job, settings=self._settings)
 
@@ -417,17 +417,17 @@ class Forecaster:
     ) -> Any:
         """Cancel a run (or one family) — a **preview by default**; stop for real only on confirm.
 
-        Delegates to `probes.cancel_run` for ``run_id`` (default: this config's id): it probes the
-        run to reconcile live state, then returns a `CancelReport`. Without ``confirm`` the report
-        is a blast-radius **preview** — it touches no runtime and no registry, so you see exactly
-        which jobs would stop and what partial data is retained. With ``confirm=True`` it stops each
-        non-terminal family's runtime job, finalizes its registry row to ``CANCELLED`` (retaining —
-        never deleting — landed partial results), records ``reason`` + the ADC actor for audit, and
-        rolls the run header up. ``job`` narrows to one family
+        Delegates to `probes.cancel.cancel_run` for ``run_id`` (default: this config's id): it
+        probes the run to reconcile live state, then returns a `CancelReport`. Without ``confirm``
+        the report is a blast-radius **preview** — it touches no runtime and no registry, so you see
+        exactly which jobs would stop and what partial data is retained. With ``confirm=True`` it
+        stops each non-terminal family's runtime job, finalizes its registry row to ``CANCELLED``
+        (retaining — never deleting — landed partial results), records ``reason`` + the ADC actor
+        for audit, and rolls the run header up. ``job`` narrows to one family
         (``statistical``/``ml``/``deep_learning``/``native``/``ensemble``); an already-terminal job
         is a no-op.
         """
-        from .probes import cancel_run
+        from .probes.cancel import cancel_run
 
         return cancel_run(
             run_id or self.run_id,

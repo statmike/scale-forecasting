@@ -15,9 +15,9 @@ layer reads the run's own ``raw_config`` back to recover what it *planned* to do
   already read, costs **no** runtime call, and is a fact rather than a judgement (a family that
   writes its cells at job end is legitimately quiet for its whole run, so a threshold here would
   cry wolf). And ``probe=True`` escalates the non-terminal families to their runtime via
-  `probes.probe_run`'s reader, attaching a `probes.ProbeReport` that says whether the job is
-  actually still alive. Registry-first is the default deliberately: a fleet poll must never fan
-  native calls, so escalation stays the deliberate per-run drill-down.
+  `probes.reconcile.probe_run`'s reader, attaching a `probes.reconcile.ProbeReport` that says
+  whether the job is actually still alive. Registry-first is the default deliberately: a fleet
+  poll must never fan native calls, so escalation stays the deliberate per-run drill-down.
 - `review_run` — *how did a finished run do, in data-science detail?* The best model per family and
   overall, the full metric panel aggregated across every series (mean + p10/p50/p90), and each
   ensemble's lift over the best base model.
@@ -42,7 +42,7 @@ from .dag import group_models_by_family
 from .registry.bq import METRIC_COLUMNS, parse_ts
 
 if TYPE_CHECKING:
-    from .probes import ProbeReport
+    from .probes.reconcile import ProbeReport
     from .settings import Settings
 
 __all__ = [
@@ -83,7 +83,7 @@ class FamilyProgress:
     time — both ``None`` for a family with no job row yet, or an unparseable timestamp. They are
     reported, never judged: how long a family may legitimately stay quiet depends on the family,
     and the escalation threshold that *does* judge it lives with the probe
-    (`probes._DEFAULT_STALE_S`), not here.
+    (`probes.reconcile._DEFAULT_STALE_S`), not here.
     """
 
     family: str
@@ -108,9 +108,9 @@ class RunProgress:
     ``fraction`` are the run-wide roll-up across families (``n_expected`` and ``fraction`` are
     ``None`` when the series count — hence the denominator — isn't known).
 
-    ``probe`` carries the reconciled `probes.ProbeReport` when `monitor_run` was called with
-    ``probe=True``, and is ``None`` for the default registry-only read — so a caller can always
-    tell "the runtime agreed the job is alive" apart from "we never asked".
+    ``probe`` carries the reconciled `probes.reconcile.ProbeReport` when `monitor_run` was
+    called with ``probe=True``, and is ``None`` for the default registry-only read — so a caller
+    can always tell "the runtime agreed the job is alive" apart from "we never asked".
     """
 
     run_id: str
@@ -250,7 +250,7 @@ def _assemble_progress(
     With no config (run never ran) this is an empty snapshot carrying just the header status.
     ``now`` is the clock the per-family ``quiet_seconds`` is measured against — injectable so the
     age arithmetic is deterministic offline, and so a caller that probes in the same pass
-    (`probes._read_and_probe`) reconciles every family against one instant.
+    (`probes.reconcile._read_and_probe`) reconciles every family against one instant.
     """
     status = (summary or {}).get("status")
     at = now or datetime.now(UTC)
@@ -337,17 +337,17 @@ def monitor_run(
     the "is this bar frozen or just coarse" signal, free because it comes off rows already read.
 
     ``probe=True`` additionally escalates the run's non-terminal jobs to their runtime and attaches
-    the reconciled `probes.ProbeReport` as ``RunProgress.probe`` — the answer to *is this job still
-    alive*, which the registry alone cannot give. It shares one pass of reads with the registry
-    side (`probes._read_and_probe`), so probing costs the native calls and not a second set of
-    queries; an already-terminal run short-circuits and touches no runtime at all.
-    ``stale_after_s`` overrides the probe's startup grace (see `probes.probe_run`) and is ignored
-    when ``probe`` is ``False``.
+    the reconciled `probes.reconcile.ProbeReport` as ``RunProgress.probe`` — the answer to *is this
+    job still alive*, which the registry alone cannot give. It shares one pass of reads with the
+    registry side (`probes.reconcile._read_and_probe`), so probing costs the native calls and not a
+    second set of queries; an already-terminal run short-circuits and touches no runtime at all.
+    ``stale_after_s`` overrides the probe's startup grace (see `probes.reconcile.probe_run`) and
+    is ignored when ``probe`` is ``False``.
     """
     from .registry import bq
 
     if probe:
-        from .probes import _read_and_probe
+        from .probes.reconcile import _read_and_probe
         from .settings import Settings as _Settings
 
         s = settings if settings is not None else _Settings.resolve()
@@ -575,7 +575,7 @@ def _reportable_verdicts(progress: RunProgress) -> dict[str, str]:
     """
     if progress.probe is None:
         return {}
-    from .probes import VERDICT_TRUST_REGISTRY
+    from .probes.vocabulary import VERDICT_TRUST_REGISTRY
 
     return {
         v.family: v.verdict
@@ -597,9 +597,9 @@ def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = 
     job that died mid-run stops moving and its status stays ``RUNNING``, so without this a dead run
     and a slow one are pixel-identical. It is reported as an age, not flagged against a threshold —
     a family that writes its cells at job end is legitimately quiet the whole time, and a
-    cry-wolf marker teaches the reader to ignore it. When a `probes.ProbeReport` is attached
-    (``monitor_run(probe=True)``), its verdict replaces the age for the families it covers, since a
-    live reading beats an inference from silence.
+    cry-wolf marker teaches the reader to ignore it. When a `probes.reconcile.ProbeReport` is
+    attached (``monitor_run(probe=True)``), its verdict replaces the age for the families it
+    covers, since a live reading beats an inference from silence.
     """
     import matplotlib.pyplot as plt
 

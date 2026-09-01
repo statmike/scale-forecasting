@@ -21,7 +21,7 @@ from .errors import ConfigError
 
 if TYPE_CHECKING:
     from .config import RunConfig
-    from .probes import ProbeHandle
+    from .probes.vocabulary import ProbeHandle
     from .settings import Settings
 
 
@@ -115,7 +115,7 @@ class SparkSubmitter:
         ray_cluster_name: str | None = None,
         ray_cluster_region: str | None = None,
     ) -> ProbeHandle | None:
-        from .probes import ProbeHandle
+        from .probes.vocabulary import ProbeHandle
 
         # ray_cluster_name/ray_cluster_region are Ray-only (a shared cluster); Spark ignores them.
         if spark is not None:
@@ -204,7 +204,7 @@ class RaySubmitter:
         # so the job's own id is deterministic; hardware="gpu" provisions the Ray GPU pool for this
         # family (kept out of cfg for run_id). ray_cluster_name/region, when set, target the run's
         # shared ephemeral cluster (reuse path — submit this family's own job to it, no create).
-        from .probes import ProbeHandle
+        from .probes.vocabulary import ProbeHandle
         from .ray_submit import submit_ray
 
         job_id, resource_name, region = submit_ray(

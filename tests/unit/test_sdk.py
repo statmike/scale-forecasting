@@ -356,7 +356,7 @@ def test_jobs_empty_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_probe_delegates_to_probe_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.probes as probes_mod
+    import scale_forecasting.probes.reconcile as probes_mod
 
     seen: dict[str, Any] = {}
 
@@ -378,7 +378,7 @@ def test_probe_delegates_to_probe_run(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_probe_honors_explicit_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.probes as probes_mod
+    import scale_forecasting.probes.reconcile as probes_mod
 
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
