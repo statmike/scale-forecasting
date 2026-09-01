@@ -43,21 +43,20 @@ artifacts + runnable commands + reproducibility manifest, no submit), and
 
 from __future__ import annotations
 
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import job_launch
+from . import job_launch, shared_clusters
 from .errors import ConfigError, get_logger
 from .registry.ids import make_run_id
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
 
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
-    from .dag import DagNode, FamilyJob, RunDag
+    from .dag import DagNode, RunDag
     from .probes.cancel import CancelReport
     from .probes.reconcile import ProbeReport
     from .settings import Settings
@@ -139,136 +138,6 @@ def _plan(cfg: RunConfig) -> _RunPlan:
         python_models=python_models,
         bq_models=bq_models,
     )
-
-
-def _shared_ray_inputs(python_jobs: list[FamilyJob]) -> tuple[list[str], bool, str | None] | None:
-    """The union sizing inputs for a run's ephemeral Ray families, or ``None`` if fewer than two.
-
-    Sharing one cluster only matters when **more than one** family resolves to Ray — that's the case
-    that would otherwise collide on the run-derived ``sf-ray-<run_id>`` name (and waste a second
-    cluster). Returns the union of those families' models, whether **any** needs a GPU pool, and the
-    GPU type to size it (the first GPU family's) — the inputs to one shared cluster. A single Ray
-    family (or none) returns ``None`` and keeps the proven self-provisioning path.
-    """
-    ray_jobs = [j for j in python_jobs if j.runtime == "ray"]
-    if len(ray_jobs) < 2:
-        return None
-    models: list[str] = []
-    any_gpu = False
-    gpu_type: str | None = None
-    for j in ray_jobs:
-        assert j.compute is not None  # a Python family always resolves compute
-        models.extend(j.models)
-        if j.compute.hardware == "gpu":
-            any_gpu = True
-            gpu_type = gpu_type or j.compute.gpu_type
-    return models, any_gpu, gpu_type
-
-
-@contextmanager
-def _shared_ray_cluster(
-    cfg: RunConfig, run_dag: RunDag, run_id: str, settings: Settings
-) -> Iterator[tuple[str, str] | None]:
-    """Provision one shared ephemeral Ray cluster when a run has several ephemeral Ray families.
-
-    Yields ``(cluster_name, cluster_region)`` to thread into each Ray family's job as a reuse target
-    (so each submits its own failure-isolated Ray job to the one cluster), or ``None`` when sharing
-    doesn't apply — a single Ray family, no Ray family, or a config already reusing a standing
-    cluster (``compute.ray_cluster_name`` set: every family targets it, no orchestrator create). The
-    cluster is torn down once in a ``finally`` so a family failure never leaks it.
-    """
-    inputs = None
-    if cfg.compute.ray_cluster_name is None:
-        inputs = _shared_ray_inputs(run_dag.python_jobs)
-    if inputs is None:
-        yield None
-        return
-    from . import ray_cluster
-
-    models, any_gpu, gpu_type = inputs
-    name, region = ray_cluster.provision_shared_cluster(
-        cfg, models=models, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
-    )
-    try:
-        yield (name, region)
-    finally:
-        ray_cluster.teardown_shared_cluster(name, region, settings)
-
-
-def _shared_spark_inputs(
-    python_jobs: list[FamilyJob],
-) -> tuple[list[str], bool, str | None] | None:
-    """The union sizing inputs for a run's ephemeral Dataproc cluster families, or ``None`` if fewer
-    than two.
-
-    Sharing one cluster only matters when **more than one** family resolves to an ephemeral Spark
-    cluster (``spark_mode="cluster"`` with no standing ``spark_cluster_name``) — the case that would
-    otherwise have each family both create *and* tear down the shared run-derived
-    ``sf-cluster-<run_id>`` name, so a family finishing first deletes the cluster out from under the
-    others. Returns the union of those families' models, whether **any** of them needs a GPU pool,
-    and the GPU type to size it (the first GPU family's) — the inputs to one shared cluster. The
-    models are only the *cluster* families': a run whose Ray or BigQuery-native families dwarf its
-    Spark ones must not buy workers for work that never lands here. Fewer than two ephemeral cluster
-    families (or none) returns ``None`` and keeps the proven per-family lifecycle (a single family
-    has no collision risk; a family naming a standing cluster already reuses).
-    """
-    cluster_jobs = [
-        j
-        for j in python_jobs
-        if j.runtime == "spark"
-        and j.compute is not None
-        and j.compute.spark_mode == "cluster"
-        and j.compute.spark_cluster_name is None
-    ]
-    if len(cluster_jobs) < 2:
-        return None
-    models: list[str] = []
-    any_gpu = False
-    gpu_type: str | None = None
-    for j in cluster_jobs:
-        assert j.compute is not None  # a Python family always resolves compute
-        models.extend(j.models)
-        if j.compute.hardware == "gpu":
-            any_gpu = True
-            gpu_type = gpu_type or j.compute.gpu_type
-    return models, any_gpu, gpu_type
-
-
-@contextmanager
-def _shared_spark_cluster(
-    cfg: RunConfig, run_dag: RunDag, run_id: str, settings: Settings
-) -> Iterator[tuple[str, str] | None]:
-    """Provision one shared ephemeral Dataproc cluster when a run has several ephemeral cluster
-    families.
-
-    Yields ``(cluster_name, cluster_region)`` to thread into each cluster family's job as a reuse
-    target (so each submits its own failure-isolated job to the one cluster, skipping the per-family
-    create/delete that would otherwise race — a family finishing first would tear down the shared
-    cluster out from under the others), or ``None`` when sharing doesn't apply — fewer than two
-    cluster families. The region is returned because a capacity failover may have moved the cluster
-    off the deployment region, and each family's job must submit to where it actually landed. The
-    cluster is torn down once in a ``finally`` so a family failure never leaks it. The Dataproc
-    analog of `_shared_ray_cluster`.
-    """
-    inputs = _shared_spark_inputs(run_dag.python_jobs)
-    if inputs is None:
-        yield None
-        return
-    from .dataproc_cluster import provision_shared_cluster, teardown_shared_cluster
-
-    models, any_gpu, gpu_type = inputs
-    name, region = provision_shared_cluster(
-        cfg,
-        run_id=run_id,
-        use_gpu=any_gpu,
-        gpu_type=gpu_type,
-        settings=settings,
-        models=models,
-    )
-    try:
-        yield (name, region)
-    finally:
-        teardown_shared_cluster(name, region, settings)
 
 
 def run(
@@ -396,8 +265,10 @@ def run(
         # for a thread; barrier mode keeps the exact family-only pool it always had.
         max_workers = max(1, len(python_jobs)) + (1 if ensemble_concurrent else 0)
         with (
-            _shared_ray_cluster(cfg, run_dag, run_id, settings) as ray_cluster,
-            _shared_spark_cluster(cfg, run_dag, run_id, settings) as spark_cluster,
+            shared_clusters.shared_ray_cluster(cfg, run_dag, run_id, settings) as ray_cluster,
+            shared_clusters.shared_spark_cluster(
+                cfg, run_dag, run_id, settings
+            ) as spark_cluster,
             ThreadPoolExecutor(max_workers=max_workers) as pool,
         ):
             futures = {

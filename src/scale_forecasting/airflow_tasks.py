@@ -19,7 +19,8 @@ The node set mirrors `dag.plan_dag`:
   cross-process stop-signal polling ``run_jobs`` for base-family completion).
 * ``create_ray_cluster`` / ``delete_ray_cluster`` (and the Dataproc-cluster pair) — the shared
   ephemeral-cluster bracket for a run with several ephemeral Ray (or Spark-cluster) families, the
-  DAG-task form of `main._shared_ray_cluster` / `_shared_spark_cluster` split into create/delete.
+  DAG-task form of `shared_clusters.shared_ray_cluster` / ``shared_spark_cluster`` split into
+  create/delete.
 * ``finalize_run`` — read every family's ``run_jobs`` outcome and finalize the header with the
   combined run status (the DAG's terminal join, ``trigger_rule="all_done"``).
 
@@ -238,13 +239,14 @@ def finalize_run(config_uri: str) -> None:
 def create_ray_cluster(config_uri: str) -> list[str]:
     """Provision the run's one shared ephemeral Ray cluster; return ``[name, region]`` for XCom.
 
-    The create half of `main._shared_ray_cluster`, split to a task. Sizes one cluster for the union
-    of the run's ephemeral Ray families (`main._shared_ray_inputs`) so each family submits its own
+    The create half of `shared_clusters.shared_ray_cluster`, split to a task. Sizes one cluster for
+    the union of the run's ephemeral Ray families (`shared_clusters.shared_ray_inputs`) so each
+    family submits its own
     failure-isolated job to it instead of colliding on the run-derived name. The region is returned
     alongside the name because a capacity failover may move the cluster off the deployment region;
     the family tasks and `delete_ray_cluster` read both from this task's XCom.
     """
-    from . import main, ray_cluster
+    from . import ray_cluster, shared_clusters
     from .config import load_config_uri
     from .dag import plan_dag
     from .errors import ConfigError
@@ -254,7 +256,7 @@ def create_ray_cluster(config_uri: str) -> list[str]:
     cfg = load_config_uri(config_uri)
     run_id = make_run_id(cfg)
     settings = Settings.resolve()
-    inputs = main._shared_ray_inputs(plan_dag(cfg).python_jobs)
+    inputs = shared_clusters.shared_ray_inputs(plan_dag(cfg).python_jobs)
     if inputs is None:
         raise ConfigError(f"create_ray_cluster: run {run_id} has no shared Ray families")
     models, any_gpu, gpu_type = inputs
@@ -267,7 +269,8 @@ def create_ray_cluster(config_uri: str) -> list[str]:
 def delete_ray_cluster(config_uri: str, ti: Any = None) -> None:
     """Tear down the run's shared ephemeral Ray cluster (``trigger_rule="all_done"`` in the DAG).
 
-    The teardown half of `main._shared_ray_cluster`, split to a task that always runs — so a family
+    The teardown half of `shared_clusters.shared_ray_cluster`, split to a task that always runs —
+    so a family
     failure never leaks the cluster. Reads the ``[name, region]`` the create task returned via XCom;
     a no-op when there was none (nothing to tear down).
     """
@@ -284,13 +287,14 @@ def create_spark_cluster(config_uri: str) -> list[str]:
     """Provision the run's one shared ephemeral Dataproc cluster; return ``[name, region]`` for
     XCom.
 
-    The Dataproc analog of `create_ray_cluster` — the create half of `main._shared_spark_cluster`.
-    Sizes one cluster for the run's ephemeral ``spark_mode="cluster"`` families
-    (`main._shared_spark_inputs`) so each submits its own job to it rather than racing to create and
+    The Dataproc analog of `create_ray_cluster` — the create half of
+    `shared_clusters.shared_spark_cluster`. Sizes one cluster for the run's ephemeral
+    ``spark_mode="cluster"`` families (`shared_clusters.shared_spark_inputs`) so each submits its
+    own job to it rather than racing to create and
     tear down the shared name. Returns ``[name, region]`` (the region because a capacity failover
     may have moved it) for the family tasks and `delete_spark_cluster`.
     """
-    from . import main
+    from . import shared_clusters
     from .config import load_config_uri
     from .dag import plan_dag
     from .dataproc_cluster import provision_shared_cluster
@@ -301,7 +305,7 @@ def create_spark_cluster(config_uri: str) -> list[str]:
     cfg = load_config_uri(config_uri)
     run_id = make_run_id(cfg)
     settings = Settings.resolve()
-    inputs = main._shared_spark_inputs(plan_dag(cfg).python_jobs)
+    inputs = shared_clusters.shared_spark_inputs(plan_dag(cfg).python_jobs)
     if inputs is None:
         raise ConfigError(
             f"create_spark_cluster: run {run_id} has no shared Dataproc-cluster families"
@@ -321,7 +325,8 @@ def create_spark_cluster(config_uri: str) -> list[str]:
 def delete_spark_cluster(config_uri: str, ti: Any = None) -> None:
     """Tear down the run's shared ephemeral Dataproc cluster (``trigger_rule="all_done"`` in DAG).
 
-    The Dataproc analog of `delete_ray_cluster` — the teardown half of `main._shared_spark_cluster`,
+    The Dataproc analog of `delete_ray_cluster` — the teardown half of
+    `shared_clusters.shared_spark_cluster`,
     always run so a family failure never leaks the cluster. Reads the ``[name, region]`` the create
     task returned via XCom; a no-op when there was none.
     """

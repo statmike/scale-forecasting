@@ -15,7 +15,7 @@ The rendered topology mirrors a live run exactly:
   only on ``begin_run``); ``finalize_run`` is the terminal join.
 * When a run has **several ephemeral Ray (or Dataproc-cluster) families**, a
   ``create_*_cluster`` → families → ``delete_*_cluster`` bracket is emitted (from the same
-  `main._shared_ray_inputs` / `_shared_spark_inputs` predicates the orchestrator uses), so those
+  `shared_clusters` predicates the orchestrator uses), so those
   families share one cluster. **Serverless Spark families never share** — each is its own batch
   task.
 
@@ -132,19 +132,20 @@ def _shared_families(cfg: RunConfig, run_dag: RunDag) -> tuple[list[str], list[s
     """The families that share an ephemeral Ray / Dataproc cluster (else empty), from the live
     predicates.
 
-    Uses the exact `main._shared_ray_inputs` / `_shared_spark_inputs` rules `main.run` uses, so the
+    Uses the exact `shared_clusters.shared_ray_inputs` / ``shared_spark_inputs`` rules `main.run`
+    uses, so the
     emitted bracket matches what a live run would provision: ≥2 ephemeral Ray families (no standing
     cluster) share one Ray cluster; ≥2 ephemeral ``spark_mode="cluster"`` families share one
     Dataproc cluster. Serverless Spark and single-family cases return empty (each runs standalone).
     """
-    from .main import _shared_ray_inputs, _shared_spark_inputs
+    from .shared_clusters import shared_ray_inputs, shared_spark_inputs
 
     python_jobs = run_dag.python_jobs
     ray_families: list[str] = []
-    if cfg.compute.ray_cluster_name is None and _shared_ray_inputs(python_jobs) is not None:
+    if cfg.compute.ray_cluster_name is None and shared_ray_inputs(python_jobs) is not None:
         ray_families = [j.family for j in python_jobs if j.runtime == "ray"]
     spark_families: list[str] = []
-    if _shared_spark_inputs(python_jobs) is not None:
+    if shared_spark_inputs(python_jobs) is not None:
         spark_families = [
             j.family
             for j in python_jobs

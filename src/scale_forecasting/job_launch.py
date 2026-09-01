@@ -99,12 +99,12 @@ def launch_family_job(
     submitter returns the real id it is stamped back onto the row (`JobFinalizer`) for the trace.
 
     ``ray_cluster``, when set, is the run's shared ephemeral Ray cluster ``(name, region)``
-    (`main._shared_ray_cluster`): a Ray family reuses it instead of self-provisioning; every other
-    runtime ignores it. ``spark_cluster``, when set, is the run's shared ephemeral Dataproc cluster
-    ``(name, region)`` (`main._shared_spark_cluster`): an ephemeral cluster family reuses it
-    (submits its own job to that region — a capacity failover may have moved the cluster off the
-    deployment region — with no per-family create/delete); a family naming its own standing cluster
-    keeps that, and every other runtime/mode ignores it.
+    (`shared_clusters.shared_ray_cluster`): a Ray family reuses it instead of self-provisioning;
+    every other runtime ignores it. ``spark_cluster``, when set, is the run's shared ephemeral
+    Dataproc cluster ``(name, region)`` (`shared_clusters.shared_spark_cluster`): an ephemeral
+    cluster family reuses it (submits its own job to that region — a capacity failover may have
+    moved the cluster off the deployment region — with no per-family create/delete); a family naming
+    its own standing cluster keeps that, and every other runtime/mode ignores it.
     """
     from .probes.vocabulary import ProbeHandle
     from .registry.ids import make_job_key

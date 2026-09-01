@@ -65,6 +65,7 @@ There are three ways a run begins, all converging on the same engines.
 |-----------|------|------------|
 | `main.run(cfg)` | [`main.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py) | **The spine.** In-process orchestrator — owns the `run_id` and the header, plans the DAG, launches every family job in parallel, then runs the ensemble node. |
 | `job_launch` | [`job_launch.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/job_launch.py) | **One DAG node, launched.** `launch_family_job` / `launch_native_job` / `launch_ensemble_job` — three variants of one recipe: resolve the attempt, derive the deterministic job identity, open the node's own `run_jobs` row, dispatch in contributor mode. Both drivers call these — `main.run` in-process, and an emitted Airflow DAG's task callables under Composer — which is where "same code local ↔ Composer" is literally true. |
+| `shared_clusters` | [`shared_clusters.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/shared_clusters.py) | **One cluster for a whole run, not one per family.** Two symmetric pairs — a pure predicate ("do ≥2 families resolve to an ephemeral Ray / Dataproc cluster, and how big must the one cluster be") and the context manager that provisions it, hands every eligible family its `(name, region)` as a reuse target, and tears it down once. `airflow_emit` calls the same predicates at emit time to decide whether to emit the `create_*`/`delete_*` task bracket, so Composer brackets a run exactly as `main.run` does. |
 | `submit` | [`submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/submit.py) | Submit-side launcher for a **Spark** family: zip the code, stage the config to GCS, build + submit a Dataproc Serverless batch. |
 | `batch_infra` | [`batch_infra.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/batch_infra.py) | The resolved Dataproc deployment envelope (`BatchInfra`) — code bucket, image, SA, subnet, and which of the two dependency envelopes delivers the locked environment. Read by the serverless *and* cluster paths, the command emitter and the fallback check, most of which never submit a batch. |
 | `batch_telemetry` | [`batch_telemetry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/batch_telemetry.py) | Reach a batch and read what it says — the regional client, the pure wall/DCU/sizing extraction, and the merge onto the run header. Used by `submit` at finish and by `probes.runtimes` mid-flight. |
@@ -225,7 +226,7 @@ whole spec is hashed into `run_id` and stamped to telemetry. `ray_autoscale=fals
 fixed-size path.
 
 When more than one family resolves to Ray in the same run, the orchestrator provisions **one shared
-Ray cluster** for the launch block (`main._shared_ray_cluster`) and each Ray family submits its job
+Ray cluster** for the launch block (`shared_clusters.shared_ray_cluster`) and each Ray family submits its job
 to it, instead of each family self-provisioning.
 
 ### BigQuery-native — SQL only
