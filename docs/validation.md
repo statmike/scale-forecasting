@@ -136,6 +136,46 @@ offline gate proves it is self-consistent, not that Dataproc accepts it.
 The campaign that re-earns these rows is profiler **W12**, which also does the `off`-vs-profiled A/B
 and captures the measurements the shipped baseline will carry.
 
+## Demonstration and scale configs
+
+Configs live in `configs/`; these are what a *user* runs — the demo path on day one, and the four
+`*_100k*` runs behind [the workshop](workshop.md)'s Act 1. The tripwire enforces one row per config
+here exactly as it does for the smokes. `compute_fallback.json` is excluded: it is a zone-failover
+map consumed at submit time, not a run config.
+
+**Every row starts `NEVER_RUN`, and that is a deliberate reading of the evidence, not a claim that
+none of these has ever executed.** Several of them certainly did, during the demo and build work
+that produced the figures quoted in `docs/workshop.md`. But no run of any of them recorded a
+`run_id`, a date, or the architecture it ran on — and this file's first rule is that an unrecorded
+run is not a result. So the demonstration surface enters the ledger empty, which is the honest
+starting position and the reason for adding the table at all: it is the surface with the *widest*
+gap between what we believe works and what we can cite.
+
+| Config | Proves | Status | Date | run_id | Axes at proof |
+|--------|--------|--------|------|--------|---------------|
+| `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | NEVER_RUN | — | — | — |
+| `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | NEVER_RUN | — | — | — |
+| `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | NEVER_RUN | — | — | — |
+| `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | NEVER_RUN | — | — | — |
+| `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | NEVER_RUN | — | — | — |
+| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | NEVER_RUN | — | — | — |
+| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | NEVER_RUN | — | — | — |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | NEVER_RUN | — | — | — |
+| `explode_100k.json` | The headline: Spark `explode` over 100,000 series | NEVER_RUN | — | — | — |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | NEVER_RUN | — | — | — |
+| `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
+| `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
+
+### What this surface will exercise that the smoke suite cannot
+
+- **`ray_autoscale=true`.** Every Ray *smoke* pins it `false`; five configs here leave it `true`,
+  which is the shipped default. See the gap below.
+- **Scale.** The smokes run 100 series. The fleet arithmetic W7b/W8 introduced is only under real
+  pressure at 100k, and `explode_100k.json` is the one config that overrides the bucket sizing
+  (`bucket_target_cells: 200`) because the default OOM'd at that scale.
+- **Cross-run reading.** `07_scale_review` compares the four scale runs *to each other*; nothing in
+  the smoke suite produces a set of runs meant to be read side by side.
+
 ## Notebooks
 
 All eight notebooks were executed headless against a live deployment and committed with their
@@ -157,6 +197,9 @@ notebook reflects the current path.
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
+| Workshop Act 1 (100k history, Cloud Shell / VM) | NEVER_RUN | The four scale configs above, run as the workshop instructs them and in that order. Not the same claim as "the configs work": Act 1 is followed by someone who has just deployed, from a shell with a session limit, and its failure modes are disk, quota and session death. |
+| Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | Headless execution of the tour notebooks against a fresh deployment. The notebook rows above were proven by the acceptance harness, which is not the same path. |
+| Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The six notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
 | RuntimeProbe read path (P1–P4) | NEVER_RUN | Offline only, against fakes. No probe has called a live Dataproc/Ray/BigQuery status API. |
@@ -171,7 +214,9 @@ Things that are true today and that no entry above covers. Keep this list short 
   Introduced by `4c988bc`, when a per-pool `AutoscalingSpec` crashed the Vertex Ray head at
   provisioning. The shipped default has therefore never passed a live smoke. That crash may have
   been the custom image — since deleted — so autoscaling may simply work now, but nobody has
-  checked.
+  checked. The smoke suite cannot close this on its own: five of the configs in the demonstration
+  table leave the default `true` (`ray_autoscale_demo`, `ray_gpu_demo`, and all three Ray-runtime
+  scale configs), so proving it is a demonstration-surface result, not a smoke result.
 - **No `run_id` was recorded for smokes 07–14.** Smokes 01–06 have them. Without one there is no
   reverse-trace from the ledger to the platform job, which is the whole point of recording a
   result. Any re-run must capture it.
