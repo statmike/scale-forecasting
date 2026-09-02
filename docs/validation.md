@@ -1016,11 +1016,27 @@ stating, because both were choices:
   `PARTIAL`, which erases a cancellation just as completely as `FAILED` does. `COMPLETED` is left
   alone: if the work genuinely finished, the cancellation lost a race it had no claim to win.
 
-Not yet re-proven live — that needs another cancel against a running job, and the honest reading is
-that this is the class of fix that looks obviously right and still has to be watched once.
+**Re-proven live the same day, on a rerun of the same shape.** `ray-cancel-sticky-824b4822945c`, a
+single `deep_learning` family on Ray CPU, 200 series. `--cancel` previewed one in-flight job at
+`0/200 series landed (retained)`; `--cancel --force` stopped it and wrote `header=CANCELLED` at
+23:06:53. The launcher then did exactly what it did before — saw its own Ray job go `STOPPED`,
+raised `EngineError: ray job … terminal state STOPPED`, and unwound — and this time the write it
+attempted did not land:
+
+| Where | Before the fix | Now |
+|---|---|---|
+| `run_registry.status` | `FAILED` | `CANCELLED` |
+| `run_jobs…deep_learning.status` | `FAILED` | `CANCELLED` |
+| `job_telemetry.cancel.cancelled_at` | `21:38:08Z` (retained) | `23:06:53Z` (retained) |
+| `job_telemetry.cancel.reason` | — | `re-proving the sticky-cancellation guard` |
+
+The rest of the unwind is unchanged and still correct: the launcher exited, and the Ray cluster was
+torn down — the v1beta1 `persistentResources` endpoint returns `{}`, which is the only teardown
+check worth quoting. So the guard suppresses one specific write and nothing else, which is what a
+conditional UPDATE in one statement should do.
 
 `cancelled_by: null` in the persisted telemetry is the same P6 `actor=None` finding as above,
-now confirmed to propagate into stored state rather than only into the console line.
+now confirmed on both runs to propagate into stored state rather than only into the console line.
 
 ### The workshop's first command printed nothing, and every offline test passed anyway
 
@@ -1241,7 +1257,8 @@ Things that are true today and that no entry above covers. Keep this list short 
   `ray-cancel-probe-e22e6fe9a830`. `job_telemetry.probe_handle` on that run carries a complete
   `resource_name`, so the fix is visible in stored state and not only in console output.
 - **~~A cancellation does not survive the launcher's unwind: the run ends `FAILED`, not
-  `CANCELLED`.~~ Fixed offline 2026-09-02, not yet re-proven live.**
+  `CANCELLED`.~~ Closed 2026-09-02 — fixed offline and re-proven live the same day** on
+  `ray-cancel-sticky-824b4822945c`, where the identical unwind left the header `CANCELLED`.
   Found live 2026-09-02 on `ray-cancel-probe-e22e6fe9a830`, analysed above. `--cancel --force` stops
   the job and writes `header=CANCELLED`; the launching process then sees its own job go `STOPPED`,
   treats that as death, and finalizes the run `FAILED` 17 s later. The evidence is not destroyed —
@@ -1252,7 +1269,7 @@ Things that are true today and that no entry above covers. Keep this list short 
   stated, though not offline-*findable*: it needs two processes disagreeing about one run, and until
   the handle fix landed the CLI could not reach far enough to create the disagreement. The fix is a
   status guard in the UPDATE's WHERE clause, applied by `registry.lifecycle` to every non-green
-  finalize. Closing it needs one more live cancel.
+  finalize. That live cancel has now been run.
 - **~~A `deep_learning` family on Ray with `hardware: cpu` hangs indefinitely.~~ Closed 2026-09-02
   — fixed by `9eeb154` and proven live the same day.** Zero-worker cluster, no timeout, no error —
   analysed above. The fix made `split_gpu_cpu_models` hardware-aware, so with no GPU pool the
