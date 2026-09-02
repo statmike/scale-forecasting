@@ -433,7 +433,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | NEVER_RUN | — | — | — |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review. Attempted 2026-09-02 and never reached a job: blocked by the Ray provisioning outage below, not by GPU | NEVER_RUN | — | — | — |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review. Attempted 2026-09-02 and never reached a job: blocked by the Ray provisioning outage below, not by GPU. That outage has since cleared, so this is runnable again | NEVER_RUN | — | — | — |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
 
@@ -477,9 +477,12 @@ that provisions a cluster. Retry before concluding anything about Ray from this 
 The sixth and seventh attempts are the ones that set expectations. The platform's own advice is
 *"please try recreating one in a few minutes"*; that was taken literally — twice, hours apart,
 each with a cluster name that had never been used — and the failure came back byte-identical both
-times, spanning most of a working day. **So this is not a transient to be waited out inside a work
-session** — it outlasts the retry the error message asks for, and the next step for it is a support
-case, not another probe.
+times, spanning most of a working day. So it outlasts the retry the error message asks for by a wide
+margin, and at that point a support case looked like the next step rather than another probe.
+
+**It cleared on its own at ~17:00 UTC the same day.** See "The Ray outage resolved itself, and the
+fix we nearly shipped for it" below — the retry advice was right in the end, just off by about six
+hours, and the draft support case was withdrawn unfiled.
 
 The seventh attempt did tear itself down cleanly (verified by `describe` returning `NOT_FOUND`, not
 by trusting the teardown log line — see the leak below), so the outage does not leak a cluster
@@ -543,6 +546,51 @@ The operational recovery, if a config starts failing with `AlreadyExists`:
 
     gcloud ai persistent-resources describe sf-ray-<run_id> --region=<region>   # list shows []
     gcloud ai persistent-resources delete   sf-ray-<run_id> --region=<region>   # wait out PROVISIONING
+
+### The Ray outage resolved itself, and the fix we nearly shipped for it
+
+**Resolved 2026-09-02 ~17:00 UTC. No code change. No support case.** The Ray track is unblocked.
+
+The recovery was spotted by accident. A Console-created cluster (`cluster-20260902-120337`) came up
+`RUNNING` at 16:26 UTC with the same project, region, PSC-I attachment, service account,
+`ray-cpu.2-47.py311` image and machine types our client had failed on seven times. Read at the time,
+that said the *service* was healthy and the fault was in what our client sends — and diffing the
+Console's resource against our payload left exactly two differences: `boot_disk_type` (`pd-standard`
+vs the SDK dataclass default `pd-ssd`, which we inherit without setting) and worker count (2 vs 5).
+
+Bisected with `create_ray_cluster` called directly, everything held still but the field under test:
+
+| Arm | Boot disk | Workers | Result |
+|-----|-----------|---------|--------|
+| A | `pd-standard` | 5 | **PROVISIONED**, 816 s |
+| B | `pd-ssd` | 2 | **PROVISIONED**, 696 s |
+| C | `pd-ssd` | **5** — the exact spec that failed 7× | **PROVISIONED**, 666 s |
+
+Arm C is the finding. The identical configuration that failed seven consecutive times at ~171 s
+provisioned normally about two hours later with nothing changed on our side. **The failure was
+transient and service-side** — not the disk type, not the fleet size, not our payload. All three
+arms tore down clean, verified by `describe` returning `NOT_FOUND` rather than by the SDK's own
+success line, per the leak finding above.
+
+**Arm A alone would have shipped the wrong fix, and the reason is worth more than the outage.** It
+passed first, and `pd-ssd` then explained every fact available: a contentless error (tenant-side SSD
+capacity is invisible to us — our own `SSD_TOTAL_GB` reads 0 used of 20480 and is not the binding
+quota), a fast pre-flight-shaped failure rather than a provisioning timeout, and a regression
+appearing overnight as other tenants' usage grew. A `pd-standard` pin was written into
+`ray_cluster.py` with a helper and five tests before arms B and C reversed it. All of it was
+reverted; `boot_disk_type` is back to the SDK default, which is what has always been proven live.
+
+The structural error: **arm A changed the hypothesis *and* let two hours pass.** Against an
+intermittent fault those are confounded, and "it recovered" is always the competing explanation —
+the one that needs its own arm. Re-running the *original failing configuration* is that arm. It cost
+25 minutes here and inverted the conclusion. Run it before shipping a fix, not after.
+
+One thing was kept, unrelated to Ray but surfaced by it: the `_fake_vertex_ray` fixture in
+`tests/unit/test_ray_submit.py` patched only `sys.modules`, so `from google.cloud.aiplatform import
+vertex_ray` bypassed the double as soon as anything else in the session imported the real lazy
+submodule — two tests failed in a full run while passing in isolation. Both bindings are patched
+now. Same theme as the rest of this file: a guard whose correctness depends on conditions nobody
+checks is indistinguishable from one that works.
 
 **Four demonstration configs are blocked on the same thing, and it is not the code.**
 `ray_gpu_demo`, `per_family_runtimes_demo`, `all_families_100k` and `all_families_100k_full` all

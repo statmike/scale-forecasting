@@ -252,6 +252,19 @@ def test_extract_ray_telemetry_degrades_on_bare_cluster() -> None:
 # The pool builder imports vertex_ray lazily, so we inject fakes via sys.modules — this keeps the
 # test offline and independent of whether the [ray] extra is installed. The fakes record the kwargs
 # each Resources gets so we can assert whether an AutoscalingSpec was attached.
+#
+# Both bindings are patched, not just sys.modules, and the reason is subtle enough to be worth
+# stating. `from google.cloud.aiplatform import vertex_ray` resolves the *attribute* on the parent
+# package first and only falls back to sys.modules if that lookup fails. vertex_ray is a lazy
+# submodule, so the attribute is normally absent and the sys.modules patch wins — but the moment any
+# test in the same session genuinely imports it, the attribute exists for the rest of the run and
+# the double is silently bypassed. The fakes then never get used, `_worker_resources` returns real
+# Resources objects with no `.kwargs`, and these two tests fail in a full run while passing in
+# isolation.
+#
+# That is not hypothetical: it happened when a throwaway test imported the real SDK, and the symptom
+# was two unrelated-looking failures 200 tests later. A test double whose correctness depends on
+# what else the session imported is a guard that stops guarding without saying so.
 
 
 @pytest.fixture
@@ -276,6 +289,10 @@ def _fake_vertex_ray(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setitem(sys.modules, "google.cloud.aiplatform.vertex_ray", vr_mod)
     monkeypatch.setitem(sys.modules, "google.cloud.aiplatform.vertex_ray.util.resources", res_mod)
+
+    from google.cloud import aiplatform
+
+    monkeypatch.setattr(aiplatform, "vertex_ray", vr_mod, raising=False)
 
 
 def test_worker_resources_attaches_autoscaling_spec_per_pool(_fake_vertex_ray: None) -> None:
