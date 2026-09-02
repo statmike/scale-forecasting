@@ -1447,8 +1447,19 @@ Things that are true today and that no entry above covers. Keep this list short 
   its measured series count and a pure `rank_harvest_candidates` chooses — closeness of scale
   first, recency only as a tie-break, distance in log space, symmetric, rounded so near-ties are
   ties. The policy left SQL specifically so it could be tested; eight offline tests pin it.
-  **Not yet re-proven live** — the next `source="auto"` run at a scale where it matters is the
-  proof, and that is the 100k wave.
+  **Proven live on the very next run.** `ray_100k` (100,000 series, `source="auto"`) resolved to
+  `explode-100k-1c59265062aa` — a 100,000-series harvest, an exact scale match. The candidate
+  recency would have chosen was `smoke-16-cluster-split-hardware-…`, 100 series, measured
+  46 minutes earlier: a **1000x** mismatch, on the most expensive run in the campaign. Both
+  candidates were in the same window and the same table, so this is the two rules disagreeing on
+  identical evidence, not a change in what was available.
+
+  One honest qualification. Discovery ranks on the **true** measured count, but the loading read is
+  still capped at `_MAX_HARVEST_CELLS = 50_000`, so what actually got loaded is a deterministic
+  fingerprint-ordered slice of the 400k cells — roughly an eighth of the panel — and the profile's
+  signature reports that smaller number. The pick is exact; the sample is not. That is the cap
+  doing its job (a submit host must not materialise half a million dicts), and it means the
+  remaining signature warning on a 100k run is ~8x rather than the 1000x it would have been.
 
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
