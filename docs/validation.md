@@ -323,9 +323,9 @@ matched the strings someone had thought of. Only a live region running out produ
 thought of. The fallback now walks all three and raises an `EngineError` naming them, which is what
 the plan's abort path expects — a defer, not a block.
 
-One workaround that looks obvious and is not — move the DL family to `hardware: cpu` — fails in the
-worst way available, and is still a live defect even now that Ray GPU works. See the zero-worker
-section two below.
+One workaround that looks obvious and was not — move the DL family to `hardware: cpu` — failed in
+the worst way available: a silent indefinite hang. Fixed and proven live 2026-09-02; see the
+zero-worker section two below.
 
 ### The Ray region failover cannot leave the deployed region, and a CPU run is what proved it
 
@@ -747,8 +747,8 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The tour notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. The tour table listed six on 2026-09-02 while Act 2 pre-rendered eight; `08_run_and_monitor` and `09_review_run` were added, so the count is now eight. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
-| RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. **Scope: reaching a Ray family through `--probe` still needs the handle fix** — see below. |
-| RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Scope: the `--cancel` verb itself could not reach the family** — same missing `resource_name` as the probe — and one summary line miscounts. See below. |
+| RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. The handle fix then landed and was re-proven live the same day: `--probe` against `ray-dl-on-cpu-probe-2e8a9f3f5c8d`, a single-family ephemeral Ray run, escalated out-of-process and returned `RUNNING_CONFIRMED`. Scope is now the whole verb, on every runtime. |
+| RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Scope: the `--cancel` verb itself could not reach the family** — same missing `resource_name` as the probe — and one summary line miscounts. See below. The handle fix has since landed and `--probe` is re-proven live on that shape; `--cancel` shares the corrected line but has **not** been re-observed live, so this scope note stands until it has. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
 | Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** |
 | Registry ops — `close_runs` (7th verb) | CURRENT | Executed live 2026-09-02 against the real registry: closed 9 of the 10 stuck headers to `FAILED` and skipped the tenth with its reason, leaving `doctor` reporting exactly one in-flight run. **The first live call failed** on a column that does not exist, which no offline test could have caught — see below. |
@@ -791,6 +791,21 @@ is knowable before anything exists to be named. The offline test that had pinned
 asserted the absence of `resource_name`, which is worth noting: a test can lock in a defect just as
 faithfully as a property, and this one did until a live run said otherwise.
 
+**Re-proven live the same day, on the shape that had been unreachable.** A single-family ephemeral
+Ray run (`ray-dl-on-cpu-probe-2e8a9f3f5c8d`, `deep_learning` on Ray CPU — one family, no shared
+cluster, nothing to be handed a name by) was probed mid-flight:
+
+```
+run ray-dl-on-cpu-probe-2e8a9f3f5c8d  status=RUNNING  escalated=True  disagreement=False
+  deep_learning  ray  RUNNING  RUNNING  RUNNING_CONFIRMED  0/6  Job is currently running.
+```
+
+`RUNNING_CONFIRMED` is the whole fix in one word: the probe left the registry, reached the Ray job,
+and got an answer back, in exactly the configuration that previously returned `UNKNOWN  handle
+missing resource_name`. The `escalated=True` matters as much as the verdict — it says the escalation
+was attempted rather than skipped. Note the probe was run from a **separate process** from the
+launcher, so this also re-proves the `_init_vertex` fix below under the conditions that exposed it.
+
 **Behind it sat a second defect, which the first one had been hiding.** `RayProbe.check` calls
 `ray_cluster._get_cluster`, and `vertex_ray.get_ray_cluster` takes no project or location — it reads
 the Vertex SDK's *global* config. The launching process sets that while creating the cluster, so
@@ -812,10 +827,12 @@ hand-completed handle, and returned `native_state=RUNNING, exists=True, detail="
 running."` — **so the read path itself is proven; the only thing still standing between `--probe` and
 a Ray family is the missing `resource_name`.**
 
-That one is not fixed here. It means either provisioning the cluster before the entry handle is
-written or stamping the resource path back the moment the submitter has it instead of at job end —
-a change to launch ordering rather than a missing call, and worth designing rather than patching
-mid-campaign. Recorded as a gap below.
+That one was not fixed in the same sitting. The options looked like provisioning the cluster before
+the entry handle is written, or stamping the resource path back the moment the submitter has it
+instead of at job end — a change to launch ordering rather than a missing call, and worth designing
+rather than patching mid-campaign. **The design that landed was neither: the path is *derived*, not
+observed** (see "Fixed offline the same day" above), which removes the ordering question instead of
+answering it. Proven live on 2026-09-02.
 
 ### A cancel that could not reach its job refused to say it had, and that is the property worth having
 
@@ -849,7 +866,10 @@ cluster would have been the worst available outcome, and it is the easy one to w
 
 **The verb could not reach the family, for the same reason the probe could not** — the entry handle
 has no `resource_name` on a single-family ephemeral Ray run. So `--cancel` inherits the gap recorded
-above; fixing the handle fixes both.
+above; fixing the handle fixes both. The handle fix has since landed and `--probe` has been
+re-proven live on exactly that shape. `--cancel` shares the one line of code that was wrong, so it
+is fixed by construction — but *shares the fix* is an argument, not an observation, and no live
+cancel has been run against a single-family Ray job since. That re-observation is still owed.
 
 **One wording defect.** The summary line read `1 in-flight job(s) stopped` when zero were. The
 per-family line immediately above it says `NOT cancelled`, so the output contradicts itself. Cosmetic
@@ -1062,19 +1082,26 @@ Things that are true today and that no entry above covers. Keep this list short 
   campaign captured one, so 01–08 and 11–14 all carry a reverse-trace. Only 09 and 10 still say "not
   recorded", and both are now runnable — the Ray GPU blocker they were held behind turned out not to
   exist (above), so what remains is spend, not entitlement.
-- **~~The Ray probe cannot escalate to a single-family Ray run.~~ Fixed offline 2026-09-02, not yet
-  re-proven live.** `resource_name` was absent from the entry handle for exactly the shape that has
+- **~~The Ray probe cannot escalate to a single-family Ray run.~~ Closed 2026-09-02 — fixed offline
+  and re-proven live the same day.** `resource_name` was absent from the entry handle for the shape that has
   no shared cluster, and the corrected handle landed only after the job was terminal; `--cancel`
   inherited it. Found live 2026-09-02, analysed above. The fix is that the cluster name is a pure
   function of the `run_id` — `ray_io.cluster_name` — so the entry handle now *predicts* the path the
   submitter is about to create instead of waiting to be told. The one guess in it is the region: a
   capacity hop would move the cluster and the predicted path would miss, degrading the probe to
-  registry-only, which is exactly where it was before. Re-proving it needs a live `--probe` against
-  a running single-family Ray job.
-- **A `deep_learning` family on Ray with `hardware: cpu` hangs indefinitely.** Zero-worker cluster,
-  no timeout, no error — analysed above. Reachable from config alone, and the natural workaround for
-  anyone blocked on the Ray GPU entitlement, which makes it the highest-value of the three deferred
-  fixes.
+  registry-only, which is exactly where it was before. Re-proven by a live `--probe` against
+  `ray-dl-on-cpu-probe-2e8a9f3f5c8d` while its one Ray family was running: `RUNNING_CONFIRMED`,
+  from a separate process. **`--cancel` shares the fixed line but has not been re-observed live on
+  this shape** — that one observation is what is still owed.
+- **~~A `deep_learning` family on Ray with `hardware: cpu` hangs indefinitely.~~ Closed 2026-09-02
+  — fixed by `9eeb154` and proven live the same day.** Zero-worker cluster, no timeout, no error —
+  analysed above. The fix made `split_gpu_cpu_models` hardware-aware, so with no GPU pool the
+  deep-learning cells are sized into the CPU pool instead of falling between the two. The live proof
+  used the exact config the commit body names as reachable —
+  `{"python_runtime": "ray", "models": ["neuralprophet"]}` — which ran to COMPLETED as
+  `ray-dl-on-cpu-probe-2e8a9f3f5c8d`, `deep_learning ray/cpu`, 6 cells. That run was the probe target
+  above, so one cheap Ray-CPU run closed both gaps: **the hang was the reason the probe fix had
+  nothing safe to be tested against.**
 - **~~Vertex Ray will not provision in `us-central1` for this project as of 2026-09-02.~~ Cleared
   the same day, ~17:00 UTC.** Six specs failed with the contentless internal error, including a
   deliberate re-probe hours later under a fresh cluster name; then three bisect arms and smoke 08
