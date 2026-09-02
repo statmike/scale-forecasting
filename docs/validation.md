@@ -565,24 +565,24 @@ board because this config does not backtest — the row proves autoscaling and s
 
 All eight notebooks were executed headless against a live deployment and committed with their
 output cells at `ff1f8bf` (2026-08-28), which lands **after** the Ray re-architecture — so the Ray
-notebook reflects the current path. **Six were re-executed on 2026-09-02** against current code and
-re-committed with their new outputs, clearing the three `STALE` rows the axis moves had left. The
-executed notebooks were diffed against the committed ones first: source cells were byte-identical in
-all six, so only outputs changed.
+notebook reflects the current path. **Seven were re-executed on 2026-09-02** against current code and
+re-committed with their new outputs, clearing the last `STALE` row in this table. The executed
+notebooks were diffed against the committed ones first: source cells were byte-identical in all
+seven, so only outputs changed.
 
 | Notebook | Status | Date | Axes at proof |
 |----------|--------|------|---------------|
 | `01_spark_via_connect.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates` |
 | `02_bigquery_native.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
-| `03_combo_and_ensemble.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| `03_combo_and_ensemble.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay` |
 | `04_ray_on_vertex.ipynb` | CURRENT | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | `07_scale_review.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
 | `08_run_and_monitor.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay` |
 | `09_review_run.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
 | `model_playground.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
 
-**`03` is the one that did not clear, and it failed twice for two different reasons.** Neither was a
-defect in the notebook — it reported **zero cell errors** both times.
+**`03` took three attempts, and the two failures had two different causes.** Neither was a defect in
+the notebook — it reported **zero cell errors** every time.
 
 The first attempt died before it started: `Quota 'CPUS' exceeded. Limit: 200.0 in region
 us-central1`, because six sibling notebooks held the region's Colab runtimes at that moment. The
@@ -602,8 +602,11 @@ a deadline kill lands after the batch succeeds and before the header closes. Bot
 3600 s, matching `01`. A ceiling is not a duration, so the headroom costs nothing unless it is
 needed, and what it prevents needs a human to clean up.
 
-`03`'s row therefore stays `STALE` at its 2026-08-28 proof rather than being upgraded on a run that
-did not finish. Re-running it under the widened ceiling is what clears it.
+The third attempt — same notebook, same region, alone, changing nothing but the ceiling — passed,
+and took roughly the 30 minutes the old limit allowed. **That is the confirmation of the diagnosis,
+not just the fix for it:** if the deadline had been a symptom rather than the cause, widening it
+would have produced a longer failure instead of a pass. It also exercised the new `--only` selection
+path end to end, which is what made a one-notebook retry affordable enough to run three times.
 
 ## Other capabilities
 
