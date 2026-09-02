@@ -635,3 +635,84 @@ def test_cli_requires_exactly_one_config_source() -> None:
         main._main(["--dry-run"])  # neither source
     with pytest.raises(SystemExit):
         main._main(["--config", "a.json", "--config-uri", "gs://b/c.json"])  # both sources
+
+
+# --- _print_cancel_report ------------------------------------------------------
+
+
+def _cancel_item(family: str, *, cancellable: bool = True) -> Any:
+    from scale_forecasting.probes.cancel import CancelPlanItem
+
+    return CancelPlanItem(
+        family=family,
+        runtime="spark",
+        registry_status="RUNNING" if cancellable else "COMPLETED",
+        native_state=None,
+        cancellable=cancellable,
+        n_done=3,
+        n_expected=10,
+        note="will stop; 3/10 cells retained",
+    )
+
+
+def _cancel_report(*, executed: bool, cancelled_flags: list[bool]) -> Any:
+    from scale_forecasting.probes.cancel import CancelOutcome, CancelPlan, CancelReport
+
+    families = [f"fam{i}" for i in range(len(cancelled_flags))]
+    plan = CancelPlan(
+        run_id="rid-1",
+        items=tuple(_cancel_item(f) for f in families),
+        ensemble_suppressed=False,
+    )
+    outcomes = (
+        tuple(
+            CancelOutcome(
+                family=f,
+                job_key=f"{f}-job",
+                requested=True,
+                cancelled=ok,
+                stopped=ok,
+                already_gone=False,
+                detail="stopped" if ok else "no reachable job handle",
+            )
+            for f, ok in zip(families, cancelled_flags, strict=True)
+        )
+        if executed
+        else ()
+    )
+    return CancelReport(
+        run_id="rid-1",
+        plan=plan,
+        executed=executed,
+        outcomes=outcomes,
+        header_status="CANCELLED" if executed else None,
+        actor="tester",
+        reason="test",
+    )
+
+
+def test_cancel_report_headline_counts_what_actually_stopped(capsys: Any) -> None:
+    """The headline must not claim a job stopped when its own row says NOT cancelled.
+
+    A per-engine cancel can fail (unreachable handle, job already terminal). Reporting the plan's
+    ``n_cancellable`` as the stopped count contradicted the per-family table three lines below —
+    and the headline is the line that gets believed, because it comes first.
+    """
+    main._print_cancel_report(_cancel_report(executed=True, cancelled_flags=[True, False]))
+    out = capsys.readouterr().out
+    assert "1 of 2 in-flight job(s) stopped" in out
+    assert "NOT cancelled" in out  # the per-family row the headline now agrees with
+
+
+def test_cancel_report_headline_when_everything_stopped(capsys: Any) -> None:
+    main._print_cancel_report(_cancel_report(executed=True, cancelled_flags=[True, True]))
+    assert "2 of 2 in-flight job(s) stopped" in capsys.readouterr().out
+
+
+def test_cancel_report_preview_counts_the_plan_not_outcomes(capsys: Any) -> None:
+    # A preview has no outcomes to count, so it still reports the blast radius — in the future
+    # tense, which is what makes the two headlines distinguishable at a glance.
+    main._print_cancel_report(_cancel_report(executed=False, cancelled_flags=[True, True]))
+    out = capsys.readouterr().out
+    assert "2 in-flight job(s) will be stopped" in out
+    assert "Confirm with --force" in out

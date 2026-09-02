@@ -369,13 +369,23 @@ def _print_cancel_report(report: CancelReport) -> None:
     then a "Confirm with --force" line. With ``--force`` it also prints each family's outcome and
     the run's rolled-up header status. Written to stdout (not the logger): the report *is* the
     ``--cancel`` verb's output and must show regardless of log level.
+
+    **After executing, the headline counts what actually stopped, not what the plan intended to
+    stop.** A per-engine cancel can fail — an unreachable job handle, a job that reached a terminal
+    state between the plan and the call — and the per-family lines below already say "NOT
+    cancelled". A headline still reporting ``n_cancellable`` contradicted the table printed three
+    lines under it, which is the reading that gets believed because it comes first.
     """
     plan = report.plan
-    verb = "Cancelled" if report.executed else "Cancel"
-    print(
-        f"{verb} run {report.run_id}: {plan.n_cancellable} in-flight job(s) "
-        f"{'stopped' if report.executed else 'will be stopped'}; partial results are RETAINED"
-    )
+    if report.executed:
+        n_stopped = sum(1 for oc in report.outcomes if oc.cancelled)
+        head = (
+            f"Cancelled run {report.run_id}: {n_stopped} of {plan.n_cancellable} "
+            f"in-flight job(s) stopped"
+        )
+    else:
+        head = f"Cancel run {report.run_id}: {plan.n_cancellable} in-flight job(s) will be stopped"
+    print(f"{head}; partial results are RETAINED")
     row_fmt = "  %-14s %-16s %-10s %s"
     print(row_fmt % ("family", "runtime", "status", "effect"))
     for item in plan.items:
