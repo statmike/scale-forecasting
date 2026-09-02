@@ -40,7 +40,8 @@ Three responsibilities, in order:
    predictions (and therefore every ensemble prediction) are a true beyond-data forecast with no
    actuals to join — so an ensemble earns its leaderboard metric on **exactly the window the base
    models are scored on** (``backtest_oof``, where ``y_true`` lives). OOF carries no interval
-   bounds, so ensemble coverage/pinball are NaN — consistent with the base models' OOF metrics.
+   bounds, so ensemble coverage/pinball are unscored — computed as NaN and written as NULL, like
+   every other metric this registry stores, consistent with the base models' OOF metrics.
    Learned consensuses are scored on the folds their meta-learner trained on (mildly optimistic,
    the price of stacking having no held-out-of-held-out window). Once these ``fold_id IS NULL`` rows
    land, the leaderboard shows the ensembles automatically — **no view change** beyond the
@@ -90,8 +91,9 @@ def run_ensembles(
 
     This is the **barrier** trigger: it blends every series in one pass, after all base jobs have
     joined. The **microbatch** counterpart (`run_ensembles_microbatch`) drains series incrementally
-    as each one's base set completes; both call the shared per-batch core (`_ensemble_batch`) and
-    land identical rows.
+    as each one's base set completes; both call the shared per-batch core (`_ensemble_batch`). They
+    land identical rows for the *calculated* strategies; the learned ones are re-fit per batch under
+    microbatch and so can differ — see `_ensemble_batch`.
     """
     from datetime import UTC, datetime
 
@@ -288,8 +290,23 @@ def _ensemble_batch(
     The shared core behind both triggers: reads the batch's base predictions / OOF / decision-metric
     rows (filtered to ``ts_ids`` when given), blends the calculated + learned consensuses in pandas,
     appends the ``ensemble_<s>`` prediction rows via the Storage Write API, and scores each
-    pseudo-model into ``forecast_metadata`` — identical logic and rows whether the caller passes one
-    ready series (microbatch) or all of them (barrier).
+    pseudo-model into ``forecast_metadata`` — identical logic whether the caller passes one ready
+    series (microbatch) or all of them (barrier).
+
+    **Identical logic is not identical numbers, and the difference is confined to the learned
+    strategies.** The calculated ones (``mean``, ``median``, ``inverse_error``) are per-series, so
+    partitioning the series changes nothing. The learned ones are not: `fit_learned` below trains on
+    whatever OOF this call was handed, so microbatch fits ``nnls``/``ridge``/``xgb`` **once per
+    ready-batch on that batch's series**, while barrier fits once over all of them. Different
+    training sample, different weights. Confirmed live on 2026-09-02 by running smokes 11 and 12
+    back to back on the same data: the three calculated strategies agreed to float noise and
+    ``ensemble_nnls`` differed in the fourth decimal (see `docs/validation.md`).
+
+    Neither answer is wrong, but the microbatch one depends on how series happened to batch, which
+    depends on job timing — so it is not reproducible the way the rest of a run is. Deciding whether
+    learned strategies should defer to a final global fit is a design question, deliberately left
+    open here rather than changed mid-campaign; this docstring's job is to stop the next reader
+    assuming the two triggers are interchangeable for stacking.
     """
 
     from google.cloud import bigquery
@@ -456,6 +473,7 @@ def _ensemble_meta_row(
 
     from .metrics import METRIC_NAMES
     from .registry.ids import make_model_hash
+    from .registry.rows import _as_float
 
     return {
         "run_id": run_id,
@@ -465,7 +483,9 @@ def _ensemble_meta_row(
         "model_hash": make_model_hash(run_id, ts_id, model_type, cfg),
         "ensemble_id": ensemble_id,
         "fold_id": None,
-        **{name: panel[name] for name in METRIC_NAMES},
+        # Through `_as_float` like every other metric write: an unscored or non-finite metric is
+        # NULL, never NaN. See `bigquery_engine._meta_row` for what the raw passthrough cost.
+        **{name: _as_float(panel[name]) for name in METRIC_NAMES},
         "fit_seconds": None,
         "best_params": None if weights is None else json.dumps(weights, sort_keys=True),
         "model_artifact": artifact_uri,

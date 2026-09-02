@@ -102,9 +102,9 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | NEEDS_RECHECK | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
-| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-08-25 | not recorded | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
+| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
 
@@ -144,6 +144,52 @@ deleted at teardown. It is built through `dataproc_cluster.build_cluster` with t
 like an ephemeral cluster in every respect but its name. Standing it up with a hand-written
 `gcloud dataproc clusters create` would have made smoke 05 a test of *that command's* fidelity to
 the product rather than of the reuse path.
+
+### Barrier and microbatch ensembling are not interchangeable, and running them back to back showed it
+
+Smokes 11 and 12 differ only in `compute.ensemble.mode`, so running them on the same data on
+2026-09-02 is a controlled comparison the suite had never actually made. The three **calculated**
+strategies agreed to float noise — identical to 15 significant figures for `inverse_error` and
+`median`, last-digit for `mean`. `ensemble_nnls` did not: **0.36516 under barrier, 0.36398 under
+microbatch**, a fourth-decimal difference against neighbours agreeing in the fifteenth.
+
+The cause is in the code and is not a bug so much as an unstated property. `_ensemble_batch` is the
+shared core behind both triggers, and it calls `fit_learned` on *whatever OOF it was handed*. Barrier
+hands it every series once. Microbatch hands it one ready-batch at a time, so the learned strategies
+are re-fit per batch on a subset. The calculated strategies are per-series and so are unaffected by
+the partitioning; a learned strategy trains across series, and a different training sample gives
+different weights. `_ensemble_batch`'s docstring claimed "identical logic and rows" for both
+triggers; it now says exactly where that stops being true.
+
+**The consequence worth carrying: `ensemble_nnls` under microbatch is not reproducible the way the
+rest of a run is.** How series batch depends on when base jobs finish, so a re-run with different
+timing can fit different weights. Whether learned strategies should defer to a final global fit is a
+design question and is left open — the campaign's job here was to notice it, and it took a live
+side-by-side to do that, because the offline tests exercise each trigger against fixtures rather
+than the two against each other.
+
+### Smoke 13 passed, and its leaderboard was wrong — two encodings for "no metric"
+
+Smoke 13 reads a **native BigQuery table** rather than Iceberg, and on 2026-09-02 it did so
+correctly: run `smoke-13-native-format-8e67fd137515`, all verifiers green. What was wrong was the
+report it printed. `arima_plus` and `timesfm` headed the leaderboard, above two models that had
+actually been scored — because the run has backtesting off, so nothing was scored at all, and the
+two native models' `wape` was **NaN** while `theta`'s and `xgboost`'s was **NULL**. BigQuery sorts
+NaN ahead of every real number, so the unscored models won a ranking they had not entered.
+
+Both encodings came from the same in-memory value. `registry/rows.py::_as_float` is the coercion
+that turns a non-finite metric into `None`, and its docstring calls itself the one boundary every
+engine's rows flow through — but `bigquery_engine._meta_row` and `ensemble_run._ensemble_meta_row`
+each built their metric columns by passing the panel through raw. Both now route through
+`_as_float`, and `tests/unit/test_metric_null_encoding.py` covers all three writers together so a
+fourth one fails there rather than re-splitting the encoding quietly.
+
+**This is not an architecture axis, and the row above still stands.** No forecast value changed and
+no mechanism was replaced; what changed is how the absence of a score is spelled in one column. A
+reader auditing rows dated before this fix should expect NaN rather than NULL in the native and
+ensemble metric columns of those runs, and should not trust an `ORDER BY <metric>` taken across
+engines on them. Only a live run finds this: every offline test asserts against one writer at a
+time, and each writer is self-consistent.
 
 ### Smoke 08 is blocked on quota, not broken — and finding that out took two fixes
 

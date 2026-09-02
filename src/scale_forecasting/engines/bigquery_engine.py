@@ -369,9 +369,17 @@ def _meta_row(
     ``cpu_seconds``/RSS/thread counts — are deliberately absent: a native family has no per-cell
     worker and traces at the ``run_jobs`` grain instead, so those columns are NULL by design rather
     than by omission.
+
+    Metrics go through `registry.rows._as_float` for the same reason the Python worker's do: an
+    unscored or non-finite metric must land as NULL, not NaN. This row used to pass the panel
+    through raw, which is how a backtest-off native run wrote NaN into columns the Python engines
+    wrote NULL into — same table, same run, same meaning, two encodings. NaN also sorts *ahead* of
+    every real number in a BigQuery ``ORDER BY wape``, so an unscored native model would head a
+    leaderboard it had not competed in. Found live 2026-09-02 in smoke 13.
     """
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_model_hash
+    from ..registry.rows import _as_float
 
     return {
         "run_id": run_id,
@@ -380,7 +388,7 @@ def _meta_row(
         "compute_engine": "bigquery",
         "model_hash": make_model_hash(run_id, str(ts_id), model_name, cfg),
         "fold_id": None,
-        **{name: panel[name] for name in METRIC_NAMES},
+        **{name: _as_float(panel[name]) for name in METRIC_NAMES},
         "fit_seconds": None,
         "best_params": best_params,
         "model_artifact": None,
