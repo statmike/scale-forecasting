@@ -97,7 +97,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-01 | `smoke-03-serverless-gpu-a918f22d7970` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | CURRENT | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-08-24 | `smoke-06-cluster-gpu-a510512f507a` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
+| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | NEEDS_RECHECK | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
@@ -117,6 +117,26 @@ ephemeral cluster must be deleted when its run ends, a named one must not. Both 
 reached `COMPLETED`, that cluster was still `RUNNING`. A reuse path that tore down a cluster it did
 not create would pass every leaderboard assertion in the harness and still be badly wrong, so the
 survival check is the assertion, and it is made against `clusters list`, outside the harness.
+
+Smoke 06 followed on 2026-09-02 — `neuralprophet` on a cluster T4 in `us-central1-b`, on the
+pre-baked driver image. **One precision about its row: "incl. zone failover" describes the config,
+not what happened.** The first candidate (deployment region, auto-zone placement) succeeded, so
+`_create_cluster_across_candidates` never walked to a second zone. The failover path therefore
+remains proven only offline; what smoke 06 proves is the GPU cluster itself — the driver image, the
+accelerator attachment, and a DL model actually fitting on the device.
+
+**`compute.machine_family` is wired end to end, and the proof is a side-by-side.** No smoke config
+sets it, so it was run once from a throwaway config —
+`wave-54-cluster-machine-family-ab6c818831e8`, 2026-09-02, `COMPLETED`, three models on two cluster
+families — with `"machine_family": "n2"` as the only difference from `04_cluster_cpu.json`. Its
+cluster came up `n2-standard-8` workers on an `n2-standard-4` master while `sf-smoke-cluster`, built
+from the same code path at `auto`, sat in the same `clusters list` at `n1-standard-8`/`n1-standard-4`.
+The field reaches GCE. There is **no row** for this in any table above and that is deliberate: the
+config is not in the repo (a file under `configs/smokes/` would trip the ledger tripwire, which
+requires exactly one row per config), so it lives here as prose with its `run_id`.
+
+Note what this run does *not* prove. `machine_family` is documented as ignored on GPU — an
+accelerator dictates its own machine — and this was a CPU run, so that branch is still offline-only.
 
 The standing cluster is a **campaign fixture, not infrastructure**: created here for smoke 05 and
 deleted at teardown. It is built through `dataproc_cluster.build_cluster` with the same
@@ -141,11 +161,19 @@ project-entitlement blocker, not an architecture one** — it needs a Vertex GPU
 until then every Ray-GPU config in this repo (`ray_gpu_demo`, `all_families_100k`,
 `all_families_100k_full`) fails at provisioning.
 
-There is a config-level route around it, and it is worth stating because it is the product's own
-answer: **deep learning does not have to run on Ray.** Smoke 03 passed the same day on Dataproc
-Serverless L4, and `14_full_dag.json` already puts the DL family there. A deployment without Vertex
-Ray GPU entitlement can run every family by pointing `compute.families.deep_learning` at
-`runtime: spark`, which is a config edit, not a code change.
+**It is a Vertex entitlement, not a GPU one, and the other three GPU paths prove that.** Three of
+the four ways this product can put a family on a GPU were proven live within a day of each other:
+Dataproc Serverless L4 (smoke 03, 2026-09-01), Dataproc cluster T4 with the pre-baked driver image
+(smoke 06, 2026-09-02, `neuralprophet` on `us-central1-b`), and BigQuery-native, which needs no
+accelerator of ours. Only Vertex Ray fails, and the cluster T4 result is the cleanest evidence why:
+it spends **Compute Engine** `NVIDIA_T4_GPUS`, which this project has, while a Vertex Ray cluster
+spends `CustomModelTrainingT4GPUsPerProjectPerRegion`, which it does not. Same accelerator, same
+region, same day — different meter, different answer.
+
+So there is a config-level route around it, and it is worth stating because it is the product's own
+answer: **deep learning does not have to run on Ray.** `14_full_dag.json` already puts the DL family
+on Serverless. A deployment without Vertex Ray GPU entitlement can run every family by pointing
+`compute.families.deep_learning` at `runtime: spark`, which is a config edit, not a code change.
 
 The trap worth carrying: **Compute Engine quota does not tell you whether a Ray GPU run can start.**
 `NVIDIA_T4_GPUS` reads 4-of-4 free in `us-central1`. The quota a Vertex Ray cluster actually spends
