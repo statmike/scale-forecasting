@@ -23,6 +23,12 @@ Only the cluster hops. The data plane — config staging, registry writes — st
 ``settings.region``, which is why `cluster_resource_path` takes an explicit region rather than
 assuming one.
 
+The other thing worth knowing is that **teardown verifies rather than assumes**. The SDK reports
+success the moment a delete is accepted, so a stuck resource and a deleted one produce the identical
+log line; `_delete_cluster` polls the resource until it reads ``NOT_FOUND`` and says so plainly when
+it does not. `_clear_stale_resource` is the other half — a run-derived name means a previous
+attempt's ``ERROR``-state wreckage sits on the exact path the next create wants.
+
 Public surface: ``cluster_resource_path``, ``provision_shared_cluster``,
 ``teardown_shared_cluster``. The lifecycle verbs `_create_cluster_across_regions` / `_get_cluster` /
 `_delete_cluster` are driven by `ray_submit.submit_ray`, which owns the create→run→teardown
@@ -357,7 +363,8 @@ def _create_cluster_across_regions(
 ) -> tuple[str, str]:  # pragma: no cover - orchestrates live Vertex I/O; @gpu smoke exercises it
     """Create the cluster, walking ``regions`` in order until one can provision it.
 
-    Returns ``(cluster_resource_name, region)`` for the region that succeeded. On a *regional
+    Returns ``(cluster_resource_name, region)`` for the region that succeeded.
+
     **The default is to keep walking.** The failed attempt's (deterministic) resource is torn down
     and the next region tried unless the message names a cause that travels with the request rather
     than the place — permission, a bad machine type, an API that isn't on — for which
@@ -378,6 +385,10 @@ def _create_cluster_across_regions(
     last_exc: Exception | None = None
     for region in regions:
         _init_vertex(settings, region)
+        resource_path = cluster_resource_path(settings, name, region)
+        # The name is run-derived, so an earlier attempt's wreckage sits on this exact path and
+        # would fail the create with AlreadyExists. Clear it first (see `_clear_stale_resource`).
+        _clear_stale_resource(resource_path)
         try:
             _log.info("attempting Ray cluster %s in region %s", name, region)
             resource_name = _create_cluster(plan, infra, name)
@@ -386,7 +397,6 @@ def _create_cluster_across_regions(
         except Exception as exc:  # noqa: BLE001 - classify, then either advance or re-raise
             # Read the resource's own error text *before* teardown — that's where the capacity
             # reason lives; the exception string is only a generic "returned an error".
-            resource_path = cluster_resource_path(settings, name, region)
             detail = _cluster_error_message(resource_path)
             message = f"{exc} | {detail}".strip(" |")
             _delete_cluster(
@@ -434,17 +444,139 @@ def _get_cluster(
     return vertex_ray.get_ray_cluster(cluster_resource_name=cluster_resource_name)
 
 
+# Two answers that end a wait: the resource is gone (what teardown is trying to establish), and the
+# read could not be completed (the admission that we cannot establish it). Both are distinct from
+# every real Vertex state name, so they can share the state channel without ambiguity.
+_ABSENT = "NOT_FOUND"
+_UNREADABLE = "UNREADABLE"
+
+# How long to wait for a delete to actually take effect, and how often to ask. A Ray cluster takes
+# a minute or two to disappear; five minutes is generous enough that a timeout means something.
+_TEARDOWN_TIMEOUT_S = 300.0
+_TEARDOWN_POLL_S = 10.0
+
+
+def _resource_state(
+    resource_name: str,
+) -> str:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
+    """The resource's state name, ``_ABSENT`` if it is gone, ``_UNREADABLE`` if the read failed.
+
+    Like `_cluster_error_message`, this must hit the resource's *regional* endpoint — against the
+    global default the ``get`` fails, and a teardown check that cannot read is a teardown check that
+    always says "unverifiable".
+    """
+    try:
+        from google.api_core.exceptions import NotFound
+        from google.cloud import aiplatform_v1
+
+        region = _region_from_resource_name(resource_name)
+        client_options = {"api_endpoint": f"{region}-aiplatform.googleapis.com"} if region else None
+        client = aiplatform_v1.PersistentResourceServiceClient(client_options=client_options)
+        try:
+            resource = client.get_persistent_resource(name=resource_name)
+        except NotFound:
+            return _ABSENT
+        return str(aiplatform_v1.PersistentResource.State(resource.state).name)
+    except Exception as exc:  # noqa: BLE001 - a failed read is an answer, not a fatal error
+        _log.debug("could not read state of %s: %r", resource_name, exc)
+        return _UNREADABLE
+
+
+def _await_absent(
+    read_state: Any,
+    *,
+    timeout_s: float = _TEARDOWN_TIMEOUT_S,
+    poll_s: float = _TEARDOWN_POLL_S,
+    sleep: Any = None,
+    clock: Any = None,
+) -> str:
+    """Poll ``read_state`` until the resource is gone; return the last state observed.
+
+    Ends on ``_ABSENT`` (gone), on ``_UNREADABLE`` (no point re-asking a question we cannot ask —
+    returning at once beats stalling for the whole timeout on a permission fault), or on the
+    deadline. The seams are injected so the loop is unit-testable without sleeping.
+    """
+    import time
+
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+
+    deadline = clock() + timeout_s
+    state = read_state()
+    while state not in (_ABSENT, _UNREADABLE) and clock() < deadline:
+        sleep(poll_s)
+        state = read_state()
+    return str(state)
+
+
 def _delete_cluster(
-    cluster_resource_name: str,
-) -> None:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
-    """Tear down an ephemeral cluster (best-effort: a teardown failure is logged, never fatal)."""
+    cluster_resource_name: str, *, verify: bool = True
+) -> bool:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
+    """Tear down an ephemeral cluster and *confirm it is gone*; True if confirmed absent.
+
+    **The SDK's success line is not evidence.** ``vertex_ray`` prints ``Successfully deleted the
+    cluster`` and returns as soon as the delete is accepted, so a resource that is stuck — or that
+    the delete never really reached — reads exactly like one that went away. This campaign watched a
+    teardown log success two seconds after a provisioning error and leave the cluster standing, and
+    the only way to tell the two apart was to go and ask. So we ask: poll the resource until it
+    reads ``NOT_FOUND``.
+
+    Still best-effort in the sense that matters — a failure is logged and never raised, because a
+    teardown that throws would mask the run's real outcome. What changes is that an unverified
+    teardown now says so, loudly, naming a resource that is still billing.
+    """
     from google.cloud.aiplatform import vertex_ray
 
     try:
         vertex_ray.delete_ray_cluster(cluster_resource_name=cluster_resource_name)
-        _log.info("deleted ephemeral Ray cluster %s", cluster_resource_name)
-    except Exception as exc:  # noqa: BLE001 - teardown is best-effort; surface it, don't re-raise
-        _log.warning("Ray cluster teardown failed (non-fatal): %r", exc)
+    except Exception as exc:  # noqa: BLE001 - teardown is best-effort; verify below regardless
+        _log.warning("Ray cluster delete call failed (non-fatal): %r", exc)
+    if not verify:
+        return False
+
+    final = _await_absent(lambda: _resource_state(cluster_resource_name))
+    if final == _ABSENT:
+        _log.info("deleted ephemeral Ray cluster %s (verified gone)", cluster_resource_name)
+        return True
+    _log.warning(
+        "Ray cluster %s did not go away after %.0fs (last state %s) — it may still be running and "
+        "billing; check it by hand",
+        cluster_resource_name,
+        _TEARDOWN_TIMEOUT_S,
+        final,
+    )
+    return False
+
+
+def _clear_stale_resource(resource_path: str) -> None:
+    """Clear a same-named leftover before a create, so old wreckage cannot block a new attempt.
+
+    The cluster name derives from ``run_id``, so every attempt at the same config targets the *same*
+    resource path. A create that failed mid-provision can leave the resource behind in ``ERROR``,
+    and the next attempt then fails with ``AlreadyExists`` while the delete that would fix it
+    returns ``FAILED_PRECONDITION`` — the config becomes unrunnable until the state changes on its
+    own. That turns an intermittent leak into a permanent one, and it is the reason this runs before
+    every create rather than only on retry.
+
+    Only ``ERROR`` is deleted: nothing is using it, and it is the state that blocks. A ``RUNNING``
+    or ``PROVISIONING`` resource of the same name is **left alone** and allowed to collide — it
+    may be a concurrent run of this same config, and taking its cluster out from under it would be
+    a far worse failure than the collision. ``STOPPING`` is simply waited out.
+    """
+    state = _resource_state(resource_path)
+    if state in (_ABSENT, _UNREADABLE):
+        return
+    if state == "STOPPING":
+        _log.info("same-named Ray cluster %s is STOPPING; waiting for it to go", resource_path)
+        _await_absent(lambda: _resource_state(resource_path))
+        return
+    if state == "ERROR":
+        _log.warning(
+            "clearing a leftover Ray cluster %s left in ERROR by an earlier attempt", resource_path
+        )
+        _delete_cluster(resource_path)
+        return
+    _log.info("same-named Ray cluster %s is %s; leaving it alone", resource_path, state)
 
 
 def provision_shared_cluster(

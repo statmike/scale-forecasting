@@ -1068,9 +1068,14 @@ Things that are true today and that no entry above covers. Keep this list short 
   leaked resource is deleted by hand — and `list` reports `[]` while it exists, so it is invisible
   from the obvious command. Analysed above. **Intermittent:** a second failed provision under
   identical conditions tore down cleanly, so the teardown success line tells you nothing either way
-  and `describe` is the only check. The product-side fix worth considering is making teardown verify
-  rather than assume, and tolerating an `ERROR`-state same-named resource at create; neither was
-  attempted during an outage, where every attempt fails for an unrelated reason.
+  and `describe` is the only check. **Both product-side fixes have since landed offline** (2026-09-02):
+  `_delete_cluster` now polls the resource until it reads `NOT_FOUND` and logs a named, still-billing
+  leak when it does not, and `_clear_stale_resource` deletes an `ERROR`-state same-named resource
+  before each create while deliberately leaving a `RUNNING`/`PROVISIONING` one alone. Unit-tested,
+  **not yet proven live** — and it cannot be proven on demand, because the leak is intermittent: the
+  live evidence will be the absence of a hand-deleted cluster over the next several Ray failures,
+  which is the weakest kind of proof there is. Recorded as offline-only until a failed provision
+  happens to exercise it.
 - **Ten run headers are stuck non-terminal, and no verb closes them.** Left by interrupted work
   across the whole build (`naive-100k`, several `nb01-spark-connect`, `nb03`, `nb06`, …), most
   recently `nb03-combo-ensemble-1788329058-c4a5e6db54a1` on 2026-09-02. Harmless to reads, but they

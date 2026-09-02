@@ -392,7 +392,15 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         # Default: no resource-side error text (tests that need one override this).
         return calls.get("cluster_error", "")
 
+    def _fake_state(resource_name: str) -> str:
+        # Default: nothing is squatting on the run-derived name, so the pre-create clear is a
+        # no-op. Tests about leftovers override this. Stubbed rather than left real because the
+        # real read builds a Vertex client and would go looking for credentials.
+        calls.setdefault("state_reads", []).append(resource_name)
+        return str(calls.get("resource_state", ray_cluster._ABSENT))
+
     monkeypatch.setattr(ray_cluster, "_init_vertex", _fake_init)
+    monkeypatch.setattr(ray_cluster, "_resource_state", _fake_state)
     monkeypatch.setattr(ray_cluster, "_cluster_error_message", _fake_cluster_error)
     monkeypatch.setattr(ray_submit, "_stage_config", _fake_stage)
     monkeypatch.setattr(ray_cluster, "_create_cluster", _fake_create)
@@ -1083,3 +1091,100 @@ def test_submit_ray_raises_when_all_regions_stock_out(
     with pytest.raises(EngineError, match="could not be created in any"):
         ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
     assert calls["created"] == 3  # us-east1, us-west1, then home us-central1
+
+
+# --- verified teardown + clearing a leftover: the SDK's success line is not evidence -----------
+
+
+def test_await_absent_returns_once_the_resource_is_gone() -> None:
+    """The wait ends on NOT_FOUND, and it polls until it gets there rather than asking once."""
+    seen = iter(["RUNNING", "STOPPING", ray_cluster._ABSENT])
+    slept: list[float] = []
+    ticks = iter(range(100))
+    final = ray_cluster._await_absent(
+        lambda: next(seen),
+        timeout_s=100.0,
+        poll_s=5.0,
+        sleep=slept.append,
+        clock=lambda: float(next(ticks)),
+    )
+    assert final == ray_cluster._ABSENT
+    assert slept == [5.0, 5.0]
+
+
+def test_await_absent_gives_up_at_the_deadline_and_names_the_last_state() -> None:
+    """A resource that never goes away must not be reported as gone — the caller needs the state."""
+    ticks = iter([0.0, 0.0, 30.0])
+    final = ray_cluster._await_absent(
+        lambda: "RUNNING",
+        timeout_s=10.0,
+        poll_s=5.0,
+        sleep=lambda _s: None,
+        clock=lambda: next(ticks),
+    )
+    assert final == "RUNNING"
+
+
+def test_await_absent_stops_at_once_when_the_state_cannot_be_read() -> None:
+    """Re-asking a question we cannot ask just burns the timeout; answer 'unverifiable' now."""
+    slept: list[float] = []
+    final = ray_cluster._await_absent(
+        lambda: ray_cluster._UNREADABLE,
+        timeout_s=300.0,
+        poll_s=10.0,
+        sleep=slept.append,
+        clock=lambda: 0.0,
+    )
+    assert final == ray_cluster._UNREADABLE
+    assert slept == []
+
+
+def test_clear_stale_resource_deletes_a_leftover_in_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ERROR wreckage on the run-derived name blocks the next create, so it is cleared."""
+    deleted: list[str] = []
+    monkeypatch.setattr(ray_cluster, "_resource_state", lambda name: "ERROR")
+    monkeypatch.setattr(ray_cluster, "_delete_cluster", lambda name: deleted.append(name) or True)
+    ray_cluster._clear_stale_resource("projects/p/locations/us-central1/persistentResources/c")
+    assert deleted == ["projects/p/locations/us-central1/persistentResources/c"]
+
+
+@pytest.mark.parametrize("state", ["RUNNING", "PROVISIONING"])
+def test_clear_stale_resource_leaves_a_live_cluster_alone(
+    state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-named *live* cluster may be a concurrent run of this config. Colliding beats
+    deleting someone else's cluster out from under them."""
+    deleted: list[str] = []
+    monkeypatch.setattr(ray_cluster, "_resource_state", lambda name: state)
+    monkeypatch.setattr(ray_cluster, "_delete_cluster", lambda name: deleted.append(name) or True)
+    ray_cluster._clear_stale_resource("projects/p/locations/us-central1/persistentResources/c")
+    assert deleted == []
+
+
+def test_clear_stale_resource_is_a_no_op_when_nothing_is_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deleted: list[str] = []
+    monkeypatch.setattr(ray_cluster, "_resource_state", lambda name: ray_cluster._ABSENT)
+    monkeypatch.setattr(ray_cluster, "_delete_cluster", lambda name: deleted.append(name) or True)
+    ray_cluster._clear_stale_resource("projects/p/locations/us-central1/persistentResources/c")
+    assert deleted == []
+
+
+def test_the_create_walk_clears_the_name_in_every_region_it_tries(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each region holds its own copy of the run-derived name, so each is checked before create."""
+    calls = _stubbed_lifecycle
+
+    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+        calls["created"] += 1
+        if calls["created"] == 1:
+            raise RuntimeError("Resources are insufficient in region: us-east1")
+        return f"projects/proj-x/locations/us-west1/persistentResources/{name}"
+
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _stockout_then_ok)
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+    regions_checked = [path.split("/locations/")[1].split("/")[0] for path in calls["state_reads"]]
+    assert regions_checked == ["us-east1", "us-west1"]
