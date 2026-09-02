@@ -449,6 +449,7 @@ below. Five creation attempts across five different cluster specs all failed ide
 | default head | `n1-standard-16` | 20 | internal error |
 | **exactly `ray_autoscale_demo`'s compute block** | `n1-standard-16` | 8 | internal error |
 | **exactly smoke 07's compute block** | default | 5 | internal error |
+| the same block again, hours later, fresh cluster name | default | 5 | internal error |
 
 The last two are the ones that matter: **both provisioned successfully on 2026-09-01 and neither
 provisions now**, with nothing changed between them but the day. That eliminates the config, the
@@ -460,6 +461,12 @@ were proven on infrastructure that worked, and an outage is not an architecture 
 does mean is operational — **the Ray half of this campaign is stalled**, which blocks `ray_100k`,
 the sizing half of the profiler A/B (the profiler is only wired on the Ray path), and any notebook
 that provisions a cluster. Retry before concluding anything about Ray from this date.
+
+The sixth attempt is the one that sets expectations. The platform's own advice is *"please try
+recreating one in a few minutes"*; that was taken literally, several hours later, with a cluster
+name that had never been used, and the failure came back byte-identical. **So this is not a
+transient to be waited out inside a work session** — it outlasts the retry the error message asks
+for, and the next step for it is a support case, not another probe.
 
 It also retro-explains the `us-central1` leg of the region-failover finding below, which had been
 left as "the opaque one". It was the same outage, one day early.
@@ -497,6 +504,22 @@ command. **Not established:** exactly why the teardown reported success. `_delet
 means the SDK call returned without raising while the resource stayed `PROVISIONING` — but whether
 the SDK swallowed a rejection or Vertex accepted a delete it then did not perform was not
 determined, and this outage is the wrong conditions to determine it in.
+
+**The sixth attempt did not leak, and that is the more useful half of the finding.** Same code, same
+region, same failure — and `describe` on its cluster name returns `NOT_FOUND`. So the leak is *not*
+unconditional: teardown works sometimes and silently fails other times, which is exactly the shape
+that makes it dangerous. It is a race, not a broken code path, and it will not reproduce on demand.
+Two details from that run sharpen where the race lives. The product's teardown logged success two
+seconds after the provisioning error, far too fast to have waited on anything. And the `vertex_ray`
+SDK prints its *own* `Successfully deleted the cluster` line — so **two independent deleters run
+against the same resource**, and because one writes to stdout and the other to stderr, their real
+order is not recoverable from a redirected log. A second teardown arriving while the first is in
+flight is a plausible way to produce a `PROVISIONING` resource that both parties believe they
+removed, but it is a hypothesis; nothing here tests it.
+
+The practical consequence is unchanged and worth stating plainly: **you cannot tell from the logs
+whether a failed Ray run left a cluster behind.** The success line is not evidence. Check with
+`describe`.
 
 The operational recovery, if a config starts failing with `AlreadyExists`:
 
@@ -879,16 +902,21 @@ Things that are true today and that no entry above covers. Keep this list short 
   no timeout, no error — analysed above. Reachable from config alone, and the natural workaround for
   anyone blocked on the Ray GPU entitlement, which makes it the highest-value of the three deferred
   fixes.
-- **Vertex Ray will not provision in `us-central1` for this project as of 2026-09-02.** Five specs,
-  including two proven the previous day, all fail with the contentless internal error. Environment,
-  not code — but it stalls `ray_100k`, the profiler A/B's sizing half, and every Ray notebook.
-  Re-attempt before trusting any Ray conclusion dated on or after this.
+- **Vertex Ray will not provision in `us-central1` for this project as of 2026-09-02.** Six specs,
+  including two proven the previous day, all fail with the contentless internal error — and the
+  sixth was a deliberate re-probe hours later under a fresh cluster name, so the platform's own
+  *"try again in a few minutes"* has been tested and does not hold. Environment, not code, but it
+  stalls `ray_100k`, the profiler A/B's sizing half, and every Ray notebook, and the next move is a
+  support case rather than another probe. Re-attempt before trusting any Ray conclusion dated on or
+  after this.
 - **A failed Ray provision can leak a cluster that blocks every retry of that config.** The name is
   derived from the `run_id`, so the retry collides with `AlreadyExists` and cannot succeed until the
   leaked resource is deleted by hand — and `list` reports `[]` while it exists, so it is invisible
-  from the obvious command. Analysed above. The product-side fix worth considering is making
-  teardown verify rather than assume, and tolerating an `ERROR`-state same-named resource at create;
-  neither was attempted during an outage, where every attempt fails for an unrelated reason.
+  from the obvious command. Analysed above. **Intermittent:** a second failed provision under
+  identical conditions tore down cleanly, so the teardown success line tells you nothing either way
+  and `describe` is the only check. The product-side fix worth considering is making teardown verify
+  rather than assume, and tolerating an `ERROR`-state same-named resource at create; neither was
+  attempted during an outage, where every attempt fails for an unrelated reason.
 - **Ten run headers are stuck non-terminal, and no verb closes them.** Left by interrupted work
   across the whole build (`naive-100k`, several `nb01-spark-connect`, `nb03`, `nb06`, …), most
   recently `nb03-combo-ensemble-1788329058-c4a5e6db54a1` on 2026-09-02. Harmless to reads, but they
