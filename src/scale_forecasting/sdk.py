@@ -538,6 +538,17 @@ class Registry:
 
         return ops.doctor(settings=self._settings)
 
+    def close_runs(self, *run_ids: str, yes: bool = False) -> Any:
+        """Finalize abandoned ``RUNNING`` headers to what their job rows already imply.
+
+        No arguments means every stuck header in this registry. Preview unless ``yes``. Deletes
+        nothing and skips any run with a job row that is not yet terminal — probe those first with
+        ``monitor(probe=True)``. See `registry.ops.close_runs`.
+        """
+        from .registry import ops
+
+        return ops.close_runs(list(run_ids) or None, settings=self._settings, yes=yes)
+
     def drop_run(self, *run_ids: str, yes: bool = False, force: bool = False) -> Any:
         """Delete named run(s) — artifacts, then BQML models, then rows. Preview unless ``yes``.
 

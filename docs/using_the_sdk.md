@@ -117,6 +117,9 @@ from scale_forecasting import Registry
 reg = Registry()                          # or Forecaster.from_file(...).registry()
 print(reg.doctor())                       # row counts, runs stuck RUNNING, orphaned artifacts
 
+reg.close_runs()                          # PREVIEW — stuck RUNNING headers and what they'd close to
+reg.close_runs(yes=True)                  # writes header statuses only; deletes nothing
+
 reg.drop_run("abc123")                    # PREVIEW — prints the blast radius, deletes nothing
 reg.drop_run("abc123", yes=True)          # artifacts, then BQML models, then rows
 
@@ -128,7 +131,9 @@ Every method delegates to `registry.ops`, the same code
 `python -m scale_forecasting.registry.ops <verb>` runs, so the notebook, the SDK and the CLI can't
 diverge. The destructive verbs preview by default and refuse a run that is still in flight (check
 with `monitor(probe=True)` first — a `RUNNING` row can also be a dead job — then pass `force=True`).
-There is deliberately no wipe method: a full teardown is `bq rm -r -f <dataset>`. Full verb
+`close_runs` is the exception, and the one to reach for when a header is *stuck* rather than wrong:
+it repairs abandoned `RUNNING` rows from the job rows they already have, deletes nothing, and skips
+any run whose jobs are not yet all terminal. There is deliberately no wipe method: a full teardown is `bq rm -r -f <dataset>`. Full verb
 reference: [running_and_reviewing.md §6](./running_and_reviewing.md#6-managing-the-registry).
 
 ---

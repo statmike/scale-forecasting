@@ -3,7 +3,7 @@
 Everything here is the pure half — set arithmetic, SQL strings, plan formatting, and the BQML
 model-name matcher `drop_run` depends on. The artifact-path arithmetic the destructive verbs
 run on moved to `registry.artifacts` with the layout itself; its tests went with it, into
-``test_registry_assembly.py``. The six verbs themselves are GCP I/O and are
+``test_registry_assembly.py``. The seven verbs themselves are GCP I/O and are
 covered by the `@gcp` smokes (the artifact-prefix delete and `snapshot`); what is tested here is
 every decision those verbs make *before* they touch anything.
 """
@@ -411,3 +411,106 @@ def test_forecaster_hands_out_a_registry_on_the_same_settings():
     assert isinstance(reg, Registry)
     assert reg.dataset_ref == "proj.registry_ds"
     assert repr(reg) == "Registry(proj.registry_ds)"
+
+
+# --- roll_up_job_statuses (the close-runs decision) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        (["COMPLETED", "COMPLETED"], "COMPLETED"),
+        (["FAILED", "FAILED"], "FAILED"),
+        (["CANCELLED", "CANCELLED"], "CANCELLED"),
+        (["COMPLETED", "FAILED"], "PARTIAL"),
+        (["COMPLETED", "CANCELLED"], "PARTIAL"),
+        (["COMPLETED", "PARTIAL"], "PARTIAL"),
+    ],
+)
+def test_roll_up_matches_the_status_a_finished_run_would_have_written(statuses, expected):
+    # Same policy as main._combined_status: all green → COMPLETED, all failed → FAILED, mix →
+    # PARTIAL. This verb writes the status the run itself failed to write, never a different one.
+    status, _reason = ops.roll_up_job_statuses(statuses)
+    assert status == expected
+
+
+@pytest.mark.parametrize("unsettled", ["RUNNING", "PENDING", "", None])
+def test_roll_up_refuses_a_run_with_a_non_terminal_job(unsettled):
+    """A live-looking job row means "go probe it", never "close it" (the load-bearing refusal).
+
+    Only a runtime probe can tell a live job from a stale row. Closing on a non-terminal row is how
+    an operator tidying the registry would silently mark a *running* job's run as finished.
+    """
+    status, reason = ops.roll_up_job_statuses(["COMPLETED", unsettled])
+    assert status is None
+    assert "not terminal" in reason
+
+
+def test_roll_up_closes_a_header_with_no_job_rows_as_failed():
+    # The common stuck shape: the driver wrote a header and died in the submit path before any
+    # family row landed. Nothing completed, so not COMPLETED; nobody stopped it, so not CANCELLED.
+    status, reason = ops.roll_up_job_statuses([])
+    assert status == "FAILED"
+    assert "never recorded a family" in reason
+
+
+def test_roll_up_is_case_insensitive():
+    assert ops.roll_up_job_statuses(["completed", "Completed"])[0] == "COMPLETED"
+
+
+# --- ClosePlan and its preview -----------------------------------------------------
+
+
+def _candidate(run_id, new_status, reason, *, jobs=("COMPLETED",)):
+    return ops.CloseCandidate(
+        run_id=run_id,
+        header_status="RUNNING",
+        job_statuses=tuple(jobs),
+        new_status=new_status,
+        reason=reason,
+    )
+
+
+def test_close_plan_splits_closable_from_skipped():
+    plan = ops.ClosePlan(
+        registry="p.d",
+        candidates=(
+            _candidate("a", "COMPLETED", "every job COMPLETED"),
+            _candidate("b", None, "1 job status(es) not terminal: RUNNING"),
+        ),
+    )
+    assert [c.run_id for c in plan.closable] == ["a"]
+    assert [c.run_id for c in plan.skipped] == ["b"]
+    assert not plan.is_empty
+
+
+def test_close_plan_with_nothing_closable_is_empty():
+    # "Empty" means nothing to *do* — a plan that is all skips must not execute, but it must still
+    # print, because the skips are the part the operator has to act on.
+    plan = ops.ClosePlan(
+        registry="p.d", candidates=(_candidate("b", None, "not terminal: RUNNING"),)
+    )
+    assert plan.is_empty
+    assert plan.skipped
+
+
+def test_format_close_plan_shows_the_transition_and_the_reason():
+    plan = ops.ClosePlan(
+        registry="p.d",
+        candidates=(
+            _candidate("run-a", "COMPLETED", "every job COMPLETED"),
+            _candidate("run-b", None, "1 job status(es) not terminal: RUNNING"),
+        ),
+        unknown=("run-c",),
+    )
+    text = ops.format_close_plan(plan)
+    assert "run-a  RUNNING -> COMPLETED" in text
+    assert "every job COMPLETED" in text
+    # The skipped run and its reason must be visible, not summarized into a count.
+    assert "left alone (1)" in text
+    assert "run-b" in text and "not terminal: RUNNING" in text
+    assert "not stuck (skipped): run-c" in text
+
+
+def test_format_close_plan_with_no_stuck_headers():
+    assert "no stuck headers" in ops.format_close_plan(ops.ClosePlan(registry="p.d"))

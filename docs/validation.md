@@ -107,6 +107,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | CURRENT | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
+| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | NEVER_RUN | — | — | — |
 
 ### Smoke 14 is the flagship, and it is green again
 
@@ -440,7 +441,7 @@ the honest starting position and the reason for adding the table at all: it is t
 `ray_100k` was attempted and never reached a job: Vertex returned the contentless
 `"An internal error occurred on your cluster. Please try recreating one in a few minutes."` in
 `us-central1`, and the two failover regions returned the missing-`networkAttachment` error recorded
-below. Five creation attempts across five different cluster specs all failed identically:
+below. Seven creation attempts across five different cluster specs all failed identically:
 
 | Attempt | Head | CPU max nodes | Result |
 |---------|------|---------------|--------|
@@ -448,13 +449,24 @@ below. Five creation attempts across five different cluster specs all failed ide
 | reduced fleet | `n1-highmem-32` | 10 | internal error |
 | default head | `n1-standard-16` | 20 | internal error |
 | **exactly `ray_autoscale_demo`'s compute block** | `n1-standard-16` | 8 | internal error |
-| **exactly smoke 07's compute block** | default | 5 | internal error |
+| **exactly smoke 07's compute block** | default (`n1-standard-16`) | 5 | internal error |
 | the same block again, hours later, fresh cluster name | default | 5 | internal error |
+| the same block a third time, ~3 h later, fresh name, autoscale off | default | 5 | internal error, 171 s |
 
-The last two are the ones that matter: **both provisioned successfully on 2026-09-01 and neither
-provisions now**, with nothing changed between them but the day. That eliminates the config, the
-head machine type, the fleet size, and the autoscaling spec in one pass, and it eliminates quota too
-— the 10-node attempt asked for 112 vCPU against 180 available. What is left is the environment.
+Every attempt ran a head node of `n1-standard-16` or larger — `n1-standard-16` is the shipped
+default (`config.ComputeConfig.ray_head_machine_type`) and two attempts exceeded it — so an
+undersized head is not the explanation.
+
+The last three are the ones that matter: **that compute block provisioned successfully on 2026-09-01
+and does not provision now**, with nothing changed between them but the day. That eliminates the
+config, the head machine type, the fleet size, and the autoscaling spec in one pass, and it
+eliminates quota too — the 10-node attempt asked for 112 vCPU against 180 available. What is left is
+the environment.
+
+**The failure is at create, not at submit**, and that distinction is worth keeping straight because
+Ray has failed at submit before on this project (the dashboard-handshake 524, where the cluster came
+up fine). Here `vertex_ray.create_ray_cluster` itself returns the error and no job is ever
+submitted.
 
 Recorded here rather than as a status change, because **no row above becomes false**: the Ray rows
 were proven on infrastructure that worked, and an outage is not an architecture axis moving. What it
@@ -462,11 +474,17 @@ does mean is operational — **the Ray half of this campaign is stalled**, which
 the sizing half of the profiler A/B (the profiler is only wired on the Ray path), and any notebook
 that provisions a cluster. Retry before concluding anything about Ray from this date.
 
-The sixth attempt is the one that sets expectations. The platform's own advice is *"please try
-recreating one in a few minutes"*; that was taken literally, several hours later, with a cluster
-name that had never been used, and the failure came back byte-identical. **So this is not a
-transient to be waited out inside a work session** — it outlasts the retry the error message asks
-for, and the next step for it is a support case, not another probe.
+The sixth and seventh attempts are the ones that set expectations. The platform's own advice is
+*"please try recreating one in a few minutes"*; that was taken literally — twice, hours apart,
+each with a cluster name that had never been used — and the failure came back byte-identical both
+times, spanning most of a working day. **So this is not a transient to be waited out inside a work
+session** — it outlasts the retry the error message asks for, and the next step for it is a support
+case, not another probe.
+
+The seventh attempt did tear itself down cleanly (verified by `describe` returning `NOT_FOUND`, not
+by trusting the teardown log line — see the leak below), so the outage does not leak a cluster
+*every* time. It leaks intermittently, which is worse: a config that fails and leaks is
+unretryable, and a config that fails and cleans up looks the same in the logs.
 
 It also retro-explains the `us-central1` leg of the region-failover finding below, which had been
 left as "the opaque one". It was the same outage, one day early.
@@ -643,7 +661,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. **Scope: reaching a Ray family through `--probe` still needs the handle fix** — see below. |
 | RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Scope: the `--cancel` verb itself could not reach the family** — same missing `resource_name` as the probe — and one summary line miscounts. See below. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
-| Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. |
+| Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** The seventh, `close_runs`, landed after this pass and has never executed live; its pure roll-up is offline-tested and there is no `@gcp` test for it yet. |
 | Run audit principal (P6) | NEEDS_RECHECK | It has now executed, live, under ADC — and produced `actor=None`. The audit line for a real cancel attempt carried no principal. Whether that is a resolver defect or the expected ADC answer for this credential type is unresolved; either way the audit trail was empty when it mattered. See below. |
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
@@ -883,14 +901,15 @@ Things that are true today and that no entry above covers. Keep this list short 
 - **A run that needs both a CPU and a GPU Dataproc cluster has never been executed.** A Dataproc
   cluster has one worker machine type, so as of 2026-09-02 a run's ephemeral cluster families are
   grouped by hardware and get one right-sized cluster each — `sf-cluster-<run_id>-cpu` alongside
-  `sf-cluster-<run_id>-gpu`. **No shipped config produces that shape**: smoke 04 is the only config
-  with two ephemeral cluster families and both are CPU, so it takes the single-group path and is
-  byte-identical to what it was — same one cluster, same unsuffixed name, same sizing. **No row
-  above goes stale, and none of them covers the new branch either.** What is unproven live is the
-  two-cluster case specifically: the second create, the two distinct names, the per-cluster region
-  after a capacity hop, and the two teardowns. Offline tests pin all of it, including the
-  partial-create unwind; that is not the same as having run it. Closing this needs a config, not
-  just a run.
+  `sf-cluster-<run_id>-gpu`. **No row above goes stale, and until smoke 16 none of them reached the
+  new branch either**: smoke 04 was the only config with two ephemeral cluster families and both are
+  CPU, so it takes the single-group path and is byte-identical to what it was — same one cluster,
+  same unsuffixed name, same sizing. `16_cluster_split_hardware.json` was added to close the config
+  half of the gap (a `statistical` CPU family and a `deep_learning` T4 family, both
+  `spark_mode: cluster`), and `tests/smokes/test_smoke_configs.py` now fails if the library ever
+  stops containing one. What remains unproven is the live half: the second create, the two distinct
+  names, the per-cluster region after a capacity hop, and the two teardowns. Offline tests pin all
+  of it, including the partial-create unwind; that is not the same as having run it.
 - **`ray_autoscale` defaults to `True` (`config.py`) but all four Ray smokes pin it `false`.**
   Introduced by `4c988bc`, when a per-pool `AutoscalingSpec` crashed the Vertex Ray head at
   provisioning. **Resolved on the demonstration surface 2026-09-01**, and the suspected cause was
@@ -940,12 +959,23 @@ Things that are true today and that no entry above covers. Keep this list short 
   `drop_run` would throw away real predictions, and `--probe` only reads. So this is a genuine
   coverage gap, not a chore. The missing verb is a reconcile-and-close: take the reconciled per-job
   truth `--probe` already computes and *write* the resulting terminal status to the header.
+  **The verb is now built** (`registry.ops.close_runs`, seventh verb, CLI `close-runs`, SDK
+  `Registry.close_runs`): it writes a header status and nothing else, and refuses any run whose job
+  rows are not already all terminal. Two facts from querying the live registry shaped it — 9 of the
+  10 stuck runs have **no job rows at all** (they died in the submit path, so they close as `FAILED`
+  by an explicit rule rather than by falling through a roll-up), and the tenth
+  (`nb03-combo-ensemble-1788329058-c4a5e6db54a1`) still has a `RUNNING` family, so it is *skipped
+  with a reason* rather than guessed at. The pure roll-up is offline-tested; **the verb itself has
+  never executed against the live registry — the ten headers are still stuck.** Closing them is a
+  spend-window item.
 - **Nothing runs the `@gcp` tests or the control-tower tools on a schedule.** Both rotted (above).
   A cheap mitigation is import-only smoke coverage for the tools and a periodic `-m gcp` collection
   pass (`--collect-only` catches neither of these; the `CellResult` break needed execution).
 - **The `--cancel` summary line miscounts.** It reported `1 in-flight job(s) stopped` on a run where
   the per-family line said `NOT cancelled`. One-line fix; not made mid-campaign only because it sits
-  in the same function as the handle fix.
+  in the same function as the handle fix. **Fixed offline** — the headline now counts outcomes
+  (`n of N stopped`) after executing, and the plan count only in preview, with tests; the live
+  re-observation still belongs to the next spend window.
 - **The recorded `run_id`s for smokes 01–06 are no longer re-derivable.** W5 added
   `compute.profile` to `ComputeConfig`, and `run_id` is a digest of the whole config, so feeding
   those same config files to today's code yields different ids. **No row was marked `STALE` for

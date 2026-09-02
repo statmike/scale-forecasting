@@ -127,7 +127,17 @@ uv run python -m scale_forecasting.registry.ops drop-run RUN_ID --yes
 uv run python -m scale_forecasting.registry.ops sweep-orphans --yes # artifacts nothing indexes now
 ```
 
-The full verb set (`init` / `doctor` / `drop-run` / `sweep-orphans` / `snapshot` / `export`) and the
+A header stuck at `RUNNING` because its driver died is a *different* problem from a run you want
+gone — `close-runs` finalizes it from its own job rows without deleting anything, and is the verb to
+reach for before you consider dropping the run to clear the status:
+
+```bash
+uv run python -m scale_forecasting.registry.ops close-runs          # preview every stuck header
+uv run python -m scale_forecasting.registry.ops close-runs --yes
+```
+
+The full verb set (`init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` / `snapshot` /
+`export`) and the
 matching `Registry` SDK class are documented in
 [running_and_reviewing.md §6](./running_and_reviewing.md#6-managing-the-registry).
 

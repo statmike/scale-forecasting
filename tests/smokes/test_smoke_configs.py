@@ -88,6 +88,33 @@ def test_library_covers_every_runtime_combo() -> None:
     assert not missing, f"smoke library no longer covers: {sorted(missing)}"
 
 
+def test_a_smoke_needs_two_dataproc_clusters_at_once() -> None:
+    """Some smoke must force the per-hardware cluster split, or the branch ships unexercised.
+
+    A Dataproc cluster has one worker machine type, so a run whose ephemeral cluster families span
+    CPU and GPU gets one cluster each. That is a different code path from the single-cluster case —
+    a second create, two distinct names, a per-cluster region, two teardowns — and *no config
+    reached it* when the split was written: smoke 04 has two cluster families and both are CPU, so
+    it takes the single-group path unchanged.
+
+    This is the config-side half of that gap. It cannot prove the two clusters actually come up
+    (that needs live spend), but it does guarantee a config exists that would, so the branch is
+    never silently uncovered again.
+    """
+    from scale_forecasting.shared_clusters import shared_spark_inputs
+
+    split = {
+        path.name: sorted(groups)
+        for path in _CONFIGS
+        if (groups := shared_spark_inputs(plan_dag(load_config(str(path))).python_jobs) or {})
+        and len(groups) > 1
+    }
+    assert split, (
+        "no smoke config produces a multi-hardware Dataproc cluster split; add one with two "
+        "ephemeral spark_mode=cluster families on different hardware"
+    )
+
+
 def test_at_least_one_native_source_format_smoke() -> None:
     # Dual-format coverage: the library must exercise both the managed-Iceberg and native BigQuery
     # source tables so a live campaign proves reads work against each.

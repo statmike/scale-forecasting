@@ -269,7 +269,7 @@ on the OOF); calculated ones (`mean`/`median`/`inverse_error`) don't.
 ## 6. Managing the registry
 
 Runs accumulate. `registry.ops` is the operator surface over the one registry your `SF_*`
-environment points at — six verbs, reachable identically from the CLI, the SDK (`Registry`), and a
+environment points at — seven verbs, reachable identically from the CLI, the SDK (`Registry`), and a
 notebook:
 
 ```bash
@@ -290,6 +290,7 @@ reg.drop_run("abc123", yes=True)
 |------|--------------|
 | `init` | Create this registry's five tables + three views (idempotent). Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
 | `doctor` | Read-only report: per-table row counts, runs still marked `RUNNING`, and artifact prefixes with no `run_registry` row. Touches nothing. |
+| `close-runs` | Finalize abandoned `RUNNING` headers to the status their own job rows already imply. Deletes nothing. Names no runs = every stuck header. |
 | `drop-run` | Delete named run(s) from every tier — GCS artifacts, BQML `sf_model_*` objects, then registry rows. Takes as many ids as you like. |
 | `sweep-orphans` | Delete artifact prefixes under *this* registry's root that have no `run_registry` row. |
 | `snapshot` | BigQuery table snapshots of the five registry tables — `--into` another dataset, `--expiration-days` for a TTL. |
@@ -299,6 +300,22 @@ reg.drop_run("abc123", yes=True)
 counts and byte totals they would touch and change nothing until you add `--yes`. They also refuse
 to touch a run whose header is still `RUNNING` or `PENDING`; check with `monitor(probe=True)` first
 (a `RUNNING` row can also be a dead job), then `--force` if you're sure.
+
+**`close-runs` is the one for a header that is stuck rather than wrong.** A driver that dies after
+writing its header leaves a `RUNNING` row forever, and none of the other verbs fit: `--cancel`
+stamps `CANCELLED` over families that actually completed, `drop-run` destroys real predictions to
+repair a status field, and `--probe` only reads. `close-runs` writes the header status its own job
+rows already imply — every job `COMPLETED` ⇒ `COMPLETED`, a mix of terminals ⇒ `PARTIAL`, no job
+rows at all ⇒ `FAILED` (the run died in the submit path) — and touches nothing else:
+
+```bash
+python -m scale_forecasting.registry.ops close-runs          # preview every stuck header
+python -m scale_forecasting.registry.ops close-runs --yes
+```
+
+It **skips any run that still has a non-terminal job row**, with the reason printed, because only a
+runtime probe can tell a live job from a stale one. So the order is `monitor(probe=True)` first,
+then `close-runs` for whatever the probe settled.
 
 **Order matters, and the verbs enforce it.** A registry row is the only index of which GCS objects
 belong to which run, so every delete goes *artifacts first, rows last*. Dropping the rows first
@@ -328,4 +345,4 @@ Two things you won't find here:
 | `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
-| `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `drop-run` / `sweep-orphans` / `snapshot` / `export`. |
+| `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` / `snapshot` / `export`. |

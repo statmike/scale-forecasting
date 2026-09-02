@@ -98,9 +98,10 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   features while the shipped forecast did not. `features.build_future_features` now builds the
   horizon frame properly, with column-order parity by construction because
   `_lag_forecaster.recursive_predict` reads exog positionally.
-- Registry operations (`registry/ops.py`) — the manage-only operator surface, six verbs over the one
-  registry `SF_*` resolves to: `init`, `doctor` (read-only: row counts, runs stuck `RUNNING`,
-  orphaned artifacts), `drop-run`, `sweep-orphans`, `snapshot`, `export`. One implementation, three
+- Registry operations (`registry/ops.py`) — the manage-only operator surface, seven verbs over the
+  one registry `SF_*` resolves to: `init`, `doctor` (read-only: row counts, runs stuck `RUNNING`,
+  orphaned artifacts), `close-runs`, `drop-run`, `sweep-orphans`, `snapshot`, `export`. One
+  implementation, three
   entry points (`python -m scale_forecasting.registry.ops <verb>`, the `Registry` SDK class,
   a notebook) — G1 applies to operations too. Deliberately **not** shipped: a wipe verb (a full
   teardown is `bq rm -r -f <dataset>` — a one-liner nobody needs wrapped, and wrapping it invites the
@@ -114,9 +115,15 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   to runs via `model_object_matches_run`, tested as the exact inverse of `_model_ref` so the namer
   and the matcher can't drift; and a `RUNNING` header can mean a live job *or* a dead one, so
   mutating verbs refuse an in-flight run and point at `monitor(probe=True)` rather than guessing
-  (`--force` overrides). Preview-by-default with exact blast radius (runs, objects, bytes), the same
-  shape the probe's cancel path uses. Pure/I-O seam throughout: planners, SQL renderers, and
-  formatters are offline-tested (`test_registry_ops.py`); the six verbs are `@gcp`.
+  (`--force` overrides). `close-runs` is the deliberate exception to that refusal — stuck headers are
+  exactly what it repairs — and it earns the exception by deleting nothing and by refusing any run
+  whose job rows are not *already* all terminal, so it can only ever record a conclusion those rows
+  had reached on their own (no job rows at all ⇒ `FAILED`: the run died in the submit path). Deciding
+  a job is dead stays `probes.reconcile`'s call, made against the runtime; conflating the two is how
+  an operator tidying the registry closes a run that is still going. Preview-by-default with exact
+  blast radius (runs, objects, bytes), the same shape the probe's cancel path uses. Pure/I-O seam
+  throughout: planners, SQL renderers, the status roll-up, and formatters are offline-tested
+  (`test_registry_ops.py`); the seven verbs are `@gcp`.
   With this landed, **`reset.py` and a whole-registry `drop_all` are gone** — the destructive tier leaves
   the product entirely. What replaces them is a `bq rm` one-liner
   ([operations.md §2c](docs/operations.md)), because the only thing `reset` did that a `bq rm`

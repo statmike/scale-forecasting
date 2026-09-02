@@ -2,7 +2,7 @@
 
 A deployment's registry is not write-once. Runs accumulate, experiments end, a bad run wants
 deleting, and the operator wants to know what is actually in there before touching any of it. This
-module is that surface: **six bounded verbs** over exactly one registry — the one
+module is that surface: **seven bounded verbs** over exactly one registry — the one
 `Settings.registry_dataset_ref` resolves to.
 
 **Manage only, by design.** There is no wipe here. A full teardown is `bq rm -r -f <dataset>` or the
@@ -13,6 +13,7 @@ below touches only what the caller named:
 |---|---|
 | `init` | create this registry's tables + views (idempotent; does not touch the source panel) |
 | `doctor` | read-only health report — row counts, runs stuck ``RUNNING``, orphaned artifacts |
+| `close_runs` | finalize abandoned ``RUNNING`` headers to what their job rows already imply |
 | `drop_run` | delete named run(s) from every tier: rows, GCS artifacts, and BQML model objects |
 | `sweep_orphans` | delete artifact prefixes under *this* registry with no ``run_registry`` row |
 | `snapshot` | BigQuery table snapshots of the five registry tables (cheap, expirable) |
@@ -36,6 +37,11 @@ default, ``yes=True`` executes, and the preview prints the exact objects — run
 object counts, byte totals — that will be touched. A mutating verb also refuses to run against a
 registry with an in-flight run unless forced; use `monitor(probe=True)` to tell a live run from a
 dead row still marked ``RUNNING``.
+
+`close_runs` is the deliberate exception to that refusal, because in-flight-looking runs are
+*exactly* what it exists to repair. It earns the exception by being the one mutating verb that
+deletes nothing: it writes a header status and nothing else, and it refuses any run whose job rows
+are not already all terminal — so it can only ever record a conclusion the rows had already reached.
 
 **This module is the policy, not the plumbing.** Step 1 of the ordering rule — reading the GCS
 layout back to find out which objects a run owns — is `artifacts`, which owns that layout in both
@@ -73,6 +79,12 @@ _log = get_logger(__name__)
 # A run whose header sits in one of these is in flight; a mutating verb refuses to touch it unless
 # forced. Anything else (COMPLETED / FAILED / PARTIAL / CANCELLED) is terminal and safe.
 LIVE_STATUSES: frozenset[str] = frozenset({"RUNNING", "PENDING"})
+
+# The terminal ``run_jobs`` statuses, for `roll_up_job_statuses`. A local dup of
+# `probes.vocabulary._TERMINAL` for the same reason that one is a dup of `sdk._TERMINAL_STATUSES`:
+# importing the probes package from here would pull a low-level module into the registry layer
+# purely for one frozenset.
+_TERMINAL_JOB_STATUSES: frozenset[str] = frozenset({"COMPLETED", "FAILED", "PARTIAL", "CANCELLED"})
 
 # Export formats we render. PARQUET is the default (typed, compact, reads straight into pandas);
 # newline-delimited JSON is the escape hatch for a consumer with no Parquet reader — and the
@@ -127,6 +139,46 @@ class DropPlan:
 
 
 @dataclass(frozen=True)
+class CloseCandidate:
+    """One run `close_runs` looked at: its stuck header, its jobs, and the verdict.
+
+    ``new_status`` is ``None`` when the run must be left alone, and ``reason`` always says why —
+    a skipped run is as much of an answer as a closed one, so both are reported.
+    """
+
+    run_id: str
+    header_status: str | None
+    job_statuses: tuple[str | None, ...]
+    new_status: str | None
+    reason: str
+
+    @property
+    def closable(self) -> bool:
+        return self.new_status is not None
+
+
+@dataclass(frozen=True)
+class ClosePlan:
+    """Exactly which stuck headers `close_runs` would finalize, and to what."""
+
+    registry: str
+    candidates: tuple[CloseCandidate, ...] = ()
+    unknown: tuple[str, ...] = ()
+
+    @property
+    def closable(self) -> tuple[CloseCandidate, ...]:
+        return tuple(c for c in self.candidates if c.closable)
+
+    @property
+    def skipped(self) -> tuple[CloseCandidate, ...]:
+        return tuple(c for c in self.candidates if not c.closable)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.closable
+
+
+@dataclass(frozen=True)
 class SweepPlan:
     """Artifact prefixes under this registry's root with no ``run_registry`` row."""
 
@@ -178,6 +230,37 @@ def blocking_runs(status_by_run: dict[str, str | None]) -> tuple[str, ...]:
     return tuple(
         sorted(r for r, s in status_by_run.items() if s is not None and s.upper() in LIVE_STATUSES)
     )
+
+
+def roll_up_job_statuses(job_statuses: Sequence[str | None]) -> tuple[str | None, str]:
+    """Roll a run's job-row statuses into the header status it should have had (pure).
+
+    Returns ``(status, reason)``; ``status`` is ``None`` when the run must **not** be closed and
+    ``reason`` says why. The policy matches `main._combined_status`, which is what a run that
+    finished normally would have written — this verb's whole job is to write the status the run
+    itself failed to, never a different one:
+
+    * every job ``COMPLETED`` ⇒ ``COMPLETED``
+    * every job ``FAILED`` ⇒ ``FAILED``; every job ``CANCELLED`` ⇒ ``CANCELLED``
+    * a mix of terminals ⇒ ``PARTIAL``
+    * **any non-terminal job ⇒ ``None``.** The job may still be running. Nothing here probes a
+      runtime, so a header is only closed when the *rows themselves* already prove the work settled;
+      deciding a job is dead is `probes.reconcile`'s call, made against the runtime, not this one's.
+    * **no job rows at all ⇒ ``FAILED``.** The run wrote a header and then never recorded a single
+      family — it died in the submit path. ``FAILED`` rather than ``COMPLETED`` because nothing
+      completed, and rather than ``CANCELLED`` because nobody stopped it.
+    """
+    if not job_statuses:
+        return "FAILED", "no job rows — the run never recorded a family"
+    normalized = [(s or "").upper() for s in job_statuses]
+    unsettled = sorted({s or "(none)" for s in normalized if s not in _TERMINAL_JOB_STATUSES})
+    if unsettled:
+        return None, f"{len(unsettled)} job status(es) not terminal: {', '.join(unsettled)}"
+    distinct = set(normalized)
+    if len(distinct) == 1:
+        only = distinct.pop()
+        return only, f"every job {only}"
+    return "PARTIAL", f"mixed terminal statuses: {', '.join(sorted(distinct))}"
 
 
 def human_bytes(n: int) -> str:
@@ -308,6 +391,29 @@ def format_plan(plan: DropPlan | SweepPlan) -> str:
             f"{', '.join(p.run_id for p in plan.prefixes) or '(none)'}"
         )
     lines.append(f"  GCS: {plan.object_count} objects, {human_bytes(plan.byte_total)}")
+    return "\n".join(lines)
+
+
+def format_close_plan(plan: ClosePlan) -> str:
+    """Render a `ClosePlan` as the operator-facing preview — the exact text a dry run prints.
+
+    Skipped runs are printed as prominently as closable ones. The reason a header is stuck is the
+    thing the operator actually needs to see: "still has a RUNNING job" means go probe it, and
+    burying that under a count of what *was* closed is how the one run that mattered gets missed.
+    """
+    lines = [f"close-runs against registry {plan.registry}"]
+    if plan.unknown:
+        lines.append(f"  not stuck (skipped): {', '.join(plan.unknown)}")
+    if plan.closable:
+        lines.append(f"  will close ({len(plan.closable)}):")
+        for c in plan.closable:
+            lines.append(f"    {c.run_id}  {c.header_status} -> {c.new_status}  [{c.reason}]")
+    if plan.skipped:
+        lines.append(f"  left alone ({len(plan.skipped)}):")
+        for c in plan.skipped:
+            lines.append(f"    {c.run_id}  {c.header_status}  [{c.reason}]")
+    if not plan.closable and not plan.skipped:
+        lines.append("  no stuck headers")
     return "\n".join(lines)
 
 
@@ -613,6 +719,157 @@ def drop_run(
     return plan
 
 
+def _stuck_run_ids(settings: Settings) -> tuple[str, ...]:  # pragma: no cover - GCP I/O, @gcp smoke
+    """Every run whose *latest* header row is in a `LIVE_STATUSES` state, oldest first.
+
+    Latest-per-run, not any-row: the header table is append-only with dedupe-on-read, so a run that
+    was written ``RUNNING`` and later ``COMPLETED`` has both rows and only the newest one counts.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    statuses = ", ".join(f"'{s}'" for s in sorted(LIVE_STATUSES))
+    sql = (
+        "SELECT run_id FROM (\n"
+        "  SELECT run_id,\n"
+        "         ARRAY_AGG(status ORDER BY created_at DESC LIMIT 1)[OFFSET(0)] AS status,\n"
+        "         MIN(created_at) AS first_seen\n"
+        f"  FROM `{settings.registry_table_ref('run_registry')}`\n"
+        "  GROUP BY run_id\n"
+        f") WHERE UPPER(status) IN ({statuses})\nORDER BY first_seen"
+    )
+    client = bigquery.Client(project=settings.project_id)
+    try:
+        return tuple(str(r["run_id"]) for r in client.query(sql).result())
+    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+        raise RegistryError(
+            f"could not list stuck runs in {settings.registry_dataset_ref}: {exc}"
+        ) from exc
+
+
+def _job_statuses(
+    settings: Settings, run_ids: Sequence[str]
+) -> dict[str, tuple[str | None, ...]]:  # pragma: no cover - GCP I/O, @gcp smoke
+    """``{run_id: (latest status per job_key, …)}`` for the named runs (one query).
+
+    Latest-per-``job_key`` for the same append-only reason as `_stuck_run_ids`: a family writes a
+    ``RUNNING`` row and then a terminal one, and rolling up both would see a non-terminal status
+    for a job that finished and refuse to close a run that is perfectly closable.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    sql = (
+        "SELECT run_id, ARRAY_AGG(status) AS statuses FROM (\n"
+        "  SELECT run_id, job_key,\n"
+        "         ARRAY_AGG(status ORDER BY created_at DESC LIMIT 1)[OFFSET(0)] AS status\n"
+        f"  FROM `{settings.registry_table_ref('run_jobs')}`\n"
+        "  WHERE run_id IN UNNEST(@run_ids)\n"
+        "  GROUP BY run_id, job_key\n"
+        ")\nGROUP BY run_id"
+    )
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", list(run_ids))]
+    )
+    client = bigquery.Client(project=settings.project_id)
+    try:
+        rows = client.query(sql, job_config).result()
+    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+        raise RegistryError(
+            f"could not read job statuses from {settings.registry_dataset_ref}: {exc}"
+        ) from exc
+    return {str(r["run_id"]): tuple(r["statuses"]) for r in rows}
+
+
+def plan_close_runs(
+    run_ids: Sequence[str] | None = None, *, settings: Settings | None = None
+) -> ClosePlan:  # pragma: no cover - GCP I/O, @gcp smoke
+    """Which stuck headers `close_runs` would finalize, and to what — without writing anything.
+
+    ``run_ids=None`` means "every run whose header is stuck", which is the usual call: the operator
+    wants the registry consistent, not a particular run. Naming runs explicitly narrows it, and a
+    named run whose header is *not* stuck is reported in ``unknown`` rather than silently rewritten
+    — this verb repairs abandoned headers and must never touch a settled one.
+    """
+    resolved = _resolved(settings)
+    targets = list(_stuck_run_ids(resolved) if run_ids is None else run_ids)
+    if not targets:
+        return ClosePlan(registry=resolved.registry_dataset_ref)
+
+    header = _statuses(resolved, targets)
+    stuck = [r for r in targets if (header.get(r) or "").upper() in LIVE_STATUSES]
+    unknown = tuple(sorted(set(targets) - set(stuck)))
+    if not stuck:
+        return ClosePlan(registry=resolved.registry_dataset_ref, unknown=unknown)
+
+    jobs = _job_statuses(resolved, stuck)
+    candidates = []
+    for run_id in stuck:
+        job_statuses = jobs.get(run_id, ())
+        new_status, reason = roll_up_job_statuses(job_statuses)
+        candidates.append(
+            CloseCandidate(
+                run_id=run_id,
+                header_status=header.get(run_id),
+                job_statuses=job_statuses,
+                new_status=new_status,
+                reason=reason,
+            )
+        )
+    return ClosePlan(
+        registry=resolved.registry_dataset_ref,
+        candidates=tuple(candidates),
+        unknown=unknown,
+    )
+
+
+def close_runs(
+    run_ids: Sequence[str] | None = None, *, settings: Settings | None = None, yes: bool = False
+) -> ClosePlan:  # pragma: no cover - GCP I/O, @gcp smoke
+    """Finalize abandoned headers to the status their own job rows already imply.
+
+    **The verb that was missing.** A run whose driver died after writing its header leaves a
+    ``RUNNING`` row forever, and nothing else could clear it: ``--cancel`` stamps ``CANCELLED`` over
+    work that actually completed, `drop_run` destroys real predictions to fix a status field, and
+    ``--probe`` only reads. This closes the header and touches nothing else — no artifact, no job
+    row, no prediction is written or deleted, so the worst case is a header status that is wrong in
+    a different way and can be re-closed.
+
+    **It never decides that a job is dead.** A run with a non-terminal job row is skipped with a
+    reason, because only a runtime probe can tell a live job from a stale row — that is
+    `probes.reconcile`'s job, and conflating the two is how an operator "cleans up" a running job.
+    So the safe order is `sdk.Forecaster.monitor` (``probe=True``) first, then this.
+
+    Preview is the default; ``yes=True`` executes. Returns the plan either way.
+    """
+    from .header import update_header
+
+    resolved = _resolved(settings)
+    plan = plan_close_runs(run_ids, settings=resolved)
+    _log.warning("%s", format_close_plan(plan))
+
+    if plan.is_empty:
+        _log.warning("nothing to close in %s", plan.registry)
+        return plan
+    if not yes:
+        _log.warning("DRY RUN — no header changed. Re-run with yes=True to execute.")
+        return plan
+
+    for candidate in plan.closable:
+        update_header(candidate.run_id, settings=resolved, status=candidate.new_status)
+        _log.warning(
+            "closed %s: %s → %s (%s)",
+            candidate.run_id,
+            candidate.header_status,
+            candidate.new_status,
+            candidate.reason,
+        )
+    _log.warning("closed %d header(s) in %s", len(plan.closable), plan.registry)
+    return plan
+
+
 def plan_sweep_orphans(
     *, settings: Settings | None = None
 ) -> SweepPlan:  # pragma: no cover - GCP I/O, @gcp smoke
@@ -722,8 +979,8 @@ def export(
 def main(argv: list[str] | None = None) -> None:
     """CLI: ``python -m scale_forecasting.registry.ops <verb> [...]``.
 
-    One subcommand per verb, the same six the SDK exposes (G1 — one implementation, three entry
-    points). Destructive verbs preview by default and need ``--yes``.
+    One subcommand per verb, the same seven the SDK exposes (G1 — one implementation, three
+    entry points). Mutating verbs preview by default and need ``--yes``.
     """
     import argparse
 
@@ -741,6 +998,14 @@ def main(argv: list[str] | None = None) -> None:
         help="also create the dataset if absent (Terraform normally owns this)",
     )
     sub.add_parser("doctor", help="read-only health report")
+
+    p_close = sub.add_parser(
+        "close-runs", help="finalize abandoned RUNNING headers from their own job rows"
+    )
+    p_close.add_argument(
+        "run_ids", nargs="*", help="run ids to close (default: every stuck header)"
+    )
+    p_close.add_argument("--yes", action="store_true", help="execute (default is a preview)")
 
     p_drop = sub.add_parser("drop-run", help="delete named run(s): artifacts, models, rows")
     p_drop.add_argument("run_ids", nargs="+", help="one or more run ids")
@@ -764,6 +1029,8 @@ def main(argv: list[str] | None = None) -> None:
         init(create_dataset=ns.create_dataset)
     elif ns.verb == "doctor":
         _log.warning("%s", format_doctor(doctor()))
+    elif ns.verb == "close-runs":
+        close_runs(ns.run_ids or None, yes=ns.yes)
     elif ns.verb == "drop-run":
         drop_run(ns.run_ids, yes=ns.yes, force=ns.force)
     elif ns.verb == "sweep-orphans":

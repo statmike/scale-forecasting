@@ -132,8 +132,15 @@ is why an age alone is never a verdict.
 
 **Symptom: the run header says `RUNNING` but nothing is happening anywhere.**
 Probe. Expect `STALE_REGISTRY` or `LIKELY_COMPLETED` — the work finished but the finalize write was
-lost. Cancel with `--force` to settle the rows; the landed results are intact and, on
-`LIKELY_COMPLETED`, complete.
+lost. Cancel with `--force` to settle the job rows; the landed results are intact and, on
+`LIKELY_COMPLETED`, complete. Once every job row is terminal, `registry.ops close-runs` finalizes
+the *header* to what those rows say — which is how you get a `COMPLETED` header on work that
+actually completed, instead of a `CANCELLED` one. It skips any run whose job rows are still
+unsettled, so probe first.
+
+**Symptom: a header is stuck `RUNNING` and the run has no job rows at all.**
+The driver died in the submit path before it recorded a single family, so there is nothing to probe.
+`registry.ops close-runs` closes it as `FAILED`; nothing completed and nobody stopped it.
 
 **Symptom: `no handle recorded`.**
 The job predates the probe surface, or its telemetry blob is malformed. There is no way to address
@@ -142,7 +149,9 @@ it in the Cloud Console and use `registry.ops` to tidy the row.
 
 **Symptom: `registry.ops drop-run` refuses.**
 It will not touch a run whose header is still `RUNNING` or `PENDING`. Probe first — a `RUNNING` row
-can also be a dead job — then either cancel it properly or pass `--force`.
+can also be a dead job — then either cancel it properly, close the header with `close-runs`, or pass
+`--force`. Reach for `drop-run --force` only when you actually want the run's data gone; if all you
+want is an accurate status, `close-runs` gets there without deleting anything.
 
 ---
 

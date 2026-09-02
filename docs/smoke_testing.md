@@ -33,9 +33,19 @@ Run them cheap → expensive; each is numbered in that order.
 | 13 | `13_native_format.json` | Reading the **native** BigQuery source table (dual-format) |
 | 14 | `14_full_dag.json` | The flagship: all families + native + ensemble, one run_id |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG **orchestrated by Composer/Airflow** — three engines (Spark + Ray GPU + BigQuery) under a microbatch ensemble |
+| 16 | `16_cluster_split_hardware.json` | **Two** Dataproc clusters under one run — a CPU cluster and a GPU cluster, created and torn down together |
 
 Every other smoke reads the managed-Iceberg source table, so 13 gives the native-format read its own
 proof; together they validate both source formats.
+
+**Why 16 exists, given 04 and 06 already cover CPU and GPU clusters.** They cover them one run at a
+time. A Dataproc cluster has exactly one worker machine type, so a run whose ephemeral cluster
+families span both hardware kinds gets *two* clusters — `sf-cluster-<run_id>-cpu` and
+`sf-cluster-<run_id>-gpu` — and that is a genuinely different path: a second create, two distinct
+names, a region resolved per cluster (a capacity hop can move one and not the other), and two
+teardowns. 04 has two cluster families but both are CPU, so it takes the single-cluster path. 16 is
+the only config that forces the split, and an offline tripwire
+(`test_a_smoke_needs_two_dataproc_clusters_at_once`) fails if it ever stops doing so.
 
 Smokes 01–14 launch the run directly (`main.run`); smoke 15 is the one that proves the **Airflow
 layer** actually orchestrates the same building blocks — see
