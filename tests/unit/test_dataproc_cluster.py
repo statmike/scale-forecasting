@@ -280,6 +280,79 @@ def test_build_cluster_honours_worker_count() -> None:
     assert cluster.config.worker_config.num_instances == 5
 
 
+# --- lifetime bounds -------------------------------------------------------------
+
+
+def test_every_cluster_we_create_carries_both_lifetime_bounds() -> None:
+    """The backstop for a killed orchestrator: a ``finally`` cannot run in a dead process."""
+    from datetime import timedelta
+
+    cluster = dataproc_cluster.build_cluster(
+        infra=_infra(),
+        settings=_settings(),
+        project_id="proj-x",
+        name="sf-cluster-run-abc",
+    )
+    lifecycle = cluster.config.lifecycle_config
+    assert lifecycle.idle_delete_ttl == timedelta(seconds=1800)
+    assert lifecycle.auto_delete_ttl == timedelta(seconds=86400)
+
+
+def test_lifetime_bounds_follow_infra_not_config() -> None:
+    """They live on `BatchInfra` on purpose — a config field would shift every run_id."""
+    from dataclasses import replace
+    from datetime import timedelta
+
+    infra = replace(_infra(), cluster_idle_ttl_seconds=600, cluster_max_age_seconds=7200)
+    cluster = dataproc_cluster.build_cluster(
+        infra=infra, settings=_settings(), project_id="proj-x", name="sf-cluster-run-abc"
+    )
+    assert cluster.config.lifecycle_config.idle_delete_ttl == timedelta(seconds=600)
+    assert cluster.config.lifecycle_config.auto_delete_ttl == timedelta(seconds=7200)
+
+
+def test_zero_disables_a_bound_without_disabling_the_other() -> None:
+    """The escape hatch for deliberately holding a cluster open, one bound at a time."""
+    from dataclasses import replace
+    from datetime import timedelta
+
+    infra = replace(_infra(), cluster_idle_ttl_seconds=0)
+    cluster = dataproc_cluster.build_cluster(
+        infra=infra, settings=_settings(), project_id="proj-x", name="sf-cluster-run-abc"
+    )
+    lifecycle = cluster.config.lifecycle_config
+    # An unset duration reads back as zero, not as absent — assert the *other* bound survived.
+    assert lifecycle.idle_delete_ttl == timedelta(0)
+    assert lifecycle.auto_delete_ttl == timedelta(seconds=86400)
+
+
+def test_both_bounds_zero_omits_the_lifecycle_config_entirely() -> None:
+    from dataclasses import replace
+
+    infra = replace(_infra(), cluster_idle_ttl_seconds=0, cluster_max_age_seconds=0)
+    assert (
+        dataproc_cluster.build_lifecycle_config(
+            infra.cluster_idle_ttl_seconds, infra.cluster_max_age_seconds
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("idle", "max_age", "match"),
+    [
+        (60, 86400, "idle ttl"),  # under Dataproc's 5-minute floor
+        (1800, 15 * 86400, "max age"),  # over Dataproc's 14-day ceiling
+    ],
+)
+def test_out_of_range_bounds_raise_locally_rather_than_at_create(
+    idle: int, max_age: int, match: str
+) -> None:
+    """A rejected create wastes staging that already happened, and the value came from a human."""
+    with pytest.raises(ConfigError, match=match):
+        dataproc_cluster.build_lifecycle_config(idle, max_age)
+
+
 # --- _gpu_worker ---------------------------------------------------------------
 
 

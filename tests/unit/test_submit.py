@@ -261,6 +261,40 @@ def test_batch_infra_resolve_reads_gpu_image(monkeypatch: pytest.MonkeyPatch) ->
     assert infra.gpu_image_uri == "projects/p/global/images/sf-dataproc-gpu-abcd1234"
 
 
+def test_batch_infra_resolve_reads_cluster_lifetime_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for var, val in (
+        ("SF_CODE_BUCKET", "code-bkt"),
+        ("SF_CONTAINER_IMAGE", "img:tag"),
+        ("SF_COMPUTE_SA", "sa@x.iam"),
+        ("SF_SUBNETWORK_URI", "projects/p/regions/r/subnetworks/s"),
+    ):
+        monkeypatch.setenv(var, val)
+    assert BatchInfra.resolve().cluster_idle_ttl_seconds == 1800  # default
+    monkeypatch.setenv("SF_CLUSTER_IDLE_TTL", "900")
+    monkeypatch.setenv("SF_CLUSTER_MAX_AGE", "3600")
+    infra = BatchInfra.resolve()
+    assert (infra.cluster_idle_ttl_seconds, infra.cluster_max_age_seconds) == (900, 3600)
+
+
+@pytest.mark.parametrize("bad", ["thirty", "-1"])
+def test_batch_infra_rejects_a_malformed_lifetime_bound(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """A typo'd ceiling silently reverting to the default is how a cluster outlives a weekend."""
+    for var, val in (
+        ("SF_CODE_BUCKET", "code-bkt"),
+        ("SF_CONTAINER_IMAGE", "img:tag"),
+        ("SF_COMPUTE_SA", "sa@x.iam"),
+        ("SF_SUBNETWORK_URI", "projects/p/regions/r/subnetworks/s"),
+    ):
+        monkeypatch.setenv(var, val)
+    monkeypatch.setenv("SF_CLUSTER_MAX_AGE", bad)
+    with pytest.raises(ConfigError, match="SF_CLUSTER_MAX_AGE"):
+        BatchInfra.resolve()
+
+
 def test_batch_infra_resolve_missing_var_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("SF_CODE_BUCKET", "SF_CONTAINER_IMAGE", "SF_COMPUTE_SA", "SF_SUBNETWORK_URI"):
         monkeypatch.delenv(var, raising=False)

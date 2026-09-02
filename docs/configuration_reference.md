@@ -437,6 +437,16 @@ runs in BigQuery).
   to `runtime="ray"`.
 - `hardware="cpu"` with a `gpu_type` set → error (drop `gpu_type` or set `hardware="gpu"`).
 
+**Cluster lifetime.** A cluster the run creates (no `spark_cluster_name`) is deleted when the run
+ends. It also carries server-side bounds so it cannot outlive the orchestrator that made it: it
+self-deletes after **30 min idle** or **24 h** total, whichever comes first. Those are backstops for
+the case where the run process is killed before its teardown runs — when teardown works they never
+fire. Override with `SF_CLUSTER_IDLE_TTL` / `SF_CLUSTER_MAX_AGE` (seconds; `0` disables a bound).
+They are environment, not config, so changing them does **not** change your `run_id`.
+
+A cluster named by `spark_cluster_name` gets neither — the run does not create it and does not own
+when it ends, so reclaiming it is yours to do.
+
 ```json
 "compute": {
   "families": {

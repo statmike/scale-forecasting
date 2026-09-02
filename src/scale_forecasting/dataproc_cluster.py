@@ -14,7 +14,9 @@ Three layers, read top to bottom:
 * **size** — `cluster_sizing`, the cluster analog of `submit.plan_sizing`, returning a worker count
   as well as properties because a cluster's ceiling is physical and fixed at *create*.
 * **lifetime** — create (walking zone/region capacity candidates), delete, and the shared-cluster
-  provision/teardown pair the DAG orchestrator calls.
+  provision/teardown pair the DAG orchestrator calls. Client-side teardown is only half of it:
+  `build_lifecycle_config` puts an idle bound and an absolute age bound on the cluster itself, so a
+  killed orchestrator leaves a cluster that reclaims itself rather than one that bills forever.
 
 The GCP imports stay lazy inside the functions that touch the network so importing this module never
 pulls the ``[spark]`` extra; the pure spec builders are import-free and unit-tested. The exact GPU
@@ -85,6 +87,13 @@ _GPU_INIT_TIMEOUT = timedelta(minutes=30)
 # How long ``wait=True`` blocks on the job before giving up (parity with the batch wait ceiling).
 _WAIT_TIMEOUT_SECONDS = 7200.0
 
+# Dataproc's own bounds on ``LifecycleConfig``. The defaults live on `BatchInfra` (this module
+# imports it, so they cannot live here without a cycle); the *limits* live here, with the builder
+# that has to satisfy them. Rejecting an out-of-range value locally beats discovering it in a
+# create that fails after the code is already staged.
+_MIN_IDLE_TTL_SECONDS = 300
+_MAX_LIFECYCLE_TTL_SECONDS = 14 * 86400
+
 
 def cluster_name(run_id: str, spark_cluster_name: str | None) -> str:
     """The cluster name: the reuse target if set, else ``sf-cluster-<run_id>`` (Dataproc-legal).
@@ -136,6 +145,11 @@ def build_cluster(
     custom image that has the driver pre-baked (fast, repeatable — no per-create compile), so no
     GPU-driver init action is added and `image_version` is dropped in favour of that image. Without
     it (the fallback) the stock GPU-driver init action installs the driver on each node at create.
+
+    Every cluster built here carries a ``LifecycleConfig`` (`build_lifecycle_config`) sized from
+    ``infra`` — the server-side backstop for the case where our own teardown never runs because the
+    orchestrator was killed. A reuse target gets none, because we did not create it and do not own
+    when it ends.
 
     ``venv_archive_uri`` + ``venv_init_uri`` wire the packed-venv delivery: the archive URI (and the
     target dir) ride as cluster metadata, and `venv_init_uri` (the staged `_stage_cluster_init`
@@ -231,6 +245,13 @@ def build_cluster(
         software_kwargs["image_version"] = _DEFAULT_IMAGE_VERSION
     software = dataproc.SoftwareConfig(**software_kwargs)
 
+    # The server-side backstop behind our own teardown — see `build_lifecycle_config`. Attached to
+    # every cluster we create, and to no cluster we merely reuse (we do not own those lifetimes).
+    lifecycle = build_lifecycle_config(
+        infra.cluster_idle_ttl_seconds, infra.cluster_max_age_seconds
+    )
+    lifecycle_kwargs: dict[str, Any] = {"lifecycle_config": lifecycle} if lifecycle else {}
+
     return dataproc.Cluster(
         project_id=project_id,
         cluster_name=name,
@@ -240,8 +261,43 @@ def build_cluster(
             worker_config=worker,
             software_config=software,
             initialization_actions=init_actions,
+            **lifecycle_kwargs,
         ),
     )
+
+
+def build_lifecycle_config(idle_ttl_seconds: int, max_age_seconds: int) -> Any | None:
+    """The ``LifecycleConfig`` bounding a cluster's lifetime, or ``None`` if both bounds are off.
+
+    The server-side backstop behind our own teardown, and the only one that survives the
+    orchestrator dying: a ``finally`` cannot run in a process that was killed, and a Dataproc
+    cluster left behind that way bills until a human notices. See the block on `BatchInfra`.
+
+    ``idle_delete_ttl`` reclaims a cluster with no YARN application; ``auto_delete_ttl`` is the
+    absolute wall for a cluster that stays busy doing the wrong thing. Either is disabled with 0.
+    Both are validated against Dataproc's own limits, because a rejected create wastes the staging
+    that already happened, and the value came from an env var a human typed.
+    """
+    from google.cloud import dataproc_v1 as dataproc
+
+    if idle_ttl_seconds and not _MIN_IDLE_TTL_SECONDS <= idle_ttl_seconds <= (
+        _MAX_LIFECYCLE_TTL_SECONDS
+    ):
+        raise ConfigError(
+            f"cluster idle ttl {idle_ttl_seconds}s outside Dataproc's "
+            f"{_MIN_IDLE_TTL_SECONDS}–{_MAX_LIFECYCLE_TTL_SECONDS}s range (0 disables it)"
+        )
+    if max_age_seconds and not 0 < max_age_seconds <= _MAX_LIFECYCLE_TTL_SECONDS:
+        raise ConfigError(
+            f"cluster max age {max_age_seconds}s outside Dataproc's "
+            f"1–{_MAX_LIFECYCLE_TTL_SECONDS}s range (0 disables it)"
+        )
+    kwargs: dict[str, Any] = {}
+    if idle_ttl_seconds:
+        kwargs["idle_delete_ttl"] = timedelta(seconds=idle_ttl_seconds)
+    if max_age_seconds:
+        kwargs["auto_delete_ttl"] = timedelta(seconds=max_age_seconds)
+    return dataproc.LifecycleConfig(**kwargs) if kwargs else None
 
 
 def master_machine_type(machine_family: str = "auto") -> str:

@@ -79,6 +79,48 @@ _VENV_ARCHIVE_PYTHON = f"./{_VENV_UNPACK_DIR}/bin/python"
 # costs nothing extra — it just stops the platform from guillotining a healthy long run.
 _DEFAULT_TTL_SECONDS = 86400
 
+# Cluster lifetime bounds (``LifecycleConfig``), the *cluster* analog of the batch ttl above — and
+# needed for a different reason. A batch is guillotined by a platform default; a cluster has no
+# default at all, so the only thing that has ever deleted one of ours is the ``finally`` in
+# `cluster_submit.submit_cluster_job` / `shared_clusters.shared_spark_cluster`. A ``finally`` does
+# not survive the process being killed, and we have already watched that happen: a notebook hit its
+# deadline mid-wait and was killed between "batch succeeded" and "header closed". That run was on
+# Serverless so nothing leaked; the same kill on the cluster path leaks a whole cluster, billing
+# indefinitely, with nothing left running that knows to reclaim it.
+#
+# Two bounds, because they catch different failures. **Idle** reclaims the orphan quickly: a cluster
+# with no YARN application is either finished or abandoned. **Max age** is the absolute wall for the
+# case where something *is* running and wrong (a wedged job keeps the cluster non-idle forever).
+# Both are ceilings, not schedules — when teardown works they never fire and cost nothing.
+#
+# 30 min of idle is well clear of the gap between create and first submit (staging + submit is
+# minutes) while still reclaiming an orphan the same hour. 24 h of max age matches the batch ttl
+# above for the same reason it was chosen there: a full-scale run must finish on its own.
+# Override with ``SF_CLUSTER_IDLE_TTL`` / ``SF_CLUSTER_MAX_AGE``; 0 disables either bound, which is
+# the escape hatch for someone deliberately holding a cluster open.
+_ENV_CLUSTER_IDLE_TTL = "SF_CLUSTER_IDLE_TTL"
+_ENV_CLUSTER_MAX_AGE = "SF_CLUSTER_MAX_AGE"
+_DEFAULT_CLUSTER_IDLE_TTL_SECONDS = 1800
+_DEFAULT_CLUSTER_MAX_AGE_SECONDS = 86400
+
+
+def _env_seconds(name: str, default: int) -> int:
+    """Read a non-negative integer seconds value from ``name``, else ``default``.
+
+    Raises rather than falling back on a malformed value: a typo'd ceiling that silently reverts to
+    the default is the kind of thing nobody notices until a cluster outlives a weekend.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        seconds = int(raw)
+    except ValueError:
+        raise ConfigError(f"{name}={raw!r} is not an integer number of seconds") from None
+    if seconds < 0:
+        raise ConfigError(f"{name}={raw!r} must be >= 0 (0 disables the bound)")
+    return seconds
+
 
 @dataclass(frozen=True)
 class BatchInfra:
@@ -103,6 +145,10 @@ class BatchInfra:
     # Which envelope delivers deps to a SERVERLESS batch — see `_ENV_SERVERLESS_DEPS`. Clusters and
     # Ray ignore it (they have exactly one mechanism each).
     serverless_deps: str = _SERVERLESS_DEPS_CONTAINER
+    # Server-side lifetime bounds for a Dataproc CLUSTER we create — see the block above. Serverless
+    # (which has `ttl_seconds`) and Ray ignore them. 0 disables a bound.
+    cluster_idle_ttl_seconds: int = _DEFAULT_CLUSTER_IDLE_TTL_SECONDS
+    cluster_max_age_seconds: int = _DEFAULT_CLUSTER_MAX_AGE_SECONDS
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -138,6 +184,12 @@ class BatchInfra:
             venv_archive_uri=os.environ.get(_ENV_VENV_ARCHIVE) or None,
             gpu_image_uri=os.environ.get(_ENV_GPU_IMAGE) or None,
             serverless_deps=serverless_deps,
+            cluster_idle_ttl_seconds=_env_seconds(
+                _ENV_CLUSTER_IDLE_TTL, _DEFAULT_CLUSTER_IDLE_TTL_SECONDS
+            ),
+            cluster_max_age_seconds=_env_seconds(
+                _ENV_CLUSTER_MAX_AGE, _DEFAULT_CLUSTER_MAX_AGE_SECONDS
+            ),
         )
 
     @classmethod
