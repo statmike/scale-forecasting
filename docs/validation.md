@@ -107,7 +107,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | CURRENT | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
-| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | NEVER_RUN | — | — | — |
+| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | CURRENT | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 
 ### Smoke 14 is the flagship, and it is green again
 
@@ -131,6 +131,54 @@ unchanged board.
 
 This run predates the metric-encoding fix recorded below, but is unaffected by it: backtesting is on
 here, so nothing was unscored and there were no NaNs to mis-sort.
+
+### Two Dataproc clusters under one run_id, and the custom GPU image had quietly expired
+
+`smoke-16-cluster-split-hardware-5e05307425e4`, 2026-09-02, PASS. This is the first live run of the
+hardware-split branch: a Dataproc cluster has one worker machine type, so a run whose ephemeral
+cluster families disagree about hardware needs two clusters, created and torn down independently
+under one `run_id`.
+
+```
+deep_learning  spark/gpu/T4    Dataproc cluster job   1040s
+statistical    spark/cpu       Dataproc cluster job    163s
+```
+
+Both clusters existed at once (`…-5e05-cpu` RUNNING while `…-5e05-gpu` was still CREATING), each got
+its own name and its own sizing, both reached `COMPLETED`, and both are gone — verified by
+`describe` returning `NOT_FOUND`, not by any SDK success line. All three models produced 100 cells.
+Wall clock 39m18s, of which roughly two thirds is cluster provisioning.
+
+**The first attempt failed, and the failure is the more useful result.** The CPU cluster created
+normally; the GPU cluster was refused outright:
+
+```
+google.api_core.exceptions.InvalidArgument: 400 Selected software image version
+'2.2.86-debian12' can no longer be used to create new clusters.
+```
+
+That version string appears in no config, no Terraform variable and no part of the run. It is baked
+into the custom GPU image the deployment built nine days earlier, on 2026-08-24, and recorded in its
+`goog-dataproc-version=2-2-86-debian12` label. Its CPU sibling was created from the `2.2-debian12`
+*alias*, which resolves forward on every create and was therefore unaffected.
+
+So a prebaked image has an invisible expiry. It is built from whatever sub-minor is current that
+day; Google retires sub-minors on its own schedule; the image cannot move, because moving is the one
+thing baking it prevents. Nothing in the deployment ages it, warns about it, or rebuilds it. The
+window here was **nine days**.
+
+The rerun that passed had `SF_GPU_IMAGE` unset, taking the documented fallback — stock image plus
+the GPU-driver init action, which compiles the driver at create time. That path cost about 14
+minutes of cluster-create for the GPU node and worked without any change. **This row therefore does
+not declare the `gpu_cluster_image` axis: it did not run the current value of it.** It is a proof of
+the two-cluster branch, not a re-proof of smoke 06's prebaked-image path.
+
+Two things follow, one shipped and one still open. Shipped: `_explain_create_failure` in
+`dataproc_cluster` now rewrites this error when a custom image was in play, naming the image, the
+`SF_GPU_IMAGE` knob that disables it and the fallback that still works, and keeping the original
+text — and `compute_fallback.is_retired_image_error` deliberately classifies it as *not* capacity,
+because hopping zones would spend the entire failover walk on an image no zone has. Still open: what
+to do about the image itself, which is a cost decision rather than a bug — see the gap below.
 
 ### The cluster path re-proved itself on 2026-09-01, and the reuse smoke checks the thing that matters
 
@@ -1142,7 +1190,21 @@ also the last remaining in-flight run in the registry, so it is a standing, visi
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
 
-- **A run that needs both a CPU and a GPU Dataproc cluster has never been executed.** A Dataproc
+- **The prebaked GPU cluster image expires, and nothing in the deployment notices.** Found live
+  2026-09-02 by smoke 16, analysed above: an image built nine days earlier was refused because the
+  Dataproc sub-minor baked into it had been retired. **Smoke 06 is the row that rests on this.** Its
+  proof is real and its code path is unchanged, but the specific artifact it ran on can no longer
+  create a cluster, so it cannot be reproduced as written until the image is rebuilt. The error is
+  now legible (`_explain_create_failure`) and the fallback is proven (smoke 16), so nothing is
+  *blocked* — what is undecided is the default. Rebuilding on a schedule keeps ~14 minutes off every
+  GPU cluster create and adds a maintenance job that nobody will remember to run; dropping the image
+  and always using the init action removes a whole class of silent expiry and pays that 14 minutes
+  every time. **This is an owner call, not a bug fix**, and it should be made before the next
+  greenfield deploy rather than discovered by it again.
+- **~~A run that needs both a CPU and a GPU Dataproc cluster has never been executed.~~ Closed
+  2026-09-02 by smoke 16** — two clusters, two names, two sizings, two teardowns, one `run_id`,
+  analysed above. The live half named below is now done except for one clause: **the per-cluster
+  region after a capacity hop is still unproven**, because neither cluster hopped. A Dataproc
   cluster has one worker machine type, so as of 2026-09-02 a run's ephemeral cluster families are
   grouped by hardware and get one right-sized cluster each — `sf-cluster-<run_id>-cpu` alongside
   `sf-cluster-<run_id>-gpu`. **No row above goes stale, and until smoke 16 none of them reached the
@@ -1151,9 +1213,8 @@ Things that are true today and that no entry above covers. Keep this list short 
   same unsuffixed name, same sizing. `16_cluster_split_hardware.json` was added to close the config
   half of the gap (a `statistical` CPU family and a `deep_learning` T4 family, both
   `spark_mode: cluster`), and `tests/smokes/test_smoke_configs.py` now fails if the library ever
-  stops containing one. What remains unproven is the live half: the second create, the two distinct
-  names, the per-cluster region after a capacity hop, and the two teardowns. Offline tests pin all
-  of it, including the partial-create unwind; that is not the same as having run it.
+  stops containing one. Offline tests pin the partial-create unwind, which the live run did not
+  exercise because neither create failed after the other had succeeded.
 - **`ray_autoscale` defaults to `True` (`config.py`) but all four Ray smokes pin it `false`.**
   Introduced by `4c988bc`, when a per-pool `AutoscalingSpec` crashed the Vertex Ray head at
   provisioning. **Resolved on the demonstration surface 2026-09-01**, and the suspected cause was
