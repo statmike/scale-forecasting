@@ -13,7 +13,12 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..errors import get_logger
-from .params import _HEADER_PARAM_TYPES, _header_param
+from .params import (
+    _HEADER_PARAM_TYPES,
+    _header_param,
+    _status_guard_param,
+    render_status_guard,
+)
 from .rows import assemble_header_row
 from .tables import _resolve_settings
 
@@ -137,13 +142,21 @@ def write_header(
 
 
 def update_header(
-    run_id: str, *, settings: Settings | None = None, **fields: Any
+    run_id: str,
+    *,
+    settings: Settings | None = None,
+    unless_status_in: Sequence[str] = (),
+    **fields: Any,
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Update named columns on a run's header row, e.g. status/runtime_seconds.
 
     ``update_header(run_id, status="COMPLETED", runtime_seconds=42.0)`` → a parameterized
     ``UPDATE … SET … WHERE run_id=@run_id``. Unknown column names raise `RegistryError`;
     a no-op call (no fields) returns without touching BigQuery.
+
+    ``unless_status_in`` adds a status guard to the WHERE (`render_status_guard`), leaving a header
+    already in one of those states untouched. Same reason as `registry.jobs.update_job`: the state
+    being protected was written by another process, so the condition belongs in the statement.
     """
     from google.cloud import bigquery
 
@@ -158,9 +171,14 @@ def update_header(
     resolved = _resolve_settings(settings)
     set_clause = ", ".join(f"{col} = @{col}" for col in fields)
     table = resolved.registry_table_ref("run_registry")
-    sql = f"UPDATE `{table}` SET {set_clause} WHERE run_id=@run_id"
+    sql = (
+        f"UPDATE `{table}` SET {set_clause} WHERE run_id=@run_id"
+        f"{render_status_guard(unless_status_in)}"
+    )
     params = [_header_param(col, value) for col, value in fields.items()]
     params.append(_header_param("run_id", run_id))
+    if unless_status_in:
+        params.append(_status_guard_param(unless_status_in))
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()

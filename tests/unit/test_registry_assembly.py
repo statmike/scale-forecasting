@@ -22,7 +22,11 @@ from scale_forecasting.registry.header import (
     sizing_telemetry_path,
 )
 from scale_forecasting.registry.lifecycle import run_job
-from scale_forecasting.registry.params import _HEADER_PARAM_TYPES, _JOB_PARAM_TYPES
+from scale_forecasting.registry.params import (
+    _HEADER_PARAM_TYPES,
+    _JOB_PARAM_TYPES,
+    render_status_guard,
+)
 from scale_forecasting.registry.rows import (
     METRIC_COLUMNS,
     assemble_header_row,
@@ -512,6 +516,53 @@ def test_run_job_contributor_mode_touches_nothing(monkeypatch: Any) -> None:
         job.finalize(status="COMPLETED")
     assert cap["written"] is None
     assert cap["updates"] == []
+
+
+# --- a cancellation is sticky against the failure it caused ---------------------
+#
+# Live 2026-09-02: `--cancel` stopped a Ray job and wrote CANCELLED, then the launching process saw
+# its own job go STOPPED, read that as death, and finalized FAILED seventeen seconds later. These
+# assert the guard travels with every non-green finalize; that it *works* is BigQuery's job, and
+# the SQL it renders is asserted separately below.
+
+
+def test_a_failing_job_will_not_overwrite_a_cancellation(monkeypatch: Any) -> None:
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(ValueError, match="stopped"):
+        with run_job("rid-0123456789ab", "deep_learning", 1):
+            raise ValueError("ray job stopped")
+
+    _, fields = cap["updates"][0]
+    assert fields["status"] == "FAILED"
+    assert fields["unless_status_in"] == ("CANCELLED",)
+
+
+@pytest.mark.parametrize(
+    ("status", "guarded"),
+    [("FAILED", True), ("PARTIAL", True), ("COMPLETED", False)],
+)
+def test_only_a_non_green_finalize_carries_the_guard(
+    monkeypatch: Any, status: str, guarded: bool
+) -> None:
+    # PARTIAL is guarded too: a run whose other families finished is finalized PARTIAL, not FAILED,
+    # and that would erase a cancellation just as completely. COMPLETED is not — if the work
+    # actually finished, the cancellation lost a race it had no claim to win.
+    cap = _capture_job_io(monkeypatch)
+    with run_job("rid-0123456789ab", "ml", 1) as job:
+        job.finalize(status=status)
+
+    _, fields = cap["updates"][0]
+    assert fields["unless_status_in"] == (("CANCELLED",) if guarded else ())
+
+
+def test_the_status_guard_renders_only_when_something_is_protected() -> None:
+    assert render_status_guard(()) == ""
+    guard = render_status_guard(("CANCELLED",))
+    assert guard.startswith(" AND ")
+    assert "@unless_status_in" in guard
+    # NULL status must not silently drop the row from the update — SQL says NULL NOT IN (…) is
+    # unknown, and a row with no status has nothing worth protecting.
+    assert "status IS NULL" in guard
 
 
 # --- artifact layout: composing the path, and reading it back -------------------

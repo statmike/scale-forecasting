@@ -3,7 +3,8 @@
 `run_header` opens a run's ``run_registry`` row at RUNNING and finalizes it exactly once on the way
 out; `run_job` does the same for one ``run_jobs`` row. Both stamp wall-clock and a terminal status
 whether the body returns or raises — which is what keeps a crashed run from leaving a row stuck at
-RUNNING forever.
+RUNNING forever. Both also decline to write a *failure* over a row that another process already
+cancelled; see `_sticky_guard`.
 """
 
 from __future__ import annotations
@@ -19,6 +20,32 @@ if TYPE_CHECKING:
 
     from ..config import RunConfig
     from ..settings import Settings
+
+
+# A cancellation is sticky against the failure it caused.
+#
+# `probes.cancel` runs in a *different process* from the one that launched the run. When it stops a
+# job, the launcher's own poll loop sees a job that went STOPPED, which from inside that process is
+# indistinguishable from a job that died — so seconds later it finalizes FAILED (or PARTIAL, for a
+# run whose other families finished) straight over the CANCELLED the cancel had just written. The
+# run then reads as broken rather than deliberately stopped, on the header, in `doctor`, and in
+# every status filter. Observed live 2026-09-02, seventeen seconds apart.
+#
+# Guarding the write rather than reading first keeps it to one statement, which matters when the
+# writer being raced is in another process. Green statuses are not guarded: if the work genuinely
+# finished, nothing about the run was lost.
+_STICKY_STATUSES: tuple[str, ...] = ("CANCELLED",)
+_NON_GREEN_STATUSES = frozenset({"FAILED", "PARTIAL"})
+
+
+def _sticky_guard(status: str) -> tuple[str, ...]:
+    """Statuses that a write of ``status`` must not overwrite — empty when it may overwrite (pure).
+
+    Only a non-green finalize is held back. Splitting on the status being *written* is what keeps
+    the rule to the case that was observed, instead of quietly making `CANCELLED` unwritable-over
+    in general.
+    """
+    return _STICKY_STATUSES if status in _NON_GREEN_STATUSES else ()
 
 
 class HeaderFinalizer:
@@ -55,6 +82,7 @@ def run_header(
     measured wall-clock ``runtime_seconds``, and any extra columns the body set via
     `HeaderFinalizer.finalize`; on an exception ``update_header(status=FAILED, runtime_seconds=…)``
     then re-raise, so a crashed run records a terminal status instead of stranding at RUNNING.
+    Either way a non-green finalize carries the sticky-cancellation guard (`_sticky_guard`).
 
     In **contributor mode** (``manage=False``): touches no header at all — `main.run` owns the
     single shared row — so this only yields the finalizer for uniform call shape. The body may
@@ -80,6 +108,7 @@ def run_header(
                 settings=settings,
                 status="FAILED",
                 runtime_seconds=time.perf_counter() - started,
+                unless_status_in=_STICKY_STATUSES,
             )
         raise
     if manage:
@@ -88,6 +117,7 @@ def run_header(
             settings=settings,
             status=fin.status,
             runtime_seconds=time.perf_counter() - started,
+            unless_status_in=_sticky_guard(fin.status),
             **fin.extra,
         )
 
@@ -135,7 +165,9 @@ def run_job(
     wall-clock ``runtime_seconds``, and any extra columns set via `JobFinalizer.finalize` (e.g. the
     platform ``system_job_id`` and ``job_telemetry``); on an exception ``update_job(status=FAILED,
     runtime_seconds=…)`` then re-raise, so a crashed job records a terminal status instead of
-    stranding at RUNNING. The run header is owned separately by `run_header`; a job row sits *under*
+    stranding at RUNNING — with the same sticky-cancellation guard `run_header` applies, since a
+    cancelled family is exactly the job this block is most likely to see raise. The run header is
+    owned separately by `run_header`; a job row sits *under*
     it. ``manage=False`` yields the finalizer without touching ``run_jobs`` (uniform call shape for
     a caller that records the job elsewhere). Assumes the tables exist (the header owner ran
     `ensure_tables`), so it does not re-create them.
@@ -172,6 +204,7 @@ def run_job(
                 status="FAILED",
                 runtime_seconds=time.perf_counter() - started,
                 ended_at=datetime.now(UTC),
+                unless_status_in=_STICKY_STATUSES,
             )
         raise
     if manage:
@@ -181,5 +214,6 @@ def run_job(
             status=fin.status,
             runtime_seconds=time.perf_counter() - started,
             ended_at=datetime.now(UTC),
+            unless_status_in=_sticky_guard(fin.status),
             **fin.extra,
         )

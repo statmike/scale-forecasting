@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .params import _JOB_PARAM_TYPES, _job_param
+from .params import _JOB_PARAM_TYPES, _job_param, _status_guard_param, render_status_guard
 from .tables import _resolve_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ..settings import Settings
 
 
@@ -43,7 +45,11 @@ def write_job(
 
 
 def update_job(
-    job_id: str, *, settings: Settings | None = None, **fields: Any
+    job_id: str,
+    *,
+    settings: Settings | None = None,
+    unless_status_in: Sequence[str] = (),
+    **fields: Any,
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Update named columns on a job's ``run_jobs`` row, e.g. status/runtime_seconds/telemetry.
 
@@ -51,6 +57,12 @@ def update_job(
     ``UPDATE … WHERE job_id=@job_id``. The ``job_id`` is 1:1 with a row, so exactly one row is
     touched. Unknown column names raise `RegistryError`; a no-op call (no fields) returns without
     touching BigQuery.
+
+    ``unless_status_in`` adds a status guard to the WHERE (`render_status_guard`), so a row already
+    in one of those states is left exactly as it is — the write is skipped, not merged. That makes
+    the update conditional inside the one statement rather than read-then-write, which matters
+    because the state being protected is written by a *different process*: see `registry.lifecycle`
+    for the only caller and why it needs this.
     """
     from google.cloud import bigquery
 
@@ -65,9 +77,14 @@ def update_job(
     resolved = _resolve_settings(settings)
     set_clause = ", ".join(f"{col} = @{col}" for col in fields)
     table = resolved.registry_table_ref("run_jobs")
-    sql = f"UPDATE `{table}` SET {set_clause} WHERE job_id=@job_id"
+    sql = (
+        f"UPDATE `{table}` SET {set_clause} WHERE job_id=@job_id"
+        f"{render_status_guard(unless_status_in)}"
+    )
     params = [_job_param(col, value) for col, value in fields.items()]
     params.append(_job_param("job_id", job_id))
+    if unless_status_in:
+        params.append(_status_guard_param(unless_status_in))
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()

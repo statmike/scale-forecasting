@@ -8,7 +8,10 @@ binders live together because they are the same idea applied twice; they live ap
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # run_registry columns that may be set by write_header / update_header, with their BQ types.
 _HEADER_PARAM_TYPES: dict[str, str] = {
@@ -67,3 +70,27 @@ def _job_param(name: str, value: Any) -> Any:
     from google.cloud import bigquery
 
     return bigquery.ScalarQueryParameter(name, _JOB_PARAM_TYPES[name], value)
+
+
+# The parameter name both status-guarded UPDATEs bind their protected-status list to.
+_STATUS_GUARD_PARAM = "unless_status_in"
+
+
+def render_status_guard(unless_status_in: Sequence[str]) -> str:
+    """The ``AND status …`` tail that makes an UPDATE skip rows already in a protected state (pure).
+
+    Empty sequence → empty string, so an unguarded call renders exactly the SQL it always did. The
+    ``status IS NULL`` arm is deliberate: SQL three-valued logic makes ``NULL NOT IN (…)`` unknown,
+    which would silently drop the row from the update, and a row with no status is precisely one
+    that has nothing worth protecting.
+    """
+    if not unless_status_in:
+        return ""
+    return f" AND (status IS NULL OR status NOT IN UNNEST(@{_STATUS_GUARD_PARAM}))"
+
+
+def _status_guard_param(unless_status_in: Sequence[str]) -> Any:
+    """Bind the protected-status list for `render_status_guard`'s tail."""
+    from google.cloud import bigquery
+
+    return bigquery.ArrayQueryParameter(_STATUS_GUARD_PARAM, "STRING", list(unless_status_in))
