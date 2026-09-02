@@ -542,8 +542,10 @@ class Registry:
         """Finalize abandoned ``RUNNING`` headers to what their job rows already imply.
 
         No arguments means every stuck header in this registry. Preview unless ``yes``. Deletes
-        nothing and skips any run with a job row that is not yet terminal — probe those first with
-        ``monitor(probe=True)``. See `registry.ops.close_runs`.
+        nothing and skips any run with a job row that is not yet terminal — probe those first.
+        `Forecaster.monitor` (``probe=True``) is the usual way in, but it needs a config;
+        `probes.reconcile.probe_run` takes a bare ``run_id``, which is what you have here. See
+        `registry.ops.close_runs`.
         """
         from .registry import ops
 

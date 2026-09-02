@@ -751,11 +751,17 @@ def _stuck_run_ids(settings: Settings) -> tuple[str, ...]:  # pragma: no cover -
 def _job_statuses(
     settings: Settings, run_ids: Sequence[str]
 ) -> dict[str, tuple[str | None, ...]]:  # pragma: no cover - GCP I/O, @gcp smoke
-    """``{run_id: (latest status per job_key, …)}`` for the named runs (one query).
+    """``{run_id: (latest status per job_id, …)}`` for the named runs (one query).
 
-    Latest-per-``job_key`` for the same append-only reason as `_stuck_run_ids`: a family writes a
-    ``RUNNING`` row and then a terminal one, and rolling up both would see a non-terminal status
-    for a job that finished and refuse to close a run that is perfectly closable.
+    ``job_id`` is the row identity here, not ``job_key`` — `jobs.update_job` moves a job to its
+    terminal status with an ``UPDATE … WHERE job_id=@job_id`` **in place**, so unlike the
+    append-only ``run_registry`` headers, a job normally owns exactly one row.
+
+    It is still deduped latest-first, because "normally" is not "always". A re-run of an identical
+    config derives the same ``run_id`` and therefore the same deterministic ``job_id``, and inserts
+    a second row rather than updating the first: the live registry currently holds 197 rows for 166
+    distinct ``job_id``s. Rolling up both copies would read the older ``RUNNING`` alongside the
+    newer ``COMPLETED`` and refuse to close a run that is perfectly closable.
     """
     from google.cloud import bigquery
 
@@ -763,11 +769,11 @@ def _job_statuses(
 
     sql = (
         "SELECT run_id, ARRAY_AGG(status) AS statuses FROM (\n"
-        "  SELECT run_id, job_key,\n"
+        "  SELECT run_id, job_id,\n"
         "         ARRAY_AGG(status ORDER BY created_at DESC LIMIT 1)[OFFSET(0)] AS status\n"
         f"  FROM `{settings.registry_table_ref('run_jobs')}`\n"
         "  WHERE run_id IN UNNEST(@run_ids)\n"
-        "  GROUP BY run_id, job_key\n"
+        "  GROUP BY run_id, job_id\n"
         ")\nGROUP BY run_id"
     )
     job_config = bigquery.QueryJobConfig(

@@ -661,7 +661,8 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. **Scope: reaching a Ray family through `--probe` still needs the handle fix** — see below. |
 | RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Scope: the `--cancel` verb itself could not reach the family** — same missing `resource_name` as the probe — and one summary line miscounts. See below. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
-| Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** The seventh, `close_runs`, landed after this pass and has never executed live; its pure roll-up is offline-tested and there is no `@gcp` test for it yet. |
+| Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** |
+| Registry ops — `close_runs` (7th verb) | CURRENT | Executed live 2026-09-02 against the real registry: closed 9 of the 10 stuck headers to `FAILED` and skipped the tenth with its reason, leaving `doctor` reporting exactly one in-flight run. **The first live call failed** on a column that does not exist, which no offline test could have caught — see below. |
 | Run audit principal (P6) | NEEDS_RECHECK | It has now executed, live, under ADC — and produced `actor=None`. The audit line for a real cancel attempt carried no principal. Whether that is a resolver defect or the expected ADC answer for this credential type is unresolved; either way the audit trail was empty when it mattered. See below. |
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
@@ -894,6 +895,49 @@ outside the package are both invisible to the gate, and both silently accumulate
 live invocation reveals.** Neither failure was a product defect. Both would have been, the first time
 someone reached for them in anger.
 
+### `close_runs` worked on the first live try except for the half that only BigQuery can check
+
+The verb's pure half — the status roll-up, the plan, the formatter — was fully offline-tested and
+was correct live on the first attempt. The verb still failed on the first attempt, at
+`400 Unrecognized name: job_key`, because its I/O half deduped `run_jobs` on a column that does not
+exist.
+
+**The wrong column came from correctly applying the wrong table's rule.** `run_registry` is
+append-only, so every reader of it takes the latest row per key; I carried that habit to `run_jobs`,
+which is not append-only — `jobs.update_job` moves a job to its terminal status with an
+`UPDATE … WHERE job_id=@job_id`, in place. The identity column is `job_id`, and there is no
+`job_key` anywhere in the schema.
+
+Checking the premise against the live table rather than just fixing the name found that the dedupe
+is nonetheless required, for a different reason than the one I had assumed: **197 rows for 166
+distinct `job_id`s.** A re-run of an identical config derives the same `run_id` and therefore the
+same deterministic `job_id`, and inserts a second row instead of updating the first. So the
+latest-per-key roll-up stays — on `job_id`, and justified by re-runs rather than by append-only
+writes. Without it, an older `RUNNING` copy would sit beside a newer `COMPLETED` one and the verb
+would refuse a run that is perfectly closable.
+
+This is the same shape as the two rots above: **the I/O half of a pure/I-O seam is exactly as
+unproven as the seam is clean.** Splitting the pure logic out is what let the roll-up be right on
+the first live call; it is also what let a nonexistent column reach production, because everything
+either side of the seam tested green.
+
+### The one run `close_runs` refused is a second gap, at the job-row level
+
+Probing `nb03-combo-ensemble-1788329058-c4a5e6db54a1` — the tenth header, the only one with job rows
+— returned `STALE_REGISTRY` for its `statistical` family: the Dataproc batch **`SUCCEEDED`**, all
+10 of 10 cells landed, and the registry row still says `RUNNING`. The finalize write was lost. Its
+`native` family is `COMPLETED` (20/20); its `ensemble` node never ran (0 of 30).
+
+`close_runs` was right to refuse — a non-terminal job row is precisely what it will not guess at.
+But nothing else settles this row correctly either. The documented move, `--cancel --force`, writes
+`CANCELLED` over a family that demonstrably **succeeded**. That is the *job-row analogue of the
+header problem `close_runs` was built to solve*, and it is not fixed: we can now close a header from
+its rows, but we cannot close a row from its runtime's own verdict. The probe already computes that
+verdict (`native_state='SUCCEEDED'`, `n_done == n_expected`); nothing writes it back.
+
+Left deliberately unclosed rather than papered over with a `CANCELLED` that would be false. It is
+also the last remaining in-flight run in the registry, so it is a standing, visible reminder.
+
 ## Known validation gaps
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
@@ -965,9 +1009,9 @@ Things that are true today and that no entry above covers. Keep this list short 
   10 stuck runs have **no job rows at all** (they died in the submit path, so they close as `FAILED`
   by an explicit rule rather than by falling through a roll-up), and the tenth
   (`nb03-combo-ensemble-1788329058-c4a5e6db54a1`) still has a `RUNNING` family, so it is *skipped
-  with a reason* rather than guessed at. The pure roll-up is offline-tested; **the verb itself has
-  never executed against the live registry — the ten headers are still stuck.** Closing them is a
-  spend-window item.
+  with a reason* rather than guessed at. **Closed live 2026-09-02** — nine headers went to `FAILED`,
+  the tenth was skipped, and `doctor` now reports one in-flight run instead of ten. Two things the
+  live call taught that the offline gate could not; both are recorded below.
 - **Nothing runs the `@gcp` tests or the control-tower tools on a schedule.** Both rotted (above).
   A cheap mitigation is import-only smoke coverage for the tools and a periodic `-m gcp` collection
   pass (`--collect-only` catches neither of these; the `CellResult` break needed execution).

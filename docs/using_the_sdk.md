@@ -133,7 +133,9 @@ diverge. The destructive verbs preview by default and refuse a run that is still
 with `monitor(probe=True)` first — a `RUNNING` row can also be a dead job — then pass `force=True`).
 `close_runs` is the exception, and the one to reach for when a header is *stuck* rather than wrong:
 it repairs abandoned `RUNNING` rows from the job rows they already have, deletes nothing, and skips
-any run whose jobs are not yet all terminal. There is deliberately no wipe method: a full teardown is `bq rm -r -f <dataset>`. Full verb
+any run whose jobs are not yet all terminal. To probe one of those skipped runs you need
+`probes.reconcile.probe_run(run_id)` rather than `monitor(probe=True)` — `monitor` lives on
+`Forecaster` and wants a config, and a stuck run is usually one you only have an id for. There is deliberately no wipe method: a full teardown is `bq rm -r -f <dataset>`. Full verb
 reference: [running_and_reviewing.md §6](./running_and_reviewing.md#6-managing-the-registry).
 
 ---
