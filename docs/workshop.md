@@ -136,7 +136,11 @@ uv run python -m scale_forecasting.main --config configs/all_families_100k.json 
 ```
 
 > **On the wait timeout.** A 100k run runs longer than the client's old 15-minute default wait, so
-> the submitter now blocks up to **2 h** (`--wait-timeout <seconds>` to change it). If you ever *do*
+> the submitter blocks up to **2 h**. That bound is **fixed on this entrypoint** — `--wait-timeout`
+> is a flag on the lower-level `python -m scale_forecasting.submit` module, and passing it to
+> `main` fails with `unrecognized arguments`. If your run will outlast two hours, drive it from a
+> persistent VM (see the note at the end of this Act) rather than reaching for a longer wait.
+> If you ever *do*
 > see a client-side `TimeoutError`, the **jobs are unaffected** — they keep running server-side; only
 > the local wait gave up. Check true state with
 > `gcloud dataproc batches list --project $PROJECT --region $REGION` or the `v_run_summary` query
@@ -192,7 +196,11 @@ ORDER BY created_at DESC
 LIMIT 25;
 ```
 
-You want three `SUCCEEDED` rows — one `explode-100k-…`, one `ray-100k-…`, one `all-families-100k-…`.
+You want three **`COMPLETED`** rows — one `explode-100k-…`, one `ray-100k-…`, one
+`all-families-100k-…`. (`COMPLETED` is the registry's word for a finished run. `SUCCEEDED` is the
+*platform's* word — what Dataproc and Ray call a finished job — and it never appears in this column;
+the registry's vocabulary is `COMPLETED` / `PARTIAL` / `FAILED` / `CANCELLED`, with `RUNNING` and
+`PENDING` as the non-terminal pair. `PARTIAL` means the run finished with some cells failed.)
 Copy those three `run_id`s; Act 3's notebook 07 reads them. For the **per-family** breakdown of any run
 — which family ran on which runtime/hardware, its platform job id, and per-job wall-clock — query
 `v_run_jobs` (one row per `(run_id, family)`, plus the ensemble node):
@@ -282,15 +290,21 @@ It prints each notebook's **job id** and a link to the **Executions** menu — t
 the jobs appear with live state, and where a finished one **opens as the executed notebook with
 rendered outputs**. That menu is your tour surface tomorrow.
 
-> **`--tier` picks how much to pre-render** (same cost tiers as the acceptance harness):
-> `smoke` = the 3 BQ/local notebooks (`model_playground`, `02`, `07` — cheap); `batch` = those + the 2
-> Dataproc ones (`01`, `03`); `full` = **all 6**, adding `04_ray_on_vertex`. `full` fires the whole tour
-> at once — that's the **same total spend as one full acceptance run** (6 Colab runtimes + the Dataproc
-> batches + a live Ray cluster), just concurrent. Pre-workshop prep, not free — but it's what
-> pre-renders everything.
+> **`--tier` picks how much to pre-render** (same cost tiers as the acceptance harness, and each tier
+> is *cumulative* — it runs its own notebooks plus every cheaper tier's):
+>
+> | Tier | Adds | Total |
+> |------|------|-------|
+> | `smoke` | `model_playground`, `02_bigquery_native`, `07_scale_review`, `09_review_run` — registry-read or BigQuery only, cheap | 4 |
+> | `batch` | `01_spark_via_connect`, `03_combo_and_ensemble`, `08_run_and_monitor` — these submit Dataproc work | 7 |
+> | `full` | `04_ray_on_vertex` — stands up a live Ray cluster | 8 |
+>
+> `full` fires the whole tour at once — the **same total spend as one full acceptance run** (8 Colab
+> runtimes + the Dataproc batches + a live Ray cluster), just concurrent. Pre-workshop prep, not free
+> — but it's what pre-renders everything.
 
 > **Run this *after* Act 1's three 100k runs land.** `07_scale_review` reads those runs, so pre-render
-> it only once they're `SUCCEEDED` — otherwise its rendered output shows missing data. (`07` reads
+> it only once they're `COMPLETED` — otherwise its rendered output shows missing data. (`07` reads
 > its `RUN_IDS` from the shipped deterministic defaults, which match the unchanged configs — if you
 > overrode a config, edit `07`'s `RUN_IDS` cell before this step or run `07` live instead.)
 
@@ -318,7 +332,9 @@ Run them **in this order** — each builds on the story of the last:
 | 3 | [`02_bigquery_native`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_bigquery_native.ipynb) | `sf-main` | The BigQuery-native family — `ARIMA_PLUS` + `TimesFM` as pure SQL, no cluster. | 100 |
 | 4 | [`03_combo_and_ensemble`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_combo_and_ensemble.ipynb) | `sf-main` | One config mixing a Spark model **and** the BQ natives under one `run_id`, with ensembles on — **and the accuracy-parity leaderboard** (backtest is on here). | 10 |
 | 5 | [`04_ray_on_vertex`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex.ipynb) | `sf-main` | The Python models on a Ray-on-Vertex cluster ∥ the BQ natives — job submission from any authenticated client via the PSC-I attachment. | demo |
-| 6 | [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) | `sf-main` | **The payoff** — the cross-run comparison over your **Act 1** 100k runs: runtime parity (Spark vs Ray) and the per-family placement (`v_run_jobs`). Runs nothing; reads the registry views. | reads 100k |
+| 6 | [`08_run_and_monitor`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_run_and_monitor.ipynb) | `sf-main` | The **live** half of the run/review pair — launches one config mixing Spark `theta` with the BQ natives (backtest + ensembles on) and watches both tracks land under one `run_id`. | 100 |
+| 7 | [`09_review_run`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_review_run.ipynb) | `sf-main` | The **finished-run** half — point it at what `08` just launched and it answers *how did it do?*: leaderboard, per-series metric distribution, ensemble lift, timeline. Read-only. | reads a run |
+| 8 | [`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) | `sf-main` | **The payoff** — the cross-run comparison over your **Act 1** 100k runs: runtime parity (Spark vs Ray) and the per-family placement (`v_run_jobs`). Runs nothing; reads the registry views. | reads 100k |
 
 **Notebook 07 is the one notebook you configure.** Its first code cell has an edit-me `RUN_IDS` block:
 

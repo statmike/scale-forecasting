@@ -582,9 +582,9 @@ notebook reflects the current path.
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
-| Workshop Act 1 (100k history, Cloud Shell / VM) | NEVER_RUN | The four scale configs above, run as the workshop instructs them and in that order. Not the same claim as "the configs work": Act 1 is followed by someone who has just deployed, from a shell with a session limit, and its failure modes are disk, quota and session death. **Its first two commands were walked verbatim on 2026-09-02 and the first one was broken** — `--dry-run` printed nothing at all. Fixed; see below. That is the whole argument for running the act rather than the configs. |
-| Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | Headless execution of the tour notebooks against a fresh deployment. The notebook rows above were proven by the acceptance harness, which is not the same path. |
-| Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The six notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. |
+| Workshop Act 1 (100k history, Cloud Shell / VM) | NEVER_RUN | The four scale configs above, run as the workshop instructs them and in that order. Not the same claim as "the configs work": Act 1 is followed by someone who has just deployed, from a shell with a session limit, and its failure modes are disk, quota and session death. **Every command and SQL block in the act was walked verbatim on 2026-09-02, and three of them were wrong** — `--dry-run` printed nothing at all, the runbook told you to look for a `SUCCEEDED` run status the registry never emits, and it advertised a `--wait-timeout` flag the documented entrypoint rejects. All fixed; see below. The SQL all ran as written. Still `NEVER_RUN` because the act's real failure modes — disk, quota, session death on a fresh deploy — are untouched by walking it from a working environment. That is the whole argument for running the act rather than the configs. |
+| Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | Headless execution of the tour notebooks against a fresh deployment. The notebook rows above were proven by the acceptance harness, which is not the same path. Its documented `--tier` table was walked on 2026-09-02 and was two notebooks out of date (3/5/6 against the registry's 4/7/8); corrected. |
+| Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The tour notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. The tour table listed six on 2026-09-02 while Act 2 pre-rendered eight; `08_run_and_monitor` and `09_review_run` were added, so the count is now eight. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. **Scope: reaching a Ray family through `--probe` still needs the handle fix** — see below. |
@@ -725,6 +725,68 @@ handler to the root logger, so a `caplog` assertion passes against the broken co
 exist, they simply have nowhere to go in a real process. The regression test therefore asserts on
 the *handler* and the *level*, having first stripped the root logger, which is the only way to
 observe the actual defect from inside a test runner.
+
+### Walking the rest of the workshop found three more drifts, and the pattern in them is the same
+
+The silent `--dry-run` was the first command of Act 1. Walking the remaining Act 1–3 commands and
+SQL verbatim — checking every claim against the code that implements it or the registry it queries —
+turned up three more. None is a code defect; all three are the documentation describing a version of
+the system that no longer exists, and all three would mislead someone following the runbook
+literally rather than merely confuse them.
+
+**Act 1 told you to look for `SUCCEEDED` runs, and the registry never emits that word.** After the
+three 100k submits the runbook said "you want three `SUCCEEDED` rows" from `v_run_summary`. Live, the
+column holds only:
+
+| status | rows |
+|---|---|
+| `COMPLETED` | 78 |
+| `FAILED` | 14 |
+| `RUNNING` | 9 |
+| `PARTIAL` | 7 |
+
+`SUCCEEDED` is the *platform's* vocabulary — what Dataproc and Ray call a finished job, and what
+`probes/vocabulary.py` normalises *away from* on the way into the registry. A reader who ran Act 1
+correctly would have found no `SUCCEEDED` row and reasonably concluded the runs had not landed. Fixed
+by naming the registry's actual vocabulary and saying explicitly which word belongs to which layer.
+The same sentence appeared a second time in Act 2's "pre-render only once they're `SUCCEEDED`" and
+was fixed with it. One other `SUCCEEDED` in the workshop — the deploy smoke in the opening paragraph
+— was checked and left, because that one really is a Dataproc batch state.
+
+**Act 1 advertised a flag that the documented entrypoint does not have.** The note on the two-hour
+wait offered `--wait-timeout <seconds>` to change it. That flag exists on
+`python -m scale_forecasting.submit`, not on `main` — the entrypoint every command in the runbook
+uses. Run as documented it fails outright:
+
+    main: error: unrecognized arguments: --wait-timeout 7200
+
+The 2 h figure itself is right (`_WAIT_TIMEOUT_SECONDS = 7200.0`), and `main.run` never threads a
+timeout through, so **there is no knob at all from the documented path** — the doc now says so and
+points at the persistent-VM route instead of implying a longer wait is available.
+
+**Act 2's tier table was two notebooks out of date, and Act 3's tour never mentioned them.** The doc
+described `smoke` = 3, `batch` = 5, `full` = "all 6". The harness registry has **8**: `smoke` = 4
+(`09_review_run` joined it, being registry-read-only), `batch` = 7 (`08_run_and_monitor`), `full` = 8.
+The code's own docstring says "all 8", so this is doc drift from when the review-layer pair landed,
+not disagreement inside the product. It mattered beyond arithmetic: Act 2 pre-renders whatever the
+tier contains, so a presenter running `--tier full` got two rendered notebooks that Act 3's tour
+table did not list and gave them no reason to open. Both are now in the tour, in the place the
+narrative wants them — `08` launches a mixed Spark + BigQuery run and watches it land, `09` reviews
+what `08` just produced — between the engine notebooks and `07`'s cross-run payoff.
+
+**What did check out.** All three Act 1 SQL blocks run as written against the live registry and
+return exactly the columns they name (`v_run_summary`: `run_id, created_at, status, python_runtime,
+n_series, n_models`; `v_run_jobs`: `run_id, family, runtime, hardware, status, runtime_seconds`; the
+`forecast_metadata` progress query). The `submit` extra Act 1 installs exists. `explode_100k`'s live
+`v_run_jobs` rows independently reproduce the wall-clocks quoted above — `statistical` 7053.7 s
+(117.6 min) and `ml` 3329.3 s (55.5 min) — so the headline row and the registry agree. And Act 2's
+`sf-demo-…` job-name prefix is correct: the fan-out path really does use a different prefix
+(`sf-demo`) from the blocking harness (`sf-accept`), which looked like a fourth drift until it was
+checked.
+
+The generalisation worth keeping: **every one of these four was found by executing the documented
+command rather than reading it**, and none was reachable by any test the repo has. Docs drift is
+invisible to a test suite that tests code.
 
 ### Code the offline gate does not run had rotted in two places, and only running it live showed that
 
