@@ -62,6 +62,36 @@ def test_is_capacity_error_false(exc: Exception) -> None:
     assert cf.is_capacity_error(exc) is False
 
 
+# --- a retired image version: nowhere and never again, not somewhere-else-and-later ---
+#
+# Live 2026-09-02: smoke 16's GPU cluster was refused with "Selected software image version
+# '2.2.86-debian12' can no longer be used to create new clusters" — the version baked into the
+# custom GPU image the deploy had built nine days earlier. Its CPU sibling, on the moving
+# `2.2-debian12` alias, created normally.
+
+
+def test_a_retired_image_version_is_recognised_and_is_not_a_stockout() -> None:
+    exc = RuntimeError(
+        "400 Selected software image version '2.2.86-debian12' can no longer be used to "
+        "create new clusters. Please select a more recent image."
+    )
+    assert cf.is_retired_image_error(exc) is True
+    # It must not read as capacity: hopping zones would burn the failover walk on an image that
+    # no zone has.
+    assert cf.is_capacity_error(exc) is False
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("Resources are insufficient in region us-central1"),
+        RuntimeError("Invalid machine type n1-bogus-9"),
+    ],
+)
+def test_other_failures_are_not_retired_images(exc: Exception) -> None:
+    assert cf.is_retired_image_error(exc) is False
+
+
 # --- catalog loading -----------------------------------------------------------
 
 

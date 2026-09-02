@@ -787,3 +787,33 @@ def test_cluster_init_script_reads_metadata_and_unpacks_to_absolute_dir() -> Non
     assert 'tar xzf /tmp/sf-venv.tar.gz -C "${VENV_DIR}"' in script
     assert "set -euo pipefail" in script  # a fetch/unpack failure fails the node, not silently bare
     assert cluster_deps._VENV_PYTHON == "/opt/sf-venv/bin/python"
+
+
+# --- explaining a create failure the operator cannot trace to any config ---------
+
+
+def test_a_retired_custom_gpu_image_is_explained_and_names_the_fallback() -> None:
+    raw = RuntimeError(
+        "400 Selected software image version '2.2.86-debian12' can no longer be used to "
+        "create new clusters."
+    )
+    explained = dataproc_cluster._explain_create_failure(
+        raw, "projects/p/global/images/sf-dataproc-gpu-abcd1234"
+    )
+    assert explained is not raw  # rewritten, not passed through
+    text = str(explained)
+    assert "sf-dataproc-gpu-abcd1234" in text  # the image nobody would think to suspect
+    assert "SF_GPU_IMAGE" in text  # the knob that turns it off
+    assert "2.2.86-debian12" in text  # the original message, retained
+
+
+def test_the_same_failure_without_a_custom_image_is_left_alone() -> None:
+    # On the stock path the version comes from the moving alias, so the raw message is already
+    # about something the operator can find. Rewriting it would only add noise.
+    raw = RuntimeError("400 Selected software image version can no longer be used")
+    assert dataproc_cluster._explain_create_failure(raw, None) is raw
+
+
+def test_an_ordinary_failure_is_passed_through_even_with_a_custom_image() -> None:
+    raw = RuntimeError("Invalid machine type n1-bogus-9")
+    assert dataproc_cluster._explain_create_failure(raw, "projects/p/global/images/x") is raw

@@ -78,6 +78,26 @@ _CAPACITY_ERROR_MARKERS: tuple[str, ...] = (
 # RESOURCE_EXHAUSTED=8). Matched by name so this module needs no google import.
 _CAPACITY_EXCEPTION_NAMES = frozenset({"ServiceUnavailable", "ResourceExhausted"})
 
+# Dataproc retires individual sub-minor image versions on its own schedule, and refuses creates from
+# them. The moving `2.2-debian12` alias resolves forward, so this only bites a create pinned to one
+# fixed version — in practice a *custom* image, which bakes the sub-minor it was built from into a
+# label and cannot move. Not a capacity error: no zone has the retired image either.
+_RETIRED_IMAGE_MARKERS: tuple[str, ...] = (
+    "can no longer be used to create new clusters",
+    "no longer supported",
+)
+
+
+def is_retired_image_error(exc: BaseException) -> bool:
+    """True if a cluster-create error reads as *this image version has been retired* (pure).
+
+    Distinct from `is_capacity_error` in the only way that matters operationally: a stockout is
+    somewhere-else-and-later, while a retired image is nowhere and never again. Both re-raise; this
+    one exists so the caller can say what actually has to change.
+    """
+    low = str(exc).lower()
+    return any(marker in low for marker in _RETIRED_IMAGE_MARKERS)
+
 
 @dataclass(frozen=True)
 class Candidate:

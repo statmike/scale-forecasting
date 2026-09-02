@@ -466,6 +466,32 @@ def _create_cluster(
     op.result(timeout=_WAIT_TIMEOUT_SECONDS)
 
 
+def _explain_create_failure(exc: Exception, gpu_image_uri: str | None) -> Exception:
+    """Return the exception to raise for a non-capacity create failure (pure).
+
+    Passes almost everything straight through. The one case it rewrites is a *retired image
+    version* on a create that used a pre-baked custom GPU image, because there the raw message
+    names a version string the operator never chose and cannot find in any config: the version is
+    baked into the image, and the image was built by the deployment weeks earlier. Left alone, the
+    error sends someone hunting for a pin that does not exist. So it names the image, says the
+    version inside it has aged out, and points at the fallback that needs no image at all.
+
+    Note what is *not* claimed: nothing here re-bakes or reroutes. A custom image has an expiry the
+    product cannot see, and the honest response to hitting it is to say so.
+    """
+    from .compute_fallback import is_retired_image_error
+    from .errors import EngineError
+
+    if not (gpu_image_uri and is_retired_image_error(exc)):
+        return exc
+    return EngineError(
+        f"Dataproc refused the custom GPU image {gpu_image_uri}: the Dataproc version baked into "
+        f"it has been retired, and a baked image cannot move to a newer one. Unset SF_GPU_IMAGE to "
+        f"use the fallback (stock image + the GPU-driver init action, which compiles the driver at "
+        f"create), or rebuild the image from a current version. Underlying error: {exc}"
+    )
+
+
 def _create_cluster_across_candidates(
     candidates: list[Candidate],
     *,
@@ -498,7 +524,7 @@ def _create_cluster_across_candidates(
             return cand
         except Exception as exc:  # noqa: BLE001 - classify, then either advance or re-raise
             if not is_capacity_error(exc):
-                raise
+                raise _explain_create_failure(exc, build_kwargs.get("gpu_image_uri")) from exc
             _log.warning(
                 "no capacity for cluster %s at %s (%s); trying next candidate",
                 name,
