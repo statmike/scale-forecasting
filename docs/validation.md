@@ -105,8 +105,31 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-08-25 | not recorded | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
+| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | CURRENT | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
+
+### Smoke 14 is the flagship, and it is green again
+
+`smoke-14-full-dag-c8664f7a2d23`, 2026-09-02: five families under one `run_id`, across three
+different execution surfaces, with an ensemble node gathering them.
+
+```
+deep_learning  spark/gpu/L4    Dataproc Serverless batch
+statistical    spark/cpu       Dataproc Serverless batch
+ml             spark/cpu       Dataproc Serverless batch
+native         bigquery/cpu    BigQuery job
+ensemble       bigquery/cpu    BigQuery job
+```
+
+Every one of the ten leaderboard entries carries a real `wape` over 100 cells — the six base models
+and the four ensemble strategies — so the DAG did not merely finish, it scored. `timesfm` (0.3554)
+leads, followed by `ensemble_nnls` (0.3652); the ensembles land above every model they are built
+from except the one BigQuery foundation model, which is the sort of ordering that suggests the
+ensemble is doing arithmetic rather than copying. The rerun check confirmed the same `run_id` and an
+unchanged board.
+
+This run predates the metric-encoding fix recorded below, but is unaffected by it: backtesting is on
+here, so nothing was unscored and there were no NaNs to mis-sort.
 
 ### The cluster path re-proved itself on 2026-09-01, and the reuse smoke checks the thing that matters
 
@@ -191,15 +214,47 @@ ensemble metric columns of those runs, and should not trust an `ORDER BY <metric
 engines on them. Only a live run finds this: every offline test asserts against one writer at a
 time, and each writer is self-consistent.
 
+### `features.level_shift` changes forecast values, and 8 of 100 series prove the detector isn't firing blindly
+
+`features.level_shift` defaults to `False` and no smoke config turns it on, so the whole feature was
+`NEVER_RUN` on live infrastructure. On 2026-09-02 two runs settled it: identical configs — `xgboost`
+alone, 100 series, horizon 28, `holidays: ["US"]`, `transform: "log1p"` — differing in that one
+boolean. `wave-68-level-shift-off-5f5e05d8ac1b` and `wave-68-level-shift-on-800462340da5`, both
+COMPLETED, both a single Serverless `ml` job.
+
+Joined on `(ts_id, forecast_date)`, **2576 of 2800 forecast values differ**, mean absolute difference
+4.76 and mean relative difference 23%. This is a forecast-value feature, not plumbing, and it now has
+live evidence of that.
+
+The 224 identical values are the more interesting half. They are **8 whole series, unchanged across
+all 28 horizon dates** — the other 92 changed at every date. That is exactly what
+`level_shift_step`'s contract predicts: it returns all zeros when no split clears
+`_LEVEL_SHIFT_SIGMA`, so those series get a constant column the tree cannot split on and the two runs
+must agree to the bit. A detector that fired on everything, or a column silently dropped, would both
+have shown up as 100/100 or 0/100. Split 92/8, with per-series all-or-nothing, is the signature of
+the detector actually discriminating.
+
+Recorded as prose rather than a table row: the two configs are throwaways outside
+`configs/smokes/`, so the ledger tripwire has nothing to bind them to. The claim is the comparison,
+not either run.
+
 ### Smoke 08 is blocked on quota, not broken — and finding that out took two fixes
 
-**GPU on Vertex Ray is unavailable to this project — in every region, on either accelerator.** On
-2026-09-01, smoke 08 was attempted six times across `us-central1`, `us-east1` and `us-west1`, first
-on T4 and then on L4 (`g2-standard-8`), and never once provisioned. `us-east1` on T4 gave the only
-message that named anything: *"The following quotas are exceeded:
-`CustomModelTrainingT4GPUsPerProjectPerRegion`"*. The rest were *"An internal error occurred on your
-cluster"* and *"Unexpected response."* — which, given the one region that did explain itself, are
-almost certainly the same ceiling wearing different masks.
+**T4 on Vertex Ray is quota-blocked for this project in all three candidate regions, and that part is
+named outright.** On 2026-09-01, smoke 08 was attempted six times across `us-central1`, `us-east1`
+and `us-west1`, first on T4 and then on L4 (`g2-standard-8`), and never once provisioned. On T4,
+**both** `us-east1` and `us-west1` said it plainly — *"The following quotas are exceeded:
+`CustomModelTrainingT4GPUsPerProjectPerRegion`"* — and `us-central1` gave *"An internal error occurred
+on your cluster"*, which given its neighbours is almost certainly the same ceiling wearing a mask.
+
+**The L4 attempts prove less than they appear to, and the correction is recorded here rather than
+quietly dropped.** Re-reading the L4 walk's log against the network finding below: `us-east1` and
+`us-west1` failed on a *missing regional network attachment*, not on a GPU meter. Those two never
+reached the entitlement question at all. So the honest scope is: T4 is quota-blocked in three
+regions; **L4 on Vertex Ray is unproven-either-way outside `us-central1`**, where it failed opaquely.
+It does not change the blocked status of smoke 08 or the workaround below — every Ray-GPU config in
+this repo still fails to provision — but "no region worked" and "no region has the quota" are
+different claims, and only the first one was actually observed for L4.
 
 The row is `NEEDS_RECHECK` rather than `STALE`: nothing here suggests the code is wrong, but
 2026-08-28's pass recorded no `run_id`, and it now cannot be re-earned to fix that. **This is a
@@ -245,6 +300,35 @@ Neither is visible offline for the usual reason: the unit tests asserted the cla
 matched the strings someone had thought of. Only a live region running out produces a string nobody
 thought of. The fallback now walks all three and raises an `EngineError` naming them, which is what
 the plan's abort path expects — a defer, not a block.
+
+### The Ray region failover cannot leave the deployed region, and a CPU run is what proved it
+
+Wave 6.1's stand-in — a Ray CPU run with **no GPU anywhere in the config** — walked all three
+`compute.ray_regions` and failed in each. `us-central1` gave the opaque internal error; `us-east1`
+and `us-west1` both gave something unambiguous:
+
+```
+The resource 'projects/307701787156/regions/us-east1/networkAttachments/scale-forecasting-ray'
+was not found
+```
+
+That is structural, not transient. `terraform/main/modules/network/main.tf` creates exactly one
+`google_compute_network_attachment`, in `var.region`, and exports it as a fully-qualified
+**regional** resource ID. `ray_cluster.py` passes that ID to `PscIConfig` verbatim — it never
+rewrites the region for the candidate it is currently trying. So on a PSC-I deployment,
+`compute.ray_regions` can only ever succeed in the one region the deployment was built in; the other
+entries are guaranteed failures that cost a provisioning attempt each before the walk gives up.
+
+**The value of proving it on CPU is that it separates two blockers that had been reading as one.** A
+GPU run that fails in three regions looks like a GPU story. Take the GPU out and the same walk still
+fails in two of the three, for a reason that has nothing to do with accelerators. That is what
+forced the L4 correction above.
+
+Not fixed here — recorded. The fix is a product decision with more than one defensible answer (make
+the attachment multi-region in Terraform; derive the ID per candidate region and skip candidates
+without one; or narrow `ray_regions` to the deployed region and drop the pretence of failover), and
+choosing it mid-campaign would move an axis under runs already recorded. Until then, treat
+`ray_regions` beyond the deployed region as **advertised but non-functional under PSC-I**.
 
 ### Why almost everything Spark is stale
 
@@ -399,10 +483,46 @@ notebook reflects the current path.
 | Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The six notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
-| RuntimeProbe read path (P1–P4) | NEVER_RUN | Offline only, against fakes. No probe has called a live Dataproc/Ray/BigQuery status API. |
+| RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a **correct refusal** on the running Ray one. **Scope: the Ray escalation itself is still unproven and cannot currently run** — see below. |
 | RuntimeProbe cancel (P5) | NEVER_RUN | Offline only. No cancel has stopped a real job. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
 | Run audit principal (P6) | NEVER_RUN | `identity.resolve_principal` is `pragma: no cover` — its ADC and userinfo paths have never executed. |
+
+### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
+
+`--probe` was pointed at `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` while its Ray family was still
+running — the exact situation the verb exists for. It printed:
+
+```
+run wave-62-...  status=RUNNING  escalated=True  disagreement=False
+  statistical    spark    COMPLETED  -        TRUST_REGISTRY  100/100
+  ml             spark    COMPLETED  -        TRUST_REGISTRY  100/100
+  deep_learning  ray      RUNNING    UNKNOWN  UNKNOWN         0/100   handle missing resource_name
+  native         bigquery COMPLETED  -        TRUST_REGISTRY  200/200
+```
+
+Three of four families are exactly right, and the fourth is a **well-behaved refusal** rather than a
+wrong answer: the probe said it could not tell, and said why. That distinction is the design working
+— but the family it could not read is the only one it was asked to escalate to.
+
+**The cause is an ordering problem, not a bug in the probe.** `job_launch` writes an *entry* handle
+before submitting, and populates `resource_name` (the Ray cluster path) only when a shared cluster
+name is already known. `shared_clusters.shared_ray_inputs` returns `None` for a run with **one**
+ephemeral Ray family, so nothing is provisioned up front — the submitter creates the cluster itself.
+The corrected handle does get stamped back with the real resource path, but only after `launch`
+returns, and `launch` blocks until the Ray job is terminal. So for the whole window in which a probe
+is useful, the handle is incomplete; by the time it is complete, the registry alone would answer.
+
+**Which means the Ray probe works only for the shapes that need it least** — a run with two or more
+ephemeral Ray families, or one reusing a standing `compute.ray_cluster_name`. A single-family Ray
+run, which is the common shape and was the shape here, is unreachable. Offline tests could not catch
+this: they construct handles directly and never exercise the launch-ordering that decides whether
+`resource_name` is present.
+
+Not fixed here. The fix is small (provision or name the cluster before writing the entry handle, or
+stamp the resource path as soon as the submitter has it rather than at job end) but it changes what
+lands in `run_jobs.job_telemetry` mid-run, and the campaign is currently recording rows against the
+present behaviour. Recorded as a gap below.
 
 ## Known validation gaps
 
@@ -417,9 +537,14 @@ Things that are true today and that no entry above covers. Keep this list short 
   fifteen-minute path does not cover the shipped default, and a regression in it would only surface
   on a demonstration run. Unpinning them is the fix; it is not urgent, because the default is now
   proven at 10,000 series, which is a harder case than any smoke poses.
-- **No `run_id` was recorded for smokes 07–14.** Smokes 01–06 have them. Without one there is no
-  reverse-trace from the ledger to the platform job, which is the whole point of recording a
-  result. Any re-run must capture it.
+- **~~No `run_id` was recorded for smokes 07–14.~~ Closed 2026-09-02.** Every re-run in this
+  campaign captured one, so 01–07 and 11–14 all carry a reverse-trace. The three that still say "not
+  recorded" — 08, 09, 10 — are the three the Vertex Ray GPU entitlement prevents from running at all,
+  so the gap that remains is the entitlement, not the discipline.
+- **The Ray probe cannot escalate to a single-family Ray run.** `resource_name` is absent from the
+  entry handle for exactly the shape that has no shared cluster, and the corrected handle lands only
+  after the job is terminal. Found live 2026-09-02, analysed above. Small fix, deliberately deferred
+  so it does not move `run_jobs.job_telemetry` under rows this campaign is still writing.
 - **The recorded `run_id`s for smokes 01–06 are no longer re-derivable.** W5 added
   `compute.profile` to `ComputeConfig`, and `run_id` is a digest of the whole config, so feeding
   those same config files to today's code yields different ids. **No row was marked `STALE` for
