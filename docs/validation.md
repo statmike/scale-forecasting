@@ -454,7 +454,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | NEVER_RUN | — | — | — |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
-| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | NEVER_RUN | — | — | — |
+| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review. Attempted 2026-09-02 and never reached a job: blocked by the Ray provisioning outage below, not by GPU. That outage has since cleared, so this is runnable again | NEVER_RUN | — | — | — |
@@ -616,12 +616,20 @@ submodule — two tests failed in a full run while passing in isolation. Both bi
 now. Same theme as the rest of this file: a guard whose correctness depends on conditions nobody
 checks is indistinguishable from one that works.
 
-**Four demonstration configs are blocked on the same thing, and it is not the code.**
-`ray_gpu_demo`, `per_family_runtimes_demo`, `all_families_100k` and `all_families_100k_full` all
-put a family on Vertex Ray GPU, which this project cannot provision in any region on either
-accelerator (see smoke 08 above). They stay `NEVER_RUN` rather than being quietly re-pointed at
-Serverless: the whole point of `per_family_runtimes_demo` is the *split*, and a version of it that
-runs everything on Spark would prove something else while keeping the name.
+**Four demonstration configs were held back by the Ray GPU blocker, which turned out to be an
+outage rather than an entitlement** (see smoke 08 above for how that was settled). `ray_gpu_demo`,
+`per_family_runtimes_demo`, `all_families_100k` and `all_families_100k_full` all put a family on
+Vertex Ray GPU. None of them was ever re-pointed at Serverless to get a green row, and that
+restraint is the reason the eventual rows mean anything: the whole point of
+`per_family_runtimes_demo` is the *split*, and a version of it that ran everything on Spark would
+have proved something else while keeping the name.
+
+**`ray_gpu_demo` is also the only live proof of autoscaling on a GPU pool.** It ships
+`ray_autoscale: true` with `ray_gpu_min_nodes: 1` / `ray_gpu_max_nodes: 2`, so the T4 pool it
+provisions is elastic, not fixed — `ray_autoscale_demo` proves the same mechanism only on CPU. Its
+four models ranked on backtested WAPE across two runtimes and two families: `timesfm` 0.279 and
+`arima_plus` 0.280 from BigQuery, `neuralprophet` 0.290 from the T4 pool, `theta` 0.339 from the Ray
+CPU pool. Provisioning took 9m26s.
 
 The three Spark demo rows landed together on 2026-09-01, and two of them are worth reading past the
 `CURRENT`:
