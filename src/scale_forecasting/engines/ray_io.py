@@ -69,6 +69,7 @@ __all__ = [
     "aggregate_status",
     "calibrate_gpu_fraction",
     "chunk_cells",
+    "cluster_name",
     "device_memory_bytes",
     "make_chunk_runner",
     "plan_cluster",
@@ -340,12 +341,17 @@ def _check_gpu_machine(gpu_type: str, gpu_machine_type: str) -> None:
         )
 
 
-def _cluster_name(cfg: RunConfig, run_id: str) -> str:
+def cluster_name(cfg: RunConfig, run_id: str) -> str:
     """The cluster name: the reuse target if set, else ``sf-ray-<run_id>`` (Vertex-legal, ≤ 63).
 
     Vertex cluster display names must be lowercase alnum + hyphens and start with a letter; the
     ``run_id`` is already a slug + hex digest, so the ``sf-ray-`` prefix keeps it legal. Clamped to
     63 chars with no trailing hyphen.
+
+    Public because the name is *knowable before the cluster exists*, and one caller needs exactly
+    that: `job_launch` builds a single-family Ray job's probe handle before submit, when nothing has
+    created a cluster yet. Being derivable from the ``run_id`` is what makes a running Ray job
+    reachable at all.
     """
     if cfg.compute.ray_cluster_name:
         return cfg.compute.ray_cluster_name
@@ -601,7 +607,7 @@ def plan_cluster(
     )
 
     return RayClusterPlan(
-        cluster_name=_cluster_name(cfg, run_id),
+        cluster_name=cluster_name(cfg, run_id),
         reuse=cfg.compute.ray_cluster_name is not None,
         head_machine_type=cfg.compute.ray_head_machine_type,
         cpu_machine_type=cfg.compute.ray_cpu_machine_type,

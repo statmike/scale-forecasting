@@ -145,11 +145,25 @@ def launch_family_job(
     # job's real id is server-assigned, so native_id is empty until the stamp-back refresh below),
     # so a probe degrades to registry-only rather than emitting a false NOT_FOUND.
     if compute.runtime == "ray":
-        resource_name = None
-        if ray_cluster_name is not None:
-            from .ray_cluster import cluster_resource_path
+        from .engines.ray_io import cluster_name as ray_cluster_name_for
+        from .ray_cluster import cluster_resource_path
 
-            resource_name = cluster_resource_path(settings, ray_cluster_name, ray_cluster_region)
+        # A shared cluster hands us its name and landed region; a *single*-family Ray run has no
+        # shared cluster, and `submit_ray` creates one only once we call it — so the name is derived
+        # here from the same pure rule the submitter will use. It has to be: `launch` blocks until
+        # the job finishes, so the stamp-back below lands only at the very end, and a handle without
+        # a resource_name leaves the probe and the cancel with nothing to reach for during the whole
+        # window they exist to serve.
+        #
+        # The region is the one guess in it. A capacity hop would move the cluster off
+        # ``settings.region`` and the predicted path would miss — the probe degrades to
+        # registry-only, exactly as it does today, and the stamp-back corrects the record at the
+        # end. A path that is right in the common case beats one that is never populated at all.
+        resource_name = cluster_resource_path(
+            settings,
+            ray_cluster_name or ray_cluster_name_for(cfg, run_id),
+            ray_cluster_region,
+        )
         entry_handle = ProbeHandle(
             "ray",
             native_id=system_job_id,

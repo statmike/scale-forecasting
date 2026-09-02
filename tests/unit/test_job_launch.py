@@ -191,13 +191,17 @@ def test_launch_family_job_dispatches_ray_for_ray_family(
 
     submission_id = ray_submission_id(make_job_key("rid-0", "statistical", 1))
     assert captured["system_job_id"] == submission_id
-    # The ENTRY probe handle for a self-provisioning Ray family: no shared cluster, so no resource
-    # path yet (omitted from the blob) and the region defaults to the deployment region.
+    # The ENTRY probe handle for a self-provisioning Ray family. There is no shared cluster, and
+    # `submit_ray` has not created one yet — but the name is a pure function of the run_id, so the
+    # handle predicts it rather than shipping without one. Without this the probe and the cancel
+    # have nothing to reach for during the entire window a single-family Ray job is running, since
+    # the stamp-back only lands after the (blocking) job finishes.
     assert seen["job"]["probe_handle"] == {
         "runtime": "ray",
         "native_id": submission_id,
         "region": "us-central1",
         "id_kind": "exact",
+        "resource_name": "projects/proj-x/locations/us-central1/persistentResources/sf-ray-rid-0",
     }
 
 

@@ -776,6 +776,12 @@ run, which is the common shape and was the shape here, is unreachable. Offline t
 this: they construct handles directly and never exercise the launch-ordering that decides whether
 `resource_name` is present.
 
+**Fixed offline the same day.** The entry handle now derives the cluster path from `ray_io`'s
+name rule rather than waiting to be handed one — the name is a pure function of the `run_id`, so it
+is knowable before anything exists to be named. The offline test that had pinned the old behaviour
+asserted the absence of `resource_name`, which is worth noting: a test can lock in a defect just as
+faithfully as a property, and this one did until a live run said otherwise.
+
 **Behind it sat a second defect, which the first one had been hiding.** `RayProbe.check` calls
 `ray_cluster._get_cluster`, and `vertex_ray.get_ray_cluster` takes no project or location — it reads
 the Vertex SDK's *global* config. The launching process sets that while creating the cluster, so
@@ -1047,11 +1053,15 @@ Things that are true today and that no entry above covers. Keep this list short 
   campaign captured one, so 01–08 and 11–14 all carry a reverse-trace. Only 09 and 10 still say "not
   recorded", and both are now runnable — the Ray GPU blocker they were held behind turned out not to
   exist (above), so what remains is spend, not entitlement.
-- **The Ray probe cannot escalate to a single-family Ray run.** `resource_name` is absent from the
-  entry handle for exactly the shape that has no shared cluster, and the corrected handle lands only
-  after the job is terminal. Found live 2026-09-02, analysed above. Small fix, deliberately deferred
-  so it does not move `run_jobs.job_telemetry` under rows this campaign is still writing. **`--cancel`
-  inherits it** — the same shape cannot be stopped from the CLI either.
+- **~~The Ray probe cannot escalate to a single-family Ray run.~~ Fixed offline 2026-09-02, not yet
+  re-proven live.** `resource_name` was absent from the entry handle for exactly the shape that has
+  no shared cluster, and the corrected handle landed only after the job was terminal; `--cancel`
+  inherited it. Found live 2026-09-02, analysed above. The fix is that the cluster name is a pure
+  function of the `run_id` — `ray_io.cluster_name` — so the entry handle now *predicts* the path the
+  submitter is about to create instead of waiting to be told. The one guess in it is the region: a
+  capacity hop would move the cluster and the predicted path would miss, degrading the probe to
+  registry-only, which is exactly where it was before. Re-proving it needs a live `--probe` against
+  a running single-family Ray job.
 - **A `deep_learning` family on Ray with `hardware: cpu` hangs indefinitely.** Zero-worker cluster,
   no timeout, no error — analysed above. Reachable from config alone, and the natural workaround for
   anyone blocked on the Ray GPU entitlement, which makes it the highest-value of the three deferred
