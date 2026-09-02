@@ -464,6 +464,45 @@ that provisions a cluster. Retry before concluding anything about Ray from this 
 It also retro-explains the `us-central1` leg of the region-failover finding below, which had been
 left as "the opaque one". It was the same outage, one day early.
 
+**A failed provision leaks a cluster, and because the name is derived from the `run_id`, the same
+config can then never be retried.** This was found by running into it, not by reading the code. After
+the fifth failed attempt the product logged its ordinary success line —
+
+    deleted ephemeral Ray cluster …/persistentResources/sf-ray-wave10-ray-availability-probe-b352a2a2cb54
+
+— and the resource was still there, in `PROVISIONING`, fifty minutes later. Retrying that config did
+not create a second cluster; it failed outright:
+
+    AlreadyExists('There is an existing PersistentResource with the same ID
+    "sf-ray-wave10-ray-availability-probe-b352a2a2cb54" created or being created.
+    Please use a different ID.')
+
+Deleting it by hand was refused for the same reason the product's own teardown could not take
+effect:
+
+    FAILED_PRECONDITION: PersistentResource "…/sf-ray-wave10-ray-availability-probe-b352a2a2cb54"
+    is being created thus can not be deleted now. Please try again later after it's active.
+
+So there is a window — a resource that failed to come up but has not yet been marked failed — in
+which Vertex will accept neither a create nor a delete for that name. It closed on its own: the
+state moved `PROVISIONING` → `ERROR`, and a delete against the `ERROR`-state resource was accepted
+immediately and left the region clean.
+
+Two things to carry from this, kept separate because they are not equally certain. **Certain:** a
+run whose cluster fails to provision can leave a resource behind that blocks every retry of that
+same config until someone removes it by hand, and `gcloud ai persistent-resources list` reports `[]`
+even while it exists (use `describe`), so the thing blocking you is invisible from the obvious
+command. **Not established:** exactly why the teardown reported success. `_delete_cluster` logs at
+`info` only on the no-exception path and downgrades any failure to a `warning`, so the success line
+means the SDK call returned without raising while the resource stayed `PROVISIONING` — but whether
+the SDK swallowed a rejection or Vertex accepted a delete it then did not perform was not
+determined, and this outage is the wrong conditions to determine it in.
+
+The operational recovery, if a config starts failing with `AlreadyExists`:
+
+    gcloud ai persistent-resources describe sf-ray-<run_id> --region=<region>   # list shows []
+    gcloud ai persistent-resources delete   sf-ray-<run_id> --region=<region>   # wait out PROVISIONING
+
 **Four demonstration configs are blocked on the same thing, and it is not the code.**
 `ray_gpu_demo`, `per_family_runtimes_demo`, `all_families_100k` and `all_families_100k_full` all
 put a family on Vertex Ray GPU, which this project cannot provision in any region on either
@@ -752,6 +791,12 @@ Things that are true today and that no entry above covers. Keep this list short 
   including two proven the previous day, all fail with the contentless internal error. Environment,
   not code — but it stalls `ray_100k`, the profiler A/B's sizing half, and every Ray notebook.
   Re-attempt before trusting any Ray conclusion dated on or after this.
+- **A failed Ray provision can leak a cluster that blocks every retry of that config.** The name is
+  derived from the `run_id`, so the retry collides with `AlreadyExists` and cannot succeed until the
+  leaked resource is deleted by hand — and `list` reports `[]` while it exists, so it is invisible
+  from the obvious command. Analysed above. The product-side fix worth considering is making
+  teardown verify rather than assume, and tolerating an `ERROR`-state same-named resource at create;
+  neither was attempted during an outage, where every attempt fails for an unrelated reason.
 - **Nine run headers are stuck non-terminal.** Left by interrupted work across the whole build
   (`naive-100k`, several `nb01-spark-connect`, `nb03`, `nb06`, …). Harmless to reads, but they block
   the dev wipe tool's interlock and they make "is anything running?" unanswerable at a glance.
