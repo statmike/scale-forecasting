@@ -452,7 +452,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | CURRENT | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | NEVER_RUN | — | — | — |
+| `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | CURRENT | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
@@ -630,6 +630,15 @@ provisions is elastic, not fixed — `ray_autoscale_demo` proves the same mechan
 four models ranked on backtested WAPE across two runtimes and two families: `timesfm` 0.279 and
 `arima_plus` 0.280 from BigQuery, `neuralprophet` 0.290 from the T4 pool, `theta` 0.339 from the Ray
 CPU pool. Provisioning took 9m26s.
+
+**`per_family_runtimes_demo` is the three-runtime split under one `run_id`, and it ran as authored.**
+Four family jobs, three runtimes: `statistical` (`theta`, `holtwinters`) and `ml` (`xgboost`) as
+Dataproc Serverless batches, `deep_learning` (`neuralprophet`) on a Vertex Ray T4 pool, `native`
+(`arima_plus`) as a BigQuery job — all four COMPLETED, 50 cells each, one `run_id`, one reverse
+trace naming all four system job ids. The config asks for `hardware: "gpu"` with no `gpu_type`, so
+the T4 in the trace is the default resolving correctly rather than a value copied from the config.
+This is the row the restraint above was protecting: the split is the claim, and it is now the thing
+that was proven.
 
 The three Spark demo rows landed together on 2026-09-01, and two of them are worth reading past the
 `CURRENT`:
