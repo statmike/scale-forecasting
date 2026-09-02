@@ -422,6 +422,47 @@ def test_combined_status_ensemble_failure_fails_a_green_run() -> None:
     assert main._combined_status(d, {"native": _boom()}, _boom()) == "PARTIAL"
 
 
+# --- CLI: says something at all -------------------------------------------------
+
+
+def test_cli_installs_a_log_handler_so_its_output_is_not_swallowed(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every verb reports through ``_log.info``, so a CLI with no handler prints nothing.
+
+    Found live: the workshop's documented first command
+    (``main --config … --dry-run``) exited 0 in total silence, because nothing in the
+    package calls `logging.basicConfig` and the root logger ships with no handler at
+    WARNING. Correct for a library, useless for a CLI. The assertion is on the *handler*
+    and the *level*, not on captured text — pytest attaches its own handler, so a caplog
+    test would pass against the broken code.
+    """
+    import json
+    import logging
+
+    monkeypatch.setattr(main, "run", lambda cfg, *, dry_run=False, force=False: "rid-123")
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    root.handlers = []
+    try:
+        path = tmp_path / "run.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "run_name": "cli logging test",
+                    "data": {"source_table": "source_series_native", "horizon": 7},
+                    "models": [_SPARK],
+                }
+            )
+        )
+        main._main(["--config", str(path), "--dry-run"])
+        assert root.handlers, "the CLI left the root logger with no handler"
+        assert root.level <= logging.INFO, f"INFO is swallowed at level {root.level}"
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level
+
+
 # --- CLI: dispatches dry_run ---------------------------------------------------
 
 

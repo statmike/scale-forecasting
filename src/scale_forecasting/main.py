@@ -394,8 +394,23 @@ def _print_cancel_report(report: CancelReport) -> None:
 def _main(argv: list[str] | None = None) -> None:
     """CLI: ``main (--config …|--config-uri …) [--dry-run|--stage-only|--probe|--cancel|…]``."""
     import argparse
+    import logging
+    import os
 
     from .config import load_config_uri
+
+    # Attach a handler to the root logger, because nothing else in the package does. Every verb
+    # here reports through `_log.info` — the resolved run_id, the fanout, "submitted" — and the
+    # root logger ships with no handler and a WARNING threshold, so as a *library* that is right
+    # and as a *CLI* it means the documented commands print nothing at all. `--dry-run`, whose
+    # entire job is to tell you what a run would do, exited 0 in silence. Guarded on `handlers` so
+    # importing `_main` from a process that has already configured logging (Airflow, a notebook)
+    # does not get a second copy of every line.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=os.environ.get("SF_LOG_LEVEL", "INFO").upper(),
+            format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+        )
 
     p = argparse.ArgumentParser(prog="main", description="Run a forecast (Spark + BigQuery).")
     # Accept either a local path (--config, the interactive UX) or a gs:// URI (--config-uri, what

@@ -432,9 +432,37 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | NEVER_RUN | — | — | — |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | NEVER_RUN | — | — | — |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review. Attempted 2026-09-02 and never reached a job: blocked by the Ray provisioning outage below, not by GPU | NEVER_RUN | — | — | — |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
+
+**On 2026-09-02 the whole Ray track stopped provisioning, and the elimination is the useful part.**
+`ray_100k` was attempted and never reached a job: Vertex returned the contentless
+`"An internal error occurred on your cluster. Please try recreating one in a few minutes."` in
+`us-central1`, and the two failover regions returned the missing-`networkAttachment` error recorded
+below. Five creation attempts across five different cluster specs all failed identically:
+
+| Attempt | Head | CPU max nodes | Result |
+|---------|------|---------------|--------|
+| `ray_100k` as shipped | `n1-highmem-32` | 20 | internal error |
+| reduced fleet | `n1-highmem-32` | 10 | internal error |
+| default head | `n1-standard-16` | 20 | internal error |
+| **exactly `ray_autoscale_demo`'s compute block** | `n1-standard-16` | 8 | internal error |
+| **exactly smoke 07's compute block** | default | 5 | internal error |
+
+The last two are the ones that matter: **both provisioned successfully on 2026-09-01 and neither
+provisions now**, with nothing changed between them but the day. That eliminates the config, the
+head machine type, the fleet size, and the autoscaling spec in one pass, and it eliminates quota too
+— the 10-node attempt asked for 112 vCPU against 180 available. What is left is the environment.
+
+Recorded here rather than as a status change, because **no row above becomes false**: the Ray rows
+were proven on infrastructure that worked, and an outage is not an architecture axis moving. What it
+does mean is operational — **the Ray half of this campaign is stalled**, which blocks `ray_100k`,
+the sizing half of the profiler A/B (the profiler is only wired on the Ray path), and any notebook
+that provisions a cluster. Retry before concluding anything about Ray from this date.
+
+It also retro-explains the `us-central1` leg of the region-failover finding below, which had been
+left as "the opaque one". It was the same outage, one day early.
 
 **Four demonstration configs are blocked on the same thing, and it is not the code.**
 `ray_gpu_demo`, `per_family_runtimes_demo`, `all_families_100k` and `all_families_100k_full` all
@@ -515,7 +543,7 @@ notebook reflects the current path.
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
-| Workshop Act 1 (100k history, Cloud Shell / VM) | NEVER_RUN | The four scale configs above, run as the workshop instructs them and in that order. Not the same claim as "the configs work": Act 1 is followed by someone who has just deployed, from a shell with a session limit, and its failure modes are disk, quota and session death. |
+| Workshop Act 1 (100k history, Cloud Shell / VM) | NEVER_RUN | The four scale configs above, run as the workshop instructs them and in that order. Not the same claim as "the configs work": Act 1 is followed by someone who has just deployed, from a shell with a session limit, and its failure modes are disk, quota and session death. **Its first two commands were walked verbatim on 2026-09-02 and the first one was broken** — `--dry-run` printed nothing at all. Fixed; see below. That is the whole argument for running the act rather than the configs. |
 | Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | Headless execution of the tour notebooks against a fresh deployment. The notebook rows above were proven by the acceptance harness, which is not the same path. |
 | Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The six notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
@@ -635,6 +663,30 @@ ADC — and returned nothing, so the audit line for a real cancel attempt names 
 credentials are expected to yield a principal here; what *is* established is that the audit trail was
 empty on the one occasion it was exercised.
 
+### The workshop's first command printed nothing, and every offline test passed anyway
+
+`docs/workshop.md` opens Act 1 with an offline sanity check:
+
+```bash
+uv run python -m scale_forecasting.main --config configs/explode_100k.json --dry-run
+```
+
+Run verbatim, it exited **0 with no output whatsoever**. Nothing in the package calls
+`logging.basicConfig`, and every verb in the CLI reports through `_log.info` — the resolved
+`run_id`, the fanout, the per-family node names, the portable launch commands, `submitted: <id>`.
+Python's root logger ships with no handler at WARNING, so all of it was discarded. Correct for a
+library; useless for a CLI whose entire job in this command is to *tell you what a run would do*.
+
+`_main` now installs a handler when the root logger has none (guarded, so importing it from Airflow
+or a notebook does not double every line; `SF_LOG_LEVEL` overrides). The same command now prints the
+run id, `fanout=Fanout(n_series=100000, n_models=4, …)`, both DAG nodes and both launch commands.
+
+**Why no test caught it, and why the new one is written the way it is.** pytest attaches its own
+handler to the root logger, so a `caplog` assertion passes against the broken code — the records
+exist, they simply have nowhere to go in a real process. The regression test therefore asserts on
+the *handler* and the *level*, having first stripped the root logger, which is the only way to
+observe the actual defect from inside a test runner.
+
 ### Code the offline gate does not run had rotted in two places, and only running it live showed that
 
 The registry-ops verbs were the last unexercised capability, and getting to them took two repairs
@@ -696,6 +748,10 @@ Things that are true today and that no entry above covers. Keep this list short 
   no timeout, no error — analysed above. Reachable from config alone, and the natural workaround for
   anyone blocked on the Ray GPU entitlement, which makes it the highest-value of the three deferred
   fixes.
+- **Vertex Ray will not provision in `us-central1` for this project as of 2026-09-02.** Five specs,
+  including two proven the previous day, all fail with the contentless internal error. Environment,
+  not code — but it stalls `ray_100k`, the profiler A/B's sizing half, and every Ray notebook.
+  Re-attempt before trusting any Ray conclusion dated on or after this.
 - **Nine run headers are stuck non-terminal.** Left by interrupted work across the whole build
   (`naive-100k`, several `nb01-spark-connect`, `nb03`, `nb06`, …). Harmless to reads, but they block
   the dev wipe tool's interlock and they make "is anything running?" unanswerable at a glance.
