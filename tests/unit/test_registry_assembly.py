@@ -16,6 +16,7 @@ import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.registry import artifacts, jobs, write_api
+from scale_forecasting.registry.harvest import rank_harvest_candidates
 from scale_forecasting.registry.header import (
     merge_header_telemetry,
     render_header_telemetry_merge,
@@ -977,3 +978,67 @@ def test_both_native_builders_survive_the_encoder_they_feed() -> None:
     ):
         msg_cls, _ = _proto_for(table, spec)
         assert len(_encode_rows(msg_cls, spec, rows)) == 1
+
+
+# --- choosing which prior harvest to size from ---------------------------------
+#
+# Live 2026-09-02, three times in one campaign: `source="auto"` resolved a 100k-series plan to a
+# harvest measured on six series, because the six-series run was the most recent one. Small runs
+# are frequent and large runs are rare, so recency-first systematically picks the worst evidence
+# available.
+
+
+def _cand(run_id: str, day: int, n_series: int) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "measured_at": datetime(2026, 9, day, tzinfo=UTC),
+        "n_series": n_series,
+    }
+
+
+def test_a_closer_scale_beats_a_newer_run() -> None:
+    candidates = [_cand("tiny-and-newest", 2, 6), _cand("big-and-older", 1, 100_000)]
+    assert rank_harvest_candidates(candidates, target_series=100_000) == "big-and-older"
+
+
+def test_recency_still_decides_between_equally_close_runs() -> None:
+    candidates = [_cand("older", 1, 1_000), _cand("newer", 3, 1_000), _cand("middle", 2, 1_000)]
+    assert rank_harvest_candidates(candidates, target_series=100_000) == "newer"
+
+
+def test_distance_is_measured_in_log_space() -> None:
+    # Linearly, 1k and 6 are both "about 100k away" from a 100k target; multiplicatively they are
+    # two orders of magnitude apart, and that is the gap that matters for sizing.
+    candidates = [_cand("six", 3, 6), _cand("one-thousand", 1, 1_000)]
+    assert rank_harvest_candidates(candidates, target_series=100_000) == "one-thousand"
+
+
+def test_over_large_and_over_small_are_trusted_equally() -> None:
+    # 100 and 10_000 are both 10x from 1_000. Neither is preferred, so recency breaks the tie.
+    candidates = [_cand("under", 1, 100), _cand("over", 2, 10_000)]
+    assert rank_harvest_candidates(candidates, target_series=1_000) == "over"
+    candidates = [_cand("under", 2, 100), _cand("over", 1, 10_000)]
+    assert rank_harvest_candidates(candidates, target_series=1_000) == "under"
+
+
+def test_an_exact_match_wins_outright() -> None:
+    candidates = [_cand("newest", 5, 10), _cand("exact", 1, 500), _cand("close", 4, 400)]
+    assert rank_harvest_candidates(candidates, target_series=500) == "exact"
+
+
+@pytest.mark.parametrize("target", [None, 0])
+def test_without_a_target_it_degrades_to_recency(target: int | None) -> None:
+    """A config with no `series_limit` does not know its scale until the source is read."""
+    candidates = [_cand("older", 1, 100_000), _cand("newer", 3, 6)]
+    assert rank_harvest_candidates(candidates, target_series=target) == "newer"
+
+
+def test_a_candidate_with_no_measured_count_is_not_ranked_out() -> None:
+    # Distance is unknowable, so it sorts as zero rather than as infinitely far: excluding it would
+    # be a harder judgement than the data supports.
+    candidates = [_cand("unknown", 1, 0), _cand("far", 3, 6)]
+    assert rank_harvest_candidates(candidates, target_series=100_000) == "unknown"
+
+
+def test_no_candidates_means_no_pick() -> None:
+    assert rank_harvest_candidates([], target_series=100_000) is None

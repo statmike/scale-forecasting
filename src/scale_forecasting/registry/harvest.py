@@ -102,22 +102,73 @@ def read_compute_harvest(
     return rows, (config.get("data") or {}).get("source_table")
 
 
+# How many candidate runs one discovery will rank. One row per run, not per cell, so this is a
+# sanity bound rather than a real limit — a 90-day window would have to hold this many *distinct
+# measured runs* to trip it. When it does, the oldest candidates are the ones dropped.
+_MAX_HARVEST_CANDIDATES = 500
+
+
+def rank_harvest_candidates(
+    candidates: list[dict[str, Any]], *, target_series: int | None
+) -> str | None:
+    """Pick the best harvest to size ``target_series`` from, or ``None`` if there are none (pure).
+
+    Each candidate is ``{"run_id", "measured_at", "n_series"}``. **Closeness of scale ranks first,
+    recency only breaks ties** — the opposite of what "the newest evidence" suggests, and
+    deliberately so. A campaign writes small harvests often and large ones rarely, so ordering by
+    recency alone reliably selects the *least* representative run in the window: observed live three
+    times, once handing a 100k-series plan a profile measured on six series.
+
+    Distance is measured in **log space**, because sizing error scales multiplicatively. Against a
+    100k target a 1k harvest is off by two orders of magnitude and a 6-series one by four, and the
+    log makes that a 2-vs-4 gap rather than a 99,000-vs-99,994 one where every small run looks
+    equally bad. Distance is symmetric: an over-large harvest is no more trusted than an equally
+    over-small one, since both are extrapolations.
+
+    With no ``target_series`` — a config with no ``series_limit``, so the scale is not known until
+    the source is read — this degrades to pure recency, which is the old behaviour.
+    """
+    if not candidates:
+        return None
+    import math
+
+    def distance(cand: dict[str, Any]) -> float:
+        n = cand.get("n_series") or 0
+        if not target_series or n <= 0:
+            return 0.0
+        # Rounded, so that two candidates whose log-distance differs in the fifteenth decimal are a
+        # genuine tie and recency decides. A 0.01 band in log space is a ~1% difference in ratio —
+        # far below the resolution at which one harvest is better evidence than another.
+        return round(abs(math.log(n) - math.log(target_series)), 2)
+
+    # Sort keys are (distance asc, measured_at desc). measured_at is a datetime, so negating is not
+    # available; sorting twice with a stable sort gives the same order and needs no key arithmetic.
+    ordered = sorted(candidates, key=lambda c: c["measured_at"], reverse=True)
+    ordered.sort(key=distance)
+    return str(ordered[0]["run_id"])
+
+
 def discover_harvest_run(
     *,
     source_table: str | None,
     freq: str | None,
+    target_series: int | None = None,
     lookback_days: int = _HARVEST_LOOKBACK_DAYS,
     settings: Settings | None = None,
 ) -> str | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """The newest completed run carrying a harvest of ``source_table`` at ``freq``, or ``None``.
+    """The completed run whose harvest of ``source_table`` at ``freq`` best fits, or ``None``.
 
     What ``compute.profile.source = "auto"`` resolves against. Only the two *identity* axes are
     filtered here — same table, same frequency — because those are the ones where a mismatch means
     "not evidence about this run at all". The scale axes (series count, history length) are checked
     after the rows are loaded, by `profiling.signature.compare_signatures`, where a mismatch is a
     warning rather than a disqualification: a 1k-series run is imperfect but usable evidence for a
-    100k one,
-    and preferring nothing over it would leave the common case unsized.
+    100k one, and preferring nothing over it would leave the common case unsized.
+
+    But *which* imperfect run gets picked is a choice, and it is made here rather than in SQL:
+    this query returns every candidate in the window with its measured series count, and
+    `rank_harvest_candidates` — pure, and therefore tested offline — chooses. See it for why scale
+    beats recency.
 
     Restricted to ``COMPLETED`` runs. A run that died partway measured only the cells that finished,
     which on a bucketed engine is a biased slice, and biased evidence sizes a fleet badly in a
@@ -135,7 +186,8 @@ def discover_harvest_run(
         "  SELECT run_id, raw_config, status FROM `{registry}` "
         "  QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1"
         ") "
-        "SELECT m.run_id AS run_id, MAX(m.created_at) AS measured_at "
+        "SELECT m.run_id AS run_id, MAX(m.created_at) AS measured_at, "
+        "       COUNT(DISTINCT m.ts_id) AS n_series "
         "FROM `{metadata}` AS m JOIN headers AS h USING (run_id) "
         "WHERE m.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback DAY) "
         "  AND {harvest_where} "
@@ -143,7 +195,7 @@ def discover_harvest_run(
         "  AND (@source_table IS NULL OR "
         "       JSON_VALUE(h.raw_config, '$.data.source_table') = @source_table) "
         "  AND (@freq IS NULL OR JSON_VALUE(h.raw_config, '$.data.freq') = @freq) "
-        "GROUP BY m.run_id ORDER BY measured_at DESC LIMIT 1"
+        "GROUP BY m.run_id ORDER BY measured_at DESC LIMIT @candidates"
     ).format(
         registry=resolved.registry_table_ref("run_registry"),
         metadata=resolved.registry_table_ref("forecast_metadata"),
@@ -155,12 +207,16 @@ def discover_harvest_run(
         bigquery.ScalarQueryParameter("lookback", "INT64", lookback_days),
         bigquery.ScalarQueryParameter("source_table", "STRING", source_table),
         bigquery.ScalarQueryParameter("freq", "STRING", freq),
+        bigquery.ScalarQueryParameter("candidates", "INT64", _MAX_HARVEST_CANDIDATES),
     ]
     client = bigquery.Client(project=resolved.project_id)
     try:
-        rows = list(
-            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-        )
+        rows = [
+            dict(r)
+            for r in client.query(
+                sql, job_config=bigquery.QueryJobConfig(query_parameters=params)
+            ).result()
+        ]
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"discover_harvest_run failed: {exc}") from exc
-    return str(rows[0]["run_id"]) if rows else None
+    return rank_harvest_candidates(rows, target_series=target_series)

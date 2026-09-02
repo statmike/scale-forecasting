@@ -321,7 +321,10 @@ def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> 
     want = signature_from_config(cfg)
     try:
         found = discover_harvest_run(
-            source_table=want.source_table, freq=want.freq, settings=settings
+            source_table=want.source_table,
+            freq=want.freq,
+            target_series=want.n_series,
+            settings=settings,
         )
     except Exception as exc:  # noqa: BLE001 - an unpinned plan is a worse plan, not a failed one
         _log.debug("profile source not pinned (registry unreachable): %r", exc)

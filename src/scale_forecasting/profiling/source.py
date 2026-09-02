@@ -283,7 +283,10 @@ def profile_for_run(cfg: RunConfig, *, settings: Settings | None = None) -> Comp
         cfg,
         load_run=lambda run_id: read_compute_harvest(run_id, settings=settings),
         discover=lambda want: discover_harvest_run(
-            source_table=want.source_table, freq=want.freq, settings=settings
+            source_table=want.source_table,
+            freq=want.freq,
+            target_series=want.n_series,
+            settings=settings,
         ),
         load_baseline=load_baseline,
     )
