@@ -71,7 +71,7 @@ def launch_family_job(
     force: bool = False,
     max_executors: int | None = None,
     ray_cluster: tuple[str, str] | None = None,
-    spark_cluster: tuple[str, str] | None = None,
+    spark_cluster: dict[str, tuple[str, str]] | None = None,
 ) -> None:
     """Run one Python family's job on its resolved runtime, wrapped in its ``run_jobs`` row.
 
@@ -101,10 +101,13 @@ def launch_family_job(
     ``ray_cluster``, when set, is the run's shared ephemeral Ray cluster ``(name, region)``
     (`shared_clusters.shared_ray_cluster`): a Ray family reuses it instead of self-provisioning;
     every other runtime ignores it. ``spark_cluster``, when set, is the run's shared ephemeral
-    Dataproc cluster ``(name, region)`` (`shared_clusters.shared_spark_cluster`): an ephemeral
-    cluster family reuses it (submits its own job to that region — a capacity failover may have
-    moved the cluster off the deployment region — with no per-family create/delete); a family naming
-    its own standing cluster keeps that, and every other runtime/mode ignores it.
+    Dataproc cluster(s) keyed by hardware — ``{"cpu": (name, region), ...}``
+    (`shared_clusters.shared_spark_cluster`): an ephemeral cluster family looks itself up by its own
+    ``compute.hardware`` and reuses that cluster (submitting to *its* region — a capacity failover
+    may have moved one cluster off the deployment region while the other landed at home — with no
+    per-family create/delete). Keyed rather than a single pair because a Dataproc cluster has one
+    worker machine type, so a mixed run gets one cluster per hardware kind. A family naming its own
+    standing cluster keeps that, and every other runtime/mode ignores the dict.
     """
     from .probes.vocabulary import ProbeHandle
     from .registry.ids import make_job_key
@@ -122,15 +125,21 @@ def launch_family_job(
     ray_cluster_region = ray_cluster[1] if ray_cluster and compute.runtime == "ray" else None
     # The shared Dataproc cluster is targeted only by ephemeral Spark cluster families (spark_mode
     # cluster, no standing cluster of their own) as a reuse target; a family naming its own standing
-    # cluster keeps it, and serverless/Ray families ignore it.
+    # cluster keeps it, and serverless/Ray families ignore it. The lookup is by this family's own
+    # hardware, because a run's cluster families split across one cluster per hardware kind — and a
+    # miss means self-provision, which is correct rather than fatal: the orchestrator only builds
+    # clusters for the hardware its planned families asked for.
     is_shared_spark_family = (
         spark_cluster is not None
         and compute.runtime == "spark"
         and compute.spark_mode == "cluster"
         and compute.spark_cluster_name is None
     )
-    shared_spark_name = spark_cluster[0] if is_shared_spark_family and spark_cluster else None
-    shared_spark_region = spark_cluster[1] if is_shared_spark_family and spark_cluster else None
+    shared_spark = (
+        spark_cluster.get(compute.hardware) if is_shared_spark_family and spark_cluster else None
+    )
+    shared_spark_name = shared_spark[0] if shared_spark else None
+    shared_spark_region = shared_spark[1] if shared_spark else None
     # The ENTRY probe handle, built from coordinates known before submit — the handle the probe
     # actually reads while a job is RUNNING. It never asserts an id it doesn't truly have (a cluster
     # job's real id is server-assigned, so native_id is empty until the stamp-back refresh below),

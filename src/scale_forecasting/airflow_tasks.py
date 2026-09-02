@@ -20,7 +20,8 @@ The node set mirrors `dag.plan_dag`:
 * ``create_ray_cluster`` / ``delete_ray_cluster`` (and the Dataproc-cluster pair) — the shared
   ephemeral-cluster bracket for a run with several ephemeral Ray (or Spark-cluster) families, the
   DAG-task form of `shared_clusters.shared_ray_cluster` / ``shared_spark_cluster`` split into
-  create/delete.
+  create/delete. One task pair either way, but the Dataproc one manages a cluster **per hardware
+  kind** (one worker machine type per cluster), so its XCom is a dict where Ray's is a pair.
 * ``finalize_run`` — read every family's ``run_jobs`` outcome and finalize the header with the
   combined run status (the DAG's terminal join, ``trigger_rule="all_done"``).
 
@@ -53,6 +54,23 @@ def _xcom_cluster(ti: Any, task_id: str) -> tuple[str, str] | None:
     if not value:
         return None
     return (value[0], value[1])
+
+
+def _xcom_spark_clusters(ti: Any) -> dict[str, tuple[str, str]] | None:
+    """Pull the shared Dataproc clusters ``{hardware: (name, region)}`` from XCom, or ``None``.
+
+    The Dataproc counterpart of `_xcom_cluster`, keyed rather than a single pair because a run's
+    cluster families split across one cluster per hardware kind (`shared_clusters
+    .shared_spark_inputs`). XCom round-trips through JSON, so the create task's ``[name, region]``
+    lists come back as lists; they are normalized to tuples here so callers see the same shape the
+    local path yields.
+    """
+    if ti is None:
+        return None
+    value = ti.xcom_pull(task_ids="create_spark_cluster")
+    if not value:
+        return None
+    return {hardware: (pair[0], pair[1]) for hardware, pair in value.items()}
 
 
 def combined_run_status(job_statuses: dict[str, str | None], *, ensemble_enabled: bool) -> str:
@@ -135,7 +153,7 @@ def run_family(config_uri: str, family: str, ti: Any = None) -> None:
         run_id,
         settings,
         ray_cluster=_xcom_cluster(ti, "create_ray_cluster"),
-        spark_cluster=_xcom_cluster(ti, "create_spark_cluster"),
+        spark_cluster=_xcom_spark_clusters(ti),
     )
 
 
@@ -283,21 +301,28 @@ def delete_ray_cluster(config_uri: str, ti: Any = None) -> None:
     ray_cluster.teardown_shared_cluster(cluster[0], cluster[1], Settings.resolve())
 
 
-def create_spark_cluster(config_uri: str) -> list[str]:
-    """Provision the run's one shared ephemeral Dataproc cluster; return ``[name, region]`` for
-    XCom.
+def create_spark_cluster(config_uri: str) -> dict[str, list[str]]:
+    """Provision the run's shared ephemeral Dataproc cluster **per hardware kind**; return
+    ``{hardware: [name, region]}`` for XCom.
 
     The Dataproc analog of `create_ray_cluster` — the create half of
-    `shared_clusters.shared_spark_cluster`. Sizes one cluster for the run's ephemeral
-    ``spark_mode="cluster"`` families (`shared_clusters.shared_spark_inputs`) so each submits its
-    own job to it rather than racing to create and
-    tear down the shared name. Returns ``[name, region]`` (the region because a capacity failover
-    may have moved it) for the family tasks and `delete_spark_cluster`.
+    `shared_clusters.shared_spark_cluster`. Sizes a cluster for each hardware kind among the run's
+    ephemeral ``spark_mode="cluster"`` families (`shared_clusters.shared_spark_inputs`) so each
+    submits its own job to the right-sized one rather than racing to create and tear down a shared
+    name. One cluster per kind because a Dataproc cluster has exactly one worker machine type — a
+    mixed CPU/GPU run cannot be served by one, and serving it with one GPU cluster would put
+    accelerators under the CPU families' work. Each value carries its own region, because a capacity
+    failover may have moved one cluster and not the other.
+
+    **A partial create tears itself down before raising.** Unlike the local path's ``ExitStack``,
+    this task has no ``finally`` reaching into `delete_spark_cluster` — a raising task pushes no
+    XCom, so the downstream teardown would find nothing and the already-created cluster would bill
+    on unnoticed. Cleaning up here is the only place that can see it.
     """
     from . import shared_clusters
     from .config import load_config_uri
     from .dag import plan_dag
-    from .dataproc_cluster import provision_shared_cluster
+    from .dataproc_cluster import provision_shared_cluster, teardown_shared_cluster
     from .errors import ConfigError
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -310,30 +335,52 @@ def create_spark_cluster(config_uri: str) -> list[str]:
         raise ConfigError(
             f"create_spark_cluster: run {run_id} has no shared Dataproc-cluster families"
         )
-    models, any_gpu, gpu_type = inputs
-    name, region = provision_shared_cluster(
-        cfg,
-        run_id=run_id,
-        use_gpu=any_gpu,
-        gpu_type=gpu_type,
-        settings=settings,
-        models=models,
-    )
-    return [name, region]
+    suffixed = len(inputs) > 1
+    clusters: dict[str, list[str]] = {}
+    try:
+        for hardware, (models, gpu_type) in inputs.items():
+            name, region = provision_shared_cluster(
+                cfg,
+                run_id=run_id,
+                use_gpu=hardware == "gpu",
+                gpu_type=gpu_type,
+                settings=settings,
+                models=models,
+                name_suffix=hardware if suffixed else None,
+            )
+            clusters[hardware] = [name, region]
+    except Exception:
+        for name, region in clusters.values():
+            teardown_shared_cluster(name, region, settings)
+        raise
+    return clusters
 
 
 def delete_spark_cluster(config_uri: str, ti: Any = None) -> None:
-    """Tear down the run's shared ephemeral Dataproc cluster (``trigger_rule="all_done"`` in DAG).
+    """Tear down every shared ephemeral Dataproc cluster the run created
+    (``trigger_rule="all_done"`` in DAG).
 
     The Dataproc analog of `delete_ray_cluster` — the teardown half of
-    `shared_clusters.shared_spark_cluster`,
-    always run so a family failure never leaks the cluster. Reads the ``[name, region]`` the create
-    task returned via XCom; a no-op when there was none.
+    `shared_clusters.shared_spark_cluster`, always run so a family failure never leaks a cluster.
+    Reads the ``{hardware: [name, region]}`` the create task returned via XCom; a no-op when there
+    was none.
+
+    Every entry is attempted even if one teardown raises, and the first error is re-raised only
+    after the rest have been tried: bailing on the first failure would leak the cluster behind it,
+    which is exactly the outcome this task exists to prevent.
     """
     from .dataproc_cluster import teardown_shared_cluster
     from .settings import Settings
 
-    cluster = _xcom_cluster(ti, "create_spark_cluster")
-    if cluster is None:
+    clusters = _xcom_spark_clusters(ti)
+    if not clusters:
         return
-    teardown_shared_cluster(cluster[0], cluster[1], Settings.resolve())
+    settings = Settings.resolve()
+    first_error: Exception | None = None
+    for name, region in clusters.values():
+        try:
+            teardown_shared_cluster(name, region, settings)
+        except Exception as exc:  # noqa: BLE001 - keep tearing down; re-raised below
+            first_error = first_error or exc
+    if first_error is not None:
+        raise first_error

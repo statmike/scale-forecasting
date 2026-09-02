@@ -82,6 +82,32 @@ def test_cluster_name_clamped_no_trailing_hyphen() -> None:
     assert not name.endswith("-")
 
 
+def test_cluster_name_suffix_distinguishes_two_clusters_in_one_run() -> None:
+    # A run whose cluster families split across CPU and GPU gets one cluster each, so the names
+    # have to differ — same run_id, two clusters.
+    assert dataproc_cluster.cluster_name("run-abc", None, "cpu") == "sf-cluster-run-abc-cpu"
+    assert dataproc_cluster.cluster_name("run-abc", None, "gpu") == "sf-cluster-run-abc-gpu"
+
+
+def test_cluster_name_suffix_clamps_within_the_limit_not_past_it() -> None:
+    """Two long run_ids must not collide by having the suffix appended after clamping.
+
+    Appending to an already-51-char name would either overflow the limit or be truncated back to
+    the same string for both hardware kinds — and two clusters sharing a name is the exact race
+    this split exists to avoid.
+    """
+    cpu = dataproc_cluster.cluster_name("x" * 100, None, "cpu")
+    gpu = dataproc_cluster.cluster_name("x" * 100, None, "gpu")
+    assert len(cpu) <= 51 and len(gpu) <= 51
+    assert cpu.endswith("-cpu") and gpu.endswith("-gpu")
+    assert cpu != gpu
+
+
+def test_cluster_name_reuse_target_ignores_the_suffix() -> None:
+    # A standing cluster's name is the operator's, not ours to decorate.
+    assert dataproc_cluster.cluster_name("run-abc", "my-standing", "gpu") == "my-standing"
+
+
 # --- build_cluster: CPU + GPU wire spec ----------------------------------------
 
 

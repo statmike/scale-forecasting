@@ -95,15 +95,24 @@ _MIN_IDLE_TTL_SECONDS = 300
 _MAX_LIFECYCLE_TTL_SECONDS = 14 * 86400
 
 
-def cluster_name(run_id: str, spark_cluster_name: str | None) -> str:
+def cluster_name(run_id: str, spark_cluster_name: str | None, suffix: str | None = None) -> str:
     """The cluster name: the reuse target if set, else ``sf-cluster-<run_id>`` (Dataproc-legal).
 
     Dataproc cluster names must be lowercase alnum + hyphens, start with a letter, ≤ 51 chars, no
     trailing hyphen. The ``run_id`` is already a slug + hex digest, so the ``sf-cluster-`` prefix
     keeps it legal; clamp to 51 with no trailing hyphen.
+
+    ``suffix`` distinguishes several clusters within one run — today only the hardware kind, when a
+    run's cluster families split across CPU and GPU and get one right-sized cluster each (see
+    `shared_clusters.shared_spark_cluster`). It is clamped *with* the suffix rather than after it,
+    because appending to an already-clamped name is how two long run_ids end up sharing a name. A
+    run needing only one cluster passes ``None`` and gets the unchanged name.
     """
     if spark_cluster_name:
         return spark_cluster_name
+    if suffix:
+        tail = f"-{suffix}"
+        return f"sf-cluster-{run_id}"[: 51 - len(tail)].rstrip("-") + tail
     return f"sf-cluster-{run_id}"[:51].rstrip("-")
 
 
@@ -529,6 +538,7 @@ def provision_shared_cluster(
     models: list[str] | None = None,
     worker_count: int | None = None,
     max_workers: int | None = None,
+    name_suffix: str | None = None,
 ) -> tuple[str, str]:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
     """Create one shared ephemeral Dataproc cluster for a run's families; return ``(name, region)``.
 
@@ -536,10 +546,13 @@ def provision_shared_cluster(
     ephemeral cluster family the DAG orchestrator provisions **one** cluster here rather than let
     each family create its own: every family derives the same ``sf-cluster-<run_id>`` name and would
     each create *and* tear it down, so a family finishing first deletes the cluster out from under
-    the others (``cluster is in state DELETING and cannot accept jobs``). Sized for the **union** of
-    those families' hardware (GPU workers when ``use_gpu`` — any cluster family needs one; CPU
-    families run on the same cluster, their jobs simply not using the GPU), mirroring the shared Ray
-    cluster. The caller threads the name **and region** into every cluster family's
+    the others (``cluster is in state DELETING and cannot accept jobs``). The caller decides how
+    many of these a run gets: `shared_clusters.shared_spark_cluster` calls this **once per hardware
+    kind**, passing ``name_suffix`` to keep the names distinct, because a Dataproc cluster has
+    exactly one worker machine type and so cannot be CPU and GPU at once. (The shared *Ray* cluster
+    is one cluster for both, and that asymmetry is real rather than an inconsistency — a Vertex Ray
+    cluster carries separate CPU and GPU worker pools.) The caller threads the name **and region**
+    into every cluster family's
     `submit_cluster_job` as the ``spark_cluster_name``/``spark_cluster_region`` reuse target (each
     submits its own failure-isolated job to the region the cluster landed in, no per-family
     create/delete) and tears it down once via `teardown_shared_cluster` after all families join.
@@ -556,7 +569,7 @@ def provision_shared_cluster(
 
     settings = settings or Settings.resolve()
     infra = infra or BatchInfra.resolve()
-    name = cluster_name(run_id, None)
+    name = cluster_name(run_id, None, name_suffix)
     venv_archive_uri = _resolve_cluster_deps(cfg, infra)
     venv_init_uri = _stage_cluster_init(infra)
     derived_workers, _properties, _sizing = cluster_sizing(

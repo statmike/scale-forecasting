@@ -880,6 +880,17 @@ someone reached for them in anger.
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
 
+- **A run that needs both a CPU and a GPU Dataproc cluster has never been executed.** A Dataproc
+  cluster has one worker machine type, so as of 2026-09-02 a run's ephemeral cluster families are
+  grouped by hardware and get one right-sized cluster each — `sf-cluster-<run_id>-cpu` alongside
+  `sf-cluster-<run_id>-gpu`. **No shipped config produces that shape**: smoke 04 is the only config
+  with two ephemeral cluster families and both are CPU, so it takes the single-group path and is
+  byte-identical to what it was — same one cluster, same unsuffixed name, same sizing. **No row
+  above goes stale, and none of them covers the new branch either.** What is unproven live is the
+  two-cluster case specifically: the second create, the two distinct names, the per-cluster region
+  after a capacity hop, and the two teardowns. Offline tests pin all of it, including the
+  partial-create unwind; that is not the same as having run it. Closing this needs a config, not
+  just a run.
 - **`ray_autoscale` defaults to `True` (`config.py`) but all four Ray smokes pin it `false`.**
   Introduced by `4c988bc`, when a per-pool `AutoscalingSpec` crashed the Vertex Ray head at
   provisioning. **Resolved on the demonstration surface 2026-09-01**, and the suspected cause was

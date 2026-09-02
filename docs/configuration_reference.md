@@ -437,8 +437,19 @@ runs in BigQuery).
   to `runtime="ray"`.
 - `hardware="cpu"` with a `gpu_type` set → error (drop `gpu_type` or set `hardware="gpu"`).
 
+**How many clusters a run creates.** One per **hardware kind** among its ephemeral cluster families,
+not one per run — a Dataproc cluster has exactly one worker machine type, so it is a CPU cluster or a
+GPU cluster and cannot be both. A run whose cluster families are all CPU gets one cluster named
+`sf-cluster-<run_id>`; a run mixing CPU and GPU families gets `sf-cluster-<run_id>-cpu` and
+`sf-cluster-<run_id>-gpu`, each sized only for the families that land on it. That is why a GPU
+`deep_learning` family no longer makes the rest of the run pay for accelerators it never uses.
+
+Ray is deliberately different: a Vertex Ray cluster carries separate CPU and GPU worker *pools*, so
+a mixed run shares **one** Ray cluster. The asymmetry is the hardware, not an inconsistency.
+
 **Cluster lifetime.** A cluster the run creates (no `spark_cluster_name`) is deleted when the run
-ends. It also carries server-side bounds so it cannot outlive the orchestrator that made it: it
+ends — every one of them, including on a failure part-way through creating the second. Each also
+carries server-side bounds so it cannot outlive the orchestrator that made it: it
 self-deletes after **30 min idle** or **24 h** total, whichever comes first. Those are backstops for
 the case where the run process is killed before its teardown runs — when teardown works they never
 fire. Override with `SF_CLUSTER_IDLE_TTL` / `SF_CLUSTER_MAX_AGE` (seconds; `0` disables a bound).

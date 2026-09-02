@@ -135,8 +135,13 @@ def _shared_families(cfg: RunConfig, run_dag: RunDag) -> tuple[list[str], list[s
     Uses the exact `shared_clusters.shared_ray_inputs` / ``shared_spark_inputs`` rules `main.run`
     uses, so the
     emitted bracket matches what a live run would provision: ≥2 ephemeral Ray families (no standing
-    cluster) share one Ray cluster; ≥2 ephemeral ``spark_mode="cluster"`` families share one
-    Dataproc cluster. Serverless Spark and single-family cases return empty (each runs standalone).
+    cluster) share one Ray cluster; ≥2 ephemeral ``spark_mode="cluster"`` families share Dataproc
+    clusters. Serverless Spark and single-family cases return empty (each runs standalone).
+
+    Returns *families*, not clusters, and that is why the DAG shape is unaffected by how many
+    Dataproc clusters the run turns out to need. A mixed CPU/GPU run gets one cluster per hardware
+    kind, but they are created and deleted by the same single task pair — so the bracket emitted
+    here is "all cluster families, bracketed", whether that is one cluster behind it or two.
     """
     from .shared_clusters import shared_ray_inputs, shared_spark_inputs
 
