@@ -21,14 +21,28 @@ lock:
 
 ## lock-check: fail if the lock is stale vs pyproject, or if requirements.txt drifted from the lock.
 ## This is the drift guard CI runs; run it locally before committing a dependency change.
+##
+## It regenerates docker/requirements.txt IN PLACE and diffs with git, which is byte-for-byte what
+## the CI job does. That is deliberate. The previous version exported to a `.check` sidecar and
+## diffed the two files, and it could never pass: uv writes the invoking command — including
+## `-o <path>` — into the file's own header comment, so the sidecar always differed from the real
+## file on line 2 and every local run reported "stale". A guard that fails unconditionally is worse
+## than no guard, because it trains you to ignore it; a real drift (`threadpoolctl` becoming a
+## direct dependency) then sat in CI red for days behind the noise.
+##
+## So there is now exactly one mechanism, not two that have to agree. A failure here leaves the
+## regenerated file in your tree — the fix is to commit it, not to re-run `make lock`.
+##
+## The diff is against HEAD, not the index: `git diff <path>` compares to the index, so `git add`-ing
+## a stale export would slip past the guard locally. In CI the index equals HEAD, so this is the same
+## comparison the workflow makes — which is the point.
 lock-check:
 	uv lock --check
-	uv export $(EXPORT_ARGS) -o docker/requirements.txt.check
-	@diff -u docker/requirements.txt docker/requirements.txt.check \
-		&& rm -f docker/requirements.txt.check \
+	uv export $(EXPORT_ARGS) -o docker/requirements.txt
+	@git diff --exit-code HEAD -- docker/requirements.txt \
 		&& echo "docker/requirements.txt is in sync with uv.lock" \
-		|| { rm -f docker/requirements.txt.check; \
-		     echo "ERROR: docker/requirements.txt is stale — run 'make lock' and commit."; exit 1; }
+		|| { echo "ERROR: docker/requirements.txt was stale; it has been regenerated above — commit it."; \
+		     exit 1; }
 
 ## sync: install the full dev environment (all extras + dev group) from the lock.
 sync:
