@@ -99,7 +99,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | NEEDS_RECHECK | 2026-08-28 | not recorded | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
+| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-02 | `smoke-08-ray-gpu-c41ecf2d5d52` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-08-25 | not recorded | `ray_deps=custom-container-image`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults`, `horizon_features=first-rows-of-history` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -239,49 +239,70 @@ Recorded as prose rather than a table row: the two configs are throwaways outsid
 `configs/smokes/`, so the ledger tripwire has nothing to bind them to. The claim is the comparison,
 not either run.
 
-### Smoke 08 is blocked on quota, not broken — and finding that out took two fixes
+### Smoke 08 passes, and the "Vertex GPU entitlement" that blocked it for two days was half wrong
 
-**T4 on Vertex Ray is quota-blocked for this project in all three candidate regions, and that part is
-named outright.** On 2026-09-01, smoke 08 was attempted six times across `us-central1`, `us-east1`
-and `us-west1`, first on T4 and then on L4 (`g2-standard-8`), and never once provisioned. On T4,
-**both** `us-east1` and `us-west1` said it plainly — *"The following quotas are exceeded:
-`CustomModelTrainingT4GPUsPerProjectPerRegion`"* — and `us-central1` gave *"An internal error occurred
-on your cluster"*, which given its neighbours is almost certainly the same ceiling wearing a mask.
+`smoke-08-ray-gpu-c41ecf2d5d52`, 2026-09-02: `neuralprophet` on a Vertex Ray cluster with **seven
+T4s** in `us-central1`, 100 cells, rerun idempotent, cluster torn down and confirmed gone by
+`describe`. Provisioning took 12 min 35 s (create 18:09:16 → `RUNNING` 18:21:51), which is the number
+to budget for a Ray *GPU* cluster the way ~10 min is the number for a CPU one.
 
-**The L4 attempts prove less than they appear to, and the correction is recorded here rather than
-quietly dropped.** Re-reading the L4 walk's log against the network finding below: `us-east1` and
-`us-west1` failed on a *missing regional network attachment*, not on a GPU meter. Those two never
-reached the entitlement question at all. So the honest scope is: T4 is quota-blocked in three
-regions; **L4 on Vertex Ray is unproven-either-way outside `us-central1`**, where it failed opaquely.
-It does not change the blocked status of smoke 08 or the workaround below — every Ray-GPU config in
-this repo still fails to provision — but "no region worked" and "no region has the quota" are
-different claims, and only the first one was actually observed for L4.
+**This row was `NEEDS_RECHECK` and the section under it said the project needed a quota grant. That
+was wrong, and the way it was wrong is the same mistake this campaign made twice.** The evidence for
+"entitlement blocker" was six failed provisions on 2026-09-01, of which **exactly one named a
+cause**. `us-east1` and `us-west1` said *"The following quotas are exceeded:
+`CustomModelTrainingT4GPUsPerProjectPerRegion`"*; `us-central1` gave the contentless *"An internal
+error occurred on your cluster"* and was read as "the same ceiling wearing a mask." It was not a
+mask. It was the [provisioning outage](#the-ray-outage-resolved-itself-and-the-fix-we-nearly-shipped-for-it)
+that took every Ray cluster in the region down for two days, GPU and CPU alike, and that this page
+already records as having clouded the `us-central1` leg of wave 6.1 on the same day.
 
-The row is `NEEDS_RECHECK` rather than `STALE`: nothing here suggests the code is wrong, but
-2026-08-28's pass recorded no `run_id`, and it now cannot be re-earned to fix that. **This is a
-project-entitlement blocker, not an architecture one** — it needs a Vertex GPU quota grant, and
-until then every Ray-GPU config in this repo (`ray_gpu_demo`, `all_families_100k`,
-`all_families_100k_full`) fails at provisioning.
+**The meter was readable the whole time, and reading it settles both halves at once.** The
+per-region Vertex training limits for this project:
 
-**It is a Vertex entitlement, not a GPU one, and the other three GPU paths prove that.** Three of
-the four ways this product can put a family on a GPU were proven live within a day of each other:
-Dataproc Serverless L4 (smoke 03, 2026-09-01), Dataproc cluster T4 with the pre-baked driver image
-(smoke 06, 2026-09-02, `neuralprophet` on `us-central1-b`), and BigQuery-native, which needs no
-accelerator of ours. Only Vertex Ray fails, and the cluster T4 result is the cleanest evidence why:
-it spends **Compute Engine** `NVIDIA_T4_GPUS`, which this project has, while a Vertex Ray cluster
-spends `CustomModelTrainingT4GPUsPerProjectPerRegion`, which it does not. Same accelerator, same
-region, same day — different meter, different answer.
+| Metric | us-central1 | us-east1 | us-west1 |
+|---|---|---|---|
+| `custom_model_training_nvidia_t4_gpus` | **12** | 2 | 2 |
+| `custom_model_training_nvidia_l4_gpus` | 28 | 28 | 28 |
 
-So there is a config-level route around it, and it is worth stating because it is the product's own
-answer: **deep learning does not have to run on Ray.** `14_full_dag.json` already puts the DL family
-on Serverless. A deployment without Vertex Ray GPU entitlement can run every family by pointing
-`compute.families.deep_learning` at `runtime: spark`, which is a config edit, not a code change.
+Smoke 08 asks for seven T4s. Seven does not fit under 2, so `us-east1` and `us-west1` were genuinely
+quota-blocked and said so accurately. Seven fits comfortably under 12, so `us-central1` never was.
+The regional split explains every observation without needing an entitlement story: **the platform
+named the quota failure where there was one, and the region where it stayed silent is the region
+that had the headroom.** Wave 11 independently established that this platform is explicit about
+quota when quota is the problem; that generalisation should have been applied here and was not.
 
-The trap worth carrying: **Compute Engine quota does not tell you whether a Ray GPU run can start.**
-`NVIDIA_T4_GPUS` reads 4-of-4 free in `us-central1`. The quota a Vertex Ray cluster actually spends
-is `CustomModelTrainingT4GPUsPerProjectPerRegion`, a different meter, and it is the one that says no.
-Checking the former before a run is worse than not checking — it gives a green light that means
-nothing.
+**The mistake, stated as a rule.** A diagnosis was inferred for `us-central1` from its *neighbours'*
+error messages rather than from anything `us-central1` itself reported, at a moment when a
+region-wide fault was independently active. That is the confounded-control failure again, in a third
+costume: a contentless error is not weak evidence for the nearest available explanation, it is
+**absence of evidence**, and the neighbouring regions differed on the very dimension being inferred
+across. The check that would have caught it costs one API call — read the meter for the region in
+question instead of borrowing a conclusion from a region with a different limit.
+
+**What survives unchanged.** Two things from the original diagnosis are still true and still worth
+having:
+
+- **Compute Engine quota does not tell you whether a Ray GPU run can start.** `NVIDIA_T4_GPUS` read
+  4-of-4 free in `us-central1` throughout. A Vertex Ray cluster does not spend that meter; it spends
+  `custom_model_training_nvidia_t4_gpus`. Checking the former before a run is worse than not
+  checking, because it answers confidently and about the wrong thing. What is new is the *right*
+  meter's name and the fact that it is per-region — `gcloud alpha services quota list
+  --service=aiplatform.googleapis.com` returns it, bucketed by region.
+- **Deep learning does not have to run on Ray**, and that remains the answer for a deployment that
+  genuinely lacks the quota. `14_full_dag.json` puts the DL family on Serverless L4; pointing
+  `compute.families.deep_learning` at `runtime: spark` is a config edit, not a code change. All four
+  GPU paths in the product are now live-proven: Serverless L4 (smoke 03), cluster T4 (smoke 06),
+  BigQuery-native, and — as of this row — Vertex Ray T4.
+
+**The multi-region part of the original claim stands, for a different reason.** Smoke 08's config
+lists three `ray_regions`, but under PSC-I only the deployed region has a network attachment, so the
+other two are unreachable regardless of their GPU quota — see the region-failover section below.
+`us-east1`/`us-west1` T4 quota of 2 is therefore not worth requesting an increase for; the network
+attachment is the binding constraint there, not the accelerator.
+
+Two defects in the region fallback surfaced only because a region actually ran out, and both were
+fixed and confirmed live the same day. They are the same defect twice: **an error the classifier
+cannot parse was treated as an error it had diagnosed.**
 
 Two defects in the region fallback surfaced only because a region actually ran out, and both were
 fixed and confirmed live the same day. They are the same defect twice: **an error the classifier
@@ -302,8 +323,9 @@ matched the strings someone had thought of. Only a live region running out produ
 thought of. The fallback now walks all three and raises an `EngineError` naming them, which is what
 the plan's abort path expects — a defer, not a block.
 
-The obvious workaround while the entitlement is pending — move the DL family to `hardware: cpu` —
-does not work either, and fails in the worst way available. See the zero-worker section two below.
+One workaround that looks obvious and is not — move the DL family to `hardware: cpu` — fails in the
+worst way available, and is still a live defect even now that Ray GPU works. See the zero-worker
+section two below.
 
 ### The Ray region failover cannot leave the deployed region, and a CPU run is what proved it
 
@@ -357,9 +379,11 @@ and both pools are omitted. Vertex accepts a head-only cluster, Ray accepts the 
 waits for a worker that will never be created. There is no timeout: the submitter polls until
 terminal, so the harness blocked indefinitely and the run had to be stopped by hand.
 
-**This is config-reachable and it is the obvious thing to try.** A reader blocked on the Ray GPU
-entitlement — which is the state this project is in — reaches for exactly this edit to get the DL
-family running on something. It costs a cluster-hour and produces no error message.
+**This is config-reachable and it is the obvious thing to try.** Anyone whose project lacks Vertex
+GPU quota — or who simply does not want to pay for accelerators — reaches for exactly this edit to
+get the DL family running on something. It costs a cluster-hour and produces no error message. This
+project turned out not to be in that state after all, which lowers how often *we* will hit it and
+changes nothing about the defect.
 
 Not fixed here, for the same reason as the failover above: there is more than one defensible answer
 (fold DL models into the CPU pool when `use_gpu` is false, so a CPU Ray run of a DL family simply
@@ -1012,9 +1036,9 @@ Things that are true today and that no entry above covers. Keep this list short 
   on a demonstration run. Unpinning them is the fix; it is not urgent, because the default is now
   proven at 10,000 series, which is a harder case than any smoke poses.
 - **~~No `run_id` was recorded for smokes 07–14.~~ Closed 2026-09-02.** Every re-run in this
-  campaign captured one, so 01–07 and 11–14 all carry a reverse-trace. The three that still say "not
-  recorded" — 08, 09, 10 — are the three the Vertex Ray GPU entitlement prevents from running at all,
-  so the gap that remains is the entitlement, not the discipline.
+  campaign captured one, so 01–08 and 11–14 all carry a reverse-trace. Only 09 and 10 still say "not
+  recorded", and both are now runnable — the Ray GPU blocker they were held behind turned out not to
+  exist (above), so what remains is spend, not entitlement.
 - **The Ray probe cannot escalate to a single-family Ray run.** `resource_name` is absent from the
   entry handle for exactly the shape that has no shared cluster, and the corrected handle lands only
   after the job is terminal. Found live 2026-09-02, analysed above. Small fix, deliberately deferred
@@ -1024,13 +1048,13 @@ Things that are true today and that no entry above covers. Keep this list short 
   no timeout, no error — analysed above. Reachable from config alone, and the natural workaround for
   anyone blocked on the Ray GPU entitlement, which makes it the highest-value of the three deferred
   fixes.
-- **Vertex Ray will not provision in `us-central1` for this project as of 2026-09-02.** Six specs,
-  including two proven the previous day, all fail with the contentless internal error — and the
-  sixth was a deliberate re-probe hours later under a fresh cluster name, so the platform's own
-  *"try again in a few minutes"* has been tested and does not hold. Environment, not code, but it
-  stalls `ray_100k`, the profiler A/B's sizing half, and every Ray notebook, and the next move is a
-  support case rather than another probe. Re-attempt before trusting any Ray conclusion dated on or
-  after this.
+- **~~Vertex Ray will not provision in `us-central1` for this project as of 2026-09-02.~~ Cleared
+  the same day, ~17:00 UTC.** Six specs failed with the contentless internal error, including a
+  deliberate re-probe hours later under a fresh cluster name; then three bisect arms and smoke 08
+  all provisioned normally with no change on our side. Environment, not code, and no support case
+  was filed. The lasting form of this gap is narrower: **a Ray conclusion is only as good as the day
+  it was reached.** The fault was transient once and can be transient again, so re-probe before
+  trusting any Ray *negative* result, and prefer running Ray work early in a window rather than last.
 - **A failed Ray provision can leak a cluster that blocks every retry of that config.** The name is
   derived from the `run_id`, so the retry collides with `AlreadyExists` and cannot succeed until the
   leaked resource is deleted by hand — and `list` reports `[]` while it exists, so it is invisible
