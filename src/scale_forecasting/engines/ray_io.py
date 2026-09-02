@@ -120,13 +120,26 @@ _MAX_CHUNKS = 100_000
 
 
 def split_gpu_cpu_models(
-    cfg: RunConfig, models: list[str] | None = None
+    cfg: RunConfig, models: list[str] | None = None, *, use_gpu: bool | None = None
 ) -> tuple[list[str], list[str]]:
     """Partition the executed models into ``(gpu_models, cpu_models)`` by family (pure).
 
     A model routes to the GPU pool iff its registered ``family`` is ``deep_learning``
-    (NeuralProphet) — the only family a GPU helps. Everything else (statistical/ml) is CPU.
-    ``models`` is the executed subset (`main.run`); ``None`` means ``cfg.models``.
+    (NeuralProphet) — the only family a GPU helps — **and this job actually has a GPU pool**.
+    Everything else (statistical/ml) is CPU. ``models`` is the executed subset (`main.run`);
+    ``None`` means ``cfg.models``. ``use_gpu`` overrides the flat ``compute.use_gpu`` with the
+    family's resolved hardware, the same way `plan_cluster` takes it.
+
+    **The ``use_gpu`` half is what keeps a GPU-less job from planning a cluster with no workers.**
+    A deep-learning model still runs without a GPU — it falls back to CPU inside the cell — so with
+    no GPU pool its cells belong to the CPU pool, not to a pool that will not exist. Splitting on
+    family alone put them in ``gpu_models``, whose cells were then zeroed because ``use_gpu`` was
+    False, while ``cpu_models`` was empty because every executed model was deep-learning: both pools
+    derived 0 nodes and the run hung on a head-only cluster with nothing to schedule on. That is not
+    an exotic config — ``deep_learning`` resolves to ``hardware="cpu"`` whenever ``compute.use_gpu``
+    is left at its default, so ``{"python_runtime": "ray", "models": ["neuralprophet"]}`` reached
+    it.
+
     Order is preserved within each list so logs and chunking stay deterministic. Unknown names raise
     `ModelError` via the factory — the same up-front validation the
     router does.
@@ -134,10 +147,11 @@ def split_gpu_cpu_models(
     from ..models import get_model
 
     executed = models if models is not None else cfg.models
+    effective_use_gpu = cfg.compute.use_gpu if use_gpu is None else use_gpu
     gpu_models: list[str] = []
     cpu_models: list[str] = []
     for name in executed:
-        if get_model(name).family == _GPU_FAMILY:
+        if effective_use_gpu and get_model(name).family == _GPU_FAMILY:
             gpu_models.append(name)
         else:
             cpu_models.append(name)
@@ -488,7 +502,8 @@ def plan_cluster(
     ``compute.use_gpu`` / ``compute.gpu_type``.
 
     Deterministic function of the config — no GCP, no GPU. Splits the executed models into GPU
-    (NeuralProphet) and CPU pools, counts the cells each pool must run (``series × models``, using
+    (NeuralProphet, and only when this job has a GPU at all) and CPU pools, counts the cells each
+    pool must run (``series × models``, using
     ``max_parallelism`` as the basis when ``series_limit`` is unbounded), and derives each pool's
     fixed-size-equivalent ``node_count`` from those cell counts (`plan_pool`), clamped
     into the pool's resolved ``[min, max]``. Folds are *not* a factor in the node count — a cell
@@ -516,13 +531,16 @@ def plan_cluster(
     field for the same reason ``use_gpu``/``gpu_type`` are: ``run_id`` digests ``cfg``, and a
     measurement taken at submit time must not move it.
     """
-    gpu_models, cpu_models = split_gpu_cpu_models(cfg, models)
-
     # Per-family overrides fall back to the flat compute defaults (kept out of cfg to hold run_id).
+    # Resolved *before* the split, because the split depends on it: without a GPU pool the
+    # deep-learning models are CPU work and have to be sized into the CPU pool (see
+    # `split_gpu_cpu_models`), not dropped between the two.
     effective_use_gpu = cfg.compute.use_gpu if use_gpu is None else use_gpu
     effective_gpu_type = gpu_type or cfg.compute.gpu_type
     if effective_use_gpu:
         _check_gpu_machine(effective_gpu_type, cfg.compute.ray_gpu_machine_type)
+
+    gpu_models, cpu_models = split_gpu_cpu_models(cfg, models, use_gpu=effective_use_gpu)
 
     n_series = cfg.data.series_limit
     basis = n_series if n_series is not None else cfg.compute.max_parallelism
@@ -545,10 +563,13 @@ def plan_cluster(
     # the bounds. A pool with zero cells stays at 0 nodes (omitted at create), never bumped to min.
     # `plan_pool` owns the arithmetic for both pools now: with ``profile=None`` it reproduces the
     # constants this function used inline, and with a profile it sizes the slot from measurement.
+    # ``n_gpu_cells`` is passed unconditionally: the split above is already hardware-aware, so a
+    # GPU-less job has no ``gpu_models`` and no GPU cells to zero out — and the cells it *does* have
+    # are counted against the CPU pool rather than dropped.
     gpu_pool = plan_pool(
         cfg,
         gpu_models,
-        n_gpu_cells if effective_use_gpu else 0,
+        n_gpu_cells,
         gpu=True,
         gpu_type=effective_gpu_type,
         profile=profile,
@@ -572,7 +593,7 @@ def plan_cluster(
     gpu_pool = plan_pool(
         cfg,
         gpu_models,
-        n_gpu_cells if effective_use_gpu else 0,
+        n_gpu_cells,
         gpu=True,
         gpu_type=effective_gpu_type,
         profile=profile,

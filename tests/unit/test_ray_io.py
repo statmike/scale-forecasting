@@ -53,14 +53,18 @@ def _compute(**over: Any) -> dict[str, Any]:
 
 
 def test_split_routes_neuralprophet_to_gpu_rest_to_cpu() -> None:
-    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=[_CPU, _GPU, "xgboost", "holtwinters"]))
+    # compute=_compute() so a GPU pool actually exists — the split is hardware-aware, and without
+    # a GPU there is no pool for neuralprophet to route to (see the GPU-off test below).
+    gpu, cpu = ray_io.split_gpu_cpu_models(
+        _cfg(models=[_CPU, _GPU, "xgboost", "holtwinters"], compute=_compute())
+    )
     assert gpu == [_GPU]
     assert cpu == [_CPU, "xgboost", "holtwinters"]
 
 
 def test_split_honors_executed_subset() -> None:
     # main.run hands only the Python-runtime subset; split must respect it, not cfg.models.
-    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(), models=[_CPU])
+    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(compute=_compute()), models=[_CPU])
     assert gpu == []
     assert cpu == [_CPU]
 
@@ -68,6 +72,40 @@ def test_split_honors_executed_subset() -> None:
 def test_split_preserves_order() -> None:
     gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=["holtwinters", _CPU]))
     assert cpu == ["holtwinters", _CPU]  # input order, not sorted
+
+
+def test_split_sends_deep_learning_to_the_cpu_pool_when_there_is_no_gpu() -> None:
+    # No GPU pool exists, so neuralprophet's cells are CPU work (it falls back inside the cell).
+    # Routing them to a pool that will not be created is what left both pools at zero nodes.
+    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=[_CPU, _GPU]))
+    assert gpu == []
+    assert cpu == [_CPU, _GPU]
+
+
+def test_split_use_gpu_argument_overrides_the_flat_default() -> None:
+    # The per-family resolved hardware wins over compute.use_gpu, the same way plan_cluster takes
+    # it — a family override must not have to round-trip through cfg (which would move run_id).
+    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=[_GPU]), use_gpu=True)
+    assert (gpu, cpu) == ([_GPU], [])
+    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=[_GPU], compute=_compute()), use_gpu=False)
+    assert (gpu, cpu) == ([], [_GPU])
+
+
+def test_plan_cluster_gives_a_gpu_less_deep_learning_job_real_workers() -> None:
+    """A deep-learning-only Ray job without a GPU must still get worker nodes (regression).
+
+    ``{"python_runtime": "ray", "models": ["neuralprophet"]}`` resolves ``deep_learning`` to
+    ``hardware="cpu"`` (``compute.use_gpu`` defaults False), which used to plan a cluster with an
+    empty GPU pool *and* an empty CPU pool — a head-only cluster the job then waited on forever,
+    with no timeout and no error. The cells have to land in the CPU pool.
+    """
+    plan = ray_io.plan_cluster(_cfg(models=[_GPU]), [_GPU], run_id="x", use_gpu=False)
+    assert plan.gpu_node_count == 0
+    assert plan.cpu_node_count > 0, (
+        "deep-learning cells must size the CPU pool when there is no GPU"
+    )
+    assert plan.n_gpu_cells == 0
+    assert plan.n_cpu_cells > 0
 
 
 # --- calibrate_gpu_fraction ----------------------------------------------------

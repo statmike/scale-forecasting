@@ -367,8 +367,8 @@ def run(
             # One Ray task per chunk. The remote closes over the picklable runner (cloudpickle
             # handles the cfg/settings closure — the single local/cloud seam, no second env path).
             # GPU tasks request a fraction of a T4 so several pack onto one device; when no GPU is
-            # provisioned, NeuralProphet cells fall back to CPU inside the task, so the GPU pool is
-            # planned as CPU work too and its options say so.
+            # provisioned there are no GPU chunks at all — those cells are in ``cpu_chunks``, and
+            # NeuralProphet falls back to CPU inside the task.
             @ray.remote
             def _task(chunk: pd.DataFrame) -> pd.DataFrame:
                 return runner(chunk)
@@ -424,9 +424,11 @@ def _pool_plans(
     """Size both worker pools for the *actual* panel — the heterogeneous-routing decision (pure).
 
     Two plans, one per pool, each carrying what a task should request and how wide the pool can
-    grow. The GPU pool is planned with ``gpu=cfg.compute.use_gpu``: when no device is provisioned
-    there is nothing to schedule against, so its cells are planned as plain CPU work and
-    NeuralProphet falls back to CPU inside the cell — the run still finishes, just slower.
+    grow. When no device is provisioned there is no GPU pool to plan against: `split_gpu_cpu_models`
+    has already put the deep-learning models in ``cpu_models`` (NeuralProphet falls back to CPU
+    inside the cell — the run still finishes, just slower), so ``gpu_models`` is empty and the GPU
+    plan is a zero-cell placeholder. ``gpu=cfg.compute.use_gpu`` therefore only matters for the
+    pool's task options in the case where a device *does* exist.
 
     The cell counts come from the panel that was actually read, not from ``series_limit``, so the
     sizing reflects the run rather than its upper bound. The autoscaling ceilings, however, come
