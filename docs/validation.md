@@ -748,7 +748,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. The handle fix then landed and was re-proven live the same day: `--probe` against `ray-dl-on-cpu-probe-2e8a9f3f5c8d`, a single-family ephemeral Ray run, escalated out-of-process and returned `RUNNING_CONFIRMED`. Scope is now the whole verb, on every runtime. |
-| RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Scope: the `--cancel` verb itself could not reach the family** — same missing `resource_name` as the probe — and one summary line miscounts. See below. The handle fix has since landed and `--probe` is re-proven live on that shape; `--cancel` shares the corrected line but has **not** been re-observed live, so this scope note stands until it has. |
+| RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Re-run live 2026-09-02 against a purpose-built single-family Ray job and the verb now reaches it** (`deep_learning cancelled — ray job stop issued`, count line correct at `1 of 1`, launcher unwound and tore the cluster down, teardown REST-verified). **New scope: the cancellation does not survive.** The launcher finalized the run `FAILED` 17 s after the cancel wrote `header=CANCELLED`, so the registry cannot distinguish a deliberate stop from a crash. See below. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
 | Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** |
 | Registry ops — `close_runs` (7th verb) | CURRENT | Executed live 2026-09-02 against the real registry: closed 9 of the 10 stuck headers to `FAILED` and skipped the tenth with its reason, leaving `doctor` reporting exactly one in-flight run. **The first live call failed** on a column that does not exist, which no offline test could have caught — see below. |
@@ -866,10 +866,8 @@ cluster would have been the worst available outcome, and it is the easy one to w
 
 **The verb could not reach the family, for the same reason the probe could not** — the entry handle
 has no `resource_name` on a single-family ephemeral Ray run. So `--cancel` inherits the gap recorded
-above; fixing the handle fixes both. The handle fix has since landed and `--probe` has been
-re-proven live on exactly that shape. `--cancel` shares the one line of code that was wrong, so it
-is fixed by construction — but *shares the fix* is an argument, not an observation, and no live
-cancel has been run against a single-family Ray job since. That re-observation is still owed.
+above; fixing the handle fixes both. **Re-observed live on 2026-09-02 and it does** — see the next
+section, which also found something the reaching gap had been hiding.
 
 **One wording defect.** The summary line read `1 in-flight job(s) stopped` when zero were. The
 per-family line immediately above it says `NOT cancelled`, so the output contradicts itself. Cosmetic
@@ -888,6 +886,77 @@ ADC — and returned nothing, so the audit line for a real cancel attempt names 
 `NEEDS_RECHECK` rather than a defect because it has not been established whether ADC user
 credentials are expected to yield a principal here; what *is* established is that the audit trail was
 empty on the one occasion it was exercised.
+
+### The cancel reached its job, and then the launcher overwrote the cancellation with `FAILED`
+
+`ray-cancel-probe-e22e6fe9a830` was built to be a cancel target and nothing else: one Ray CPU family,
+200 series, deliberately long. Once the Ray job was submitted, `--cancel` was run from a separate
+process. The preview was right:
+
+```
+Cancel run ray-cancel-probe-e22e6fe9a830: 1 in-flight job(s) will be stopped; partial results are RETAINED
+  deep_learning  ray  RUNNING  will cancel; 0/200 series landed (retained)
+Confirm with --force (CLI) / confirm=True (SDK) to stop these jobs.
+```
+
+and `--force` **reached the family**, which is the thing that was owed:
+
+```
+Cancelled run ray-cancel-probe-e22e6fe9a830: 1 of 1 in-flight job(s) stopped; partial results are RETAINED
+actor=None  reason=-  header=CANCELLED
+  deep_learning  cancelled      ray job stop issued
+```
+
+Three of the four open items on this verb closed at once. `cancelled  ray job stop issued` is the
+CLI reaching a single-family ephemeral Ray job, which it could not do before. `1 of 1` is the count
+line telling the truth — the earlier `1 in-flight job(s) stopped` when zero were is gone. And the
+launching process observed the stop by itself and unwound properly: `EngineError: ray job
+sf-ray-cancel-probe-e22e6fe9a830-deep_learning-a1 terminal state STOPPED`, then its `finally`
+tore the cluster down — verified by REST, zero persistent resources. **That is the verified-teardown
+path proven on the cancel route, which is the harder one**: the unwind happens through an exception,
+which is exactly where a teardown gets skipped.
+
+The registry also shows the handle fix directly rather than by inference. `job_telemetry.probe_handle`
+was persisted complete at entry:
+
+```json
+{"id_kind":"exact","runtime":"ray","region":"us-central1",
+ "native_id":"sf-ray-cancel-probe-e22e6fe9a830-deep_learning-a1",
+ "resource_name":"projects/…/locations/us-central1/persistentResources/sf-ray-ray-cancel-probe-e22e6fe9a830"}
+```
+
+**Then the fourth thing: the run does not end up recorded as cancelled.** The final state is
+
+| where | value |
+|-------|-------|
+| `run_registry.status` (header) | `FAILED` |
+| `run_jobs.deep_learning.status` | `FAILED` |
+| `job_telemetry.cancel.cancelled_at` | `2026-09-02T21:38:08Z` |
+| `run_jobs.ended_at` | `2026-09-02 21:38:25` |
+
+The cancel wrote `header=CANCELLED` at 21:38:08 and the launching process finalized the run `FAILED`
+seventeen seconds later, because from inside that process a job that went `STOPPED` is a job that
+died. **So the verb printed an outcome that did not survive a quarter of a minute.** It was not lying
+when it printed it, which is a different failure from the one this file worried about, and in some
+ways a worse one: the earlier defect refused to record a cancellation it had not achieved, whereas
+this one achieves the cancellation, records it, and then loses the record.
+
+What survives is `job_telemetry.cancel` — `cancelled_at`, `native_state_at_cancel: "RUNNING"`,
+`n_done_at_cancel: 0`. So the evidence is not destroyed, it is *demoted* into a JSON column. Every
+summary surface — the header, `doctor`, any leaderboard-adjacent view that filters on `status` —
+shows a run that failed, with no way to tell a deliberate stop from a crash without opening the
+telemetry of each job. For the one verb whose entire purpose is deliberate intervention, that is the
+wrong default.
+
+**The rule the fix needs is one sentence: a cancellation is sticky against the failure it caused.**
+`CANCELLED` is terminal, and a later `FAILED` arriving from the launcher's own unwind of that same
+cancellation must not overwrite it. That is stateable, small, and offline-testable once stated — but
+no offline test would have found it, because it needs two processes disagreeing about one run, and
+the previous cancel could not reach far enough to create the disagreement. **The reaching gap was
+hiding it.** Recorded as a gap below rather than patched mid-campaign.
+
+`cancelled_by: null` in the persisted telemetry is the same P6 `actor=None` finding as above,
+now confirmed to propagate into stored state rather than only into the console line.
 
 ### The workshop's first command printed nothing, and every offline test passed anyway
 
@@ -1091,8 +1160,19 @@ Things that are true today and that no entry above covers. Keep this list short 
   capacity hop would move the cluster and the predicted path would miss, degrading the probe to
   registry-only, which is exactly where it was before. Re-proven by a live `--probe` against
   `ray-dl-on-cpu-probe-2e8a9f3f5c8d` while its one Ray family was running: `RUNNING_CONFIRMED`,
-  from a separate process. **`--cancel` shares the fixed line but has not been re-observed live on
-  this shape** — that one observation is what is still owed.
+  from a separate process, and by `--cancel --force` reaching the family on
+  `ray-cancel-probe-e22e6fe9a830`. `job_telemetry.probe_handle` on that run carries a complete
+  `resource_name`, so the fix is visible in stored state and not only in console output.
+- **A cancellation does not survive the launcher's unwind: the run ends `FAILED`, not `CANCELLED`.**
+  Found live 2026-09-02 on `ray-cancel-probe-e22e6fe9a830`, analysed above. `--cancel --force` stops
+  the job and writes `header=CANCELLED`; the launching process then sees its own job go `STOPPED`,
+  treats that as death, and finalizes the run `FAILED` 17 s later. The evidence is not destroyed —
+  `job_telemetry.cancel` keeps `cancelled_at`, `native_state_at_cancel` and `n_done_at_cancel` — but
+  it is demoted out of every surface that reads `status`, so a deliberate stop is indistinguishable
+  from a crash in the header, in `doctor`, and in any status filter. The fix is one rule —
+  **a cancellation is sticky against the failure it caused** — and it is offline-testable once
+  stated, though not offline-*findable*: it needs two processes disagreeing about one run, and until
+  the handle fix landed the CLI could not reach far enough to create the disagreement.
 - **~~A `deep_learning` family on Ray with `hardware: cpu` hangs indefinitely.~~ Closed 2026-09-02
   — fixed by `9eeb154` and proven live the same day.** Zero-worker cluster, no timeout, no error —
   analysed above. The fix made `split_gpu_cpu_models` hardware-aware, so with no GPU pool the
@@ -1248,6 +1328,17 @@ Things that are true today and that no entry above covers. Keep this list short 
   `basis: "reference"` behaved correctly, so this cost accuracy rather than correctness — but
   "most recent" is a weak selector once more than one run has harvested, and the signature it already
   computes is the obvious thing to rank on.
+
+  **Seen a second time on 2026-09-02, which is what moves it from a plausible reading to a habit.**
+  `ray-cancel-probe-e22e6fe9a830` (200 series) was sized off the 6-series probe run finished an hour
+  earlier — `compute profile: series count differs by 33x (6 measured vs 200 planned)` — with better
+  matches available. The pattern is now clear: because a campaign writes small harvests often and
+  large ones rarely, "newest" reliably selects the *least* representative evidence in the table. Note
+  that the lookback window already does the freshness job, so recency is being paid for twice; the
+  ordering is the part with nothing to defend it. The complication is that `discover_harvest_run`
+  takes only the two identity axes and would need the target's scale to rank on proximity — a
+  signature change reaching the `source = "auto"` caller, which is why this stays recorded rather
+  than squeezed into a campaign gap.
 
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
