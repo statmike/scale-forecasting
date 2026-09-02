@@ -1437,6 +1437,19 @@ Things that are true today and that no entry above covers. Keep this list short 
   signature change reaching the `source = "auto"` caller, which is why this stays recorded rather
   than squeezed into a campaign gap.
 
+  **A third sighting the same day settled it, and it is now fixed offline.**
+  `ray-cancel-sticky-824b4822945c` (200 series) resolved to `smoke-16-cluster-split-hardware-…`,
+  which had finished twenty minutes earlier and measured six series. Three sightings in one
+  campaign, and the next runs due are the 100k long poles — where "newest" would hand a
+  100,000-series plan a six-series profile. The deferral reasoning above was about *cost*, and it
+  was wrong on the facts: both callers already hold the signature, so passing `want.n_series` is
+  two lines, not a refactor. `discover_harvest_run` now returns every candidate in the window with
+  its measured series count and a pure `rank_harvest_candidates` chooses — closeness of scale
+  first, recency only as a tie-break, distance in log space, symmetric, rounded so near-ties are
+  ties. The policy left SQL specifically so it could be tested; eight offline tests pin it.
+  **Not yet re-proven live** — the next `source="auto"` run at a scale where it matters is the
+  proof, and that is the 100k wave.
+
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
   ended that in a single wave, and did it twice over. Run 1 harvested; run 2 was sized from run 1.
