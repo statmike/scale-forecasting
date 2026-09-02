@@ -27,7 +27,8 @@ and the human-open path validate the *same* thing.
 escalates deliberately (smoke → batch → full); see `REGISTRY` and `notebooks_for_tier`.
 
 Public surface: `REGISTRY`, `AcceptanceResult`, `run_acceptance`, `notebooks_for_tier`,
-`notebook_completed_clean`, and a ``python -m scale_forecasting.notebook_acceptance`` CLI.
+`notebooks_by_name`, `notebook_completed_clean`, and a
+``python -m scale_forecasting.notebook_acceptance`` CLI.
 """
 
 from __future__ import annotations
@@ -89,9 +90,17 @@ REGISTRY: dict[str, NotebookSpec] = {
         # shadow the base image's numpy 2.x — together ~30 min, so it gets a wider budget than a
         # normal batch notebook.
         NotebookSpec("01_spark_via_connect", TEMPLATE_MAIN, TIER_BATCH, 3600),
-        NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 1800),
+        # 03 and 08 both block on a Dataproc Serverless batch, which carries ~30 min of fixed
+        # provisioning overhead before any cell of work runs — so a 1800 s ceiling gave them roughly
+        # zero margin, and on 2026-09-02 03 tripped it. Widened to 3600 s, matching 01, because of
+        # what tripping it costs: the run's finalizer lives in the notebook process, so a deadline
+        # kill lands *after* the batch has succeeded and *before* the header is closed, leaving a
+        # permanently RUNNING row in the registry. A ceiling is not a duration — nothing pays for
+        # the extra headroom unless it is needed — and the failure it prevents needs a human to
+        # clean up. 08 is the same shape and was passing only narrowly; it moves with 03.
+        NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 3600),
         # 08 launches a multi-engine run (Spark ∥ BigQuery) then live-monitors it → Dataproc spend.
-        NotebookSpec("08_run_and_monitor", TEMPLATE_MAIN, TIER_BATCH, 1800),
+        NotebookSpec("08_run_and_monitor", TEMPLATE_MAIN, TIER_BATCH, 3600),
         NotebookSpec("04_ray_on_vertex", TEMPLATE_MAIN, TIER_FULL, 5400),
     )
 }
@@ -108,6 +117,27 @@ def notebooks_for_tier(tier: str) -> list[NotebookSpec]:
     max_rank = _TIER_ORDER.index(tier)
     included = set(_TIER_ORDER[: max_rank + 1])
     return [spec for spec in REGISTRY.values() if spec.tier in included]
+
+
+def notebooks_by_name(names: list[str]) -> list[NotebookSpec]:
+    """Exactly the named notebooks, in registry order — the re-run-one-notebook path.
+
+    A tier is the right unit for *proving* the suite and the wrong unit for *repairing* it. A single
+    notebook can fail for reasons that have nothing to do with it — the one that prompted this
+    returned `Quota 'CPUS' exceeded` because six of its siblings happened to hold the region's
+    runtimes at that moment — and re-running the whole tier to retry it costs the tier's full time
+    and spend to re-prove seven things that already passed.
+
+    Unknown names raise rather than being skipped: a typo here silently "passing" because it matched
+    nothing is the failure mode worth spending an exception on.
+    """
+    unknown = [name for name in names if name not in REGISTRY]
+    if unknown:
+        raise EngineError(
+            f"unknown notebook(s) {', '.join(sorted(unknown))}; choose from {', '.join(REGISTRY)}"
+        )
+    wanted = set(names)
+    return [spec for spec in REGISTRY.values() if spec.name in wanted]
 
 
 @dataclass(frozen=True)
@@ -604,6 +634,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "no cell errored. Tiers escalate cost: smoke (BQ/local) → batch (+Dataproc) → full (+Ray).",
     )
     parser.add_argument("--tier", default=TIER_SMOKE, choices=_TIER_ORDER, help="acceptance tier")
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        metavar="NOTEBOOK",
+        help="run exactly these notebooks instead of a tier (repair path: re-run the one that "
+        "failed for an infrastructure reason without re-paying for the rest of the tier)",
+    )
     parser.add_argument("--project", required=True, help="GCP project id (explicit, never ambient)")
     parser.add_argument("--region", default="us-central1", help="region the templates live in")
     parser.add_argument(
@@ -643,8 +680,9 @@ def _run_fanout_cli(
     args: argparse.Namespace, notebooks_dir: Path, specs: list[NotebookSpec]
 ) -> int:
     """``--no-wait`` path: fan the notebooks out and print job ids + the Executions link."""
+    selection = f"only={','.join(args.only)}" if args.only else f"tier={args.tier}"
     print(
-        f"Fan-out tier={args.tier}: submitting {len(specs)} notebook(s) on project {args.project} "
+        f"Fan-out {selection}: submitting {len(specs)} notebook(s) on project {args.project} "
         "(not waiting for completion)"
     )
     results = run_fanout(
@@ -684,10 +722,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.notebooks_dir
         else Path(__file__).resolve().parents[2] / "notebooks"
     )
-    specs = notebooks_for_tier(args.tier)
+    specs = notebooks_by_name(args.only) if args.only else notebooks_for_tier(args.tier)
     if args.no_wait:
         return _run_fanout_cli(args, notebooks_dir, specs)
-    print(f"Acceptance tier={args.tier}: {len(specs)} notebook(s) on project {args.project}")
+    selection = f"only={','.join(args.only)}" if args.only else f"tier={args.tier}"
+    print(f"Acceptance {selection}: {len(specs)} notebook(s) on project {args.project}")
     results = run_acceptance(
         specs=specs,
         project_id=args.project,

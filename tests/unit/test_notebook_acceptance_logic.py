@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from scale_forecasting import notebook_acceptance as na
+from scale_forecasting.errors import EngineError
 
 
 def test_notebooks_for_tier_is_cumulative() -> None:
@@ -25,6 +26,27 @@ def test_notebooks_for_tier_is_cumulative() -> None:
     assert "09_review_run" in smoke
     # 08 launches a multi-engine run then monitors it — Dataproc spend → batch, not smoke.
     assert "08_run_and_monitor" in batch and "08_run_and_monitor" not in smoke
+
+
+def test_notebooks_by_name_selects_exactly_those_notebooks_in_registry_order() -> None:
+    """The repair path: re-run one notebook without re-paying for its whole tier."""
+    specs = na.notebooks_by_name(["03_combo_and_ensemble"])
+    assert [s.name for s in specs] == ["03_combo_and_ensemble"]
+
+    # Registry order, not argument order — the harness runs cheapest-first for a reason, and a
+    # caller listing them backwards should not reorder the run.
+    picked = na.notebooks_by_name(["08_run_and_monitor", "02_bigquery_native"])
+    assert [s.name for s in picked] == ["02_bigquery_native", "08_run_and_monitor"]
+
+
+def test_notebooks_by_name_raises_on_a_typo_rather_than_selecting_nothing() -> None:
+    """A typo that silently matched nothing would exit 0 having run no notebook — a false pass."""
+    with pytest.raises(EngineError) as exc:
+        na.notebooks_by_name(["03_combo_and_ensembel"])
+    assert "03_combo_and_ensembel" in str(exc.value)
+    # Known-good names alongside the typo must not rescue it.
+    with pytest.raises(EngineError):
+        na.notebooks_by_name(["02_bigquery_native", "nope"])
 
 
 def test_every_notebook_file_is_registered() -> None:

@@ -565,18 +565,45 @@ board because this config does not backtest — the row proves autoscaling and s
 
 All eight notebooks were executed headless against a live deployment and committed with their
 output cells at `ff1f8bf` (2026-08-28), which lands **after** the Ray re-architecture — so the Ray
-notebook reflects the current path.
+notebook reflects the current path. **Six were re-executed on 2026-09-02** against current code and
+re-committed with their new outputs, clearing the three `STALE` rows the axis moves had left. The
+executed notebooks were diffed against the committed ones first: source cells were byte-identical in
+all six, so only outputs changed.
 
 | Notebook | Status | Date | Axes at proof |
 |----------|--------|------|---------------|
-| `01_spark_via_connect.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=first-rows-of-history` |
-| `02_bigquery_native.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
+| `01_spark_via_connect.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates` |
+| `02_bigquery_native.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
 | `03_combo_and_ensemble.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
 | `04_ray_on_vertex.ipynb` | CURRENT | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
-| `07_scale_review.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
-| `08_run_and_monitor.ipynb` | STALE | 2026-08-28 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=platform-defaults` |
-| `09_review_run.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
-| `model_playground.ipynb` | CURRENT | 2026-08-28 | `python=3.11` |
+| `07_scale_review.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
+| `08_run_and_monitor.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay` |
+| `09_review_run.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
+| `model_playground.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
+
+**`03` is the one that did not clear, and it failed twice for two different reasons.** Neither was a
+defect in the notebook — it reported **zero cell errors** both times.
+
+The first attempt died before it started: `Quota 'CPUS' exceeded. Limit: 200.0 in region
+us-central1`, because six sibling notebooks held the region's Colab runtimes at that moment. The
+region measured 36/200 once the wave drained, so this was contention inside the harness's own
+fan-out, not a standing shortage. Worth recording for a second reason: **Vertex names a quota
+failure explicitly when that is what happened**, which independently strengthens the elimination
+above — the Ray outage's contentless "internal error" really was not quota.
+
+The second attempt, re-run alone against a quiet region, hit `Job deadline exceeded` at its 1800 s
+ceiling. **The work had actually succeeded** — Dataproc batch
+`sf-nb03-combo-ensemble-1788329058-c4a5e6db54a1-statistical-a1` reports `SUCCEEDED` — but the
+notebook process was killed while still waiting, so the run header is stranded at `RUNNING`
+forever. That is the failure mode that matters: `03` and `08` both block on a Dataproc Serverless
+batch, which carries ~30 min of fixed provisioning overhead before any work runs, so a 30-minute
+ceiling gave them close to zero margin, and **the run's finalizer lives in the notebook process** —
+a deadline kill lands after the batch succeeds and before the header closes. Both timeouts are now
+3600 s, matching `01`. A ceiling is not a duration, so the headroom costs nothing unless it is
+needed, and what it prevents needs a human to clean up.
+
+`03`'s row therefore stays `STALE` at its 2026-08-28 proof rather than being upgraded on a run that
+did not finish. Re-running it under the widened ceiling is what clears it.
 
 ## Other capabilities
 
@@ -859,10 +886,18 @@ Things that are true today and that no entry above covers. Keep this list short 
   from the obvious command. Analysed above. The product-side fix worth considering is making
   teardown verify rather than assume, and tolerating an `ERROR`-state same-named resource at create;
   neither was attempted during an outage, where every attempt fails for an unrelated reason.
-- **Nine run headers are stuck non-terminal.** Left by interrupted work across the whole build
-  (`naive-100k`, several `nb01-spark-connect`, `nb03`, `nb06`, …). Harmless to reads, but they block
-  the dev wipe tool's interlock and they make "is anything running?" unanswerable at a glance.
-  `sweep_orphans` is the verb; it is now live-proven, so this is a chore, not a gap in coverage.
+- **Ten run headers are stuck non-terminal, and no verb closes them.** Left by interrupted work
+  across the whole build (`naive-100k`, several `nb01-spark-connect`, `nb03`, `nb06`, …), most
+  recently `nb03-combo-ensemble-1788329058-c4a5e6db54a1` on 2026-09-02. Harmless to reads, but they
+  block the dev wipe tool's interlock and they make "is anything running?" unanswerable at a glance.
+  **An earlier version of this bullet named `sweep_orphans` as the fix, and that was wrong** —
+  `sweep_orphans` deletes artifact prefixes that have *no* registry row, which is the opposite
+  direction. Checked against the actual verb list (`init`, `doctor`, `drop_run`, `sweep_orphans`,
+  `snapshot`, `export`, plus `--probe`/`--cancel`), **nothing finalizes a non-terminal header whose
+  jobs have all already succeeded**: `--cancel` would stamp `CANCELLED` on work that completed,
+  `drop_run` would throw away real predictions, and `--probe` only reads. So this is a genuine
+  coverage gap, not a chore. The missing verb is a reconcile-and-close: take the reconciled per-job
+  truth `--probe` already computes and *write* the resulting terminal status to the header.
 - **Nothing runs the `@gcp` tests or the control-tower tools on a schedule.** Both rotted (above).
   A cheap mitigation is import-only smoke coverage for the tools and a periodic `-m gcp` collection
   pass (`--collect-only` catches neither of these; the `CellResult` break needed execution).
