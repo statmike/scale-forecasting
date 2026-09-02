@@ -301,6 +301,9 @@ matched the strings someone had thought of. Only a live region running out produ
 thought of. The fallback now walks all three and raises an `EngineError` naming them, which is what
 the plan's abort path expects — a defer, not a block.
 
+The obvious workaround while the entitlement is pending — move the DL family to `hardware: cpu` —
+does not work either, and fails in the worst way available. See the zero-worker section two below.
+
 ### The Ray region failover cannot leave the deployed region, and a CPU run is what proved it
 
 Wave 6.1's stand-in — a Ray CPU run with **no GPU anywhere in the config** — walked all three
@@ -329,6 +332,40 @@ the attachment multi-region in Terraform; derive the ID per candidate region and
 without one; or narrow `ray_regions` to the deployed region and drop the pretence of failover), and
 choosing it mid-campaign would move an axis under runs already recorded. Until then, treat
 `ray_regions` beyond the deployed region as **advertised but non-functional under PSC-I**.
+
+### A deep-learning family on Ray with `hardware: cpu` builds a cluster with no workers and hangs forever
+
+The other wave-6 stand-in — smoke 10's config with the `deep_learning` family moved from
+`{"runtime":"ray","hardware":"gpu","gpu_type":"T4"}` to `{"runtime":"ray","hardware":"cpu"}` — did
+not fail. It provisioned, submitted, and then sat. The other three families finished; the Ray one
+was still running **1h34m** later, with its autoscaler repeating:
+
+```
+No available node types can fulfill resource request {'CPU': 1.0}
+```
+
+The cluster was up and healthy. It had no workers to run anything on.
+
+**The chain is three correct-looking decisions that compose into a dead run.**
+`engines/ray_io.split_gpu_cpu_models` partitions the model list by each model's **registered
+family**, so `neuralprophet` is in `gpu_models` no matter what hardware was asked for. `hardware:
+cpu` makes `effective_use_gpu` false, and the sizing call then passes `n_gpu_cells` as **0**. With
+every model in `gpu_models`, `cpu_models` is empty, so `n_cpu_cells` is **0** too. `_build_workers`
+omits any pool with zero planned nodes — correctly, since Vertex rejects a zero-node worker type —
+and both pools are omitted. Vertex accepts a head-only cluster, Ray accepts the job, and the job
+waits for a worker that will never be created. There is no timeout: the submitter polls until
+terminal, so the harness blocked indefinitely and the run had to be stopped by hand.
+
+**This is config-reachable and it is the obvious thing to try.** A reader blocked on the Ray GPU
+entitlement — which is the state this project is in — reaches for exactly this edit to get the DL
+family running on something. It costs a cluster-hour and produces no error message.
+
+Not fixed here, for the same reason as the failover above: there is more than one defensible answer
+(fold DL models into the CPU pool when `use_gpu` is false, so a CPU Ray run of a DL family simply
+runs slowly; or reject a zero-worker plan before provisioning; or both), and the sizing path feeds
+`run_id`-relevant config. Until it is fixed, **`hardware: cpu` on a `deep_learning` Ray family is a
+hang, not a slower run.** The zero-worker plan is the detectable signal — no valid run ever wants
+one.
 
 ### Why almost everything Spark is stale
 
@@ -484,9 +521,10 @@ notebook reflects the current path.
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. **Scope: reaching a Ray family through `--probe` still needs the handle fix** — see below. |
-| RuntimeProbe cancel (P5) | NEVER_RUN | Offline only. No cancel has stopped a real job. |
+| RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Scope: the `--cancel` verb itself could not reach the family** — same missing `resource_name` as the probe — and one summary line miscounts. See below. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
-| Run audit principal (P6) | NEVER_RUN | `identity.resolve_principal` is `pragma: no cover` — its ADC and userinfo paths have never executed. |
+| Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. |
+| Run audit principal (P6) | NEEDS_RECHECK | It has now executed, live, under ADC — and produced `actor=None`. The audit line for a real cancel attempt carried no principal. Whether that is a resolver defect or the expected ADC answer for this credential type is unresolved; either way the audit trail was empty when it mattered. See below. |
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
 
@@ -545,6 +583,93 @@ written or stamping the resource path back the moment the submitter has it inste
 a change to launch ordering rather than a missing call, and worth designing rather than patching
 mid-campaign. Recorded as a gap below.
 
+### A cancel that could not reach its job refused to say it had, and that is the property worth having
+
+The deadlocked Ray family above gave the cancel path something no offline test can construct: a real
+in-flight job, on a real cluster, that the verb could not actually reach.
+
+The preview was right about everything it could see:
+
+```
+run wave-62-mixed-runtimes-cpu-a7d04b6a9c8e  status=RUNNING
+  would cancel:  deep_learning (ray, RUNNING)
+  unaffected:    statistical, ml, native (already COMPLETED)
+  partial results are RETAINED
+```
+
+Correct blast radius, correct per-family effect, and an explicit statement of what happens to data
+already written. Then `--cancel --force`:
+
+```
+deep_learning  NOT cancelled  handle missing resource_name
+audit: actor=None  reason=...  header=None
+```
+
+**Three things came out of that, and the middle one is the point.**
+
+**It did not lie about the registry.** `run_jobs.deep_learning` stayed `RUNNING` and the run header
+stayed `RUNNING`. The product refused to record a cancellation it had not achieved. That is the
+cancel data-integrity property from the RuntimeProbe design, and it has now been proven the only way
+that really counts — by a cancel that failed. A run marked CANCELLED while its job kept burning a
+cluster would have been the worst available outcome, and it is the easy one to write.
+
+**The verb could not reach the family, for the same reason the probe could not** — the entry handle
+has no `resource_name` on a single-family ephemeral Ray run. So `--cancel` inherits the gap recorded
+above; fixing the handle fixes both.
+
+**One wording defect.** The summary line read `1 in-flight job(s) stopped` when zero were. The
+per-family line immediately above it says `NOT cancelled`, so the output contradicts itself. Cosmetic
+in isolation, not cosmetic in an operational verb someone runs when they are trying to stop spend.
+
+The job was then stopped out of band by calling `RayProbe().cancel()` directly with a hand-completed
+handle — `stopped: True | already_gone: False | detail: ray job stop issued` — which closes the
+mechanism end to end: the Ray job moved to `STOPPED`, the run's own poll loop observed the terminal
+state and raised `EngineError`, the harness unwound, and its `finally` tore the cluster down. The
+registry finished `deep_learning FAILED` with the other three `COMPLETED`, and
+`gcloud ai persistent-resources describe` returned `NOT_FOUND`. **So the stop, the propagation, and
+the teardown all work; only the path from the CLI to the handle does not.**
+
+`actor=None` is the P6 finding. `identity.resolve_principal` ran for the first time — live, under
+ADC — and returned nothing, so the audit line for a real cancel attempt names no one. Recorded as
+`NEEDS_RECHECK` rather than a defect because it has not been established whether ADC user
+credentials are expected to yield a principal here; what *is* established is that the audit trail was
+empty on the one occasion it was exercised.
+
+### Code the offline gate does not run had rotted in two places, and only running it live showed that
+
+The registry-ops verbs were the last unexercised capability, and getting to them took two repairs
+that have nothing to do with the verbs and everything to do with **what the gate covers**. The
+offline gate deselects `@gcp`, and it has never had any reason to look at the control-tower tools at
+all. Both categories drifted behind refactors that were themselves clean.
+
+**`test_drop_run_deletes_every_tier_of_a_real_run` no longer constructed a valid `CellResult`.**
+`model_hash` and `error` became required fields; the test predates them and had not been run since.
+It failed at `TypeError` before reaching a single assertion — so the most destructive verb in the
+product had the *appearance* of a live test and none of the coverage. Repaired; the six now pass in
+135s.
+
+**Both control-tower tools crashed on import-time API drift.** `split_gcs_uri` moved from
+`registry.ops` to `registry.artifacts` in the artifacts-before-rows split, and `wipe_registry.py` and
+`rebuild_source.py` both still called `ops.split_gcs_uri`. Neither is in any test suite by design —
+they are dev tooling, not product — but that is exactly why they rot. Both repaired and both previews
+now render against the real deployment.
+
+**The wipe tool's safety interlock then refused, on real data, which is the proof worth having:**
+
+```
+REFUSING: 9 run(s) still PENDING/RUNNING — naive-100k-7530d9b41ebb, nb01-spark-connect-…
+```
+
+Nine non-terminal run headers are sitting in the registry from interrupted work across the whole
+build. A tool whose entire job is irreversible deletion looked at them and stopped. Nothing was
+wiped — and nothing should be: the registry holds every `run_id` this ledger's reverse-traces point
+at, so a wipe would invalidate the provenance of the campaign that proved the wipe works.
+
+The general lesson is worth stating because it will recur: **a test marked `@gcp` and a tool kept
+outside the package are both invisible to the gate, and both silently accumulate drift that only a
+live invocation reveals.** Neither failure was a product defect. Both would have been, the first time
+someone reached for them in anger.
+
 ## Known validation gaps
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
@@ -565,7 +690,22 @@ Things that are true today and that no entry above covers. Keep this list short 
 - **The Ray probe cannot escalate to a single-family Ray run.** `resource_name` is absent from the
   entry handle for exactly the shape that has no shared cluster, and the corrected handle lands only
   after the job is terminal. Found live 2026-09-02, analysed above. Small fix, deliberately deferred
-  so it does not move `run_jobs.job_telemetry` under rows this campaign is still writing.
+  so it does not move `run_jobs.job_telemetry` under rows this campaign is still writing. **`--cancel`
+  inherits it** — the same shape cannot be stopped from the CLI either.
+- **A `deep_learning` family on Ray with `hardware: cpu` hangs indefinitely.** Zero-worker cluster,
+  no timeout, no error — analysed above. Reachable from config alone, and the natural workaround for
+  anyone blocked on the Ray GPU entitlement, which makes it the highest-value of the three deferred
+  fixes.
+- **Nine run headers are stuck non-terminal.** Left by interrupted work across the whole build
+  (`naive-100k`, several `nb01-spark-connect`, `nb03`, `nb06`, …). Harmless to reads, but they block
+  the dev wipe tool's interlock and they make "is anything running?" unanswerable at a glance.
+  `sweep_orphans` is the verb; it is now live-proven, so this is a chore, not a gap in coverage.
+- **Nothing runs the `@gcp` tests or the control-tower tools on a schedule.** Both rotted (above).
+  A cheap mitigation is import-only smoke coverage for the tools and a periodic `-m gcp` collection
+  pass (`--collect-only` catches neither of these; the `CellResult` break needed execution).
+- **The `--cancel` summary line miscounts.** It reported `1 in-flight job(s) stopped` on a run where
+  the per-family line said `NOT cancelled`. One-line fix; not made mid-campaign only because it sits
+  in the same function as the handle fix.
 - **The recorded `run_id`s for smokes 01–06 are no longer re-derivable.** W5 added
   `compute.profile` to `ComputeConfig`, and `run_id` is a digest of the whole config, so feeding
   those same config files to today's code yields different ids. **No row was marked `STALE` for

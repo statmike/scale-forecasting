@@ -212,7 +212,9 @@ def test_drop_run_deletes_every_tier_of_a_real_run(settings: Settings) -> None:
         ts_id="series-0",
         model_type="theta",
         compute_engine="local",
+        model_hash="0" * 12,
         status="ok",
+        error=None,
         predictions=pd.DataFrame(
             {
                 "ds": pd.to_datetime(["2026-02-01"]),
