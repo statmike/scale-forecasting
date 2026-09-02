@@ -237,6 +237,14 @@ class RayProbe:
     connect, which would otherwise retry through its warm-up budget against a dead endpoint. When
     the cluster is alive it reuses `ray_jobs._connect_job_client` + ``get_job_status`` (and
     ``get_job_info`` for the failure message). Any error degrades to UNKNOWN.
+
+    **`_init_vertex` first, always.** ``vertex_ray.get_ray_cluster`` takes no project or location —
+    it reads the SDK's global config, which a probe process has never set. The launching process
+    happens to have pinned it while creating the cluster, so this is invisible in-process and fails
+    out-of-process, which is the only way a probe is ever actually run: the regional endpoint is
+    unset, Vertex answers 404, and the ``except`` below turns a knowable state into UNKNOWN. Found
+    live 2026-09-02 — the same call went 404 → ``RUNNING`` with nothing changed but the init.
+    The handle's own region is used, not ``settings.region``, because a cluster may have hopped.
     """
 
     name = "ray"
@@ -245,7 +253,7 @@ class RayProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..ray_cluster import _get_cluster
+            from ..ray_cluster import _get_cluster, _init_vertex
             from ..ray_jobs import _connect_job_client
 
             resource_name = handle.resource_name
@@ -254,6 +262,7 @@ class RayProbe:
                 return ProbeResult(
                     NATIVE_UNKNOWN, exists=True, detail="handle missing resource_name"
                 )
+            _init_vertex(settings, handle.region or settings.region)
             try:
                 _get_cluster(resource_name)
             except NotFound:
@@ -275,7 +284,7 @@ class RayProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..ray_cluster import _get_cluster
+            from ..ray_cluster import _get_cluster, _init_vertex
             from ..ray_jobs import _connect_job_client
 
             resource_name = handle.resource_name
@@ -283,6 +292,9 @@ class RayProbe:
                 return CancelResult(
                     stopped=False, already_gone=False, detail="handle missing resource_name"
                 )
+            # Same reason as `check` — without this the SDK has no regional endpoint out-of-process,
+            # and a cancel that cannot reach the cluster reports failure instead of stopping a job.
+            _init_vertex(settings, handle.region or settings.region)
             try:
                 _get_cluster(resource_name)
             except NotFound:

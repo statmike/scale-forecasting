@@ -385,18 +385,32 @@ def _patch_ray(
     *,
     client: _FakeRayJobClient | None = None,
     cluster_exc: Exception | None = None,
-) -> None:
+) -> list[Any]:
+    """Stub the Vertex calls and return the trace of what the probe did, in order.
+
+    The trace exists for one reason: ``vertex_ray.get_ray_cluster`` reads the SDK's *global*
+    project/location, so the probe must pin them with `_init_vertex` first. Nothing about the
+    return value of a stubbed `_get_cluster` can show whether that happened — only the order can.
+    """
     import scale_forecasting.ray_cluster as ray_cluster
     import scale_forecasting.ray_jobs as ray_jobs
 
+    trace: list[Any] = []
+
     def _get_cluster(resource_name: str) -> Any:
+        trace.append(("get_cluster", resource_name))
         if cluster_exc is not None:
             raise cluster_exc
         return types.SimpleNamespace(name=resource_name)
 
+    def _init_vertex(settings: Any, region: str) -> None:
+        trace.append(("init", region))
+
     monkeypatch.setattr(ray_cluster, "_get_cluster", _get_cluster)
+    monkeypatch.setattr(ray_cluster, "_init_vertex", _init_vertex)
     if client is not None:
         monkeypatch.setattr(ray_jobs, "_connect_job_client", lambda rn: client)
+    return trace
 
 
 @pytest.mark.parametrize(
@@ -441,10 +455,9 @@ def test_ray_missing_resource_name_is_unknown() -> None:
 
 
 def test_ray_connect_error_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    import scale_forecasting.ray_cluster as ray_cluster
     import scale_forecasting.ray_jobs as ray_jobs
 
-    monkeypatch.setattr(ray_cluster, "_get_cluster", lambda rn: object())
+    _patch_ray(monkeypatch)
 
     def _boom(rn: str) -> Any:
         raise RuntimeError("dashboard 524")
@@ -455,6 +468,35 @@ def test_ray_connect_error_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.native_state == NATIVE_UNKNOWN
     assert result.exists is True
+
+
+def test_ray_pins_the_sdk_to_the_handles_region_before_reading_the_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A probe runs out-of-process, where the Vertex SDK has never been initialized. Without the
+    # pin, `get_ray_cluster` resolves against no regional endpoint, Vertex answers 404, and the
+    # probe's catch-all turns a knowable RUNNING into UNKNOWN. Observed live 2026-09-02.
+    trace = _patch_ray(monkeypatch, client=_FakeRayJobClient("RUNNING"))
+
+    RayProbe().check(_ray_handle(), settings=_SETTINGS)
+
+    # The handle's region, not settings.region — a cluster may have hopped on a capacity stockout.
+    assert trace == [("init", "us-west1"), ("get_cluster", _ray_handle().resource_name)]
+
+
+def test_ray_cancel_pins_the_sdk_before_reading_the_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same failure, worse consequence: an unreachable cluster makes cancel report "could not stop"
+    # while the job keeps running and billing.
+    client = _FakeRayJobClient("RUNNING")
+    trace = _patch_ray(monkeypatch, client=client)
+
+    result = RayProbe().cancel(_ray_handle(), settings=_SETTINGS)
+
+    assert trace[0] == ("init", "us-west1")
+    assert result.stopped is True
+    assert client.stopped_id == "job-1"
 
 
 # --- BigQueryProbe -------------------------------------------------------------

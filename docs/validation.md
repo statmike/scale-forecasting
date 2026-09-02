@@ -483,7 +483,7 @@ notebook reflects the current path.
 | Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The six notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
 | Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
-| RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a **correct refusal** on the running Ray one. **Scope: the Ray escalation itself is still unproven and cannot currently run** — see below. |
+| RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. **Scope: reaching a Ray family through `--probe` still needs the handle fix** — see below. |
 | RuntimeProbe cancel (P5) | NEVER_RUN | Offline only. No cancel has stopped a real job. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
 | Run audit principal (P6) | NEVER_RUN | `identity.resolve_principal` is `pragma: no cover` — its ADC and userinfo paths have never executed. |
@@ -519,10 +519,31 @@ run, which is the common shape and was the shape here, is unreachable. Offline t
 this: they construct handles directly and never exercise the launch-ordering that decides whether
 `resource_name` is present.
 
-Not fixed here. The fix is small (provision or name the cluster before writing the entry handle, or
-stamp the resource path as soon as the submitter has it rather than at job end) but it changes what
-lands in `run_jobs.job_telemetry` mid-run, and the campaign is currently recording rows against the
-present behaviour. Recorded as a gap below.
+**Behind it sat a second defect, which the first one had been hiding.** `RayProbe.check` calls
+`ray_cluster._get_cluster`, and `vertex_ray.get_ray_cluster` takes no project or location — it reads
+the Vertex SDK's *global* config. The launching process sets that while creating the cluster, so
+in-process everything works; a probe process never does. Isolated live against the same running
+cluster, one call, two outcomes:
+
+```
+without _init_vertex:  ValueError: Failed in getting the cluster ... MethodNotImplemented (404)
+with    _init_vertex:  OK RUNNING
+```
+
+The probe's catch-all would have turned that 404 into `UNKNOWN` — a knowable state reported as
+unknowable. `RayProbe.check` and `.cancel` now pin the SDK to **the handle's** region first (not
+`settings.region`: a cluster may have hopped on a stockout), and two ordering tests assert the pin
+precedes the cluster read, since no stubbed return value can show it.
+
+With that fixed, the Ray probe was driven live out-of-process against the still-running job with a
+hand-completed handle, and returned `native_state=RUNNING, exists=True, detail="Job is currently
+running."` — **so the read path itself is proven; the only thing still standing between `--probe` and
+a Ray family is the missing `resource_name`.**
+
+That one is not fixed here. It means either provisioning the cluster before the entry handle is
+written or stamping the resource path back the moment the submitter has it instead of at job end —
+a change to launch ordering rather than a missing call, and worth designing rather than patching
+mid-campaign. Recorded as a gap below.
 
 ## Known validation gaps
 
