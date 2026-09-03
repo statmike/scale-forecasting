@@ -84,7 +84,7 @@ its resolved runtime, plus a downstream ensemble node. Two methods expose that D
 (what *will* run) and one live (what *did*), lined up by the same deterministic `job_key`:
 
 ```python
-forecaster = sf.Forecaster.from_file("configs/all_families_100k.json")
+forecaster = sf.Forecaster.from_file("configs/all_families_10k.json")
 
 # Offline — the planned DAG, no GCP. One DagNode per family + the ensemble.
 for node in forecaster.dag():

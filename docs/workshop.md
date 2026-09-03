@@ -39,11 +39,18 @@ two runtimes, plus the all-families DAG:
 |--------|-----------|----------------------|
 | `explode_100k.json` | Spark | The 100k CPU workhorse — `theta`, `holtwinters`, `sarimax`, `xgboost` (statistical + ml families) on Dataproc Serverless, one Spark task per `(series, model)` cell. |
 | `ray_100k.json` | Ray | **The same four models, on Ray** — the runtime-parity comparison. Same unit of work, same answers, different engine; the wall-clock/overhead difference is the story. |
-| `all_families_100k.json` | Ray ∥ BigQuery | **The family DAG.** One config, seven models across **all four families** (statistical / ml / deep-learning / native) — each family runs as its own parallel job under one `run_id`, deep-learning packing NeuralProphet onto fractional T4s and the native models running in BigQuery. |
+| `all_families_10k.json` | Ray ∥ BigQuery | **The family DAG.** One config, seven models across **all four families** (statistical / ml / deep-learning / native) — each family runs as its own parallel job under one `run_id`, deep-learning packing NeuralProphet onto fractional T4s and the native models running in BigQuery. |
 
-`explode_100k` and `ray_100k` are the *same models on different runtimes*; `all_families_100k` is *one
+`explode_100k` and `ray_100k` are the *same models on different runtimes*; `all_families_10k` is *one
 config fanned into a job per family*. Together they give notebook 07 both stories: runtime parity and the
 per-family placement.
+
+**Why the family DAG runs at 10,000 series and not 100,000.** It is the only one of the three that
+includes a deep-learning model, and NeuralProphet needs a T4. A default project is allowed **four**
+of them, which is enough for ~10,000 series in about ten hours and nowhere near enough for 100,000.
+The CPU-only configs stay at 100k because CPU quota is not the binding constraint at that scale.
+[Quota and scale](quota_and_scale.md) has the arithmetic, and the quota to request if you want to
+run the family DAG larger.
 
 Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true), then:
 
@@ -132,7 +139,7 @@ telemetry `07_scale_review` charts), so they run **one after another** — budge
 ```bash
 uv run python -m scale_forecasting.main --config configs/explode_100k.json        # Spark
 uv run python -m scale_forecasting.main --config configs/ray_100k.json            # Ray
-uv run python -m scale_forecasting.main --config configs/all_families_100k.json   # every family
+uv run python -m scale_forecasting.main --config configs/all_families_10k.json   # every family
 ```
 
 > **On the wait timeout.** A 100k run runs longer than the client's old 15-minute default wait, so
@@ -162,14 +169,14 @@ ORDER BY latest_write DESC;
 ```
 
 Each run's target is **`n_series` × `n_models` cells** — `explode_100k` / `ray_100k` are 100,000 × 4
-models = **~400,000 cells**, and `all_families_100k` is 100,000 × 7 models = **~700,000 cells** — so
+models = **~400,000 cells**, and `all_families_10k` is 10,000 × 7 models = **~70,000 cells** — so
 `cells_written / target` is a rough % complete. Reading the numbers:
 
 - **Counts climbing between two checks = healthy.** Leave the jobs alone; they're serverless/autoscaling
   and finish server-side regardless of your shell. **Don't kill them to "restart"** — you'd discard the
   cells already written and pay to recompute (re-submitting the same config reuses the same
   deterministic `run_id` and dedupes-on-read, so nothing already done is wasted).
-- **Each family fills independently** in `all_families_100k` — the deep-learning family (NeuralProphet on
+- **Each family fills independently** in `all_families_10k` — the deep-learning family (NeuralProphet on
   T4s) is the slowest, so its cells trail the statistical/ml ones. Expected: a run's wall-clock is its
   *slowest* family, and the others finish and wait.
 - **Genuinely stuck** looks like: count **flat** across several minutes **and** the job's UI (the
@@ -219,7 +226,7 @@ ORDER BY runtime_seconds DESC;
 > Accuracy parity across engines is demonstrated at small scale in notebook **03** (where backtest is
 > on). Say this out loud before opening 07 and it's a feature, not a surprise.
 
-> **Runs that outlast Cloud Shell?** The full-suite run `configs/all_families_100k_full.json`
+> **Runs that outlast Cloud Shell?** The full-suite run `configs/all_families_10k_full.json`
 > (100k × 7 models, backtest on, NeuralProphet on T4s) runs for **hours** — longer than Cloud Shell
 > will hold the orchestrator that finalizes the run header. Drive it from a **persistent VM** instead:
 > ➡️ [operations.md §4 — Long runs on a persistent

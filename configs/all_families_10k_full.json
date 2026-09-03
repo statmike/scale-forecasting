@@ -1,10 +1,10 @@
 {
-  "run_name": "all_families_100k_full",
+  "run_name": "all_families_10k_full",
   "python_runtime": "ray",
   "data": {
     "source_table": "source_series_iceberg",
     "horizon": 28,
-    "series_limit": 100000
+    "series_limit": 10000
   },
   "models": [
     "theta",

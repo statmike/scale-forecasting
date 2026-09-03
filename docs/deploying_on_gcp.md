@@ -421,3 +421,9 @@ resolve; see the notebooks and `terraform/README.md` for the exact wiring.
   `run_seed = false` to skip). `create_composer` is **off by default** — the only real at-rest cost.
 - Run `terraform plan` and read it. Nothing is created until `apply`, and the plan is the honest
   preview of exactly what this document describes.
+- **Check your quota against the scale you actually want.** Terraform creates nothing that needs an
+  unusual allowance, so the apply will succeed on a stock project — but the *runs* are bounded by
+  regional `CPUS` and `NVIDIA_T4_GPUS`, and a default project caps out at roughly 20 worker nodes
+  and 4 GPUs. That is comfortable to ~10,000 series and slow past ~100,000.
+  [Quota and scale](quota_and_scale.md) has the measured numbers and the exact metrics to request;
+  quota approvals take days, so file before you need them, not after.

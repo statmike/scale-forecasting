@@ -510,10 +510,8 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `all_families_10k.json` | Every family under one `run_id` at the largest scale four T4s allow (Ray + BigQuery) | NEVER_RUN | — | — | — |
-| `scale_100k_three_engines.json` | 100,000 series across statistical + ml (Ray) and native (BigQuery) — `all_families_100k` minus the family that quota cannot reach | NEVER_RUN | — | — | — |
-| `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) — **quota-blocked**, see below | NEVER_RUN | — | — | — |
-| `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
+| `all_families_10k.json` | Every family under one `run_id` — the largest scale a default project's 4 T4s can reach (Ray + BigQuery) | NEVER_RUN | — | — | — |
+| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
 
 **On 2026-09-02 the whole Ray track stopped provisioning, and the elimination is the useful part.**
 `ray_100k` was attempted and never reached a job: Vertex returned the contentless
@@ -672,7 +670,7 @@ checks is indistinguishable from one that works.
 
 **Four demonstration configs were held back by the Ray GPU blocker, which turned out to be an
 outage rather than an entitlement** (see smoke 08 above for how that was settled). `ray_gpu_demo`,
-`per_family_runtimes_demo`, `all_families_100k` and `all_families_100k_full` all put a family on
+`per_family_runtimes_demo`, `all_families_10k` and `all_families_10k_full` all put a family on
 Vertex Ray GPU. None of them was ever re-pointed at Serverless to get a green row, and that
 restraint is the reason the eventual rows mean anything: the whole point of
 `per_family_runtimes_demo` is the *split*, and a version of it that ran everything on Spark would
@@ -1326,15 +1324,36 @@ Things that are true today and that no entry above covers. Keep this list short 
   therefore a statement about a 200-core allowance, not about the product, and raising a
   `max_nodes` knob cannot change any of them.
 
-  The GPU side is where the ceiling actually blocks a claim. `all_families_100k` asks for 100,000
-  `neuralprophet` fits; `smoke-09-shared-ray` measured that model at **23.9 s/fit and an effective
-  concurrency of 11.6**, and 4 T4s cannot do better, so the run is **~47 hours** — not expensive so
-  much as unfinishable within any sensible window. It is split rather than dropped:
-  `all_families_10k` proves all four families under one `run_id` including GPU, and
-  `scale_100k_three_engines` proves 100,000 series across the other three. **The one claim neither
-  of them makes is the deep-learning family at 100k**, and `all_families_100k.json` stays in the
-  tree unrun precisely so that the claim keeps a name. A quota increase is the only thing that
-  closes this.
+  The GPU side is where the ceiling stops being a cost question. The default `NVIDIA_T4_GPUS`
+  allowance is **4**, and `neuralprophet` runs at roughly **4 cells/min per T4**, so a
+  deep-learning pass costs ~10 hours at 10,000 series and **~104 hours at 100,000** — not expensive
+  so much as unfinishable. **A default project runs out of deep-learning headroom around 1,000
+  series, two orders of magnitude before it runs out of CPU headroom.** The 100k all-families
+  configs were therefore retired in favour of `all_families_10k` / `all_families_10k_full`: 10,000
+  series is the largest scale a stock project can actually reproduce, which is the only scale a
+  demonstration config should claim. The 100k rows that remain above (`explode_100k`, `ray_100k`)
+  are kept because they are *proven* — they are the evidence that the architecture reaches 100k,
+  and `docs/quota_and_scale.md` is where the arithmetic for going beyond it now lives.
+- **No deep-learning run has ever exceeded 100 series, anywhere in this ledger.** Every
+  `neuralprophet` row — smokes 03, 06, 09, 10, 14, 16, `ray_gpu_demo`, `per_family_runtimes_demo` —
+  is at 100 cells or fewer. The GPU code path is well proven; its *throughput at scale* is not
+  measured at all, and the 4 cells/min/T4 figure now published in `quota_and_scale.md` is
+  extrapolated from spans where cluster start-up was a large fraction of the total. It is flagged
+  as soft in that document. `all_families_10k` is the run that would replace the extrapolation with
+  a measurement.
+- **The Ray fleet ran at roughly one busy core in eight, and the resource plan did not predict it.**
+  Measured 2026-09-03 from `ray-100k-dcc77a9d1e9b`: 37,500 chunk tasks were queued against 20
+  `n1-standard-8` workers, and the plan expected 4–8 concurrent cells per node. Actual concurrency,
+  computed as `SUM(fit_seconds) / wall` per 30-minute bucket, was **0.97 cells per node** — flat, at
+  exactly one, for eight consecutive buckets. `cell_started_at`/`cell_ended_at` bracket the same
+  duration as `fit_seconds`, so the idle time is not inside the cell; it is between cells or between
+  chunks. Two candidate causes, not yet separated: Ray placing one task per node despite `num_cpus`
+  leaving room for four, or per-chunk overhead dominating a chunk of only 8 cells
+  (`_DEFAULT_TARGET_CELLS_PER_SLOT = 8` produced 37,500 separate tasks and 37,500 separate
+  registry writes for 300,000 cells). **Separating them needs a live `ray status` during a run,
+  which is why this is a gap and not a fix.** It is not a correctness problem — every published
+  wall-clock figure is real and reproducible — but it means the throughput numbers are a floor, and
+  a fleet four to eight times faster may be available at identical quota.
 - **The prebaked GPU cluster image expires, and nothing in the deployment notices.** Found live
   2026-09-02 by smoke 16, analysed above: an image built nine days earlier was refused because the
   Dataproc sub-minor baked into it had been retired. **Smoke 06 is the row that rests on this.** Its
