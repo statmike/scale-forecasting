@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from .rows import assemble_job_row
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
     from ..config import RunConfig
     from ..settings import Settings
@@ -125,21 +125,36 @@ def run_header(
 class JobFinalizer:
     """Mutable finalize state a `run_job` body fills in before a clean exit.
 
-    A job's terminal ``status`` (default ``COMPLETED``) plus any extra ``run_jobs`` columns to stamp
-    on success — notably ``system_job_id`` (once the platform assigns/accepts it) and
-    ``job_telemetry`` (the per-job sizing/wall/DCU overlay). Left untouched, the block finalizes a
-    plain ``COMPLETED`` with only the wall-clock ``runtime_seconds`` `run_job` measures.
+    A job's terminal ``status`` (default ``COMPLETED``), any extra ``run_jobs`` columns to stamp on
+    success — notably ``system_job_id``, once the platform assigns/accepts it — and a
+    ``job_telemetry`` patch. Left untouched, the block finalizes a plain ``COMPLETED`` with only the
+    wall-clock ``runtime_seconds`` `run_job` measures.
     """
 
     def __init__(self) -> None:
         self.status: str = "COMPLETED"
         self.extra: dict[str, Any] = {}
+        self.telemetry: dict[str, Any] = {}
 
-    def finalize(self, *, status: str | None = None, **fields: Any) -> None:
-        """Set the terminal ``status`` (if given) and merge extra columns for the success write."""
+    def finalize(
+        self,
+        *,
+        status: str | None = None,
+        telemetry: Mapping[str, Any] | None = None,
+        **fields: Any,
+    ) -> None:
+        """Set the terminal ``status`` (if given), merge extra columns, accrete a telemetry patch.
+
+        ``telemetry`` is a ``{dotted.path: value}`` patch merged into the row's ``job_telemetry``
+        (`registry.jobs.update_job`'s ``merge_telemetry``) rather than replacing the column — which
+        is what a body wants nearly always, because the row it is finalizing may already carry a
+        capacity ledger somebody else wrote while it was waiting to start.
+        """
         if status is not None:
             self.status = status
         self.extra.update(fields)
+        if telemetry:
+            self.telemetry.update(telemetry)
 
 
 @contextmanager
@@ -162,8 +177,9 @@ def run_job(
     The `run_header` analog for the per-job tier: on entry write the job row (RUNNING) with its
     deterministic id (`assemble_job_row` → `registry.ids.make_job_key`) and resolved compute; on a
     clean exit ``update_job`` with the finalizer's ``status`` (default COMPLETED), the measured
-    wall-clock ``runtime_seconds``, and any extra columns set via `JobFinalizer.finalize` (e.g. the
-    platform ``system_job_id`` and ``job_telemetry``); on an exception ``update_job(status=FAILED,
+    wall-clock ``runtime_seconds``, any extra columns set via `JobFinalizer.finalize` (e.g. the
+    platform ``system_job_id``) and its ``job_telemetry`` patch **merged** into whatever the row
+    already carries; on an exception ``update_job(status=FAILED,
     runtime_seconds=…)`` then re-raise, so a crashed job records a terminal status instead of
     stranding at RUNNING — with the same sticky-cancellation guard `run_header` applies, since a
     cancelled family is exactly the job this block is most likely to see raise. The run header is
@@ -213,6 +229,7 @@ def run_job(
                 runtime_seconds=time.perf_counter() - started,
                 ended_at=datetime.now(UTC),
                 unless_status_in=_STICKY_STATUSES,
+                merge_telemetry=fin.telemetry or None,
                 **fin.extra,
             )
         raise
@@ -224,5 +241,6 @@ def run_job(
             runtime_seconds=time.perf_counter() - started,
             ended_at=datetime.now(UTC),
             unless_status_in=_sticky_guard(fin.status),
+            merge_telemetry=fin.telemetry or None,
             **fin.extra,
         )

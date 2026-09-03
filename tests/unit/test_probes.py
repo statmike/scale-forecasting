@@ -1015,6 +1015,52 @@ def test_build_cancel_audit_shape() -> None:
     }
 
 
+def test_cancelling_a_family_does_not_erase_what_it_took_to_get_here(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row a cancel finalizes is the one most likely to carry a capacity ledger.
+
+    A family an operator gives up on is very often a family that has been hopping regions looking
+    for a T4 — its whole attempt log lives under ``$.capacity``. Rebuilding ``job_telemetry`` from
+    the handle and the audit alone would delete the record of every region tried at exactly the
+    moment it became the interesting part of the row.
+    """
+    from scale_forecasting.probes import cancel as cancel_mod
+    from scale_forecasting.registry import jobs as jobs_mod
+
+    wrote: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        jobs_mod, "update_job", lambda job_id, **kw: wrote.append({"job_id": job_id, **kw})
+    )
+
+    ts = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
+    item = cancel_mod.CancelPlanItem(
+        family="deep_learning",
+        runtime="ray",
+        registry_status=AWAITING_CAPACITY,
+        native_state=None,
+        cancellable=True,
+        n_done=0,
+        n_expected=100,
+        note="",
+    )
+    cancel_mod._finalize_cancelled(
+        {"job_id": "j-1", "started_at": None},
+        _serverless_handle(),
+        item,
+        actor="sa@proj.iam",
+        cancelled_at=ts,
+        reason="gave up",
+        settings=_SETTINGS,
+    )
+
+    (call,) = wrote
+    assert "job_telemetry" not in call  # never the whole column
+    assert set(call["merge_telemetry"]) == {"probe_handle", "cancel"}
+    assert call["merge_telemetry"]["cancel"]["cancelled_by"] == "sa@proj.iam"
+    assert call["status"] == "CANCELLED"
+
+
 # --- P5: per-engine cancel() (stubbed clients, never touch GCP) ----------------
 
 

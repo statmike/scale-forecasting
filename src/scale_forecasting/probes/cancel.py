@@ -288,9 +288,12 @@ def _finalize_cancelled(
 ) -> None:  # pragma: no cover - GCP I/O
     """Finalize one job row to ``CANCELLED`` with the audit blob merged into ``job_telemetry``.
 
-    A non-terminal job row's ``job_telemetry`` holds only its ``probe_handle`` (sizing telemetry
-    goes to the header, not the job row), so we rebuild it from the handle we parsed plus the new
-    ``$.cancel`` audit blob — preserving the handle so the cancelled attempt stays reconcilable.
+    A **merge**, not a whole-column write, and the difference is load-bearing: a family that walked
+    regions looking for capacity carries its entire attempt ledger under ``$.capacity``, and
+    rebuilding the column from the handle alone would erase the record of every region tried at
+    exactly the moment someone gave up on it. ``$.probe_handle`` is re-sent from the handle we
+    parsed — cheap, and it means a row whose handle was written by an older code path comes out of
+    a cancel reconcilable either way.
     """
     from ..registry.jobs import update_job
 
@@ -301,16 +304,16 @@ def _finalize_cancelled(
         native_state=item.native_state,
         n_done=item.n_done,
     )
-    telemetry: dict[str, Any] = {"probe_handle": handle.to_blob(), "cancel": audit}
     started = _parse_ts(row.get("started_at"))
-    fields: dict[str, Any] = {
-        "status": _CANCELLED,
-        "ended_at": cancelled_at,
-        "job_telemetry": telemetry,
-    }
+    fields: dict[str, Any] = {"status": _CANCELLED, "ended_at": cancelled_at}
     if started is not None:
         fields["runtime_seconds"] = (cancelled_at - started).total_seconds()
-    update_job(row["job_id"], settings=settings, **fields)
+    update_job(
+        row["job_id"],
+        settings=settings,
+        merge_telemetry={"probe_handle": handle.to_blob(), "cancel": audit},
+        **fields,
+    )
 
 
 def cancel_run(

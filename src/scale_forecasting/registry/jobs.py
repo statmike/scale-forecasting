@@ -8,11 +8,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .params import _JOB_PARAM_TYPES, _job_param, _status_guard_param, render_status_guard
+from .params import (
+    _JOB_PARAM_TYPES,
+    _job_param,
+    _status_guard_param,
+    render_status_guard,
+    render_telemetry_merge,
+    telemetry_merge_params,
+)
 from .tables import _resolve_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ..settings import Settings
 
@@ -49,39 +56,58 @@ def update_job(
     *,
     settings: Settings | None = None,
     unless_status_in: Sequence[str] = (),
+    merge_telemetry: Mapping[str, Any] | None = None,
     **fields: Any,
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Update named columns on a job's ``run_jobs`` row, e.g. status/runtime_seconds/telemetry.
 
     ``update_job(job_id, status="COMPLETED", runtime_seconds=42.0)`` → a parameterized
     ``UPDATE … WHERE job_id=@job_id``. The ``job_id`` is 1:1 with a row, so exactly one row is
-    touched. Unknown column names raise `RegistryError`; a no-op call (no fields) returns without
-    touching BigQuery.
+    touched. Unknown column names raise `RegistryError`; a no-op call (no fields, no patch) returns
+    without touching BigQuery.
+
+    ``merge_telemetry`` is the accreting alternative to ``job_telemetry=…``: a ``{dotted.path:
+    value}`` patch merged in place (`params.render_telemetry_merge`) so the paths it does not name
+    survive. Use it whenever the row may already carry telemetry someone else wrote — a family that
+    walked regions for capacity holds its whole attempt ledger under ``$.capacity``, and a
+    whole-column write erases the record of every region tried. Passing both forms raises, because
+    a statement that replaces the column *and* merges into it has no honest meaning.
 
     ``unless_status_in`` adds a status guard to the WHERE (`render_status_guard`), so a row already
     in one of those states is left exactly as it is — the write is skipped, not merged. That makes
     the update conditional inside the one statement rather than read-then-write, which matters
     because the state being protected is written by a *different process*: see `registry.lifecycle`
-    for the only caller and why it needs this.
+    and `probes.settle` for the two callers and why each needs it. A guarded skip is silent, so a
+    caller that must know whether its write landed re-reads the row rather than assuming.
     """
     from google.cloud import bigquery
 
     from ..errors import RegistryError
 
-    if not fields:
+    patch = dict(merge_telemetry or {})
+    if not fields and not patch:
         return
     unknown = set(fields) - set(_JOB_PARAM_TYPES)
     if unknown:
         raise RegistryError(f"update_job: unknown run_jobs column(s): {sorted(unknown)}")
+    if patch and "job_telemetry" in fields:
+        raise RegistryError(
+            "update_job: pass either job_telemetry= (replace) or merge_telemetry= (merge), not both"
+        )
 
+    assignments = [f"{col} = @{col}" for col in fields]
+    params = [_job_param(col, value) for col, value in fields.items()]
+    if patch:
+        # Bound before the settings are resolved, so an illegal path is a caller bug that raises
+        # the same way whether or not this process can reach a project.
+        params.extend(telemetry_merge_params(patch, caller="update_job"))
+        assignments.append(render_telemetry_merge(list(patch)))
     resolved = _resolve_settings(settings)
-    set_clause = ", ".join(f"{col} = @{col}" for col in fields)
     table = resolved.registry_table_ref("run_jobs")
     sql = (
-        f"UPDATE `{table}` SET {set_clause} WHERE job_id=@job_id"
+        f"UPDATE `{table}` SET {', '.join(assignments)} WHERE job_id=@job_id"
         f"{render_status_guard(unless_status_in)}"
     )
-    params = [_job_param(col, value) for col, value in fields.items()]
     params.append(_job_param("job_id", job_id))
     if unless_status_in:
         params.append(_status_guard_param(unless_status_in))

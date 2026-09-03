@@ -4,14 +4,18 @@ One table per registry table (``run_registry``, ``run_jobs``) mapping column nam
 BigQuery type, plus the binder that turns a name/value pair into a query parameter. The two
 binders live together because they are the same idea applied twice; they live apart from
 `registry.ddl` because that renders the schema while this consumes it.
+
+The two SQL fragments here — the status guard and the ``job_telemetry`` merge — are for the same
+reason: both tables' writers need them, so neither writer can own them.
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 # run_registry columns that may be set by write_header / update_header, with their BQ types.
 _HEADER_PARAM_TYPES: dict[str, str] = {
@@ -100,3 +104,47 @@ def _status_guard_param(unless_status_in: Sequence[str]) -> Any:
     from google.cloud import bigquery
 
     return bigquery.ArrayQueryParameter(_STATUS_GUARD_PARAM, "STRING", list(unless_status_in))
+
+
+# A `job_telemetry` merge path: dot-separated lower-snake segments, rendered as ``$.a.b``. The
+# charset is enforced rather than escaped because every caller is our own code writing a known
+# key — a path that needs quoting is a bug in the caller, not an input to accommodate.
+_TELEMETRY_PATH_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
+
+
+def render_telemetry_merge(paths: Sequence[str]) -> str:
+    """The ``job_telemetry = JSON_SET(…)`` assignment that merges ``paths`` into place (pure).
+
+    ``JSON_SET`` writes each path independently and leaves the rest of the document alone, which is
+    the whole point: both telemetry columns are written by more than one author, so a whole-column
+    write means whichever finishes last is the only one that leaves a trace. On the header that is
+    several jobs of one run stamping their sizing; on a job row it is the capacity ledger, the probe
+    handle and the cancel/settle audit accreting on the same row from different code paths at
+    different times. ``IFNULL(…, JSON '{}')`` covers the first writer, whose column is still NULL;
+    nested paths create their parent objects.
+
+    Returned as the bare SET assignment (no table, no WHERE) so the two tables' writers can each
+    wrap it in their own statement. Parameters are named ``@t0…@tN`` positionally against ``paths``;
+    the caller binds them in the same order.
+    """
+    sets = ", ".join(f"'$.{path}', @t{i}" for i, path in enumerate(paths))
+    return f"job_telemetry = JSON_SET(IFNULL(job_telemetry, JSON '{{}}'), {sets})"
+
+
+def telemetry_merge_params(patch: Mapping[str, Any], *, caller: str) -> list[Any]:
+    """Bind a ``{path: value}`` telemetry patch to ``@t0…@tN``, validating the paths (pure-ish).
+
+    Values are bound as ``JSON`` parameters, so a dict lands as an object rather than as a string.
+    An illegal path raises `errors.RegistryError` naming ``caller`` rather than being escaped into
+    SQL. Order matches ``list(patch)``, which is the order `render_telemetry_merge` numbers.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    bad = [path for path in patch if not _TELEMETRY_PATH_RE.match(path)]
+    if bad:
+        raise RegistryError(f"{caller}: illegal telemetry path(s): {sorted(bad)}")
+    return [
+        bigquery.ScalarQueryParameter(f"t{i}", "JSON", patch[path]) for i, path in enumerate(patch)
+    ]

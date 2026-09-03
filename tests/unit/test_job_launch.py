@@ -152,8 +152,11 @@ def test_launch_family_job_stamps_real_id_when_submitter_returns_one(
 
     # The real (server-assigned) id is stamped back onto the run_jobs row for reverse-trace.
     assert seen["fin"].extra["system_job_id"] == "real-dataproc-job-id"
-    # The stamp-back also refreshes the probe handle with the post-submit truths (real id + region).
-    assert seen["fin"].extra["job_telemetry"] == {
+    # The stamp-back also refreshes the probe handle with the post-submit truths (real id + region)
+    # — as a merge, so a family that walked regions before it got this cluster does not have the
+    # record of what it took to succeed erased at the moment of success.
+    assert "job_telemetry" not in seen["fin"].extra
+    assert seen["fin"].telemetry == {
         "probe_handle": {
             "runtime": "spark",
             "native_id": "real-dataproc-job-id",
@@ -331,8 +334,9 @@ def test_the_publisher_writes_awaiting_capacity_with_the_ledger_and_the_handle(
 ) -> None:
     """The mid-walk write: a live status, the attempt ledger, and the handle re-sent beside it.
 
-    ``job_telemetry`` is a whole-column write, so the probe handle has to be re-sent every time —
-    dropping it would blind the probe and the cancel path for the entire wait, which is precisely
+    The telemetry is merged, so the ledger accretes onto whatever the row already holds. The probe
+    handle is re-sent anyway, cheaply: a row written by an older code path that has no
+    ``$.probe_handle`` yet would otherwise stay unprobeable for the entire wait, which is precisely
     the window an operator is most likely to be looking.
     """
     from scale_forecasting import capacity
@@ -353,8 +357,9 @@ def test_the_publisher_writes_awaiting_capacity_with_the_ledger_and_the_handle(
     wrote = written[0]
     assert wrote["job_id"] == "rid-0-statistical-1"
     assert wrote["status"] == capacity.AWAITING_CAPACITY
-    assert wrote["job_telemetry"]["probe_handle"] == handle
-    assert wrote["job_telemetry"]["capacity"]["attempts"][0]["candidate"] == "us-east1"
+    assert "job_telemetry" not in wrote
+    assert wrote["merge_telemetry"]["probe_handle"] == handle
+    assert wrote["merge_telemetry"]["capacity"]["attempts"][0]["candidate"] == "us-east1"
 
 
 def test_the_publisher_will_not_write_over_a_cancel_that_landed_mid_walk(
@@ -413,12 +418,12 @@ def test_a_family_that_runs_out_of_regions_records_why_before_it_fails(
     # the failure, not a softening of it.
     extra = seen["fin"].extra
     assert extra["failure_reason"] == capacity.CAPACITY_EXHAUSTED
-    recorded = extra["job_telemetry"]["capacity"]["attempts"]
+    recorded = seen["fin"].telemetry["capacity"]["attempts"]
     assert [a["candidate"] for a in recorded] == ["us-central1", "us-east1"]
     assert [a["verdict"] for a in recorded] == [capacity.TRANSIENT_CAPACITY, capacity.HARD_CEILING]
     # The handle stays alongside it: the row a reconciler reads must not lose its coordinates just
     # because the launch failed.
-    assert extra["job_telemetry"]["probe_handle"]["runtime"] == "spark"
+    assert seen["fin"].telemetry["probe_handle"]["runtime"] == "spark"
     # And nothing else in the row is invented — `run_job`'s own handler owns the FAILED status.
     assert "status" not in extra
 

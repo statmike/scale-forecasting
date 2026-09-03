@@ -566,7 +566,7 @@ def test_the_header_path_is_a_legal_telemetry_path() -> None:
     # `merge_header_telemetry` rejects anything else rather than escaping it into SQL, and it does
     # so at write time — inside a best-effort publish that swallows the error. A bad key here would
     # be silently dropped telemetry, not a failure anyone sees.
-    from scale_forecasting.registry.header import _TELEMETRY_PATH_RE
+    from scale_forecasting.registry.params import _TELEMETRY_PATH_RE
 
     for path in ("capacity.ray", "capacity.dataproc_cluster_cpu"):
         assert _TELEMETRY_PATH_RE.match(path)

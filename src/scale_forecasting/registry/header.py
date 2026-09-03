@@ -18,6 +18,8 @@ from .params import (
     _header_param,
     _status_guard_param,
     render_status_guard,
+    render_telemetry_merge,
+    telemetry_merge_params,
 )
 from .rows import assemble_header_row
 from .tables import _resolve_settings
@@ -186,31 +188,15 @@ def update_header(
         raise RegistryError(f"update_header failed for run {run_id}: {exc}") from exc
 
 
-# A `job_telemetry` merge path: dot-separated lower-snake segments, rendered as ``$.a.b``. The
-# charset is enforced rather than escaped because every caller is our own code writing a known
-# key — a path that needs quoting is a bug in the caller, not an input to accommodate.
-_TELEMETRY_PATH_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
-
-
 def render_header_telemetry_merge(table_ref: str, paths: Sequence[str]) -> str:
     """The ``UPDATE … JSON_SET(…)`` that merges ``paths`` into a header's ``job_telemetry`` (pure).
 
-    Separated from the client call so the SQL is readable and testable offline. ``JSON_SET`` writes
-    each path independently and leaves the rest of the document alone, which is the whole point:
-    the run header's telemetry is written by *several* jobs of one run (a Serverless batch, a
-    cluster job, a Ray job), and a whole-column write means whichever finishes last is the only one
-    that leaves a trace. ``IFNULL(…, JSON '{}')`` covers the first writer, whose column is still
-    NULL; nested paths create their parent objects.
-
-    Parameters are named ``@t0…@tN`` positionally against ``paths``; the caller binds them in the
-    same order.
+    Separated from the client call so the SQL is readable and testable offline. The SET assignment
+    itself is `params.render_telemetry_merge`, shared with the job-row writer; this wraps it in the
+    header's statement. Parameters are named ``@t0…@tN`` positionally against ``paths``; the caller
+    binds them in the same order.
     """
-    sets = ", ".join(f"'$.{path}', @t{i}" for i, path in enumerate(paths))
-    return (
-        f"UPDATE `{table_ref}` "
-        f"SET job_telemetry = JSON_SET(IFNULL(job_telemetry, JSON '{{}}'), {sets}) "
-        "WHERE run_id=@run_id"
-    )
+    return f"UPDATE `{table_ref}` SET {render_telemetry_merge(paths)} WHERE run_id=@run_id"
 
 
 def sizing_telemetry_path(sizing: Mapping[str, Any]) -> str:
@@ -244,16 +230,9 @@ def merge_header_telemetry(
 
     if not patch:
         return
-    bad = [path for path in patch if not _TELEMETRY_PATH_RE.match(path)]
-    if bad:
-        raise RegistryError(f"merge_header_telemetry: illegal telemetry path(s): {sorted(bad)}")
-
+    params = telemetry_merge_params(patch, caller="merge_header_telemetry")
     resolved = _resolve_settings(settings)
-    paths = list(patch)
-    sql = render_header_telemetry_merge(resolved.registry_table_ref("run_registry"), paths)
-    params: list[Any] = [
-        bigquery.ScalarQueryParameter(f"t{i}", "JSON", patch[path]) for i, path in enumerate(paths)
-    ]
+    sql = render_header_telemetry_merge(resolved.registry_table_ref("run_registry"), list(patch))
     params.append(_header_param("run_id", run_id))
     client = bigquery.Client(project=resolved.project_id)
     try:

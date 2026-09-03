@@ -27,6 +27,8 @@ from scale_forecasting.registry.params import (
     _HEADER_PARAM_TYPES,
     _JOB_PARAM_TYPES,
     render_status_guard,
+    render_telemetry_merge,
+    telemetry_merge_params,
 )
 from scale_forecasting.registry.rows import (
     METRIC_COLUMNS,
@@ -467,7 +469,7 @@ def test_run_job_writes_running_then_completes(monkeypatch: Any) -> None:
         hardware="gpu",
         gpu_type="T4",
     ) as job:
-        job.finalize(system_job_id="dp-batch-xyz", job_telemetry={"total_wall_s": 12.0})
+        job.finalize(system_job_id="dp-batch-xyz", telemetry={"total_wall_s": 12.0})
 
     row = cap["written"]
     assert row["job_id"] == "sf-my-run-0123456789ab-deep_learning-a1"
@@ -486,7 +488,10 @@ def test_run_job_writes_running_then_completes(monkeypatch: Any) -> None:
     assert "runtime_seconds" in fields
     assert fields["ended_at"] is not None  # wall-clock end stamped at exit
     assert fields["system_job_id"] == "dp-batch-xyz"
-    assert fields["job_telemetry"] == {"total_wall_s": 12.0}
+    # A *merge*, not a whole-column write: by the time a body finalizes, its row may already carry
+    # a capacity ledger written from another frame while it was waiting for a cluster.
+    assert fields["merge_telemetry"] == {"total_wall_s": 12.0}
+    assert "job_telemetry" not in fields
 
 
 def test_run_job_records_failed_and_reraises(monkeypatch: Any) -> None:
@@ -502,6 +507,9 @@ def test_run_job_records_failed_and_reraises(monkeypatch: Any) -> None:
     assert fields["status"] == "FAILED"
     assert "runtime_seconds" in fields
     assert fields["ended_at"] is not None  # a crashed job still records its wall-clock end
+    # Nothing was finalized, so no merge is sent — an empty patch would render a JSON_SET that
+    # rewrites the column to itself.
+    assert fields["merge_telemetry"] is None
 
 
 def test_the_failure_write_carries_what_the_body_finalized_before_it_raised(
@@ -517,14 +525,30 @@ def test_the_failure_write_carries_what_the_body_finalized_before_it_raised(
     with pytest.raises(ValueError, match="no room"):
         with run_job("rid-0123456789ab", "deep_learning", 1) as job:
             job.finalize(
-                failure_reason="CAPACITY_EXHAUSTED", job_telemetry={"capacity": {"attempts": []}}
+                failure_reason="CAPACITY_EXHAUSTED", telemetry={"capacity": {"attempts": []}}
             )
             raise ValueError("no room anywhere")
 
     _, fields = cap["updates"][0]
     assert fields["status"] == "FAILED"
     assert fields["failure_reason"] == "CAPACITY_EXHAUSTED"
-    assert fields["job_telemetry"] == {"capacity": {"attempts": []}}
+    assert fields["merge_telemetry"] == {"capacity": {"attempts": []}}
+
+
+def test_the_finalizers_telemetry_accretes_across_calls(monkeypatch: Any) -> None:
+    """Two frames of one launch each know one thing; neither should erase the other's.
+
+    `job_launch` finalizes the probe handle after submit and could finalize more later — the patch
+    is a dict update, so the row goes terminal once carrying everything anyone said.
+    """
+    cap = _capture_job_io(monkeypatch)
+    with run_job("rid-0123456789ab", "ml", 1) as job:
+        job.finalize(telemetry={"probe_handle": {"runtime": "ray"}})
+        job.finalize(telemetry={"total_wall_s": 3.0}, system_job_id="ray-1")
+
+    _, fields = cap["updates"][0]
+    assert fields["merge_telemetry"] == {"probe_handle": {"runtime": "ray"}, "total_wall_s": 3.0}
+    assert fields["system_job_id"] == "ray-1"
 
 
 def test_a_raising_body_is_failed_whatever_status_it_hoped_to_finalize(
@@ -824,6 +848,37 @@ def test_append_response_level_error_fails_fast(monkeypatch: Any) -> None:
 # --- accreting job_telemetry writes --------------------------------------------
 
 
+def test_the_merge_fragment_is_the_one_both_tables_writers_share() -> None:
+    # A bare SET assignment — no table, no WHERE — because the header writes it into an
+    # `UPDATE … WHERE run_id` and the job writer into an `UPDATE … WHERE job_id`, and the moment
+    # each owns its own copy the two drift.
+    fragment = render_telemetry_merge(["capacity", "probe_handle"])
+    assert fragment.startswith("job_telemetry = JSON_SET(IFNULL(job_telemetry, JSON '{}')")
+    assert "UPDATE" not in fragment
+    assert "WHERE" not in fragment
+    assert fragment in render_header_telemetry_merge(
+        "p.d.run_registry", ["capacity", "probe_handle"]
+    )
+
+
+def test_the_merge_fragment_and_its_bindings_agree_on_every_parameter_name() -> None:
+    # The renderer numbers `@t0…@tN` off the path list and the binder numbers off the patch; they
+    # are separate functions and nothing but this ordering keeps a value under the path it belongs
+    # to. Disagreement would file the capacity ledger under `$.probe_handle` and nothing would
+    # notice until an operator read the row.
+    patch = {
+        "probe_handle": {"runtime": "ray"},
+        "capacity": {"attempts": []},
+        "cancel": {"by": "x"},
+    }
+    sql = render_telemetry_merge(list(patch))
+    bound = telemetry_merge_params(patch, caller="test")
+    for i, path in enumerate(patch):
+        assert f"'$.{path}', @t{i}" in sql
+    assert [p.name for p in bound] == ["t0", "t1", "t2"]
+    assert [p.value for p in bound] == list(patch.values())
+
+
 def test_the_telemetry_merge_sets_each_path_against_the_existing_document() -> None:
     sql = render_header_telemetry_merge("p.d.run_registry", ["total_wall_s", "sizing.ml"])
     # IFNULL, so the first writer on a header with no telemetry yet merges into {} rather than
@@ -858,6 +913,27 @@ def test_an_illegal_telemetry_path_is_a_caller_bug_not_an_escaped_string() -> No
 def test_merging_nothing_touches_nothing() -> None:
     # No client is constructed, so this would raise if the empty patch weren't short-circuited.
     merge_header_telemetry("rid", {})
+    jobs.update_job("job-1")
+    jobs.update_job("job-1", merge_telemetry={})
+
+
+def test_a_job_row_merge_rejects_an_illegal_path_the_same_way_the_header_does() -> None:
+    from scale_forecasting.errors import RegistryError
+
+    # Same validation, same failure, on the table whose telemetry has the most authors.
+    with pytest.raises(RegistryError, match="illegal telemetry path"):
+        jobs.update_job("job-1", merge_telemetry={"capacity.'; DROP": {"x": 1}})
+
+
+def test_replacing_and_merging_the_same_column_in_one_statement_is_a_caller_bug() -> None:
+    from scale_forecasting.errors import RegistryError
+
+    # A statement that overwrites `job_telemetry` *and* merges into it has no honest reading, and
+    # whichever the SQL happened to apply last would be silent.
+    with pytest.raises(RegistryError, match="not both"):
+        jobs.update_job(
+            "job-1", job_telemetry={"probe_handle": {}}, merge_telemetry={"capacity": {}}
+        )
 
 
 # --- the native engine writes into the same specs, from its own builders --------

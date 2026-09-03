@@ -75,11 +75,12 @@ def _capacity_publisher(
     whole point of the state: a run whose deep-learning family has spent twenty minutes failing to
     find a T4 previously looked exactly like one that was computing.
 
-    Two details are load-bearing. ``job_telemetry`` is a whole-column write, so the entry probe
-    handle is re-sent alongside the ledger — dropping it would blind the probe and the cancel path
-    for the whole wait. And the write is guarded against `lifecycle._STICKY_STATUSES`: an operator
-    who cancels a family mid-walk must not have the next attempt write ``AWAITING_CAPACITY`` back
-    over their ``CANCELLED``.
+    Two details are load-bearing. The telemetry is written as a **merge**, so the ledger accretes
+    onto the row rather than replacing whatever else is on it; the entry probe handle is re-sent
+    alongside it anyway, cheaply, so a row written by an older code path still comes out of a long
+    wait probe-able. And the write is guarded against `lifecycle._STICKY_STATUSES`: an operator who
+    cancels a family mid-walk must not have the next attempt write ``AWAITING_CAPACITY`` back over
+    their ``CANCELLED``.
 
     `capacity._publish` swallows anything this raises — a failed telemetry write must not sink a
     walk that might still find room.
@@ -92,7 +93,7 @@ def _capacity_publisher(
             job_id,
             settings=settings,
             status=AWAITING_CAPACITY,
-            job_telemetry={"probe_handle": probe_handle, "capacity": ledger.to_json()},
+            merge_telemetry={"probe_handle": probe_handle, "capacity": ledger.to_json()},
             unless_status_in=_STICKY_STATUSES,
         )
 
@@ -266,18 +267,22 @@ def launch_family_job(
             # the finalizer rather than a second write, so the row goes terminal exactly once.
             fin.finalize(
                 failure_reason=CAPACITY_EXHAUSTED,
-                job_telemetry={"probe_handle": entry_blob, "capacity": exc.ledger.to_json()},
+                telemetry={"probe_handle": entry_blob, "capacity": exc.ledger.to_json()},
             )
             raise
         # Stamp-back refresh: replace the entry handle with post-submit truths (a cluster's real id,
         # the landed region + Ray resource path). A cluster job's id is server-assigned, so when the
         # returned native_id differs from system_job_id, also stamp the real id back for
         # reverse-trace. The in-process session submits nothing and returns None (no refresh).
+        #
+        # The handle refresh is a *merge*: a family that walked regions before it got a cluster has
+        # its whole attempt ledger under ``$.capacity`` by now, and replacing the column here would
+        # erase — at the moment of success — the record of what it took to succeed.
         if handle is not None:
-            fields: dict[str, Any] = {"job_telemetry": {"probe_handle": handle.to_blob()}}
+            fields: dict[str, Any] = {}
             if handle.native_id != system_job_id:
                 fields["system_job_id"] = handle.native_id
-            fin.finalize(**fields)
+            fin.finalize(telemetry={"probe_handle": handle.to_blob()}, **fields)
 
 
 def launch_native_job(
