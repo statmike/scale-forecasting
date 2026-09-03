@@ -207,9 +207,14 @@ cd terraform/main
 terraform apply -var create_composer=false
 ```
 
-The deep-learning family on Ray GPU over 200 series × 10 folds is the long pole and can approach the
-~60-min bearer-token expiry (a known limit); the config is the knob — drop `backtest.n_folds` or move
-`deep_learning` to CPU if a live run runs long.
+The deep-learning family on Ray GPU is the long pole in this smoke, and it is why `backtest.n_folds`
+is **3** rather than the 10 the other backtesting smokes use. At the measured ~4 cells/min per T4
+node ([quota and scale](quota_and_scale.md)), 200 series × 3 folds is ~600 NeuralProphet fits — under
+an hour including cluster provisioning, which keeps the run inside the ~60-min bearer-token expiry (a
+known limit). Ten folds would be ~2 hours and would trip it. What this smoke exists to prove is
+*Airflow orchestrating three engines*, not deep-learning throughput; three folds is enough to
+exercise backtesting, the error-weighted ensemble strategies, and many microbatch intervals. The
+config is the knob if a live run still runs long — drop folds further or move `deep_learning` to CPU.
 
 ## Verifying by hand in BigQuery
 

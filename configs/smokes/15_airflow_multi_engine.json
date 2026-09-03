@@ -13,7 +13,7 @@
   },
   "backtest": {
     "enabled": true,
-    "n_folds": 10,
+    "n_folds": 3,
     "horizon": 28,
     "step": 28
   },
