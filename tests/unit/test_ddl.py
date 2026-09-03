@@ -218,6 +218,14 @@ def test_additive_columns_include_trace_timing_columns() -> None:
     assert meta["cell_ended_at"] == "TIMESTAMP"
 
 
+def test_failure_reason_auto_migrates_onto_an_existing_run_jobs() -> None:
+    # Nullable, so a deployment that predates the capacity work picks it up from `render_migrations`
+    # rather than needing its registry rebuilt — the whole reason the migration is derived from the
+    # same table body the CREATE renders.
+    jobs = dict(additive_columns("run_jobs"))
+    assert jobs["failure_reason"] == "STRING"
+
+
 def test_the_measurement_columns_auto_migrate_onto_an_existing_forecast_metadata() -> None:
     # All five are nullable, so a deployment that predates them picks them up from
     # `render_migrations` without a hand-written ALTER — which is the whole point of deriving

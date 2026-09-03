@@ -34,9 +34,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .capacity import AWAITING_CAPACITY, CAPACITY_EXHAUSTED, CapacityExhausted, publishing_to
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .capacity import CapacityLedger
     from .config import RunConfig
     from .dag import FamilyJob
     from .settings import Settings
@@ -59,6 +62,41 @@ def _system_job_id(job_key: str, runtime: str) -> str:
     if runtime == "ray":
         return ray_submission_id(job_key)
     return bigquery_job_id(job_key)
+
+
+def _capacity_publisher(
+    job_id: str, probe_handle: dict[str, Any], settings: Settings
+) -> Callable[[CapacityLedger], None]:
+    """A callback that writes a walk's live attempt ledger onto this family's ``run_jobs`` row.
+
+    Installed by `launch_family_job` for the duration of one launch (`capacity.publishing_to`) and
+    called by `capacity.walk` after every attempt, so a family stuck hopping regions reads as
+    ``AWAITING_CAPACITY`` *while it is happening* rather than only in the post-mortem. That is the
+    whole point of the state: a run whose deep-learning family has spent twenty minutes failing to
+    find a T4 previously looked exactly like one that was computing.
+
+    Two details are load-bearing. ``job_telemetry`` is a whole-column write, so the entry probe
+    handle is re-sent alongside the ledger — dropping it would blind the probe and the cancel path
+    for the whole wait. And the write is guarded against `lifecycle._STICKY_STATUSES`: an operator
+    who cancels a family mid-walk must not have the next attempt write ``AWAITING_CAPACITY`` back
+    over their ``CANCELLED``.
+
+    `capacity._publish` swallows anything this raises — a failed telemetry write must not sink a
+    walk that might still find room.
+    """
+    from .registry.jobs import update_job
+    from .registry.lifecycle import _STICKY_STATUSES
+
+    def publish(ledger: CapacityLedger) -> None:
+        update_job(
+            job_id,
+            settings=settings,
+            status=AWAITING_CAPACITY,
+            job_telemetry={"probe_handle": probe_handle, "capacity": ledger.to_json()},
+            unless_status_in=_STICKY_STATUSES,
+        )
+
+    return publish
 
 
 def launch_family_job(
@@ -184,34 +222,53 @@ def launch_family_job(
             region=settings.region,
             spark_mode="serverless",
         )
-    with run_job(
-        run_id,
-        job.family,
-        attempt,
-        runtime=compute.runtime,
-        spark_mode=compute.spark_mode,
-        hardware=compute.hardware,
-        gpu_type=compute.gpu_type,
-        system_job_id=system_job_id,
-        probe_handle=entry_handle.to_blob(),
-        settings=settings,
-    ) as fin:
-        handle = get_submitter(compute.runtime).launch(
-            cfg,
-            models=list(job.models),
-            manage_header=False,
-            settings=settings,
-            spark=spark,
-            max_executors=max_executors,
-            system_job_id=system_job_id,
+    entry_blob = entry_handle.to_blob()
+    job_id = make_job_key(run_id, job.family, attempt)
+    # The publisher is installed *around* the dispatch, not passed into it: the capacity walk runs
+    # several frames down inside the submitter, and this is the only frame that knows which row it
+    # belongs to. See `capacity.publishing_to` for why it is ambient rather than a parameter.
+    with (
+        run_job(
+            run_id,
+            job.family,
+            attempt,
+            runtime=compute.runtime,
+            spark_mode=compute.spark_mode,
             hardware=compute.hardware,
             gpu_type=compute.gpu_type,
-            spark_mode=compute.spark_mode,
-            spark_cluster_name=compute.spark_cluster_name or shared_spark_name,
-            spark_cluster_region=shared_spark_region,
-            ray_cluster_name=ray_cluster_name,
-            ray_cluster_region=ray_cluster_region,
-        )
+            system_job_id=system_job_id,
+            probe_handle=entry_blob,
+            settings=settings,
+        ) as fin,
+        publishing_to(_capacity_publisher(job_id, entry_blob, settings)),
+    ):
+        try:
+            handle = get_submitter(compute.runtime).launch(
+                cfg,
+                models=list(job.models),
+                manage_header=False,
+                settings=settings,
+                spark=spark,
+                max_executors=max_executors,
+                system_job_id=system_job_id,
+                hardware=compute.hardware,
+                gpu_type=compute.gpu_type,
+                spark_mode=compute.spark_mode,
+                spark_cluster_name=compute.spark_cluster_name or shared_spark_name,
+                spark_cluster_region=shared_spark_region,
+                ray_cluster_name=ray_cluster_name,
+                ray_cluster_region=ray_cluster_region,
+            )
+        except CapacityExhausted as exc:
+            # The one failure worth re-running unchanged, and previously indistinguishable from a
+            # broken import. `run_job`'s handler will write FAILED on the way out; what it cannot
+            # know is *why*, so the reason and the finished ledger are attached here. Recorded via
+            # the finalizer rather than a second write, so the row goes terminal exactly once.
+            fin.finalize(
+                failure_reason=CAPACITY_EXHAUSTED,
+                job_telemetry={"probe_handle": entry_blob, "capacity": exc.ledger.to_json()},
+            )
+            raise
         # Stamp-back refresh: replace the entry handle with post-submit truths (a cluster's real id,
         # the landed region + Ray resource path). A cluster job's id is server-assigned, so when the
         # returned native_id differs from system_job_id, also stamp the real id back for

@@ -21,7 +21,10 @@ Three views, matched to the questions a run prompts:
   sized off (`resources.audit.sizing_telemetry`). Left as raw ``JSON`` rather than unpacked into
   columns because its interesting parts are per-family and nested: read a run's shape from the
   scalar columns, read *why* with ``JSON_QUERY(sizing, '$.deep_learning')``. NULL on a run submitted
-  before this existed, or one that left the platform's own defaults standing. A forced re-run of an
+  before this existed, or one that left the platform's own defaults standing. ``capacity`` is the
+  same shape for the other run-level wait: one attempt ledger per *shared* cluster, keyed by service
+  (`shared_clusters.shared_capacity_path`), recording every region tried before one had room. A
+  per-family walk is on the family's row instead — see ``v_run_jobs``. A forced re-run of an
   unchanged config appends a second header row under the same ``run_id``; the view keeps only the
   latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one run is always one row.
 
@@ -29,9 +32,13 @@ Three views, matched to the questions a run prompts:
   One row per ``(run_id, family)`` = the run's DAG as executed: the deterministic ``job_id``, the
   resolved ``runtime`` / ``spark_mode`` / ``hardware`` / ``gpu_type``, the platform's own
   ``system_job_id``, the per-job ``status`` and ``runtime_seconds``, and a ``dcu_milli_seconds``
-  overlay from the per-job ``job_telemetry``. A ``--force`` re-run appends a higher-``attempt`` job
-  under the same ``(run_id, family)``; the view keeps only the current one (``QUALIFY ROW_NUMBER()
-  … ORDER BY attempt DESC = 1``), so the forward ``run_id → current job`` map is one row per family.
+  overlay from the per-job ``job_telemetry``. ``failure_reason`` says *why* a FAILED row failed
+  (``CAPACITY_EXHAUSTED`` is the first token) and ``capacity`` carries the whole attempt ledger —
+  every candidate tried, its verdict, and the cloud's verbatim message. Both are NULL for a job
+  that never had to wait, which is nearly all of them. A ``--force`` re-run appends a
+  higher-``attempt`` job under the same ``(run_id, family)``; the view keeps only the current one
+  (``QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1``), so the forward ``run_id → current job``
+  map is one row per family.
 
 - ``v_model_leaderboard`` — *which model won, per run?* One row per ``(run_id, model_type,
   ensemble_id)``: cell counts, the error rate (a model failing every cell — the libgomp/lightgbm
@@ -84,7 +91,8 @@ SELECT
   JSON_VALUE(job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
   JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version,
-  JSON_QUERY(job_telemetry, '$.sizing') AS sizing
+  JSON_QUERY(job_telemetry, '$.sizing') AS sizing,
+  JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `{d}.run_registry`
 QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1""",
     "v_run_jobs": """\
@@ -104,9 +112,11 @@ SELECT
   started_at,
   ended_at,
   runtime_seconds,
+  failure_reason,
   CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
-  JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle
+  JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle,
+  JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `{d}.run_jobs`
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC

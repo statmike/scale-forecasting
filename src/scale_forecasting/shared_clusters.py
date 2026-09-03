@@ -39,8 +39,16 @@ region is yielded, not assumed, because a capacity failover may have moved a clu
 deployment region and each family's job has to submit to where it actually landed. Teardown is
 unconditional on the way out, so a family failure never leaks a cluster.
 
+**Where a shared cluster's capacity ledger goes, and why it is not a job row.** A per-family walk
+publishes ``AWAITING_CAPACITY`` onto that family's ``run_jobs`` row (`job_launch`). A shared cluster
+is provisioned *before* the fan-out, so no job row exists yet to carry it — and the wait is not one
+family's anyway, it is the whole run's. So it goes on the run header instead, merged under
+``job_telemetry.$.capacity.<service>`` (`shared_capacity_path`), with the header left at RUNNING:
+the run genuinely is running, it is provisioning. A merge and not a whole-column write because a
+run's header telemetry is written by several jobs and the last writer must not erase the rest.
+
 Public surface: ``shared_ray_inputs``, ``shared_ray_cluster``, ``shared_spark_inputs``,
-``shared_spark_cluster``.
+``shared_spark_cluster``, ``shared_capacity_path``.
 """
 
 from __future__ import annotations
@@ -48,12 +56,46 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+from .capacity import publishing_to
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+    from .capacity import CapacityLedger
     from .config import RunConfig
     from .dag import FamilyJob, RunDag
     from .settings import Settings
+
+
+def shared_capacity_path(service: str, suffix: str | None = None) -> str:
+    """Where one shared cluster's attempt ledger is filed on the run header (pure).
+
+    ``capacity.<service>``, or ``capacity.<service>_<suffix>`` when a run provisions more than one
+    cluster of a service and they would otherwise overwrite each other — the same "only distinguish
+    when there is something to distinguish" rule the cluster *names* follow in
+    `shared_spark_cluster` (a one-group run keeps the plain key). Keyed by service rather than
+    dumped at ``$.capacity`` whole so a mixed run's Ray walk and Dataproc walk both survive.
+    """
+    return f"capacity.{service}_{suffix}" if suffix else f"capacity.{service}"
+
+
+def _header_capacity_publisher(
+    run_id: str, path: str, settings: Settings
+) -> Callable[[CapacityLedger], None]:
+    """A callback that merges a shared cluster's live attempt ledger into the run header.
+
+    The run-scoped counterpart to `job_launch._capacity_publisher`. Same purpose — a run stuck
+    hopping regions for twenty minutes should say so while it is happening — and the same
+    best-effort contract, since `capacity._publish` swallows whatever this raises rather than
+    sinking a walk that might still find room. It writes no ``status``: the header's RUNNING is
+    already true and the per-family ``AWAITING_CAPACITY`` has no header-tier equivalent.
+    """
+    from .registry.header import merge_header_telemetry
+
+    def publish(ledger: CapacityLedger) -> None:
+        merge_header_telemetry(run_id, {path: ledger.to_json()}, settings=settings)
+
+    return publish
 
 
 def shared_ray_inputs(python_jobs: list[FamilyJob]) -> tuple[list[str], bool, str | None] | None:
@@ -101,9 +143,12 @@ def shared_ray_cluster(
     from . import ray_cluster
 
     models, any_gpu, gpu_type = inputs
-    name, region = ray_cluster.provision_shared_cluster(
-        cfg, models=models, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
-    )
+    # The publisher is installed around the *create* only, not the yield: once the fan-out starts,
+    # each family installs its own and publishes to its own row.
+    with publishing_to(_header_capacity_publisher(run_id, shared_capacity_path("ray"), settings)):
+        name, region = ray_cluster.provision_shared_cluster(
+            cfg, models=models, run_id=run_id, use_gpu=any_gpu, gpu_type=gpu_type, settings=settings
+        )
     try:
         yield (name, region)
     finally:
@@ -203,15 +248,17 @@ def shared_spark_cluster(
     with ExitStack() as stack:
         clusters: dict[str, tuple[str, str]] = {}
         for hardware, (models, gpu_type) in inputs.items():
-            name, region = provision_shared_cluster(
-                cfg,
-                run_id=run_id,
-                use_gpu=hardware == "gpu",
-                gpu_type=gpu_type,
-                settings=settings,
-                models=models,
-                name_suffix=hardware if suffixed else None,
-            )
+            path = shared_capacity_path("dataproc_cluster", hardware if suffixed else None)
+            with publishing_to(_header_capacity_publisher(run_id, path, settings)):
+                name, region = provision_shared_cluster(
+                    cfg,
+                    run_id=run_id,
+                    use_gpu=hardware == "gpu",
+                    gpu_type=gpu_type,
+                    settings=settings,
+                    models=models,
+                    name_suffix=hardware if suffixed else None,
+                )
             # Registered the instant it exists, so a failure in the *next* create still unwinds it.
             stack.callback(teardown_shared_cluster, name, region, settings)
             clusters[hardware] = (name, region)

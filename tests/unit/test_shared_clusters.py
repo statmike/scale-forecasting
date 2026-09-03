@@ -541,3 +541,108 @@ def test_launch_family_job_keeps_standing_cluster_over_shared(
     assert sub.kwargs["spark_cluster_name"] == "standing"
     # A standing-cluster family isn't the shared-cluster reuser, so no shared region is threaded.
     assert sub.kwargs["spark_cluster_region"] is None
+
+
+# --- a shared cluster's capacity ledger goes on the run header -----------------
+#
+# A per-family walk publishes AWAITING_CAPACITY onto that family's run_jobs row. A shared cluster is
+# provisioned *before* the fan-out, so there is no job row yet to carry it — and the wait belongs to
+# the whole run anyway. These pin where it goes instead, and that it stops being ambient the moment
+# the families start (each of which publishes to its own row).
+
+
+def test_shared_capacity_path_keys_by_service_so_a_mixed_run_keeps_both() -> None:
+    # A run that shares both a Ray cluster and a Dataproc cluster walks twice; dumping both at
+    # `$.capacity` would leave whichever finished last as the only one with a trace.
+    assert shared_clusters.shared_capacity_path("ray") == "capacity.ray"
+    assert shared_clusters.shared_capacity_path("dataproc_cluster") == "capacity.dataproc_cluster"
+    assert (
+        shared_clusters.shared_capacity_path("dataproc_cluster", "gpu")
+        == "capacity.dataproc_cluster_gpu"
+    )
+
+
+def test_the_header_path_is_a_legal_telemetry_path() -> None:
+    # `merge_header_telemetry` rejects anything else rather than escaping it into SQL, and it does
+    # so at write time — inside a best-effort publish that swallows the error. A bad key here would
+    # be silently dropped telemetry, not a failure anyone sees.
+    from scale_forecasting.registry.header import _TELEMETRY_PATH_RE
+
+    for path in ("capacity.ray", "capacity.dataproc_cluster_cpu"):
+        assert _TELEMETRY_PATH_RE.match(path)
+
+
+def test_the_header_publisher_merges_the_ledger_and_leaves_the_status_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A merge, not a whole-column write: a run's header telemetry has several writers.
+
+    And no ``status``: the header's RUNNING is already true while the run provisions, and there is
+    no header-tier AWAITING_CAPACITY to promote it to.
+    """
+    from scale_forecasting import capacity
+    from scale_forecasting.registry import header as header_mod
+
+    merged: list[Any] = []
+    monkeypatch.setattr(
+        header_mod,
+        "merge_header_telemetry",
+        lambda run_id, patch, *, settings=None: merged.append((run_id, patch)),
+    )
+
+    publish = shared_clusters._header_capacity_publisher("run-abc", "capacity.ray", _SETTINGS)
+    ledger = capacity.CapacityLedger(service="ray")
+    ledger.record("us-central1", capacity.TRANSIENT_CAPACITY, "no room", 1.0)
+    publish(ledger)
+
+    run_id, patch = merged[0]
+    assert run_id == "run-abc"
+    assert list(patch) == ["capacity.ray"]
+    assert patch["capacity.ray"]["attempts"][0]["candidate"] == "us-central1"
+
+
+def test_the_shared_ray_create_publishes_to_the_header_and_stops_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installed around the create only — once the fan-out starts each family owns its own row."""
+    from scale_forecasting import capacity
+
+    calls: dict[str, Any] = {}
+    _patch_shared_cluster(monkeypatch, calls)
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        shared_clusters,
+        "_header_capacity_publisher",
+        lambda run_id, path, settings: seen.setdefault("installed", (run_id, path)) and None,
+    )
+    cfg = _ray_cfg()
+    run_dag = dag.plan_dag(cfg)
+    with shared_clusters.shared_ray_cluster(cfg, run_dag, "run-abc", _SETTINGS):
+        # Inside the block the families are launching; nothing run-scoped may still be installed.
+        assert capacity.current_publisher() is None
+    assert seen["installed"] == ("run-abc", "capacity.ray")
+
+
+def test_each_shared_dataproc_cluster_publishes_under_its_own_hardware_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two clusters, two walks, two ledgers — and the same "suffix only when there is something to
+    # distinguish" rule the cluster names follow, so the common one-cluster run keeps the plain key.
+    calls: dict[str, Any] = {}
+    _patch_shared_spark(monkeypatch, calls)
+    paths: list[str] = []
+    monkeypatch.setattr(
+        shared_clusters,
+        "_header_capacity_publisher",
+        lambda run_id, path, settings: paths.append(path) and None,
+    )
+    run_dag = dag.plan_dag(_mixed_hardware_cfg())
+    with shared_clusters.shared_spark_cluster(_mixed_hardware_cfg(), run_dag, "run-abc", _SETTINGS):
+        pass
+    assert paths == ["capacity.dataproc_cluster_cpu", "capacity.dataproc_cluster_gpu"]
+
+    paths.clear()
+    run_dag = dag.plan_dag(_spark_cluster_cfg())
+    with shared_clusters.shared_spark_cluster(_spark_cluster_cfg(), run_dag, "r", _SETTINGS):
+        pass
+    assert paths == ["capacity.dataproc_cluster"]

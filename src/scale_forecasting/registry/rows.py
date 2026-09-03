@@ -198,8 +198,9 @@ def assemble_job_row(
     drift. The resolved compute fields (``runtime``/``spark_mode``/``hardware``/``gpu_type``) are
     passed in, not re-derived, so this stays a pure mapping: the orchestrator resolves them
     (`config.RunConfig.resolve_family_compute` for a model family, the ensemble node's own config
-    for ``ensemble``) and hands them over. ``status`` starts RUNNING; ``runtime_seconds`` and
-    ``job_telemetry`` are NULL until the job finishes and the submitter updates the row.
+    for ``ensemble``) and hands them over. ``status`` starts RUNNING; ``runtime_seconds``,
+    ``failure_reason`` and ``job_telemetry`` are NULL until the job finishes and the submitter
+    updates the row.
 
     ``started_at`` is the job's execution start (defaults to ``created_at`` when not given); the
     matching ``ended_at`` is NULL here and stamped by `run_job` at exit — together they give the
@@ -222,6 +223,10 @@ def assemble_job_row(
         "started_at": started_at if started_at is not None else created_at,
         "ended_at": None,
         "runtime_seconds": None,
+        # NULL until something fails with a reason worth naming (`capacity.CAPACITY_EXHAUSTED` is
+        # the first). Present-and-NULL rather than absent so the row's keys stay exactly the
+        # writable column set — the tripwire below this module's tests enforce.
+        "failure_reason": None,
         # The probe handle (runtime coordinates for reconciliation) is stamped at RUNNING entry so a
         # reader can check a live job; NULL when no handle was captured (a pre-feature run).
         "job_telemetry": {"probe_handle": probe_handle} if probe_handle is not None else None,

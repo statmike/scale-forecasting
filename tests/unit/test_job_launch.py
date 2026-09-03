@@ -294,6 +294,156 @@ def test_launch_ensemble_job_stamps_bigquery_prefix_handle(
     assert seen["job"]["family"] == "ensemble"
 
 
+# --- running out of regions: AWAITING_CAPACITY while it waits, FAILED with a reason after ---
+
+
+def test_a_launching_family_installs_a_publisher_the_submitter_can_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The install is *around* the dispatch, so a walk several frames down finds it.
+
+    Only this frame knows which ``run_jobs`` row a walk belongs to, and it does not pass that down
+    — see `capacity.publishing_to`. The submitter stands in for the walk here; the full chain
+    (``submit_ray`` → ``_create_cluster_across_regions`` → ``walk``) is proven in test_ray_submit.
+    """
+    import scale_forecasting.submitters as submitters_mod
+    from scale_forecasting import capacity
+
+    _fake_job_lifecycle(monkeypatch)
+    inside: list[Any] = []
+
+    class _LooksAtAmbient:
+        def launch(self, cfg: RunConfig, **kw: Any) -> None:
+            inside.append(capacity.current_publisher())
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _LooksAtAmbient())
+
+    cfg = _cfg(models=[_SPARK])
+    job = dag.plan_dag(cfg).python_jobs[0]
+    job_launch.launch_family_job(cfg, job, "rid-0", _SETTINGS)
+
+    assert inside and inside[0] is not None  # the submitter saw a publisher...
+    assert capacity.current_publisher() is None  # ...and it did not outlive the launch
+
+
+def test_the_publisher_writes_awaiting_capacity_with_the_ledger_and_the_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mid-walk write: a live status, the attempt ledger, and the handle re-sent beside it.
+
+    ``job_telemetry`` is a whole-column write, so the probe handle has to be re-sent every time —
+    dropping it would blind the probe and the cancel path for the entire wait, which is precisely
+    the window an operator is most likely to be looking.
+    """
+    from scale_forecasting import capacity
+    from scale_forecasting.registry import jobs as jobs_mod
+
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        jobs_mod, "update_job", lambda job_id, **kw: written.append({"job_id": job_id, **kw})
+    )
+
+    handle = {"runtime": "ray", "native_id": "job-1", "region": "us-central1"}
+    publish = job_launch._capacity_publisher("rid-0-statistical-1", handle, _SETTINGS)
+    ledger = capacity.CapacityLedger(service="ray")
+    ledger.record("us-east1", capacity.TRANSIENT_CAPACITY, "Resources are insufficient", 1.0)
+    publish(ledger)
+
+    assert len(written) == 1
+    wrote = written[0]
+    assert wrote["job_id"] == "rid-0-statistical-1"
+    assert wrote["status"] == capacity.AWAITING_CAPACITY
+    assert wrote["job_telemetry"]["probe_handle"] == handle
+    assert wrote["job_telemetry"]["capacity"]["attempts"][0]["candidate"] == "us-east1"
+
+
+def test_the_publisher_will_not_write_over_a_cancel_that_landed_mid_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator who stops a waiting family must not have the next attempt undo it.
+
+    The walk is a loop inside the submitting process, so a cancel cannot interrupt it — the next
+    attempt comes around regardless. Without the guard it would write AWAITING_CAPACITY straight
+    back over the CANCELLED, and the row would read as still waiting for a job nobody wants.
+    """
+    from scale_forecasting import capacity
+    from scale_forecasting.registry import jobs as jobs_mod
+    from scale_forecasting.registry.lifecycle import _STICKY_STATUSES
+
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        jobs_mod, "update_job", lambda job_id, **kw: written.append({"job_id": job_id, **kw})
+    )
+
+    publish = job_launch._capacity_publisher("j-1", {}, _SETTINGS)
+    publish(capacity.CapacityLedger(service="ray"))
+
+    assert written[0]["unless_status_in"] == _STICKY_STATUSES
+
+
+def test_a_family_that_runs_out_of_regions_records_why_before_it_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CAPACITY_EXHAUSTED plus the finished ledger, attached on the way out through `run_job`.
+
+    Every other launch failure is a bug to fix; this one is a run to re-submit, possibly unchanged.
+    A bare FAILED row cannot tell those apart, and before this the two were indistinguishable — a
+    stocked-out region looked exactly like a broken import.
+    """
+    import scale_forecasting.submitters as submitters_mod
+    from scale_forecasting import capacity
+
+    seen = _fake_job_lifecycle(monkeypatch)
+    ledger = capacity.CapacityLedger(service="ray")
+    ledger.record("us-central1", capacity.TRANSIENT_CAPACITY, "no room", 1.0)
+    ledger.record("us-east1", capacity.HARD_CEILING, "Quota exceeded for NVIDIA_T4_GPUS", 2.0)
+
+    class _AllStockedOut:
+        def launch(self, cfg: RunConfig, **kw: Any) -> None:
+            raise capacity.CapacityExhausted("no capacity after 2 attempts", ledger=ledger)
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _AllStockedOut())
+
+    cfg = _cfg(models=[_SPARK])
+    job = dag.plan_dag(cfg).python_jobs[0]
+    with pytest.raises(capacity.CapacityExhausted):
+        job_launch.launch_family_job(cfg, job, "rid-0", _SETTINGS)
+
+    # Re-raised, so the run's combined status still goes non-green — the reason is an addition to
+    # the failure, not a softening of it.
+    extra = seen["fin"].extra
+    assert extra["failure_reason"] == capacity.CAPACITY_EXHAUSTED
+    recorded = extra["job_telemetry"]["capacity"]["attempts"]
+    assert [a["candidate"] for a in recorded] == ["us-central1", "us-east1"]
+    assert [a["verdict"] for a in recorded] == [capacity.TRANSIENT_CAPACITY, capacity.HARD_CEILING]
+    # The handle stays alongside it: the row a reconciler reads must not lose its coordinates just
+    # because the launch failed.
+    assert extra["job_telemetry"]["probe_handle"]["runtime"] == "spark"
+    # And nothing else in the row is invented — `run_job`'s own handler owns the FAILED status.
+    assert "status" not in extra
+
+
+def test_an_ordinary_launch_failure_records_no_capacity_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason has to stay rare to stay meaningful — a broken import is not a stockout."""
+    import scale_forecasting.submitters as submitters_mod
+
+    seen = _fake_job_lifecycle(monkeypatch)
+
+    class _Broken:
+        def launch(self, cfg: RunConfig, **kw: Any) -> None:
+            raise ModuleNotFoundError("statsmodels")
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _Broken())
+
+    cfg = _cfg(models=[_SPARK])
+    job = dag.plan_dag(cfg).python_jobs[0]
+    with pytest.raises(ModuleNotFoundError):
+        job_launch.launch_family_job(cfg, job, "rid-0", _SETTINGS)
+    assert "failure_reason" not in seen["fin"].extra
+
+
 # --- ensemble DAG node: identity + mode dispatch -------------------------------
 
 

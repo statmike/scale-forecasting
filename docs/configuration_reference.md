@@ -296,6 +296,57 @@ spec is hashed into `run_id` and stamped to `run_registry.job_telemetry`. Set `r
 for the proven fixed-size path (no autoscaling spec). See the Ray runtime in
 [architecture.md](./architecture.md).
 
+### `compute.capacity` — how hard to look for room
+
+"Resources are not available" is a **state**, not an exception. When a create fails for want of
+machines the launcher walks its candidate places (Ray: `ray_regions`; a Dataproc cluster: the
+zone/region fallback map; Serverless: the region), and if none has room it backs off and walks them
+again until a budget runs out. While it waits the family's `run_jobs` row reads `AWAITING_CAPACITY`
+and carries a ledger of every attempt; on exhaustion the row is `FAILED` with
+`failure_reason = CAPACITY_EXHAUSTED`. See
+[troubleshooting.md](./troubleshooting.md#capacity--the-cloud-has-no-room) for reading it.
+
+`{"enabled": false}` (top level) collapses every service to a single pass with no back-off — the
+pre-retry behaviour exactly. Otherwise each service takes a **partial** override: name only the
+number you have an opinion about and inherit the rest.
+
+| Field | Type | Default | Constraint | Purpose |
+|-------|------|---------|-----------|---------|
+| `enabled` | `bool` | `true` | — | `false` = one pass over the candidates, no back-off, all services. Beats an authored `max_passes`. |
+| `ray` \| `dataproc_cluster` \| `dataproc_serverless` | `object` | `{}` | — | Per-service partial override; unset fields inherit the shipped default below. |
+
+Per-service fields, all optional, `0` disables that bound:
+
+| Field | Type | `ray` | `dataproc_cluster` | `dataproc_serverless` | Purpose |
+|-------|------|-------|--------------------|-----------------------|---------|
+| `max_attempts` | `int ≥ 0` | `6` | `8` | `10` | Total attempts across all candidates. |
+| `max_wall_seconds` | `float ≥ 0` | `3600` | `2700` | `1800` | Clock budget for the whole walk. |
+| `max_passes` | `int ≥ 0` | unbounded | unbounded | unbounded | Full sweeps of the candidate list. |
+| `backoff_seconds` | `float ≥ 0` | `120` | `60` | `30` | First wait after a fruitless pass. |
+| `backoff_multiplier` | `float ≥ 1.0` | `2.0` | `2.0` | `2.0` | Growth per pass. |
+| `backoff_max_seconds` | `float ≥ 0` | `600` | `300` | `120` | Cap on the wait. |
+
+The three differ because the services do. A Vertex Ray GPU provision costs ~12 minutes per attempt,
+so it gets the fewest tries and the longest patience; a Serverless batch is rejected in seconds, so
+retrying is nearly free and the clock is the bound that matters.
+
+**BigQuery has no entry, deliberately.** Slot contention is resolved BigQuery-side and surfaces as
+latency, not as a create that failed somewhere else it could be tried. There is no candidate list to
+walk.
+
+**None of this moves the `run_id`.** Patience is an operational knob, not part of what was asked
+for — same rule as `compute.profile.source`. If it hashed into the digest, waiting longer for a GPU
+would fork your run identity and break dedupe-on-read.
+
+```json
+"compute": {
+  "capacity": {
+    "ray": {"max_wall_seconds": 7200},
+    "dataproc_serverless": {"max_attempts": 20}
+  }
+}
+```
+
 ### `compute.profile` — measured compute profiling
 
 Sizing is otherwise a pure cell **count** (`n_series × n_models × n_folds`, divided by a flat

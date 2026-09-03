@@ -44,7 +44,7 @@ import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .capacity import DEFAULT_POLICIES, CapacityLedger, CapacityPolicy
+from .capacity import DEFAULT_POLICIES, CapacityLedger, CapacityPolicy, current_publisher
 from .capacity import walk as capacity_walk
 from .engines import ray_io
 from .errors import get_logger
@@ -315,7 +315,8 @@ def _create_cluster_across_regions(
     ``policy`` defaults to the shipped Ray patience; callers with a config pass
     ``cfg.compute.capacity.policy_for("ray")``. ``ledger`` is caller-owned so the attempt log
     survives *success* too — landing in ``us-east1`` after two stockouts is worth recording — and
-    ``on_state`` lets the caller publish ``AWAITING_CAPACITY`` while the walk is still running.
+    ``on_state`` publishes ``AWAITING_CAPACITY`` while the walk is still running, defaulting to
+    whatever `capacity.publishing_to` installed for this family (`job_launch` does).
     """
     ledger = ledger if ledger is not None else CapacityLedger(service="ray")
     return capacity_walk(
@@ -324,7 +325,7 @@ def _create_cluster_across_regions(
         ledger=ledger,
         policy=policy or DEFAULT_POLICIES["ray"],
         describe_failure=lambda region, exc: _describe_region_failure(name, settings, region, exc),
-        on_state=on_state,
+        on_state=on_state if on_state is not None else current_publisher(),
     )
 
 

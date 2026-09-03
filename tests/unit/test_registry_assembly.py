@@ -504,6 +504,44 @@ def test_run_job_records_failed_and_reraises(monkeypatch: Any) -> None:
     assert fields["ended_at"] is not None  # a crashed job still records its wall-clock end
 
 
+def test_the_failure_write_carries_what_the_body_finalized_before_it_raised(
+    monkeypatch: Any,
+) -> None:
+    """A body that told the finalizer something and *then* raised knew that thing when it failed.
+
+    Discarding it is how a row ends up saying FAILED with nothing about why. `job_launch` leans on
+    exactly this to attach ``failure_reason`` and the capacity ledger to a family that ran out of
+    regions to try — the only route it has, since the whole point is that the block does not return.
+    """
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(ValueError, match="no room"):
+        with run_job("rid-0123456789ab", "deep_learning", 1) as job:
+            job.finalize(
+                failure_reason="CAPACITY_EXHAUSTED", job_telemetry={"capacity": {"attempts": []}}
+            )
+            raise ValueError("no room anywhere")
+
+    _, fields = cap["updates"][0]
+    assert fields["status"] == "FAILED"
+    assert fields["failure_reason"] == "CAPACITY_EXHAUSTED"
+    assert fields["job_telemetry"] == {"capacity": {"attempts": []}}
+
+
+def test_a_raising_body_is_failed_whatever_status_it_hoped_to_finalize(
+    monkeypatch: Any,
+) -> None:
+    """`finalize` keeps ``status`` out of ``extra``, so the two can never collide in the kwargs."""
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(ValueError):
+        with run_job("rid-0123456789ab", "ml", 1) as job:
+            job.finalize(status="COMPLETED", system_job_id="dp-1")
+            raise ValueError("died after finalizing")
+
+    _, fields = cap["updates"][0]
+    assert fields["status"] == "FAILED"
+    assert fields["system_job_id"] == "dp-1"
+
+
 def test_job_row_started_at_overrides_created_at() -> None:
     started = datetime(2026, 1, 2, 3, 5, 0, tzinfo=UTC)
     row = assemble_job_row("rid-0123456789ab", "ml", 1, _CREATED, started_at=started)

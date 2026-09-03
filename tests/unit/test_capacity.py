@@ -821,3 +821,65 @@ def test_an_unknown_capacity_field_is_rejected_rather_than_silently_ignored() ->
 def test_a_resolved_policy_is_the_type_the_walk_takes() -> None:
     """`policy_for` is the only bridge from config to the loop; it must land on the dataclass."""
     assert isinstance(CapacityConfig().policy_for("ray"), cap.CapacityPolicy)
+
+
+# --- the ambient publisher ------------------------------------------------------------------
+#
+# `walk` takes `on_state` explicitly and knows nothing about this; the plumbing exists so the one
+# frame that knows *which registry row* a walk belongs to can install a publisher without threading
+# a telemetry parameter down through `RuntimeSubmitter.launch`. These tests pin the three properties
+# the rest of the system leans on: it is scoped, it is per-thread, and it never becomes mandatory.
+
+
+def test_no_publisher_is_installed_by_default() -> None:
+    """A bare API call or a test must not need to know this exists."""
+    assert cap.current_publisher() is None
+
+
+def test_publishing_to_scopes_the_publisher_to_its_block() -> None:
+    def publish(_led: cap.CapacityLedger) -> None: ...
+
+    with cap.publishing_to(publish):
+        assert cap.current_publisher() is publish
+    assert cap.current_publisher() is None
+
+
+def test_publishing_to_restores_the_outer_publisher_rather_than_clearing_it() -> None:
+    """`reset(token)` and not `set(None)`: a nested install must not blind the frame outside it."""
+
+    def outer(_led: cap.CapacityLedger) -> None: ...
+
+    def inner(_led: cap.CapacityLedger) -> None: ...
+
+    with cap.publishing_to(outer):
+        with cap.publishing_to(inner):
+            assert cap.current_publisher() is inner
+        assert cap.current_publisher() is outer
+
+
+def test_publishing_to_unwinds_when_the_block_raises() -> None:
+    """A submitter that dies mid-launch must not leave its row's publisher installed."""
+
+    def publish(_led: cap.CapacityLedger) -> None: ...
+
+    with pytest.raises(RuntimeError), cap.publishing_to(publish):
+        raise RuntimeError("launch blew up")
+    assert cap.current_publisher() is None
+
+
+def test_a_publisher_installed_on_one_thread_is_invisible_to_another() -> None:
+    """The whole reason this is a ContextVar and not a module global.
+
+    A run's families launch on concurrent pool threads and each publishes to its *own* ``run_jobs``
+    row. With a global, whichever family installed last would own every other family's telemetry.
+    """
+    import threading
+
+    def publish(_led: cap.CapacityLedger) -> None: ...
+
+    seen: list[object] = []
+    with cap.publishing_to(publish):
+        thread = threading.Thread(target=lambda: seen.append(cap.current_publisher()))
+        thread.start()
+        thread.join()
+    assert seen == [None]

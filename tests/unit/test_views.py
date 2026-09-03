@@ -122,6 +122,21 @@ def test_run_jobs_view_projects_probe_handle() -> None:
     assert "JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle" in stmt
 
 
+def test_run_jobs_view_surfaces_why_a_job_failed_and_what_it_tried() -> None:
+    # `failure_reason` is a column so "show me every job that ran out of regions" is a WHERE
+    # clause; the ledger stays JSON because its interesting part is a per-attempt list.
+    stmt = render_create_views("d")["v_run_jobs"]
+    assert "\n  failure_reason,\n" in stmt
+    assert "JSON_QUERY(job_telemetry, '$.capacity') AS capacity" in stmt
+
+
+def test_run_summary_view_projects_the_shared_clusters_capacity_ledger() -> None:
+    # The run-level half of the same story: a shared cluster is provisioned before any job row
+    # exists, so its walk is recorded on the header instead — see `shared_capacity_path`.
+    stmt = render_create_views("d")["v_run_summary"]
+    assert "JSON_QUERY(job_telemetry, '$.capacity') AS capacity" in stmt
+
+
 def test_views_snapshot() -> None:
     rendered = _render_all()
     if os.environ.get("SF_UPDATE_SNAPSHOTS") == "1":

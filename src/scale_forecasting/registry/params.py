@@ -61,6 +61,12 @@ _JOB_PARAM_TYPES: dict[str, str] = {
     "started_at": "TIMESTAMP",
     "ended_at": "TIMESTAMP",
     "runtime_seconds": "FLOAT64",
+    # Why a FAILED row failed, as a short machine-readable token (`capacity.CAPACITY_EXHAUSTED` is
+    # the first). A column rather than another JSON path because this is the field an operator
+    # filters a whole registry on — "show me every job that ran out of regions" has to be a WHERE
+    # clause, not something you need to know a JSON path to find. NULL for every other failure and
+    # for every row written before it existed.
+    "failure_reason": "STRING",
     "job_telemetry": "JSON",
 }
 

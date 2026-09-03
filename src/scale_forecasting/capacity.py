@@ -39,7 +39,9 @@ entire time budget on the region that was arithmetically impossible.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TypeVar
 
@@ -532,3 +534,36 @@ def _publish(on_state: Callable[[CapacityLedger], None] | None, ledger: Capacity
         on_state(ledger)
     except Exception as exc:  # noqa: BLE001 - observability must not sink the walk
         _log.debug("capacity state publish failed (non-fatal): %r", exc)
+
+
+# --- reaching the walk from the job that owns it ------------------------------------------------
+#
+# The walk runs deep inside a submitter — `job_launch` → `submitters.launch` → `submit_ray` →
+# `provision_shared_cluster` → `walk` — and the thing it needs to write to (a ``run_jobs`` row) is
+# known only at the top of that chain. Threading a callback down four signatures would put a
+# telemetry parameter on `RuntimeSubmitter.launch`, a documented seam, for the benefit of one
+# feature.
+#
+# So it is ambient instead: `launch_family_job` installs a publisher for the duration of one
+# family's launch, and the two cluster modules pick it up as their default `on_state`. A
+# `ContextVar` and not a global because families launch on concurrent worker threads and each needs
+# its own row — a plain module global would have every family publishing onto whichever row was
+# installed last. `walk` itself stays pure: it takes `on_state` explicitly and never reads this.
+_CURRENT_PUBLISHER: ContextVar[Callable[[CapacityLedger], None] | None] = ContextVar(
+    "scale_forecasting_capacity_publisher", default=None
+)
+
+
+@contextmanager
+def publishing_to(on_state: Callable[[CapacityLedger], None] | None) -> Iterator[None]:
+    """Install ``on_state`` as the ambient capacity publisher for the duration of the block."""
+    token = _CURRENT_PUBLISHER.set(on_state)
+    try:
+        yield
+    finally:
+        _CURRENT_PUBLISHER.reset(token)
+
+
+def current_publisher() -> Callable[[CapacityLedger], None] | None:
+    """The ambient publisher, or ``None`` when nothing installed one (a bare API call, a test)."""
+    return _CURRENT_PUBLISHER.get()

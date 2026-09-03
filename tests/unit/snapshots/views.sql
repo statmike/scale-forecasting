@@ -22,7 +22,8 @@ SELECT
   JSON_VALUE(job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
   JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version,
-  JSON_QUERY(job_telemetry, '$.sizing') AS sizing
+  JSON_QUERY(job_telemetry, '$.sizing') AS sizing,
+  JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `proj.scale_forecasting.run_registry`
 QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1;
 
@@ -42,9 +43,11 @@ SELECT
   started_at,
   ended_at,
   runtime_seconds,
+  failure_reason,
   CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
-  JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle
+  JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle,
+  JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `proj.scale_forecasting.run_jobs`
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC

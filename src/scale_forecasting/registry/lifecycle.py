@@ -171,6 +171,14 @@ def run_job(
     it. ``manage=False`` yields the finalizer without touching ``run_jobs`` (uniform call shape for
     a caller that records the job elsewhere). Assumes the tables exist (the header owner ran
     `ensure_tables`), so it does not re-create them.
+
+    The failure write carries ``fin.extra`` too. A body that told the finalizer something and
+    *then* raised knew that thing at the moment it failed, and discarding it is how a row ends up
+    saying FAILED with nothing about why: `job_launch` uses exactly this to attach
+    ``failure_reason`` and the capacity ledger to a job that ran out of regions to try. The
+    finalizer's ``status`` is deliberately not honoured here — a raising body is FAILED regardless
+    of what it hoped to write — and `JobFinalizer.finalize` keeps ``status`` out of ``extra``, so
+    the two can never collide.
     """
     from .ids import make_job_key
     from .jobs import update_job, write_job  # late-bound writers, as in `run_header`
@@ -205,6 +213,7 @@ def run_job(
                 runtime_seconds=time.perf_counter() - started,
                 ended_at=datetime.now(UTC),
                 unless_status_in=_STICKY_STATUSES,
+                **fin.extra,
             )
         raise
     if manage:

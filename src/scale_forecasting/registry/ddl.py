@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS `{d}.run_jobs` (
   started_at       TIMESTAMP,
   ended_at         TIMESTAMP,
   runtime_seconds  FLOAT64,
+  failure_reason   STRING,
   job_telemetry    JSON
 )
 PARTITION BY DATE(created_at)

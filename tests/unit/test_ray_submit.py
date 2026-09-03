@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import ray_cluster, ray_infra, ray_jobs, ray_submit, ray_telemetry
+from scale_forecasting import capacity, ray_cluster, ray_infra, ray_jobs, ray_submit, ray_telemetry
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.errors import ConfigError, EngineError
@@ -917,6 +917,72 @@ def test_submit_ray_falls_back_to_next_region_on_capacity_stockout(
     assert calls["deleted"] == 2
     # the stocked-out region's resource path was among the deletes.
     assert any("us-east1" in name for name in calls["delete_names"])
+
+
+def test_an_ambient_publisher_reaches_the_walk_several_frames_below_it(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The end-to-end proof that the AWAITING_CAPACITY plumbing actually connects.
+
+    `job_launch` installs a publisher at the top of one family's launch; the walk that would use it
+    runs three frames down, inside `submit_ray` → `_create_cluster_across_regions`. Nothing in
+    between passes it, so if the contextvar hand-off is wrong this is silently dead telemetry — a
+    row that stays RUNNING through a twenty-minute stockout, which is the exact failure the state
+    was added to end. Asserting on the ledger the publisher receives, not merely that it was called.
+    """
+    calls = _stubbed_lifecycle
+
+    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+        calls["created"] += 1
+        calls["order"].append("create")
+        if calls["created"] == 1:
+            raise RuntimeError("Resources are insufficient in region: us-east1.")
+        return f"projects/proj-x/locations/us-west1/persistentResources/{name}"
+
+    monkeypatch.setattr(ray_cluster, "_create_cluster", _stockout_then_ok)
+    published: list[dict[str, Any]] = []
+    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
+    with capacity.publishing_to(lambda led: published.append(led.to_json())):
+        ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
+
+    assert published, "the walk never reached the ambient publisher"
+    attempts = published[-1]["attempts"]
+    assert [a["candidate"] for a in attempts] == ["us-east1"]
+    assert attempts[0]["verdict"] == capacity.TRANSIENT_CAPACITY
+    # The cloud's own words survive the hop — the thing three classifier defects were fixed by.
+    assert "insufficient in region: us-east1" in attempts[0]["message"]
+
+
+def test_an_explicit_on_state_still_wins_over_the_ambient_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ambient publisher is a *default*, not an override — a direct caller keeps control."""
+    tried: list[str] = []
+
+    def _fake_attempt(plan: Any, infra: Any, name: str, settings: Any, region: str) -> Any:
+        tried.append(region)
+        if len(tried) == 1:
+            raise RuntimeError("Resources are insufficient in region: us-east1.")
+        return (f"projects/p/locations/{region}/persistentResources/{name}", region)
+
+    monkeypatch.setattr(ray_cluster, "_attempt_cluster_in_region", _fake_attempt)
+    monkeypatch.setattr(ray_cluster, "_describe_region_failure", lambda n, s, r, exc: str(exc))
+
+    explicit: list[Any] = []
+    ambient: list[Any] = []
+    with capacity.publishing_to(ambient.append):
+        _resource, region = ray_cluster._create_cluster_across_regions(
+            None,
+            None,
+            "sf-ray-x",
+            _settings(),
+            ["us-east1", "us-west1"],
+            policy=capacity.CapacityPolicy(backoff_seconds=0.0),
+            on_state=explicit.append,
+        )
+    assert region == "us-west1"
+    assert len(explicit) == 1  # the caller's own callback saw the stockout...
+    assert ambient == []  # ...and the ambient one was never consulted
 
 
 def test_submit_ray_falls_back_when_capacity_reason_only_on_resource_error(

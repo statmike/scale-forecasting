@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.run_jobs` (
   started_at       TIMESTAMP,
   ended_at         TIMESTAMP,
   runtime_seconds  FLOAT64,
+  failure_reason   STRING,
   job_telemetry    JSON
 )
 PARTITION BY DATE(created_at)

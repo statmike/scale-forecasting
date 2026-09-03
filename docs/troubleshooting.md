@@ -5,7 +5,7 @@ The single home for known issues seen building and running this at scale, each a
 doc explains *why* the handling exists so you recognize the symptom fast.
 
 Grouped by where it bites: [In-flight runs](#in-flight-runs--probe-reconcile-cancel) ·
-[Ray](#ray-on-vertex) · [Spark](#spark-on-dataproc) ·
+[Capacity](#capacity--the-cloud-has-no-room) · [Ray](#ray-on-vertex) · [Spark](#spark-on-dataproc) ·
 [Registry / writes](#registry--writes) · [Versions](#versions--runtimes) ·
 [Deploy / Terraform](#deploy--terraform) · [Notebooks](#notebooks).
 
@@ -155,6 +155,60 @@ want is an accurate status, `close-runs` gets there without deleting anything.
 
 ---
 
+## Capacity — the cloud has no room
+
+A cluster create that fails for want of machines is not a bug in your config, and it is the one
+failure worth re-submitting unchanged. It gets its own state so it stops looking like a hang and
+stops looking like a crash.
+
+### A family sits at `AWAITING_CAPACITY`
+**Symptom:** `monitor` shows a job that is neither `RUNNING` nor terminal, sometimes for many
+minutes.
+**Cause:** the launcher is walking candidate regions/zones looking for one that can provision the
+cluster. This is a **live, non-terminal** state — the work has not started and has not failed.
+**Fix:** usually nothing; wait. Two things are worth knowing:
+
+- The row's `capacity` ledger says exactly what has been tried. Read it from `v_run_jobs`:
+
+  ```sql
+  SELECT family, status, failure_reason, capacity FROM `PROJECT.DATASET.v_run_jobs`
+  WHERE run_id = 'RUN_ID'
+  ```
+
+  Each attempt carries its candidate, the verdict, and the **cloud's verbatim message**. A shared
+  cluster is provisioned before any job row exists, so its ledger is on the run header instead —
+  same key, in `v_run_summary.capacity`, one entry per service.
+- **`--cancel` cannot interrupt a walk.** The loop runs inside the submitting process, and an
+  `AWAITING_CAPACITY` row has no runtime job to stop — cancel reports "no handle recorded" and
+  leaves the row alone. Stop the launching process (or let the budget expire) instead.
+
+### A job FAILED with `failure_reason = CAPACITY_EXHAUSTED`
+**Symptom:** a family went terminal without ever running.
+**Cause:** the walk used up its attempt budget or its wall-clock budget without finding room. The
+finished ledger is still on the row.
+**Fix:** re-submit — often unchanged, since a stockout is transient. If the ledger shows
+`HARD_CEILING` on every candidate, waiting will not help: that is a quota this project is not
+allowed past, so either request more quota or ask for less (fewer GPUs, a different accelerator).
+Verdicts, and what each one does to the walk:
+
+| Verdict | Means | Effect |
+|---|---|---|
+| `TRANSIENT_CAPACITY` | No machines right now. | Hop to the next candidate, and come back to this one after the back-off. |
+| `HARD_CEILING` | A quota you cannot exceed. | Hop, and drop this candidate from later passes — waiting cannot raise a quota. |
+| `CONFIG_FAULT` | The request itself is wrong (bad machine type, retired image). | Stop immediately and re-raise. Another zone cannot fix it. |
+
+An unrecognised message is treated as transient, deliberately: the cost of one extra hop is smaller
+than the cost of abandoning a run over a phrasing nobody had seen yet.
+
+### The wait is too long, or too short
+**Fix:** `compute.capacity` sets per-service patience — `max_attempts`, `max_passes`,
+`max_wall_seconds`, and the back-off. `{"enabled": false}` collapses every service to a single pass,
+which is what you want when you would rather fail fast than wait. None of it moves the `run_id`: how
+patient you are is an operational knob, not part of what you asked for. See the compute block in
+[configuration_reference.md](./configuration_reference.md).
+
+---
+
 ## Ray on Vertex
 
 ### Ray job submission hangs, or HTTP 524 on `/api/version`
@@ -197,8 +251,10 @@ confirm ADC is still valid on the orchestrator.
 ### Regional GPU capacity stockout
 **Symptom:** cluster create fails to obtain T4s in a region.
 **Cause:** transient regional accelerator stockout.
-**Fix:** `compute.ray_regions` is a fallback list — the launcher tries them in order. Add more
-regions if one is chronically short.
+**Fix:** `compute.ray_regions` is the candidate list the launcher walks, and the walk retries the
+whole list rather than giving up after one pass. See
+[Capacity](#capacity--the-cloud-has-no-room) for the state it reports while it waits, the ledger it
+keeps, and how to tune the patience. Add more regions if one is chronically short.
 
 ### Ray cluster won't shrink when idle / can't grow under load
 **Symptom:** the expensive GPU pool stays allocated while idle, or the CPU pool can't grow to work

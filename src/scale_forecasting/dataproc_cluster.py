@@ -31,7 +31,13 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .batch_infra import BatchInfra
-from .capacity import DEFAULT_POLICIES, CapacityExhausted, CapacityLedger, CapacityPolicy
+from .capacity import (
+    DEFAULT_POLICIES,
+    CapacityExhausted,
+    CapacityLedger,
+    CapacityPolicy,
+    current_publisher,
+)
 from .capacity import walk as capacity_walk
 from .cluster_deps import (
     _VENV_ARCHIVE_METADATA_KEY,
@@ -545,7 +551,9 @@ def _create_cluster_across_candidates(
     retired image — because another zone cannot fix any of those.
 
     ``policy`` defaults to the shipped Dataproc-cluster patience; callers with a config pass
-    ``cfg.compute.capacity.policy_for("dataproc_cluster")``.
+    ``cfg.compute.capacity.policy_for("dataproc_cluster")``. ``on_state`` publishes
+    ``AWAITING_CAPACITY`` mid-walk, defaulting to whatever `capacity.publishing_to` installed for
+    this family (`job_launch` does).
     """
     ledger = ledger if ledger is not None else CapacityLedger(service="dataproc_cluster")
     try:
@@ -560,7 +568,7 @@ def _create_cluster_across_candidates(
             describe_failure=lambda cand, exc: _describe_candidate_failure(
                 cand, exc, project_id=project_id, name=name
             ),
-            on_state=on_state,
+            on_state=on_state if on_state is not None else current_publisher(),
         )
     except CapacityExhausted:
         raise
