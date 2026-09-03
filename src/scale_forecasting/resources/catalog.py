@@ -89,6 +89,19 @@ _MACHINE_TYPE_RE = r"^([a-z0-9]+-[a-z]+)-(\d+)$"
 # Also absorbs the OS and the Ray runtime itself.
 _SCHEDULABLE_MEMORY_FRACTION = 0.7
 
+# Share of *schedulable* memory one slot may ask for. The clamp above is an estimate of what the
+# scheduler will hand out, and estimating it exactly is not possible from a machine-type name: Ray
+# takes its 30% off what the container's OS reports, which is a percent or two below nameplate, so
+# a request sized at exactly `_SCHEDULABLE_MEMORY_FRACTION` of nameplate lands just *over* the real
+# ceiling and the task is never placed. Live 2026-09-03: a 100k Ray run sat at zero cells for an
+# hour with the autoscaler repeating "No available node types can fulfill resource request
+# {'CPU': 1.0, 'memory': 22548578304.0}" — 0.7 x n1-standard-8's nameplate, to the byte.
+#
+# The headroom is not only defensive arithmetic. A slot entitled to a whole node's memory is a slot
+# that runs one cell per node with every other core idle, which is a bad plan even where it is a
+# legal one. Capping the ask below the node forces the packing arithmetic to stay meaningful.
+_MAX_SLOT_MEMORY_FRACTION = 0.85
+
 _GIB = 1024**3
 _MIB = 1024**2
 

@@ -988,11 +988,12 @@ def test_both_native_builders_survive_the_encoder_they_feed() -> None:
 # available.
 
 
-def _cand(run_id: str, day: int, n_series: int) -> dict[str, Any]:
+def _cand(run_id: str, day: int, n_series: int, engines: list[str] | None = None) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "measured_at": datetime(2026, 9, day, tzinfo=UTC),
         "n_series": n_series,
+        "engines": engines,
     }
 
 
@@ -1042,3 +1043,76 @@ def test_a_candidate_with_no_measured_count_is_not_ranked_out() -> None:
 
 def test_no_candidates_means_no_pick() -> None:
     assert rank_harvest_candidates([], target_series=100_000) is None
+
+
+# --- and on which runtime it was measured --------------------------------------
+#
+# Live 2026-09-03: fixing the scale axis above made `auto` pick a well-matched *Spark* harvest for a
+# *Ray* run. `process_rss_bytes` is the whole process's footprint — one task on Ray, a whole
+# many-cell executor on Spark — so that number is not a large estimate of a Ray task, it is a
+# measurement of something else. The run held a 21 GiB per-task request no node could satisfy and
+# sat at zero cells for an hour.
+
+
+def test_the_target_runtime_outranks_a_better_scale_match() -> None:
+    candidates = [
+        _cand("spark-exact-scale", 3, 100_000, ["spark"]),
+        _cand("ray-wrong-scale", 1, 1_000, ["ray"]),
+    ]
+    picked = rank_harvest_candidates(candidates, target_series=100_000, target_runtime="ray")
+    assert picked == "ray-wrong-scale"
+
+
+def test_scale_still_decides_among_runs_on_the_target_runtime() -> None:
+    candidates = [
+        _cand("ray-tiny-newest", 3, 6, ["ray"]),
+        _cand("ray-right-size", 1, 90_000, ["ray"]),
+    ]
+    picked = rank_harvest_candidates(candidates, target_series=100_000, target_runtime="ray")
+    assert picked == "ray-right-size"
+
+
+def test_a_pure_run_beats_a_mixed_one_that_merely_contains_the_runtime() -> None:
+    # The harvest read pulls every cell of the chosen run, so a mixed run hands the cost model a
+    # blend of two incomparable kinds of number. Usable if it is all there is; not preferred.
+    candidates = [
+        _cand("mixed", 3, 100_000, ["ray", "spark"]),
+        _cand("pure-ray", 1, 100_000, ["ray"]),
+    ]
+    picked = rank_harvest_candidates(candidates, target_series=100_000, target_runtime="ray")
+    assert picked == "pure-ray"
+
+
+def test_a_mixed_run_still_beats_one_with_none_of_the_runtime() -> None:
+    candidates = [
+        _cand("no-ray", 3, 100_000, ["spark"]),
+        _cand("mixed", 1, 100_000, ["ray", "spark"]),
+    ]
+    picked = rank_harvest_candidates(candidates, target_series=100_000, target_runtime="ray")
+    assert picked == "mixed"
+
+
+def test_a_mismatched_runtime_is_ranked_down_not_excluded() -> None:
+    # Wrong-runtime evidence still beats no evidence: the alternative is the declared-config
+    # fallback, which is a guess rather than a measurement.
+    candidates = [_cand("spark-only", 1, 100_000, ["spark"])]
+    picked = rank_harvest_candidates(candidates, target_series=100_000, target_runtime="ray")
+    assert picked == "spark-only"
+
+
+def test_a_harvest_that_recorded_no_engine_is_unknown_rather_than_wrong() -> None:
+    # Ranks with the mixed runs — below a known match, above a known mismatch.
+    candidates = [
+        _cand("known-mismatch", 3, 100_000, ["spark"]),
+        _cand("no-engine-recorded", 2, 100_000, None),
+        _cand("known-match", 1, 100_000, ["ray"]),
+    ]
+    picked = rank_harvest_candidates(candidates, target_series=100_000, target_runtime="ray")
+    assert picked == "known-match"
+    picked = rank_harvest_candidates(candidates[:2], target_series=100_000, target_runtime="ray")
+    assert picked == "no-engine-recorded"
+
+
+def test_without_a_target_runtime_the_axis_has_no_opinion() -> None:
+    candidates = [_cand("spark", 1, 100_000, ["spark"]), _cand("ray", 3, 6, ["ray"])]
+    assert rank_harvest_candidates(candidates, target_series=100_000) == "spark"

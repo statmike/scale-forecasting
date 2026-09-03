@@ -271,6 +271,7 @@ def profile_for_run(cfg: RunConfig, *, settings: Settings | None = None) -> Comp
         signature.source_table,
         signature.freq,
         signature.n_series,
+        cfg.python_runtime,  # ranks the candidates, so two runtimes can resolve differently
         profile_cfg.memory_margin,
         profile_cfg.time_margin,
     )
@@ -286,6 +287,7 @@ def profile_for_run(cfg: RunConfig, *, settings: Settings | None = None) -> Comp
             source_table=want.source_table,
             freq=want.freq,
             target_series=want.n_series,
+            target_runtime=cfg.python_runtime,
             settings=settings,
         ),
         load_baseline=load_baseline,

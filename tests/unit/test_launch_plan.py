@@ -339,9 +339,15 @@ def test_auto_is_pinned_to_the_run_it_resolves_to(monkeypatch: pytest.MonkeyPatc
     seen = _fake_discover(monkeypatch, "prior-run-0123456789ab")
     locked = launch_plan.lock_profile_source(_lock_cfg(), settings=_SETTINGS)
     assert locked.compute.profile.source == "prior-run-0123456789ab"
-    # The identity axes filter in SQL; the scale axis does not filter but does *rank*, so the
-    # target series count has to reach discovery rather than only being checked after load.
-    assert set(seen[0]) == {"source_table", "freq", "target_series", "settings"}
+    # The identity axes filter in SQL; scale and runtime do not filter but do *rank*, so both have
+    # to reach discovery rather than only being checked after the rows are loaded.
+    assert set(seen[0]) == {
+        "source_table",
+        "freq",
+        "target_series",
+        "target_runtime",
+        "settings",
+    }
 
 
 def test_pinning_does_not_move_the_run_id(monkeypatch: pytest.MonkeyPatch) -> None:

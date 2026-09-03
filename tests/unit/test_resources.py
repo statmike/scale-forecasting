@@ -39,8 +39,10 @@ from scale_forecasting.resources import audit, catalog, cluster, fleet, serverle
 from scale_forecasting.resources.catalog import machine_memory_bytes
 from scale_forecasting.resources.fleet import (
     UnitShape,
+    max_slot_memory_bytes,
     plan_fleet,
     plan_resources,
+    schedulable_memory_bytes,
     slots_per_unit,
     tasks_for_ceiling,
 )
@@ -50,7 +52,8 @@ from scale_forecasting.resources.slot import ResourceSlot, merge_slots, resource
 _GIB = 1024**3
 _MIB = 1024**2
 
-# An n1-standard-8: 8 cores, 30 GiB nameplate, 21 GiB schedulable.
+# An n1-standard-8: 8 cores, 30 GiB nameplate, 21 GiB schedulable, ~17.9 GiB the most one slot
+# may ask for.
 _N1_STANDARD_8 = UnitShape(cores=8, memory_bytes=30 * _GIB)
 
 
@@ -181,7 +184,7 @@ def test_a_slot_wider_than_the_machine_is_clamped_and_the_clamp_is_recorded() ->
     assert any("clamped" in note for note in slot.notes)
 
 
-def test_a_slot_heavier_than_the_machine_is_clamped_to_schedulable_memory() -> None:
+def test_a_slot_heavier_than_the_machine_is_clamped_to_fit_inside_it() -> None:
     """Same failure mode on the memory axis, and the same answer."""
     plan = plan_resources(
         _profile(_fit(process_rss_bytes=40 * _GIB)),
@@ -190,9 +193,43 @@ def test_a_slot_heavier_than_the_machine_is_clamped_to_schedulable_memory() -> N
         n_cells=10,
         unit=_N1_STANDARD_8,
     )
-    assert plan.slot.memory_bytes == int(30 * _GIB * 0.7)
+    assert plan.slot.memory_bytes == max_slot_memory_bytes(_N1_STANDARD_8)
     assert plan.slots_per_unit == 1
     assert any("clamped" in note for note in plan.slot.notes)
+
+
+def test_the_clamp_leaves_headroom_under_the_schedulable_ceiling() -> None:
+    """Live 2026-09-03, and the reason `max_slot_memory_bytes` is not `schedulable_memory_bytes`.
+
+    A Ray run clamped a per-task ask to exactly 0.7 x an n1-standard-8's nameplate RAM and then
+    queued for an hour: Ray's own ceiling is 0.7 x what the *container's OS* reports, which is a
+    little below nameplate, so a request at exactly our estimate lands just above the real one. The
+    autoscaler said so once a second — "No available node types can fulfill resource request
+    {'CPU': 1.0, 'memory': 22548578304.0}" — and never placed the task.
+    """
+    schedulable = schedulable_memory_bytes(_N1_STANDARD_8)
+    assert schedulable is not None
+    ask = max_slot_memory_bytes(_N1_STANDARD_8)
+    assert ask is not None
+    assert ask < schedulable
+
+    plan = plan_resources(
+        _profile(_fit(process_rss_bytes=40 * _GIB)),
+        "statistical",
+        "ray",
+        n_cells=10,
+        unit=_N1_STANDARD_8,
+    )
+    # The number Ray is actually handed, not an intermediate: whatever the clamp is, a task must
+    # never ask a node for every byte the node has to give.
+    assert plan.task_options["memory"] < schedulable
+
+
+def test_a_unit_of_unknown_size_bounds_nothing() -> None:
+    """An unparseable machine type means *no* memory bound — not a node with no memory."""
+    unit = UnitShape(cores=8, memory_bytes=None)
+    assert schedulable_memory_bytes(unit) is None
+    assert max_slot_memory_bytes(unit) is None
 
 
 # --- the GPU axis --------------------------------------------------------------

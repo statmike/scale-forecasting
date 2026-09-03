@@ -30,7 +30,7 @@ from .catalog import (
     _MIN_GPU_FRACTION,
     _SPARK_JVM_MB_PER_CORE,
 )
-from .fleet import RuntimeResourcePlan, UnitShape, plan_fleet, schedulable_memory_bytes
+from .fleet import RuntimeResourcePlan, UnitShape, max_slot_memory_bytes, plan_fleet
 from .slot import ResourceSlot, merge_slots, resource_slot
 
 if TYPE_CHECKING:
@@ -359,7 +359,7 @@ def plan_serverless(
                     device_bytes=device_bytes,
                     static_gpu_fraction=static_gpu_fraction,
                     max_cores=unit.cores,
-                    max_memory_bytes=schedulable_memory_bytes(unit),
+                    max_memory_bytes=max_slot_memory_bytes(unit),
                 )
                 for family in (families or ["cpu"])
             ],

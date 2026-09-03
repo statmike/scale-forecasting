@@ -22,7 +22,11 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .catalog import _DEFAULT_TARGET_CELLS_PER_SLOT, _SCHEDULABLE_MEMORY_FRACTION
+from .catalog import (
+    _DEFAULT_TARGET_CELLS_PER_SLOT,
+    _MAX_SLOT_MEMORY_FRACTION,
+    _SCHEDULABLE_MEMORY_FRACTION,
+)
 from .slot import ResourceSlot, resource_slot
 
 if TYPE_CHECKING:
@@ -148,6 +152,26 @@ def schedulable_memory_bytes(unit: UnitShape) -> int | None:
     return int(unit.memory_bytes * _SCHEDULABLE_MEMORY_FRACTION) if unit.memory_bytes else None
 
 
+def max_slot_memory_bytes(unit: UnitShape) -> int | None:
+    """The largest memory ask one slot may make of a unit (pure; unknown → ``None``).
+
+    `schedulable_memory_bytes` with `_MAX_SLOT_MEMORY_FRACTION` of headroom on top, and the
+    distinction between the two is the difference between a fleet that runs and one that hangs.
+    The schedulable figure is an *estimate* of the scheduler's ceiling, derived from a machine
+    type's nameplate RAM; the scheduler's real ceiling is derived from what the container's OS
+    reports, which is lower. Clamping a slot to exactly the estimate therefore produces a task
+    request that is plausibly just above what any node can offer, and an unplaceable Ray task does
+    not fail — it queues forever while the autoscaler explains, once per second, that no node type
+    can fulfil it.
+
+    Use this wherever a slot is being *clamped to fit*; use `schedulable_memory_bytes` where a
+    unit's capacity is being *divided up* (`_memory_bound`, container sizing). Same node, two
+    different questions.
+    """
+    schedulable = schedulable_memory_bytes(unit)
+    return int(schedulable * _MAX_SLOT_MEMORY_FRACTION) if schedulable else None
+
+
 def _memory_bound(slot: ResourceSlot, unit: UnitShape) -> int | None:
     """Cells one unit's schedulable RAM holds, or ``None`` when either side is unknown (pure)."""
     schedulable = schedulable_memory_bytes(unit)
@@ -255,7 +279,7 @@ def plan_resources(
         device_bytes=device_bytes,
         static_gpu_fraction=static_gpu_fraction,
         max_cores=unit.cores if unit.cores > 0 else None,
-        max_memory_bytes=schedulable_memory_bytes(unit),
+        max_memory_bytes=max_slot_memory_bytes(unit),
     )
     return plan_fleet(
         slot,

@@ -324,6 +324,7 @@ def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> 
             source_table=want.source_table,
             freq=want.freq,
             target_series=want.n_series,
+            target_runtime=cfg.python_runtime,
             settings=settings,
         )
     except Exception as exc:  # noqa: BLE001 - an unpinned plan is a worse plan, not a failed one

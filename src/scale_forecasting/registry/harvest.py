@@ -109,15 +109,30 @@ _MAX_HARVEST_CANDIDATES = 500
 
 
 def rank_harvest_candidates(
-    candidates: list[dict[str, Any]], *, target_series: int | None
+    candidates: list[dict[str, Any]],
+    *,
+    target_series: int | None,
+    target_runtime: str | None = None,
 ) -> str | None:
     """Pick the best harvest to size ``target_series`` from, or ``None`` if there are none (pure).
 
-    Each candidate is ``{"run_id", "measured_at", "n_series"}``. **Closeness of scale ranks first,
-    recency only breaks ties** — the opposite of what "the newest evidence" suggests, and
-    deliberately so. A campaign writes small harvests often and large ones rarely, so ordering by
-    recency alone reliably selects the *least* representative run in the window: observed live three
-    times, once handing a 100k-series plan a profile measured on six series.
+    Each candidate is ``{"run_id", "measured_at", "n_series", "engines"}``. Three keys, in strict
+    order: **runtime comparability, then closeness of scale, then recency**.
+
+    *Runtime* comes first because a mismatch there is not an inaccuracy, it is a category error.
+    ``process_rss_bytes`` is the absolute footprint of the process that ran the cell: on Ray that is
+    one task, on Spark it is an executor running many cells at once. Reading a Spark number as a Ray
+    per-task bound therefore over-states it by roughly the executor's density, and the result is not
+    a fleet that is merely too large — it is a per-task ``memory`` request no node can satisfy,
+    which Ray answers by queueing the task forever. Live 2026-09-03: a 100k Ray run sat at zero
+    cells for an hour holding a 21 GiB per-task request harvested from a Spark run. A run whose
+    cells are *all* the target runtime ranks above a mixed run (whose harvest read would blend both
+    kinds of number), which ranks above one with none of it.
+
+    *Scale* comes second, and ahead of recency — the opposite of what "the newest evidence"
+    suggests, and deliberately so. A campaign writes small harvests often and large ones rarely, so
+    ordering by recency alone reliably selects the *least* representative run in the window:
+    observed live three times, once handing a 100k-series plan a profile measured on six series.
 
     Distance is measured in **log space**, because sizing error scales multiplicatively. Against a
     100k target a 1k harvest is off by two orders of magnitude and a 6-series one by four, and the
@@ -125,12 +140,23 @@ def rank_harvest_candidates(
     equally bad. Distance is symmetric: an over-large harvest is no more trusted than an equally
     over-small one, since both are extrapolations.
 
-    With no ``target_series`` — a config with no ``series_limit``, so the scale is not known until
-    the source is read — this degrades to pure recency, which is the old behaviour.
+    Each axis degrades to *no opinion* when its input is missing — no ``target_runtime``, or no
+    ``target_series`` (a config with no ``series_limit``, so the scale is not known until the source
+    is read) — and with both missing this is pure recency, the original behaviour.
     """
     if not candidates:
         return None
     import math
+
+    def runtime_tier(cand: dict[str, Any]) -> int:
+        if not target_runtime:
+            return 0
+        engines = {e for e in (cand.get("engines") or []) if e}
+        if not engines:
+            return 1  # an older harvest that recorded no engine — unknown, not disqualified
+        if engines == {target_runtime}:
+            return 0
+        return 1 if target_runtime in engines else 2
 
     def distance(cand: dict[str, Any]) -> float:
         n = cand.get("n_series") or 0
@@ -141,10 +167,12 @@ def rank_harvest_candidates(
         # far below the resolution at which one harvest is better evidence than another.
         return round(abs(math.log(n) - math.log(target_series)), 2)
 
-    # Sort keys are (distance asc, measured_at desc). measured_at is a datetime, so negating is not
-    # available; sorting twice with a stable sort gives the same order and needs no key arithmetic.
+    # Sort keys are (runtime tier asc, distance asc, measured_at desc). measured_at is a datetime,
+    # so negating it is not available; sorting repeatedly with a stable sort, least-significant key
+    # first, gives the same order and needs no key arithmetic.
     ordered = sorted(candidates, key=lambda c: c["measured_at"], reverse=True)
     ordered.sort(key=distance)
+    ordered.sort(key=runtime_tier)
     return str(ordered[0]["run_id"])
 
 
@@ -153,6 +181,7 @@ def discover_harvest_run(
     source_table: str | None,
     freq: str | None,
     target_series: int | None = None,
+    target_runtime: str | None = None,
     lookback_days: int = _HARVEST_LOOKBACK_DAYS,
     settings: Settings | None = None,
 ) -> str | None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
@@ -165,10 +194,10 @@ def discover_harvest_run(
     warning rather than a disqualification: a 1k-series run is imperfect but usable evidence for a
     100k one, and preferring nothing over it would leave the common case unsized.
 
-    But *which* imperfect run gets picked is a choice, and it is made here rather than in SQL:
-    this query returns every candidate in the window with its measured series count, and
-    `rank_harvest_candidates` — pure, and therefore tested offline — chooses. See it for why scale
-    beats recency.
+    But *which* imperfect run gets picked is a choice, and it is made here rather than in SQL: this
+    query returns every candidate in the window with its measured series count and the set of
+    engines its cells ran on, and `rank_harvest_candidates` — pure, and therefore tested offline —
+    chooses. See it for why runtime beats scale and scale beats recency.
 
     Restricted to ``COMPLETED`` runs. A run that died partway measured only the cells that finished,
     which on a bucketed engine is a biased slice, and biased evidence sizes a fleet badly in a
@@ -187,7 +216,8 @@ def discover_harvest_run(
         "  QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1"
         ") "
         "SELECT m.run_id AS run_id, MAX(m.created_at) AS measured_at, "
-        "       COUNT(DISTINCT m.ts_id) AS n_series "
+        "       COUNT(DISTINCT m.ts_id) AS n_series, "
+        "       ARRAY_AGG(DISTINCT m.compute_engine IGNORE NULLS) AS engines "
         "FROM `{metadata}` AS m JOIN headers AS h USING (run_id) "
         "WHERE m.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback DAY) "
         "  AND {harvest_where} "
@@ -219,4 +249,4 @@ def discover_harvest_run(
         ]
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"discover_harvest_run failed: {exc}") from exc
-    return rank_harvest_candidates(rows, target_series=target_series)
+    return rank_harvest_candidates(rows, target_series=target_series, target_runtime=target_runtime)

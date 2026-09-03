@@ -46,8 +46,8 @@ from ..resources.catalog import machine_cores, machine_memory_bytes
 from ..resources.fleet import (
     RuntimeResourcePlan,
     UnitShape,
+    max_slot_memory_bytes,
     plan_fleet,
-    schedulable_memory_bytes,
 )
 from ..resources.slot import merge_slots, resource_slot
 
@@ -442,7 +442,7 @@ def plan_pool(
                 gpu_fraction if gpu_fraction is not None else _sizing_fraction(cfg)
             ),
             max_cores=unit.cores if unit.cores > 0 else None,
-            max_memory_bytes=schedulable_memory_bytes(unit),
+            max_memory_bytes=max_slot_memory_bytes(unit),
         )
         for family in families
     ]
