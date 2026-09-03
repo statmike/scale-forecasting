@@ -51,8 +51,12 @@ min/initial/max, `spark.task.cpus`, the thread pins, and a derived worker count 
 properties overlay. **This is a different fleet**, so any Spark result proven on the old one is a
 claim about a machine shape that no longer exists.
 
-Two runtimes do *not* declare it. **BigQuery-native** work has no fleet of ours to shape. **Ray** is
-unmoved in practice: `plan_pool(profile=None)` reproduces the pre-profiler arithmetic exactly, W1's
+Two runtimes do *not* declare it. **BigQuery-native** work has no fleet of ours to shape. **Ray**
+does not, because the axis is about a Spark *properties overlay* and Ray has none — but the
+parenthetical that used to follow ("Ray is unmoved in practice") stopped being true on 2026-09-03.
+`plan_pool(profile=None)` still reproduces the pre-profiler arithmetic exactly, and every Ray row
+above `ray_100k` was sized that way; `ray_100k` is the first Ray run whose *slot* came from a
+measurement (`basis: measured`, 2 cores and 1.29 GiB per task, from a prior Ray harvest). W1's
 autoscale-ceiling derivation only fires when `ray_autoscale` is true and all four Ray smokes pin it
 `false` (the demonstration surface covers that path — see `ray_autoscale_demo`, which reached the
 derived ceiling of 8), and W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
@@ -505,7 +509,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review. Attempted twice. 2026-09-02: never reached a job, blocked by the Ray provisioning outage below. 2026-09-03: the cluster came up and the run held at **zero cells for 57 minutes** on an unplaceable per-task memory request — see the section below; fixed offline at `17e1221`, live proof pending | NEVER_RUN | — | — | — |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
 
@@ -778,11 +782,46 @@ one-axis ranker had been silently getting the right answer only because the corp
 
 Both fixes are offline-proven at `17e1221` (2406 passed, 2 skipped) and include a regression test
 that pins the property directly: a slot may never be clamped to a node's entire schedulable memory.
-Neither is live-proven. `ray_100k` is the run that will do it.
 
 The cancellation itself is a small good-news footnote: `--cancel --force` on a hung two-family run
 tore it down cleanly — header `CANCELLED`, both job rows `CANCELLED`, cluster gone — which is the
 second live proof of the sticky-cancel guard and the first on a multi-family run.
+
+**Re-run the same day, and it completed.** `ray-100k-dcc77a9d1e9b` attempt 2, `COMPLETED`, **400,000
+cells** — `theta`, `holtwinters`, `sarimax` and `xgboost` at 100,000 each, one `run_id`, two family
+jobs on one shared Ray cluster. Cluster provisioning 15 min; `statistical` 317.8 min, `ml` 294.4
+min; **330.3 min end to end**. Teardown verified by `describe` returning 404, not by the SDK's
+success line. Throughput held flat at ~1,450 cells/min for five hours with no stalls, and the
+`~60-minute bearer-token TTL` never surfaced — the proactive refresh in `ray_jobs` carried a
+five-and-a-half-hour poll, which is by a wide margin the longest run this product has completed.
+
+What the run proves, in the order it was in doubt:
+
+1. **The headroom fix works.** Zero clamps fired. `statistical` got 2 cores and 1.29 GiB per task
+   against an `n1-standard-8`'s 21 GiB schedulable — nowhere near the ceiling, because the evidence
+   was finally the right kind of evidence.
+2. **The runtime-ranked harvest works.** `auto` resolved to `ray-autoscale-demo-886a053c374c`, a
+   **Ray** run at 10,000 series, in preference to `explode-100k-1c59265062aa`, a Spark run at
+   100,000 — the exact scale match that hung the previous attempt. Runtime beat scale, which is the
+   whole of the fix.
+3. **Ray autoscaling reached its ceiling under real load.** The worker pool went 1 → **20**, its
+   configured `ray_cpu_max_nodes`, and stayed there. `saturating_units` records what the arithmetic
+   actually wanted: **12,500**. The run was throttled by the ceiling, not by the work, and the
+   record says so.
+4. **A Ray fleet was sized from a measurement for the first time.** `basis: measured` on the
+   `statistical` plan — 4 slots per node from a harvested 1.29 GiB `slot_rss_bytes`, versus the 8
+   the static path would have assumed.
+
+One honest qualification on point 4. **The `ml` family fell back to `basis: static`**, because
+`ray-autoscale-demo` measured three statistical models and no `xgboost` — so the best-ranked Ray
+harvest was a *partial* match, and the profile had nothing to say about the family that turned out
+to be the faster of the two. The ranker chose correctly on the axes it has; "does this harvest cover
+the families I am about to run" is a fourth axis, unranked, and it cost nothing here only because
+the static fallback for `ml` was adequate. Recorded, not fixed.
+
+And this run is itself the artifact W13 was waiting for: **the first 100,000-series Ray harvest**,
+measured across 400,000 fits, which is what a shipped baseline profile should be cut from rather
+than the 10,000-series demo run it would have had to use yesterday.
 
 ### What this surface will exercise that the smoke suite cannot
 
@@ -1263,16 +1302,19 @@ also the last remaining in-flight run in the registry, so it is a standing, visi
 Things that are true today and that no entry above covers. Keep this list short and act on it.
 
 - **A per-task memory clamp with no headroom is unschedulable, and no offline test could have
-  caught it. Fixed 2026-09-03 at `17e1221`; not yet proven live.** `ray_100k` held at zero cells for
+  caught it. Fixed 2026-09-03 at `17e1221` and proven live the same day.** `ray_100k` held at zero cells for
   57 minutes on a request of exactly `0.7 × nameplate RAM` — our own ceiling, refused by Ray because
   Ray derives its ceiling from what the container's OS reports rather than from the machine type's
   nameplate. The gap the unit tests could not close is that **the true ceiling is not knowable from
   a machine-type name**, so every test of "does the clamp fit" was testing our estimate against
   itself. What is testable, and now is, is the weaker invariant that actually prevents the hang: a
-  slot may never be clamped to a node's *entire* schedulable memory. Two things stay open until
-  `ray_100k` completes — whether 0.85 is enough headroom on machine types other than
-  `n1-standard-8`, and whether the runtime-ranked harvest picks a Ray profile at 100k scale when one
-  exists. Both are decided by the same run.
+  slot may never be clamped to a node's *entire* schedulable memory. The re-run settled it:
+  `ray-100k-dcc77a9d1e9b` COMPLETED with **400,000 cells** in 330 minutes, and **no clamp fired at
+  all** — the runtime-ranked harvest supplied 1.29 GiB per task, which is not close enough to the
+  ceiling for the headroom to matter. What is still open is narrower than the bullet was: the 0.85
+  figure has been *exercised* only on `n1-standard-8`, and the run that proved the ranker did so
+  without ever reaching the clamp. The hang is fixed twice over (right evidence, and headroom if the
+  evidence is ever wrong); the second belt has not itself been pulled tight by a live run.
 - **The prebaked GPU cluster image expires, and nothing in the deployment notices.** Found live
   2026-09-02 by smoke 16, analysed above: an image built nine days earlier was refused because the
   Dataproc sub-minor baked into it had been retired. **Smoke 06 is the row that rests on this.** Its
@@ -1537,8 +1579,17 @@ Things that are true today and that no entry above covers. Keep this list short 
   one-axis ranker had been getting away with it only because the corpus was small.**
   `rank_harvest_candidates` now ranks runtime comparability first (all-target-runtime → mixed or
   unrecorded → none), scale second, recency last; discovery aggregates each candidate's
-  `compute_engine` set to feed it. Seven more offline tests, and the fix is unproven live —
-  `ray_100k` is the run that will settle it.
+  `compute_engine` set to feed it. Seven more offline tests, and **live-proven the same day**: the
+  `ray_100k` re-run resolved `auto` to `ray-autoscale-demo-886a053c374c` — a Ray run at 10,000
+  series — in preference to the 100,000-series Spark harvest that is still the better scale match,
+  and completed 400,000 cells. Runtime beat scale, which is the whole of the fix.
+
+  One axis remains unranked, and the same run showed it: `ray-autoscale-demo` measured three
+  statistical models and no `xgboost`, so the `ml` family fell back to `basis: static` while
+  `statistical` got `basis: measured`. The ranker has no notion of *coverage* — "does this harvest
+  contain the families I am about to run" — and picked a partial match over nothing. That was the
+  right call here and cost nothing, because the static fallback for `ml` was adequate. It is a
+  fourth axis, not a defect, and it is cheap to add when a run makes it matter.
 
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
