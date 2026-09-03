@@ -207,6 +207,23 @@ cd terraform/main
 terraform apply -var create_composer=false
 ```
 
+!!! warning "Why the harness talks REST, not `gcloud composer environments run`"
+    The obvious way to confirm a DAG parsed and to trigger it is the Airflow CLI, wrapped as
+    `gcloud composer environments run <env> ... dags list` / `dags trigger`. **Do not use it here.**
+    Those verbs route through the Composer `executeAirflowCommand` API, which spins up a pod per
+    invocation; against a healthy, `RUNNING` environment a single `dags list-import-errors` was
+    observed to produce no output and hang past a 400-second timeout. In a poll loop that gates a
+    live billing run, that is a hang with a meter attached.
+
+    The harness instead reads the environment's `airflowUri` with a plain `describe` (a control-plane
+    read — about a second, no pod) and then calls the **Airflow REST API** directly with ADC
+    credentials: `GET /api/v1/dags/<dag_id>` to confirm the parse, `PATCH` to unpause,
+    `POST .../dagRuns` to trigger. It answers in well under a second and returns
+    `has_import_errors` explicitly — which `dags list` does not, so the REST path distinguishes
+    *"not parsed yet"* from *"parsed and broken"* where the CLI could only time out. Only the DAG
+    **upload** stays on `gcloud` (`storage dags import`), because that is a GCS copy and is
+    reliable.
+
 The deep-learning family on Ray GPU is the long pole in this smoke, and it is why `backtest.n_folds`
 is **3** rather than the 10 the other backtesting smokes use. At the measured ~4 cells/min per T4
 node ([quota and scale](quota_and_scale.md)), 200 series × 3 folds is ~600 NeuralProphet fits — under

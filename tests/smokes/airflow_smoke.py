@@ -11,10 +11,20 @@ runs the same building blocks (same code local↔Composer). Verification reuses 
 `smoke_harness` (`verify_run_jobs`, `verify_leaderboard`, `verify_predictions`), so the two smokes
 hold the result to one standard.
 
-The command-builders below are pure argv (offline-unit-tested in `test_harness`); the live driver
-(`run_airflow_smoke`) shells out to ``gcloud composer`` + polls the registry and is ``@gcp`` — it
-provisions nothing but needs a running Composer environment (``create_composer=true``) with the
-package installed on its workers. The runbook (`docs/smoke_testing.md`) drives it. Usage:
+Two control planes, deliberately: the DAG file is delivered with ``gcloud composer environments
+storage dags import`` (a GCS copy — fast and reliable), but *confirming the parse* and *triggering
+the run* go through the **Airflow REST API** on the environment's ``airflowUri``. The
+``gcloud composer environments run`` verbs are not used: they route through
+``executeAirflowCommand``, which spins up a pod per invocation and was observed to hang
+indefinitely against a healthy environment — unacceptable in a loop that gates a live billing run.
+The REST API answers the same questions in under a second and reports ``has_import_errors``
+directly, which the CLI does not.
+
+The builders below are pure (offline-unit-tested in `test_airflow_smoke`); the live driver
+(`run_airflow_smoke`) shells out once for the environment lookup, calls the REST API, polls the
+registry, and is ``@gcp`` — it provisions nothing but needs a running Composer environment
+(``create_composer=true``) with the package delivered to its workers (``make composer-sync``).
+The runbook (`docs/smoke_testing.md`) drives it. Usage:
 
     .venv/bin/python tests/smokes/airflow_smoke.py configs/smokes/15_airflow_multi_engine.json \
         --composer-env scale-forecasting --location us-central1
@@ -74,41 +84,34 @@ def dags_import_command(
     ]
 
 
-def dags_list_command(env: str, location: str, project: str | None = None) -> list[str]:
-    """``gcloud`` argv to list the DAGs Airflow has parsed (to confirm the upload was picked up)."""
+def airflow_uri_command(env: str, location: str, project: str | None = None) -> list[str]:
+    """``gcloud`` argv to read an environment's Airflow web URI — the REST API's base address.
+
+    A plain ``describe`` against the Composer control plane: it returns in about a second and does
+    NOT go through ``executeAirflowCommand``, so it is safe to call before a live run.
+    """
     return [
         "gcloud",
         "composer",
         "environments",
-        "run",
+        "describe",
         env,
         "--location",
         location,
         *_project_flag(project),
-        "dags",
-        "list",
+        "--format",
+        "value(config.airflowUri)",
     ]
 
 
-def dags_trigger_command(
-    env: str, location: str, dag_id: str, project: str | None = None
-) -> list[str]:
-    """``gcloud`` argv to trigger one run of ``dag_id`` (tokens after ``--`` go to Airflow)."""
-    return [
-        "gcloud",
-        "composer",
-        "environments",
-        "run",
-        env,
-        "--location",
-        location,
-        *_project_flag(project),
-        "dags",
-        "trigger",
-        "--",
-        "-d",
-        dag_id,
-    ]
+def dag_url(airflow_uri: str, dag_id: str) -> str:
+    """Airflow REST URL for one DAG's detail — the parse check (``has_import_errors``) reads it."""
+    return f"{airflow_uri.rstrip('/')}/api/v1/dags/{dag_id}"
+
+
+def dag_runs_url(airflow_uri: str, dag_id: str) -> str:
+    """Airflow REST URL for one DAG's runs collection — POST here to trigger a manual run."""
+    return f"{dag_url(airflow_uri, dag_id)}/dagRuns"
 
 
 # --- live orchestration (@gcp; needs a running Composer env) --------------------
@@ -201,19 +204,42 @@ def run_airflow_smoke(
         dag_path.write_text(source)
         _cli(dags_import_command(composer_env, location, str(dag_path), project))
 
-    # 3. wait for Airflow to parse the new file, then trigger a manual run. A failed list poll just
-    #    means "not confirmed yet" — keep waiting rather than aborting on a transient API error.
+    # 3. wait for Airflow to parse the new file, then trigger a manual run — over the REST API, not
+    #    the `gcloud composer environments run` CLI (see the module docstring for why).
+    #    AuthorizedSession signs each call with ADC and refreshes on its own, so a slow poll cannot
+    #    outlive its token the way a captured bearer string would.
+    import google.auth
+    from google.auth.transport.requests import AuthorizedSession
+
+    airflow_uri = _cli(airflow_uri_command(composer_env, location, project)).stdout.strip()
+    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    session = AuthorizedSession(credentials)
+    detail_url = dag_url(airflow_uri, dag_id)
+
+    # A DAG appears here only once the scheduler has parsed the file, so a 200 IS the parse
+    # confirmation — and `has_import_errors` tells us the parse *succeeded*, which the CLI's
+    # `dags list` could not. Transient errors just mean "not confirmed yet"; keep waiting.
     deadline = time.monotonic() + timeout_s
+    parsed = False
     while time.monotonic() < deadline:
-        listed = subprocess.run(
-            dags_list_command(composer_env, location, project),
-            capture_output=True,
-            text=True,
-        )
-        if listed.returncode == 0 and dag_id in listed.stdout:
+        resp = session.get(detail_url, timeout=60)
+        if resp.status_code == 200:
+            detail = resp.json()
+            if detail.get("has_import_errors"):
+                raise RuntimeError(f"Airflow reports import errors for {dag_id}: {detail}")
+            parsed = True
             break
         time.sleep(poll_interval_s)
-    _cli(dags_trigger_command(composer_env, location, dag_id, project))
+    if not parsed:
+        raise RuntimeError(f"Airflow never parsed {dag_id} within {timeout_s}s")
+
+    # Composer can create DAGs paused (`dags_are_paused_at_creation`); an unpause is a no-op when
+    # it does not, and the difference is a run that silently never starts.
+    session.patch(detail_url, json={"is_paused": False}, timeout=60)
+
+    triggered = session.post(dag_runs_url(airflow_uri, dag_id), json={"conf": {}}, timeout=60)
+    if triggered.status_code not in (200, 201):
+        raise RuntimeError(f"trigger failed ({triggered.status_code}): {triggered.text}")
 
     # 4. wait for the run to reach a terminal header status in the registry (same signal run_smoke
     #    uses — the DAG writes the same registry a local run does).
