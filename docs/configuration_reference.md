@@ -293,8 +293,9 @@ max resolves to `ray_max_nodes`. Config validation requires `min ≤ resolved ma
 *initial* pool size stays a deterministic function of the config (fan-out ÷
 `ray_target_cells_per_slot`, clamped into the bounds), so the run remains reproducible — the whole
 spec is hashed into `run_id` and stamped to `run_registry.job_telemetry`. Set `ray_autoscale=false`
-for the proven fixed-size path (no autoscaling spec). See the Ray runtime in
-[architecture.md](./architecture.md).
+to opt out and get a fixed-size pool instead (no autoscaling spec at all) — worth reaching for when
+you want a cluster whose cost is flat and predictable rather than demand-shaped. See the Ray runtime
+in [architecture.md](./architecture.md).
 
 ### `compute.capacity` — how hard to look for room
 

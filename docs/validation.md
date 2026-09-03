@@ -37,6 +37,7 @@ old value goes stale by definition.
 | `run_id_inputs` | `authored-config-only` | `a22e94c` (2026-09-01), after the fork below | `+compute.profile.source` (W11a) |
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
+| `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not
@@ -57,10 +58,17 @@ parenthetical that used to follow ("Ray is unmoved in practice") stopped being t
 `plan_pool(profile=None)` still reproduces the pre-profiler arithmetic exactly, and every Ray row
 above `ray_100k` was sized that way; `ray_100k` is the first Ray run whose *slot* came from a
 measurement (`basis: measured`, 2 cores and 1.29 GiB per task, from a prior Ray harvest). W1's
-autoscale-ceiling derivation only fires when `ray_autoscale` is true and all four Ray smokes pin it
-`false` (the demonstration surface covers that path — see `ray_autoscale_demo`, which reached the
-derived ceiling of 8), and W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
+autoscale-ceiling derivation only fires when `ray_autoscale` is true, which until 2026-09-03 no Ray
+smoke did (the demonstration surface covered that path alone — see `ray_autoscale_demo`, which
+reached the derived ceiling of 8); the four smokes have since dropped the pin and gone stale for it.
+W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
 because it submits Serverless work alongside its Ray families.
+
+`ray_pool_shape` is the Ray-side counterpart: **whether a worker pool is provisioned with an
+`AutoscalingSpec` or at a fixed `node_count`.** These are two different provisioning calls, not two
+settings of one, and the difference has bitten before — a per-pool `AutoscalingSpec` is what crashed
+the Vertex Ray head in `4c988bc`. Only Ray entries declare it. A pool that autoscales also makes
+W1's derived ceiling live, so the fan-out arithmetic reaches the cluster instead of sitting inert.
 
 `horizon_features` governs **what an exog-aware model is handed for the forecast horizon**. Until
 `cb7d15f` the horizon's design matrix was the first `horizon` rows of *history*. Holiday flags and
@@ -102,10 +110,10 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | CURRENT | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-02 | `smoke-08-ray-gpu-c41ecf2d5d52` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
-| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | CURRENT | 2026-09-02 | `smoke-09-shared-ray-1d308b8a712c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | CURRENT | 2026-09-02 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | STALE | 2026-09-02 | `smoke-08-ray-gpu-c41ecf2d5d52` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
+| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-02 | `smoke-09-shared-ray-1d308b8a712c` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-02 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -495,10 +503,10 @@ one.
 
 Both ran the Ray path on the custom container image. `822ae25` deleted that path — the custom image
 fails Vertex Ray GPU provisioning, so all Ray moved to the stock prebuilt image with dependencies
-delivered by Ray 2.47's `runtime_env` uv plugin. Smokes 07 and 08 were re-run on the new path and
-pass; **09 and 10 were not.** Smoke 10 is the significant loss: it was the strongest proof in the
-suite — all four families across all three runtimes under a single `run_id` — and that claim does
-not currently stand on the shipped architecture.
+delivered by Ray 2.47's `runtime_env` uv plugin. All four Ray rows (07–10) have since been re-run on
+the new path and passed, including smoke 10 — the strongest proof in the suite, all four families
+across all three runtimes under a single `run_id`. They are stale again for a different and narrower
+reason, recorded below: they stopped pinning `ray_autoscale`.
 
 **The Spark rows (01, 03, 04, 05, 06, 10–14 and notebooks 03, 08) went stale on 2026-08-31** when
 W7b/W8 moved `fleet_sizing`. Every one of them ran on a fleet the platform shaped; today's code
@@ -526,8 +534,52 @@ overlay submitted is the one the model actually fitted under. That is the single
 untested mechanism in the suite cleared; the remaining Spark rows are stale for want of a re-run,
 not for want of a working overlay.
 
-The campaign that re-earns the rest is profiler **W12**, which also does the `off`-vs-profiled A/B
-and captures the measurements the shipped baseline will carry.
+The campaign that re-earns the rest is profiler **W12**, which also does the `off`-vs-profiled A/B.
+It no longer has to capture the baseline's measurements — the 100k Ray run already carried them, so
+the baseline shipped ahead of it (see below).
+
+### Smokes 07–10 are stale because they stopped pinning `ray_autoscale`, which was the point
+
+All four pinned `"ray_autoscale": false` from `4c988bc` (2026-08-25), when a per-pool
+`AutoscalingSpec` crashed the Vertex Ray head at provisioning. That crash was later attributed to
+the **custom node image**, which no longer exists — every Ray path moved to the stock image plus the
+`runtime_env` uv plugin. So the pin was a workaround for a component that has been deleted, and
+while it stood, the smoke suite — the part of the record that is supposed to cover the shipped
+defaults — was the one part of it not exercising this one.
+
+The autoscaling path itself is not unproven: `ray_autoscale_demo` reached the derived ceiling of 8
+on CPU, `ray_gpu_demo` scaled a T4 pool, and `ray_100k` ran at scale, all with `ray_autoscale: true`.
+Those four rows now declare `ray_pool_shape=autoscaling` so the record says where the proof lives.
+What is unproven is **these four configs** on it — including the two that stand up GPU pools and
+the one that shares a cluster across families, which is where a provisioning-time crash would land.
+
+Removing the key (rather than setting it to `true`) is the deliberate edit: the config then runs
+whatever the product ships, which is the thing under test. Both spellings hash identically —
+identity is `authored-config-only`, and an explicitly-authored `true` and an absent key resolve to
+the same value — so this is a genuine behaviour change, not a cosmetic one.
+
+**Four `run_id`s move and the new `ray_pool_shape` axis moves under them**, so four rows go stale by
+construction; they were re-graded in the same commit as the config edit:
+
+| # | Proven id | The id its config now resolves to |
+|---|---|---|
+| 07 | `smoke-07-ray-cpu-782bcec2718f` | `smoke-07-ray-cpu-2cb4115312b1` |
+| 08 | `smoke-08-ray-gpu-c41ecf2d5d52` | `smoke-08-ray-gpu-38e33f02fd6d` |
+| 09 | `smoke-09-shared-ray-1d308b8a712c` | `smoke-09-shared-ray-f42e5785f6b9` |
+| 10 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `smoke-10-mixed-runtimes-a39f0fb4f3fa` |
+
+**One thing the arithmetic turned up that is worth recording.** For 08, 09 and 10 the "proven id"
+column is exactly what their committed config produced before this edit — checked against both
+today's code and the last pushed commit. For 07 it is not: `07_ray_cpu.json` resolves to
+`smoke-07-ray-cpu-af6d7d054b5b` under either, never to the `…-782bcec2718f` its row names. That run
+is real and `COMPLETED` in the registry on 2026-09-01, and it is not the
+not-recomputable-from-config category the gaps section describes — that one moved *every* id
+together, and its three siblings match. The likeliest reading is a hand-edited variant, of the kind
+wave 6.1 used to separate the Ray region-failover blocker from the GPU one, whose id the row then
+inherited; the difference has not been reconstructed and is not worth the archaeology, because the
+re-run replaces the pointer either way. Recorded rather than quietly overwritten: a `run_id` column
+whose entries are not re-derivable from the config beside them is the one failure this table cannot
+absorb, and it took arithmetic — not reading — to notice.
 
 ## Demonstration and scale configs
 
@@ -552,11 +604,11 @@ the honest starting position and the reason for adding the table at all: it is t
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | CURRENT | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | CURRENT | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
-| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
-| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
+| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `all_families_10k.json` | Every family under one `run_id` — the largest scale a default project's 4 T4s can reach (Ray + BigQuery) | NEVER_RUN | — | — | — |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
 

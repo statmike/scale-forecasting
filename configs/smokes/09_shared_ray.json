@@ -18,7 +18,6 @@
         "gpu_type": "T4"
       }
     },
-    "ray_regions": ["us-central1", "us-east1", "us-west1"],
-    "ray_autoscale": false
+    "ray_regions": ["us-central1", "us-east1", "us-west1"]
   }
 }
