@@ -223,6 +223,7 @@ def submit_cluster_job(
                 "gpu_image_uri": infra.gpu_image_uri,
                 "machine_family": cfg.compute.machine_family,
             },
+            policy=cfg.compute.capacity.policy_for("dataproc_cluster"),
         )
         region = landed.region
 

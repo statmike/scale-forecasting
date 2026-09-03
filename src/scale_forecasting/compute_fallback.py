@@ -5,7 +5,9 @@ transient stockout — a ``ServiceUnavailable`` from Compute Engine, or a "…do
 resources" / "Resources are insufficient in region" message — even when the project's quota is fine.
 This is most acute for scarce accelerators (a T4/L4 GPU cluster) but happens for CPU too. Rather
 than fail the run on the first stocked-out zone, the cluster submitter walks an ordered list of
-places to try; this module builds that list and classifies which errors are worth hopping on.
+places to try; **this module builds that list**. It no longer classifies the failures — that moved
+to `scale_forecasting.capacity`, which owns one verdict vocabulary for both cluster services and
+the walk that consumes it. What is left here is the geography.
 
 The order (see `resolve_candidates`) is deliberately conservative:
 
@@ -59,25 +61,6 @@ US_ZONES: dict[str, list[str]] = {
     "us-west4": ["us-west4-a", "us-west4-b", "us-west4-c"],
 }
 
-# Substrings (matched lowercased) that mark a create failure as a *capacity* stockout worth trying
-# elsewhere. A specific fault with none of these (bad machine type, missing quota, permission) is
-# re-raised at once because another zone/region won't fix it.
-_CAPACITY_ERROR_MARKERS: tuple[str, ...] = (
-    "resources are insufficient in region",
-    "does not have enough resources",
-    "insufficient resources",
-    "resource exhausted",
-    "resource pool exhausted",
-    "zone_resource_pool_exhausted",
-    "out of resources",
-    "try a different",
-    "capacity",
-)
-
-# api_core exception class names that are transient/capacity by nature (gRPC UNAVAILABLE=14,
-# RESOURCE_EXHAUSTED=8). Matched by name so this module needs no google import.
-_CAPACITY_EXCEPTION_NAMES = frozenset({"ServiceUnavailable", "ResourceExhausted"})
-
 # Dataproc retires individual sub-minor image versions on its own schedule, and refuses creates from
 # them. The moving `2.2-debian12` alias resolves forward, so this only bites a create pinned to one
 # fixed version — in practice a *custom* image, which bakes the sub-minor it was built from into a
@@ -91,9 +74,10 @@ _RETIRED_IMAGE_MARKERS: tuple[str, ...] = (
 def is_retired_image_error(exc: BaseException) -> bool:
     """True if a cluster-create error reads as *this image version has been retired* (pure).
 
-    Distinct from `is_capacity_error` in the only way that matters operationally: a stockout is
-    somewhere-else-and-later, while a retired image is nowhere and never again. Both re-raise; this
-    one exists so the caller can say what actually has to change.
+    `capacity.classify` already reads this as a `CONFIG_FAULT` and stops the walk, which is right:
+    a stockout is somewhere-else-and-later, while a retired image is nowhere and never again. This
+    predicate exists on top of that so the caller can say what actually has to change — the version
+    is baked into an image the operator never picked a version for.
     """
     low = str(exc).lower()
     return any(marker in low for marker in _RETIRED_IMAGE_MARKERS)
@@ -117,21 +101,6 @@ class Candidate:
     def label(self) -> str:
         """A short human label for logs: ``region/zone`` (``region/auto`` for auto-placement)."""
         return f"{self.region}/{self.zone or 'auto'}"
-
-
-def is_capacity_error(exc: BaseException) -> bool:
-    """True if a cluster-create error reads as a transient *capacity* stockout (pure).
-
-    Classifies on the exception **type** (an api_core ``ServiceUnavailable``/``ResourceExhausted``,
-    i.e. gRPC UNAVAILABLE/RESOURCE_EXHAUSTED — how a Compute Engine stockout surfaces from
-    ``create_cluster``) and on the message text (`_CAPACITY_ERROR_MARKERS`, covering the
-    "Resources are insufficient in region" / "does not have enough resources" phrasings). Anything
-    else is a real fault another zone/region won't fix, so the caller re-raises rather than hops.
-    """
-    if type(exc).__name__ in _CAPACITY_EXCEPTION_NAMES:
-        return True
-    low = str(exc).lower()
-    return any(marker in low for marker in _CAPACITY_ERROR_MARKERS)
 
 
 def _catalog_path() -> str | None:

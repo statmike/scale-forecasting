@@ -139,6 +139,55 @@ def test_every_verdict_classify_can_return_is_a_declared_verdict() -> None:
         assert cap.classify(message) in cap.VERDICTS
 
 
+# --- regression: messages this system has actually been told ------------------------------------
+#
+# Verbatim text from live failures, kept because each one was, at the time, classified wrongly by
+# the two predecessors this module replaced. A phrasing that has cost a run once is worth a test
+# forever — the classifier is string-matching, and string-matching regresses silently.
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        # 2026-09-01, Vertex Ray. All three were contentless, all three were misread as diagnosed
+        # config faults by the allowlist-to-continue the fallback ran then, and each one stopped a
+        # three-region config after one region.
+        (
+            "An internal error occurred on your cluster. Please try recreating one.",
+            cap.TRANSIENT_CAPACITY,
+        ),
+        ("Unexpected response.", cap.TRANSIENT_CAPACITY),
+        (
+            "[Ray on Vertex AI]: Cluster projects/p/persistentResources/x returned an error.",
+            cap.TRANSIENT_CAPACITY,
+        ),
+        # 2026-09-01, us-east1. Plural, and in an order no fixed marker matched — which is why quota
+        # is matched compositionally rather than enumerated.
+        (
+            "The following quotas are exceeded: CustomModelTrainingT4GPUsPerProjectPerRegion",
+            cap.HARD_CEILING,
+        ),
+        # 2026-09-02, smoke 16. The version is baked into a custom image the operator never chose a
+        # version for; no zone has it either, so hopping would burn the whole walk.
+        (
+            "400 Selected software image version '2.2.86-debian12' can no longer be used to "
+            "create new clusters. Please select a more recent image.",
+            cap.CONFIG_FAULT,
+        ),
+        # Compute Engine's zonal stockout, as Dataproc reports it.
+        ("ZONE_RESOURCE_POOL_EXHAUSTED", cap.TRANSIENT_CAPACITY),
+        (
+            "Resources are insufficient in region: us-central1. Please try a different region.",
+            cap.TRANSIENT_CAPACITY,
+        ),
+    ],
+)
+def test_messages_observed_live_classify_the_way_the_incident_needed(
+    message: str, expected: str
+) -> None:
+    assert cap.classify(message) == expected
+
+
 # --- policy -------------------------------------------------------------------------------------
 
 

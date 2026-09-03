@@ -7,17 +7,20 @@ and own the resource's whole lifetime.
 
 The interesting part is the **region fallback**. GPU capacity and accelerator quota are both granted
 per-region, so a create that fails for either reason says nothing about the next region's odds —
-`_create_cluster_across_regions` walks the configured regions until one provisions. Two things make
-that harder than it sounds and are the reason the error classifiers are their own pure functions:
-the SDK's exception is a generic "Cluster … returned an error" while the actionable text lives on
-the ``PersistentResource.error`` field (`_cluster_error_message`), and that read has to hit the
-*regional* endpoint or the reason is silently lost. Misclassifying here means either burning every
-region on a config typo or giving up on the first stockout.
+`_create_cluster_across_regions` walks the configured regions until one provisions. The walk itself
+(classification, back-off, both budgets, the attempt ledger) is not here: it is
+`scale_forecasting.capacity`, shared with the Dataproc path so both cluster services answer to one
+rule and one vocabulary. This module supplies the two things only Vertex knows — how to attempt a
+region, and where the reason for a failure actually lives.
 
-Those two costs are not symmetric, and the walk is biased accordingly: it continues by default and
-stops only on a cause that is the same everywhere. Vertex frequently fails a provision without
-saying why at all, so a classifier that had to *recognise* a reason before continuing spent most of
-its life not continuing.
+That second one is the whole difficulty. The SDK's exception is a generic "Cluster … returned an
+error" while the actionable text sits on the ``PersistentResource.error`` field
+(`_cluster_error_message`), and that read has to hit the *regional* endpoint or the reason is
+silently lost. So the walk is handed a ``describe_failure`` that reads the resource before tearing
+it down, and classifies on that.
+
+Vertex frequently fails a provision without saying why at all, which is why the shared classifier
+treats an unrecognised message as transient rather than as a diagnosed fault (see `capacity`).
 
 Only the cluster hops. The data plane — config staging, registry writes — stays pinned to
 ``settings.region``, which is why `cluster_resource_path` takes an explicit region rather than
@@ -38,10 +41,13 @@ ordering for a single-family run.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from .capacity import DEFAULT_POLICIES, CapacityLedger, CapacityPolicy
+from .capacity import walk as capacity_walk
 from .engines import ray_io
-from .errors import EngineError, get_logger
+from .errors import get_logger
 from .ray_infra import RayInfra
 
 if TYPE_CHECKING:
@@ -115,112 +121,6 @@ def _init_vertex(
     from google.cloud import aiplatform
 
     aiplatform.init(project=settings.project_id, location=region)
-
-
-# Substrings that mark a *regional capacity* failure (retry a different region) vs. a config/quota
-# error (retrying elsewhere won't help). Matched case-insensitively against the cluster's error
-# message. Kept as data so the classifier stays a pure, unit-testable function.
-_CAPACITY_ERROR_MARKERS = (
-    "resources are insufficient in region",
-    "try a different region",
-    "does not have enough resources",
-    "insufficient resources",
-    "resource exhausted",
-)
-
-
-def _is_capacity_error(message: str) -> bool:
-    """True if a cluster-create error message signals a *regional capacity* shortage (pure).
-
-    Capacity errors are worth retrying in another region; a bad machine type or permission fault is
-    not. Quota is handled separately by `_is_quota_error` (also region-hoppable, different reason).
-    """
-    low = message.lower()
-    return any(marker in low for marker in _CAPACITY_ERROR_MARKERS)
-
-
-# What marks a *regional quota* ceiling. GPU/accelerator quota on Vertex is granted
-# per-region, so a region that is over its quota says nothing about the next region's ceiling — the
-# fallback advances on these just as it does on capacity stockouts. A quota error is distinct from a
-# capacity stockout (the region has room, this project is simply not allowed more), so it gets its
-# own classifier rather than widening the capacity markers.
-#
-# Matched *compositionally* — "quota" near a word of exhaustion — rather than as fixed phrases.
-# Every phrase the fixed list once held ("quota exceeded", "exceeds quota", "quota limit", …) says
-# quota and says exceed-or-limit, so nothing is lost; what is gained is the wordings nobody
-# enumerated. Found live 2026-09-01: `us-east1` answered "The following quotas are exceeded:
-# CustomModelTrainingT4GPUsPerProjectPerRegion" — plural, and in an order no marker matched — so a
-# textbook hoppable quota ceiling was misread as a config fault and the third region never tried.
-_QUOTA_WORDS = ("quota", "quotas")
-_EXHAUSTION_WORDS = ("exceed", "exceeds", "exceeded", "limit", "limits")
-
-
-def _is_quota_error(message: str) -> bool:
-    """True if a cluster-create error message signals a *regional quota* ceiling (pure).
-
-    Vertex accelerator quota is per-region, so a quota-exhausted region is worth retrying elsewhere:
-    another region carries its own independent ceiling. (A capacity stockout is a different reason
-    with the same remedy — hop — and is classified by `_is_capacity_error`.)
-
-    Note that the relevant ceiling is often *not* the Compute Engine one. `NVIDIA_T4_GPUS` can read
-    4-of-4 free in a region while `CustomModelTrainingT4GPUsPerProjectPerRegion` — the Vertex-side
-    quota a Ray cluster actually spends — is zero. Checking Compute Engine quota before a Ray GPU
-    run tells you nothing.
-    """
-    low = message.lower()
-    return any(q in low for q in _QUOTA_WORDS) and any(e in low for e in _EXHAUSTION_WORDS)
-
-
-# Substrings marking a cause that is the *same in every region*, and so the only reason to stop
-# walking. Everything here names something about the request rather than the place: who is asking,
-# what they asked for, whether the API is even on. Trying `us-east1` will not change any of them.
-#
-# This list is the *whole* stop condition — see `_is_region_invariant_error` for why the fallback is
-# an allowlist of reasons to give up rather than an allowlist of reasons to continue.
-_REGION_INVARIANT_MARKERS = (
-    "permission denied",
-    "permission_denied",
-    "does not have permission",
-    "not authorized",
-    "unauthorized",
-    "iam",
-    "service account",
-    "invalid argument",
-    "invalid_argument",
-    # Broad on purpose: any complaint *about the machine type* is a complaint about what was asked
-    # for. Guarded below by the capacity/quota check, which wins — "machine type X is unavailable in
-    # this zone" is about the place, and reads as capacity.
-    "machine type",
-    "unsupported accelerator",
-    "has not been used in project",  # API disabled
-    "api is not enabled",
-    "billing",
-)
-
-
-def _is_region_invariant_error(message: str) -> bool:
-    """True if the failure would recur identically in every region, so walking is pointless (pure).
-
-    **This is the stop condition, and it is deliberately an allowlist of reasons to give up.** The
-    fallback used to work the other way — hop only on reasons we recognised, re-raise on everything
-    else — and that inverted default cost the feature three times in one afternoon (2026-09-01),
-    each time to a different contentless string: "An internal error occurred on your cluster",
-    "Unexpected response.", and a quota message phrased in an order no marker matched. Each read as
-    a diagnosed config fault and re-raised in the first region, so a config naming three regions
-    tried one.
-
-    The asymmetry justifies the inversion. Hopping when we should not have costs a few minutes of
-    provisioning per extra region, and the caller still ends up with an `EngineError` naming every
-    region tried and carrying the last error — the diagnosis is not lost, only delayed. Not hopping
-    when we should have costs the entire feature, silently, and only shows up as a live failure in a
-    region that ran out. So: give up only when the message names a cause that travels with the
-    *request*, not with the *place*.
-
-    Capacity and quota keep their own classifiers (`_is_capacity_error`, `_is_quota_error`) — no
-    longer to decide whether to continue, but to say *why* in the log, which is worth keeping.
-    """
-    low = message.lower()
-    return any(marker in low for marker in _REGION_INVARIANT_MARKERS)
 
 
 def _resolve_regions(cfg: RunConfig, settings: Settings) -> list[str]:
@@ -354,84 +254,77 @@ def _cluster_error_message(
         return ""
 
 
+def _attempt_cluster_in_region(
+    plan: ray_io.RayClusterPlan, infra: RayInfra, name: str, settings: Settings, region: str
+) -> tuple[str, str]:  # pragma: no cover - live Vertex I/O; @gpu smoke exercises it
+    """One attempt: pin the SDK to ``region``, clear any wreckage, create. Raises on failure.
+
+    Only the cluster hops — the data plane (config staging, registry writes) stays in
+    ``settings.region``. `_init_vertex` re-pins the SDK to the region being attempted, so
+    ``vertex_ray`` provisions there.
+    """
+    _init_vertex(settings, region)
+    # The name is run-derived, so an earlier attempt's wreckage sits on this exact path and would
+    # fail the create with AlreadyExists. Clear it first (see `_clear_stale_resource`). This is also
+    # what makes a *second pass* over the same region possible at all.
+    _clear_stale_resource(cluster_resource_path(settings, name, region))
+    _log.info("attempting Ray cluster %s in region %s", name, region)
+    resource_name = _create_cluster(plan, infra, name)
+    _log.info("Ray cluster %s created in region %s", name, region)
+    return resource_name, region
+
+
+def _describe_region_failure(
+    name: str, settings: Settings, region: str, exc: Exception
+) -> str:  # pragma: no cover - live Vertex I/O; @gpu smoke exercises it
+    """The richest text available for a failed create, then tear the failed resource down.
+
+    Reads the resource's own ``error.message`` **before** teardown — that is where the reason lives;
+    the SDK's exception is only a generic "returned an error", so classifying on it alone would
+    never detect a stockout. A create that errors mid-provision still leaves a resource behind, and
+    it has to go before this region can be attempted again on a later pass.
+    """
+    resource_path = cluster_resource_path(settings, name, region)
+    detail = _cluster_error_message(resource_path)
+    _delete_cluster(resource_path)
+    return f"{exc} | {detail}".strip(" |")
+
+
 def _create_cluster_across_regions(
     plan: ray_io.RayClusterPlan,
     infra: RayInfra,
     name: str,
     settings: Settings,
     regions: list[str],
+    *,
+    policy: CapacityPolicy | None = None,
+    ledger: CapacityLedger | None = None,
+    on_state: Callable[[CapacityLedger], None] | None = None,
 ) -> tuple[str, str]:  # pragma: no cover - orchestrates live Vertex I/O; @gpu smoke exercises it
-    """Create the cluster, walking ``regions`` in order until one can provision it.
+    """Create the cluster, walking ``regions`` until one can provision it.
 
     Returns ``(cluster_resource_name, region)`` for the region that succeeded.
 
-    **The default is to keep walking.** The failed attempt's (deterministic) resource is torn down
-    and the next region tried unless the message names a cause that travels with the request rather
-    than the place — permission, a bad machine type, an API that isn't on — for which
-    `_is_region_invariant_error` re-raises at once. Capacity and quota are still recognised, but now
-    only to say *why* in the log. Exhausting every region raises `EngineError` naming the regions
-    tried and carrying the last error. See `_is_region_invariant_error` for why the stop condition
-    is an allowlist rather than the continue condition.
+    The loop is `capacity.walk`, shared with the Dataproc path: try each live region with no wait
+    between them, then back off and try them again, until an attempt or wall-clock budget runs out.
+    A `capacity.HARD_CEILING` region (a quota this project is not allowed past) is dropped from
+    later passes — waiting cannot raise a quota. A `capacity.CONFIG_FAULT` re-raises the original
+    exception at once. Exhaustion raises `capacity.CapacityExhausted`, an `EngineError` carrying the
+    ledger of every attempt.
 
-    The failure signal is read from the failed resource's ``error.message`` (via
-    `_cluster_error_message`) *and* the raised exception string — the SDK's exception is a
-    generic "returned an error" while the "Resources are insufficient in region" / quota text lives
-    only on the resource, so classifying on the exception alone would never detect a stockout.
-
-    Only the cluster hops — the data plane (config staging, registry writes) stays in
-    ``settings.region``. The SDK is re-pinned to each attempted region via `_init_vertex`
-    just before the create, so ``vertex_ray`` provisions there.
+    ``policy`` defaults to the shipped Ray patience; callers with a config pass
+    ``cfg.compute.capacity.policy_for("ray")``. ``ledger`` is caller-owned so the attempt log
+    survives *success* too — landing in ``us-east1`` after two stockouts is worth recording — and
+    ``on_state`` lets the caller publish ``AWAITING_CAPACITY`` while the walk is still running.
     """
-    last_exc: Exception | None = None
-    for region in regions:
-        _init_vertex(settings, region)
-        resource_path = cluster_resource_path(settings, name, region)
-        # The name is run-derived, so an earlier attempt's wreckage sits on this exact path and
-        # would fail the create with AlreadyExists. Clear it first (see `_clear_stale_resource`).
-        _clear_stale_resource(resource_path)
-        try:
-            _log.info("attempting Ray cluster %s in region %s", name, region)
-            resource_name = _create_cluster(plan, infra, name)
-            _log.info("Ray cluster %s created in region %s", name, region)
-            return resource_name, region
-        except Exception as exc:  # noqa: BLE001 - classify, then either advance or re-raise
-            # Read the resource's own error text *before* teardown — that's where the capacity
-            # reason lives; the exception string is only a generic "returned an error".
-            detail = _cluster_error_message(resource_path)
-            message = f"{exc} | {detail}".strip(" |")
-            _delete_cluster(
-                resource_path
-            )  # a create that errors mid-provision still leaves a resource
-            # Hop when the reason reads as a per-region condition — capacity stockout or quota
-            # ceiling — OR when we couldn't read the reason but the SDK raised its generic
-            # post-provision "returned an error" (which only fires after polling to ERROR state — in
-            # practice a stockout). A specific exception with none of those signals is a real
-            # config/permission fault: another region won't help, so re-raise.
-            # Capacity and quota win the tie. A message can name a machine type *and* say the
-            # region ran out of it ("machine type X unavailable in zone Y"); that is about the
-            # place, and hopping is exactly right.
-            regional = _is_capacity_error(message) or _is_quota_error(message)
-            if _is_region_invariant_error(message) and not regional:
-                raise
-            if _is_quota_error(message) and not _is_capacity_error(message):
-                reason = "quota ceiling"
-            elif _is_capacity_error(message):
-                reason = "insufficient capacity"
-            else:
-                # The common case, and the one the old allowlist kept getting wrong: Vertex
-                # failed and would not say why. Name it as unexplained rather than guessing.
-                reason = "an unexplained provisioning failure"
-            _log.warning(
-                "region %s hit %s (%s); trying next region",
-                region,
-                reason,
-                detail or exc,
-            )
-            last_exc = exc
-    # Deliberately does not name a cause. Since the walk continues on anything it cannot rule out,
-    # exhausting the list means only that no region worked — often Vertex never said why.
-    raise EngineError(
-        f"Ray cluster {name} could not be created in any of {regions}: last error {last_exc!r}"
+    ledger = ledger if ledger is not None else CapacityLedger(service="ray")
+    return capacity_walk(
+        regions,
+        lambda region: _attempt_cluster_in_region(plan, infra, name, settings, region),
+        ledger=ledger,
+        policy=policy or DEFAULT_POLICIES["ray"],
+        describe_failure=lambda region, exc: _describe_region_failure(name, settings, region, exc),
+        on_state=on_state,
     )
 
 
@@ -629,7 +522,12 @@ def provision_shared_cluster(
         plan.gpu_node_count,
     )
     _resource, region = _create_cluster_across_regions(
-        plan, infra, plan.cluster_name, settings, regions
+        plan,
+        infra,
+        plan.cluster_name,
+        settings,
+        regions,
+        policy=cfg.compute.capacity.policy_for("ray"),
     )
     return plan.cluster_name, region
 

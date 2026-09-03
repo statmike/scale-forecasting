@@ -1,4 +1,8 @@
-"""Offline tests for the Dataproc cluster capacity-failover candidate logic (pure, no network)."""
+"""Offline tests for the Dataproc cluster capacity-failover candidate logic (pure, no network).
+
+Failure *classification* lives in `tests/unit/test_capacity.py` — this module owns the geography
+(which places to try, in what order, and where their subnets come from).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from scale_forecasting import capacity
 from scale_forecasting import compute_fallback as cf
 
 
@@ -23,45 +28,6 @@ class _Infra:
 _HOME_SUBNET = "projects/p/regions/us-central1/subnetworks/sf-compute"
 
 
-# --- capacity classifier -------------------------------------------------------
-
-
-# The classifier matches by class *name* (so it needs no google import); these stand in for the real
-# google.api_core.exceptions types and must therefore carry their exact names.
-class ServiceUnavailable(Exception):
-    """Stands in for google.api_core.exceptions.ServiceUnavailable (matched by class name)."""
-
-
-class ResourceExhausted(Exception):
-    pass
-
-
-@pytest.mark.parametrize(
-    "exc",
-    [
-        ServiceUnavailable("UNAVAILABLE, errorSource: COMPUTE_ENGINE, Internal error"),
-        ResourceExhausted("quota-ish"),
-        RuntimeError("Resources are insufficient in region: us-central1"),
-        RuntimeError("The zone does not have enough resources available"),
-        RuntimeError("ZONE_RESOURCE_POOL_EXHAUSTED"),
-    ],
-)
-def test_is_capacity_error_true(exc: Exception) -> None:
-    assert cf.is_capacity_error(exc) is True
-
-
-@pytest.mark.parametrize(
-    "exc",
-    [
-        RuntimeError("Invalid machine type n1-bogus-9"),
-        PermissionError("caller does not have permission"),
-        ValueError("bad config"),
-    ],
-)
-def test_is_capacity_error_false(exc: Exception) -> None:
-    assert cf.is_capacity_error(exc) is False
-
-
 # --- a retired image version: nowhere and never again, not somewhere-else-and-later ---
 #
 # Live 2026-09-02: smoke 16's GPU cluster was refused with "Selected software image version
@@ -76,9 +42,9 @@ def test_a_retired_image_version_is_recognised_and_is_not_a_stockout() -> None:
         "create new clusters. Please select a more recent image."
     )
     assert cf.is_retired_image_error(exc) is True
-    # It must not read as capacity: hopping zones would burn the failover walk on an image that
-    # no zone has.
-    assert cf.is_capacity_error(exc) is False
+    # And the shared classifier must not read it as capacity: hopping zones would burn the failover
+    # walk on an image that no zone has.
+    assert capacity.classify(str(exc)) == capacity.CONFIG_FAULT
 
 
 @pytest.mark.parametrize(

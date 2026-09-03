@@ -26,10 +26,13 @@ are pinned here so the specs and their tests stay deterministic.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .batch_infra import BatchInfra
+from .capacity import DEFAULT_POLICIES, CapacityExhausted, CapacityLedger, CapacityPolicy
+from .capacity import walk as capacity_walk
 from .cluster_deps import (
     _VENV_ARCHIVE_METADATA_KEY,
     _VENV_DIR,
@@ -37,8 +40,8 @@ from .cluster_deps import (
     _resolve_cluster_deps,
     _stage_cluster_init,
 )
-from .compute_fallback import Candidate, is_capacity_error, resolve_candidates
-from .errors import ConfigError, EngineError, get_logger
+from .compute_fallback import Candidate, resolve_candidates
+from .errors import ConfigError, get_logger
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -492,52 +495,82 @@ def _explain_create_failure(exc: Exception, gpu_image_uri: str | None) -> Except
     )
 
 
+def _attempt_cluster_at(
+    cand: Candidate, *, project_id: str, name: str, build_kwargs: dict[str, Any]
+) -> Candidate:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
+    """One attempt: build the cluster pinned to this candidate's zone/subnet and create it there."""
+    cluster = build_cluster(
+        name=name, zone=cand.zone, subnetwork_uri=cand.subnetwork_uri, **build_kwargs
+    )
+    _log.info("attempting cluster %s at %s", name, cand.label)
+    _create_cluster(_cluster_client(cand.region), project_id, cand.region, cluster)
+    _log.info("cluster %s created at %s", name, cand.label)
+    return cand
+
+
+def _describe_candidate_failure(
+    cand: Candidate, exc: Exception, *, project_id: str, name: str
+) -> str:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
+    """Tear down whatever the failed create left behind, then hand the walk the failure text.
+
+    A create that errors mid-provision can still leave a resource, and it has to go before the hop
+    — and before this candidate can be attempted again on a later pass.
+    """
+    _delete_cluster(_cluster_client(cand.region), project_id, cand.region, name)
+    return str(exc) or repr(exc)
+
+
 def _create_cluster_across_candidates(
     candidates: list[Candidate],
     *,
     project_id: str,
     name: str,
     build_kwargs: dict[str, Any],
+    policy: CapacityPolicy | None = None,
+    ledger: CapacityLedger | None = None,
+    on_state: Callable[[CapacityLedger], None] | None = None,
 ) -> Candidate:  # pragma: no cover - orchestrates live Dataproc I/O, exercised by the @gcp smoke
-    """Create the cluster, walking ``candidates`` until one has capacity; return the one that won.
+    """Create the cluster, walking ``candidates`` until one has room; return the one that won.
 
     Compute capacity is zonal and stocks out transiently (`compute_fallback`): the first candidate
     is the deployment region with auto-zone placement — identical to the pre-failover single attempt
-    — so a run that would have succeeded takes the same first step. On a *capacity* failure
-    (`is_capacity_error`: a Compute Engine ``ServiceUnavailable``/``ResourceExhausted`` or an
-    "insufficient resources"/"does not have enough resources" message) the partial cluster is torn
-    down and the next candidate tried; any *other* error (bad machine type, missing quota,
-    permission) is re-raised at once because another zone/region won't fix it. Each attempt targets
-    its candidate's region (the regional cluster client) and pins its zone + subnet via
-    `build_cluster`. Exhausting every candidate raises `EngineError` naming how many were tried.
+    — so a run that would have succeeded takes the same first step. Each attempt targets its
+    candidate's region (the regional cluster client) and pins its zone + subnet via `build_cluster`.
+
+    The loop is `capacity.walk`, shared with the Vertex Ray path. **This makes the Dataproc walk
+    more patient than it was in two ways, both deliberate.** It now comes *back* to a stocked-out
+    zone after a back-off instead of walking the list once, and it now hops on a failure it cannot
+    classify instead of re-raising (see `capacity.classify` for why that default is inverted). What
+    still stops it at once is a `capacity.CONFIG_FAULT` — a bad machine type, a permission, a
+    retired image — because another zone cannot fix any of those.
+
+    ``policy`` defaults to the shipped Dataproc-cluster patience; callers with a config pass
+    ``cfg.compute.capacity.policy_for("dataproc_cluster")``.
     """
-    last_exc: Exception | None = None
-    for cand in candidates:
-        client = _cluster_client(cand.region)
-        cluster = build_cluster(
-            name=name, zone=cand.zone, subnetwork_uri=cand.subnetwork_uri, **build_kwargs
+    ledger = ledger if ledger is not None else CapacityLedger(service="dataproc_cluster")
+    try:
+        return capacity_walk(
+            candidates,
+            lambda cand: _attempt_cluster_at(
+                cand, project_id=project_id, name=name, build_kwargs=build_kwargs
+            ),
+            ledger=ledger,
+            policy=policy or DEFAULT_POLICIES["dataproc_cluster"],
+            label=lambda cand: cand.label,
+            describe_failure=lambda cand, exc: _describe_candidate_failure(
+                cand, exc, project_id=project_id, name=name
+            ),
+            on_state=on_state,
         )
-        try:
-            _log.info("attempting cluster %s at %s", name, cand.label)
-            _create_cluster(client, project_id, cand.region, cluster)
-            _log.info("cluster %s created at %s", name, cand.label)
-            return cand
-        except Exception as exc:  # noqa: BLE001 - classify, then either advance or re-raise
-            if not is_capacity_error(exc):
-                raise _explain_create_failure(exc, build_kwargs.get("gpu_image_uri")) from exc
-            _log.warning(
-                "no capacity for cluster %s at %s (%s); trying next candidate",
-                name,
-                cand.label,
-                exc,
-            )
-            # A create that errors mid-provision can still leave a resource — clean it before hop.
-            _delete_cluster(client, project_id, cand.region, name)
-            last_exc = exc
-    raise EngineError(
-        f"cluster {name} could not be created in any of {len(candidates)} candidate "
-        f"zone(s)/region(s) (no capacity): last error {last_exc!r}"
-    )
+    except CapacityExhausted:
+        raise
+    except Exception as exc:
+        # The walk re-raises a CONFIG_FAULT verbatim, which is right for every case but one: a
+        # retired custom GPU image names a version the operator never chose. Rewrite only that.
+        explained = _explain_create_failure(exc, build_kwargs.get("gpu_image_uri"))
+        if explained is exc:
+            raise
+        raise explained from exc
 
 
 def _delete_cluster(
@@ -631,6 +664,7 @@ def provision_shared_cluster(
             "gpu_image_uri": infra.gpu_image_uri,
             "machine_family": cfg.compute.machine_family,
         },
+        policy=cfg.compute.capacity.policy_for("dataproc_cluster"),
     )
     return name, landed.region
 

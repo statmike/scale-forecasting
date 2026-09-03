@@ -573,95 +573,10 @@ def test_submit_ray_no_wait_skips_poll_telemetry_and_teardown_check(
     assert calls["deleted"] == 1  # still torn down
 
 
-# --- region fallback: capacity classifier + resolution + the multi-region create loop ----------
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Resources are insufficient in region: us-central1. Please try a different region.",
-        "The zone does not have enough resources available",
-        "RESOURCE EXHAUSTED",
-    ],
-)
-def test_is_capacity_error_true_for_stockout_messages(message: str) -> None:
-    assert ray_cluster._is_capacity_error(message) is True
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "machine type's memory is too small",
-        "Permission denied on service account",
-        "Quota exceeded for aiplatform.googleapis.com",  # a quota error, not a *capacity* one
-    ],
-)
-def test_is_capacity_error_false_for_non_capacity_messages(message: str) -> None:
-    # Capacity is a classifier distinct from quota; a bad machine type / permission is neither.
-    assert ray_cluster._is_capacity_error(message) is False
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Quota exceeded for quota metric 'Nvidia T4 GPUs' of service 'aiplatform.googleapis.com'",
-        "The request exceeds quota for the region",
-        "resource creation would exceed quota limit for NVIDIA_T4_GPUS",
-        # Verbatim from a live wave-4 failure (`us-east1`, 2026-09-01). Plural, and in an order no
-        # fixed marker matched — which is why the classifier composes instead of enumerating.
-        "The following quotas are exceeded: CustomModelTrainingT4GPUsPerProjectPerRegion",
-    ],
-)
-def test_is_quota_error_true_for_quota_messages(message: str) -> None:
-    # Vertex accelerator quota is per-region, so a quota ceiling in one region is worth hopping.
-    assert ray_cluster._is_quota_error(message) is True
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Resources are insufficient in region: us-central1",  # capacity, not quota
-        "machine type's memory is too small",
-        "Permission denied on service account",
-    ],
-)
-def test_is_quota_error_false_for_non_quota_messages(message: str) -> None:
-    assert ray_cluster._is_quota_error(message) is False
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        # All three verbatim from live failures on 2026-09-01, and all three were misread as
-        # diagnosed config faults by the allowlist-to-continue the fallback used to run.
-        "An internal error occurred on your cluster. Please try recreating one in a few minutes.",
-        "Unexpected response.",
-        "[Ray on Vertex AI]: Cluster projects/.../persistentResources/x returned an error.",
-        # And the ones it did recognise, which must keep hopping.
-        "Resources are insufficient in region: us-central1",
-        "The following quotas are exceeded: CustomModelTrainingT4GPUsPerProjectPerRegion",
-    ],
-)
-def test_a_failure_that_names_no_region_invariant_cause_keeps_walking(message: str) -> None:
-    """The walk continues by default. Only a cause that travels with the *request* stops it."""
-    assert ray_cluster._is_region_invariant_error(message) is False
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Permission denied on service account scale-forecasting-compute@example",
-        "The caller does not have permission",
-        "PERMISSION_DENIED: missing iam role",
-        "INVALID_ARGUMENT: g2-standard-9 is not a valid machine type",
-        "unsupported accelerator NVIDIA_H100 for this machine type",
-        "Cloud Quotas API has not been used in project 1234 before or it is disabled",
-        "billing account is not open",
-    ],
-)
-def test_a_cause_that_travels_with_the_request_stops_the_walk(message: str) -> None:
-    # Another region cannot fix who is asking, what they asked for, or whether the API is on.
-    assert ray_cluster._is_region_invariant_error(message) is True
+# --- region fallback: resolution + the multi-region create loop --------------------------------
+#
+# Failure classification is no longer here: both cluster paths share `scale_forecasting.capacity`,
+# and the live-observed Vertex messages that shaped it are regression-tested in test_capacity.py.
 
 
 @pytest.mark.parametrize(
@@ -1080,6 +995,12 @@ def test_a_stockout_that_mentions_the_machine_type_still_hops(
 def test_submit_ray_raises_when_all_regions_stock_out(
     _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """One pass over every region, then `CapacityExhausted` — still an `EngineError` to callers.
+
+    ``capacity.enabled: false`` is not incidental here: it is the escape hatch resolving to exactly
+    one pass, which is also what this test wants (the back-off schedule and the multi-pass budgets
+    are proven against an injected clock in `test_capacity.py`, not against a real one here).
+    """
     calls = _stubbed_lifecycle
 
     def _always_stockout(plan: Any, infra: Any, name: str) -> str:
@@ -1087,8 +1008,14 @@ def test_submit_ray_raises_when_all_regions_stock_out(
         raise RuntimeError("Resources are insufficient in region: x. try a different region")
 
     monkeypatch.setattr(ray_cluster, "_create_cluster", _always_stockout)
-    cfg = _cfg(compute={"use_gpu": True, "ray_regions": ["us-east1", "us-west1"]})
-    with pytest.raises(EngineError, match="could not be created in any"):
+    cfg = _cfg(
+        compute={
+            "use_gpu": True,
+            "ray_regions": ["us-east1", "us-west1"],
+            "capacity": {"enabled": False},
+        }
+    )
+    with pytest.raises(EngineError, match="no capacity after 3 attempt"):
         ray_submit.submit_ray(cfg, settings=_settings(), infra=_infra(), wait=True)
     assert calls["created"] == 3  # us-east1, us-west1, then home us-central1
 
