@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .numbers import as_optional_int
+from .numeric import as_optional_int
 
 if TYPE_CHECKING:
     from ..config import RunConfig

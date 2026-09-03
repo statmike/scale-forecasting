@@ -1,7 +1,9 @@
 """Repo-wide static checks on the source tree that ruff does not make.
 
-One check today, and it exists because of a bug class that is genuinely invisible until it
-runs: a relative import at the **wrong level**. Ruff resolves undefined names and unused
+Two checks, and both exist because of a bug class that is genuinely invisible until it runs on
+a launch point that is not a developer's laptop.
+
+The first is a relative import at the **wrong level**. Ruff resolves undefined names and unused
 imports, not whether ``from .models import get_model`` names a module that exists. When that
 import sits at the top of a file, any test that imports the file catches it immediately. When
 it sits inside a function body — which this codebase does deliberately, to keep heavy model,
@@ -11,11 +13,20 @@ and the branch that runs it is often on a cluster, mid-job, an hour in.
 Moving a module into a package is exactly when this breaks: every ``from .x import y`` in the
 moved code silently starts meaning something else. The check is a few lines of ``ast`` and it
 covers the whole tree, so it costs nothing to keep and pays for itself on the first move.
+
+The second is a module whose name **shadows a stdlib module**. Inside a package this is normally
+harmless — ``scale_forecasting.profiling.numbers`` and stdlib ``numbers`` coexist fine, because
+only the package root is ever on ``sys.path``. It stops being harmless the moment something puts
+an inner directory on ``sys.path``, and a Composer plugins delivery does exactly that: a live
+Airflow run died on ``cannot import name 'Number' from 'numbers'`` because a *third-party*
+library's ``import numbers`` resolved to our file. Nothing local reproduces it — the same code
+imports cleanly from a repo checkout — so a static name check is the only cheap guard.
 """
 
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "scale_forecasting"
@@ -66,3 +77,22 @@ def test_the_check_would_notice_a_wrong_level_import() -> None:
 def test_the_source_tree_actually_has_relative_imports_to_check() -> None:
     """Guard the guard: an rglob that matched nothing would also report zero breakage."""
     assert len(_relative_imports()) > 50
+
+
+def test_no_module_name_shadows_a_stdlib_module() -> None:
+    # See the module docstring: a Composer plugins delivery puts inner directories on sys.path, so
+    # `profiling/numbers.py` made an unrelated library's `import numbers` resolve to our file and
+    # killed a live Ray submit with `cannot import name 'Number' from 'numbers'`. A repo checkout
+    # never reproduces it, so nothing but this check stands between us and the next one.
+    offenders = [
+        f"{path.relative_to(SRC.parent)} shadows stdlib '{path.stem}'"
+        for path in sorted(SRC.rglob("*.py"))
+        if path.stem in sys.stdlib_module_names
+    ]
+    assert not offenders, "rename these — stdlib-shadowing module names:\n" + "\n".join(offenders)
+
+
+def test_the_shadowing_check_knows_what_a_stdlib_name_looks_like() -> None:
+    # Guard the guard: if `sys.stdlib_module_names` ever came back empty the check above would pass
+    # vacuously and we would learn about it on a cluster instead of here.
+    assert {"numbers", "json", "types"} <= sys.stdlib_module_names

@@ -13,7 +13,7 @@ be. Sizing a fleet off the worst case over-provisions every run; sizing memory o
 median OOM-kills it. Using one tail for both is the mistake this split exists to prevent.
 
 **Absence is a value.** Every aggregated axis is ``| None``, and ``None`` means "we have no
-basis for this number" — never "zero"; see `numbers` for the helpers that enforce it.
+basis for this number" — never "zero"; see `numeric` for the helpers that enforce it.
 
 **This module reports bytes, seconds and cores. It never emits a runtime knob** — no GPU
 fraction, no executor cores, no node count, no autoscaling bound. Turning a `ComputeProfile`
@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .measure import _MIN_WALL_S, MeasuredFit
-from .numbers import as_number, as_optional_int, safe_max, safe_median, usable
+from .numeric import as_number, as_optional_int, safe_max, safe_median, usable
 from .sampling import SampleSpec
 from .signature import DataSignature
 
