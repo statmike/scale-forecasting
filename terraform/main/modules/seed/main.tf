@@ -6,10 +6,12 @@
 # terminal state on apply, so `terraform apply` == submit + wait for SUCCEEDED/FAILED.
 #
 # CODE DELIVERY: the batch loads the scale_forecasting package at RUNTIME via python_file_uris, not
-# from the container image. Terraform zips src/ (archive_file) every apply and uploads it; the zip's
-# md5 is folded into batch_id, so any code change yields a new (immutable) batch that runs the new
-# code. The runtime image carries only locked deps (docker/requirements.txt) — no package, no stale
-# code. The thin launcher (seed_entry.py) is the gs:// main file; the zip supplies what it imports.
+# from the container image. Terraform zips src/ (archive_file) every apply and uploads it under a
+# name carrying the zip's md5, so the batch always runs current code. The BATCH ID, however, is
+# keyed on a narrower hash covering only the files that decide what gets written (see `seed_hash`
+# in locals) — a change elsewhere in src/ redelivers the code without re-running the seed. The
+# runtime image carries only locked deps (docker/requirements.txt) — no package, no stale code. The
+# thin launcher (seed_entry.py) is the gs:// main file; the zip supplies what it imports.
 #
 # SYNC / RECOVERY: google_dataproc_batch blocks until terminal, but its client-side wait has a
 # timeout (we set it to 60m below; the provider default is only 10m and it bit us on the 100k run —
@@ -144,11 +146,42 @@ locals {
   src_dir  = "${path.module}/../../../../src"
   zip_path = "${path.module}/.terraform-tmp/scale_forecasting.zip"
 
-  # Batch ids: lowercase alnum + hyphens, 4-63 chars. Unique per (label, count) AND per code
-  # version — the 8-char code hash means a source change yields a NEW immutable batch that runs the
-  # new code (batches are never updated in place). "sf-seed-full-100000-1a2b3c4d" = 28 chars < 63.
-  code_hash = var.create ? substr(data.archive_file.package[0].output_md5, 0, 8) : ""
-  batch_id  = "sf-seed-${var.run_label}-${var.num_series}-${local.code_hash}"
+  # TWO HASHES, TWO JOBS — and conflating them cost an hour on 2026-09-03.
+  #
+  # `delivery_hash` names the uploaded zip. It covers ALL of src/ because the batch really does need
+  # the whole package on sys.path, and a distinct object per code version is what keeps concurrent
+  # applies from overwriting each other's zip in place.
+  #
+  # `seed_hash` names the BATCH, and it covers only the files that decide what gets written. That
+  # distinction is the fix. Keying the batch id on the whole-src/ md5 made a "content-addressed,
+  # runs once" resource re-run on ANY source change: a `terraform apply -var create_composer=false`
+  # — a teardown — resubmitted a full 100,000-series seed and blocked 68 minutes on it, because
+  # three unrelated commits had moved the zip's md5. variables.tf promises a re-run only when "the
+  # seed code" changes; this is the implementation finally matching that promise.
+  #
+  # The globs are the seed's real content surface, traced from seed_entry.py:
+  #   data_gen/**     the generator and its Spark driver
+  #   seasonality.py  generator.py imports it for seasonal_period/periods_per_year — it moves the
+  #                   NUMBERS, so it belongs here even though it lives outside data_gen/
+  #   registry/ddl.py the source-table DDL — it moves the SHAPE of what is written
+  # Globs rather than a file list, so a new module dropped into data_gen/ is hashed automatically
+  # instead of being silently ignored. Everything else in src/ (engines, models, the registry
+  # writer, the CLI) cannot change a seeded row, so it must not force a re-seed.
+  #
+  # Escape hatch when you DO want to re-seed without touching these files: bump `seed_run_label`.
+  seed_code_globs = [
+    "scale_forecasting/data_gen/**/*.py",
+    "scale_forecasting/seasonality.py",
+    "scale_forecasting/registry/ddl.py",
+  ]
+  seed_code_files = sort(flatten([for g in local.seed_code_globs : tolist(fileset(local.src_dir, g))]))
+  seed_hash       = substr(md5(join("", [for f in local.seed_code_files : filemd5("${local.src_dir}/${f}")])), 0, 8)
+
+  # Batch ids: lowercase alnum + hyphens, 4-63 chars. Unique per (label, count) AND per seed-code
+  # version — a seed-code change yields a NEW immutable batch that runs the new code (batches are
+  # never updated in place). "sf-seed-full-100000-1a2b3c4d" = 28 chars < 63.
+  delivery_hash = var.create ? substr(data.archive_file.package[0].output_md5, 0, 8) : ""
+  batch_id      = "sf-seed-${var.run_label}-${var.num_series}-${local.seed_hash}"
 
   # The infra identity is passed as JOB ARGS, not Spark env properties. Dataproc Serverless
   # allowlists Spark property prefixes and rejects driver-env (spark.kubernetes.driverEnv.* →
@@ -164,8 +197,9 @@ locals {
   ]
 }
 
-# Zip the scale_forecasting package from src/ at apply time. output_md5 changes iff the source
-# changes, driving both the uploaded object name and the batch_id (so new code => new batch).
+# Zip the scale_forecasting package from src/ at apply time. output_md5 changes iff ANY source file
+# changes, which is right for the object name (a distinct object per code version) and wrong for the
+# batch id — see `seed_hash` in locals for why those are now two different hashes.
 data "archive_file" "package" {
   count       = var.create ? 1 : 0
   type        = "zip"
@@ -178,7 +212,7 @@ data "archive_file" "package" {
 resource "google_storage_bucket_object" "package" {
   count  = var.create ? 1 : 0
   bucket = var.code_bucket
-  name   = "seed/scale_forecasting-${local.code_hash}.zip"
+  name   = "seed/scale_forecasting-${local.delivery_hash}.zip"
   source = data.archive_file.package[0].output_path
 }
 

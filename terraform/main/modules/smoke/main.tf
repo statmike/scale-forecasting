@@ -136,6 +136,13 @@ locals {
   # Batch id: lowercase alnum + hyphens, 4-63 chars. Content-addressed on the code hash AND the
   # config, so a code or config change yields a NEW immutable batch (batches are never updated in
   # place). "sf-smoke-smoke-1a2b3c4d" style, well under 63 chars.
+  #
+  # DELIBERATELY the WHOLE-src/ hash, unlike modules/seed — do not "fix" this to match. The seed
+  # writes rows and only a few files decide what those rows are, so re-running it on an unrelated
+  # code change is waste. The smoke runs a real forecast through engines, models, the router and the
+  # registry writer: ANY source change alters what it proves, so re-running is the entire point of
+  # having it. It is also cheap and non-blocking (--async, on_failure = continue), so a re-run costs
+  # a small batch rather than an hour of apply.
   code_hash   = var.create ? substr(data.archive_file.package[0].output_md5, 0, 8) : ""
   config_hash = var.create ? substr(md5(local.smoke_config), 0, 8) : ""
   batch_id    = "sf-smoke-${var.run_label}-${local.code_hash}-${local.config_hash}"

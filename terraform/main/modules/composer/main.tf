@@ -80,7 +80,7 @@ variable "pypi_packages" {
     # Feature-engineering that runs ON the launch point (not in a job): the native/BigQuery track
     # builds holiday exog columns in Python on the worker before issuing BQML SQL, so `holidays` is a
     # submit-side dep here even though it's not part of the in-service model stack.
-    "holidays"                = ">=0.50"
+    "holidays" = ">=0.50"
   }
 }
 

@@ -128,7 +128,8 @@ variable "run_seed" {
     Submit the Dataproc Serverless seed batch that materializes the example dataset (real cloud
     spend). Default TRUE — a fresh deploy comes with the shipped 100k-series dataset in both source
     tables, ready to forecast against immediately (the "solution-in-a-box" promise). The batch is
-    content-addressed (batch_id embeds series count + code hash), so it runs on the FIRST apply and
+    content-addressed (batch_id embeds series count + a hash of the seed code ONLY — the generator,
+    seasonality and the source-table DDL, not the rest of src/), so it runs on the FIRST apply and
     does NOT re-run on later applies unless you change seed_num_series / seed_run_label / the seed
     code — reseeds are deliberate, not per-apply. google_dataproc_batch blocks until the batch is
     terminal, so the first `terraform apply` submits and waits (~8.5 min compute, ~$0.15 measured at
