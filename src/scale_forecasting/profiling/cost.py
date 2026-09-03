@@ -332,6 +332,90 @@ class ComputeProfile:
         }
 
 
+def profile_from_dict(payload: Mapping[str, Any]) -> ComputeProfile:
+    """Rebuild a `ComputeProfile` from a `ComputeProfile.to_dict` payload (pure).
+
+    The reader half of the shipped baseline (`profiling.baseline`), and the reason a baseline can
+    be a committed artifact at all: without it, shipping numbers would mean shipping a second,
+    hand-written cost model beside this one, free to drift from it.
+
+    **Only the raw fields are read.** ``slot_*``, ``planning_*``, ``n_failed`` and
+    ``n_sample_series`` are properties derived from those raw fields, so they are recomputed rather
+    than trusted — a payload whose derived values were hand-edited out of step cannot mislead the
+    arithmetic, only its human reader, and `test_profiling` closes that second half by asserting the
+    shipped payload's derived values still equal what the properties compute.
+
+    **Three fields do not survive a round trip, all documented losses rather than oversights.**
+    ``sample_ts_ids`` is truncated by `to_dict` to `_TELEMETRY_SAMPLE_IDS`, so what comes back is
+    the truncation — the whole count survives on ``n_measurements``. ``sample`` is not reconstructed
+    at all: `sampling.SampleSpec.to_dict` flattens its `SeriesStats`, and a harvested profile (the
+    only kind ever serialized for reuse) carries no sample anyway. And ``first_error_by_model``
+    comes back as ``{}`` where it went in as ``None``, because `to_dict` does not distinguish them;
+    `build_profile` always sets a dict, so the distinction never arises on a real profile.
+    """
+    provenance_payload = payload.get("provenance")
+    provenance: ProfileProvenance | None = None
+    if provenance_payload:
+        signature_payload = provenance_payload.get("signature")
+        provenance = ProfileProvenance(
+            basis=provenance_payload["basis"],
+            source=provenance_payload["source"],
+            run_id=provenance_payload.get("run_id"),
+            baseline_version=provenance_payload.get("baseline_version"),
+            measured_at=provenance_payload.get("measured_at"),
+            signature=DataSignature(**signature_payload) if signature_payload else None,
+            warnings=tuple(provenance_payload.get("warnings") or ()),
+        )
+
+    models = {
+        name: ModelCost(
+            model_type=item["model_type"],
+            family=item["family"],
+            n_fits=item["n_fits"],
+            n_ok=item["n_ok"],
+            max_n_obs=item["max_n_obs"],
+            max_peak_rss_bytes=item["max_peak_rss_bytes"],
+            max_peak_gpu_bytes=item["max_peak_gpu_bytes"],
+            median_wall_s=item["median_wall_s"],
+            median_cpu_s=item["median_cpu_s"],
+            max_effective_cores=item["max_effective_cores"],
+            max_process_rss_bytes=item["max_process_rss_bytes"],
+        )
+        for name, item in (payload.get("models") or {}).items()
+    }
+    families = {
+        name: FamilyCost(
+            family=item["family"],
+            models=tuple(item["models"]),
+            n_fits=item["n_fits"],
+            n_ok=item["n_ok"],
+            max_peak_rss_bytes=item["max_peak_rss_bytes"],
+            max_peak_gpu_bytes=item["max_peak_gpu_bytes"],
+            max_effective_cores=item["max_effective_cores"],
+            median_wall_s=item["median_wall_s"],
+            total_wall_s_per_series=item["total_wall_s_per_series"],
+            memory_margin=item["memory_margin"],
+            time_margin=item["time_margin"],
+            max_process_rss_bytes=item["max_process_rss_bytes"],
+        )
+        for name, item in (payload.get("families") or {}).items()
+    }
+    return ComputeProfile(
+        families=families,
+        models=models,
+        memory_margin=payload["memory_margin"],
+        time_margin=payload["time_margin"],
+        n_measurements=payload["n_measurements"],
+        n_ok=payload["n_ok"],
+        sample_ts_ids=tuple(payload.get("sample_ts_ids") or ()),
+        dropped_models=tuple(payload.get("dropped_models") or ()),
+        first_error_by_model=(
+            dict(payload["first_error_by_model"]) if "first_error_by_model" in payload else None
+        ),
+        provenance=provenance,
+    )
+
+
 def _model_cost(model_type: str, records: list[MeasuredFit]) -> ModelCost | None:
     """Roll one model's measurements up: max for peaks, median for times (pure).
 

@@ -2192,10 +2192,130 @@ def test_profile_for_run_memoizes_so_every_family_job_sizes_off_one_lookup() -> 
     assert first is second
 
 
-def test_the_shipped_baseline_is_absent_until_it_is_measured_and_committed() -> None:
-    """A baseline whose provenance is a chat message is what the validation ledger exists to stop.
+# --- W13: the shipped baseline, and the serialization it rides on -------------------
 
-    The loader is real and wired into the chain, so shipping one (W13) is dropping a file in, not
-    rewiring the resolver — but there is nothing to load until a live run produces it.
+
+def _rich_profile() -> cost.ComputeProfile:
+    """A profile with every field carrying a non-default value — the round trip's real subject.
+
+    A round trip over a sparse profile proves very little: a field the parser forgot would come
+    back as its default and compare equal to an input that never set it either. So this sets a
+    second family, a dropped model with a recorded error, and a full provenance.
     """
-    assert source.load_baseline() is None
+    profile = build_profile(
+        [
+            _fit("theta", ts_id="a", wall_s=2.0, cpu_s=3.5, n_obs=400),
+            _fit("xgboost", ts_id="b", family="ml", wall_s=5.0, peak_gpu_bytes=4 * _GIB),
+            _fit("prophet", ts_id="c", ok=False, error="fit exploded"),
+        ],
+        memory_margin=1.45,
+        time_margin=1.15,
+    )
+    return replace(
+        profile,
+        provenance=cost.ProfileProvenance(
+            basis="reference",
+            source="baseline",
+            run_id="some-run-0123456789ab",
+            baseline_version="2026.09.03",
+            measured_at="2026-09-03T00:00:00Z",
+            signature=signature.DataSignature("t", 1000, 730, "H"),
+            warnings=("measured on a different table",),
+        ),
+    )
+
+
+def test_a_profile_survives_a_round_trip_through_its_own_serialization() -> None:
+    """`profile_from_dict` is the exact inverse of `to_dict` — the tripwire on field drift.
+
+    A new field on `ModelCost` / `FamilyCost` / `ComputeProfile` that `to_dict` learns and the
+    parser does not is a shipped baseline that silently loses it, so the check is equality of the
+    whole object rather than of the fields anyone remembered to assert.
+    """
+    original = _rich_profile()
+    assert cost.profile_from_dict(original.to_dict()) == original
+
+
+def test_the_round_trip_recomputes_the_derived_values_rather_than_reading_them() -> None:
+    """A hand-edited ``slot_*`` cannot mislead the arithmetic, only the reader who edited it."""
+    payload = _rich_profile().to_dict()
+    payload["families"]["ml"]["slot_rss_bytes"] = 999
+    payload["families"]["ml"]["slot_cores"] = 64
+    parsed = cost.profile_from_dict(payload)
+    family = parsed.for_family("ml")
+    assert family is not None
+    assert family.slot_cores == 1  # from max_effective_cores, not from the 64 in the payload
+    assert family.slot_rss_bytes != 999
+
+
+def test_the_shipped_baseline_loads_and_names_the_run_it_was_cut_from() -> None:
+    """Committed numbers are a live-proof claim; the run id is what makes it one.
+
+    `docs/validation.md` carries the matching row. If this file is ever re-cut, that row moves with
+    it — a baseline whose provenance is a chat message is what the ledger exists to stop.
+    """
+    profile = source.load_baseline()
+    assert profile is not None and not profile.is_empty
+    provenance = profile.provenance
+    assert provenance is not None
+    assert provenance.basis == "reference"
+    assert provenance.run_id == "ray-100k-dcc77a9d1e9b"
+    assert provenance.baseline_version
+    assert provenance.measured_at
+    assert provenance.signature is not None
+    assert provenance.signature.source_table == "source_series_iceberg"
+
+
+def test_the_shipped_baseline_still_agrees_with_its_own_derived_values() -> None:
+    """The payload carries ``slot_*``/``planning_*`` for the reader; the parser ignores them.
+
+    Which leaves exactly one way for the file to lie: an edit to a raw field that leaves the
+    derived value beside it stale. Nothing in the code would notice — so this does.
+    """
+    from scale_forecasting.profiling.baseline import _BASELINE
+
+    for name, item in _BASELINE["families"].items():
+        family = cost.profile_from_dict(_BASELINE).for_family(name)
+        assert family is not None
+        for key in ("slot_rss_bytes", "slot_gpu_bytes", "slot_cores", "planning_wall_s"):
+            assert item[key] == getattr(family, key), f"{name}.{key} is stale in the payload"
+
+
+def test_the_shipped_baseline_leaves_the_families_it_never_measured_absent() -> None:
+    """The run behind it had no deep-learning family and no GPU, and absence says so.
+
+    A fabricated device bound would be consumed as a real size; ``None`` is the signal to fall back
+    to static config, which is the correct answer for an axis nobody measured.
+    """
+    profile = source.load_baseline()
+    assert profile is not None
+    assert profile.for_family("deep_learning") is None
+    statistical = profile.for_family("statistical")
+    assert statistical is not None
+    assert statistical.slot_gpu_bytes is None
+    assert statistical.slot_cores == 1  # every one of these fits is single-threaded
+
+
+def test_the_baseline_is_reachable_from_the_real_chain_when_discovery_finds_nothing() -> None:
+    """Precedence step 4, wired end to end — the cold-start path a fresh deployment takes."""
+
+    class _NoCandidates:
+        @staticmethod
+        def discover_harvest_run(**_: Any) -> None:
+            return None
+
+        @staticmethod
+        def read_compute_harvest(*_: Any, **__: Any) -> None:
+            return None
+
+    monkey = pytest.MonkeyPatch()
+    with monkey.context() as m:
+        m.setattr(source, "_RESOLVED", {})
+        m.setitem(__import__("sys").modules, "scale_forecasting.registry.harvest", _NoCandidates)
+        resolved = source.profile_for_run(_sourced("auto"))
+
+    assert resolved is not None and resolved.provenance is not None
+    assert resolved.provenance.basis == "reference"
+    assert resolved.provenance.run_id == "ray-100k-dcc77a9d1e9b"
+    assert resolved.provenance.baseline_version
+    assert "shipped baseline" in " ".join(resolved.provenance.warnings)

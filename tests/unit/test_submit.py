@@ -846,10 +846,21 @@ def test_a_gpu_overlay_uses_the_configs_own_gpu_fraction_not_the_nominal_one() -
 
 
 def _submit_capturing_properties(
-    monkeypatch: pytest.MonkeyPatch, cfg: RunConfig, **kwargs: Any
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: RunConfig,
+    *,
+    profile: Any = None,
+    **kwargs: Any,
 ) -> dict[str, str]:
-    """Run ``submit_batch`` against stubbed staging/client and return the batch's properties."""
+    """Run ``submit_batch`` against stubbed staging/client and return the batch's properties.
+
+    The profile resolution is stubbed alongside the client, because `profile_for_run` reads the
+    registry and these tests are about the *wiring* between whatever it hands back and the batch —
+    not about the precedence chain that produces it (`test_profiling` owns that). ``profile=None``
+    is the no-evidence case; pass one to exercise the other half.
+    """
     from scale_forecasting import batch_telemetry, submit
+    from scale_forecasting.profiling import source as profile_source
 
     captured: dict[str, str] = {}
 
@@ -869,6 +880,7 @@ def _submit_capturing_properties(
     monkeypatch.setattr(submit, "_stage_config", lambda cfg, run_id, infra: "gs://c/r.json")
     monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
     monkeypatch.setattr(batch_telemetry, "_stamp_job_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(profile_source, "profile_for_run", lambda cfg, **kw: profile)
     submit.submit_batch(cfg, settings=_settings(), infra=_infra(), **kwargs)
     return captured
 
@@ -882,6 +894,26 @@ def test_submit_batch_puts_the_sizing_overlay_on_the_batch_it_creates(
     props = _submit_capturing_properties(monkeypatch, cfg)
     assert props == sizing_properties(cfg)
     assert props  # and it is not the vacuously-passing empty dict
+
+
+def test_submit_batch_sizes_the_batch_from_the_profile_it_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The evidence half of the same wire: what `profile_for_run` returns has to reach the batch.
+
+    Not a hypothetical path since W13 shipped a baseline — a deployment whose registry holds no
+    matching harvest still resolves a profile, so the memory properties below are what an ordinary
+    first run now gets. They appear only if the resolved profile is actually handed to
+    `plan_sizing`; drop that argument and this is the test that notices.
+    """
+    from scale_forecasting.profiling.baseline import baseline_profile
+
+    cfg = _cfg(data={"source_table": "t", "series_limit": 100})
+    profile = baseline_profile()
+    props = _submit_capturing_properties(monkeypatch, cfg, profile=profile)
+    assert props == sizing_properties(cfg, profile=profile)
+    assert "spark.executor.memory" in props  # the property only a measurement can produce
+    assert props != sizing_properties(cfg)  # and not what no-evidence sizing would have emitted
 
 
 def test_submit_batch_with_profiling_off_creates_the_pre_profiler_batch(

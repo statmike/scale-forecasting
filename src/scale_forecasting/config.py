@@ -270,20 +270,19 @@ class ProfileConfig(BaseModel):
     experiment record, and a run whose fleet was sized differently is not the same run for
     performance purposes. Silently varying the shape under a stable id would be the worse trade.
 
-    **Connected on one runtime out of three, and the "pre-pass" framing is what has to change.**
-    ``engines/ray_engine`` calls `profiling.source.resolve_profile` and sizes its pools from the
-    result — that works, because a Ray task's ``num_cpus``/``num_gpus`` is a request made in-run
-    against an autoscaling pool. Both Spark paths pass ``None`` (``submit.sizing_properties``,
-    ``dataproc_cluster.cluster_sizing``) and structurally must: ``spark.executor.cores`` and
-    ``spark.task.cpus`` are fixed at submit (Serverless) or at create (cluster), before any of our
-    code runs out there. So on Spark the measurement is sized from static arithmetic, and on Ray it
-    can only repack a pool that already exists.
+    **A profile is produced by one run and consumed by later ones**, which is why ``mode`` is
+    split into a *source* (what evidence to consume) and a *measure* (what evidence to produce)
+    below. Every runtime consumes: ``submit.sizing_properties``, ``dataproc_cluster.cluster_sizing``
+    and the Ray sizing paths all resolve one through `profiling.source.profile_for_run`.
 
-    The settled direction is that a profile is **produced by one run and consumed by later ones**,
-    splitting ``mode`` into a *source* (what evidence to consume) and a *measure* (what evidence to
-    produce). Until that lands, ``"auto"`` and ``"always"`` differ only on the Ray path; on Spark
-    every value sizes identically and only ``"off"`` is load-bearing, where it also suppresses the
-    static-arithmetic overlay.
+    What differs per runtime is **when the measurement can be taken**, and only Ray gets a choice.
+    ``spark.executor.cores`` and ``spark.task.cpus`` are fixed at submit (Serverless) or at create
+    (cluster), before any of our code runs out there, so on Spark the only evidence that can reach
+    a sizing decision is *prior* evidence — a harvest, or the shipped baseline. ``ray_engine`` can
+    additionally call `profiling.source.resolve_profile` and measure in-run, because a Ray task's
+    ``num_cpus``/``num_gpus`` is a request made against a pool that already exists. So ``"auto"``
+    and ``"always"`` still differ only on the Ray path; ``"off"`` is the setting that is
+    load-bearing everywhere, where it also suppresses the static-arithmetic overlay.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

@@ -28,6 +28,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..errors import ConfigError, DataError, get_logger
+from .baseline import baseline_profile
 from .cost import ComputeProfile, ProfileProvenance, build_profile, harvest_profile
 from .measure import MeasuredFit, measure_fit
 from .sampling import select_profile_sample
@@ -72,7 +73,8 @@ RunHarvestLoader = Callable[[str], "tuple[Sequence[Mapping[str, Any]], str | Non
 # Finds the newest run whose harvest matches a signature, or ``None``. Separate from the loader
 # because "which run" is a search and "what did it cost" is a read, and only `auto` does the search.
 RunDiscoverer = Callable[[DataSignature], "str | None"]
-# The shipped, versioned baseline (W13), or ``None`` before one exists.
+# The shipped, versioned baseline — see `profiling.baseline`. Still ``| None`` so a caller can
+# inject a deployment that ships none; that is how the gate exercises the last fall-through.
 BaselineLoader = Callable[[], "ComputeProfile | None"]
 
 
@@ -153,6 +155,10 @@ def resolve_profile_source(
                 ProfileProvenance(
                     basis="reference",  # measured, but never on your data — that is what it is for
                     source=source,
+                    # The run the baseline was cut from, carried through so an operator reading a
+                    # sizing decision can trace it all the way back. It names a run in the
+                    # *product's* reference deployment, not in yours — there is nothing to probe.
+                    run_id=existing.run_id if existing else None,
                     baseline_version=existing.baseline_version if existing else None,
                     measured_at=existing.measured_at if existing else None,
                     signature=existing.signature if existing else None,
@@ -307,16 +313,17 @@ def profile_for_run(cfg: RunConfig, *, settings: Settings | None = None) -> Comp
 
 
 def load_baseline() -> ComputeProfile | None:
-    """The shipped, versioned reference profile — ``None`` until one is measured and committed.
+    """The shipped, versioned reference profile — the cold-start floor under the chain above.
 
-    Deliberately a real function with a real caller rather than a ``TODO``: the precedence chain
-    already routes through it, so shipping the baseline is dropping a file in beside this and
-    parsing it, not rewiring the resolver. It is the last artifact in the profiler's arc because it
-    is a *live-proof* claim — committed numbers from a real run, with a version that moves the
-    digest and a row in the validation ledger. A baseline whose provenance is a chat message is the
-    exact failure that ledger exists to prevent, so there is nothing to load yet.
+    Kept as a seam in this module rather than resolving `baseline.baseline_profile` at the call
+    site, because "is there a baseline, and can it be loaded" is a *precedence* question and this
+    is where the precedence lives. It stays ``| None`` in the signature for the same reason: the
+    `BaselineLoader` protocol lets a caller inject a deployment that ships none, and
+    `resolve_profile_source` already treats that as "fall through to static config".
+
+    See `profiling.baseline` for where the numbers came from and what they deliberately omit.
     """
-    return None
+    return baseline_profile()
 
 
 def _profilable_models(models: Sequence[str]) -> list[str]:

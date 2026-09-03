@@ -410,7 +410,7 @@ so there is still exactly one switch that makes the whole feature inert.
 |----------|-----------------------------|------------------|
 | `"auto"` | The newest completed run whose harvest matches this run's data signature; failing that, the shipped baseline; failing that, static config. Resolved **at plan time** and written into the staged config as a concrete `run_id`, so the run records what it actually sized from rather than a search that might resolve differently tomorrow. | `measured` / `reference` |
 | `"<run_id>"` | That run's harvest, whatever its signature. Naming a run is a decision, so it is honoured — a drifted signature comes back as a warning, not a substitution. | `measured` / `reference` |
-| `"baseline"` | The shipped, versioned reference measurements. Real numbers, taken on reference hardware and reference data — never on yours. | `reference` |
+| `"baseline"` | The shipped, versioned reference measurements — see below. Real numbers, taken on reference hardware and reference data, never on yours. | `reference` |
 | `"none"` | Nothing is consulted; size from declared config. | — |
 
 The precedence, outside-in: **explicit `compute` settings > `compute.profile.source` > shipped
@@ -424,8 +424,18 @@ but not on your data**. That third value exists because a pinned profile from mo
 different table is worse than no profile at all — precisely because it looks authoritative. A
 mismatch is never silent, and never fatal: sizing off drifted evidence still beats sizing off none.
 
-If BigQuery is unreachable when the source is resolved, the run logs a warning and sizes from static
-config. Evidence is an optimisation; a registry hiccup must not stop a run from submitting.
+If BigQuery is unreachable when the source is resolved, the run logs a warning and falls through the
+rest of the chain — which today means the shipped baseline. Evidence is an optimisation; a registry
+hiccup must not stop a run from submitting.
+
+**What ships in the baseline.** It was cut from a real 100,000-series run on Ray (`ray_100k`,
+recorded in [validation.md](validation.md)): daily series of 1,460 observations, four models across
+the `statistical` and `ml` families. It therefore sizes those two families and **not**
+`deep_learning`, and it carries no GPU bound — that run had neither. An unmeasured family resolves
+to nothing rather than to a guess, so a run with a deep-learning family gets the static arithmetic
+for it and measured numbers for the rest. The number it is really there for is
+`slot_cores: 1`: every one of those fits measured single-threaded, and that is a property of the
+libraries rather than of your panel, so it transfers in a way a memory bound does not.
 
 **What the resolved profile actually changes.** Only the memory axis. The executor cores, the thread
 pins, the warm `initialExecutors`, the device-aware `spark.task.cpus` and the worker/executor counts

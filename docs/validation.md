@@ -942,6 +942,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
 | Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** |
 | Registry ops — `close_runs` (7th verb) | CURRENT | Executed live 2026-09-02 against the real registry: closed 9 of the 10 stuck headers to `FAILED` and skipped the tenth with its reason, leaving `doctor` reporting exactly one in-flight run. **The first live call failed** on a column that does not exist, which no offline test could have caught — see below. |
+| Shipped baseline profile (`profiling.baseline`) | CURRENT | The numbers committed in `src/scale_forecasting/profiling/baseline.py` were harvested on 2026-09-03 from `ray-100k-dcc77a9d1e9b` — the `ray_100k` row above, a real 100,000-series Ray run — through the ordinary `read_compute_harvest` path. **This row is a claim about the numbers' provenance and nothing else.** No run has yet been *sized* from the baseline on live infrastructure; that needs a deployment with an empty registry, which this project no longer is. See below. |
 | Run audit principal (P6) | NEEDS_RECHECK | It has now executed, live, under ADC — and produced `actor=None`. The audit line for a real cancel attempt carried no principal. Whether that is a resolver defect or the expected ADC answer for this credential type is unresolved; either way the audit trail was empty when it mattered. See below. |
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
@@ -1350,6 +1351,51 @@ also the last remaining in-flight run in the registry, so it is a standing, visi
 work only: **no line of it has touched live infrastructure**, so it gets no row in the table above.
 This run is the fixture reserved to prove it, and there is exactly one of it. Draft the ledger row
 before the command runs.
+
+### The shipped baseline is measured numbers, and the axis it does *not* move is the interesting part
+
+`load_baseline()` returned `None` until 2026-09-03, with a docstring saying why: *"a baseline whose
+provenance is a chat message is the exact failure that ledger exists to prevent."* The measurements
+now exist, so it ships one.
+
+**What it is.** `src/scale_forecasting/profiling/baseline.py` holds a `ComputeProfile.to_dict()`
+payload harvested from `ray-100k-dcc77a9d1e9b` — 100,000 daily series of 1,460 observations from
+`source_series_iceberg`, fitted on Ray on Vertex across `theta` / `holtwinters` / `sarimax` /
+`xgboost`. It was pulled through `registry.harvest.read_compute_harvest`, whose 50,000-cell cap
+makes it a deterministic `FARM_FINGERPRINT(ts_id)` slice of 12,500 series × 4 models out of the
+400,000 fits that run performed. That cap is load-bearing rather than a compromise: it makes the
+committed payload byte-identical to what pinning `compute.profile.source:
+"ray-100k-dcc77a9d1e9b"` resolves to, so the baseline is not a second kind of artifact — it is a
+harvest, frozen.
+
+It is a **Python module and not a JSON file** because `code_delivery.build_package_zip` walks
+`*.py` and nothing else. A data file would never reach a Dataproc worker or a Ray `working_dir`,
+and `resolve_profile_source` swallows a loader failure by design — so the miss would degrade sizing
+on exactly the clusters that matter and say nothing.
+
+**It does not move `fleet_sizing`, and that was checked rather than assumed.** Shipping a baseline
+changes what a run gets when precedence step 4 is reached — no pin, and discovery finds nothing.
+Every config in this repo uses the defaults (`mode: auto`, `source: auto`), so the question is
+whether `discover_harvest_run` comes back empty for any of them. It does not: on 2026-09-03 the
+90-day window held **32 completed, measured candidate runs** on `source_series_iceberg`/`D` and one
+on `source_series_native`/`D`, which between them cover every `data.source_table` any config here
+names. Step 4 is unreachable for every ledger-tracked row, so no row's fleet changes and no row
+goes stale. Beyond that, the axis is about the *derivation* — the Spark properties overlay — and a
+baseline changes only what evidence the derivation is handed.
+
+**What is not proven, and cannot be proven here.** No run has been sized *from* the baseline on
+live infrastructure, because reaching it requires a registry with no matching harvest and this
+project has 32 of them. The claim in the capabilities table is therefore narrow and deliberate: the
+numbers are real and traceable to a live run. Exercising the consumption path is a fresh-deployment
+test, and it belongs with the other fresh-deploy gaps below.
+
+**What it deliberately omits.** No `deep_learning` family and no GPU bound — that run had neither.
+`for_family` returns `None` for an unmeasured family and `None` means "fall back to static config",
+so a run with a deep-learning family gets today's arithmetic for it and measured numbers for the
+rest. A fabricated device bound would be worse than an absent one. The number the baseline is
+really for is `slot_cores: 1`: `max_effective_cores` measured 1.01–1.05 across all four models, so
+every one of these fits is single-threaded. That is a property of the libraries, not of the panel,
+which is why it transfers to a user's data in a way a memory bound does not.
 
 ## Known validation gaps
 
