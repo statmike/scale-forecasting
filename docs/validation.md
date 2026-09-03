@@ -110,7 +110,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | CURRENT | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-09-01 | `smoke-07-ray-cpu-782bcec2718f` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | STALE | 2026-09-02 | `smoke-08-ray-gpu-c41ecf2d5d52` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-02 | `smoke-09-shared-ray-1d308b8a712c` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-02 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -538,7 +538,7 @@ The campaign that re-earns the rest is profiler **W12**, which also does the `of
 It no longer has to capture the baseline's measurements — the 100k Ray run already carried them, so
 the baseline shipped ahead of it (see below).
 
-### Smokes 07–10 are stale because they stopped pinning `ray_autoscale`, which was the point
+### Smokes 07–10 stopped pinning `ray_autoscale`, which was the point (07 re-earned 2026-09-03)
 
 All four pinned `"ray_autoscale": false` from `4c988bc` (2026-08-25), when a per-pool
 `AutoscalingSpec` crashed the Vertex Ray head at provisioning. That crash was later attributed to
@@ -550,8 +550,10 @@ defaults — was the one part of it not exercising this one.
 The autoscaling path itself is not unproven: `ray_autoscale_demo` reached the derived ceiling of 8
 on CPU, `ray_gpu_demo` scaled a T4 pool, and `ray_100k` ran at scale, all with `ray_autoscale: true`.
 Those four rows now declare `ray_pool_shape=autoscaling` so the record says where the proof lives.
-What is unproven is **these four configs** on it — including the two that stand up GPU pools and
+What was unproven is **these four configs** on it — including the two that stand up GPU pools and
 the one that shares a cluster across families, which is where a provisioning-time crash would land.
+07, the CPU-only one, has since re-run (below); the three that touch T4s have not, and they are the
+ones the original crash would have hit.
 
 Removing the key (rather than setting it to `true`) is the deliberate edit: the config then runs
 whatever the product ships, which is the thing under test. Both spellings hash identically —
@@ -561,12 +563,29 @@ the same value — so this is a genuine behaviour change, not a cosmetic one.
 **Four `run_id`s move and the new `ray_pool_shape` axis moves under them**, so four rows go stale by
 construction; they were re-graded in the same commit as the config edit:
 
-| # | Proven id | The id its config now resolves to |
-|---|---|---|
-| 07 | `smoke-07-ray-cpu-782bcec2718f` | `smoke-07-ray-cpu-2cb4115312b1` |
-| 08 | `smoke-08-ray-gpu-c41ecf2d5d52` | `smoke-08-ray-gpu-38e33f02fd6d` |
-| 09 | `smoke-09-shared-ray-1d308b8a712c` | `smoke-09-shared-ray-f42e5785f6b9` |
-| 10 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `smoke-10-mixed-runtimes-a39f0fb4f3fa` |
+| # | Proven id | The id its config now resolves to | Re-run |
+|---|---|---|---|
+| 07 | `smoke-07-ray-cpu-782bcec2718f` | `smoke-07-ray-cpu-2cb4115312b1` | **done 2026-09-03 — CURRENT** |
+| 08 | `smoke-08-ray-gpu-c41ecf2d5d52` | `smoke-08-ray-gpu-38e33f02fd6d` | pending |
+| 09 | `smoke-09-shared-ray-1d308b8a712c` | `smoke-09-shared-ray-f42e5785f6b9` | pending |
+| 10 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | pending |
+
+**07 re-ran on 2026-09-03 and landed on exactly the predicted id**, which is the first thing worth
+recording: the table above was arithmetic against uncommitted code, and the cluster agreed with it.
+The run provisioned, executed both CPU families and tore down; teardown was confirmed by the
+v1beta1 `persistentResources` endpoint returning no clusters, not by the SDK's "Successfully deleted"
+line, which is not evidence.
+
+The header's `job_telemetry` carries the actual proof of the axis: `autoscale: true` with
+`cpu_min_nodes: 1` against `cpu_max_nodes: 4`. A fixed-size pool has no such spec at all, so this is
+the pool shape itself and not a config echo. Its row also picks up `fleet_sizing=derived-overlay` —
+the sizing plan recorded `derived_units: 2` under `max_units: 2` on a `basis: measured` slot, so W1's
+derived ceiling reached a cluster that could actually act on it. That is the coupling the axis prose
+predicted, observed rather than argued. `gpu_node_count: 0`, so the run consumed none of the four
+T4s and could not have contended with anything.
+
+The re-run also disposes of the id discrepancy described below, in the only way that was ever going
+to: row 07 now names an id that re-derives from the config beside it.
 
 **One thing the arithmetic turned up that is worth recording.** For 08, 09 and 10 the "proven id"
 column is exactly what their committed config produced before this edit — checked against both
