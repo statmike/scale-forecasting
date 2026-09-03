@@ -4,14 +4,14 @@ The single home for known issues seen building and running this at scale, each a
 **symptom → cause → fix / where it's handled**. Most are already handled in code or config; this
 doc explains *why* the handling exists so you recognize the symptom fast.
 
-Grouped by where it bites: [In-flight runs](#in-flight-runs--probe-reconcile-cancel) ·
+Grouped by where it bites: [In-flight runs](#in-flight-runs--probe-settle-cancel) ·
 [Capacity](#capacity--the-cloud-has-no-room) · [Ray](#ray-on-vertex) · [Spark](#spark-on-dataproc) ·
 [Registry / writes](#registry--writes) · [Versions](#versions--runtimes) ·
 [Deploy / Terraform](#deploy--terraform) · [Notebooks](#notebooks).
 
 ---
 
-## In-flight runs — probe, reconcile, cancel
+## In-flight runs — probe, settle, cancel
 
 The rest of this page is symptom-keyed. This section is the **tool** you reach for when the symptom
 is *"I can't tell what this run is doing"* — a bar that has stopped moving, a job that may or may not
@@ -54,9 +54,9 @@ says and what the runtime says; `disagreement` is set only when they contradict 
 |---|---|---|
 | `TRUST_REGISTRY` | Terminal, or never launched — nothing to reconcile. | Nothing. |
 | `RUNNING_CONFIRMED` | The runtime confirms the job is alive. | Wait. The bar is slow, not dead. |
-| `STALE_REGISTRY` | The runtime is terminal but the row never caught up. | The run is over; see below. |
-| `LIKELY_COMPLETED` | Job gone **and** every expected cell landed. | It finished; the finalize write was lost. |
-| `LOST` | Job gone, artifacts missing, past the startup grace. | The job died. Cancel to finalize, then re-run. |
+| `STALE_REGISTRY` | The runtime is terminal but the row never caught up. | The run is over; `--settle` writes that down. |
+| `LIKELY_COMPLETED` | Job gone **and** every expected cell landed. | It finished; the finalize write was lost. `--settle`. |
+| `LOST` | Job gone, artifacts missing, past the startup grace. | The job died. `--settle` finalizes it `FAILED`, then re-run. |
 | `UNKNOWN` | Couldn't tell — no handle, or the probe degraded. | Re-probe; treat the registry as authoritative meanwhile. |
 
 Two distinctions in that table are deliberate and easy to misread:
@@ -71,6 +71,59 @@ Two distinctions in that table are deliberate and easy to misread:
 - **A native family reporting `SUCCEEDED` with incomplete artifacts is `UNKNOWN`, not stale.** A
   BigQuery family's statements go `DONE` one at a time, so an all-`DONE` reading mid-run is a lull
   between statements. The probe declines to overrule the registry on that.
+
+### Settle a stale row
+
+The probe *knows* the deep-learning family finished forty minutes ago. **Settle** is the verb that
+writes that down — a probe that writes, at the job tier, taking the probe's own per-family verdict.
+
+```bash
+python -m scale_forecasting.main --config CONFIG --settle                      # preview only
+python -m scale_forecasting.main --config CONFIG --settle --force \
+    --reason "driver OOMed after the last cell landed"                         # execute
+```
+
+```python
+Forecaster(cfg).settle()                                    # preview
+Forecaster(cfg).settle(yes=True, reason="…")                # execute
+```
+
+Four readings settle; everything else is refused:
+
+| Verdict | Runtime says | Cells | Settles to |
+|---|---|---|---|
+| `STALE_REGISTRY` | `SUCCEEDED` | all landed | `COMPLETED` |
+| `STALE_REGISTRY` | `FAILED` | any | `FAILED`, `failure_reason=RUNTIME_FAILED` |
+| `LIKELY_COMPLETED` | job gone | all landed | `COMPLETED` |
+| `LOST` | job gone | missing | `FAILED`, `failure_reason=RUNTIME_LOST` |
+
+**Refusal is the feature.** `RUNNING_CONFIRMED` is live, `TRUST_REGISTRY` is already terminal or
+deliberately waiting, and `UNKNOWN` — the probe degraded, no handle was recorded, the runtime claims
+`SUCCEEDED` but the cells have not landed — never writes. The preview lists the families it will
+*not* touch and why, because "left alone: verdict `UNKNOWN`" is the line that means *go look*, and a
+count of what was settled is exactly how the one row that mattered gets missed.
+
+Four more things worth knowing:
+
+- **Settle never deletes and never invents time.** The landed data is untouched; the row gets a
+  status, a `failure_reason` when there is a token for it, and an audit blob. It does **not** stamp
+  `ended_at` or `runtime_seconds` — a row settled three days after the fact would report three days
+  of runtime for a ten-minute job.
+- **`LIKELY_COMPLETED` settles to `COMPLETED`, and that arm has to exist.** A Ray persistent
+  resource is collected when its job finishes, so "no record of the job, and all the work is in
+  BigQuery" is the *normal* trace of a successful Ray run whose driver died before closing the row.
+- **It leaves the run header alone.** `registry.ops close-runs` owns that tier, and settling the job
+  rows is what unblocks it (it refuses any run with a non-terminal row). The report prints the hint.
+- **A row that reached a terminal status on its own wins.** Every settle write is guarded against
+  all four terminal statuses, because the process that ran the job outranks a repair verb. That skip
+  is silent, so the rows are re-read afterwards and each outcome reports the status it *actually*
+  ended up with — which is what the headline counts.
+
+The audit trail lands under `run_jobs.job_telemetry.$.settle`: `settled_by` (resolved from ADC
+unless you pass `actor`), `settled_at`, your `reason`, plus the whole of the evidence — `from_status`,
+`verdict`, `native_state`, `n_done` / `n_expected`. A settled row is the one row in the registry
+whose terminal status was written by somebody who was not running the job, so it carries enough for
+a reader a week later to re-derive the decision and disagree with it.
 
 ### Cancel safely
 
@@ -126,17 +179,18 @@ discarding its results are different decisions.
 ### Common shapes
 
 **Symptom: a bar has been quiet for a long time.**
-Probe. `RUNNING_CONFIRMED` ⇒ it's slow, wait. `LOST` ⇒ it died; cancel to finalize the row, then
-re-run. Families that write their cells at job end are legitimately quiet for their whole run, which
-is why an age alone is never a verdict.
+Probe. `RUNNING_CONFIRMED` ⇒ it's slow, wait. `LOST` ⇒ it died; `--settle --force` finalizes the row
+`FAILED`, then re-run. Families that write their cells at job end are legitimately quiet for their
+whole run, which is why an age alone is never a verdict.
 
 **Symptom: the run header says `RUNNING` but nothing is happening anywhere.**
 Probe. Expect `STALE_REGISTRY` or `LIKELY_COMPLETED` — the work finished but the finalize write was
-lost. Cancel with `--force` to settle the job rows; the landed results are intact and, on
-`LIKELY_COMPLETED`, complete. Once every job row is terminal, `registry.ops close-runs` finalizes
-the *header* to what those rows say — which is how you get a `COMPLETED` header on work that
-actually completed, instead of a `CANCELLED` one. It skips any run whose job rows are still
-unsettled, so probe first.
+lost. `--settle --force` writes the rows to what the runtime says: the landed results are intact
+and, on `LIKELY_COMPLETED`, complete, so the rows go `COMPLETED`. **Do not cancel here** — cancel
+would stamp `CANCELLED` over work that succeeded, and the label is the only thing left to get right.
+Once every job row is terminal, `registry.ops close-runs` finalizes the *header* to what those rows
+say. It skips any run whose job rows are still unsettled, which is exactly what settling them
+unblocks.
 
 **Symptom: a header is stuck `RUNNING` and the run has no job rows at all.**
 The driver died in the submit path before it recorded a single family, so there is nothing to probe.
@@ -149,9 +203,10 @@ it in the Cloud Console and use `registry.ops` to tidy the row.
 
 **Symptom: `registry.ops drop-run` refuses.**
 It will not touch a run whose header is still `RUNNING` or `PENDING`. Probe first — a `RUNNING` row
-can also be a dead job — then either cancel it properly, close the header with `close-runs`, or pass
-`--force`. Reach for `drop-run --force` only when you actually want the run's data gone; if all you
-want is an accurate status, `close-runs` gets there without deleting anything.
+can also be a dead job — then settle the rows (`--settle --force`), cancel it properly if it really
+is live, close the header with `close-runs`, or pass `--force`. Reach for `drop-run --force` only
+when you actually want the run's data gone; if all you want is an accurate status, `--settle` plus
+`close-runs` gets there without deleting anything.
 
 ---
 

@@ -716,3 +716,142 @@ def test_cancel_report_preview_counts_the_plan_not_outcomes(capsys: Any) -> None
     out = capsys.readouterr().out
     assert "2 in-flight job(s) will be stopped" in out
     assert "Confirm with --force" in out
+
+
+# --- --settle: the verb, and its report ----------------------------------------
+
+
+def _settle_item(family: str, *, settleable: bool = True) -> Any:
+    from scale_forecasting.probes.settle import SettleDecision, SettleItem
+
+    decision = (
+        SettleDecision("COMPLETED", None, "runtime succeeded; 10/10 series landed")
+        if settleable
+        else None
+    )
+    return SettleItem(
+        family=family,
+        runtime="ray",
+        registry_status="RUNNING",
+        verdict="STALE_REGISTRY" if settleable else "UNKNOWN",
+        native_state="SUCCEEDED" if settleable else None,
+        n_done=10 if settleable else 3,
+        n_expected=10,
+        decision=decision,
+        note=(
+            "RUNNING -> COMPLETED (runtime succeeded; 10/10 series landed)"
+            if settleable
+            else "left alone: verdict UNKNOWN — no handle recorded"
+        ),
+    )
+
+
+def _settle_report(*, executed: bool, settled_flags: list[bool], hint: str = "") -> Any:
+    from scale_forecasting.probes.settle import SettleOutcome, SettlePlan, SettleReport
+
+    families = [f"fam{i}" for i in range(len(settled_flags))]
+    plan = SettlePlan(
+        run_id="rid-1",
+        header_status="RUNNING",
+        items=tuple(_settle_item(f) for f in families) + (_settle_item("quiet", settleable=False),),
+    )
+    outcomes = (
+        tuple(
+            SettleOutcome(
+                family=f,
+                job_key=f"{f}-job",
+                from_status="RUNNING",
+                to_status="COMPLETED",
+                final_status="COMPLETED" if ok else "FAILED",
+                settled=ok,
+                detail="runtime succeeded; 10/10 series landed",
+            )
+            for f, ok in zip(families, settled_flags, strict=True)
+        )
+        if executed
+        else ()
+    )
+    return SettleReport(
+        run_id="rid-1",
+        plan=plan,
+        executed=executed,
+        outcomes=outcomes,
+        header_hint=hint,
+        actor="tester" if executed else None,
+        reason="test",
+    )
+
+
+def test_cli_dispatches_settle_and_force_is_its_confirmation_gate(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--settle`` resolves the config's run_id offline and gates the write on ``--force``.
+
+    The CLI spells every confirmation ``--force``; `probes.settle.settle_run` spells it ``yes=``
+    (it repairs our own registry, it does not stop cloud work). This pins the translation — a
+    ``--settle`` that reached ``settle_run`` with ``yes=True`` by default would write on a preview.
+    """
+    import json
+
+    import scale_forecasting.probes.settle as settle_mod
+    from scale_forecasting.config import load_config_uri
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        settle_mod, "settle_run", lambda run_id, **kw: seen.update(run_id=run_id, **kw) or "REPORT"
+    )
+    printed: dict[str, Any] = {}
+    monkeypatch.setattr(main, "_print_settle_report", lambda r: printed.__setitem__("report", r))
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli settle test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    main._main(["--config", str(path), "--settle", "--job", "ml"])
+    assert seen["run_id"] == make_run_id(load_config_uri(str(path)))
+    assert seen == {"run_id": seen["run_id"], "job": "ml", "yes": False, "reason": ""}
+    assert printed["report"] == "REPORT"
+
+    seen.clear()
+    main._main(["--config", str(path), "--settle", "--force", "--reason", "driver died"])
+    assert seen["yes"] is True and seen["reason"] == "driver died"
+
+
+def test_settle_is_mutually_exclusive_with_the_other_verbs() -> None:
+    with pytest.raises(SystemExit):
+        main._main(["--config", "a.json", "--settle", "--cancel"])
+
+
+def test_settle_report_preview_prints_the_plan_and_refuses_to_stop_there(capsys: Any) -> None:
+    main._print_settle_report(_settle_report(executed=False, settled_flags=[True, True]))
+    out = capsys.readouterr().out
+    # The plan block is `format_settle_plan` verbatim — including the families it will NOT touch.
+    assert "settle run rid-1 (header RUNNING)" in out
+    assert "2 of 3 job row(s) would be settled" in out
+    assert "left alone: verdict UNKNOWN" in out
+    assert "Confirm with --force" in out and "yes=True (SDK)" in out
+
+
+def test_settle_report_headline_counts_the_rows_that_actually_moved(capsys: Any) -> None:
+    """A settle UPDATE is guarded against every terminal status and a guarded skip is silent.
+
+    ``final_status`` is the re-read truth; a headline reporting the plan's intent would contradict
+    the per-family line under it, and the headline is the line that gets believed.
+    """
+    main._print_settle_report(_settle_report(executed=True, settled_flags=[True, False]))
+    out = capsys.readouterr().out
+    assert "Settled 1 of 2 job row(s)" in out
+    assert "NOT settled" in out and "final=FAILED" in out
+    assert "actor=tester" in out and "reason=test" in out
+
+
+def test_settle_report_prints_the_header_hint_when_there_is_one(capsys: Any) -> None:
+    hint = "header left at RUNNING; every job row is terminal now — close_runs can close it"
+    main._print_settle_report(_settle_report(executed=True, settled_flags=[True], hint=hint))
+    assert hint in capsys.readouterr().out

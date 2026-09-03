@@ -201,9 +201,9 @@ tell them apart, and they cost differently:
   enough to be suspicious, not on every poll. An already-terminal run short-circuits and touches no
   runtime at all.
 
-For the full operational picture — the six verdicts and how to read them, cancelling safely, and
-what a cancelled run keeps — see
-[troubleshooting.md § In-flight runs](./troubleshooting.md#in-flight-runs--probe-reconcile-cancel).
+For the full operational picture — the six verdicts and how to read them, settling a stale row from
+the verdict, cancelling safely, and what a cancelled run keeps — see
+[troubleshooting.md § In-flight runs](./troubleshooting.md#in-flight-runs--probe-settle-cancel).
 
 ## 4. Review — which model won
 
@@ -314,8 +314,12 @@ python -m scale_forecasting.registry.ops close-runs --yes
 ```
 
 It **skips any run that still has a non-terminal job row**, with the reason printed, because only a
-runtime probe can tell a live job from a stale one. So the order is `monitor(probe=True)` first,
-then `close-runs` for whatever the probe settled.
+runtime probe can tell a live job from a stale one. Settling those rows is what unblocks it, so the
+order is `monitor(probe=True)` first, then `main --settle --force` for the rows the probe can call,
+then `close-runs` for the header. Settle is the same preview-by-default shape as the verbs in this
+table — it writes only on confirmation, refuses anything ambiguous, and never deletes; the full
+decision table is in
+[troubleshooting.md § Settle a stale row](./troubleshooting.md#settle-a-stale-row).
 
 **Order matters, and the verbs enforce it.** A registry row is the only index of which GCS objects
 belong to which run, so every delete goes *artifacts first, rows last*. Dropping the rows first

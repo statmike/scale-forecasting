@@ -438,6 +438,45 @@ class Forecaster:
             settings=self._settings,
         )
 
+    def settle(
+        self,
+        run_id: str | None = None,
+        job: str | None = None,
+        *,
+        yes: bool = False,
+        reason: str = "",
+    ) -> Any:
+        """Repair stale job rows from the probe's own verdicts — a **preview by default**.
+
+        Delegates to `probes.settle.settle_run` for ``run_id`` (default: this config's id). `probe`
+        already decides that a family whose row still says RUNNING finished forty minutes ago and
+        then discards that answer; this is the verb that writes it down. Without ``yes`` it probes,
+        returns the `SettlePlan` inside a ``SettleReport``, and changes nothing. With ``yes=True``
+        it sets each settleable family's status (``COMPLETED``, or ``FAILED`` with a
+        ``RUNTIME_FAILED`` / ``RUNTIME_LOST`` token), records ``reason`` + the ADC actor and the
+        full evidence under ``job_telemetry.$.settle``, and re-reads every row so the outcome is
+        the status it actually ended up with. ``job`` narrows to one family.
+
+        Only four (verdict, runtime-state) readings settle; ``UNKNOWN`` and ``RUNNING_CONFIRMED``
+        are always refused, and the plan says *why* each untouched family was left alone. Settle
+        never deletes and never stamps ``ended_at``/``runtime_seconds`` — a row settled days later
+        would report days of runtime. It leaves the run header to `registry.ops.close_runs`, which
+        settling the job rows is precisely what unblocks; the report carries the hint.
+
+        ``yes=`` rather than ``confirm=`` on purpose: `cancel`'s ``confirm=`` gates stopping running
+        work in the cloud, ``yes=`` gates repairing a status field in our own registry — the same
+        gate `registry.ops.close_runs` and `registry.ops.sweep_orphans` use.
+        """
+        from .probes.settle import settle_run
+
+        return settle_run(
+            run_id or self.run_id,
+            job=job,
+            yes=yes,
+            reason=reason,
+            settings=self._settings,
+        )
+
     def trace(self, run_id: str | None = None, *, cell_limit: int = 5000) -> pd.DataFrame:
         """The run's execution timeline as a long-form frame — per-job spans + per-cell spans.
 

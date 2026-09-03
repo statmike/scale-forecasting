@@ -1344,6 +1344,13 @@ verdict (`native_state='SUCCEEDED'`, `n_done == n_expected`); nothing writes it 
 Left deliberately unclosed rather than papered over with a `CANCELLED` that would be false. It is
 also the last remaining in-flight run in the registry, so it is a standing, visible reminder.
 
+**The verb now exists; it has not been run against this row.** `main --settle` /
+`Forecaster.settle()` writes a job row from the probe's own verdict — `STALE_REGISTRY` +
+`SUCCEEDED` + all cells landed ⇒ `COMPLETED` — and refuses everything ambiguous. That is offline
+work only: **no line of it has touched live infrastructure**, so it gets no row in the table above.
+This run is the fixture reserved to prove it, and there is exactly one of it. Draft the ledger row
+before the command runs.
+
 ## Known validation gaps
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.

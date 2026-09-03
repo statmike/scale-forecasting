@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from .dag import RunDag
     from .probes.cancel import CancelReport
     from .probes.reconcile import ProbeReport
+    from .probes.settle import SettleReport
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -401,8 +402,38 @@ def _print_cancel_report(report: CancelReport) -> None:
         print(f"  {oc.family:<14} {state:<14} {oc.detail}")
 
 
+def _print_settle_report(report: SettleReport) -> None:
+    """Print a `SettleReport` — the plan (always), then (if executed) what each row ended up as.
+
+    The plan block is `probes.settle.format_settle_plan` verbatim rather than a second rendering of
+    the same fields: a preview an operator reads before confirming, and the record of what was
+    confirmed, must not be able to disagree about what the plan said.
+
+    **After executing, the headline counts rows whose status was actually re-read as the settled
+    one.** A settle UPDATE carries a terminal-status guard, so a job that finished on its own
+    between the probe and the write keeps its own status and the statement silently touches
+    nothing. `SettleOutcome.final_status` is the re-read truth; the headline agrees with it.
+    """
+    from .probes.settle import format_settle_plan
+
+    print(format_settle_plan(report.plan))
+    if not report.executed:
+        print("Confirm with --force (CLI) / yes=True (SDK) to write these rows.")
+        return
+    n_settled = sum(1 for oc in report.outcomes if oc.settled)
+    print(
+        f"Settled {n_settled} of {report.plan.n_settleable} job row(s); "
+        f"actor={report.actor}  reason={report.reason or '-'}"
+    )
+    for oc in report.outcomes:
+        state = "settled" if oc.settled else "NOT settled"
+        print(f"  {oc.family:<16} {state:<12} final={oc.final_status or '-':<10} {oc.detail}")
+    if report.header_hint:
+        print(f"  {report.header_hint}")
+
+
 def _main(argv: list[str] | None = None) -> None:
-    """CLI: ``main (--config …|--config-uri …) [--dry-run|--stage-only|--probe|--cancel|…]``."""
+    """CLI: ``main (--config …|--config-uri …) [--dry-run|--stage-only|--probe|--settle|…]``."""
     import argparse
     import logging
     import os
@@ -455,14 +486,20 @@ def _main(argv: list[str] | None = None) -> None:
         help="stop this config's in-flight jobs and finalize the registry to CANCELLED; without "
         "--force this only PREVIEWS the blast radius and stops nothing",
     )
+    verbs.add_argument(
+        "--settle",
+        action="store_true",
+        help="repair this run's stale job rows from the probe's own verdicts (a probe that "
+        "writes); without --force this only PREVIEWS what would be written",
+    )
     p.add_argument(
         "--job",
-        help="with --probe/--cancel: narrow to one family "
+        help="with --probe/--cancel/--settle: narrow to one family "
         "(statistical/ml/deep_learning/native/ensemble)",
     )
     p.add_argument(
         "--reason",
-        help="with --cancel --force: free-text reason recorded in the cancel audit trail",
+        help="with --cancel/--settle --force: free-text reason recorded in the audit trail",
     )
     p.add_argument(
         "--emit-out",
@@ -499,6 +536,17 @@ def _main(argv: list[str] | None = None) -> None:
             make_run_id(cfg), job=ns.job, confirm=ns.force, reason=ns.reason or ""
         )
         _print_cancel_report(cancel_report)
+        return
+    if ns.settle:
+        from .probes.settle import settle_run
+
+        # --force is settle's confirmation gate too. The CLI spells every confirmation `--force`;
+        # the SDK deliberately does not (`yes=`, not `confirm=`) because settle repairs a status
+        # field in our own registry rather than stopping running work in the cloud.
+        settle_report = settle_run(
+            make_run_id(cfg), job=ns.job, yes=ns.force, reason=ns.reason or ""
+        )
+        _print_settle_report(settle_report)
         return
     run_id = run(cfg, dry_run=ns.dry_run, force=ns.force)
     _log.info("%s: %s", "planned" if ns.dry_run else "submitted", run_id)

@@ -399,6 +399,47 @@ def test_probe_honors_explicit_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen["job"] is None  # default: whole run, no family narrowing
 
 
+# --- settle: the probe verdict, written back -----------------------------------
+
+
+def test_settle_previews_by_default_and_threads_the_injected_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``settle()`` with no arguments must reach `settle_run` with ``yes=False``.
+
+    Settle is the one probe verb that writes, so the default matters more than the delegation: a
+    ``yes`` that defaulted true would repair rows on a call an operator made to *look*.
+    """
+    import scale_forecasting.probes.settle as settle_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        settle_mod, "settle_run", lambda run_id, **kw: seen.update(run_id=run_id, **kw) or "report"
+    )
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+
+    assert f.settle() == "report"
+    assert seen["run_id"] == f.run_id  # defaults to this config's id
+    assert seen["yes"] is False and seen["job"] is None and seen["reason"] == ""
+    assert seen["settings"] is _SETTINGS
+
+
+def test_settle_passes_the_confirmation_and_the_audit_reason_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting.probes.settle as settle_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        settle_mod, "settle_run", lambda run_id, **kw: seen.update(run_id=run_id, **kw)
+    )
+    sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).settle(
+        run_id="sf-other", job="deep_learning", yes=True, reason="driver died mid-write"
+    )
+    assert seen["run_id"] == "sf-other" and seen["job"] == "deep_learning"
+    assert seen["yes"] is True and seen["reason"] == "driver died mid-write"
+
+
 # --- trace: the per-job + per-cell execution timeline --------------------------
 
 
