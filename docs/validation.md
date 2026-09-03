@@ -505,7 +505,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review. Attempted 2026-09-02 and never reached a job: blocked by the Ray provisioning outage below, not by GPU. That outage has since cleared, so this is runnable again | NEVER_RUN | — | — | — |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review. Attempted twice. 2026-09-02: never reached a job, blocked by the Ray provisioning outage below. 2026-09-03: the cluster came up and the run held at **zero cells for 57 minutes** on an unplaceable per-task memory request — see the section below; fixed offline at `17e1221`, live proof pending | NEVER_RUN | — | — | — |
 | `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
 
@@ -727,6 +727,62 @@ overhead, and it is charged before any work starts. The job itself ran ~79 minut
 the bearer-token expiry** that a Ray run over ~60 minutes is documented to risk; that limit is
 narrower than assumed, but one run is not enough to call it closed. And `wape` is `None` across the
 board because this config does not backtest — the row proves autoscaling and scale, not accuracy.
+
+### `ray_100k` reached a cluster and then did nothing at all for an hour, and the number in the error was ours
+
+**2026-09-03. `ray-100k-dcc77a9d1e9b`, cancelled after 58 minutes with zero cells written.** The
+cluster provisioned. The job submitted. The driver started. And then nothing — no cells, no
+failures, no progress, and a job that would have sat there until the four-hour TTL killed it.
+
+The autoscaler was saying why the whole time, once a second:
+
+    Error: No available node types can fulfill resource request
+    {'CPU': 1.0, 'memory': 22548578304.0}.
+    Add suitable node types to this cluster to resolve this issue.
+
+22,548,578,304 bytes is not an arbitrary number. It is exactly `0.7 × 30 GiB` — our own
+`_SCHEDULABLE_MEMORY_FRACTION` applied to the nameplate RAM of an `n1-standard-8`, which is the
+worker type this run asked for. **The product computed a per-task memory request equal to the
+largest amount it believed a node could offer, handed it to Ray, and Ray could not place it.** An
+unplaceable Ray task does not fail; it queues. So the run's failure mode was silence.
+
+The irony is on the record in the code. `resources/slot.py` clamps a slot to its unit precisely
+because *"a task asking for more cores than any node has is not slow, it is unschedulable, and Ray
+will sit on it forever rather than fail. Clamping and recording beats hanging."* The clamp that
+exists to prevent the hang produced one.
+
+Two independent defects had to line up, and both are worth separating because they fail differently.
+
+**1. The clamp had no headroom.** `schedulable_memory_bytes` *estimates* the scheduler's ceiling
+from a machine type's nameplate RAM. Ray computes its real ceiling from what the container's OS
+reports, which is a percent or two below nameplate — so a request sized at exactly our estimate
+lands just *above* the real ceiling. Not approximately at it; above it. And clamping to exactly the
+ceiling would have been a bad plan even where it was a legal one: one cell per node, seven cores
+idle. Fixed by adding `_MAX_SLOT_MEMORY_FRACTION = 0.85` and a separate `max_slot_memory_bytes()`
+used at the three sites that clamp a slot *to fit*; the sites that *divide up* a node's capacity
+still use the schedulable figure, because that is a different question.
+
+**2. The evidence was the wrong kind of measurement.** The ~21 GiB came from `slot_rss_bytes`,
+harvested from `explode-100k-1c59265062aa` — a **Spark** run. `process_rss_bytes` is the absolute
+footprint of the process that ran the cell: on Ray that process is one task, on Spark it is an
+executor running many cells concurrently. Reading a Spark number as a Ray per-task bound is not an
+over-estimate, it is a measurement of something else. `rank_harvest_candidates` now ranks runtime
+comparability *above* scale: all-target-runtime beats mixed (or unrecorded), which beats none.
+
+**The fix for the previous finding is what exposed this one.** The scale-ranking fix landed hours
+earlier did exactly its job — it preferred a 100k-series Spark harvest over a 1k-series Ray one,
+which on the scale axis is unambiguously the better evidence. That correct choice on one axis
+surfaced a latent category error on an axis nobody had thought to rank. The lesson is not that the
+scale fix was wrong; it is that **the profile's provenance had one axis and needed two**, and a
+one-axis ranker had been silently getting the right answer only because the corpus was small.
+
+Both fixes are offline-proven at `17e1221` (2406 passed, 2 skipped) and include a regression test
+that pins the property directly: a slot may never be clamped to a node's entire schedulable memory.
+Neither is live-proven. `ray_100k` is the run that will do it.
+
+The cancellation itself is a small good-news footnote: `--cancel --force` on a hung two-family run
+tore it down cleanly — header `CANCELLED`, both job rows `CANCELLED`, cluster gone — which is the
+second live proof of the sticky-cancel guard and the first on a multi-family run.
 
 ### What this surface will exercise that the smoke suite cannot
 
@@ -1206,6 +1262,17 @@ also the last remaining in-flight run in the registry, so it is a standing, visi
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
 
+- **A per-task memory clamp with no headroom is unschedulable, and no offline test could have
+  caught it. Fixed 2026-09-03 at `17e1221`; not yet proven live.** `ray_100k` held at zero cells for
+  57 minutes on a request of exactly `0.7 × nameplate RAM` — our own ceiling, refused by Ray because
+  Ray derives its ceiling from what the container's OS reports rather than from the machine type's
+  nameplate. The gap the unit tests could not close is that **the true ceiling is not knowable from
+  a machine-type name**, so every test of "does the clamp fit" was testing our estimate against
+  itself. What is testable, and now is, is the weaker invariant that actually prevents the hang: a
+  slot may never be clamped to a node's *entire* schedulable memory. Two things stay open until
+  `ray_100k` completes — whether 0.85 is enough headroom on machine types other than
+  `n1-standard-8`, and whether the runtime-ranked harvest picks a Ray profile at 100k scale when one
+  exists. Both are decided by the same run.
 - **The prebaked GPU cluster image expires, and nothing in the deployment notices.** Found live
   2026-09-02 by smoke 16, analysed above: an image built nine days earlier was refused because the
   Dataproc sub-minor baked into it had been retired. **Smoke 06 is the row that rests on this.** Its
@@ -1460,6 +1527,18 @@ Things that are true today and that no entry above covers. Keep this list short 
   signature reports that smaller number. The pick is exact; the sample is not. That is the cap
   doing its job (a submit host must not materialise half a million dicts), and it means the
   remaining signature warning on a 100k run is ~8x rather than the 1000x it would have been.
+
+  **And then the exact-scale pick hung the run, which is the part worth keeping.** The harvest it
+  correctly chose was a *Spark* run and the plan it sized was a *Ray* one, and
+  `process_rss_bytes` does not mean the same thing on both: one Ray task versus one Spark executor
+  running many cells. `ray_100k` took a ~21 GiB per-task memory bound from it, Ray could not place
+  the task on any node, and the run sat at zero cells for 57 minutes — analysed in full above. So
+  the fix was right and incomplete in the same breath: **scale was never the only axis, and a
+  one-axis ranker had been getting away with it only because the corpus was small.**
+  `rank_harvest_candidates` now ranks runtime comparability first (all-target-runtime → mixed or
+  unrecorded → none), scale second, recency last; discovery aggregates each candidate's
+  `compute_engine` set to feed it. Seven more offline tests, and the fix is unproven live —
+  `ray_100k` is the run that will settle it.
 
 - **The measurement path is live — closed 2026-09-01, and what is left of the gap is narrow.** This
   entry used to read "no live run has ever taken a compute measurement, on any runtime." Smoke 01
