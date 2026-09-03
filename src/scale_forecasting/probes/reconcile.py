@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from ..errors import ConfigError
 from .runtimes import get_probe
 from .vocabulary import (
+    _AWAITING_CAPACITY,
     _REGISTRY_RUNNING,
     _TERMINAL,
     NATIVE_FAILED,
@@ -116,6 +117,11 @@ def _is_stale(fp: FamilyProgress, stale_after_s: float | None) -> bool:
     defensive: a family whose timestamps didn't parse has no ``quiet_seconds`` and is treated as
     *not* stale, never raising.
 
+    That ``RUNNING``-only test is what keeps ``AWAITING_CAPACITY`` out of the staleness math, and it
+    should stay that way: a family waiting on a stocked-out region is quiet *on purpose* and can
+    legitimately stay quiet for an hour, so measuring its silence against a launch-window grace
+    would report every capacity wait as a lost job.
+
     This is the judgement half of a two-part split: the monitor reports the age (a fact anyone can
     read off a frozen bar), and the threshold that turns it into an escalation lives here, with the
     probe that acts on it.
@@ -124,6 +130,18 @@ def _is_stale(fp: FamilyProgress, stale_after_s: float | None) -> bool:
         return False
     threshold = _DEFAULT_STALE_S if stale_after_s is None else stale_after_s
     return fp.quiet_seconds > threshold
+
+
+def _probe_targets(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The job rows worth escalating to a runtime, in order (pure).
+
+    A row is skipped when its status is terminal (the registry is authoritative and the runtime job
+    is very likely gone) or ``AWAITING_CAPACITY`` (no runtime job has been created yet). Everything
+    else is escalated. Pure so the "don't spend an API call on a job that provably isn't there"
+    rule is testable offline — it lives out here for the same reason `_narrow_to_job` does.
+    """
+    skip = _TERMINAL | {_AWAITING_CAPACITY}
+    return [dict(r) for r in rows if (r.get("status") or "").upper() not in skip]
 
 
 def _verdict_for_family(
@@ -138,6 +156,10 @@ def _verdict_for_family(
     families that were escalated; ``no_handle`` names families escalated but with no usable
     `vocabulary.ProbeHandle`; ``stale`` names families past their startup grace (a vanished job in
     this set is LOST, a young one is still-starting → UNKNOWN).
+
+    Two statuses short-circuit before any native reading is consulted: a terminal one (the work is
+    done) and ``AWAITING_CAPACITY`` (the work has not started). Both trust the registry, for
+    opposite reasons.
     """
     common: dict[str, Any] = {
         "family": fp.family,
@@ -155,6 +177,18 @@ def _verdict_for_family(
             verdict=VERDICT_TRUST_REGISTRY,
             disagreement=False,
             detail="",
+        )
+    # Waiting between capacity attempts → in flight, but deliberately not progressing. There is no
+    # runtime job to reconcile against and that is the expected state, not a gap in our knowledge:
+    # UNKNOWN would be a lie ("we couldn't tell") about the one status where we can tell exactly.
+    if (fp.status or "").upper() == _AWAITING_CAPACITY:
+        return FamilyVerdict(
+            **common,
+            native_state=None,
+            exists=None,
+            verdict=VERDICT_TRUST_REGISTRY,
+            disagreement=False,
+            detail="awaiting capacity; no runtime job exists yet",
         )
     # Non-terminal but escalated with no usable handle (pre-feature / malformed blob) → can't tell.
     if fp.family in no_handle:
@@ -308,8 +342,11 @@ def _read_and_probe(
 
     # --job narrows the report and the rows together, or neither — see `_narrow_to_job`.
     progress, rows = _narrow_to_job(progress, job_rows, job, run_id)
-    # Escalate every non-terminal job to its runtime; terminal rows short-circuit to the registry.
-    to_probe = [r for r in rows if r.get("status") not in _TERMINAL]
+    # Escalate every non-terminal job to its runtime; terminal rows short-circuit to the registry,
+    # and so do AWAITING_CAPACITY rows — a family between capacity attempts has no runtime job to
+    # address, so escalating it would spend a live API call to be told NOT_FOUND, which we already
+    # knew. `_probe_targets` is the pure half so that decision is checkable with no cloud.
+    to_probe = _probe_targets(rows)
     # A RUNNING family quiet longer than the floor is "stale" — past its startup grace, so a
     # vanished runtime job is judged LOST rather than still-starting (see `_verdict_for_family`).
     # Read off the assembled progress, so the monitor's reported age and the probe's escalation

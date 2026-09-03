@@ -66,6 +66,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ..capacity import AWAITING_CAPACITY
 from ..errors import get_logger
 from . import artifacts
 from .artifacts import ArtifactPrefix
@@ -78,7 +79,10 @@ _log = get_logger(__name__)
 
 # A run whose header sits in one of these is in flight; a mutating verb refuses to touch it unless
 # forced. Anything else (COMPLETED / FAILED / PARTIAL / CANCELLED) is terminal and safe.
-LIVE_STATUSES: frozenset[str] = frozenset({"RUNNING", "PENDING"})
+# `AWAITING_CAPACITY` is in the set because this is a *deny*-list for destructive verbs: the default
+# for an unrecognised status here is "safe to drop", so a live status that was left out would let
+# `drop_run` delete a run that is merely waiting for the cloud to have room.
+LIVE_STATUSES: frozenset[str] = frozenset({"RUNNING", "PENDING", AWAITING_CAPACITY})
 
 # The terminal ``run_jobs`` statuses, for `roll_up_job_statuses`. A local dup of
 # `probes.vocabulary._TERMINAL` for the same reason that one is a dup of `sdk._TERMINAL_STATUSES`:
@@ -246,6 +250,9 @@ def roll_up_job_statuses(job_statuses: Sequence[str | None]) -> tuple[str | None
     * **any non-terminal job ⇒ ``None``.** The job may still be running. Nothing here probes a
       runtime, so a header is only closed when the *rows themselves* already prove the work settled;
       deciding a job is dead is `probes.reconcile`'s call, made against the runtime, not this one's.
+      ``AWAITING_CAPACITY`` lands here by construction (it is simply not in the terminal set), and
+      that is the right answer for the right reason: a job between capacity attempts has neither
+      finished nor failed, so closing its run would write a verdict on work still queued to happen.
     * **no job rows at all ⇒ ``FAILED``.** The run wrote a header and then never recorded a single
       family — it died in the submit path. ``FAILED`` rather than ``COMPLETED`` because nothing
       completed, and rather than ``CANCELLED`` because nobody stopped it.

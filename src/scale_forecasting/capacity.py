@@ -60,6 +60,27 @@ CONFIG_FAULT = "CONFIG_FAULT"
 VERDICTS: frozenset[str] = frozenset({TRANSIENT_CAPACITY, HARD_CEILING, CONFIG_FAULT})
 
 
+# --- the registry status ------------------------------------------------------------------------
+
+# The ``run_jobs.status`` a family wears while the walk is between attempts. It is **non-terminal**:
+# the job has not failed, it has not been abandoned, and it is not running either — it is waiting on
+# a cloud that has no room yet. That third thing had no name before this module, so a run in it
+# looked exactly like a run that had hung.
+#
+# The literal lives *here*, next to the walk that writes it, and every reader imports it. There are
+# already four separately-spelled copies of the terminal-status set in this codebase
+# (`registry.ops`, `probes.vocabulary`, `airflow_tasks`, `sdk`) for import-cycle reasons; a fifth
+# divergent spelling of a status meaning "do not close this run yet" is where that would bite.
+#
+# It is deliberately **not** terminal. See `CapacityExhausted`: when the budget runs out the row
+# goes ``FAILED`` with ``failure_reason=CAPACITY_EXHAUSTED``, because FAILED is already
+# load-bearing in the header roll-up, `close_runs`, and the validation ledger.
+AWAITING_CAPACITY = "AWAITING_CAPACITY"
+
+# The ``failure_reason`` stamped on the FAILED row when the walk gives up.
+CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
+
+
 # --- classification ---------------------------------------------------------------------------
 
 # Phrases that mark a *capacity* shortage: the place is out of the thing, right now. Pooled from the

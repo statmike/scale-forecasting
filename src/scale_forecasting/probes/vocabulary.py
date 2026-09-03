@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ..capacity import AWAITING_CAPACITY
+
 if TYPE_CHECKING:
     from ..settings import Settings
 
@@ -48,6 +50,13 @@ NATIVE_UNKNOWN = "UNKNOWN"
 _REGISTRY_RUNNING = "RUNNING"
 _CANCELLED = "CANCELLED"
 _TERMINAL = frozenset({"COMPLETED", "FAILED", "PARTIAL", _CANCELLED})
+
+# `capacity.AWAITING_CAPACITY` is re-exported here so the three probe layers can name it without
+# each importing the capacity module. It is the one non-terminal status that must **not** be
+# escalated to a runtime: a family waiting between capacity attempts has no runtime job yet *by
+# definition*, so probing it would 404 and the reconciler would have to guess. The registry already
+# knows the exact answer — which is the distinction this package exists to draw.
+_AWAITING_CAPACITY = AWAITING_CAPACITY
 
 # --- reconciled verdicts (closed set) -----------------------------------------
 # One verdict per family after fusing registry status + landed artifacts + (only when the family was

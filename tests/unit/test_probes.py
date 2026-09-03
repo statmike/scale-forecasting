@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from scale_forecasting.capacity import AWAITING_CAPACITY
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.probes.cancel import (
     CancelOutcome,
@@ -30,6 +31,7 @@ from scale_forecasting.probes.reconcile import (
     _assemble_probe_report,
     _is_stale,
     _narrow_to_job,
+    _probe_targets,
 )
 from scale_forecasting.probes.runtimes import (
     _BQ_MAX_JOBS_SCAN,
@@ -1285,3 +1287,74 @@ def test_cancel_steps_copies_the_row_it_hands_to_the_finalizer() -> None:
     (step,) = _cancel_steps(plan, source)
     step.row["status"] = "CANCELLED"
     assert source[0]["status"] == "RUNNING"
+
+
+# --- AWAITING_CAPACITY: a live status with nothing to probe -------------------
+#
+# The status a family wears between capacity attempts is non-terminal, so every "is this still in
+# flight?" reader has to agree it is live — but it is the one live status with *no runtime job
+# behind it*, so every "go ask the runtime" reader has to agree there is nothing to ask. Those are
+# opposite answers to two questions that look alike, which is exactly why each is pinned here
+# rather than left to fall out of a frozenset.
+
+
+def test_a_family_awaiting_capacity_is_never_escalated_to_a_runtime() -> None:
+    # The whole point: no cluster was created, so a probe would spend a live API call to be told
+    # NOT_FOUND — and the reconciler would then have to decide whether that meant LOST.
+    rows = [
+        {"family": "statistical", "status": "RUNNING"},
+        {"family": "deep_learning", "status": AWAITING_CAPACITY},
+        {"family": "native", "status": "COMPLETED"},
+    ]
+    assert [r["family"] for r in _probe_targets(rows)] == ["statistical"]
+
+
+def test_probe_targets_still_escalates_an_unknown_or_missing_status() -> None:
+    # Unrecognised is not the same as settled: a row we cannot read must still be checked.
+    rows = [{"family": "ml", "status": None}, {"family": "dl", "status": "WEIRD"}]
+    assert [r["family"] for r in _probe_targets(rows)] == ["ml", "dl"]
+
+
+def test_report_awaiting_capacity_trusts_the_registry_rather_than_reporting_unknown() -> None:
+    # It arrives in `no_handle` (a row with no cluster has no probe_handle), and the naive reading
+    # of that is UNKNOWN — "we could not tell". That would be a lie about the one status where the
+    # registry knows exactly what is going on, so the awaiting check runs first.
+    progress = _progress(_fp("deep_learning", AWAITING_CAPACITY, runtime="ray"))
+    report = _assemble_probe_report(progress, {}, frozenset({"deep_learning"}))
+    fv = _only(report)
+    assert fv.verdict == VERDICT_TRUST_REGISTRY
+    assert fv.disagreement is False
+    assert fv.native_state is None and fv.exists is None
+    assert "awaiting capacity" in fv.detail
+
+
+def test_a_family_awaiting_capacity_is_never_stale() -> None:
+    # A family waiting on a stocked-out region is quiet on purpose and may stay quiet for an hour;
+    # judging that silence against the launch-window grace would report every wait as a lost job.
+    assert _is_stale(_quiet(AWAITING_CAPACITY, 7 * 3600.0), None) is False
+
+
+def test_cancel_plan_counts_an_awaiting_family_as_live_but_unaddressable() -> None:
+    report = _assemble_probe_report(
+        _progress(_fp("deep_learning", AWAITING_CAPACITY, runtime="ray")),
+        {},
+        frozenset(),
+    )
+    item = _assemble_cancel_plan(report).items[0]
+    assert item.cancellable is True  # live: it belongs in the blast radius
+    assert "no runtime job to stop" in item.note  # but the preview says so before anyone types yes
+
+
+def test_an_awaiting_family_still_suppresses_the_ensemble() -> None:
+    # The ensemble must not run on a base family that never got its compute. Suppression keys off
+    # "a base family is being cancelled", and an awaiting base family is one.
+    report = _assemble_probe_report(
+        _progress(
+            _fp("deep_learning", AWAITING_CAPACITY, runtime="ray"),
+            _fp("ensemble", "RUNNING", runtime="bigquery"),
+        ),
+        {},
+        frozenset(),
+    )
+    plan = _assemble_cancel_plan(report)
+    assert plan.ensemble_suppressed is True

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from .reconcile import ProbeReport, _read_and_probe
 from .runtimes import get_probe
 from .vocabulary import (
+    _AWAITING_CAPACITY,
     _CANCELLED,
     _TERMINAL,
     NATIVE_NOT_FOUND,
@@ -130,6 +131,11 @@ def _assemble_cancel_plan(report: ProbeReport) -> CancelPlan:
     includes ``CANCELLED``, so an already-cancelled job is a no-op). The note states what a cancel
     retains (landed cells) and, when the runtime already vanished, says so. The ensemble node is
     flagged as suppressed when any *base* family will be cancelled.
+
+    An ``AWAITING_CAPACITY`` family counts as cancellable — it is live, so it belongs in the blast
+    radius and its presence must keep suppressing the ensemble — but its note says plainly that
+    there is no runtime job to address. It is the honest reading: the walk is a loop in the
+    submitting process, and cancelling a cloud job that was never created cannot reach it.
     """
     base_cancelled = any(
         fv.family != "ensemble" and (fv.registry_status or "") not in _TERMINAL
@@ -145,6 +151,12 @@ def _assemble_cancel_plan(report: ProbeReport) -> CancelPlan:
             note = f"already {fv.registry_status or 'terminal'}, untouched"
         elif fv.family == "ensemble" and ensemble_suppressed:
             note = "will be SKIPPED (a base family is cancelled)"
+        elif (fv.registry_status or "").upper() == _AWAITING_CAPACITY:
+            # Live, so it is in the blast radius, but there is nothing at a runtime to stop: the
+            # walk never got a cluster. `_cancel_steps` will report it unreachable rather than
+            # silently claim a stop, and saying so in the *preview* is the point — an operator
+            # should learn this before they type yes, not in the outcome table afterwards.
+            note = "awaiting capacity; no runtime job to stop (the row is left as-is)"
         else:
             note = f"will cancel; {fv.n_done}/{exp} series landed (retained)"
             if fv.native_state == NATIVE_NOT_FOUND:

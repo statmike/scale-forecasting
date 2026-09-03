@@ -19,9 +19,21 @@ from scale_forecasting.registry.ddl import REGISTRY_TABLE_NAMES, SOURCE_TABLE_NA
 # --- blocking_runs -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status", ["RUNNING", "PENDING", "running", "pending"])
+@pytest.mark.parametrize(
+    "status", ["RUNNING", "PENDING", "running", "pending", "AWAITING_CAPACITY", "awaiting_capacity"]
+)
 def test_live_statuses_block(status):
     assert ops.blocking_runs({"r1": status}) == ("r1",)
+
+
+def test_a_run_awaiting_capacity_cannot_be_dropped():
+    """`LIVE_STATUSES` is a deny-list, so a live status left out of it reads as safe to delete.
+
+    A run waiting for a stocked-out region has no runtime job and no recent signal, which is
+    exactly what a stuck run looks like — and `drop_run` is destructive. The status has to be in
+    the set on purpose; the default for anything unrecognised is "terminal and safe".
+    """
+    assert "AWAITING_CAPACITY" in ops.LIVE_STATUSES
 
 
 @pytest.mark.parametrize("status", ["COMPLETED", "FAILED", "PARTIAL", "CANCELLED"])
@@ -434,7 +446,7 @@ def test_roll_up_matches_the_status_a_finished_run_would_have_written(statuses, 
     assert status == expected
 
 
-@pytest.mark.parametrize("unsettled", ["RUNNING", "PENDING", "", None])
+@pytest.mark.parametrize("unsettled", ["RUNNING", "PENDING", "AWAITING_CAPACITY", "", None])
 def test_roll_up_refuses_a_run_with_a_non_terminal_job(unsettled):
     """A live-looking job row means "go probe it", never "close it" (the load-bearing refusal).
 
@@ -456,6 +468,19 @@ def test_roll_up_closes_a_header_with_no_job_rows_as_failed():
 
 def test_roll_up_is_case_insensitive():
     assert ops.roll_up_job_statuses(["completed", "Completed"])[0] == "COMPLETED"
+
+
+def test_close_runs_will_not_settle_a_run_that_is_still_waiting_for_capacity():
+    """Stated on purpose, not left to fall out of a frozenset.
+
+    ``AWAITING_CAPACITY`` refuses because it is simply not in `_TERMINAL_JOB_STATUSES` — free, and
+    correct for the right reason: the family has neither finished nor failed, it is queued to try
+    again, so closing the run would write a verdict on work still scheduled to happen. If someone
+    ever "tidies" the terminal set by adding it, this fails and says why.
+    """
+    status, reason = ops.roll_up_job_statuses(["COMPLETED", "AWAITING_CAPACITY"])
+    assert status is None
+    assert "AWAITING_CAPACITY" in reason
 
 
 # --- ClosePlan and its preview -----------------------------------------------------
