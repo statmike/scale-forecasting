@@ -69,6 +69,17 @@ VERDICT_LIKELY_COMPLETED = "LIKELY_COMPLETED"  # job gone + expected artifacts a
 VERDICT_LOST = "LOST"  # job gone with artifacts missing / denominator unknown
 VERDICT_UNKNOWN = "UNKNOWN"  # couldn't tell (no handle, or the probe itself degraded)
 
+# --- failure_reason tokens the settle verb writes ------------------------------
+# `run_jobs.failure_reason` is the short machine-readable why behind a FAILED row (see
+# `registry.params`), and `capacity.CAPACITY_EXHAUSTED` was its first token. These two are the
+# settle verb's: a row that goes FAILED because the *runtime* said so, and one that goes FAILED
+# because the runtime job vanished with its work unfinished. They are spelled apart from an
+# ordinary FAILED on purpose — a row settled from outside the process that ran it was never
+# written by that process's own handler, and an operator reading the registry a week later should
+# be able to filter for exactly that.
+RUNTIME_FAILED = "RUNTIME_FAILED"  # the runtime reported FAILED; the registry never caught up
+RUNTIME_LOST = "RUNTIME_LOST"  # the runtime job is gone with its artifacts incomplete
+
 
 @dataclass(frozen=True)
 class ProbeHandle:

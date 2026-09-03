@@ -1404,3 +1404,258 @@ def test_an_awaiting_family_still_suppresses_the_ensemble() -> None:
     )
     plan = _assemble_cancel_plan(report)
     assert plan.ensemble_suppressed is True
+
+
+# --- item 11: settle — write back the verdict the probe already computed -------
+#
+# The decision table is built against reports the *real* reconciler produced (`_fp` → `_progress` →
+# `_assemble_probe_report`), not against hand-built verdicts. Settle adds no inference of its own;
+# what it must never do is write on a reading `reconcile` did not commit to, and hand-building the
+# input would be exactly the way to miss that.
+
+
+def _settle_plan(*families: Any, native: dict[str, ProbeResult] | None = None, **kw: Any) -> Any:
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+
+    report = _assemble_probe_report(_progress(*families, **kw), native or {}, frozenset())
+    return _assemble_settle_plan(report)
+
+
+def test_a_finished_runtime_over_a_running_row_settles_completed() -> None:
+    plan = _settle_plan(
+        _fp("statistical", "RUNNING", n_done=10, n_expected=10),
+        native={"statistical": ProbeResult(NATIVE_SUCCEEDED, exists=True)},
+    )
+    (item,) = plan.items
+    assert item.decision is not None
+    assert (item.decision.status, item.decision.failure_reason) == ("COMPLETED", None)
+    assert plan.n_settleable == 1
+
+
+def test_a_vanished_runtime_with_every_cell_landed_settles_completed() -> None:
+    """The Ray case, and the reason this arm has to exist at all.
+
+    A Vertex persistent resource is garbage-collected when its job finishes, so "no record of the
+    job, and all the work is in BigQuery" is the *normal* trace of a successful Ray run whose
+    driver died before it closed the row. Refusing LIKELY_COMPLETED would leave the verb unable to
+    repair the runtime that needs it most.
+    """
+    plan = _settle_plan(
+        _fp("deep_learning", "RUNNING", runtime="ray", n_done=10, n_expected=10),
+        native={"deep_learning": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+    )
+    (item,) = plan.items
+    assert item.verdict == VERDICT_LIKELY_COMPLETED
+    assert item.decision is not None and item.decision.status == "COMPLETED"
+
+
+def test_a_failed_runtime_settles_failed_with_its_own_reason_token() -> None:
+    from scale_forecasting.probes.vocabulary import RUNTIME_FAILED
+
+    plan = _settle_plan(
+        _fp("ml", "RUNNING", n_done=3, n_expected=10),
+        native={"ml": ProbeResult(NATIVE_FAILED, exists=True)},
+    )
+    (item,) = plan.items
+    assert item.decision is not None
+    assert (item.decision.status, item.decision.failure_reason) == ("FAILED", RUNTIME_FAILED)
+
+
+def test_a_lost_job_settles_failed_and_says_so_distinctly() -> None:
+    from scale_forecasting.probes.vocabulary import RUNTIME_LOST
+
+    # RUNTIME_LOST is spelled apart from RUNTIME_FAILED because they mean different things to
+    # whoever re-runs this: one job died, the other vanished with work unfinished.
+    report = _assemble_probe_report(
+        _progress(_fp("statistical", "RUNNING", n_done=3, n_expected=10)),
+        {"statistical": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+        frozenset(),
+        frozenset({"statistical"}),  # past the startup grace
+    )
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+
+    (item,) = _assemble_settle_plan(report).items
+    assert item.verdict == VERDICT_LOST
+    assert item.decision is not None
+    assert (item.decision.status, item.decision.failure_reason) == ("FAILED", RUNTIME_LOST)
+
+
+@pytest.mark.parametrize(
+    ("label", "families", "native", "why"),
+    [
+        (
+            "running",
+            (_fp("statistical", "RUNNING"),),
+            {"statistical": ProbeResult(NATIVE_RUNNING, exists=True)},
+            "the job is live",
+        ),
+        (
+            "no handle",
+            (_fp("statistical", "RUNNING"),),
+            {},
+            "we could not address the runtime at all",
+        ),
+        (
+            "probe degraded",
+            (_fp("statistical", "RUNNING"),),
+            {"statistical": ProbeResult(NATIVE_UNKNOWN, exists=True)},
+            "the probe itself could not tell",
+        ),
+        (
+            "succeeded but cells missing",
+            (_fp("native", "RUNNING", runtime="bigquery", n_done=3, n_expected=10),),
+            {"native": ProbeResult(NATIVE_SUCCEEDED, exists=True)},
+            "an all-DONE reading mid-run is a lull between statements",
+        ),
+        (
+            "vanished but young",
+            (_fp("statistical", "RUNNING", n_done=0, n_expected=10),),
+            {"statistical": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+            "a job inside its startup grace has not lost anything yet",
+        ),
+        (
+            "awaiting capacity",
+            (_fp("deep_learning", AWAITING_CAPACITY, runtime="ray"),),
+            {},
+            "it has not started; there is nothing to settle",
+        ),
+    ],
+)
+def test_an_ambiguous_reading_is_refused_and_the_refusal_is_the_feature(
+    label: str, families: tuple[Any, ...], native: dict[str, ProbeResult], why: str
+) -> None:
+    """A verb that guessed would be worse than no verb — its guesses would read as measurements."""
+    plan = _settle_plan(*families, native=native)
+    (item,) = plan.items
+    assert item.decision is None, f"{label}: {why}"
+    assert plan.n_settleable == 0
+    assert item.note.startswith("left alone:")
+
+
+def test_a_row_that_is_already_terminal_is_never_rewritten() -> None:
+    # The registry is authoritative once the work is done — and a re-settle that "corrected"
+    # COMPLETED to COMPLETED would still stamp a fresh audit blob claiming a repair happened.
+    plan = _settle_plan(
+        _fp("statistical", "COMPLETED", n_done=10, n_expected=10),
+        status="COMPLETED",
+        native={"statistical": ProbeResult(NATIVE_SUCCEEDED, exists=True)},
+    )
+    (item,) = plan.items
+    assert item.decision is None
+    assert item.note == "already COMPLETED, untouched"
+
+
+def test_the_plan_lists_the_families_it_will_not_touch_too() -> None:
+    # "What won't change, and why" is the question an operator with a stuck run is actually asking.
+    plan = _settle_plan(
+        _fp("statistical", "RUNNING", n_done=10, n_expected=10),
+        _fp("ml", "RUNNING"),
+        _fp("ensemble", "COMPLETED"),
+        native={
+            "statistical": ProbeResult(NATIVE_SUCCEEDED, exists=True),
+            "ml": ProbeResult(NATIVE_RUNNING, exists=True),
+        },
+    )
+    assert [i.family for i in plan.items] == ["statistical", "ml", "ensemble"]
+    assert plan.n_settleable == 1
+    from scale_forecasting.probes.settle import format_settle_plan
+
+    text = format_settle_plan(plan)
+    assert "1 of 3 job row(s) would be settled" in text
+    assert "RUNNING -> COMPLETED" in text
+
+
+def test_the_settle_join_needs_a_job_row_but_not_a_handle() -> None:
+    """Unlike cancel, settle addresses no runtime — so an unparseable handle is not a blocker.
+
+    That is the whole difference between the two verbs at this seam: cancel must *reach* the job,
+    settle only has to write down what the probe already learned about it.
+    """
+    from scale_forecasting.probes.settle import _settle_steps
+
+    plan = _settle_plan(
+        _fp("statistical", "RUNNING", n_done=10, n_expected=10),
+        _fp("ml", "RUNNING", n_done=10, n_expected=10),
+        _fp("dl", "RUNNING", runtime="ray"),
+        native={
+            "statistical": ProbeResult(NATIVE_SUCCEEDED, exists=True),
+            "ml": ProbeResult(NATIVE_SUCCEEDED, exists=True),
+            "dl": ProbeResult(NATIVE_RUNNING, exists=True),
+        },
+    )
+    # statistical has a row and no handle; ml is settleable but has no row at all; dl is live.
+    steps = _settle_steps(plan, [{"family": "statistical", "job_id": "j-1", "probe_handle": None}])
+    assert [s.row["job_id"] for s in steps] == ["j-1"]
+
+
+def test_the_settle_audit_records_the_whole_evidence_not_just_the_verdict() -> None:
+    from scale_forecasting.probes.settle import _build_settle_audit
+
+    ts = datetime(2026, 9, 3, 12, 0, 0, tzinfo=UTC)
+    plan = _settle_plan(
+        _fp("statistical", "RUNNING", n_done=10, n_expected=10),
+        native={"statistical": ProbeResult(NATIVE_SUCCEEDED, exists=True)},
+    )
+    audit = _build_settle_audit(
+        plan.items[0], actor="sa@proj.iam", settled_at=ts, reason="driver was OOM-killed"
+    )
+    # A settled row is the one row whose terminal status was written by somebody who was not
+    # running the job, so the blob has to carry enough for a reader to re-derive — and disagree.
+    assert audit == {
+        "settled_by": "sa@proj.iam",
+        "settled_at": ts.isoformat(),
+        "from_status": "RUNNING",
+        "verdict": VERDICT_STALE_REGISTRY,
+        "native_state": NATIVE_SUCCEEDED,
+        "n_done": 10,
+        "n_expected": 10,
+        "reason": "driver was OOM-killed",
+    }
+
+
+def test_the_audit_falls_back_to_the_decisions_own_reason() -> None:
+    from scale_forecasting.probes.settle import _build_settle_audit
+
+    plan = _settle_plan(
+        _fp("statistical", "RUNNING", n_done=10, n_expected=10),
+        native={"statistical": ProbeResult(NATIVE_SUCCEEDED, exists=True)},
+    )
+    audit = _build_settle_audit(
+        plan.items[0], actor=None, settled_at=datetime(2026, 9, 3, tzinfo=UTC), reason=""
+    )
+    assert audit["reason"] == "runtime succeeded; 10/10 series landed"
+
+
+def test_the_settle_write_is_guarded_against_every_terminal_status() -> None:
+    from scale_forecasting.probes.settle import _SETTLE_GUARD
+
+    # Wider than the lifecycle's sticky guard: settle runs later than everything, so between its
+    # probe read and its UPDATE the process that owns the job may have closed the row itself — and
+    # that writer was there.
+    assert set(_SETTLE_GUARD) == {"COMPLETED", "FAILED", "PARTIAL", "CANCELLED"}
+
+
+def test_the_header_hint_says_who_closes_the_header_settle_did_not() -> None:
+    from scale_forecasting.probes.settle import _header_hint
+
+    plan = _settle_plan(
+        _fp("statistical", "RUNNING", n_done=10, n_expected=10),
+        _fp("ml", "RUNNING"),
+        native={
+            "statistical": ProbeResult(NATIVE_SUCCEEDED, exists=True),
+            "ml": ProbeResult(NATIVE_RUNNING, exists=True),
+        },
+    )
+    # A family still live ⇒ name it; that is why close_runs would still refuse.
+    assert "still non-terminal: ml" in _header_hint(
+        plan, {"statistical": "COMPLETED", "ml": "RUNNING"}
+    )
+    # Everything terminal ⇒ point at the verb that owns the header tier.
+    assert "close_runs" in _header_hint(plan, {"statistical": "COMPLETED", "ml": "COMPLETED"})
+
+
+def test_a_terminal_header_needs_no_hint_at_all() -> None:
+    from scale_forecasting.probes.settle import _header_hint
+
+    plan = _settle_plan(_fp("statistical", "COMPLETED"), status="COMPLETED")
+    assert _header_hint(plan, {"statistical": "COMPLETED"}) == ""
