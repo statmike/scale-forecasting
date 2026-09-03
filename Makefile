@@ -75,4 +75,5 @@ composer-sync:
 	 echo "Delivering src/ -> $$prefix"; \
 	 gsutil -m rsync -r -d src/scale_forecasting "$$prefix/scale_forecasting"; \
 	 gsutil -m cp src/spark_main.py "$$prefix/spark_main.py"; \
-	 echo "src/ delivered. Workers can now import the driver and ship this code to jobs."
+	 gsutil -m cp docker/requirements.txt "$$prefix/docker/requirements.txt"; \
+	 echo "src/ + docker/requirements.txt delivered. Workers can now import the driver and ship this code to jobs."

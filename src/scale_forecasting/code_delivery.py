@@ -40,7 +40,18 @@ from typing import Any
 _SRC_DIR = Path(__file__).resolve().parent.parent
 _PKG_ROOT = _SRC_DIR / "scale_forecasting"
 _REPO_ROOT = _SRC_DIR.parent
-_REQUIREMENTS = _REPO_ROOT / "docker" / "requirements.txt"
+
+# Where those locked deps can be, in priority order. A launch point has one of two shapes: a full
+# repo checkout (local dev, CI, a notebook clone), where ``docker/`` sits beside ``src/``; or a
+# **src-only delivery**, where something rsynced just the code somewhere and there is no repo root
+# above it. Composer is the second shape — ``make composer-sync`` puts ``src/`` in the environment's
+# plugins prefix, so it copies ``docker/`` in beside it and the second candidate is the one that
+# resolves. Searching both keeps ONE file the source of truth instead of shipping a second copy
+# inside the package for the delivery mechanisms to keep in sync.
+_REQUIREMENTS_CANDIDATES = (
+    _REPO_ROOT / "docker" / "requirements.txt",
+    _SRC_DIR / "docker" / "requirements.txt",
+)
 
 # torch's x86_64/linux pin is the CUDA-12.6 local build (``torch==2.13.0+cu126``) for the Vertex T4
 # driver — that ``+cuXXX`` local version exists ONLY on the PyTorch index, never on PyPI. The
@@ -75,6 +86,24 @@ def build_package_zip() -> tuple[bytes, str]:
 _CLUSTER_PROVIDED = frozenset({"ray"})
 
 
+def _requirements_path() -> Path:
+    """The first `_REQUIREMENTS_CANDIDATES` entry that exists, or a `FileNotFoundError` naming both.
+
+    A bare ``FileNotFoundError`` on the repo-shaped path is a genuinely confusing failure on a
+    launch point that has no repo — it names a directory the operator never chose and cannot
+    create. Say what was searched and what fixes it.
+    """
+    for candidate in _REQUIREMENTS_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(p) for p in _REQUIREMENTS_CANDIDATES)
+    raise FileNotFoundError(
+        f"locked cluster requirements not found (searched: {searched}). On a launch point that "
+        "holds only src/ — a Composer environment, say — deliver them with `make composer-sync`, "
+        "which copies docker/ in beside src/."
+    )
+
+
 def _requirements_packages() -> list[str]:
     """Parse ``docker/requirements.txt`` into a package-spec list, dropping cluster-provided deps.
 
@@ -83,7 +112,7 @@ def _requirements_packages() -> list[str]:
     `_CLUSTER_PROVIDED` (see its note — Ray must come from the image, not pip).
     """
     packages: list[str] = []
-    for raw in _REQUIREMENTS.read_text().splitlines():
+    for raw in _requirements_path().read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue

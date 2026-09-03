@@ -277,3 +277,32 @@ def test_write_package_zip_round_trips(tmp_path: Path) -> None:
     _, code_hash = code_delivery.build_package_zip()
     # Filename carries the hash so re-adding after an edit is a distinct artifact.
     assert code_hash in out.name
+
+
+def test_cluster_requirements_are_found_from_a_src_only_launch_point() -> None:
+    # A Composer worker gets `src/` rsynced into a plugins prefix and nothing else — there is no
+    # repo root above it, so the repo-shaped `<repo>/docker/requirements.txt` does not exist and the
+    # Ray submit died with a bare FileNotFoundError naming a directory the operator never chose.
+    # `make composer-sync` copies docker/ in beside src/; the resolver must look there too.
+    from scale_forecasting import code_delivery as cd
+
+    src_only = cd._SRC_DIR / "docker" / "requirements.txt"
+    assert src_only in cd._REQUIREMENTS_CANDIDATES, "src-only delivery shape must be searched"
+    assert cd._REPO_ROOT / "docker" / "requirements.txt" in cd._REQUIREMENTS_CANDIDATES
+    # In this checkout the repo-shaped path is the one that resolves.
+    assert cd._requirements_path().is_file()
+
+
+def test_missing_cluster_requirements_names_what_was_searched(monkeypatch) -> None:
+    # The failure an operator actually hits should say where it looked and how to fix it, rather
+    # than surfacing one absolute path from inside the package.
+    import pytest
+
+    from scale_forecasting import code_delivery as cd
+
+    monkeypatch.setattr(cd, "_REQUIREMENTS_CANDIDATES", (cd._SRC_DIR / "nope" / "req.txt",))
+    with pytest.raises(FileNotFoundError) as excinfo:
+        cd._requirements_path()
+    message = str(excinfo.value)
+    assert "nope/req.txt" in message
+    assert "composer-sync" in message
