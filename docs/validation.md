@@ -110,8 +110,55 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | CURRENT | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | NEVER_RUN | — | — | — |
+| 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | CURRENT | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | CURRENT | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+
+### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
+
+`smoke-15-airflow-multi-engine-5ec2924b3374`, 2026-09-03: Composer 3 / Airflow 2.10.5 ran the
+emitted `dag_<run_id>.py` end to end — 200 series, five models, three backtest folds, a microbatch
+ensemble — and reached `COMPLETED` in 80 minutes.
+
+```
+statistical    spark/cpu       Dataproc Serverless batch    1607 s
+ml             spark/cpu       Dataproc Serverless batch    1653 s
+deep_learning  ray/gpu/T4      Vertex Ray submission        3137 s
+native         bigquery/cpu    BigQuery job                  340 s
+ensemble       bigquery/cpu    BigQuery job (microbatch)    4801 s
+```
+
+The assertion that makes this smoke worth its cost is not the leaderboard — it is that the `run_id`
+Airflow produced is **the same string** the local planner resolved before anything was submitted.
+Same config, same code, two orchestrators, one identity. That is the local↔Composer constraint
+stated as a test rather than as an intention. The ensemble node, running microbatch, spanned the
+whole 80 minutes and gathered every family as it landed; all four strategies scored over the full
+200 series, and `ensemble_nnls` (0.3590) came second only to `timesfm` (0.3474).
+
+**It found two deployment bugs on its first live run, and neither can be reproduced from a repo
+checkout.** Both come from the same root fact: a Composer environment is a *src-only delivery*, not
+a repository, and Airflow puts inner plugin directories on `sys.path`.
+
+1. `code_delivery` resolved the locked cluster requirements as `<repo root>/docker/requirements.txt`.
+   On a checkout that path always exists. On the plugins prefix there is no repo root above `src/`,
+   so building a Ray `runtime_env` died on `FileNotFoundError: /home/airflow/gcs/docker/requirements.txt`.
+   Fixed by searching both launch-point shapes and having `make composer-sync` deliver the file
+   beside `src/` — one source of truth, not a second copy inside the package.
+2. `profiling/numbers.py` **shadowed the stdlib `numbers` module**. Inside a package that is
+   harmless, because only the package root is ever on `sys.path`; under Airflow it is not, and an
+   unrelated third-party library's `import numbers` resolved to our file. Renamed to `numeric.py`,
+   with a static check in `tests/unit/test_source_conventions.py` that fails any module named after
+   a stdlib module.
+
+The second one is worth dwelling on because of **how it presented**: the failure the operator saw
+was `Ray cluster … could not be created in any of ['us-central1']`, which reads as a capacity or
+quota problem in the region. The `ImportError` was only in the tail of the wrapped message. A
+region-failover error string that can be produced by a typo in our own import graph is a diagnostic
+trap, and it cost the first three attempts of this run.
+
+The repair was made **in place**: after re-syncing the fixed code, only the `deep_learning` task was
+cleared (`only_failed`, no downstream), so the three families that had already succeeded were not
+re-billed. Duplicate `run_jobs` rows across those retries are expected — `v_run_jobs` dedupes on
+read by `(run_id, family)`.
 
 ### Smoke 14 is the flagship, and it is green again
 
@@ -889,7 +936,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | Headless execution of the tour notebooks against a fresh deployment. The notebook rows above were proven by the acceptance harness, which is not the same path. Its documented `--tier` table was walked on 2026-09-02 and was two notebooks out of date (3/5/6 against the registry's 4/7/8); corrected. |
 | Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The tour notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. The tour table listed six on 2026-09-02 while Act 2 pre-rendered eight; `08_run_and_monitor` and `09_review_run` were added, so the count is now eight. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
-| Airflow DAG emitter (`airflow_emit`) | NEVER_RUN | The renderer is offline-proven (emitted source compiles; `DagBag` parse test). No run has ever been orchestrated by Composer — that is smoke 15. |
+| Airflow DAG emitter (`airflow_emit`) | CURRENT | Smoke 15, 2026-09-03: an emitted `dag_<run_id>.py` was parsed by a real Composer 3 / Airflow 2.10.5 scheduler (`has_import_errors: false`) and orchestrated a five-family run across Serverless Spark, Ray-on-Vertex GPU and BigQuery to `COMPLETED`. The Airflow-produced `run_id` equalled the locally-resolved one — the same-code local↔Composer claim. See below. |
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. The handle fix then landed and was re-proven live the same day: `--probe` against `ray-dl-on-cpu-probe-2e8a9f3f5c8d`, a single-family ephemeral Ray run, escalated out-of-process and returned `RUNNING_CONFIRMED`. Scope is now the whole verb, on every runtime. |
 | RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Re-run live 2026-09-02 against a purpose-built single-family Ray job and the verb now reaches it** (`deep_learning cancelled — ray job stop issued`, count line correct at `1 of 1`, launcher unwound and tore the cluster down, teardown REST-verified). **New scope: the cancellation does not survive.** The launcher finalized the run `FAILED` 17 s after the cancel wrote `header=CANCELLED`, so the registry cannot distinguish a deliberate stop from a crash. See below. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
