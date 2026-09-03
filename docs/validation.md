@@ -510,7 +510,9 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) | NEVER_RUN | — | — | — |
+| `all_families_10k.json` | Every family under one `run_id` at the largest scale four T4s allow (Ray + BigQuery) | NEVER_RUN | — | — | — |
+| `scale_100k_three_engines.json` | 100,000 series across statistical + ml (Ray) and native (BigQuery) — `all_families_100k` minus the family that quota cannot reach | NEVER_RUN | — | — | — |
+| `all_families_100k.json` | Every family at 100,000 series under one `run_id` (Ray + BigQuery, T4) — **quota-blocked**, see below | NEVER_RUN | — | — | — |
 | `all_families_100k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
 
 **On 2026-09-02 the whole Ray track stopped provisioning, and the elimination is the useful part.**
@@ -1315,6 +1317,24 @@ Things that are true today and that no entry above covers. Keep this list short 
   figure has been *exercised* only on `n1-standard-8`, and the run that proved the ranker did so
   without ever reaching the clamp. The hang is fixed twice over (right evidence, and headroom if the
   evidence is ever wrong); the second belt has not itself been pulled tight by a live run.
+- **The scale ceiling this project has been proving against is a *quota* ceiling, not an
+  architectural one, and no row above said so.** Measured 2026-09-03: `us-central1` allows **200
+  CPUs** and **4 NVIDIA T4s**. `ray_100k` used 192 of the 200 — an `n1-highmem-32` head plus 20
+  `n1-standard-8` workers — so `ray_cpu_max_nodes: 20` was never a tuning choice, it is simply what
+  fits. Its own telemetry recorded `saturating_units: 12500`, meaning the arithmetic wanted **625x**
+  what the project is allowed to ask for. Every "N minutes at 100k" figure in this document is
+  therefore a statement about a 200-core allowance, not about the product, and raising a
+  `max_nodes` knob cannot change any of them.
+
+  The GPU side is where the ceiling actually blocks a claim. `all_families_100k` asks for 100,000
+  `neuralprophet` fits; `smoke-09-shared-ray` measured that model at **23.9 s/fit and an effective
+  concurrency of 11.6**, and 4 T4s cannot do better, so the run is **~47 hours** — not expensive so
+  much as unfinishable within any sensible window. It is split rather than dropped:
+  `all_families_10k` proves all four families under one `run_id` including GPU, and
+  `scale_100k_three_engines` proves 100,000 series across the other three. **The one claim neither
+  of them makes is the deep-learning family at 100k**, and `all_families_100k.json` stays in the
+  tree unrun precisely so that the claim keeps a name. A quota increase is the only thing that
+  closes this.
 - **The prebaked GPU cluster image expires, and nothing in the deployment notices.** Found live
   2026-09-02 by smoke 16, analysed above: an image built nine days earlier was refused because the
   Dataproc sub-minor baked into it had been retired. **Smoke 06 is the row that rests on this.** Its
