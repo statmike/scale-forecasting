@@ -46,6 +46,39 @@ def test_empty_slug_falls_back_to_run() -> None:
     assert make_run_id(_cfg(run_name="!!!")).startswith("run-")
 
 
+# --- what is deliberately NOT part of the identity -------------------------------
+#
+# A run's identity is *what was asked for*. Provenance the launcher resolves, and operational
+# patience, are neither — and both failure modes here are silent, so each gets a test that says so.
+
+
+def test_how_long_we_wait_for_capacity_does_not_move_the_run_id() -> None:
+    """Patience is an operational knob, not a description of the experiment.
+
+    If `compute.capacity` moved the digest, an operator who raised the GPU wait after a stock-out
+    would land on a *different* run_id — a second run instead of a resumed one, and dedupe-on-read
+    would never see the two as the same work.
+    """
+    patient = _cfg(compute={"capacity": {"ray": {"max_wall_seconds": 7200.0}}})
+    assert make_run_id(patient) == make_run_id(_cfg())
+
+
+def test_disabling_capacity_retry_does_not_move_the_run_id() -> None:
+    """The escape hatch must not fork identity either — same ask, same id."""
+    assert make_run_id(_cfg(compute={"capacity": {"enabled": False}})) == make_run_id(_cfg())
+
+
+def test_the_resolved_profile_source_does_not_move_the_run_id() -> None:
+    """Observed live (smoke 01): a pinned harvest in the digest never converges on a re-run."""
+    pinned = _cfg(compute={"profile": {"source": "prior-run-0123456789ab"}})
+    assert make_run_id(pinned) == make_run_id(_cfg())
+
+
+def test_the_rest_of_the_profile_block_still_moves_the_run_id() -> None:
+    """Only `source` is exempt — the sizing knobs themselves describe a different experiment."""
+    assert make_run_id(_cfg(compute={"profile": {"measure": "controlled"}})) != make_run_id(_cfg())
+
+
 # --- model_hash ----------------------------------------------------------------
 
 

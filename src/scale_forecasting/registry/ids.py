@@ -55,7 +55,10 @@ def _slug(text: str) -> str:
 
 # Config fields that are *resolved* rather than *authored*, and so must not reach the digest. Each
 # is a path from the config root. See ``_canonical_config``.
-_NOT_IDENTITY: tuple[tuple[str, ...], ...] = (("compute", "profile", "source"),)
+_NOT_IDENTITY: tuple[tuple[str, ...], ...] = (
+    ("compute", "profile", "source"),
+    ("compute", "capacity"),
+)
 
 
 def _canonical_config(cfg: RunConfig) -> str:

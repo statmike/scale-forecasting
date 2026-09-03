@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +27,7 @@ from pydantic import (
     model_validator,
 )
 
+from .capacity import DEFAULT_POLICIES, CapacityPolicy
 from .errors import ConfigError, get_logger
 
 _log = get_logger(__name__)
@@ -262,7 +263,9 @@ class ProfileConfig(BaseModel):
     lands in it), ``time_margin`` to the **median** (a fleet is sized for typical work, and sizing
     it for the worst case over-provisions every run).
 
-    Part of the ``run_id`` digest, like everything else under ``compute``. It changes the resource
+    Part of the ``run_id`` digest — unlike the two fields that are not (its own ``source``, and
+    ``compute.capacity``, both of which are resolved or operational rather than authored). It
+    changes the resource
     shape rather than the numbers a run produces, so it is arguable — but the config *is* the
     experiment record, and a run whose fleet was sized differently is not the same run for
     performance purposes. Silently varying the shape under a stable id would be the worse trade.
@@ -378,6 +381,82 @@ class ProfileConfig(BaseModel):
     def unpins_threads(self) -> bool:
         """Should the fleet leave native thread pools uncapped so `effective_cores` is real?"""
         return self.records_measurements and self.measure == "controlled"
+
+
+class CapacityServicePolicy(BaseModel):
+    """A partial override of one service's shipped retry policy — every field optional.
+
+    Partial on purpose. A user who wants to wait longer for a GPU should be able to say only
+    ``{"max_wall_seconds": 7200}`` and inherit the rest; requiring the whole policy would mean
+    copying four numbers they have no opinion about and silently freezing them against future
+    default changes. Unset fields fall through to `capacity.DEFAULT_POLICIES[service]`.
+
+    Bounds are validated here as well as in `capacity.CapacityPolicy`, so a bad config fails at load
+    with a pydantic error naming the field rather than at provisioning time with a ValueError.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # 0 disables a bound; see `capacity.CapacityPolicy` for what each one counts.
+    max_attempts: int | None = Field(default=None, ge=0)
+    max_wall_seconds: float | None = Field(default=None, ge=0)
+    max_passes: int | None = Field(default=None, ge=0)
+    backoff_seconds: float | None = Field(default=None, ge=0)
+    backoff_multiplier: float | None = Field(default=None, ge=1.0)
+    backoff_max_seconds: float | None = Field(default=None, ge=0)
+
+
+class CapacityConfig(BaseModel):
+    """How hard to look for room when a service says it has none — per service (G2).
+
+    "Resources are not available" is a **state**, not an exception: a run walks its candidate
+    places, and if none has room it waits and walks them again, until an attempt budget or a clock
+    runs out. `scale_forecasting.capacity` implements that; this is where a run tunes it.
+
+    **Not part of the ``run_id`` digest** — excluded in `registry.ids._NOT_IDENTITY`, and there is a
+    test that says so. Same rule as ``compute.profile.source``, for the same reason: a run's
+    identity is *what was asked for*, and patience is an operational knob. If it moved the digest,
+    waiting longer for a GPU would fork your run id and break dedupe-on-read.
+
+    ``enabled: false`` restores the pre-retry behaviour exactly — one pass over the candidates, no
+    back-off — which is the escape hatch if a retry loop ever misbehaves in production. It does not
+    disable *classification*: a config fault still stops immediately and a quota ceiling is still
+    named as one in the ledger, because those were improvements to the diagnosis, not to the
+    patience.
+
+    BigQuery has no entry and that omission is deliberate (`capacity.UNMANAGED_SERVICES`): slot
+    contention is resolved BigQuery-side and surfaces as latency, not as a create that failed
+    somewhere and could be retried elsewhere. There is no candidate list to walk.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    # Vertex Ray cluster creation — walks `compute.ray_regions`. The most expensive attempt
+    # (~12 min for a GPU provision), so the shipped default is fewest tries and longest wait.
+    ray: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+    # Dataproc cluster creation — walks the zone/region candidates from `compute_fallback`.
+    dataproc_cluster: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+    # Dataproc Serverless batch submission — region only, and rejections come back in seconds.
+    dataproc_serverless: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+
+    def policy_for(self, service: str) -> CapacityPolicy:
+        """Resolve this config into the runtime policy for ``service`` (pure).
+
+        The shipped per-service default with any authored field laid over it, plus the
+        ``enabled: false`` collapse to a single pass. Raises `KeyError` for a service with no
+        candidate walk (BigQuery), because asking for its retry policy is a programming error rather
+        than a configuration one.
+        """
+        base = DEFAULT_POLICIES[service]
+        override: CapacityServicePolicy = getattr(self, service)
+        fields = {
+            key: value
+            for key, value in override.model_dump().items()
+            if value is not None and key != "max_passes"
+        }
+        max_passes = 1 if not self.enabled else (override.max_passes or base.max_passes)
+        return replace(base, max_passes=max_passes, **fields)
 
 
 class ComputeConfig(BaseModel):
@@ -510,6 +589,10 @@ class ComputeConfig(BaseModel):
     # within a pool that is already provisioned. Measurements that size a fleet therefore have to
     # come from an earlier run. See `ProfileConfig`.
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
+    # How hard to look for room when a service says it has none. The second field under `compute`
+    # that is NOT part of the run_id digest (see `CapacityConfig`) — patience is an operational
+    # knob, not a description of the experiment.
+    capacity: CapacityConfig = Field(default_factory=CapacityConfig)
     # How the Ray driver reads the source panel. Both paths hit the SAME BigQuery Storage Read API
     # (no query slots, matching Spark) and yield the SAME driver-side pandas panel, so the
     # downstream fan-out is byte-identical either way — this knob only chooses the client:
