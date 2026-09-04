@@ -143,6 +143,31 @@ _CONFIG_FAULT_MARKERS: tuple[str, ...] = (
     "no longer supported",
 )
 
+# api_core exception class names that are region-invariant by *type*, consulted only after every
+# text check below has declined to classify. Matched by name for the same reason
+# `_CAPACITY_EXCEPTION_NAMES` is: this module imports nothing from google.
+#
+# Earned live 2026-09-04. Vertex rejects an autoscaling spec whose ``min == max`` with
+# ``InvalidArgument: max_replica_count must be in range (min, 1000]`` — a sentence that contains no
+# capacity word, no quota word, and not the literal string "invalid argument" either, so it fell
+# through to the TRANSIENT_CAPACITY default and a config that could never succeed anywhere was
+# retried six times across two regions before an operator killed it. The request was malformed; no
+# region was ever going to accept it.
+_CONFIG_FAULT_EXCEPTION_NAMES: frozenset[str] = frozenset(
+    {"InvalidArgument", "PermissionDenied", "Unauthenticated", "BadRequest", "Forbidden"}
+)
+
+# A missing *regional* prerequisite: the thing being referred to is absent here but may well exist
+# elsewhere. That is exactly `HARD_CEILING`'s meaning — hop, but never wait, because no amount of
+# patience creates a resource nobody has built.
+#
+# Also found live 2026-09-04, and it is the reason the advertised Ray multi-region failover has
+# never worked: ``SF_RAY_NETWORK_ATTACHMENT`` names a network attachment, attachments are regional,
+# and
+# Terraform builds exactly one. A create in any other region 404s on it long before quota is
+# consulted. Classified here it costs one attempt per region instead of the full retry budget.
+_HARD_CEILING_EXCEPTION_NAMES: frozenset[str] = frozenset({"NotFound"})
+
 
 def classify(message: str, exc: BaseException | None = None) -> str:
     """Read a provisioning failure and return one of `VERDICTS` (pure).
@@ -161,9 +186,13 @@ def classify(message: str, exc: BaseException | None = None) -> str:
     2. **Quota, when it is not also capacity, is a `HARD_CEILING`.** The region has room; this
        project is simply not allowed more. Hop, never wait.
     3. **A named region-invariant cause is a `CONFIG_FAULT`.** Stop.
-    4. **Everything else is `TRANSIENT_CAPACITY`.**
+    4. **Only then, the exception's *type*.** `_CONFIG_FAULT_EXCEPTION_NAMES` (a malformed request)
+       stops; `_HARD_CEILING_EXCEPTION_NAMES` (a prerequisite that does not exist here) hops without
+       waiting. Deliberately last, so it can only rescue cases that would otherwise have fallen
+       through to step 5 — every classification the text already makes is left exactly as it was.
+    5. **Everything else is `TRANSIENT_CAPACITY`.**
 
-    Step 4 is the asymmetry, and it is deliberate. The classifier used to work the other way — hop
+    Step 5 is the asymmetry, and it is deliberate. The classifier used to work the other way — hop
     only on reasons we recognised — and that inverted default cost the feature three times in one
     afternoon (2026-09-01), each to a different contentless string: "An internal error occurred on
     your cluster", "Unexpected response.", and the plural quota message above. Each read as a
@@ -185,6 +214,12 @@ def classify(message: str, exc: BaseException | None = None) -> str:
         return HARD_CEILING
     if any(marker in low for marker in _CONFIG_FAULT_MARKERS):
         return CONFIG_FAULT
+    if exc is not None:
+        name = type(exc).__name__
+        if name in _CONFIG_FAULT_EXCEPTION_NAMES:
+            return CONFIG_FAULT
+        if name in _HARD_CEILING_EXCEPTION_NAMES:
+            return HARD_CEILING
     return TRANSIENT_CAPACITY
 
 
@@ -318,6 +353,12 @@ class CapacityLedger:
     service: str
     attempts: list[CapacityAttempt] = field(default_factory=list)
     exhausted: bool = False
+    # What was known *before* the first attempt: one `quota.QuotaPreflight.to_dict` per candidate
+    # region. It rides here rather than in its own telemetry column because the question it answers
+    # is the same one the attempt list answers — why did this run land where it landed — and a
+    # reader should not have to join two places to get it. It also records the readings for regions
+    # that were never attempted, which is the only trace those leave.
+    preflight: list[dict[str, object]] = field(default_factory=list)
 
     def record(self, candidate: str, verdict: str, message: str, elapsed_seconds: float) -> None:
         """Append one attempt, clipping an over-long message."""
@@ -342,12 +383,15 @@ class CapacityLedger:
 
     def to_json(self) -> dict[str, object]:
         """The ``$.capacity`` payload: the service, the attempt list, and whether it gave up."""
-        return {
+        payload: dict[str, object] = {
             "service": self.service,
             "exhausted": self.exhausted,
             "n_attempts": len(self.attempts),
             "attempts": [a.to_json() for a in self.attempts],
         }
+        if self.preflight:
+            payload["preflight"] = self.preflight
+        return payload
 
 
 class CapacityExhausted(EngineError):

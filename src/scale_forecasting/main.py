@@ -475,6 +475,13 @@ def _main(argv: list[str] | None = None) -> None:
         help="render this run's Airflow DAG to a local dag_<run_id>.py; touch no GCP",
     )
     verbs.add_argument(
+        "--quota",
+        action="store_true",
+        help="read this run's capacity meters in every candidate region and report what they "
+        "allow, what they would clamp, and what a quota increase would buy in wall clock; "
+        "reads only, launches nothing",
+    )
+    verbs.add_argument(
         "--probe",
         action="store_true",
         help="registry-first reconciled status of this config's run; escalate incomplete/stale "
@@ -520,6 +527,12 @@ def _main(argv: list[str] | None = None) -> None:
     if ns.stage_only:
         result = launch_plan.stage_run(cfg, force=ns.force)
         _log.info("staged: %s", result.run_id)
+        return
+    if ns.quota:
+        from .quota import report_for_run
+
+        for line in report_for_run(cfg):
+            _log.info("%s", line)
         return
     if ns.probe:
         from .probes.reconcile import probe_run

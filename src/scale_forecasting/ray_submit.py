@@ -215,7 +215,13 @@ def submit_ray(
             cluster_resource_name = ray_cluster.cluster_resource_path(settings, name, region)
         else:
             cluster_resource_name, cluster_region = ray_cluster._create_cluster_across_regions(
-                plan, infra, name, settings, regions, policy=cfg.compute.capacity.policy_for("ray")
+                plan,
+                infra,
+                name,
+                settings,
+                regions,
+                policy=cfg.compute.capacity.policy_for("ray"),
+                preflight=cfg.compute.capacity.preflight,
             )
             region = cluster_region
             teardown_target = ray_cluster.cluster_resource_path(settings, name, cluster_region)

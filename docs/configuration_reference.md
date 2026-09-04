@@ -314,7 +314,17 @@ number you have an opinion about and inherit the rest.
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
 | `enabled` | `bool` | `true` | — | `false` = one pass over the candidates, no back-off, all services. Beats an authored `max_passes`. |
+| `preflight` | `bool` | `true` | — | Read each candidate region's quota **before** the first create, and skip or clamp accordingly. See below. |
 | `ray` \| `dataproc_cluster` \| `dataproc_serverless` | `object` | `{}` | — | Per-service partial override; unset fields inherit the shipped default below. |
+
+`preflight` is the cheap half of the same problem: retrying is for a region that is *temporarily*
+full, and a preflight is for one that was never going to work. It reads the region's allowance,
+drops a region that cannot host even the minimum (recorded as a hard ceiling, no create attempted),
+and lowers this run's pool ceilings to what a smaller region will grant rather than failing there.
+It only ever lowers, and it never touches `run_id`. `--quota` prints the same report without
+launching — see [Quota and scale](./quota_and_scale.md#4-which-quotas-and-where). Set it `false`
+only if the runner service account lacks `serviceusage.services.get`; the check degrades to silence
+on any read failure, so a missing permission costs you the diagnostic, not the run.
 
 Per-service fields, all optional, `0` disables that bound:
 

@@ -32,6 +32,14 @@ class InvalidArgument(Exception):
     pass
 
 
+class NotFound(Exception):
+    pass
+
+
+class PermissionDenied(Exception):
+    pass
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -127,6 +135,30 @@ def test_a_transient_exception_type_outranks_a_config_fault_message() -> None:
 
 def test_an_unrelated_exception_type_does_not_make_a_message_transient() -> None:
     assert cap.classify("permission denied", InvalidArgument()) == cap.CONFIG_FAULT
+
+
+def test_a_config_fault_exception_type_is_not_retried_on_a_message_we_cannot_read() -> None:
+    """Live 2026-09-04: an ``InvalidArgument`` for ``max_replica_count`` out of range carried no
+    marker word, so the default sent a malformed spec back six times. The retries could never have
+    worked — the request was wrong, not the moment."""
+    assert cap.classify("max_replica_count must be in range (1, 1000]", InvalidArgument()) == (
+        cap.CONFIG_FAULT
+    )
+    assert cap.classify("nothing recognisable", PermissionDenied()) == cap.CONFIG_FAULT
+
+
+def test_a_missing_resource_is_a_hard_ceiling_not_something_to_wait_for() -> None:
+    """Live 2026-09-04: a network attachment is regional, so a create in a region without one 404s
+    forever. Backing off and re-trying cannot make the resource appear."""
+    assert cap.classify("networkAttachment was not found", NotFound()) == cap.HARD_CEILING
+
+
+def test_exception_types_are_consulted_only_after_every_text_check() -> None:
+    """The new branches may only rescue cases that used to fall through to the default; a stockout
+    message still wins even when the exception type says config fault."""
+    assert cap.classify("resource pool exhausted", InvalidArgument()) == cap.TRANSIENT_CAPACITY
+    assert cap.classify("quota exceeded", NotFound()) == cap.HARD_CEILING
+    assert cap.classify("quota exceeded", InvalidArgument()) == cap.HARD_CEILING
 
 
 def test_classification_is_case_insensitive() -> None:
@@ -277,6 +309,32 @@ def test_the_ledger_json_is_plain_types_all_the_way_down() -> None:
     assert payload["exhausted"] is True
     assert payload["n_attempts"] == 1
     assert payload["attempts"][0]["elapsed_seconds"] == 3.142
+    assert "preflight" not in payload  # nothing read, nothing claimed
+
+
+def test_a_preflight_reading_rides_along_in_the_ledger_json() -> None:
+    """The quota preflight has no telemetry column of its own; it lands under ``$.capacity``, and
+    it must survive the same JSON round-trip the attempt list does."""
+    import json
+
+    from scale_forecasting import quota
+
+    ledger = cap.CapacityLedger(service="ray")
+    demand = quota.QuotaDemand(
+        metric=quota.vertex_gpu_metric("T4"),
+        region="us-east1",
+        pool="gpu",
+        per_unit=1,
+        min_units=1,
+        max_units=12,
+    )
+    reading = quota.QuotaReading(demand.metric, "us-east1", 2, "regional limit 2")
+    outcome = quota.reconcile(demand, reading)
+    ledger.preflight.append(quota.QuotaPreflight(region="us-east1", outcomes=(outcome,)).to_dict())
+
+    payload = json.loads(json.dumps(ledger.to_json()))
+    assert payload["preflight"][0]["region"] == "us-east1"
+    assert payload["preflight"][0]["clamped"] is True
 
 
 # --- the walk -----------------------------------------------------------------------------------

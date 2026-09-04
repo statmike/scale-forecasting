@@ -431,6 +431,13 @@ class CapacityConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = True
+    # Read the region's quota *before* attempting a create (`scale_forecasting.quota`): drop regions
+    # that cannot host the fleet at all, lower a ceiling the allowance will not grant, and report
+    # what the ceiling is costing in wall clock. On by default because its failure mode is benign —
+    # an unreadable meter changes nothing — and its success mode saves a ~12-minute create attempt.
+    # `false` skips the read entirely, for a deployment whose runner SA is not granted
+    # ``serviceusage.services.get`` and would rather not log the resulting miss on every launch.
+    preflight: bool = True
     # Vertex Ray cluster creation — walks `compute.ray_regions`. The most expensive attempt
     # (~12 min for a GPU provision), so the shipped default is fewest tries and longest wait.
     ray: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)

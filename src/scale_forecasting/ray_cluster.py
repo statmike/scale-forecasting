@@ -44,7 +44,14 @@ import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .capacity import DEFAULT_POLICIES, CapacityLedger, CapacityPolicy, current_publisher
+from .capacity import (
+    DEFAULT_POLICIES,
+    HARD_CEILING,
+    CapacityExhausted,
+    CapacityLedger,
+    CapacityPolicy,
+    current_publisher,
+)
 from .capacity import walk as capacity_walk
 from .engines import ray_io
 from .errors import get_logger
@@ -290,6 +297,79 @@ def _describe_region_failure(
     return f"{exc} | {detail}".strip(" |")
 
 
+def _apply_quota_preflight(
+    plan: ray_io.RayClusterPlan,
+    infra: RayInfra,
+    settings: Settings,
+    regions: list[str],
+    ledger: CapacityLedger,
+) -> dict[str, ray_io.RayClusterPlan]:
+    """Rule out the regions that cannot work, and return the per-region plan for the ones that can.
+
+    Two checks, cheapest first. `quota.regions_without_attachment` is a regex over a string and
+    needs no network at all: a PSC-I network attachment is a *regional* resource and Terraform
+    builds exactly one, so every region other than its home is unreachable no matter what its quota
+    says. Only the survivors are worth an API read.
+
+    Then three effects, which are the whole point of preflighting rather than discovering:
+
+    * a region that cannot host the fleet is recorded in ``ledger`` as a `capacity.HARD_CEILING`
+      with ``elapsed_seconds=0``, which both explains the omission in telemetry and puts the region
+      into `CapacityLedger.dead_candidates` so the walk never revisits it;
+    * a region that can host a smaller fleet gets a plan clamped to what its allowance grants,
+      keyed by region because the answer genuinely differs between them (12 T4s in ``us-central1``,
+      2 in ``us-east1``);
+    * every non-trivial finding is logged, including the wall clock the ceiling implies.
+
+    Returns ``{}`` and logs at debug if the read itself fails — a preflight is a diagnostic, and a
+    diagnostic that can block a launch is worse than no diagnostic. The zero elapsed time on the
+    recorded attempts is deliberate and honest: nothing was spent establishing them.
+    """
+    from . import quota
+
+    # getattr, not attribute access: the preflight is a diagnostic layered over the launch path and
+    # must degrade to "I know nothing" rather than raise on an infra object it did not expect.
+    attachment = getattr(infra, "network_attachment", None)
+    unreachable = quota.regions_without_attachment(attachment, regions)
+    for region, reason in unreachable.items():
+        _log.warning("preflight rules out %s without attempting a create: %s", region, reason)
+        ledger.record(region, HARD_CEILING, f"preflight: {reason}", 0.0)
+    candidates = [region for region in regions if region not in unreachable]
+    if not candidates:
+        return {}
+
+    try:
+        preflights = quota.preflight_ray(plan, candidates, settings.project_id)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never sink a launch
+        _log.debug("quota preflight unavailable (non-fatal): %r", exc)
+        return {}
+
+    plans: dict[str, ray_io.RayClusterPlan] = {}
+    for region, preflight in preflights.items():
+        ledger.preflight.append(preflight.to_dict())
+        for line in preflight.render():
+            _log.info("%s", line)
+        if preflight.blocked:
+            _log.warning(
+                "quota preflight rules out %s without attempting a create: %s",
+                region,
+                preflight.block_reason,
+            )
+            ledger.record(region, HARD_CEILING, f"quota preflight: {preflight.block_reason}", 0.0)
+            continue
+        plans[region] = quota.apply_to_ray_plan(plan, preflight)
+    return plans
+
+
+def _publish_ledger(
+    on_state: Callable[[CapacityLedger], None] | None, ledger: CapacityLedger
+) -> None:  # pragma: no cover - one-line delegation to a tested helper
+    """Publish the ledger through the caller's channel, or the ambient one."""
+    publish = on_state if on_state is not None else current_publisher()
+    if publish is not None:
+        publish(ledger)
+
+
 def _create_cluster_across_regions(
     plan: ray_io.RayClusterPlan,
     infra: RayInfra,
@@ -300,10 +380,18 @@ def _create_cluster_across_regions(
     policy: CapacityPolicy | None = None,
     ledger: CapacityLedger | None = None,
     on_state: Callable[[CapacityLedger], None] | None = None,
+    preflight: bool = True,
 ) -> tuple[str, str]:  # pragma: no cover - orchestrates live Vertex I/O; @gpu smoke exercises it
     """Create the cluster, walking ``regions`` until one can provision it.
 
     Returns ``(cluster_resource_name, region)`` for the region that succeeded.
+
+    Before the first create, `_apply_quota_preflight` drops every region with no PSC-I network
+    attachment (a regex, no API call) and reads the rest's allowance. Regions that cannot host the
+    fleet are recorded as `capacity.HARD_CEILING` and never attempted, a region that can host a
+    *smaller* fleet gets a plan clamped to what it will grant, and the throttle is logged in
+    wall-clock terms. ``preflight=False`` (``compute.capacity.preflight``) skips both checks; the
+    walk then behaves exactly as it did before they existed.
 
     The loop is `capacity.walk`, shared with the Dataproc path: try each live region with no wait
     between them, then back off and try them again, until an attempt or wall-clock budget runs out.
@@ -319,9 +407,22 @@ def _create_cluster_across_regions(
     whatever `capacity.publishing_to` installed for this family (`job_launch` does).
     """
     ledger = ledger if ledger is not None else CapacityLedger(service="ray")
+    plans = _apply_quota_preflight(plan, infra, settings, regions, ledger) if preflight else {}
+    live = [region for region in regions if region not in ledger.dead_candidates]
+    if not live:
+        ledger.exhausted = True
+        _publish_ledger(on_state, ledger)
+        raise CapacityExhausted(
+            f"ray: preflight ruled out every candidate region "
+            f"({', '.join(regions)}); no create was attempted",
+            ledger,
+        )
+
     return capacity_walk(
-        regions,
-        lambda region: _attempt_cluster_in_region(plan, infra, name, settings, region),
+        live,
+        lambda region: _attempt_cluster_in_region(
+            plans.get(region, plan), infra, name, settings, region
+        ),
         ledger=ledger,
         policy=policy or DEFAULT_POLICIES["ray"],
         describe_failure=lambda region, exc: _describe_region_failure(name, settings, region, exc),
@@ -529,6 +630,7 @@ def provision_shared_cluster(
         settings,
         regions,
         policy=cfg.compute.capacity.policy_for("ray"),
+        preflight=cfg.compute.capacity.preflight,
     )
     return plan.cluster_name, region
 

@@ -345,6 +345,7 @@ Two things you won't find here:
 | Command | Purpose |
 |---------|---------|
 | `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run — a job per family in parallel (Spark/Ray ∥ BigQuery) under one `run_id`. |
+| `python -m scale_forecasting.main --config C --quota` | Read this run's capacity meters in every candidate region: what they allow, what they would clamp, and what a quota increase would buy in wall clock. Reads only. See [Quota and scale](quota_and_scale.md#4-which-quotas-and-where). |
 | `python -m scale_forecasting.submit --config C` | Submit a single Spark family job to Dataproc. |
 | `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |

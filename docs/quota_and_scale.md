@@ -188,6 +188,11 @@ The metrics that bind this product:
 | `DISKS_TOTAL_GB` | Boot disks across the fleet | 40,960 |
 | `IN_USE_ADDRESSES` | Rarely binding — clusters are private | 69 |
 
+**There is no Dataproc capacity quota to look for.** Every `dataproc.googleapis.com` quota is an API
+*request rate*, not an amount of hardware — including for Serverless, whose batch vCPUs bill to
+Compute Engine `CPUS` in the region. If a Serverless batch is capacity-starved, the meter to raise
+is the Compute Engine one above.
+
 **Ray on Vertex is not in that table, and `gcloud compute` cannot show it.** Vertex draws GPUs from
 its own service quota, so a Ray run is bound by a metric the recipe above never prints:
 
@@ -203,6 +208,37 @@ gcloud alpha services quota list \
 Read the `effectiveLimit` for your region out of `quotaBuckets`. Checking only the Compute Engine
 number is how you conclude you have 4 T4s on a project that has 12.
 
+**You do not have to run either command.** `--quota` reads the same meters for the run you are about
+to launch, in every region it would consider, and prints what they allow:
+
+```bash
+python -m scale_forecasting.main --config configs/all_families_10k.json --quota
+```
+
+```
+quota report for all-families-10k-eb01dcfecfab — candidate regions: us-central1, us-east1, us-west1
+  native: on bigquery, no per-job capacity meter to read
+  deep_learning on ray/gpu: gpu[1,12]
+    us-central1: OK
+      quota: gpu pool in us-central1 — aiplatform.googleapis.com/custom_model_training_nvidia_t4_gpus = 12, usable nodes = 12
+        this run would saturate at 5000 nodes (10000 cells / 2 per node); the ceiling holds it to 12
+        now   12 node(s): ~1h29m
+        at    24 node(s): ~45m
+    us-east1: UNREACHABLE — the PSC-I network attachment is in us-central1; ...
+```
+
+It reads only and launches nothing. The wall-clock projections appear when a
+[measured profile](configuration_reference.md) exists for the family; without one you still get the
+ceiling and the throttle ratio.
+
+The launch path runs the same check by itself, before the first cluster create. A region that cannot
+host the fleet is recorded as a hard ceiling and skipped without spending the ~12 minutes a failed
+Ray create costs; a region that can host a *smaller* fleet has this run's pool ceilings lowered to
+fit rather than failing. It never raises a floor — quota is evidence about what you are permitted,
+not about what the work needs — and it never changes `run_id`, so the same config is still the same
+run in a region that grants less. Set `compute.capacity.preflight: false` to skip it (the only
+reason to: a runner service account without `serviceusage.services.get`).
+
 Two things that surprise people:
 
 - **The head node counts.** An `n1-highmem-32` driver consumes 32 vCPUs before a single worker
@@ -211,6 +247,11 @@ Two things that surprise people:
   the Dataproc path.** Ray on Vertex bills its vCPUs to `custom_model_training_cpus`, whose
   `us-central1` default is 2,200 — an order of magnitude looser, and the reason a Ray config can
   carry a 12-node GPU pool and a 20-node CPU pool at once (288 vCPU) without CPU ever binding.
+- **Vertex's vCPU quota is per machine family.** `custom_model_training_cpus` covers N1 and E2 only;
+  `n2`, `n4`, `c2`, `g2`, `a2`, `a3` and `m1` machines each have their own metric
+  (`custom_model_training_g2_cpus`, and so on). Reading the N1 meter for a G2 pool reports a number
+  about machines your run is not using. The reference configs are all N1, so the default meter is
+  the right one unless you change `ray_machine_type`.
 - **GPU nodes consume both.** Four T4 workers on `n1-standard-8` cost 4 T4s *and* 32 vCPUs. Raising
   `NVIDIA_T4_GPUS` without also raising `CPUS` will not get you more GPU workers.
 
@@ -260,10 +301,17 @@ on BigQuery's own slots, and consume **none** of your Compute Engine quota. A ru
 with Python models gets that family for free in vCPU terms, and it runs concurrently with the rest
 of the DAG rather than after it.
 
-**Use a second region.** Quota is regional. If `us-central1` is capped and the work splits naturally
-(different business units, say), two runs in two regions have two independent allowances. This does
-not speed up a *single* run — `ray_regions` is failover, not simultaneous execution — but it does
-raise total throughput across a workload.
+**Use a second region — but deploy into it first.** Quota is regional, so if `us-central1` is capped
+and the work splits naturally (different business units, say), two runs in two regions have two
+independent allowances. This does not speed up a *single* run — `ray_regions` is failover, not
+simultaneous execution — but it does raise total throughput across a workload.
+
+The catch, and it is a real one: **a Ray cluster on the private path can only be created in the
+region its network attachment lives in**, and Terraform builds one attachment. Listing three
+`ray_regions` against a single-region deployment does not give you three candidates; it gives you
+one, and two regions that 404 on the attachment before quota is ever consulted. `--quota` reports
+those as `UNREACHABLE` and the launch path skips them. To make a second region real, deploy a
+network attachment there too.
 
 ---
 
