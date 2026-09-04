@@ -19,7 +19,9 @@ if TYPE_CHECKING:
 
 # A user credential doesn't carry its email, so we read it once from the OpenID userinfo endpoint —
 # short-timeout and best-effort — to attribute a laptop-launched run. A runner SA never reaches this
-# (its email is on the credential), so this is the laptop-user path only.
+# (its email is on the credential), so this is the laptop-user path only. The call goes out with the
+# quota project stripped; see `_without_quota_project` for why that is the difference between an
+# attributed audit line and an empty one.
 _USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 _USERINFO_TIMEOUT_S = 10.0
 
@@ -60,10 +62,30 @@ def resolve_principal(settings: Settings | None = None) -> str | None:  # pragma
         return None
 
 
+def _without_quota_project(creds: Any) -> Any:
+    """The same credential with no quota project (pure; ``creds`` unchanged if unsupported).
+
+    ``AuthorizedSession`` turns a credential's quota project into an ``x-goog-user-project`` header.
+    Userinfo is an *identity* endpoint, not a billed API, so that header adds nothing but a
+    requirement — ``serviceusage.services.use`` on whatever project ADC happens to point at, which
+    is frequently not the project being deployed to. A caller without it gets a 403 and an
+    unattributed audit line. Strip it: the principal is a property of the credential, not of any
+    project.
+    """
+    with_quota = getattr(creds, "with_quota_project", None)
+    if with_quota is None:
+        return creds
+    try:
+        return with_quota(None)
+    except Exception:  # noqa: BLE001 - best-effort; the original credential is still usable
+        return creds
+
+
 def _userinfo_email(creds: Any) -> str | None:  # pragma: no cover - network I/O
     """A user credential's email via the OpenID userinfo endpoint (best-effort, short-timeout)."""
     import google.auth.transport.requests as gtr
 
+    creds = _without_quota_project(creds)
     if not getattr(creds, "valid", False):
         creds.refresh(gtr.Request())
     resp = gtr.AuthorizedSession(creds).get(_USERINFO_URL, timeout=_USERINFO_TIMEOUT_S)

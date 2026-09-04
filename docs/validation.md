@@ -1143,7 +1143,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** |
 | Registry ops — `close_runs` (7th verb) | CURRENT | Executed live 2026-09-02 against the real registry: closed 9 of the 10 stuck headers to `FAILED` and skipped the tenth with its reason, leaving `doctor` reporting exactly one in-flight run. **The first live call failed** on a column that does not exist, which no offline test could have caught — see below. |
 | Shipped baseline profile (`profiling.baseline`) | CURRENT | The numbers committed in `src/scale_forecasting/profiling/baseline.py` were harvested on 2026-09-03 from `ray-100k-dcc77a9d1e9b` — the `ray_100k` row above, a real 100,000-series Ray run — through the ordinary `read_compute_harvest` path. **This row is a claim about the numbers' provenance and nothing else.** No run has yet been *sized* from the baseline on live infrastructure; that needs a deployment with an empty registry, which this project no longer is. See below. |
-| Run audit principal (P6) | NEEDS_RECHECK | It has now executed, live, under ADC — and produced `actor=None`. The audit line for a real cancel attempt carried no principal. Whether that is a resolver defect or the expected ADC answer for this credential type is unresolved; either way the audit trail was empty when it mattered. See below. |
+| Run audit principal (P6) | CURRENT | The `actor=None` on 2026-09-02's live cancel was a **defect**, resolved 2026-09-04: the userinfo lookup was sending the ADC quota project as `x-goog-user-project` and getting a 403 for `serviceusage.services.use` on a project unrelated to the run. Fixed by stripping the quota project (`identity._without_quota_project`) and verified live under the same ADC credential — `resolve_principal()` returns the user's email. The end-to-end cancel-with-attribution has **not** been re-observed; the audit *write* was already proven on 2026-09-02, and this closes the resolver that fed it blank. See below. |
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
 
@@ -1273,10 +1273,29 @@ registry finished `deep_learning FAILED` with the other three `COMPLETED`, and
 the teardown all work; only the path from the CLI to the handle does not.**
 
 `actor=None` is the P6 finding. `identity.resolve_principal` ran for the first time — live, under
-ADC — and returned nothing, so the audit line for a real cancel attempt names no one. Recorded as
-`NEEDS_RECHECK` rather than a defect because it has not been established whether ADC user
-credentials are expected to yield a principal here; what *is* established is that the audit trail was
-empty on the one occasion it was exercised.
+ADC — and returned nothing, so the audit line for a real cancel attempt names no one. It was recorded
+as `NEEDS_RECHECK` rather than a defect because it had not been established whether ADC user
+credentials are expected to yield a principal here.
+
+**Resolved 2026-09-04, and it was a defect.** Reproduced under the same credential type and traced to
+the userinfo call: `AuthorizedSession` attaches the credential's quota project as an
+`x-goog-user-project` header, and the endpoint then answers **403 — caller lacks
+`serviceusage.services.use`** on that project. The header is the whole problem. Userinfo is an
+*identity* endpoint; it needs no project, and the one it was being billed against was simply whatever
+ADC happened to point at, which for a laptop is routinely unrelated to the deployment. The credential
+was fine, the scopes were fine, and `resolve_principal` swallowed the 403 exactly as designed — best
+effort, never raise — so the failure surfaced only as a blank field.
+
+The fix strips the quota project before the call (`identity._without_quota_project`). Verified live
+under the same ADC credential that produced the blank: `resolve_principal()` now returns the user's
+email. Two properties worth keeping: it is a *copy* of the credential, so nothing else in the process
+is affected, and a credential type that cannot strip goes out unchanged rather than failing —
+attribution stays advisory and never blocks the operation it annotates.
+
+**What this generalizes to.** The audit trail failed on an IAM permission in a project that has
+nothing to do with the run — the same shape as the Cloud Billing API check that failed against the
+ADC quota project during a Cloud Shell deploy. Any call made with ADC that does not *need* a quota
+project should not send one.
 
 ### The cancel reached its job, and then the launcher overwrote the cancellation with `FAILED`
 
@@ -1379,7 +1398,10 @@ check worth quoting. So the guard suppresses one specific write and nothing else
 conditional UPDATE in one statement should do.
 
 `cancelled_by: null` in the persisted telemetry is the same P6 `actor=None` finding as above,
-now confirmed on both runs to propagate into stored state rather than only into the console line.
+confirmed on both runs to propagate into stored state rather than only into the console line — which
+is what made it worth chasing rather than dismissing as a cosmetic gap. Root-caused and fixed
+2026-09-04 (quota project on the userinfo call); these two rows keep their nulls, since a stored
+audit line is a historical record and is not rewritten.
 
 ### The workshop's first command printed nothing, and every offline test passed anyway
 
