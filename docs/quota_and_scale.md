@@ -152,11 +152,11 @@ At ~4 cells/min per T4, one deep-learning model over the same series counts:
 
 **A default project runs out of deep-learning headroom at around 1,000–3,000 series**, one to two
 orders of magnitude before it runs out of CPU headroom. This is why `all_families_10k.json` is the
-largest config here that includes `neuralprophet`. Note that it pins `ray_gpu_max_nodes: 4` — sized
-to the Compute Engine number even though it runs on Ray, so it leaves two-thirds of the Vertex
-allowance unused and takes most of a working day rather than an afternoon. That is deliberate
-conservatism in a reference config, not a limit of the runtime; raise the pin if your project's
-Vertex quota supports it.
+largest config here that includes `neuralprophet`. It pins `ray_gpu_max_nodes: 12`, the Vertex
+default for `us-central1`; it previously pinned `4`, which was the Compute Engine number applied to
+a Ray run by mistake and left two-thirds of the allowance unused. If you deploy to a region with a
+smaller Vertex allowance, lower it — the pool starts at `ray_gpu_min_nodes` and a `max` above your
+quota is not an error, just a ceiling the autoscaler never reaches.
 
 Treat these figures as **the softest numbers on this page.** No deep-learning run in the
 [validation ledger](validation.md) has yet exceeded **100 series**, so the 4 cells/min/T4 anchor is
@@ -205,9 +205,12 @@ number is how you conclude you have 4 T4s on a project that has 12.
 
 Two things that surprise people:
 
-- **The head node counts.** An `n1-highmem-32` driver consumes 32 vCPUs of your `CPUS` allowance
-  before a single worker starts. On a 200-vCPU project that is 16% of everything you have, which is
-  why the reference configs cap workers at 20: `32 + (20 x 8) = 192`, and 200 is the ceiling.
+- **The head node counts.** An `n1-highmem-32` driver consumes 32 vCPUs before a single worker
+  starts. On a 200-vCPU project that is 16% of everything you have, which is why the reference
+  configs cap CPU workers at 20: `32 + (20 x 8) = 192`, and 200 is the ceiling. **This applies to
+  the Dataproc path.** Ray on Vertex bills its vCPUs to `custom_model_training_cpus`, whose
+  `us-central1` default is 2,200 — an order of magnitude looser, and the reason a Ray config can
+  carry a 12-node GPU pool and a 20-node CPU pool at once (288 vCPU) without CPU ever binding.
 - **GPU nodes consume both.** Four T4 workers on `n1-standard-8` cost 4 T4s *and* 32 vCPUs. Raising
   `NVIDIA_T4_GPUS` without also raising `CPUS` will not get you more GPU workers.
 

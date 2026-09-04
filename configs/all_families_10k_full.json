@@ -37,7 +37,7 @@
     "ray_cpu_min_nodes": 1,
     "ray_cpu_max_nodes": 20,
     "ray_gpu_min_nodes": 1,
-    "ray_gpu_max_nodes": 4,
+    "ray_gpu_max_nodes": 12,
     "ray_regions": ["us-central1", "us-east1", "us-west1"]
   }
 }
