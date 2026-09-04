@@ -1624,11 +1624,14 @@ Things that are true today and that no entry above covers. Keep this list short 
   therefore a statement about a 200-core allowance, not about the product, and raising a
   `max_nodes` knob cannot change any of them.
 
-  The GPU side is where the ceiling stops being a cost question. The default `NVIDIA_T4_GPUS`
-  allowance is **4**, and `neuralprophet` runs at roughly **4 cells/min per T4**, so a
-  deep-learning pass costs ~10 hours at 10,000 series and **~104 hours at 100,000** — not expensive
-  so much as unfinishable. **A default project runs out of deep-learning headroom around 1,000
-  series, two orders of magnitude before it runs out of CPU headroom.** The 100k all-families
+  The GPU side is where the ceiling stops being a cost question. The two runtimes draw on different
+  allowances — **4** `NVIDIA_T4_GPUS` for Dataproc, **12** `custom_model_training_nvidia_t4_gpus`
+  for Ray on Vertex — and `neuralprophet` measures at **7.6 cells/min per T4** (2026-09-04, revised
+  up from an extrapolated 4). A deep-learning pass is therefore ~1 h 50 m at 10,000 series on the
+  Ray allowance and **~18 hours at 100,000** — or ~55 hours on Dataproc's four. Not expensive so
+  much as unfinishable. **A default project runs out of deep-learning headroom somewhere around
+  10,000–20,000 series, an order of magnitude before it runs out of CPU headroom.** The 100k
+  all-families
   configs were therefore retired in favour of `all_families_10k` / `all_families_10k_full`: 10,000
   series is the largest scale a stock project can actually reproduce, which is the only scale a
   demonstration config should claim. The 100k rows that remain above (`explode_100k`, `ray_100k`)
