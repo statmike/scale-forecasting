@@ -60,7 +60,8 @@ above `ray_100k` was sized that way; `ray_100k` is the first Ray run whose *slot
 measurement (`basis: measured`, 2 cores and 1.29 GiB per task, from a prior Ray harvest). W1's
 autoscale-ceiling derivation only fires when `ray_autoscale` is true, which until 2026-09-03 no Ray
 smoke did (the demonstration surface covered that path alone — see `ray_autoscale_demo`, which
-reached the derived ceiling of 8); the four smokes have since dropped the pin and gone stale for it.
+reached the derived ceiling of 8); the four smokes dropped the pin and re-ran on 2026-09-03/04, so
+they declare it now too.
 W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
 because it submits Serverless work alongside its Ray families.
 
@@ -111,9 +112,9 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | STALE | 2026-09-02 | `smoke-08-ray-gpu-c41ecf2d5d52` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
-| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-02 | `smoke-09-shared-ray-1d308b8a712c` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-02 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `ray_pool_shape=fixed-size`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-03 | `smoke-08-ray-gpu-38e33f02fd6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | CURRENT | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | CURRENT | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -552,8 +553,8 @@ on CPU, `ray_gpu_demo` scaled a T4 pool, and `ray_100k` ran at scale, all with `
 Those four rows now declare `ray_pool_shape=autoscaling` so the record says where the proof lives.
 What was unproven is **these four configs** on it — including the two that stand up GPU pools and
 the one that shares a cluster across families, which is where a provisioning-time crash would land.
-07, the CPU-only one, has since re-run (below); the three that touch T4s have not, and they are the
-ones the original crash would have hit.
+All four have since re-run (below), including the three that stand up T4 pools — the ones the
+original crash would actually have hit.
 
 Removing the key (rather than setting it to `true`) is the deliberate edit: the config then runs
 whatever the product ships, which is the thing under test. Both spellings hash identically —
@@ -566,9 +567,15 @@ construction; they were re-graded in the same commit as the config edit:
 | # | Proven id | The id its config now resolves to | Re-run |
 |---|---|---|---|
 | 07 | `smoke-07-ray-cpu-782bcec2718f` | `smoke-07-ray-cpu-2cb4115312b1` | **done 2026-09-03 — CURRENT** |
-| 08 | `smoke-08-ray-gpu-c41ecf2d5d52` | `smoke-08-ray-gpu-38e33f02fd6d` | pending |
-| 09 | `smoke-09-shared-ray-1d308b8a712c` | `smoke-09-shared-ray-f42e5785f6b9` | pending |
-| 10 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | pending |
+| 08 | `smoke-08-ray-gpu-c41ecf2d5d52` | `smoke-08-ray-gpu-38e33f02fd6d` | **done 2026-09-03 — CURRENT** |
+| 09 | `smoke-09-shared-ray-1d308b8a712c` | `smoke-09-shared-ray-f42e5785f6b9` | **done 2026-09-03 — CURRENT** |
+| 10 | `smoke-10-mixed-runtimes-f6f98f70eb80` | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | **done 2026-09-04 — CURRENT** |
+
+**All four re-ran, all four landed on the id this table predicted, and all four passed.** 10 closed
+it out with an autoscaling Ray GPU pool running alongside two Dataproc Serverless batches and a
+BigQuery job under one `run_id`. Every cluster was confirmed gone afterwards by `describe`/REST, not
+by the SDK's farewell line. `ray_pool_shape` therefore has no `fixed-size` rows left anywhere in this
+document: the pin from `4c988bc` is fully retired, in the record as well as in the configs.
 
 **07 re-ran on 2026-09-03 and landed on exactly the predicted id**, which is the first thing worth
 recording: the table above was arithmetic against uncommitted code, and the cluster agreed with it.
@@ -586,6 +593,49 @@ T4s and could not have contended with anything.
 
 The re-run also disposes of the id discrepancy described below, in the only way that was ever going
 to: row 07 now names an id that re-derives from the config beside it.
+
+**08 followed, and it is the one that actually retires the `4c988bc` fear.** 07 autoscales a CPU
+pool; 08 autoscales a **GPU** pool, which is the precise shape that crashed the Vertex Ray head and
+caused the pin. It provisioned, trained `neuralprophet` on 100 series, and tore down —
+`total_wall_s: 873.8`, `job_status: SUCCEEDED`, teardown confirmed by the REST endpoint. The
+workaround has now outlived both the component it worked around and the failure it prevented.
+
+**And it took seven T4s, which is more than this project is documented to have.** See below — that
+turned out to be the more valuable finding of the two.
+
+**09 then autoscaled both pools on one shared cluster** (`reuse: true`, `autoscale: true`,
+`total_wall_s: 627.8`), running `statistical`, `ml` and `deep_learning` under a single
+`persistentResource`. This is the case where a provisioning-time crash had the most surface — two
+`AutoscalingSpec`s on one cluster — and it is now proven. It also took a 7-node GPU pool.
+
+#### `NVIDIA_T4_GPUS` is not the quota that binds a Ray run
+
+`quota_and_scale.md` names `NVIDIA_T4_GPUS` (Compute Engine, default **4**) as the metric limiting
+deep-learning workers, and builds its deep-learning scale table on "the default 4 T4s". That is
+correct for the **Dataproc** path and wrong for the **Vertex Ray** path, which is a different
+service drawing on a different pool. Measured on this project, 2026-09-03:
+
+| Pool | Metric | us-central1 | us-east1 | us-west1 |
+|---|---|---|---|---|
+| Compute Engine (Dataproc clusters) | `NVIDIA_T4_GPUS` | 4 | — | — |
+| Vertex AI (Ray on Vertex) | `aiplatform.../custom_model_training_nvidia_t4_gpus` | **12** | 2 | 2 |
+
+Smoke 08 derived a 7-node GPU pool and got all seven. Nothing is over-committed and nothing is
+broken: `ray_max_nodes` (default 16) is the product's only guardrail here, 7 sits under it, and 7
+sits under the Vertex limit of 12. The mistake is entirely in the documentation — and it is the
+expensive direction of wrong, because a reader sizing a Ray run against the doc will believe they
+have a third of the headroom they actually have, and the `gcloud compute regions describe` recipe
+the doc gives them cannot show the number that binds them.
+
+Two consequences worth stating plainly, neither of them acted on in this commit:
+
+- **`all_families_10k.json` pins `ray_gpu_max_nodes: 4`**, sized to the Compute Engine number while
+  running `python_runtime: "ray"`. On the pool it actually uses it could ask for 12. The config is
+  not wrong — it runs — but the "~10 hours" this table quotes for it is a 4-GPU estimate for a run
+  that could have three times the GPUs.
+- **11b's `HARD_CEILING` fixture survives, and is now exact.** `us-east1` allows 2 Vertex T4s, so a
+  Ray GPU config pointed there asking for 3 hits a real ceiling on demand. That was previously a
+  hope about an unmeasured limit; it is now a number.
 
 **One thing the arithmetic turned up that is worth recording.** For 08, 09 and 10 the "proven id"
 column is exactly what their committed config produced before this edit — checked against both

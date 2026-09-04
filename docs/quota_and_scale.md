@@ -124,23 +124,39 @@ the quota.**
 
 ### Deep learning is on a separate, much lower ceiling
 
-`neuralprophet` needs a T4, fits ~50x slower than a statistical model, and the default
-`NVIDIA_T4_GPUS` allowance is **4**. Those three facts together are the hardest limit in this
-product. At ~4 cells/min per T4, one deep-learning model over the same series counts:
+`neuralprophet` needs a T4 and fits ~50x slower than a statistical model, so GPU allowance is the
+hardest limit in this product. **Which** allowance depends on the runtime, and the two are not the
+same number:
 
-| Series | Wall clock on the **default 4 T4s** | T4s for a **~1-hour** run |
+| Deep-learning runtime | Quota metric | Typical default |
 |---|---|---|
-| **100** | ~25 s | 1 |
-| **1,000** | ~1 hour | 5 |
-| **10,000** | **~10 hours** | 42 |
-| **100,000** | **~104 hours** | 417 |
-| **1,000,000** | ~6 weeks | 4,167 |
+| Spark on a **Dataproc** cluster | `NVIDIA_T4_GPUS` (Compute Engine) | **4** |
+| **Ray on Vertex** | `custom_model_training_nvidia_t4_gpus` (Vertex AI) | **12** |
 
-**A default project runs out of deep-learning headroom at around 1,000 series**, two orders of
-magnitude before it runs out of CPU headroom. This is why `all_families_10k.json` is the largest
-config here that includes `neuralprophet`, and why it is expected to take most of a working day: at
-10,000 series the deep-learning family alone is ~10 hours, while every other family finishes in
-under one.
+These are separate pools in separate services. Raising one does nothing for the other, and the
+`gcloud compute regions describe` recipe below shows only the first — see
+[§4](#4-which-quotas-and-where) for how to read the Vertex one. The Vertex allowance is also far more
+regionally uneven than the Compute Engine one: on the project used for the
+[validation ledger](validation.md) it is 12 in `us-central1` but **2** in both `us-east1` and
+`us-west1`, so a failover region may be a third of the capacity you sized for.
+
+At ~4 cells/min per T4, one deep-learning model over the same series counts:
+
+| Series | Wall clock on **4 T4s** (Dataproc default) | On **12 T4s** (Ray default) | T4s for a **~1-hour** run |
+|---|---|---|---|
+| **100** | ~25 s | ~8 s | 1 |
+| **1,000** | ~1 hour | ~20 min | 5 |
+| **10,000** | **~10 hours** | **~3.5 hours** | 42 |
+| **100,000** | **~104 hours** | ~35 hours | 417 |
+| **1,000,000** | ~6 weeks | ~2 weeks | 4,167 |
+
+**A default project runs out of deep-learning headroom at around 1,000–3,000 series**, one to two
+orders of magnitude before it runs out of CPU headroom. This is why `all_families_10k.json` is the
+largest config here that includes `neuralprophet`. Note that it pins `ray_gpu_max_nodes: 4` — sized
+to the Compute Engine number even though it runs on Ray, so it leaves two-thirds of the Vertex
+allowance unused and takes most of a working day rather than an afternoon. That is deliberate
+conservatism in a reference config, not a limit of the runtime; raise the pin if your project's
+Vertex quota supports it.
 
 Treat these figures as **the softest numbers on this page.** No deep-learning run in the
 [validation ledger](validation.md) has yet exceeded **100 series**, so the 4 cells/min/T4 anchor is
@@ -167,10 +183,25 @@ The metrics that bind this product:
 | Quota metric | What it limits | Typical default |
 |---|---|---|
 | `CPUS` | Every worker and head/driver vCPU in the region | 200 |
-| `NVIDIA_T4_GPUS` | Deep-learning worker nodes | 4 |
+| `NVIDIA_T4_GPUS` | Deep-learning worker nodes **on Dataproc** | 4 |
 | `PREEMPTIBLE_NVIDIA_T4_GPUS` | The same, for preemptible pools | 4 |
 | `DISKS_TOTAL_GB` | Boot disks across the fleet | 40,960 |
 | `IN_USE_ADDRESSES` | Rarely binding — clusters are private | 69 |
+
+**Ray on Vertex is not in that table, and `gcloud compute` cannot show it.** Vertex draws GPUs from
+its own service quota, so a Ray run is bound by a metric the recipe above never prints:
+
+```bash
+# The quota that actually binds a Ray GPU run
+gcloud alpha services quota list \
+  --service=aiplatform.googleapis.com \
+  --consumer="projects/${SF_PROJECT_ID}" \
+  --filter="metric:custom_model_training_nvidia_t4_gpus" \
+  --format=json
+```
+
+Read the `effectiveLimit` for your region out of `quotaBuckets`. Checking only the Compute Engine
+number is how you conclude you have 4 T4s on a project that has 12.
 
 Two things that surprise people:
 
