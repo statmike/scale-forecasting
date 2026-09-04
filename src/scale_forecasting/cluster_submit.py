@@ -224,6 +224,7 @@ def submit_cluster_job(
                 "machine_family": cfg.compute.machine_family,
             },
             policy=cfg.compute.capacity.policy_for("dataproc_cluster"),
+            preflight=cfg.compute.capacity.preflight,
         )
         region = landed.region
 

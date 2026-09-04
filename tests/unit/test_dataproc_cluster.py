@@ -817,3 +817,132 @@ def test_the_same_failure_without_a_custom_image_is_left_alone() -> None:
 def test_an_ordinary_failure_is_passed_through_even_with_a_custom_image() -> None:
     raw = RuntimeError("Invalid machine type n1-bogus-9")
     assert dataproc_cluster._explain_create_failure(raw, "projects/p/global/images/x") is raw
+
+
+# --- the quota preflight in front of the capacity walk -------------------------------------------
+
+
+def _candidates() -> list[Any]:
+    from scale_forecasting.compute_fallback import Candidate
+
+    return [
+        Candidate(region="us-central1", zone=None, subnetwork_uri="s"),
+        Candidate(region="us-central1", zone="us-central1-b", subnetwork_uri="s"),
+        Candidate(region="us-east1", zone="us-east1-c", subnetwork_uri="t"),
+    ]
+
+
+def _stub_preflights(monkeypatch, limits: dict[str, dict[str, str]]) -> None:
+    """Pin `quota.preflight_cluster` to a per-region metric->limit table, no network."""
+    from scale_forecasting import quota
+
+    real = quota.preflight_cluster
+
+    def fake(regions, project_id, **kwargs):
+        def fetch(service, metric):
+            value = limits.get(metric, {})
+            return {
+                "consumerQuotaLimits": [
+                    {
+                        "quotaBuckets": [
+                            {"dimensions": {"region": r}, "effectiveLimit": v}
+                            for r, v in value.items()
+                        ]
+                    }
+                ]
+            }
+
+        return real(regions, project_id, fetch=fetch, **kwargs)
+
+    monkeypatch.setattr(quota, "preflight_cluster", fake)
+
+
+def _apply(monkeypatch, limits, ledger, **build):
+    from scale_forecasting.dataproc_cluster import _apply_quota_preflight
+
+    _stub_preflights(monkeypatch, limits)
+    kwargs: dict = {
+        "hardware": "gpu",
+        "gpu_type": "T4",
+        "worker_count": 8,
+        "machine_family": "auto",
+    }
+    kwargs.update(build)
+    return _apply_quota_preflight(_candidates(), project_id="p", build_kwargs=kwargs, ledger=ledger)
+
+
+def test_a_region_with_no_gpu_quota_loses_every_candidate_in_it(monkeypatch):
+    """The meters are regional and the candidates are zonal, so one verdict rules out both zones."""
+    from scale_forecasting.capacity import HARD_CEILING, CapacityLedger
+
+    ledger = CapacityLedger(service="dataproc_cluster")
+    live, granted = _apply(
+        monkeypatch,
+        {
+            "compute.googleapis.com/nvidia_t4_gpus": {"us-central1": "4", "us-east1": "0"},
+            "compute.googleapis.com/cpus": {"us-central1": "200", "us-east1": "200"},
+        },
+        ledger,
+    )
+    assert [c.label for c in live] == ["us-central1/auto", "us-central1/us-central1-b"]
+    assert ledger.dead_candidates == frozenset({"us-east1/us-east1-c"})
+    assert all(a.verdict == HARD_CEILING for a in ledger.attempts)
+    # Nothing was spent establishing it, and the ledger says so rather than implying a create.
+    assert all(a.elapsed_seconds == 0.0 for a in ledger.attempts)
+    assert granted["us-central1"] == 4
+
+
+def test_a_clean_region_asks_for_exactly_what_was_planned(monkeypatch):
+    from scale_forecasting.capacity import CapacityLedger
+
+    ledger = CapacityLedger(service="dataproc_cluster")
+    live, granted = _apply(
+        monkeypatch,
+        {
+            "compute.googleapis.com/nvidia_t4_gpus": {"us-central1": "16", "us-east1": "16"},
+            "compute.googleapis.com/cpus": {"us-central1": "200", "us-east1": "200"},
+        },
+        ledger,
+    )
+    assert len(live) == 3
+    assert set(granted.values()) == {8}
+    assert not ledger.attempts
+
+
+def test_the_preflight_reading_rides_into_telemetry(monkeypatch):
+    from scale_forecasting.capacity import CapacityLedger
+
+    ledger = CapacityLedger(service="dataproc_cluster")
+    _apply(
+        monkeypatch,
+        {
+            "compute.googleapis.com/nvidia_t4_gpus": {"us-central1": "4", "us-east1": "0"},
+            "compute.googleapis.com/cpus": {"us-central1": "200", "us-east1": "200"},
+        },
+        ledger,
+    )
+    payload = ledger.to_json()
+    assert {entry["region"] for entry in payload["preflight"]} == {"us-central1", "us-east1"}
+
+
+def test_an_unreadable_meter_leaves_every_candidate_standing(monkeypatch):
+    """A diagnostic that can block a launch is worse than no diagnostic."""
+    from scale_forecasting import quota
+    from scale_forecasting.capacity import CapacityLedger
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no ADC")
+
+    monkeypatch.setattr(quota, "preflight_cluster", boom)
+    from scale_forecasting.dataproc_cluster import _apply_quota_preflight
+
+    ledger = CapacityLedger(service="dataproc_cluster")
+    live, granted = _apply_quota_preflight(
+        _candidates(),
+        project_id="p",
+        build_kwargs={"hardware": "gpu", "gpu_type": "T4", "worker_count": 8},
+        ledger=ledger,
+    )
+    assert len(live) == 3
+    assert granted == {}
+    assert not ledger.attempts

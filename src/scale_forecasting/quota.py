@@ -8,8 +8,8 @@ path; discovered here it costs one HTTP GET.
 
 Four parts, in dependency order:
 
-1. **The vocabulary** (`QuotaMetric`, `metrics_for_ray` / `metrics_for_cluster`) — which meter a
-   given piece of infra is actually billed to. This is the part that had been wrong.
+1. **The vocabulary** (`QuotaMetric` and the ``*_metric`` functions under it) — which meter a given
+   piece of infra is actually billed to. This is the part that had been wrong.
 2. **The reader** (`read_limits`) — live `effectiveLimit` per metric per region from Service Usage.
    It never raises and never blocks a run on its own failure.
 3. **The reconciler** (`reconcile`) — pure. Turns a limit and an ask into a verdict and, where the
@@ -462,6 +462,12 @@ class QuotaOutcome:
     one cannot be written as a range and the pool has to be created fixed-size instead. Discovered
     the hard way — a spec with ``min == max`` is rejected outright, and the resulting
     ``InvalidArgument`` was being retried as though the cloud were merely busy.
+
+    ``advisory`` marks the one outcome that is ``QUOTA_OK`` and still worth saying out loud: a
+    *shared* meter that will not cover the full fleet. Nothing is reshaped — that is what shared
+    scope means — but "this region has 24 vCPUs and your cluster wants 68" is precisely the
+    sentence an operator needs, and without this flag `QuotaPreflight.render` would drop it for
+    being OK.
     """
 
     demand: QuotaDemand
@@ -471,16 +477,23 @@ class QuotaOutcome:
     max_units: int
     autoscale_viable: bool
     detail: str
+    advisory: bool = False
 
     @property
     def clamped(self) -> bool:
         """True when the usable ceiling came out below the one the profiler asked for."""
         return self.max_units < self.demand.max_units
 
+    @property
+    def noteworthy(self) -> bool:
+        """True when this outcome has something to tell a reader — anything but a clean pass."""
+        return self.status != QUOTA_OK or self.advisory
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe dict — part of one ``job_telemetry.$.capacity.preflight`` entry."""
         return {
             "status": self.status,
+            "advisory": self.advisory,
             "pool": self.demand.pool,
             "region": self.demand.region,
             "metric": self.demand.metric.console_name,
@@ -598,6 +611,7 @@ def reconcile(demand: QuotaDemand, reading: QuotaReading) -> QuotaOutcome:
                 f"{demand.metric.console_name} ({reading.limit}) is below the "
                 f"{demand.amount(asked_max)} a full {demand.pool} pool would use; shared meter, "
                 f"not clamped",
+                advisory=True,
             )
         return QuotaOutcome(demand, reading, QUOTA_OK, asked_min, asked_max, True, reading.detail)
 
@@ -817,7 +831,7 @@ class QuotaPreflight:
         """Human-readable lines for the plan output and the launch log."""
         lines: list[str] = []
         for outcome in self.outcomes:
-            if outcome.status != QUOTA_OK:
+            if outcome.noteworthy:
                 lines.append(f"quota [{outcome.status}] {outcome.detail}")
         for advice in self.advice:
             lines.extend(advice.render())
@@ -1014,6 +1028,140 @@ def apply_to_ray_plan(plan: RayClusterPlan, preflight: QuotaPreflight) -> RayClu
     return replace(plan, **changes)
 
 
+# --- Dataproc clusters: assembling the ask, and applying the answer -----------------------------
+
+
+def cluster_demands(
+    region: str,
+    *,
+    master_machine_type: str,
+    worker_machine_type: str,
+    worker_count: int,
+    gpu_type: str | None = None,
+    accelerators_per_worker: int = 0,
+) -> list[QuotaDemand]:
+    """The meters a Dataproc cluster of this shape will draw on, in one region (pure).
+
+    Two demands, and both are **Compute Engine's**. A Dataproc cluster is a set of GCE VMs and is
+    billed as one; nothing under ``dataproc.googleapis.com`` is a capacity meter, so there is no
+    third, Dataproc-specific number to go looking for.
+
+    * the **GPU device** meter, pool-scoped, so a shortfall lowers the worker count. Note this is
+      `compute_gpu_metric` and not `vertex_gpu_metric` — the same T4 reads 4 here and 12 on the Ray
+      path, and reaching for the wrong one is the mistake this module exists to make impossible.
+    * the **cluster's vCPUs**, master plus workers, against `compute_cpu_metric`. Shared scope, so
+      a shortfall is reported rather than acted on (see `QuotaMetric.scope`): those vCPUs are the
+      same pool every other VM in the project draws from, and shrinking *this* cluster because
+      something else is using the region is a judgement call belonging to a person. The one case it
+      does stop a run is when even a single worker will not fit, which is not a judgement call.
+
+    ``min_units`` is **1, not the worker count**, and that difference is the whole behaviour. A
+    Dataproc cluster does not autoscale, so its "floor" is not a shape requirement the way a Ray
+    pool's is — it is just the smallest thing that is still a cluster. An allowance that seats two
+    of the eight workers asked for should build a two-worker cluster and say so, not refuse to
+    build anything.
+
+    No wall-clock advice comes back from this path, and the omission is deliberate rather than
+    unfinished: `advise` prices a ceiling in cells-per-slot, and a cluster is sized against *tasks*
+    — buckets of `compute.bucket_target_cells` cells that run sequentially inside one frame (see
+    `dataproc_cluster.cluster_sizing`). Quoting the Ray arithmetic over a different unit would put a
+    confidently wrong number in front of an operator.
+    """
+    demands: list[QuotaDemand] = []
+    workers = max(1, worker_count)
+
+    if gpu_type and accelerators_per_worker > 0:
+        metric = compute_gpu_metric(gpu_type)
+        if metric is not None:
+            demands.append(
+                QuotaDemand(
+                    metric=metric,
+                    region=region,
+                    pool="gpu",
+                    per_unit=accelerators_per_worker,
+                    min_units=1,
+                    max_units=workers,
+                )
+            )
+
+    demands.append(
+        QuotaDemand(
+            metric=compute_cpu_metric(),
+            region=region,
+            pool="worker",
+            per_unit=machine_cores(worker_machine_type),
+            min_units=1,
+            max_units=workers,
+            fixed=machine_cores(master_machine_type),
+        )
+    )
+    return demands
+
+
+def preflight_cluster(
+    regions: list[str],
+    project_id: str,
+    *,
+    master_machine_type: str,
+    worker_machine_type: str,
+    worker_count: int,
+    gpu_type: str | None = None,
+    accelerators_per_worker: int = 0,
+    fetch: Any = None,
+) -> dict[str, QuotaPreflight]:
+    """Read each candidate region's Compute Engine meters and judge this cluster shape against them.
+
+    The Dataproc analog of `preflight_ray`, and the same economics: one GET per metric returns every
+    regional bucket, so judging three candidate regions costs exactly what judging one does. Returns
+    one `QuotaPreflight` per region, in the order given.
+
+    The Dataproc candidate list is *zonal* (`compute_fallback.Candidate`) while these meters are
+    regional, so several candidates share a verdict. Callers group by region before calling.
+    """
+    demands_by_region = {
+        region: cluster_demands(
+            region,
+            master_machine_type=master_machine_type,
+            worker_machine_type=worker_machine_type,
+            worker_count=worker_count,
+            gpu_type=gpu_type,
+            accelerators_per_worker=accelerators_per_worker,
+        )
+        for region in regions
+    }
+    metrics = {d.metric.metric: d.metric for ds in demands_by_region.values() for d in ds}
+    readings = read_limits(project_id, list(metrics.values()), regions, fetch=fetch)
+
+    result: dict[str, QuotaPreflight] = {}
+    for region, demands in demands_by_region.items():
+        outcomes = [
+            reconcile(
+                demand,
+                readings.get(
+                    (demand.metric.metric, region),
+                    QuotaReading(demand.metric, region, None, "not read"),
+                ),
+            )
+            for demand in demands
+        ]
+        result[region] = QuotaPreflight(region=region, outcomes=tuple(outcomes))
+    return result
+
+
+def clamp_worker_count(worker_count: int, preflight: QuotaPreflight) -> int:
+    """The worker count this region will actually grant, never above the one asked for (pure).
+
+    Only the device meter moves this number — the vCPU meter is shared and reports rather than
+    reshapes. Floored at one, because a zero-worker cluster is not a smaller cluster, it is a
+    different thing; a region that cannot seat even one worker comes back `QuotaPreflight.blocked`
+    and is dropped from the walk before this is ever consulted.
+    """
+    outcome = preflight.for_pool("gpu")
+    if outcome is None or outcome.status != QUOTA_CLAMPED:
+        return worker_count
+    return max(1, min(worker_count, outcome.max_units))
+
+
 # --- regional prerequisites: things that must exist here, quota aside ---------------------------
 
 _ATTACHMENT_REGION_RE = re.compile(r"/regions/([^/]+)/networkAttachments/")
@@ -1069,18 +1217,24 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
     launch path cannot do, which is tell you *before* you spend anything. An operator deciding
     whether to file a quota increase should not have to start a run to find out what it would buy.
 
-    One block per Ray family node in the DAG (`dag.dag_nodes`), because the ask genuinely differs
-    between them: a ``deep_learning`` job on T4s and an ``ml`` job on CPUs draw on different meters
-    with different allowances. Families on Spark and BigQuery are named but not metered — the
-    Serverless path bills Compute Engine vCPUs with no per-job ceiling worth pre-reading, and
-    BigQuery has no capacity meter at all (`UNMETERED_SERVICES`).
+    One block per metered family node in the DAG (`dag.dag_nodes`), because the ask genuinely
+    differs between them: a ``deep_learning`` job on Vertex T4s and a ``statistical`` job on a
+    Dataproc cluster draw on *different services'* meters for the same card, with different
+    allowances. Three shapes come back:
+
+    * **Ray** — the Vertex pools, their ceilings, and what a raise would buy in wall clock.
+    * **Spark on an ephemeral cluster** — the Compute Engine device and vCPU meters, and the worker
+      count the region will actually grant.
+    * **Spark on Serverless, BigQuery, and a reused cluster** — named, not metered. A reused cluster
+      already exists so nothing is being asked for; a Serverless batch has no fixed allocation to
+      pre-read (its vCPUs bill to Compute Engine as they are used); BigQuery has no capacity meter
+      at all (`UNMETERED_SERVICES`).
 
     Best-effort throughout: an unresolvable environment or an unreadable meter produces a line
     saying so, never an exception. A reporting verb that can fail is one an operator stops running.
     """
     from . import ray_cluster
     from .dag import dag_nodes, plan_dag
-    from .engines import ray_io
     from .profiling.source import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -1094,54 +1248,138 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
     run_id = make_run_id(cfg)
     regions = ray_cluster._resolve_regions(cfg, settings)
     profile = profile_for_run(cfg, settings=settings)
-    nodes = dag_nodes(plan_dag(cfg))
+    run_dag = plan_dag(cfg)
+    # A family told to reuse a named cluster provisions nothing, so there is no ask to preflight.
+    # `DagNode` does not carry the name (it is not part of a job's identity), so it comes from the
+    # resolved compute the DAG was planned from.
+    reused = {
+        job.family
+        for job in run_dag.jobs
+        if job.compute is not None and job.compute.spark_cluster_name
+    }
     lines.append(f"quota report for {run_id} — candidate regions: {', '.join(regions)}")
 
-    ray_nodes = [node for node in nodes if node.runtime == "ray"]
-    for node in nodes:
-        if node.runtime != "ray":
-            lines.append(f"  {node.family}: on {node.runtime}, no per-job capacity meter to read")
-    if not ray_nodes:
-        return lines
-
-    for node in ray_nodes:
-        plan = ray_io.plan_cluster(
-            cfg,
-            list(node.models),
-            run_id=run_id,
-            use_gpu=node.hardware == "gpu",
-            gpu_type=node.gpu_type,
-            profile=profile,
-        )
-        seconds = _seconds_per_cell(profile, node.family)
-        preflights = preflight_ray(
-            plan,
-            regions,
-            settings.project_id,
-            cpu_seconds_per_cell=seconds,
-            gpu_seconds_per_cell=seconds,
-        )
-        unreachable = regions_without_attachment(_attachment_or_none(), regions)
-        lines.append(f"  {node.family} on ray/{node.hardware}: {_describe_pools(plan)}")
-        if seconds is None:
-            # Said out loud rather than left as a row of "~unknown": the reason a projection is
-            # missing is that nothing has measured this family yet, which is a fixable state and a
-            # different thing from the meter being unreadable.
+    for node in dag_nodes(run_dag):
+        if node.runtime == "ray":
+            lines.extend(_report_ray_node(cfg, node, run_id, regions, settings, profile))
+        elif node.runtime == "spark" and node.spark_mode == "cluster" and node.family not in reused:
+            lines.extend(_report_cluster_node(cfg, node, settings, profile))
+        else:
             lines.append(
-                f"    no measured profile for {node.family}; ceilings are reported without "
-                f"wall-clock projections"
+                f"  {node.family}: on {_placement(node, node.family in reused)}, "
+                f"no capacity meter to pre-read"
             )
-        for region in regions:
-            if region in unreachable:
-                lines.append(f"    {region}: UNREACHABLE — {unreachable[region]}")
-                continue
-            preflight = preflights.get(region)
-            if preflight is None:
-                continue
-            verdict = "BLOCKED" if preflight.blocked else "CLAMPED" if preflight.clamped else "OK"
-            lines.append(f"    {region}: {verdict}")
-            lines.extend(f"      {line}" for line in preflight.render())
     return lines
+
+
+def _placement(node: Any, reused: bool = False) -> str:
+    """How a node's runtime reads in the report — ``spark/serverless``, ``bigquery`` (pure)."""
+    if reused:
+        return f"{node.runtime}/cluster (reused)"
+    return f"{node.runtime}/{node.spark_mode}" if node.spark_mode else node.runtime
+
+
+def _report_ray_node(
+    cfg: Any, node: Any, run_id: str, regions: list[str], settings: Any, profile: Any
+) -> list[str]:
+    """One Ray family's block: its pools, and each candidate region's verdict on them."""
+    from .engines import ray_io
+
+    plan = ray_io.plan_cluster(
+        cfg,
+        list(node.models),
+        run_id=run_id,
+        use_gpu=node.hardware == "gpu",
+        gpu_type=node.gpu_type,
+        profile=profile,
+    )
+    seconds = _seconds_per_cell(profile, node.family)
+    preflights = preflight_ray(
+        plan,
+        regions,
+        settings.project_id,
+        cpu_seconds_per_cell=seconds,
+        gpu_seconds_per_cell=seconds,
+    )
+    unreachable = regions_without_attachment(_attachment_or_none(), regions)
+
+    lines = [f"  {node.family} on ray/{node.hardware}: {_describe_pools(plan)}"]
+    if seconds is None:
+        # Said out loud rather than left as a row of "~unknown": the reason a projection is missing
+        # is that nothing has measured this family yet, which is a fixable state and a different
+        # thing from the meter being unreadable.
+        lines.append(
+            f"    no measured profile for {node.family}; ceilings are reported without "
+            f"wall-clock projections"
+        )
+    for region in regions:
+        if region in unreachable:
+            lines.append(f"    {region}: UNREACHABLE — {unreachable[region]}")
+            continue
+        preflight = preflights.get(region)
+        if preflight is not None:
+            lines.extend(_render_region(region, preflight))
+    return lines
+
+
+def _report_cluster_node(cfg: Any, node: Any, settings: Any, profile: Any) -> list[str]:
+    """One ephemeral-Dataproc-cluster family's block: its worker fleet, judged per region.
+
+    The candidate list is `compute_fallback.resolve_candidates` rather than ``ray_regions`` — the
+    Dataproc walk is zonal and hops on its own catalogue, so reporting the Ray region list here
+    would describe a walk that will not happen. Distinct regions only, since these meters are
+    regional and every zone in a region shares one verdict.
+    """
+    from .batch_infra import BatchInfra
+    from .compute_fallback import resolve_candidates
+    from .dataproc_cluster import (
+        _DEFAULT_WORKER_COUNT,
+        cluster_sizing,
+        master_machine_type,
+        worker_machine_type,
+    )
+
+    hardware = node.hardware or "cpu"
+    family = cfg.compute.machine_family
+    derived, _properties, _audit = cluster_sizing(
+        cfg,
+        list(node.models),
+        hardware=hardware,
+        gpu_type=node.gpu_type,
+        profile=profile,
+    )
+    workers = derived if derived is not None else _DEFAULT_WORKER_COUNT
+    candidates = resolve_candidates(settings=settings, infra=BatchInfra.resolve())
+    regions = list(dict.fromkeys(c.region for c in candidates))
+
+    preflights = preflight_cluster(
+        regions,
+        settings.project_id,
+        master_machine_type=master_machine_type(family),
+        worker_machine_type=worker_machine_type(hardware, node.gpu_type, family),
+        worker_count=workers,
+        gpu_type=node.gpu_type if hardware == "gpu" else None,
+        accelerators_per_worker=1 if hardware == "gpu" else 0,
+    )
+
+    lines = [f"  {node.family} on spark/cluster/{hardware}: {workers} worker(s) + 1 master"]
+    for region in regions:
+        preflight = preflights.get(region)
+        if preflight is None:
+            continue
+        lines.extend(_render_region(region, preflight))
+        granted = clamp_worker_count(workers, preflight)
+        if granted < workers:
+            lines.append(
+                f"      the cluster would be built with {granted} worker(s), not {workers}"
+            )
+    return lines
+
+
+def _render_region(region: str, preflight: QuotaPreflight) -> list[str]:
+    """A region's verdict headline plus every non-trivial finding under it (pure)."""
+    verdict = "BLOCKED" if preflight.blocked else "CLAMPED" if preflight.clamped else "OK"
+    return [f"    {region}: {verdict}", *(f"      {line}" for line in preflight.render())]
 
 
 def _describe_pools(plan: RayClusterPlan) -> str:

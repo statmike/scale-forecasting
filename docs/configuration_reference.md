@@ -320,8 +320,10 @@ number you have an opinion about and inherit the rest.
 `preflight` is the cheap half of the same problem: retrying is for a region that is *temporarily*
 full, and a preflight is for one that was never going to work. It reads the region's allowance,
 drops a region that cannot host even the minimum (recorded as a hard ceiling, no create attempted),
-and lowers this run's pool ceilings to what a smaller region will grant rather than failing there.
-It only ever lowers, and it never touches `run_id`. `--quota` prints the same report without
+and lowers this run's pool ceilings — or, on the Dataproc-cluster path, its physical worker count —
+to what a smaller region will grant rather than failing there. It applies to Ray on Vertex and to
+ephemeral Dataproc clusters, each read against *its own* service's meters. It only ever lowers, and
+it never touches `run_id`. `--quota` prints the same report without
 launching — see [Quota and scale](./quota_and_scale.md#4-which-quotas-and-where). Set it `false`
 only if the runner service account lacks `serviceusage.services.get`; the check degrades to silence
 on any read failure, so a missing permission costs you the diagnostic, not the run.

@@ -231,13 +231,34 @@ It reads only and launches nothing. The wall-clock projections appear when a
 [measured profile](configuration_reference.md) exists for the family; without one you still get the
 ceiling and the throttle ratio.
 
-The launch path runs the same check by itself, before the first cluster create. A region that cannot
-host the fleet is recorded as a hard ceiling and skipped without spending the ~12 minutes a failed
-Ray create costs; a region that can host a *smaller* fleet has this run's pool ceilings lowered to
-fit rather than failing. It never raises a floor — quota is evidence about what you are permitted,
-not about what the work needs — and it never changes `run_id`, so the same config is still the same
+A family on an **ephemeral Dataproc cluster** is reported the same way, against Compute Engine's
+meters rather than Vertex's, and over the zonal candidate list the Dataproc walk actually uses:
+
+```
+  statistical on spark/cluster/gpu: 8 worker(s) + 1 master
+    us-central1: CLAMPED
+      quota [CLAMPED] compute.googleapis.com/nvidia_t4_gpus allows 4 in us-central1, so the gpu
+        pool tops out at 4 node(s) instead of 8
+      the cluster would be built with 4 worker(s), not 8
+```
+
+Families on Serverless, on BigQuery, and on a cluster you told the run to reuse are named but not
+metered: a reused cluster already exists so nothing is being asked for, a Serverless batch has no
+fixed allocation to pre-read, and BigQuery has no capacity meter at all.
+
+The launch path runs the same check by itself, before the first cluster create, on both the Ray and
+the Dataproc-cluster path. A region that cannot host the fleet is recorded as a hard ceiling and
+skipped without spending the ~12 minutes a failed Ray create costs; a region that can host a
+*smaller* fleet has this run's pool ceilings — or its physical worker count, on Dataproc — lowered
+to fit rather than failing. It never raises a floor: quota is evidence about what you are permitted,
+not about what the work needs. And it never changes `run_id`, so the same config is still the same
 run in a region that grants less. Set `compute.capacity.preflight: false` to skip it (the only
 reason to: a runner service account without `serviceusage.services.get`).
+
+**vCPUs are reported, never clamped.** Compute Engine's regional vCPU pool is shared with every
+other VM in the project, so shrinking *your* cluster because something else is using the region is
+a decision the product leaves to you — you get the sentence, not a silently smaller fleet. The one
+exception is a region that cannot seat even a single worker, which is not a judgement call.
 
 Two things that surprise people:
 

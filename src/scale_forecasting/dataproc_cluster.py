@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 from .batch_infra import BatchInfra
 from .capacity import (
     DEFAULT_POLICIES,
+    HARD_CEILING,
     CapacityExhausted,
     CapacityLedger,
     CapacityPolicy,
@@ -526,6 +527,80 @@ def _describe_candidate_failure(
     return str(exc) or repr(exc)
 
 
+def _apply_quota_preflight(
+    candidates: list[Candidate],
+    *,
+    project_id: str,
+    build_kwargs: dict[str, Any],
+    ledger: CapacityLedger,
+) -> tuple[list[Candidate], dict[str, int]]:
+    """Drop the candidates whose region cannot host this cluster; size the ones that can.
+
+    Returns ``(survivors, worker count by region)``. A region absent from the second is asking for
+    exactly the worker count that was planned.
+
+    A Dataproc create that runs out of quota is not cheap — the API accepts it, provisions what it
+    can, and reports the shortfall minutes later — so the same trade the Ray path makes applies
+    here: one HTTP GET buys the answer that a create would otherwise charge for. What differs is
+    the shape of the answer. Candidates are **zonal** while these meters are **regional**, so the
+    read is per distinct region and its verdict lands on every candidate in it; and a clamp lowers
+    a physical worker count rather than an autoscaling ceiling, because a cluster's size is fixed at
+    create.
+
+    Blocked regions are recorded in ``ledger`` as a `capacity.HARD_CEILING` per candidate label with
+    ``elapsed_seconds=0`` — honest, since nothing was spent — which both explains the omission in
+    telemetry and puts those labels in `CapacityLedger.dead_candidates` so a later pass of the walk
+    cannot pick them back up.
+
+    Degrades to "everything as planned" if the read fails. A diagnostic that can block a launch is
+    worse than no diagnostic.
+    """
+    from . import quota
+
+    hardware = build_kwargs.get("hardware", "cpu")
+    gpu_type = build_kwargs.get("gpu_type")
+    machine_family = build_kwargs.get("machine_family", "auto")
+    workers = int(build_kwargs.get("worker_count") or _DEFAULT_WORKER_COUNT)
+    regions = list(dict.fromkeys(cand.region for cand in candidates))
+
+    try:
+        preflights = quota.preflight_cluster(
+            regions,
+            project_id,
+            master_machine_type=master_machine_type(machine_family),
+            worker_machine_type=worker_machine_type(hardware, gpu_type, machine_family),
+            worker_count=workers,
+            gpu_type=gpu_type if hardware == "gpu" else None,
+            # Every GPU cluster we build attaches exactly one card per worker (`_gpu_worker`).
+            accelerators_per_worker=1 if hardware == "gpu" else 0,
+        )
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never sink a launch
+        _log.debug("quota preflight unavailable (non-fatal): %r", exc)
+        return candidates, {}
+
+    granted: dict[str, int] = {}
+    blocked: set[str] = set()
+    for region, preflight in preflights.items():
+        ledger.preflight.append(preflight.to_dict())
+        for line in preflight.render():
+            _log.info("%s", line)
+        if preflight.blocked:
+            _log.warning(
+                "quota preflight rules out %s without attempting a create: %s",
+                region,
+                preflight.block_reason,
+            )
+            blocked.add(region)
+            continue
+        granted[region] = quota.clamp_worker_count(workers, preflight)
+
+    for cand in candidates:
+        if cand.region in blocked:
+            reason = preflights[cand.region].block_reason
+            ledger.record(cand.label, HARD_CEILING, f"quota preflight: {reason}", 0.0)
+    return [cand for cand in candidates if cand.region not in blocked], granted
+
+
 def _create_cluster_across_candidates(
     candidates: list[Candidate],
     *,
@@ -535,6 +610,7 @@ def _create_cluster_across_candidates(
     policy: CapacityPolicy | None = None,
     ledger: CapacityLedger | None = None,
     on_state: Callable[[CapacityLedger], None] | None = None,
+    preflight: bool = True,
 ) -> Candidate:  # pragma: no cover - orchestrates live Dataproc I/O, exercised by the @gcp smoke
     """Create the cluster, walking ``candidates`` until one has room; return the one that won.
 
@@ -550,18 +626,43 @@ def _create_cluster_across_candidates(
     still stops it at once is a `capacity.CONFIG_FAULT` — a bad machine type, a permission, a
     retired image — because another zone cannot fix any of those.
 
+    Before the first create, `_apply_quota_preflight` reads each distinct region's Compute Engine
+    allowance: a region that cannot seat even one worker is recorded as a `capacity.HARD_CEILING`
+    and never attempted, and a region that can seat fewer workers than were planned gets a cluster
+    sized to what it will grant. ``preflight=False`` (``compute.capacity.preflight``) skips the
+    read; the walk then behaves exactly as it did before it existed.
+
     ``policy`` defaults to the shipped Dataproc-cluster patience; callers with a config pass
     ``cfg.compute.capacity.policy_for("dataproc_cluster")``. ``on_state`` publishes
     ``AWAITING_CAPACITY`` mid-walk, defaulting to whatever `capacity.publishing_to` installed for
     this family (`job_launch` does).
     """
     ledger = ledger if ledger is not None else CapacityLedger(service="dataproc_cluster")
+    granted: dict[str, int] = {}
+    if preflight:
+        candidates, granted = _apply_quota_preflight(
+            candidates, project_id=project_id, build_kwargs=build_kwargs, ledger=ledger
+        )
+    if not candidates:
+        ledger.exhausted = True
+        publish = on_state if on_state is not None else current_publisher()
+        if publish is not None:
+            publish(ledger)
+        raise CapacityExhausted(
+            "dataproc_cluster: quota preflight ruled out every candidate region; "
+            "no create was attempted",
+            ledger,
+        )
+
+    def attempt(cand: Candidate) -> Candidate:
+        workers = granted.get(cand.region)
+        kwargs = build_kwargs if workers is None else {**build_kwargs, "worker_count": workers}
+        return _attempt_cluster_at(cand, project_id=project_id, name=name, build_kwargs=kwargs)
+
     try:
         return capacity_walk(
             candidates,
-            lambda cand: _attempt_cluster_at(
-                cand, project_id=project_id, name=name, build_kwargs=build_kwargs
-            ),
+            attempt,
             ledger=ledger,
             policy=policy or DEFAULT_POLICIES["dataproc_cluster"],
             label=lambda cand: cand.label,
@@ -673,6 +774,7 @@ def provision_shared_cluster(
             "machine_family": cfg.compute.machine_family,
         },
         policy=cfg.compute.capacity.policy_for("dataproc_cluster"),
+        preflight=cfg.compute.capacity.preflight,
     )
     return name, landed.region
 

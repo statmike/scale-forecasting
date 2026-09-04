@@ -477,3 +477,145 @@ def test_describe_pools_omits_a_pool_the_job_will_never_create():
     assert quota._describe_pools(cpu_only) == "cpu[1,20]"
     gpu_only = ray_plan(cpu_node_count=0)
     assert quota._describe_pools(gpu_only) == "gpu[1,12]"
+
+
+# --- Dataproc clusters ---------------------------------------------------------------------------
+
+CE_T4 = quota.compute_gpu_metric("T4")
+CE_CPUS = quota.compute_cpu_metric()
+
+
+def _cluster_preflight(region: str, limits: dict[str, str], **overrides) -> quota.QuotaPreflight:
+    """A GPU cluster of eight `n1-standard-4` workers behind an `n2-standard-4` master."""
+    kwargs: dict = {
+        "master_machine_type": "n2-standard-4",
+        "worker_machine_type": "n1-standard-4",
+        "worker_count": 8,
+        "gpu_type": "T4",
+        "accelerators_per_worker": 1,
+    }
+    kwargs.update(overrides)
+
+    def fetch(service, metric):
+        value = limits.get(metric)
+        return payload(bucket(value, region)) if value is not None else payload()
+
+    return quota.preflight_cluster([region], "p", fetch=fetch, **kwargs)[region]
+
+
+def test_a_cluster_is_judged_on_compute_engine_meters_not_vertex_ones():
+    """The whole reason this module exists: the same T4 reads 4 here and 12 on the Ray path."""
+    demands = quota.cluster_demands(
+        "us-central1",
+        master_machine_type="n2-standard-4",
+        worker_machine_type="n1-standard-4",
+        worker_count=8,
+        gpu_type="T4",
+        accelerators_per_worker=1,
+    )
+    services = {d.metric.service for d in demands}
+    assert services == {"compute.googleapis.com"}
+    assert all("aiplatform" not in d.metric.metric for d in demands)
+
+
+def test_a_cluster_floor_is_one_worker_not_the_worker_count():
+    """A cluster does not autoscale, so its floor is "still a cluster", not a shape requirement.
+
+    Getting this wrong would refuse to build anything in a region that can seat two of eight.
+    """
+    demands = quota.cluster_demands(
+        "us-central1",
+        master_machine_type="n2-standard-4",
+        worker_machine_type="n1-standard-4",
+        worker_count=8,
+        gpu_type="T4",
+        accelerators_per_worker=1,
+    )
+    assert all(d.min_units == 1 for d in demands)
+    assert all(d.max_units == 8 for d in demands)
+
+
+def test_the_vcpu_demand_counts_the_master_as_a_fixed_cost():
+    demand = next(
+        d
+        for d in quota.cluster_demands(
+            "us-central1",
+            master_machine_type="n2-standard-4",
+            worker_machine_type="n1-standard-8",
+            worker_count=8,
+        )
+        if d.metric.unit == "vcpus"
+    )
+    assert demand.fixed == 4
+    assert demand.per_unit == 8
+    assert demand.amount(8) == 4 + 64
+
+
+def test_four_t4s_clamp_an_eight_worker_gpu_cluster_to_four():
+    pre = _cluster_preflight("us-central1", {CE_T4.metric: "4", CE_CPUS.metric: "200"})
+    assert pre.clamped
+    assert not pre.blocked
+    assert quota.clamp_worker_count(8, pre) == 4
+
+
+def test_a_region_with_no_t4_at_all_is_blocked_before_a_create():
+    pre = _cluster_preflight("us-west2", {CE_T4.metric: "0", CE_CPUS.metric: "200"})
+    assert pre.blocked
+    assert "nvidia_t4_gpus" in pre.block_reason
+
+
+def test_a_shared_vcpu_shortfall_reports_but_does_not_shrink_the_cluster():
+    """Compute Engine vCPUs are the whole project's pool. Shrinking this cluster because something
+    else is using the region is a person's call, so the report says so and the plan stands."""
+    pre = _cluster_preflight(
+        "us-central1",
+        {CE_T4.metric: "12", CE_CPUS.metric: "24"},
+        gpu_type=None,
+        accelerators_per_worker=0,
+        worker_machine_type="n1-standard-8",
+    )
+    assert not pre.blocked
+    assert not pre.clamped
+    assert quota.clamp_worker_count(8, pre) == 8
+    assert any("not clamped" in line for line in pre.render())
+
+
+def test_a_region_that_cannot_seat_one_worker_is_blocked_on_vcpus_alone():
+    pre = _cluster_preflight(
+        "us-west4", {CE_CPUS.metric: "2"}, gpu_type=None, accelerators_per_worker=0
+    )
+    assert pre.blocked
+
+
+def test_a_cpu_cluster_is_not_judged_on_an_accelerator_it_never_wanted():
+    demands = quota.cluster_demands(
+        "us-central1",
+        master_machine_type="n2-standard-4",
+        worker_machine_type="n2-standard-8",
+        worker_count=4,
+    )
+    assert [d.pool for d in demands] == ["worker"]
+
+
+def test_an_unreadable_cluster_meter_changes_nothing():
+    pre = _cluster_preflight("us-east4", {})
+    assert not pre.blocked
+    assert not pre.clamped
+    assert quota.clamp_worker_count(8, pre) == 8
+
+
+def test_clamp_never_returns_a_zero_worker_cluster():
+    """A zero-worker cluster is not a smaller cluster; a region seating none comes back blocked."""
+    pre = _cluster_preflight("us-east1", {CE_T4.metric: "1", CE_CPUS.metric: "200"})
+    assert quota.clamp_worker_count(8, pre) == 1
+
+
+def test_a_cluster_preflight_serializes_for_telemetry():
+    pre = _cluster_preflight("us-central1", {CE_T4.metric: "4", CE_CPUS.metric: "200"})
+    blob = pre.to_dict()
+    assert blob["region"] == "us-central1"
+    assert blob["clamped"] is True
+    assert {o["metric"] for o in blob["outcomes"]} == {
+        "compute.googleapis.com/nvidia_t4_gpus",
+        "compute.googleapis.com/cpus",
+    }
