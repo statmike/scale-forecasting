@@ -158,10 +158,20 @@ a Ray run by mistake and left two-thirds of the allowance unused. If you deploy 
 smaller Vertex allowance, lower it — the pool starts at `ray_gpu_min_nodes` and a `max` above your
 quota is not an error, just a ceiling the autoscaler never reaches.
 
-Treat these figures as **the softest numbers on this page.** No deep-learning run in the
-[validation ledger](validation.md) has yet exceeded **100 series**, so the 4 cells/min/T4 anchor is
-extrapolated from small samples in which cluster start-up was a large fraction of the span. The true
-steady-state figure is probably better. Plan with these, then measure your own.
+Treat these figures as **the softest numbers on this page**, and the 12-T4 column as not yet earned.
+The 4 cells/min/T4 anchor was extrapolated from runs of 100 series or fewer, in which cluster
+start-up was a large fraction of the span. **The first real measurement arrived on 2026-09-04**:
+`all_families_10k.json` fit 10,000 `neuralprophet` series across 12 T4s in 7 h 34 m — 22 cells/min
+for the whole fleet, and an average fit of **30 s per cell**, which is 2 cells/min for one device
+working on one series at a time.
+
+Read those two numbers together and the fleet of twelve delivered what one device would. It did:
+each node was pinned to a single concurrent cell by an over-stated memory request, a defect fixed
+the same day (`ray_slot_memory` in the [validation ledger](validation.md)). So what is measured
+today is the **serial** rate, 2 cells/min per T4 rather than 4, and what is unmeasured is how many
+cells a T4 node runs at once now that the pin is gone. Until that re-run lands, size from the
+30-second-per-cell figure and one cell per device, and treat every multi-GPU column above as an
+upper bound you should verify on your own project.
 
 ---
 
@@ -292,13 +302,22 @@ On `ray-100k-dcc77a9d1e9b`, 37,500 tasks were queued against 20 eight-vCPU nodes
 plan expected 4–8 concurrent cells per node. Measured concurrency was **0.97 cells per node**, flat
 across the entire steady state. Roughly one core in eight was doing arithmetic.
 
-That gap is under investigation and is recorded as an open item in the
-[validation ledger](validation.md). Until it closes, throughput scales with **node count**, so:
+**The cause is now known.** A live read of the cluster during a 10,000-series run on 2026-09-04
+showed every worker holding 1.0 of 7.0 CPUs and 17.6 of its 18.1 GiB of memory. Ray schedules on
+memory as hard as it schedules on cores, so a task asking for 97 % of a node's memory takes the
+whole node and the other six cores are unreachable. The request came from a driver-side sizing
+pre-pass that was charging each task the *driver's* memory footprint rather than a worker's; it is
+fixed in code and recorded as `ray_slot_memory` in the [validation ledger](validation.md), and the
+re-run that measures the improvement has not landed yet.
+
+So the advice below is the advice for the fleet you get from the last released behaviour, and it is
+expected to invert. Until the re-run is in the ledger, throughput scales with **node count**, so:
 
 - **Prefer more, smaller nodes over fewer, larger ones.** Twenty `n1-standard-8` workers currently
   outperform ten `n1-standard-16` workers, even though the vCPU count is identical and the second
   arrangement costs the same. This is the opposite of the advice you would give for a well-packed
-  fleet, and it will stop being true when the packing is fixed.
+  fleet, and it should stop being true — the packing fix predicts roughly seven cells per node on
+  that shape, at which point the larger node wins on overhead and this bullet reverses.
 - **Do not size a quota request off vCPU count alone.** Ask for the vCPUs that buy you the *nodes*
   in the table.
 

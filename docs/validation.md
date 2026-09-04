@@ -38,6 +38,7 @@ old value goes stale by definition.
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 | `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
+| `ray_slot_memory` | `harvest-only` | `efecb4c` (2026-09-04) | `driver-rss-prepass` |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not
@@ -70,6 +71,35 @@ because it submits Serverless work alongside its Ray families.
 settings of one, and the difference has bitten before — a per-pool `AutoscalingSpec` is what crashed
 the Vertex Ray head in `4c988bc`. Only Ray entries declare it. A pool that autoscales also makes
 W1's derived ceiling live, so the fan-out arithmetic reaches the cluster instead of sitting inert.
+
+`ray_slot_memory` is the other half of the Ray sizing story, and it is about **density inside a
+node** rather than the number of nodes. `ray_engine` runs a driver-side measurement pre-pass
+(`profiling.source.resolve_profile`) and turned what it measured into the task's Ray `memory`
+request. Ray treats `memory` as a hard scheduling resource, so that request decides how many cells
+a node runs at once. The pre-pass kept the fits' absolute `process_rss_bytes` — the right axis for a
+slot, but only when the process measured is the process the slot describes, and the driver is not.
+It holds the whole source panel resident on a head node a class larger than the workers. `efecb4c`
+drops the memory axis from the pre-pass (`_without_driver_rss`); a real memory bound is now earned
+only from a **prior run's harvest**, whose rows were written by the worker processes themselves,
+and with no basis the slot requests nothing and packs on cores.
+
+**This changes how many cells a Ray node runs concurrently, so it changes wall-clock at fixed
+quota** — which is what the affected rows below were measuring. It reaches node *counts* too, not
+just density: `ray_autoscale_demo`'s headline is "1→8 CPU nodes at 10,000 series", and a fleet that
+packs seven cells per node instead of one has a different reason to reach 8. The mechanism claims
+those rows also carry — that autoscaling provisions elastically, that Ray reaches 100,000 series —
+are untouched; it is the numbers that are stale. Only Ray rows whose fan-out reached
+`compute.profile.min_cells` (1000 cells, the `mode="auto"` threshold) declare it: below that the
+pre-pass returns `None` and never sized anything, which is why the Ray smokes and the 6–50-series
+demos are untouched. The rows that do declare it are the three large ones — `ray_autoscale_demo`,
+`ray_100k` and `all_families_10k`. They are marked from the *mechanism*, not from a measurement of
+how much each one lost: the pre-pass ran on all three and what it feeds the slot has changed, and
+whether that reading was the binding one on any given run is precisely what a re-run answers. It is
+also the second time the Ray memory axis has cost a run — on 2026-09-03 `ray_100k` sat at zero cells
+for 57 minutes behind an unschedulable ~21 GiB per-task request, recorded at the end of this file.
+That one asked for more than a node had and never placed; this one asked for 97 % of a node, which
+places perfectly well and then fits exactly once. A schedulability guard catches the first and
+cannot catch the second, which is why `efecb4c` also added `RuntimeResourcePlan.binding_axis`.
 
 `horizon_features` governs **what an exog-aware model is handed for the forecast horizon**. Until
 `cb7d15f` the horizon's design matrix was the first `horizon` rows of *history*. Holiday flags and
@@ -627,12 +657,15 @@ expensive direction of wrong, because a reader sizing a Ray run against the doc 
 have a third of the headroom they actually have, and the `gcloud compute regions describe` recipe
 the doc gives them cannot show the number that binds them.
 
-Two consequences worth stating plainly, neither of them acted on in this commit:
+Two consequences worth stating plainly, neither of them acted on in that commit (the first has been
+since):
 
-- **`all_families_10k.json` pins `ray_gpu_max_nodes: 4`**, sized to the Compute Engine number while
-  running `python_runtime: "ray"`. On the pool it actually uses it could ask for 12. The config is
-  not wrong — it runs — but the "~10 hours" this table quotes for it is a 4-GPU estimate for a run
-  that could have three times the GPUs.
+- **~~`all_families_10k.json` pins `ray_gpu_max_nodes: 4`~~ — raised to 12 and run.** It had been
+  sized to the Compute Engine number while running `python_runtime: "ray"`, so it asked for a third
+  of the pool it actually draws from. It now asks for 12, and on 2026-09-04 it got all 12. The
+  "~10 hours" this table quotes for it was a 4-GPU estimate; the run took 7 h 45 m on 12 GPUs, which
+  is not the vindication it looks like — see `ray_slot_memory` above for why 12 GPUs performed like
+  one.
 - **11b's `HARD_CEILING` fixture survives, and is now exact.** `us-east1` allows 2 Vertex T4s, so a
   Ray GPU config pointed there asking for 3 hits a real ceiling on demand. That was previously a
   hope about an unmeasured limit; it is now a number.
@@ -675,11 +708,36 @@ the honest starting position and the reason for adding the table at all: it is t
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | CURRENT | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
-| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | STALE | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=driver-rss-prepass` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `all_families_10k.json` | Every family under one `run_id` — the largest scale a default project's 4 T4s can reach (Ray + BigQuery) | NEVER_RUN | — | — | — |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=driver-rss-prepass` |
+| `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=driver-rss-prepass` |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
+
+**`all_families_10k` passed on 2026-09-04 and is `STALE` the same day, on purpose — it is the
+"before" half of a deliberate A/B.** It is the run that found the `ray_slot_memory` defect, so its
+numbers are the measurement of the old behaviour and worth keeping rather than overwriting. What it
+proves stands: all four families under one `run_id`, `COMPLETED`, `n_series 10000`, `n_models 7`,
+and `forecast_predictions` holding exactly 1,960,000 rows (10,000 series × 7 models × 28 horizon
+steps) over 10,000 distinct `ts_id` and 7 distinct `model_type`, with 10,000 `forecast_metadata`
+cells for each model. What is stale is every wall-clock number attached to it:
+
+| Family | Runtime | Wall |
+|--------|---------|------|
+| `native` | BigQuery | 673 s |
+| `ml` | Ray CPU | 2,385 s |
+| `statistical` | Ray CPU | 3,088 s |
+| `deep_learning` | Ray GPU (T4) | **27,245 s** (7 h 34 m) |
+| whole run | — | 27,932 s (7 h 45 m) |
+
+All 12 T4 nodes were provisioned and all 12 worked the whole run (727–906 cells each, evenly
+spread) — and each ran **exactly one cell at a time**: 1.0 of 7.0 CPUs, 0.1 of 1.0 GPU, and 17.6 of
+18.1 GiB of memory held per node. The driver's pre-pass had measured 13.58 GiB where the workers'
+own `forecast_metadata.process_rss_bytes` rows for `neuralprophet` peak at 1.51 GiB, a ~9×
+overstatement that the 1.3 memory margin turned into a 17.65 GiB request against 18.12 GiB
+schedulable. So the deep-learning number above is a measurement of one-cell-per-GPU, not of 12 T4s.
+`efecb4c` predicts cores (7) bind instead; the re-run under that fix is the "after", and until it
+lands the density claim is unproven.
 
 **On 2026-09-02 the whole Ray track stopped provisioning, and the elimination is the useful part.**
 `ray_100k` was attempted and never reached a job: Vertex returned the contentless
@@ -1555,13 +1613,19 @@ Things that are true today and that no entry above covers. Keep this list short 
   demonstration config should claim. The 100k rows that remain above (`explode_100k`, `ray_100k`)
   are kept because they are *proven* — they are the evidence that the architecture reaches 100k,
   and `docs/quota_and_scale.md` is where the arithmetic for going beyond it now lives.
-- **No deep-learning run has ever exceeded 100 series, anywhere in this ledger.** Every
+- **~~No deep-learning run has ever exceeded 100 series, anywhere in this ledger.~~ Closed
+  2026-09-04 by `all_families_10k`** — 10,000 `neuralprophet` series on 12 T4s. Until then every
   `neuralprophet` row — smokes 03, 06, 09, 10, 14, 16, `ray_gpu_demo`, `per_family_runtimes_demo` —
-  is at 100 cells or fewer. The GPU code path is well proven; its *throughput at scale* is not
-  measured at all, and the 4 cells/min/T4 figure now published in `quota_and_scale.md` is
-  extrapolated from spans where cluster start-up was a large fraction of the total. It is flagged
-  as soft in that document. `all_families_10k` is the run that would replace the extrapolation with
-  a measurement.
+  was at 100 cells or fewer, so the GPU code path was well proven and its *throughput at scale* was
+  not measured at all. **The measurement is now taken and it is worse than the extrapolation, for a
+  reason that has since been fixed.** 10,000 cells took 27,245 s across 12 T4s: 22.0 cells/min
+  fleet-wide, or **1.8 cells/min per T4** against the 4 cells/min/T4 published in
+  `quota_and_scale.md`. The per-cell fit averaged 30.25 s, which is 2.0 cells/min in a *single*
+  stream — so the fleet of 12 delivered almost exactly what one serial GPU would, which is the
+  signature of one cell per node (`ray_slot_memory`, above). The published figure was therefore
+  ~2x optimistic even for a serial device, and the parallelism it assumed was not happening at all.
+  Neither number should be republished until the re-run under `efecb4c` lands; that run is what the
+  `quota_and_scale.md` table should be rewritten from.
 - **The Ray fleet ran at roughly one busy core in eight, and the resource plan did not predict it.**
   Measured 2026-09-03 from `ray-100k-dcc77a9d1e9b`: 37,500 chunk tasks were queued against 20
   `n1-standard-8` workers, and the plan expected 4–8 concurrent cells per node. Actual concurrency,
@@ -1575,6 +1639,16 @@ Things that are true today and that no entry above covers. Keep this list short 
   which is why this is a gap and not a fix.** It is not a correctness problem — every published
   wall-clock figure is real and reproducible — but it means the throughput numbers are a floor, and
   a fleet four to eight times faster may be available at identical quota.
+
+  **Separated 2026-09-04, and it was the first cause.** The live cluster read this gap asked for was
+  taken mid-flight against `all-families-10k-eb01dcfecfab` — the Ray dashboard's
+  `/api/cluster_status`, `loadMetricsReport.usageByNode` — and every worker showed the same three
+  numbers: 1.0 of 7.0 CPUs, 0.1 of 1.0 GPU, and **17.6 of 18.1 GiB of memory**. Ray schedules on
+  `memory` as hard as it schedules on `num_cpus`, so a task holding 97 % of a node's memory holds
+  the node, and the seven idle cores were never reachable. Chunk overhead is not exonerated but it
+  is not what was binding. The cause of the memory request is `ray_slot_memory`, above; the fix is
+  `efecb4c`; the "four to eight times faster at identical quota" guess is now a specific prediction
+  of ~7x that the re-run will confirm or refute.
 - **The prebaked GPU cluster image expires, and nothing in the deployment notices.** Found live
   2026-09-02 by smoke 16, analysed above: an image built nine days earlier was refused because the
   Dataproc sub-minor baked into it had been retired. **Smoke 06 is the row that rests on this.** Its
