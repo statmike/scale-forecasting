@@ -453,11 +453,11 @@ class Forecaster:
         then discards that answer; this is the verb that writes it down. Without ``yes`` it probes,
         returns the `SettlePlan` inside a ``SettleReport``, and changes nothing. With ``yes=True``
         it sets each settleable family's status (``COMPLETED``, or ``FAILED`` with a
-        ``RUNTIME_FAILED`` / ``RUNTIME_LOST`` token), records ``reason`` + the ADC actor and the
-        full evidence under ``job_telemetry.$.settle``, and re-reads every row so the outcome is
-        the status it actually ended up with. ``job`` narrows to one family.
+        ``RUNTIME_FAILED`` / ``RUNTIME_LOST`` / ``CAPACITY_ABANDONED`` token), records ``reason`` +
+        the ADC actor and the full evidence under ``job_telemetry.$.settle``, and re-reads every row
+        so the outcome is the status it actually ended up with. ``job`` narrows to one family.
 
-        Only four (verdict, runtime-state) readings settle; ``UNKNOWN`` and ``RUNNING_CONFIRMED``
+        Only five (verdict, runtime-state) readings settle; ``UNKNOWN`` and ``RUNNING_CONFIRMED``
         are always refused, and the plan says *why* each untouched family was left alone. Settle
         never deletes and never stamps ``ended_at``/``runtime_seconds`` — a row settled days later
         would report days of runtime. It leaves the run header to `registry.ops.close_runs`, which

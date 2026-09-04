@@ -16,7 +16,7 @@ nothing. ``yes=`` rather than ``confirm=`` is deliberate: ``confirm=`` gates sto
 in the cloud, ``yes=`` gates repairing a status field in our own registry — the same gate
 `registry.ops.close_runs` and `registry.ops.sweep_orphans` use, and settle belongs with them.
 
-*Refusal is the feature.* Only four (verdict, native-state) combinations settle. ``UNKNOWN`` — the
+*Refusal is the feature.* Only five (verdict, native-state) combinations settle. ``UNKNOWN`` — the
 probe degraded, no handle was recorded, the runtime says SUCCEEDED but the cells have not landed —
 writes nothing, ever. A verb that guessed would be worse than no verb, because its guesses would
 be indistinguishable from measurements afterwards.
@@ -43,11 +43,13 @@ from typing import TYPE_CHECKING, Any
 from .reconcile import ProbeReport, _read_and_probe
 from .vocabulary import (
     _TERMINAL,
+    CAPACITY_ABANDONED,
     NATIVE_FAILED,
     NATIVE_NOT_FOUND,
     NATIVE_SUCCEEDED,
     RUNTIME_FAILED,
     RUNTIME_LOST,
+    VERDICT_ABANDONED_WAIT,
     VERDICT_LIKELY_COMPLETED,
     VERDICT_LOST,
     VERDICT_STALE_REGISTRY,
@@ -87,7 +89,7 @@ class SettleDecision:
 def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
     """The status a family's stale row should be repaired to, or ``None`` to leave it alone (pure).
 
-    Four arms write, everything else refuses:
+    Five arms write, everything else refuses:
 
     * ``STALE_REGISTRY`` + runtime ``SUCCEEDED`` + every expected cell landed → ``COMPLETED``.
     * ``STALE_REGISTRY`` + runtime ``FAILED`` → ``FAILED`` / ``RUNTIME_FAILED``. The runtime is
@@ -98,6 +100,12 @@ def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
       is the *normal* trace of a successful Ray run whose driver died before it closed the row.
     * ``LOST`` (runtime gone, cells missing, past the startup grace) → ``FAILED`` /
       ``RUNTIME_LOST``.
+    * ``ABANDONED_WAIT`` (still ``AWAITING_CAPACITY`` past any walk's own budget) → ``FAILED`` /
+      ``CAPACITY_ABANDONED``. The one arm with no runtime reading behind it, because a row that
+      never launched has no runtime to read. Its witness is the clock instead
+      (`reconcile._is_abandoned_wait`), and without this arm the row is unreachable by every verb
+      we have: settle had nothing to probe, and ``close-runs`` refuses the header for as long as a
+      non-terminal job row exists.
 
     ``RUNNING_CONFIRMED`` is live and must be left alone. ``TRUST_REGISTRY`` is already terminal or
     deliberately waiting. ``UNKNOWN`` is the whole point of refusing: we could not tell, so we do
@@ -124,6 +132,12 @@ def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
     if fv.verdict == VERDICT_LOST:
         return SettleDecision(
             "FAILED", RUNTIME_LOST, f"runtime job gone; only {fv.n_done}/{exp} series landed"
+        )
+    if fv.verdict == VERDICT_ABANDONED_WAIT:
+        return SettleDecision(
+            "FAILED",
+            CAPACITY_ABANDONED,
+            f"capacity walk abandoned; {fv.n_done}/{exp} series landed",
         )
     return None
 
@@ -334,6 +348,7 @@ def settle_run(
     actor: str | None = None,
     settings: Settings | None = None,
     stale_after_s: float | None = None,
+    abandoned_after_s: float | None = None,
 ) -> SettleReport:  # pragma: no cover - GCP I/O
     """Repair a run's stale job rows from the probe's own verdicts — preview unless ``yes``.
 
@@ -341,7 +356,9 @@ def settle_run(
     ``yes``** — writes each settleable family's row: the decided status, the ``failure_reason``
     token when there is one, and the audit blob merged under ``job_telemetry.$.settle``. Without
     ``yes`` it returns the plan and writes nothing. ``job`` narrows to one family; ``reason`` and
-    ``actor`` (default: resolved from ADC) are recorded in the audit.
+    ``actor`` (default: resolved from ADC) are recorded in the audit. ``stale_after_s`` and
+    ``abandoned_after_s`` pass through to the probe, where they set the two clocks that decide the
+    ``LOST`` and ``ABANDONED_WAIT`` verdicts respectively.
 
     Every write carries a status guard against `_SETTLE_GUARD`, so a job that reached a terminal
     status of its own between the probe read and the UPDATE keeps it — the process that ran the
@@ -354,7 +371,11 @@ def settle_run(
 
     s = settings if settings is not None else Settings.resolve()
     _progress, report, rows = _read_and_probe(
-        run_id, job=job, settings=s, stale_after_s=stale_after_s
+        run_id,
+        job=job,
+        settings=s,
+        stale_after_s=stale_after_s,
+        abandoned_after_s=abandoned_after_s,
     )
     plan = _assemble_settle_plan(report)
     if not yes:

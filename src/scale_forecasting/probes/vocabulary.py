@@ -67,6 +67,7 @@ VERDICT_RUNNING = "RUNNING_CONFIRMED"  # runtime confirms the job is still live
 VERDICT_STALE_REGISTRY = "STALE_REGISTRY"  # runtime is terminal but the registry never caught up
 VERDICT_LIKELY_COMPLETED = "LIKELY_COMPLETED"  # job gone + expected artifacts all landed
 VERDICT_LOST = "LOST"  # job gone with artifacts missing / denominator unknown
+VERDICT_ABANDONED_WAIT = "ABANDONED_WAIT"  # AWAITING_CAPACITY long past any walk's own budget
 VERDICT_UNKNOWN = "UNKNOWN"  # couldn't tell (no handle, or the probe itself degraded)
 
 # --- failure_reason tokens the settle verb writes ------------------------------
@@ -79,6 +80,13 @@ VERDICT_UNKNOWN = "UNKNOWN"  # couldn't tell (no handle, or the probe itself deg
 # be able to filter for exactly that.
 RUNTIME_FAILED = "RUNTIME_FAILED"  # the runtime reported FAILED; the registry never caught up
 RUNTIME_LOST = "RUNTIME_LOST"  # the runtime job is gone with its artifacts incomplete
+# The third: a capacity walk that nobody is walking any more. Spelled apart from
+# `capacity.CAPACITY_EXHAUSTED` because the two facts are different and the difference is
+# actionable. EXHAUSTED means the policy did its job and ran out of candidates — raise
+# `max_attempts`, add a region, or accept the region has no room. ABANDONED means the *driver*
+# went away mid-walk (Ctrl-C, a closed shell, a restarted kernel) and nothing was ever asked for
+# again — the run tells you nothing about whether capacity existed.
+CAPACITY_ABANDONED = "CAPACITY_ABANDONED"  # the walk stopped being walked; no verdict was reached
 
 
 @dataclass(frozen=True)

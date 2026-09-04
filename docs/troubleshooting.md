@@ -47,7 +47,7 @@ The probe reads the registry, then escalates every **non-terminal** family to it
 
 ### Read the verdict
 
-Each family comes back with one of six verdicts. The two columns that matter are what the registry
+Each family comes back with one of seven verdicts. The two columns that matter are what the registry
 says and what the runtime says; `disagreement` is set only when they contradict each other.
 
 | Verdict | Means | What to do |
@@ -57,6 +57,7 @@ says and what the runtime says; `disagreement` is set only when they contradict 
 | `STALE_REGISTRY` | The runtime is terminal but the row never caught up. | The run is over; `--settle` writes that down. |
 | `LIKELY_COMPLETED` | Job gone **and** every expected cell landed. | It finished; the finalize write was lost. `--settle`. |
 | `LOST` | Job gone, artifacts missing, past the startup grace. | The job died. `--settle` finalizes it `FAILED`, then re-run. |
+| `ABANDONED_WAIT` | Still `AWAITING_CAPACITY` past any walk's own budget. | The driver that was waiting is gone. `--settle`, then re-run. |
 | `UNKNOWN` | Couldn't tell — no handle, or the probe degraded. | Re-probe; treat the registry as authoritative meanwhile. |
 
 Two distinctions in that table are deliberate and easy to misread:
@@ -71,6 +72,12 @@ Two distinctions in that table are deliberate and easy to misread:
 - **A native family reporting `SUCCEEDED` with incomplete artifacts is `UNKNOWN`, not stale.** A
   BigQuery family's statements go `DONE` one at a time, so an all-`DONE` reading mid-run is a lull
   between statements. The probe declines to overrule the registry on that.
+- **`ABANDONED_WAIT` is the one verdict with no runtime behind it.** A family still waiting for
+  capacity never created a runtime job, so there is nothing to ask; the witness is the clock. A live
+  capacity walk ends *itself* at its budget (`CapacityPolicy.max_wall_seconds`, 3600 s) by writing
+  `FAILED`/`CAPACITY_EXHAUSTED`, so a row still `AWAITING_CAPACITY` at twice that (2 h,
+  `abandoned_after_s` to override) was written by a walk that stopped existing — a Ctrl-C, a closed
+  shell, a restarted kernel. Under that window the wait is legitimate and reads `TRUST_REGISTRY`.
 
 ### Settle a stale row
 
@@ -88,7 +95,7 @@ Forecaster(cfg).settle()                                    # preview
 Forecaster(cfg).settle(yes=True, reason="…")                # execute
 ```
 
-Four readings settle; everything else is refused:
+Five readings settle; everything else is refused:
 
 | Verdict | Runtime says | Cells | Settles to |
 |---|---|---|---|
@@ -96,6 +103,7 @@ Four readings settle; everything else is refused:
 | `STALE_REGISTRY` | `FAILED` | any | `FAILED`, `failure_reason=RUNTIME_FAILED` |
 | `LIKELY_COMPLETED` | job gone | all landed | `COMPLETED` |
 | `LOST` | job gone | missing | `FAILED`, `failure_reason=RUNTIME_LOST` |
+| `ABANDONED_WAIT` | never launched | none | `FAILED`, `failure_reason=CAPACITY_ABANDONED` |
 
 **Refusal is the feature.** `RUNNING_CONFIRMED` is live, `TRUST_REGISTRY` is already terminal or
 deliberately waiting, and `UNKNOWN` — the probe degraded, no handle was recorded, the runtime claims
@@ -103,8 +111,12 @@ deliberately waiting, and `UNKNOWN` — the probe degraded, no handle was record
 *not* touch and why, because "left alone: verdict `UNKNOWN`" is the line that means *go look*, and a
 count of what was settled is exactly how the one row that mattered gets missed.
 
-Four more things worth knowing:
+Five more things worth knowing:
 
+- **`CAPACITY_ABANDONED` is not `CAPACITY_EXHAUSTED`, and the difference is what you do next.**
+  Exhausted means the policy did its job and ran out of candidates — raise `max_attempts`, add a
+  region, or accept that the region has no room. Abandoned means the driver went away mid-walk, so
+  the run tells you nothing about whether capacity existed. Just re-run it.
 - **Settle never deletes and never invents time.** The landed data is untouched; the row gets a
   status, a `failure_reason` when there is a token for it, and an audit blob. It does **not** stamp
   `ended_at` or `runtime_seconds` — a row settled three days after the fact would report three days

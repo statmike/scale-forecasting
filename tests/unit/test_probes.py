@@ -29,6 +29,7 @@ from scale_forecasting.probes.cancel import (
 )
 from scale_forecasting.probes.reconcile import (
     _assemble_probe_report,
+    _is_abandoned_wait,
     _is_stale,
     _narrow_to_job,
     _probe_targets,
@@ -46,6 +47,7 @@ from scale_forecasting.probes.vocabulary import (
     NATIVE_RUNNING,
     NATIVE_SUCCEEDED,
     NATIVE_UNKNOWN,
+    VERDICT_ABANDONED_WAIT,
     VERDICT_LIKELY_COMPLETED,
     VERDICT_LOST,
     VERDICT_RUNNING,
@@ -1406,6 +1408,61 @@ def test_an_awaiting_family_still_suppresses_the_ensemble() -> None:
     assert plan.ensemble_suppressed is True
 
 
+# --- item 11f: the capacity walk nobody is walking any more --------------------
+#
+# The one non-terminal status with no runtime to ask, so the only witness available is the clock.
+# `_is_abandoned_wait` is its threshold — a deliberate second window, far longer than `_is_stale`'s
+# launch grace, because a capacity wait is quiet *on purpose* until it outlives the budget its own
+# walk would have terminated at.
+
+
+def test_a_capacity_wait_inside_the_budget_is_not_abandoned() -> None:
+    # Half an hour into a walk whose policy allows an hour: the driver may well still be walking.
+    assert _is_abandoned_wait(_quiet(AWAITING_CAPACITY, 1800.0), None) is False
+
+
+def test_a_capacity_wait_past_double_the_shipped_budget_is_abandoned() -> None:
+    # A live walk ends itself at its budget by writing FAILED/CAPACITY_EXHAUSTED. Silence at 3h is
+    # therefore evidence about the *driver*, not about the region's capacity.
+    assert _is_abandoned_wait(_quiet(AWAITING_CAPACITY, 3 * 3600.0), None) is True
+
+
+def test_the_abandoned_window_is_tunable_for_a_deployment_that_raised_its_budget() -> None:
+    fp = _quiet(AWAITING_CAPACITY, 3 * 3600.0)
+    assert _is_abandoned_wait(fp, 3600.0) is True
+    assert _is_abandoned_wait(fp, 86400.0) is False
+
+
+def test_only_a_capacity_wait_can_be_abandoned() -> None:
+    # The two windows must not bleed into each other: a RUNNING row quiet for a week belongs to
+    # `_is_stale` (it has a runtime to probe), and settling it from the clock alone would skip that.
+    assert _is_abandoned_wait(_quiet("RUNNING", 7 * 86400.0), None) is False
+    assert _is_abandoned_wait(_quiet("COMPLETED", 7 * 86400.0), None) is False
+
+
+def test_an_unparseable_timestamp_never_reads_as_abandoned() -> None:
+    # Defensive in the same direction as `_is_stale`: no evidence of silence, no verdict from it.
+    assert _is_abandoned_wait(_quiet(AWAITING_CAPACITY, None), None) is False
+    assert _is_abandoned_wait(_quiet(None, None), None) is False
+
+
+def test_an_abandoned_wait_contradicts_the_registry_where_a_patient_one_does_not() -> None:
+    # Same row, same absent runtime; the only thing that changed is membership of `abandoned`.
+    fp = _fp("deep_learning", AWAITING_CAPACITY, runtime="ray", quiet_seconds=3 * 3600.0)
+    fv = _only(_assemble_probe_report(_progress(fp), {}, frozenset(), frozenset(), frozenset()))
+    assert fv.verdict == VERDICT_TRUST_REGISTRY and fv.disagreement is False
+
+    fv = _only(
+        _assemble_probe_report(
+            _progress(fp), {}, frozenset(), frozenset(), frozenset({"deep_learning"})
+        )
+    )
+    assert fv.verdict == VERDICT_ABANDONED_WAIT
+    assert fv.disagreement is True  # the clock is the witness contradicting the row
+    assert fv.native_state is None and fv.exists is None  # still nothing was probed
+    assert "3.0h" in fv.detail and "driver is gone" in fv.detail
+
+
 # --- item 11: settle — write back the verdict the probe already computed -------
 #
 # The decision table is built against reports the *real* reconciler produced (`_fp` → `_progress` →
@@ -1478,6 +1535,42 @@ def test_a_lost_job_settles_failed_and_says_so_distinctly() -> None:
     assert item.verdict == VERDICT_LOST
     assert item.decision is not None
     assert (item.decision.status, item.decision.failure_reason) == ("FAILED", RUNTIME_LOST)
+
+
+def test_an_abandoned_capacity_wait_settles_failed_and_is_the_only_way_out() -> None:
+    """The pre-launch arm: the one settle decision with no runtime reading behind it.
+
+    Without it the row is unreachable by every verb we have — settle had nothing to probe (no
+    runtime job was ever created) and ``close-runs`` refuses the header for as long as a
+    non-terminal job row exists. CAPACITY_ABANDONED is spelled apart from CAPACITY_EXHAUSTED
+    because they mean different things to whoever re-runs this: the policy ran out of candidates,
+    versus nobody was left asking.
+    """
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+    from scale_forecasting.probes.vocabulary import CAPACITY_ABANDONED
+
+    report = _assemble_probe_report(
+        _progress(
+            _fp("deep_learning", AWAITING_CAPACITY, runtime="ray", quiet_seconds=5 * 3600.0),
+        ),
+        {},
+        frozenset(),
+        frozenset(),
+        frozenset({"deep_learning"}),
+    )
+    (item,) = _assemble_settle_plan(report).items
+    assert item.verdict == VERDICT_ABANDONED_WAIT
+    assert item.decision is not None
+    assert (item.decision.status, item.decision.failure_reason) == ("FAILED", CAPACITY_ABANDONED)
+
+
+def test_a_capacity_wait_inside_its_budget_is_still_refused_by_settle() -> None:
+    # The refusal that keeps the new arm honest: a legitimate wait must stay untouched, or settle
+    # would race the walk it is meant to clean up after and stamp FAILED on a run that was fine.
+    plan = _settle_plan(_fp("deep_learning", AWAITING_CAPACITY, runtime="ray", quiet_seconds=600.0))
+    (item,) = plan.items
+    assert item.decision is None
+    assert plan.n_settleable == 0
 
 
 @pytest.mark.parametrize(

@@ -34,6 +34,7 @@ from .vocabulary import (
     NATIVE_NOT_FOUND,
     NATIVE_RUNNING,
     NATIVE_SUCCEEDED,
+    VERDICT_ABANDONED_WAIT,
     VERDICT_LIKELY_COMPLETED,
     VERDICT_LOST,
     VERDICT_RUNNING,
@@ -54,6 +55,17 @@ if TYPE_CHECKING:
 # a not-yet-created runtime job reads as UNKNOWN, not a false LOST (the startup grace). Tunable per
 # call via `probe_run(stale_after_s=...)` (G2).
 _DEFAULT_STALE_S = 900.0
+
+# The same idea for the other non-terminal status, on a far longer clock. An ``AWAITING_CAPACITY``
+# row is quiet *on purpose*, so it needs a window bounded by the walk's own patience rather than by
+# a launch grace: `capacity.CapacityPolicy.max_wall_seconds` ships at 3600s, and its docstring puts
+# the real ceiling at that plus one in-flight attempt (~12 min for a Ray GPU provision). Past double
+# that, a living walk would already have written ``FAILED``/``CAPACITY_EXHAUSTED`` — so the silence
+# is evidence the *driver* is gone, not that it is still being patient. Generous on purpose: reading
+# too early puts a false FAILED on a run that was fine, while reading too late only leaves a dead
+# row sitting a while longer. Tunable per call via `probe_run(abandoned_after_s=...)` for a
+# deployment that raised its own budget (G2).
+_DEFAULT_ABANDONED_WAIT_S = 7200.0
 
 # --- reconciliation (pure) ----------------------------------------------------
 # The layer above the probes: fuse a run's registry+artifact progress (`review.RunProgress`) with
@@ -132,6 +144,27 @@ def _is_stale(fp: FamilyProgress, stale_after_s: float | None) -> bool:
     return fp.quiet_seconds > threshold
 
 
+def _is_abandoned_wait(fp: FamilyProgress, abandoned_after_s: float | None) -> bool:
+    """Whether an ``AWAITING_CAPACITY`` family's walk has outlived any walk's own patience (pure).
+
+    The counterpart to `_is_stale` for the *other* non-terminal status, and deliberately a separate
+    function on a separate clock rather than a widening of that one — the two windows answer
+    different questions and share nothing but their shape. `_is_stale` asks "has a job that should
+    be writing gone quiet?" against a launch grace. This asks "is anyone still walking?" against
+    `_DEFAULT_ABANDONED_WAIT_S`, which is sized from the capacity policy's own wall-clock budget.
+
+    The reasoning that makes this safe without a heartbeat: a walk that is still alive terminates
+    *itself* at its budget, writing ``FAILED``/``CAPACITY_EXHAUSTED``. So a row that is still
+    ``AWAITING_CAPACITY`` at twice the shipped budget was not written by a walk that is deciding
+    slowly — it was written by one that stopped existing. Defensive in the same way as `_is_stale`:
+    an unparseable timestamp yields no ``quiet_seconds`` and is treated as *not* abandoned.
+    """
+    if (fp.status or "").upper() != _AWAITING_CAPACITY or fp.quiet_seconds is None:
+        return False
+    threshold = _DEFAULT_ABANDONED_WAIT_S if abandoned_after_s is None else abandoned_after_s
+    return fp.quiet_seconds > threshold
+
+
 def _probe_targets(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """The job rows worth escalating to a runtime, in order (pure).
 
@@ -149,17 +182,20 @@ def _verdict_for_family(
     native: dict[str, ProbeResult],
     no_handle: frozenset[str],
     stale: frozenset[str],
+    abandoned: frozenset[str] = frozenset(),
 ) -> FamilyVerdict:
     """The verdict matrix for one `review.FamilyProgress`, as a single if-ladder.
 
     ``fp`` is a `review.FamilyProgress`; ``native`` holds a `vocabulary.ProbeResult` only for
     families that were escalated; ``no_handle`` names families escalated but with no usable
     `vocabulary.ProbeHandle`; ``stale`` names families past their startup grace (a vanished job in
-    this set is LOST, a young one is still-starting → UNKNOWN).
+    this set is LOST, a young one is still-starting → UNKNOWN); ``abandoned`` names capacity waits
+    past any walk's own budget (`_is_abandoned_wait`).
 
     Two statuses short-circuit before any native reading is consulted: a terminal one (the work is
     done) and ``AWAITING_CAPACITY`` (the work has not started). Both trust the registry, for
-    opposite reasons.
+    opposite reasons — except for the one capacity wait that has outlived the walk that was
+    supposed to end it, which is the single reading here taken from the clock alone.
     """
     common: dict[str, Any] = {
         "family": fp.family,
@@ -182,6 +218,21 @@ def _verdict_for_family(
     # runtime job to reconcile against and that is the expected state, not a gap in our knowledge:
     # UNKNOWN would be a lie ("we couldn't tell") about the one status where we can tell exactly.
     if (fp.status or "").upper() == _AWAITING_CAPACITY:
+        # ...unless it has been waiting longer than any walk is allowed to. A live walk ends itself
+        # at its budget; one that did not is a walk with nobody left to walk it, and saying
+        # TRUST_REGISTRY there tells an operator to keep waiting for a decision that will never
+        # come. `disagreement=True` because this *is* the registry being contradicted — by the
+        # clock rather than by a runtime, which is the only witness a pre-launch row can have.
+        if fp.family in abandoned:
+            quiet = f"{fp.quiet_seconds / 3600:.1f}h" if fp.quiet_seconds else "long"
+            return FamilyVerdict(
+                **common,
+                native_state=None,
+                exists=None,
+                verdict=VERDICT_ABANDONED_WAIT,
+                disagreement=True,
+                detail=f"awaiting capacity for {quiet}, past any walk's budget; driver is gone",
+            )
         return FamilyVerdict(
             **common,
             native_state=None,
@@ -259,16 +310,20 @@ def _assemble_probe_report(
     native: dict[str, ProbeResult],
     no_handle: frozenset[str],
     stale: frozenset[str] = frozenset(),
+    abandoned: frozenset[str] = frozenset(),
 ) -> ProbeReport:
     """Fuse registry+artifact `review.RunProgress` with live native readings into a `ProbeReport`.
 
     Pure: ``native`` carries a `vocabulary.ProbeResult` only for the escalated families and
     ``no_handle`` names the escalated ones that had no usable handle; ``stale`` names families past
-    their startup grace (used to split a vanished job into LOST vs. still-starting); every other
-    family reconciles from the registry alone. ``escalated`` reflects whether any family was probed;
-    ``disagreement`` rolls up the per-family flags.
+    their startup grace (used to split a vanished job into LOST vs. still-starting); ``abandoned``
+    names capacity waits past any walk's own budget; every other family reconciles from the registry
+    alone. ``escalated`` reflects whether any family was probed; ``disagreement`` rolls up the
+    per-family flags.
     """
-    families = tuple(_verdict_for_family(fp, native, no_handle, stale) for fp in progress.families)
+    families = tuple(
+        _verdict_for_family(fp, native, no_handle, stale, abandoned) for fp in progress.families
+    )
     return ProbeReport(
         run_id=progress.run_id,
         status=progress.status,
@@ -316,6 +371,7 @@ def _read_and_probe(
     job: str | None,
     settings: Settings,
     stale_after_s: float | None,
+    abandoned_after_s: float | None = None,
 ) -> tuple[RunProgress, ProbeReport, list[dict[str, Any]]]:  # pragma: no cover - GCP I/O
     """Read the registry, escalate the incomplete jobs, reconcile → `(progress, report, rows)`.
 
@@ -325,6 +381,7 @@ def _read_and_probe(
     progress and attaches the report) — so a monitor that escalates pays for the native calls, not
     for a second set of registry queries. ``rows`` is the run's job rows filtered to ``job`` (all
     families when ``None``); ``progress`` and the reconciled ``report`` cover the same set.
+    ``abandoned_after_s`` overrides the capacity-wait window (`_DEFAULT_ABANDONED_WAIT_S`).
     """
     from ..config import RunConfig
     from ..registry.jobs import read_run_jobs
@@ -352,6 +409,12 @@ def _read_and_probe(
     # Read off the assembled progress, so the monitor's reported age and the probe's escalation
     # decision can never disagree about how quiet a family has been.
     stale = frozenset(f.family for f in progress.families if _is_stale(f, stale_after_s))
+    # And an AWAITING_CAPACITY family quiet past any walk's own budget is "abandoned" — the one
+    # reading here that comes from the clock with no runtime to ask, because a pre-launch row has
+    # no runtime to ask (see `_is_abandoned_wait`). It deliberately does not widen `to_probe`.
+    abandoned = frozenset(
+        f.family for f in progress.families if _is_abandoned_wait(f, abandoned_after_s)
+    )
     native: dict[str, ProbeResult] = {}
     no_handle: set[str] = set()
     for r in to_probe:
@@ -360,7 +423,7 @@ def _read_and_probe(
             no_handle.add(r["family"])
             continue
         native[r["family"]] = get_probe(handle.runtime).check(handle, settings=settings)
-    report = _assemble_probe_report(progress, native, frozenset(no_handle), stale)
+    report = _assemble_probe_report(progress, native, frozenset(no_handle), stale, abandoned)
     return progress, report, rows
 
 
@@ -370,6 +433,7 @@ def probe_run(
     job: str | None = None,
     settings: Settings | None = None,
     stale_after_s: float | None = None,
+    abandoned_after_s: float | None = None,
 ) -> ProbeReport:  # pragma: no cover - GCP I/O
     """Reconcile a run's registry state against live runtime state → a `ProbeReport`.
 
@@ -381,13 +445,19 @@ def probe_run(
     family (the per-family drill-down; an unknown name raises `ConfigError` listing the valid ones);
     ``settings`` is the GCP identity (from the ``SF_*`` env when ``None``); ``stale_after_s``
     overrides the startup-grace floor (`_DEFAULT_STALE_S`) that decides whether a vanished young job
-    reads LOST or still-starting. A family whose handle can't be parsed (a pre-feature or malformed
-    row) degrades to registry-only via ``no_handle`` rather than raising.
+    reads LOST or still-starting, and ``abandoned_after_s`` the far longer window
+    (`_DEFAULT_ABANDONED_WAIT_S`) past which a capacity wait reads as a walk nobody is walking. A
+    family whose handle can't be parsed (a pre-feature or malformed row) degrades to registry-only
+    via ``no_handle`` rather than raising.
     """
     from ..settings import Settings
 
     s = settings if settings is not None else Settings.resolve()
     _progress, report, _rows = _read_and_probe(
-        run_id, job=job, settings=s, stale_after_s=stale_after_s
+        run_id,
+        job=job,
+        settings=s,
+        stale_after_s=stale_after_s,
+        abandoned_after_s=abandoned_after_s,
     )
     return report
