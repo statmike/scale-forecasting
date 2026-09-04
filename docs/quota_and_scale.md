@@ -72,17 +72,20 @@ Per-cell fit times behind that figure, from the same run:
 dominated by `sarimax` is slower. Series length matters too — these were ~4 years of daily
 observations.
 
-!!! note "Why per-node and not per-core"
-    72 cells/min/node is **not** 9 cells/min/vCPU. On the run above, a node was fitting roughly one
-    cell at a time despite having eight vCPUs, so throughput scaled with *nodes*, not with cores.
-    That is a known inefficiency, not a design intent — see
-    [the caveat below](#5-the-caveat-nodes-are-the-unit-not-cores). Plan with nodes.
+!!! warning "This anchor predates the density fix — treat it as a floor"
+    72 cells/min/node was measured when a node was fitting roughly **one cell at a time** despite
+    having eight vCPUs, because of the memory-request defect described in
+    [§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out). Throughput scaled with *nodes* rather
+    than cores, and the figure above is what that regime delivered. The fix landed on 2026-09-04 and
+    a comparable CPU workload came in 1.5–2x faster, so **plan with 72 cells/min/node and expect to
+    beat it.** A re-run of this anchor at 100,000 series has not been done; when it is, this section
+    gets a bigger number.
 
 **Deep learning is a different regime entirely.** `neuralprophet` measures at **21–65 s/fit**
-against sub-second statistical models — 50x or more — and it needs a GPU. Across the GPU smokes it
-lands at roughly **4 cells/min per T4 node**. Treat that number as soft: no deep-learning run has
-yet executed above **100 series**, so it is an extrapolation from small samples, and cluster
-start-up is a large fraction of those spans.
+against sub-second statistical models — 50x or more — and it needs a GPU. Measured at 10,000 series
+on 12 T4s, it lands at **7.6 cells/min per T4 node** (the 2026-09-04 `all_families_10k` run, 1 h
+50 m for 10,000 cells). Unlike the CPU anchor above, this one is post-fix; the arithmetic in
+[§3](#3-the-table) is built on it.
 
 ---
 
@@ -140,38 +143,38 @@ regionally uneven than the Compute Engine one: on the project used for the
 [validation ledger](validation.md) it is 12 in `us-central1` but **2** in both `us-east1` and
 `us-west1`, so a failover region may be a third of the capacity you sized for.
 
-At ~4 cells/min per T4, one deep-learning model over the same series counts:
+At **7.6 cells/min per T4** — measured, see below — one deep-learning model over the same series
+counts:
 
 | Series | Wall clock on **4 T4s** (Dataproc default) | On **12 T4s** (Ray default) | T4s for a **~1-hour** run |
 |---|---|---|---|
-| **100** | ~25 s | ~8 s | 1 |
-| **1,000** | ~1 hour | ~20 min | 5 |
-| **10,000** | **~10 hours** | **~3.5 hours** | 42 |
-| **100,000** | **~104 hours** | ~35 hours | 417 |
-| **1,000,000** | ~6 weeks | ~2 weeks | 4,167 |
+| **100** | ~3 min | ~1 min | 1 |
+| **1,000** | ~33 min | ~11 min | 3 |
+| **10,000** | **~5.5 hours** | **~1.8 hours** | 22 |
+| **100,000** | **~55 hours** | ~18 hours | 219 |
+| **1,000,000** | ~23 days | ~7.6 days | 2,193 |
 
-**A default project runs out of deep-learning headroom at around 1,000–3,000 series**, one to two
-orders of magnitude before it runs out of CPU headroom. This is why `all_families_10k.json` is the
-largest config here that includes `neuralprophet`. It pins `ray_gpu_max_nodes: 12`, the Vertex
-default for `us-central1`; it previously pinned `4`, which was the Compute Engine number applied to
-a Ray run by mistake and left two-thirds of the allowance unused. If you deploy to a region with a
-smaller Vertex allowance, lower it — the pool starts at `ray_gpu_min_nodes` and a `max` above your
-quota is not an error, just a ceiling the autoscaler never reaches.
+**A default project runs out of deep-learning headroom somewhere around 10,000–20,000 series** for a
+run you are willing to sit through, an order of magnitude before it runs out of CPU headroom. This
+is why `all_families_10k.json` is the largest config here that includes `neuralprophet`. It pins
+`ray_gpu_max_nodes: 12`, the Vertex default for `us-central1`; it previously pinned `4`, which was
+the Compute Engine number applied to a Ray run by mistake and left two-thirds of the allowance
+unused. If you deploy to a region with a smaller Vertex allowance, lower it — the pool starts at
+`ray_gpu_min_nodes` and a `max` above your quota is not an error, just a ceiling the autoscaler
+never reaches.
 
-Treat these figures as **the softest numbers on this page**, and the 12-T4 column as not yet earned.
-The 4 cells/min/T4 anchor was extrapolated from runs of 100 series or fewer, in which cluster
-start-up was a large fraction of the span. **The first real measurement arrived on 2026-09-04**:
-`all_families_10k.json` fit 10,000 `neuralprophet` series across 12 T4s in 7 h 34 m — 22 cells/min
-for the whole fleet, and an average fit of **30 s per cell**, which is 2 cells/min for one device
-working on one series at a time.
+**Where the 7.6 cells/min/T4 anchor comes from.** It replaces an extrapolation from runs of 100
+series or fewer, in which cluster start-up was a large fraction of the span. On 2026-09-04
+`all_families_10k.json` fit **10,000 `neuralprophet` series across 12 T4s in 1 h 50 m** — 91
+cells/min for the fleet. The 10,000-series row above is therefore not a projection; it is that run.
 
-Read those two numbers together and the fleet of twelve delivered what one device would. It did:
-each node was pinned to a single concurrent cell by an over-stated memory request, a defect fixed
-the same day (`ray_slot_memory` in the [validation ledger](validation.md)). So what is measured
-today is the **serial** rate, 2 cells/min per T4 rather than 4, and what is unmeasured is how many
-cells a T4 node runs at once now that the pin is gone. Until that re-run lands, size from the
-30-second-per-cell figure and one cell per device, and treat every multi-GPU column above as an
-upper bound you should verify on your own project.
+Two things about the number are worth understanding before you plan with it. **It is a throughput
+figure, not a latency figure.** The average individual fit in that run took 43.5 s, which is
+1.4 cells/min if you watch a single series — roughly seven cells share each T4, and they contend.
+Sizing from the per-cell time will over-provision you by about 5x. **And it is `neuralprophet` on a
+T4 at this data's shape.** A different model, a different device, or much longer series will move
+it. The rate is the right starting point precisely because it is now measured rather than guessed;
+it is still your own first run that tells you your number. Plan with these, then measure.
 
 ---
 
@@ -292,38 +295,43 @@ worth.
 
 ---
 
-## 5. The caveat: nodes are the unit, not cores
+## 5. Cores are the unit, and it took a bug to find out
 
-The 72 cells/min/node figure comes with an asterisk that is worth understanding, because it means
-**the table above is conservative and the product should get faster without you asking for
-anything.**
+This section used to advise the opposite of what it advises now, and the history is worth two
+paragraphs because it is the reason to trust the current version.
 
-On `ray-100k-dcc77a9d1e9b`, 37,500 tasks were queued against 20 eight-vCPU nodes, and the resource
+On `ray-100k-dcc77a9d1e9b`, 37,500 tasks were queued against 20 eight-vCPU nodes and the resource
 plan expected 4–8 concurrent cells per node. Measured concurrency was **0.97 cells per node**, flat
-across the entire steady state. Roughly one core in eight was doing arithmetic.
+across the entire steady state — roughly one core in eight doing arithmetic. With no explanation for
+that, the only safe advice was to buy nodes rather than cores.
 
-**The cause is now known.** A live read of the cluster during a 10,000-series run on 2026-09-04
-showed every worker holding 1.0 of 7.0 CPUs and 17.6 of its 18.1 GiB of memory. Ray schedules on
-memory as hard as it schedules on cores, so a task asking for 97 % of a node's memory takes the
-whole node and the other six cores are unreachable. The request came from a driver-side sizing
-pre-pass that was charging each task the *driver's* memory footprint rather than a worker's; it is
-fixed in code and recorded as `ray_slot_memory` in the [validation ledger](validation.md), and the
-re-run that measures the improvement has not landed yet.
+**The explanation arrived on 2026-09-04.** A live read of a 10,000-series run showed every worker
+holding 1.0 of 7.0 CPUs and 17.6 of its 18.1 GiB of memory. Ray schedules on memory as hard as it
+schedules on cores, so a task asking for 97 % of a node's memory takes the whole node and the other
+six cores are unreachable. The request came from a driver-side sizing pre-pass charging each task
+the *driver's* memory footprint rather than a worker's. Fixed the same day, and the identical config
+re-run under the fix went from 0.93 to 5.5 concurrent cells per node — **5.9x the density and 3.8x
+the wall-clock at identical quota**. Recorded as `ray_slot_memory` in the
+[validation ledger](validation.md).
 
-So the advice below is the advice for the fleet you get from the last released behaviour, and it is
-expected to invert. Until the re-run is in the ledger, throughput scales with **node count**, so:
+So the advice inverts, and the numbers in this document are the post-fix ones:
 
-- **Prefer more, smaller nodes over fewer, larger ones.** Twenty `n1-standard-8` workers currently
-  outperform ten `n1-standard-16` workers, even though the vCPU count is identical and the second
-  arrangement costs the same. This is the opposite of the advice you would give for a well-packed
-  fleet, and it should stop being true — the packing fix predicts roughly seven cells per node on
-  that shape, at which point the larger node wins on overhead and this bullet reverses.
-- **Do not size a quota request off vCPU count alone.** Ask for the vCPUs that buy you the *nodes*
-  in the table.
+- **Cores are the unit.** A node's worth of throughput is its core count divided by the cores a cell
+  asks for, and you should expect a fleet to reach it. Twenty `n1-standard-8` workers and ten
+  `n1-standard-16` workers are now roughly equivalent for the same vCPU spend; prefer the larger
+  node where per-task overhead matters, and the smaller one where a single cell's memory footprint
+  is large enough that a big node would be under-filled anyway.
+- **Do not size a quota request off node count alone.** Ask for the vCPUs, then check the node shape
+  divides into them sensibly.
+- **Expect per-cell latency to get worse as density improves, and do not read that as a regression.**
+  The re-run above made each `neuralprophet` fit 44 % slower (30.25 s → 43.48 s) while the fleet did
+  4.1x the work. Contention between packed cells is what a well-used node looks like.
 
-When per-node packing improves, every wall-clock number here drops and every quota number with it.
-Nothing in the table becomes wrong — it becomes pessimistic, which is the safe direction for a
-document you are using to justify a spend.
+**If you see one busy core in N, suspect a memory request before you suspect the scheduler.** The
+Ray dashboard's `/api/cluster_status` reports `usageByNode`, and a node pinned this way is obvious
+in it: cores idle, memory at the ceiling. The product now names the condition itself —
+`RuntimeResourcePlan.binding_axis` lands in the run's telemetry and the Ray engine logs a density
+note at `WARNING` when memory rather than cores is what limits a pool.
 
 ---
 
