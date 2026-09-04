@@ -357,6 +357,10 @@ def run(
                 source, cfg, run_id, cpu_models, gpu_models, profile, gpu_fraction
             )
             _log.info("ray sizing: cpu=%s gpu=%s", cpu_plan.to_dict(), gpu_plan.to_dict())
+            # A memory-bound pool is the one that under-runs silently — say so out loud.
+            for note in (cpu_plan.density_note, gpu_plan.density_note):
+                if note:
+                    _log.warning("ray sizing: %s", note)
 
             # Chunk counts come from the true cell counts (series in the panel × pool models),
             # floored so the pool can actually reach its autoscaling ceiling (`tasks_for_ceiling`).

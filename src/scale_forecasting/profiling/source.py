@@ -347,6 +347,31 @@ def _profilable_models(models: Sequence[str]) -> list[str]:
     return keep
 
 
+def _without_driver_rss(record: MeasuredFit) -> MeasuredFit:
+    """Drop a pre-pass record's absolute RSS — the driver is the wrong process to ask (pure).
+
+    ``process_rss_bytes`` is the *absolute* footprint of the process that ran the fit, and that
+    is the right question for a slot: a slot holds an interpreter with the model stack imported,
+    not just the delta a fit adds (see `measure.measure_fit`). It is only the right question
+    when the process being measured is the process the slot describes — and in this pre-pass it
+    is not. The driver has the whole source panel resident and, on Ray, runs on a head node a
+    class larger than the workers; a task holds one chunk on an ordinary worker.
+
+    Measured live 2026-09-04 on a 10,000-series Ray run: the pre-pass charged a cell 13.58 GiB,
+    every worker that actually ran one reported 0.8-1.5 GiB, and the resulting ``memory``
+    request (13.58 GiB x the 1.3 margin = 17.65 GiB) took 97% of a worker node's 18.12 GiB of
+    schedulable memory. Ray treats ``memory`` as a hard scheduling resource, so the pool ran
+    **one cell per node** with seven cores and 90% of every T4 idle.
+
+    So the pre-pass keeps the axes it can honestly measure anywhere — wall time, CPU time,
+    effective cores, GPU bytes — and gives up the one that is a property of *where* it ran. The
+    memory axis then comes back as ``None``, which `resources.slot.resource_slot` already
+    means: request nothing, pack on cores alone. A real memory bound is earned by a prior run,
+    whose `registry.harvest` rows were written by the worker processes themselves.
+    """
+    return replace(record, process_rss_bytes=None)
+
+
 def resolve_profile(
     panel: pd.DataFrame,
     cfg: RunConfig,
@@ -369,14 +394,16 @@ def resolve_profile(
     ``ComputeProfile`` rather than ``None`` — the distinction is "we did not look" versus "we
     looked and found nothing", and only the second is worth an audit record.
 
-    **The sample loop is the outer one, deliberately.** Absolute process RSS only grows within a
-    process, so a model measured exactly once is charged whatever happened to be imported by the
-    time its turn came — the first model measured looks artificially small because the later
-    models' libraries were not loaded yet. Cycling every model across every sampled series means
-    each model is measured at least once against a fully warm heap, and the ``max`` aggregation
-    picks that measurement up. (At ``samples=1`` there is no second pass to warm into, so a
-    one-sample budget under-states early models. It also has no length spread and no complexity
-    spread; one sample is a smoke-test setting, not a sizing one.)
+    **The memory axis is dropped before aggregation** — see `_without_driver_rss`. Everything the
+    pre-pass keeps is a cost of the *fit*; absolute RSS is a cost of the *process*, and the driver
+    is not the process a slot describes.
+
+    **The sample loop is the outer one, deliberately.** Cycling every model across every sampled
+    series is what gives each model the same spread of series lengths and shapes, so one model's
+    reading is never taken from the one short series while another's came from the long one; it
+    also charges the first fit's import cost to a single reading that the ``median`` aggregation
+    then steps over. (At ``samples=1`` there is no spread at all — one sample is a smoke-test
+    setting, not a sizing one.)
 
     **Hyperparameters.** ``params_by_model`` (the fleetwide pre-pass's output) is passed straight
     through, so the measured fit is the fit that will run. Under **per-series** HPO the pre-pass
@@ -431,6 +458,7 @@ def resolve_profile(
                 measure_one(series, model_name, cfg, params=tuned.get(model_name, untuned))
             )
 
+    measurements = [_without_driver_rss(record) for record in measurements]
     profile = build_profile(
         measurements,
         sample=sample,

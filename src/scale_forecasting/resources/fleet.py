@@ -32,6 +32,8 @@ from .slot import ResourceSlot, resource_slot
 if TYPE_CHECKING:
     from ..profiling.cost import ComputeProfile
 
+_GIB = 1024**3
+
 
 @dataclass(frozen=True)
 class UnitShape:
@@ -100,6 +102,48 @@ class RuntimeResourcePlan:
         return self.slots_per_unit * self.max_units
 
     @property
+    def binding_axis(self) -> str:
+        """Which resource holds this pool's density down — ``memory``/``device``/``cores``.
+
+        ``"scheduler"`` when the stored density did not come from this module's arithmetic at
+        all (`plan_fleet`'s ``density`` override — Serverless), because then no axis here is
+        the one that decided.
+        """
+        if slots_per_unit(self.slot, self.unit) != self.slots_per_unit:
+            return "scheduler"
+        return _binding_axis(self.slot, self.unit)
+
+    @property
+    def density_note(self) -> str | None:
+        """One line, only when *memory* is what holds the density down (pure; else ``None``).
+
+        A pool bound by cores is a pool doing the obvious thing, and saying so on every run is
+        noise. A pool bound by memory is the one that goes wrong silently: `slots_per_unit`
+        takes the min of the two bounds and returns a single integer, so a slot sized at 97% of
+        a node collapses the pool to one cell per unit and reports it as a density with no
+        indication that the other axis had room to spare. That is exactly what a live 10,000-
+        series Ray run did — one cell per node, seven of eight cores and 90% of every T4 idle,
+        and nothing in the record said why (see `profiling.source._without_driver_rss` for the
+        cause).
+
+        So the memory axis has to speak up. It names both sides of the comparison and what the
+        primary axis *would* have packed, which is the difference between "this family is
+        genuinely memory-heavy, buy bigger nodes" and "the slot is mis-measured."
+        """
+        schedulable = schedulable_memory_bytes(self.unit)
+        if schedulable is None or not self.slot.memory_bytes:
+            return None
+        if self.binding_axis != "memory":
+            return None
+        axis = "devices" if self.slot.gpu_fraction is not None else "cores"
+        return (
+            f"memory is holding this {self.family} pool to {self.slots_per_unit} concurrent "
+            f"cells per unit: {self.slot.memory_bytes / _GIB:.2f} GiB per cell against "
+            f"{schedulable / _GIB:.2f} GiB schedulable, where {axis} alone would have packed "
+            f"{_primary_bound(self.slot, self.unit)}."
+        )
+
+    @property
     def task_options(self) -> dict[str, float]:
         """The Ray ``@ray.remote.options(**...)`` mapping this plan implies.
 
@@ -138,6 +182,7 @@ class RuntimeResourcePlan:
             "target_cells_per_slot": self.target_cells_per_slot,
             "total_slots": self.total_slots,
             "slots_at_ceiling": self.slots_at_ceiling,
+            "binding_axis": self.binding_axis,
         }
 
 
@@ -180,6 +225,22 @@ def _memory_bound(slot: ResourceSlot, unit: UnitShape) -> int | None:
     return math.floor(schedulable / slot.memory_bytes)
 
 
+def _primary_bound(slot: ResourceSlot, unit: UnitShape) -> int:
+    """Cells one unit holds on the axis the slot is *defined* by — devices or cores (pure)."""
+    if slot.gpu_fraction is not None:
+        packed = max(1, math.floor(1.0 / slot.gpu_fraction))
+        return max(1, unit.accelerators * packed) if unit.accelerators else 1
+    return math.floor(unit.cores / slot.cores) if slot.cores > 0 else 1
+
+
+def _binding_axis(slot: ResourceSlot, unit: UnitShape) -> str:
+    """Which of the two bounds in `slots_per_unit` is the one that decided (pure)."""
+    by_memory = _memory_bound(slot, unit)
+    if by_memory is not None and by_memory < _primary_bound(slot, unit):
+        return "memory"
+    return "device" if slot.gpu_fraction is not None else "cores"
+
+
 def slots_per_unit(slot: ResourceSlot, unit: UnitShape) -> int:
     """Concurrent cells one unit holds — the min of its primary bound and its memory bound (pure).
 
@@ -203,12 +264,7 @@ def slots_per_unit(slot: ResourceSlot, unit: UnitShape) -> int:
     `resource_slot`, so the floor here is a belt-and-braces guard against a caller
     that assembled a slot by hand.
     """
-    if slot.gpu_fraction is not None:
-        packed = max(1, math.floor(1.0 / slot.gpu_fraction))
-        primary = max(1, unit.accelerators * packed) if unit.accelerators else 1
-    else:
-        primary = math.floor(unit.cores / slot.cores) if slot.cores > 0 else 1
-
+    primary = _primary_bound(slot, unit)
     by_memory = _memory_bound(slot, unit)
     return max(1, primary if by_memory is None else min(primary, by_memory))
 

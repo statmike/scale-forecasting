@@ -1499,14 +1499,16 @@ def _recording_measure(
     calls: list[tuple[str, str, Any]],
     *,
     rss_by_model: dict[str, int] | None = None,
+    peak_by_model: dict[str, int] | None = None,
 ) -> Any:
     """A stand-in for `measure_fit` that records its arguments and returns a fixed record.
 
     The whole pre-pass is testable offline because the measurement is injected: no fit runs, no
     statsmodels, no accelerator — and the *order* it was called in becomes assertable, which is
-    the property the warm-heap argument in `resolve_profile` rests on.
+    the property the sample-loop argument in `resolve_profile` rests on.
     """
     rss_by_model = rss_by_model or {}
+    peak_by_model = peak_by_model or {}
 
     def measure(series: pd.DataFrame, model_name: str, cfg: RunConfig, *, params: Any = None):
         ts_id = str(series["ts_id"].iloc[0])
@@ -1518,7 +1520,7 @@ def _recording_measure(
             n_obs=len(series),
             wall_s=1.0,
             cpu_s=1.0,
-            peak_rss_bytes=1024,
+            peak_rss_bytes=peak_by_model.get(model_name, 1024),
             peak_gpu_bytes=None,
             ok=True,
             error=None,
@@ -1594,8 +1596,8 @@ def test_every_model_is_measured_on_every_sampled_series() -> None:
     assert len({ts_id for ts_id, _, _ in calls}) == 3
 
 
-def test_a_model_measured_late_still_reaches_the_family_max() -> None:
-    """The reason the sample loop is outer: max over a cycled sample picks up the warm reading."""
+def test_the_heavier_member_of_a_family_sets_its_max() -> None:
+    """A family costs what its worst member costs — the max is over models, not the first one."""
     cfg = _cfg(
         models=["theta", "holtwinters"],
         compute={"profile": {"mode": "always", "samples": 4}},
@@ -1604,12 +1606,55 @@ def test_a_model_measured_late_still_reaches_the_family_max() -> None:
         _profilable_panel(6),
         cfg,
         ["theta", "holtwinters"],
-        measure=_recording_measure([], rss_by_model={"theta": 400_000_000}),
+        measure=_recording_measure([], peak_by_model={"holtwinters": 4096}),
     )
     assert profile is not None
     family = profile.for_family("statistical")
     assert family is not None
-    assert family.max_process_rss_bytes == 512 * 1024 * 1024  # the heavier member, not the first
+    assert family.max_peak_rss_bytes == 4096  # the heavier member, not the first measured
+
+
+def test_the_pre_pass_never_charges_a_slot_the_drivers_own_footprint() -> None:
+    """The driver holds the whole panel and runs on a bigger box; its RSS is not a cell's.
+
+    Live 2026-09-04 this axis asked for 97% of a Ray worker's schedulable memory and pinned the
+    pool to one cell per node. `source._without_driver_rss` drops it, which puts the slot back
+    on its documented no-basis path: request nothing, pack on cores.
+    """
+    cfg = _cfg(compute={"profile": {"mode": "always", "samples": 3}})
+    profile = source.resolve_profile(
+        _profilable_panel(6),
+        cfg,
+        ["theta"],
+        measure=_recording_measure([], rss_by_model={"theta": 13 * 1024**3}),
+    )
+    assert profile is not None
+    family = profile.for_family("statistical")
+    assert family is not None
+    assert family.max_process_rss_bytes is None
+    assert family.slot_rss_bytes is None
+    assert family.median_wall_s is not None  # the axes it *can* measure anywhere are untouched
+
+
+def test_dropping_the_driver_rss_leaves_every_other_axis_byte_identical() -> None:
+    """A targeted drop, not a blanket one: only the axis that is a property of *where* it ran."""
+    record = MeasuredFit(
+        ts_id="s01",
+        model_type="theta",
+        family="statistical",
+        n_obs=40,
+        wall_s=1.5,
+        cpu_s=3.0,
+        peak_rss_bytes=2048,
+        peak_gpu_bytes=4096,
+        ok=True,
+        error=None,
+        intraop_threads=2,
+        process_rss_bytes=99 * 1024**3,
+    )
+    dropped = source._without_driver_rss(record)
+    assert dropped.process_rss_bytes is None
+    assert replace(dropped, process_rss_bytes=record.process_rss_bytes) == record
 
 
 def test_bigquery_native_models_are_never_profiled() -> None:

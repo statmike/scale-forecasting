@@ -513,6 +513,65 @@ def test_an_unmeasured_gpu_slot_packs_by_device_alone_exactly_as_before() -> Non
     assert slots_per_unit(slot, unit) == 8
 
 
+# --- density: the axis that bound it has to say so ------------------------------
+
+
+def test_a_memory_bound_pool_says_so_and_names_what_cores_would_have_packed() -> None:
+    """The failure mode this exists for: one cell per node, and nothing in the record said why."""
+    plan = plan_resources(
+        _profile(
+            _fit(model_type="neuralprophet", family="deep_learning", process_rss_bytes=17 * _GIB)
+        ),
+        "deep_learning",
+        "ray",
+        n_cells=1000,
+        unit=_N1_STANDARD_8,
+    )
+    assert plan.slots_per_unit == 1
+    assert plan.binding_axis == "memory"
+    note = plan.density_note
+    assert note is not None
+    assert "cores alone would have packed 8" in note
+    assert "21.00 GiB schedulable" in note  # 0.7 x 30 GiB, the figure the packing divides
+
+
+def test_a_cores_bound_pool_stays_quiet_because_that_is_the_ordinary_case() -> None:
+    """Saying "cores bound this" on every run is noise; the memory axis is the silent one."""
+    plan = plan_resources(
+        _profile(_fit(process_rss_bytes=900 * _MIB)),
+        "statistical",
+        "ray",
+        n_cells=1000,
+        unit=_N1_STANDARD_8,
+    )
+    assert plan.binding_axis == "cores"
+    assert plan.density_note is None
+
+
+def test_a_device_bound_gpu_pool_reports_its_device_axis_and_stays_quiet() -> None:
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=2)
+    slot = _slot("deep_learning", memory_bytes=1 * _GIB, gpu_fraction=0.5, measured=_HOST_AXES)
+    plan = fleet.plan_fleet(slot, runtime="ray", n_cells=100, unit=unit)
+    assert plan.binding_axis == "device"
+    assert plan.density_note is None
+
+
+def test_an_unmeasured_memory_axis_claims_no_binding_axis_it_cannot_see() -> None:
+    """No basis → no bound → nothing to report. Silence here is the honest answer."""
+    plan = plan_resources(None, "statistical", "ray", n_cells=100, unit=_N1_STANDARD_8)
+    assert plan.binding_axis == "cores"
+    assert plan.density_note is None
+
+
+def test_a_scheduler_set_density_disclaims_the_axis_this_module_did_not_decide() -> None:
+    """Serverless density comes from spark.task.cpus; no bound here is the one that applied."""
+    slot = _slot("deep_learning", cores=1, memory_bytes=17 * _GIB, measured=_HOST_AXES)
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB)
+    plan = fleet.plan_fleet(slot, runtime="serverless", n_cells=100, unit=unit, density=4)
+    assert plan.binding_axis == "scheduler"
+    assert plan.density_note is None
+
+
 # --- the fleet -----------------------------------------------------------------
 
 
@@ -639,6 +698,7 @@ def test_the_plan_is_json_serializable_for_telemetry() -> None:
         "target_cells_per_slot",
         "total_slots",
         "slots_at_ceiling",
+        "binding_axis",
     }
 
 
