@@ -45,18 +45,23 @@ vCPUs needed = (worker nodes x vCPUs per worker) + vCPUs for the head/driver nod
 ## 2. What one node actually delivers
 
 Measured, not estimated. The anchor is `ray-100k-dcc77a9d1e9b` — 100,000 series x 4 models =
-400,000 cells on Ray, 20 x `n1-standard-8` workers, five and a half hours. Throughput was flat for
-the whole steady state, which is what makes it usable for planning:
+400,000 cells on Ray, 20 x `n1-standard-8` workers. It has been run twice: once before the
+memory-request defect described in [§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out) was
+found, and once after. Same config, same pool, same `run_id`:
 
-| Minutes in | Active nodes | Cells/min |
-|---|---|---|
-| 0–30 | 26 | 1,061 *(autoscaler still ramping)* |
-| 30–240 | 20 | **1,425–1,457** |
-| 270+ | 20 | 826 *(tail — work running out)* |
+| Run | Cells | Compute wall | Cells/min | Per node |
+|---|---|---|---|---|
+| 2026-09-03, pre-fix | 400,000 | 19,069 s (5 h 18 m) | 1,259 | 63 |
+| **2026-09-05, post-fix** | 400,000 | **6,290 s (1 h 45 m)** | **3,816** | **191** |
 
 So for a mixed statistical + ML workload on 8-vCPU nodes:
 
-> **~72 cells per minute per 8-vCPU node.**
+> **~191 cells per minute per 8-vCPU node** — about 24 per vCPU per minute.
+
+Both rows are total cells over total compute wall clock, which is the figure that plans a run. The
+pool held **139–140 of its 140 cores busy** for the post-fix hour and three quarters, with up to
+38,000 tasks queued behind it; the pre-fix run averaged roughly one busy core per node. Nothing
+changed but what a task claimed it needed.
 
 Per-cell fit times behind that figure, from the same run:
 
@@ -72,20 +77,17 @@ Per-cell fit times behind that figure, from the same run:
 dominated by `sarimax` is slower. Series length matters too — these were ~4 years of daily
 observations.
 
-!!! warning "This anchor predates the density fix — treat it as a floor"
-    72 cells/min/node was measured when a node was fitting roughly **one cell at a time** despite
-    having eight vCPUs, because of the memory-request defect described in
-    [§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out). Throughput scaled with *nodes* rather
-    than cores, and the figure above is what that regime delivered. The fix landed on 2026-09-04 and
-    a comparable CPU workload came in 1.5–2x faster, so **plan with 72 cells/min/node and expect to
-    beat it.** A re-run of this anchor at 100,000 series has not been done; when it is, this section
-    gets a bigger number.
+!!! note "This page used to say 72, and the difference is worth a sentence"
+    That figure came from the steady-state *window* of the pre-fix run (1,425–1,457 cells/min across
+    20 nodes) rather than from the run end to end. Measured the way the table above measures — all
+    cells over all wall clock — the same run gives **63**, and the gap is start-up and tail. Both
+    rows are now derived identically so they can be compared, and the number that survives is 191.
 
 **Deep learning is a different regime entirely.** `neuralprophet` measures at **21–65 s/fit**
 against sub-second statistical models — 50x or more — and it needs a GPU. Measured at 10,000 series
 on 12 T4s, it lands at **7.6 cells/min per T4 node** (the 2026-09-04 `all_families_10k` run, 1 h
-50 m for 10,000 cells). Unlike the CPU anchor above, this one is post-fix; the arithmetic in
-[§3](#3-the-table) is built on it.
+50 m for 10,000 cells) — post-fix, like the CPU anchor. The arithmetic in [§3](#3-the-table) is
+built on both.
 
 ---
 
@@ -98,11 +100,11 @@ head node is a fixed cost you pay once per run.
 | Series | Cells | Wall clock on a **default 200-vCPU** project (20 nodes) | Nodes for a **~1-hour** run | vCPUs to request |
 |---|---|---|---|---|
 | **10** | 60 | seconds | 1 | 40 — **default is fine** |
-| **100** | 600 | < 1 min | 1 | 40 — **default is fine** |
-| **1,000** | 6,000 | ~4 min | 2 | 48 — **default is fine** |
-| **10,000** | 60,000 | ~42 min | 14 | 144 — **default is fine** |
-| **100,000** | 600,000 | **~7 hours** | 139 | **~1,150** |
-| **1,000,000** | 6,000,000 | **~70 hours** | 1,389 | **~11,150** |
+| **100** | 600 | seconds | 1 | 40 — **default is fine** |
+| **1,000** | 6,000 | ~2 min | 1 | 40 — **default is fine** |
+| **10,000** | 60,000 | ~16 min | 6 | 80 — **default is fine** |
+| **100,000** | 600,000 | **~2.6 hours** | 53 | **~460** |
+| **1,000,000** | 6,000,000 | **~26 hours** | 524 | **~4,225** |
 
 !!! warning "Add the start-up floor to the top two rows"
     Provisioning a cluster takes **10–15 minutes** regardless of how little work you then give it.
@@ -113,14 +115,16 @@ head node is a fixed cost you pay once per run.
 
 Read it as two separate questions.
 
-**"Can I do this at all today?"** — column 3. A stock project runs 10,000 series in well under an
-hour and 100,000 series overnight. Both are useful; neither needs a support ticket. This is why the
-demonstration configs in `configs/` top out at 10,000 series: it is the largest scale that a
-default project runs comfortably, which makes it the largest scale a reader can *reproduce*.
+**"Can I do this at all today?"** — column 3. A stock project runs 10,000 series in about a quarter
+of an hour and 100,000 series over an afternoon. Both are useful; neither needs a support ticket.
+This is why the demonstration configs in `configs/` top out at 10,000 series: it is the largest
+scale that a default project runs comfortably, which makes it the largest scale a reader can
+*reproduce*.
 
 **"How much quota to make it fast?"** — columns 4 and 5. Wanting 100,000 series in an hour rather
-than seven means asking for roughly **1,150 vCPUs**, about 6x a default allowance. A million series
-in an hour is ~11,000 vCPUs and is a conversation with your account team, not a form.
+than two and a half means asking for roughly **460 vCPUs**, a bit over 2x a default allowance —
+small enough to be a routine request. A million series in an hour is ~4,200 vCPUs and is a
+conversation with your account team, not a form.
 
 The relationship is linear in both directions, so interpolate freely: **halve the wall clock, double
 the quota.**
@@ -311,7 +315,9 @@ schedules on cores, so a task asking for 97 % of a node's memory takes the whole
 six cores are unreachable. The request came from a driver-side sizing pre-pass charging each task
 the *driver's* memory footprint rather than a worker's. Fixed the same day, and the identical config
 re-run under the fix went from 0.93 to 5.5 concurrent cells per node — **5.9x the density and 3.8x
-the wall-clock at identical quota**. Recorded as `ray_slot_memory` in the
+the wall-clock at identical quota**. `ray-100k-dcc77a9d1e9b` itself was re-run on 2026-09-05 and
+came back at 139–140 of 140 cores busy for 2.9x the wall clock, which is what re-anchored
+[§2](#2-what-one-node-actually-delivers). Recorded as `ray_slot_memory` in the
 [validation ledger](validation.md).
 
 So the advice inverts, and the numbers in this document are the post-fix ones:
@@ -337,7 +343,7 @@ note at `WARNING` when memory rather than cores is what limits a pool.
 
 ## 6. Cheaper than more quota
 
-Before filing for 1,150 vCPUs, three things cost nothing:
+Before filing for 460 vCPUs, three things cost nothing:
 
 **Cut cells, not corners.** `cells = series x models x folds`. Dropping one expensive model from a
 100,000-series run removes 100,000 cells. Backtesting with 2 folds doubles the run. Both are

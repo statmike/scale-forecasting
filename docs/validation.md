@@ -97,15 +97,35 @@ measurement of what each one lost — the pre-pass ran on all three and what it 
 changed. On the third the cost is measured, and it is large: `all_families_10k` was re-run under the
 fix the same day and came in **3.8x faster end to end**, with the deep-learning family 4.1x faster.
 
-**Two of the three have now been re-earned, and the mechanism scoping held.** `ray_autoscale_demo`
-re-ran on 2026-09-05 in **2,513 s against 5,223 s — 2.08x** on the same config, same `run_id`, same
-eight-node ceiling. The dashboard read mid-run is the cleanest picture of the defect and its fix
-anywhere in this file: every one of the eight workers at `CPU [7.0, 7.0]`, 56 cells in flight and
-1,732 queued, where the pre-fix regime put roughly one cell on a node with seven idle cores. Nothing
-about the pool changed — same machine type, same `max`, same autoscaler. Only what a task claimed it
-needed. It is
-also the second time the Ray memory axis has cost a run — on 2026-09-03 `ray_100k` sat at zero cells
-for 57 minutes behind an unschedulable ~21 GiB per-task request, recorded at the end of this file.
+**All three have now been re-earned, and the mechanism scoping held on every one.**
+`ray_autoscale_demo` re-ran on 2026-09-05 in **2,513 s against 5,223 s — 2.08x** on the same config,
+same `run_id`, same eight-node ceiling. The dashboard read mid-run is the cleanest picture of the
+defect and its fix anywhere in this file: every one of the eight workers at `CPU [7.0, 7.0]`, 56
+cells in flight and 1,732 queued, where the pre-fix regime put roughly one cell on a node with seven
+idle cores. Nothing about the pool changed — same machine type, same `max`, same autoscaler. Only
+what a task claimed it needed.
+
+`ray_100k` followed the same day and is the one that matters most, because 11c's original
+0.97-cells-per-node measurement was taken on it:
+
+| Family | Cells | Before (2026-09-03) | After (2026-09-05) | |
+|---|---|---|---|---|
+| `ml` (`xgboost`) | 100,000 | 17,666 s (4 h 54 m) | **3,681 s** (1 h 01 m) | **4.80x** |
+| `statistical` (3 models) | 300,000 | 19,069 s (5 h 18 m) | **6,290 s** (1 h 45 m) | **3.03x** |
+| whole run | 400,000 | ~19,800 s (5 h 30 m) | **6,923 s** (1 h 55 m) | **2.86x** |
+
+At full scale the pool held **139–140 of 140 cores busy** across 20 nodes with 38,000 tasks queued
+behind it — against ~20 concurrent cells before. That is the 7x density the fix predicted, arriving
+at 3.0x wall clock for the same reason the GPU run did: cells contend once they are actually packed
+together. This is also the run [quota and scale](quota_and_scale.md) plans from: its CPU throughput
+anchor moves from **72 to 191 cells/min per 8-vCPU node** on the strength of it. Downstream, 100,000
+series x 6 models on a stock 200-vCPU project goes from a seven-hour job to a two-and-a-half-hour
+one, and the quota to finish it inside an hour falls from ~1,150 vCPUs to **~460** — the difference
+between a conversation with an account team and a routine request.
+
+This is the second time the Ray memory axis has cost a run. On 2026-09-03 `ray_100k` sat at zero
+cells for 57 minutes behind an unschedulable ~21 GiB per-task request, recorded at the end of this
+file.
 That one asked for more than a node had and never placed; this one asked for 97 % of a node, which
 places perfectly well and then fits exactly once. A schedulability guard catches the first and
 cannot catch the second, which is why `efecb4c` also added `RuntimeResourcePlan.binding_axis`.
@@ -719,7 +739,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=driver-rss-prepass` |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | CURRENT | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
 
@@ -1149,7 +1169,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** |
 | Registry ops — `close_runs` (7th verb) | CURRENT | Executed live 2026-09-02 against the real registry: closed 9 of the 10 stuck headers to `FAILED` and skipped the tenth with its reason, leaving `doctor` reporting exactly one in-flight run. **The first live call failed** on a column that does not exist, which no offline test could have caught — see below. |
 | Shipped baseline profile (`profiling.baseline`) | CURRENT | The numbers committed in `src/scale_forecasting/profiling/baseline.py` were harvested on 2026-09-03 from `ray-100k-dcc77a9d1e9b` — the `ray_100k` row above, a real 100,000-series Ray run — through the ordinary `read_compute_harvest` path. **This row is a claim about the numbers' provenance and nothing else.** No run has yet been *sized* from the baseline on live infrastructure; that needs a deployment with an empty registry, which this project no longer is. See below. |
-| Run audit principal (P6) | CURRENT | The `actor=None` on 2026-09-02's live cancel was a **defect**, resolved 2026-09-04: the userinfo lookup was sending the ADC quota project as `x-goog-user-project` and getting a 403 for `serviceusage.services.use` on a project unrelated to the run. Fixed by stripping the quota project (`identity._without_quota_project`) and verified live under the same ADC credential — `resolve_principal()` returns the user's email. The end-to-end cancel-with-attribution has **not** been re-observed; the audit *write* was already proven on 2026-09-02, and this closes the resolver that fed it blank. See below. |
+| Run audit principal (P6) | CURRENT | The `actor=None` on 2026-09-02's live cancel was a **defect**, resolved 2026-09-04: the userinfo lookup was sending the ADC quota project as `x-goog-user-project` and getting a 403 for `serviceusage.services.use` on a project unrelated to the run. Fixed by stripping the quota project (`identity._without_quota_project`) and verified live under the same ADC credential — `resolve_principal()` returns the user's email. Proven end-to-end on a real run 2026-09-05: `ray-100k-dcc77a9d1e9b`'s header row carries `user_id = <the launching user email>`, where its three pre-fix attempts are blank. That is the *launch* path; cancel-with-attribution has not been re-exercised live since the fix, though the audit *write* was already proven on 2026-09-02. See below. |
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
 
@@ -1297,6 +1317,13 @@ under the same ADC credential that produced the blank: `resolve_principal()` now
 email. Two properties worth keeping: it is a *copy* of the credential, so nothing else in the process
 is affected, and a credential type that cannot strip goes out unchanged rather than failing —
 attribution stays advisory and never blocks the operation it annotates.
+
+**And then a real run proved it end to end, unprompted.** The `ray_100k` re-run the next day carries
+`user_id = <the launching user email>` on its `run_registry` header row — the first run in this
+project's history to be attributed to a person. The three earlier attempts at the same `run_id` are
+blank in that column, which makes the four rows a before/after of the fix sitting inside the registry
+itself. That is *launch* attribution; the cancel path writes its actor through the same resolver but
+has not been re-exercised live since the fix.
 
 **What this generalizes to.** The audit trail failed on an IAM permission in a project that has
 nothing to do with the run — the same shape as the Cloud Billing API check that failed against the
