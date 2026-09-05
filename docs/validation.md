@@ -175,7 +175,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
 | 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-01 | `smoke-01-serverless-cpu-5af5de1accf2` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11` |
+| 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | STALE | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-01 | `smoke-03-serverless-gpu-a918f22d7970` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | CURRENT | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -791,7 +791,7 @@ the honest starting position and the reason for adding the table at all: it is t
 
 | Config | Proves | Status | Date | run_id | Axes at proof |
 |--------|--------|--------|------|--------|---------------|
-| `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | CURRENT | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11` |
+| `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | STALE | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | CURRENT | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
@@ -1992,10 +1992,46 @@ Things that are true today and that no entry above covers. Keep this list short 
   02 (`…-439b5350249b`, `…-0ffcc1f22d54`) joined this category hours after being written. They
   remain valid pointers into the registry and the results they point at are unaffected; they are
   simply no longer recomputable from their configs. Smoke 01's row has since been re-earned by a
-  post-fix run and carries a recomputable id again (`…-5af5de1accf2`); smoke 02's has not, and its
-  id stays a pointer-only. Unlike the three before it, this move makes
-  identity *stop* drifting rather than start: `run_id_inputs` is now `authored-config-only` and
-  there is no resolved value left in the digest to move it again.
+  post-fix run, submitted at 16:02 — one minute after the fix landed — so it declares the new
+  `run_id_inputs=authored-config-only` honestly. Smoke 02 never was re-run, and neither was
+  `bq_native_demo`, which ran in the same pre-fix window; both rows were carrying no
+  `run_id_inputs` value at all, which read as "unaffected" when the truth is "proven under the old
+  one". They now declare `run_id_inputs=+compute.profile.source` and are graded **STALE**, which is
+  what the axis is for. Unlike the three moves before it, this one makes identity *stop* drifting
+  rather than start: there is no resolved value left in the digest to move it again.
+
+  **But "no resolved value left" is not "no drift left", and the distinction cost us six rows.**
+  That sentence is only about values the *launcher* fills in. A plain new field with a default
+  still moves every id, because the digest hashes the dumped payload and a defaulted field appears
+  in every config's dump whether or not the config mentions it. One landed the same evening —
+  `d6fe690` at 18:11 added `compute.max_executors` — and its own commit body says so outright
+  ("the new config field moving every run_id"). What nobody did was reconcile the rows already
+  written earlier that day. Six of them record a `run_id` their config no longer produces:
+
+  | Row | Proven id | The id its config resolves to today |
+  |---|---|---|
+  | smoke 02 | `smoke-02-bq-native-0ffcc1f22d54` | `…-58478a846e89` |
+  | `bq_native_demo` | `bq-native-demo-b374041fdd1e` | `…-a54e5afe2ba4` |
+  | smoke 01 | `smoke-01-serverless-cpu-5af5de1accf2` | `…-95b59d88fbe8` |
+  | `explode_demo` | `explode-demo-d1b57690dc96` | `…-2226cd3f0780` |
+  | `mixed_demo` | `mixed-demo-405983dddf0a` | `…-d87f8cdab605` |
+  | `ensemble_demo` | `ensemble-demo-9849a2f73669` | `…-c89b6f04afed` |
+
+  Every one of the other twenty-two matches, and the reason is simply that they were re-earned on
+  2026-09-02 or later. The six are exactly the runs of 2026-09-01 that finished before 18:11.
+
+  Smoke 01 is the interesting one, because it is **CURRENT and every axis it declares is correct**,
+  and its id still does not reproduce. That is the gap in the grading model: an axis records a
+  decision the result depends on, and adding a config field is not a decision — it moves identity
+  without touching any claim. The ledger cannot see it, and for four days nothing else could either.
+
+  Two things close it. The narrow one is that the digest-input *set* is itself worth versioning, so
+  the next deliberate break bumps this axis to `authored-config-only-v2` and every row goes stale by
+  construction rather than by inspection. The durable one already exists:
+  `tests/unit/snapshots/run_ids_prebreak.json` pins today's digest for all twenty-eight shipped
+  configs, and `tests/unit/test_prebreak_snapshots.py` fails the offline gate the moment an
+  unplanned field moves one. Discovering this by hand, once, was the last time that should be
+  necessary.
   The change that *did* make live results stale arrived at W7b/W8, and it was not the one predicted
   here. This note used to say the staleness event would be W6, "when `profile.mode='auto'` starts
   actually sizing fleets from measurement." That never happened and now never will in that form —
