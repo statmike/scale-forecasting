@@ -741,7 +741,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | CURRENT | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | NEVER_RUN | — | — | — |
+| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | CURRENT | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 
 **`all_families_10k` ran twice on 2026-09-04, and the pair is the `ray_slot_memory` A/B.** The first
 pass is the run that found the defect; the second is the identical config under the fix, submitted
@@ -785,6 +785,48 @@ Two operational notes from the second pass. The Ray jobs client crossed the bear
 21:40 and refreshed itself rather than 401-ing, so the long-run failure mode from earlier campaigns
 did not recur. Teardown was REST-verified: 404 on the resource and `{}` on the collection, not the
 SDK's "Successfully deleted the cluster" line.
+
+### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
+
+Ran 2026-09-05, `all-families-10k-full-e68d9341ce01`, `COMPLETED` in **19,035 s (5 h 17 m)**. Same
+seven models and four families as `all_families_10k`, plus the two things that row does not cover:
+**`backtest.n_folds: 2`** and **`persist_models: true`**.
+
+| Family | Runtime | Wall | Cells |
+|---|---|---|---|
+| `native` (`arima_plus`, `timesfm`) | BigQuery | 1,084 s | 20,000 |
+| `statistical` (3 models) | Ray CPU | 3,025 s | 30,000 |
+| `ml` (`xgboost`) | Ray CPU | 3,177 s | 10,000 |
+| `deep_learning` (`neuralprophet`) | Ray GPU (12 x T4) | **18,373 s (5 h 06 m)** | 10,000 |
+
+Everything verified: 1,960,000 prediction rows, **1,960,000 distinct** `(ts_id, model_type,
+forecast_date)` — a first run of this `run_id`, so raw and distinct agree exactly. `backtest_oof`
+holds **560,000 rows per model for all seven**, folds 1 and 2, 10,000 series each: 3,920,000
+out-of-fold rows, and every family produced them, BigQuery natives included. `no_artifact_rate` is
+**0.0 across all five Python models — 50,000 GCS artifacts, zero misses**, which is the first
+`persist_models: true` proof at this scale. The two natives report 1.0 by design: a BQML model lives
+in BigQuery and has no GCS ObjectRef. Header attributed to a principal. Teardown REST-verified.
+
+**It found an error in `quota_and_scale.md`'s core formula.** That page said `cells = series x models
+x folds` and that 2-fold backtesting "doubles the run". It does not. Each fold is a fit on truncated
+history and then the model is fitted *once more* on all of it to produce the shipped forecast, so
+`n_folds: 2` is three fits per cell. Measured against `all_families_10k` on the identical config
+minus backtesting, the deep-learning family went **6,582 s → 18,373 s, 2.79x**. The formula is now
+`fits = series x models x (folds + 1)` with that measurement beside it.
+
+**And it separated the GPU anchor from the GPU pool's real limit.** At 3 fits per cell this run
+delivers **8.2 fits/min/T4** against the 7.6 measured the day before — the same number, which
+confirms the anchor is per *fit* rather than per cell. But the pool never used the allowance it was
+given: `CPU [84.0, 91.0]` and `GPU [8.4, 12.0]`, held flat for five hours. A deep-learning task asks
+for one vCPU as well as a GPU fraction, and 12 `n1-standard-8` workers offer only 84 usable cores, so
+**84 concurrent fits is the ceiling and 30 % of the T4 allowance is unreachable** — not the memory
+defect from the row above, just the machine shape. Raising `ray_gpu_max_nodes` would buy quota that
+cannot be fed; the fix is a GPU worker with more vCPUs. Written up in
+[quota and scale](quota_and_scale.md).
+
+The run also crossed the bearer-token TTL **four times** (06:12, 07:42, 08:28, 09:13) and the Ray
+jobs client refreshed itself each time without a 401 — a five-hour unattended run is the strongest
+evidence yet for that mechanism.
 
 **On 2026-09-02 the whole Ray track stopped provisioning, and the elimination is the useful part.**
 `ray_100k` was attempted and never reached a job: Vertex returned the contentless
@@ -1681,9 +1723,11 @@ Things that are true today and that no entry above covers. Keep this list short 
 
   The GPU side is where the ceiling stops being a cost question. The two runtimes draw on different
   allowances — **4** `NVIDIA_T4_GPUS` for Dataproc, **12** `custom_model_training_nvidia_t4_gpus`
-  for Ray on Vertex — and `neuralprophet` measures at **7.6 cells/min per T4** (2026-09-04, revised
-  up from an extrapolated 4). A deep-learning pass is therefore ~1 h 50 m at 10,000 series on the
-  Ray allowance and **~18 hours at 100,000** — or ~55 hours on Dataproc's four. Not expensive so
+  for Ray on Vertex — and `neuralprophet` measures at **7.6 fits/min per T4** (2026-09-04, revised
+  up from an extrapolated 4; confirmed at 8.2 the next day on a 3-fit-per-cell run). A single-fold
+  deep-learning pass is therefore ~1 h 50 m at 10,000 series on the
+  Ray allowance and **~18 hours at 100,000** — or ~55 hours on Dataproc's four, and roughly three
+  times each of those with `n_folds: 2`. Not expensive so
   much as unfinishable. **A default project runs out of deep-learning headroom somewhere around
   10,000–20,000 series, an order of magnitude before it runs out of CPU headroom.** The 100k
   all-families
@@ -1702,9 +1746,18 @@ Things that are true today and that no entry above covers. Keep this list short 
   `quota_and_scale.md`. The per-cell fit averaged 30.25 s, which is 2.0 cells/min in a *single*
   stream — so the fleet of 12 delivered almost exactly what one serial GPU would, the signature of
   one cell per node (`ray_slot_memory`, above). **The second pass, under the fix, is the number to
-  use: 6,582 s, 91 cells/min fleet-wide, `7.6 cells/min per T4`** — nearly twice the figure that had
+  use: 6,582 s, 91 fits/min fleet-wide, `7.6 fits/min per T4`** — nearly twice the figure that had
   been extrapolated from 100-series runs, and now measured at 10,000. `quota_and_scale.md` is
   rewritten from it.
+
+  **Re-confirmed 2026-09-05 by `all_families_10k_full`, which also showed why the pool never
+  saturates.** At 3 fits per cell that run delivered 8.2 fits/min/T4 — the same anchor, which settles
+  that it is a per-*fit* rate. But it held `GPU [8.4, 12.0]` and `CPU [84.0, 91.0]` flat for five
+  hours: a deep-learning task asks for a vCPU as well as a GPU fraction, and 12 `n1-standard-8`
+  workers have only 84 usable cores, so **84 concurrent fits is the ceiling and 30 % of the T4
+  allowance cannot be reached at that machine shape.** Distinct from `ray_slot_memory` — nothing is
+  over-requesting here, there simply are not enough cores to feed the devices. The lever is
+  `ray_gpu_machine_type`, not `ray_gpu_max_nodes`.
 - **The Ray fleet ran at roughly one busy core in eight, and the resource plan did not predict it.**
   Measured 2026-09-03 from `ray-100k-dcc77a9d1e9b`: 37,500 chunk tasks were queued against 20
   `n1-standard-8` workers, and the plan expected 4–8 concurrent cells per node. Actual concurrency,

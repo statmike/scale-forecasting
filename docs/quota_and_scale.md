@@ -15,15 +15,21 @@ with a number you can defend.
 
 Three quantities, and everything follows from them.
 
-**Cells.** The unit of work is one *cell* — one model fitted to one series for one backtest fold.
+**Cells.** The unit of work is one *cell* — one model fitted to one series.
 
 ```
-cells = series x models x folds
+cells = series x models
+fits  = cells x (folds + 1)
 ```
 
-10,000 series with 6 models and no backtesting is 60,000 cells. Turn on 2-fold backtesting and it is
-120,000 — backtesting multiplies, it does not add. Watch that number; it is the one that sets your
-bill and your wall clock.
+10,000 series with 6 models is 60,000 cells. **The `+ 1` is the one people miss.** Each backtest fold
+is a fit on truncated history, and then the model is fitted once more on *all* of it to produce the
+forecast you actually ship. So `n_folds: 2` is three fits per cell, not two — and it costs about
+three times a no-backtest run, not twice.
+
+Measured, on the same config with and without backtesting (`all_families_10k` vs
+`all_families_10k_full`, 2026-09-04/05): the deep-learning family went **6,582 s → 18,372 s, 2.79x**.
+Watch that number; it is the one that sets your bill and your wall clock.
 
 **Throughput.** Cells are independent, so they run in parallel and throughput is linear in the size
 of the fleet. What matters is throughput *per node*, measured end to end:
@@ -85,7 +91,7 @@ observations.
 
 **Deep learning is a different regime entirely.** `neuralprophet` measures at **21–65 s/fit**
 against sub-second statistical models — 50x or more — and it needs a GPU. Measured at 10,000 series
-on 12 T4s, it lands at **7.6 cells/min per T4 node** (the 2026-09-04 `all_families_10k` run, 1 h
+on 12 T4s, it lands at **7.6 fits/min per T4 node** (the 2026-09-04 `all_families_10k` run, 1 h
 50 m for 10,000 cells) — post-fix, like the CPU anchor. The arithmetic in [§3](#3-the-table) is
 built on both.
 
@@ -147,8 +153,8 @@ regionally uneven than the Compute Engine one: on the project used for the
 [validation ledger](validation.md) it is 12 in `us-central1` but **2** in both `us-east1` and
 `us-west1`, so a failover region may be a third of the capacity you sized for.
 
-At **7.6 cells/min per T4** — measured, see below — one deep-learning model over the same series
-counts:
+At **7.6 fits/min per T4** — measured, see below — one deep-learning model over the same series
+counts, *without* backtesting (with `n_folds: 2`, multiply by three):
 
 | Series | Wall clock on **4 T4s** (Dataproc default) | On **12 T4s** (Ray default) | T4s for a **~1-hour** run |
 |---|---|---|---|
@@ -167,18 +173,31 @@ unused. If you deploy to a region with a smaller Vertex allowance, lower it — 
 `ray_gpu_min_nodes` and a `max` above your quota is not an error, just a ceiling the autoscaler
 never reaches.
 
-**Where the 7.6 cells/min/T4 anchor comes from.** It replaces an extrapolation from runs of 100
+**Where the 7.6 fits/min/T4 anchor comes from.** It replaces an extrapolation from runs of 100
 series or fewer, in which cluster start-up was a large fraction of the span. On 2026-09-04
 `all_families_10k.json` fit **10,000 `neuralprophet` series across 12 T4s in 1 h 50 m** — 91
-cells/min for the fleet. The 10,000-series row above is therefore not a projection; it is that run.
+fits/min for the fleet. The 10,000-series row above is therefore not a projection; it is that run.
+`all_families_10k_full.json` re-measured it the next day at 3 fits per cell and landed at **8.2
+fits/min/T4**, which is the same number: the anchor is per *fit*, and backtesting buys more of them.
 
-Two things about the number are worth understanding before you plan with it. **It is a throughput
-figure, not a latency figure.** The average individual fit in that run took 43.5 s, which is
-1.4 cells/min if you watch a single series — roughly seven cells share each T4, and they contend.
-Sizing from the per-cell time will over-provision you by about 5x. **And it is `neuralprophet` on a
-T4 at this data's shape.** A different model, a different device, or much longer series will move
-it. The rate is the right starting point precisely because it is now measured rather than guessed;
-it is still your own first run that tells you your number. Plan with these, then measure.
+Three things about it are worth understanding before you plan with it.
+
+**It is a throughput figure, not a latency figure.** The average individual fit took 43.5 s, which is
+1.4 fits/min if you watch a single series — roughly seven fits share each T4, and they contend.
+Sizing from the per-fit time will over-provision you by about 5x.
+
+**Your GPU pool will run out of cores before it runs out of GPU.** A deep-learning task asks for one
+vCPU *and* a fraction of a device, and on the default `n1-standard-8` GPU worker the vCPUs run out
+first: 12 nodes give 84 usable cores, so 84 fits run concurrently and the T4s sit at **8.4 of 12
+busy** — 70 % — for the whole run. That is not a defect and not the memory bug from
+[§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out); it is the machine shape. If you want the
+last 30 % of your GPU allowance, give each T4 more vCPUs by raising `ray_gpu_machine_type`, not by
+raising `ray_gpu_max_nodes` — more nodes you cannot feed cost quota and deliver nothing.
+
+**And it is `neuralprophet` on a T4 at this data's shape.** A different model, a different device, or
+much longer series will move it. The rate is the right starting point precisely because it is now
+measured rather than guessed; it is still your own first run that tells you your number. Plan with
+these, then measure.
 
 ---
 
@@ -345,8 +364,8 @@ note at `WARNING` when memory rather than cores is what limits a pool.
 
 Before filing for 460 vCPUs, three things cost nothing:
 
-**Cut cells, not corners.** `cells = series x models x folds`. Dropping one expensive model from a
-100,000-series run removes 100,000 cells. Backtesting with 2 folds doubles the run. Both are
+**Cut cells, not corners.** `fits = series x models x (folds + 1)`. Dropping one expensive model from
+a 100,000-series run removes 100,000 cells. Backtesting with 2 folds costs ~2.8x, measured. Both are
 one-line config changes, and both are usually the right answer during development — run the full
 model set at 1,000 series, then the shortlist at 100,000.
 
