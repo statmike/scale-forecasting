@@ -96,8 +96,14 @@ demos are untouched. The rows that do declare it are the three large ones — `r
 measurement of what each one lost — the pre-pass ran on all three and what it feeds the slot has
 changed. On the third the cost is measured, and it is large: `all_families_10k` was re-run under the
 fix the same day and came in **3.8x faster end to end**, with the deep-learning family 4.1x faster.
-That is the scale of what `ray_autoscale_demo` and `ray_100k` are now claiming without evidence. It
-is
+
+**Two of the three have now been re-earned, and the mechanism scoping held.** `ray_autoscale_demo`
+re-ran on 2026-09-05 in **2,513 s against 5,223 s — 2.08x** on the same config, same `run_id`, same
+eight-node ceiling. The dashboard read mid-run is the cleanest picture of the defect and its fix
+anywhere in this file: every one of the eight workers at `CPU [7.0, 7.0]`, 56 cells in flight and
+1,732 queued, where the pre-fix regime put roughly one cell on a node with seven idle cores. Nothing
+about the pool changed — same machine type, same `max`, same autoscaler. Only what a task claimed it
+needed. It is
 also the second time the Ray memory axis has cost a run — on 2026-09-03 `ray_100k` sat at zero cells
 for 57 minutes behind an unschedulable ~21 GiB per-task request, recorded at the end of this file.
 That one asked for more than a node had and never placed; this one asked for 97 % of a node, which
@@ -711,7 +717,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | CURRENT | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
-| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | STALE | 2026-09-01 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=driver-rss-prepass` |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-03 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=driver-rss-prepass` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | CURRENT | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
