@@ -338,7 +338,12 @@ def run_cell(
             artifact_bytes=artifact_bytes,
             cpu_seconds=cpu_seconds if measuring else None,
             process_rss_bytes=_process_rss_bytes() if measuring else None,
-            peak_gpu_bytes=_peak_gpu_bytes() if measuring else None,
+            # Unconditional, unlike its neighbours: this is the only record of whether a device
+            # the run paid for was ever visible to a cell, and gating it on profiling left 8 of
+            # 21 historical GPU jobs with no evidence either way. It is also the cheapest probe
+            # here — `_peak_gpu_bytes` memoizes "no accelerator" per process, so a CPU-only
+            # worker pays one failed import for its whole life and every later cell short-circuits.
+            peak_gpu_bytes=_peak_gpu_bytes(),
             intraop_threads=intraop_threads,
             n_obs=len(series) if measuring else None,
         )

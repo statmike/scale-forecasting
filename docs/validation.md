@@ -39,10 +39,20 @@ old value goes stale by definition.
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 | `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
 | `ray_slot_memory` | `harvest-only` | `efecb4c` (2026-09-04) | `driver-rss-prepass` |
+| `dl_gpu_routing` | `resolved-per-family` | P1 (2026-09-05) | `flat-compute.use_gpu` |
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not
 declare this axis.
+
+`dl_gpu_routing` is narrower than it looks, and the scoping is deliberate rather than an omission.
+It governs how `engines/ray_engine` decides whether *this* job has a device, so only a row with a
+deep-learning family **on Ray** declares it. Two groups are therefore left alone. Spark rows never
+enter that file at all. Rows whose config asks for a GPU through the flat `compute.use_gpu` field —
+`ray_gpu_demo`, `all_families_10k`, `all_families_10k_full` — are unaffected because the old code
+and the new code return the same answer for a flat config: the old path read `compute.use_gpu`
+directly, the new one asks `resolve_family_compute`, which for a config with no family override
+resolves to exactly that flat field. Only the per-family shape made the two disagree.
 
 `fleet_sizing` governs **how a Spark fleet's shape is decided**. Until W7b/W8 we stated a worker or
 executor *count* and let the platform choose everything else: Dataproc Serverless picked its own
@@ -171,14 +181,14 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-03 | `smoke-08-ray-gpu-38e33f02fd6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | CURRENT | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | CURRENT | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | STALE | 2026-09-03 | `smoke-08-ray-gpu-38e33f02fd6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
+| 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `dl_gpu_routing=flat-compute.use_gpu` |
+| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | CURRENT | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | CURRENT | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | CURRENT | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
@@ -552,12 +562,63 @@ get the DL family running on something. It costs a cluster-hour and produces no 
 project turned out not to be in that state after all, which lowers how often *we* will hit it and
 changes nothing about the defect.
 
-Not fixed here, for the same reason as the failover above: there is more than one defensible answer
-(fold DL models into the CPU pool when `use_gpu` is false, so a CPU Ray run of a DL family simply
-runs slowly; or reject a zero-worker plan before provisioning; or both), and the sizing path feeds
-`run_id`-relevant config. Until it is fixed, **`hardware: cpu` on a `deep_learning` Ray family is a
-hang, not a slower run.** The zero-worker plan is the detectable signal — no valid run ever wants
-one.
+Not fixed at the time, for the same reason as the failover above: there is more than one defensible
+answer (fold DL models into the CPU pool when `use_gpu` is false, so a CPU Ray run of a DL family
+simply runs slowly; or reject a zero-worker plan before provisioning; or both), and the sizing path
+feeds `run_id`-relevant config. The zero-worker plan is the detectable signal — no valid run ever
+wants one.
+
+**Fixed since, in two steps.** `split_gpu_cpu_models` took the first option and grew a `use_gpu`
+parameter: with no GPU pool, deep-learning cells belong to the CPU pool rather than to a pool that
+will not exist. That left one gap, because the engine was still computing `use_gpu` from the flat
+`compute.use_gpu` field — so a config combining flat `use_gpu: true` with a family override of
+`hardware: "cpu"` still routed cells at a device the submitter had not bought. P1 closes that by
+having the engine resolve its GPU decision from the same per-family resolver the submitter
+provisions from (see the section above). Both directions are covered offline by
+`tests/unit/test_gpu_routing_coherence.py`; **neither has been re-proven live**, and a Ray
+deep-learning family on `hardware: cpu` remains an untested live shape.
+
+### Five Ray rows bought accelerators that no cell ever saw
+
+There are two ways to ask for a GPU. The flat `compute.use_gpu` / `compute.gpu_type` pair is the
+original one; `compute.families.deep_learning.hardware` is the per-family one, and it is what every
+example config written since the multi-runtime DAG landed uses.
+`config.RunConfig.resolve_family_compute` reconciles the two, and the submitter provisions from its
+answer. `engines/ray_engine` did not ask it — it read the flat field directly, in five places. For a
+per-family config the flat field is `False`, so the submitter provisioned accelerators and the
+engine sent every deep-learning cell to the CPU pool. Nothing raised, nothing warned, and the run
+finished green.
+
+The registry says so unambiguously, and it says so on the recorded runs rather than on a
+reconstruction. Across the five per-family Ray rows — smokes 08, 09, 10, 15 and
+`per_family_runtimes_demo` — **550 of 550 `neuralprophet` cells report `peak_gpu_bytes` as NULL,
+and all 550 report `cpu_seconds`.** That second half is what makes the first half readable: a NULL
+`peak_gpu_bytes` means either "no CUDA device was visible" or "profiling was off", and a recorded
+`cpu_seconds` rules out the second. The three Ray rows that ask through the flat field recorded a
+device on every cell in the same period — `ray_gpu_demo` at 56,320 bytes, both `all_families_10k`
+runs at 77,824 — so this is not a gap in the probe.
+
+So the five rows are STALE for the plainest possible reason: what they claim to prove is the thing
+that did not happen. Smoke 08's whole purpose is "Ray on Vertex, GPU T4"; smoke 09's is a shared
+cluster with a GPU pool beside the CPU one. Their other claims — the DAG shape, the shared cluster,
+Airflow orchestrating five models across three runtimes — all held, and the runs are real. Only the
+accelerator half is void, and the ledger has no way to stale half a row.
+
+Two details worth keeping. First, the numbers those runs produced are still correct: NeuralProphet
+falls back to CPU inside the cell, so the forecasts are forecasts, just slower and on hardware
+nobody meant to pay for. Second, the bug ran in the other direction too — flat `use_gpu: true` with
+a family override of `hardware: "cpu"` had the engine asking Ray for `num_gpus` against a cluster
+with no GPU nodes, which presents as a permanent hang rather than an error. No shipped config is in
+that shape, so no row is affected, but it is the same one-line cause.
+
+P1 gives the engine one source of truth, `ray_io.resolve_job_gpu`, which asks the same resolver the
+submitter provisions from. A static test walks `ray_engine`'s AST and fails if any read of
+`...compute.use_gpu` or `...compute.gpu_type` comes back, because fixing five call sites does not
+stop a sixth from being added; the behavioural tests cover both directions. The `peak_gpu_bytes`
+probe is now unconditional rather than gated on profiling, so a future run of this shape leaves
+evidence either way instead of leaving nothing. **Re-running these five is the point of the live
+campaign, and the bar for a re-run is not a green PASS — it is a non-NULL `peak_gpu_bytes` on the
+deep-learning cells.**
 
 ### Why almost everything Spark is stale
 
@@ -734,7 +795,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | CURRENT | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | CURRENT | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | STALE | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
@@ -1204,7 +1265,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | Headless execution of the tour notebooks against a fresh deployment. The notebook rows above were proven by the acceptance harness, which is not the same path. Its documented `--tier` table was walked on 2026-09-02 and was two notebooks out of date (3/5/6 against the registry's 4/7/8); corrected. |
 | Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The tour notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. The tour table listed six on 2026-09-02 while Act 2 pre-rendered eight; `08_run_and_monitor` and `09_review_run` were added, so the count is now eight. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
-| Airflow DAG emitter (`airflow_emit`) | CURRENT | Smoke 15, 2026-09-03: an emitted `dag_<run_id>.py` was parsed by a real Composer 3 / Airflow 2.10.5 scheduler (`has_import_errors: false`) and orchestrated a five-family run across Serverless Spark, Ray-on-Vertex GPU and BigQuery to `COMPLETED`. The Airflow-produced `run_id` equalled the locally-resolved one — the same-code local↔Composer claim. See below. |
+| Airflow DAG emitter (`airflow_emit`) | CURRENT | Smoke 15, 2026-09-03: an emitted `dag_<run_id>.py` was parsed by a real Composer 3 / Airflow 2.10.5 scheduler (`has_import_errors: false`) and orchestrated a five-family run across Serverless Spark, Ray-on-Vertex and BigQuery to `COMPLETED`. The Airflow-produced `run_id` equalled the locally-resolved one — the same-code local↔Composer claim. **Narrowed 2026-09-05:** the Ray family in that run asked for a T4 per-family and got no device (see the `dl_gpu_routing` section), so what Airflow is proven to orchestrate is Ray-on-Vertex, not Ray-on-Vertex *GPU*. Orchestration is what this row claims and orchestration held. See below. |
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. The handle fix then landed and was re-proven live the same day: `--probe` against `ray-dl-on-cpu-probe-2e8a9f3f5c8d`, a single-family ephemeral Ray run, escalated out-of-process and returned `RUNNING_CONFIRMED`. Scope is now the whole verb, on every runtime. |
 | RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Re-run live 2026-09-02 against a purpose-built single-family Ray job and the verb now reaches it** (`deep_learning cancelled — ray job stop issued`, count line correct at `1 of 1`, launcher unwound and tore the cluster down, teardown REST-verified). **New scope: the cancellation does not survive.** The launcher finalized the run `FAILED` 17 s after the cancel wrote `header=CANCELLED`, so the registry cannot distinguish a deliberate stop from a crash. See below. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
@@ -1697,6 +1758,16 @@ which is why it transfers to a user's data in a way a memory bound does not.
 ## Known validation gaps
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
+
+- **Nothing yet fails a run that paid for a GPU and never touched one.** The `dl_gpu_routing` fix
+  makes the engine route where the submitter provisions, and the `peak_gpu_bytes` probe now records
+  on every cell rather than only under profiling — but recording is not checking. A run in that
+  state still reports `COMPLETED`, and the only reason we know five earlier ones were in it is that
+  somebody queried the registry by hand. The missing piece is a verdict at the end of a
+  GPU-provisioned job: if no deep-learning cell reports device bytes, say so where the operator will
+  see it. Until that exists, "the GPU was used" is a manual check on every GPU run, per runtime —
+  Ray on Vertex, Serverless Spark and cluster Spark each provision accelerators by a different
+  mechanism, so a passing check on one says nothing about the other two.
 
 - **A per-task memory clamp with no headroom is unschedulable, and no offline test could have
   caught it. Fixed 2026-09-03 at `17e1221` and proven live the same day.** `ray_100k` held at zero cells for

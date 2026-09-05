@@ -1,4 +1,13 @@
-"""NeuralProphet — the one model that benefits from a GPU.
+"""NeuralProphet — a neural additive forecaster (the ``deep_learning`` family).
+
+**On GPUs, measured rather than assumed.** This file used to open by calling NeuralProphet "the one
+model that benefits from a GPU". It does not, at the parameters we construct it with. Across 31,356
+fits on live T4s, peak device memory was 50–78 KB against a card holding 17,179,869,184, while
+``cpu_seconds / fit_seconds`` sat between 0.93 and 0.996 on a single thread. The reason is not a
+broken install — CUDA initializes and the tensors are device-resident — it is that we never pass
+``n_lags``, so NeuralProphet's own default of 0 applies and the network is a few hundred trend and
+Fourier parameters. The Lightning loop, the dataloader and pandas dwarf the kernels. Autoregression
+(``n_lags > 0``, AR-Net) is what would make the device worth attaching, and it is not wired yet.
 
 One model, one file. Runtime python, deep_learning family. NeuralProphet is
 an optional dependency, imported lazily in ``fit`` so the model registers without it (and

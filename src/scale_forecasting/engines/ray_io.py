@@ -159,6 +159,31 @@ def split_gpu_cpu_models(
     return gpu_models, cpu_models
 
 
+def resolve_job_gpu(cfg: RunConfig) -> tuple[bool, str | None]:
+    """This Ray job's GPU decision, from the *resolved* per-family compute (pure).
+
+    The single answer to "does this job have a device, and which one" — the same
+    `config.RunConfig.resolve_family_compute` the submitter provisions from and the DAG
+    orchestrator plans from. The engine must ask this rather than read ``compute.use_gpu``
+    directly, because that flat field is only one of the two ways a run can request a GPU.
+
+    **This exists because reading the flat field shipped a real defect.** A config that asks
+    per-family — ``compute.families.deep_learning.hardware: "gpu"``, which is the documented
+    way — leaves ``compute.use_gpu`` at ``False``. The submitter resolved the family and
+    provisioned accelerators; the engine read the flat field, sent every deep-learning cell to
+    the CPU pool, and the devices sat idle for the whole run with nothing reporting it. It also
+    ran the reverse: flat ``use_gpu: true`` with a family override of ``hardware: "cpu"``
+    provisioned no GPU nodes while the engine still asked Ray for ``num_gpus``, leaving tasks
+    permanently unschedulable. Both disappear once provisioning and routing read one function.
+
+    Returns ``(has_gpu, gpu_type)``. Only ``deep_learning`` can resolve to a GPU, so that is the
+    family asked; a config with no deep-learning model still answers, and the answer costs
+    nothing because the resolver is pure.
+    """
+    dl = cfg.resolve_family_compute(_GPU_FAMILY)
+    return dl.hardware == "gpu", dl.gpu_type
+
+
 # --- pure: auto-fraction calibration -------------------------------------------
 
 

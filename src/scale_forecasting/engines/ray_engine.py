@@ -310,7 +310,10 @@ def run(
     settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
     executed = models if models is not None else cfg.models
-    gpu_models, cpu_models = ray_io.split_gpu_cpu_models(cfg, executed)
+    # One GPU decision for this job, from the resolved per-family compute the submitter
+    # provisioned from. Never the flat compute.use_gpu — see ray_io.resolve_job_gpu.
+    job_gpu, job_gpu_type = ray_io.resolve_job_gpu(cfg)
+    gpu_models, cpu_models = ray_io.split_gpu_cpu_models(cfg, executed, use_gpu=job_gpu)
     _log.info(
         "ray run start: run_id=%s series_limit=%s gpu_models=%s cpu_models=%s manage_header=%s",
         run_id,
@@ -342,11 +345,11 @@ def run(
             # when "auto". Sample series only when auto (profiling costs) and a GPU is present.
             sample = (
                 _sample_series(source, cfg)
-                if (gpu_models and cfg.compute.use_gpu and cfg.compute.gpu_fraction == "auto")
+                if (gpu_models and job_gpu and cfg.compute.gpu_fraction == "auto")
                 else None
             )
             gpu_fraction = ray_io.calibrate_gpu_fraction(
-                cfg, sample_series=sample, gpu_type=cfg.compute.gpu_type
+                cfg, sample_series=sample, gpu_type=job_gpu_type
             )
 
             # Measure what the models actually cost before deciding what to ask Ray for. Driver-side
@@ -431,8 +434,13 @@ def _pool_plans(
     grow. When no device is provisioned there is no GPU pool to plan against: `split_gpu_cpu_models`
     has already put the deep-learning models in ``cpu_models`` (NeuralProphet falls back to CPU
     inside the cell — the run still finishes, just slower), so ``gpu_models`` is empty and the GPU
-    plan is a zero-cell placeholder. ``gpu=cfg.compute.use_gpu`` therefore only matters for the
-    pool's task options in the case where a device *does* exist.
+    plan is a zero-cell placeholder.
+
+    The GPU decision comes from `ray_io.resolve_job_gpu` — the resolved per-family compute, which
+    is what the submitter provisioned from — and **not** from the flat ``compute.use_gpu``. Reading
+    the flat field here is what let a run buy accelerators and then size a pool that asked for
+    none. Re-resolving rather than taking it as an argument is deliberate: the function is pure and
+    cheap, and an argument is one more thing that can be threaded through inconsistently.
 
     The cell counts come from the panel that was actually read, not from ``series_limit``, so the
     sizing reflects the run rather than its upper bound. The autoscaling ceilings, however, come
@@ -440,7 +448,15 @@ def _pool_plans(
     engine cannot widen them now; re-deriving them here would let the chunk count chase a ceiling
     the pool can never reach. Pure (no Ray, no GPU) so the routing stays unit-testable.
     """
-    cluster = ray_io.plan_cluster(cfg, cpu_models + gpu_models, run_id=run_id, profile=profile)
+    job_gpu, job_gpu_type = ray_io.resolve_job_gpu(cfg)
+    cluster = ray_io.plan_cluster(
+        cfg,
+        cpu_models + gpu_models,
+        run_id=run_id,
+        use_gpu=job_gpu,
+        gpu_type=job_gpu_type,
+        profile=profile,
+    )
     cpu_plan = ray_io.plan_pool(
         cfg,
         cpu_models,
@@ -453,8 +469,8 @@ def _pool_plans(
         cfg,
         gpu_models,
         _pool_cells(source, cfg, gpu_models),
-        gpu=cfg.compute.use_gpu,
-        gpu_type=cfg.compute.gpu_type,
+        gpu=job_gpu,
+        gpu_type=job_gpu_type,
         profile=profile,
         gpu_fraction=gpu_fraction,
         max_units=cluster.gpu_max_nodes,
