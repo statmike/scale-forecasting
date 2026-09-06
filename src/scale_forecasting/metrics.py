@@ -19,6 +19,10 @@ Definitions (n = horizon, e = yhat - y_true):
 - bias  = mean(e)   (mean error / ME)
 - coverage = fraction of y_true within [lower, upper]  (needs intervals)
 - pinball  = mean quantile loss across the interval bounds (needs intervals)
+- mase_seasonal = mae / mae_naive, naive = *seasonal* (m=`seasonal_period`) on y_train
+- maape = mean(arctan(|e| / |y_true|))  — defined at y_true == 0, unlike MAPE
+- interval_score  = mean Winkler score of [lower, upper] at α = 0.2  (needs intervals)
+- interval_width  = mean(upper - lower)  (needs intervals)
 """
 
 from __future__ import annotations
@@ -35,7 +39,13 @@ if TYPE_CHECKING:
 _LOWER_Q = 0.1
 _UPPER_Q = 0.9
 
+# The nominal miss rate of the [0.1, 0.9] interval — the α the Winkler interval score
+# penalises with. Derived from the bounds above so the two can never drift apart.
+_INTERVAL_ALPHA = 2.0 * _LOWER_Q
+
 # Panel order — kept identical to config.DecisionMetric / the DDL (single source of truth).
+# New metrics append at the *tail*: the DDL and the Storage Write API spec are generated
+# from this order, and only a tail append leaves the existing columns where they are.
 METRIC_NAMES: tuple[str, ...] = (
     "mae",
     "rmse",
@@ -48,6 +58,10 @@ METRIC_NAMES: tuple[str, ...] = (
     "bias",
     "coverage",
     "pinball",
+    "mase_seasonal",
+    "maape",
+    "interval_score",
+    "interval_width",
 )
 
 
@@ -57,6 +71,7 @@ def compute_metrics(
     y_train: Sequence[float] | np.ndarray | None = None,
     lower: Sequence[float] | np.ndarray | None = None,
     upper: Sequence[float] | np.ndarray | None = None,
+    seasonal_period: int | None = None,
 ) -> dict[str, float]:
     """Compute the full metric panel for one forecast window.
 
@@ -66,6 +81,10 @@ def compute_metrics(
         y_train: training-history actuals; required for scale-free MASE/RMSSE (else NaN).
         lower: lower prediction bound; with ``upper`` enables coverage/pinball (else NaN).
         upper: upper prediction bound.
+        seasonal_period: steps in one seasonal cycle, from `seasonality.seasonal_period`;
+            required for ``mase_seasonal`` (else NaN). Callers pass the run frequency's
+            period rather than a default, because guessing it here would silently score
+            an hourly run against a weekly naive.
 
     Returns:
         ``{name: float}`` for every name in `METRIC_NAMES`. Undefined metrics are NaN.
@@ -95,6 +114,10 @@ def compute_metrics(
     out["rmsse"] = _scaled(out["rmse"], y_train, kind="rmse")
     out["coverage"] = _coverage(yt, lower, upper)
     out["pinball"] = _pinball(yt, lower, upper)
+    out["mase_seasonal"] = _scaled_seasonal(out["mae"], y_train, seasonal_period)
+    out["maape"] = _maape(yt, abs_err)
+    out["interval_score"] = _interval_score(yt, lower, upper)
+    out["interval_width"] = _interval_width(lower, upper)
     return out
 
 
@@ -137,6 +160,74 @@ def _scaled(numerator: float, y_train: object, *, kind: str) -> float:
     if scale == 0:
         return float("nan")  # flat training history → undefined scaling
     return numerator / scale
+
+
+def _scaled_seasonal(mae: float, y_train: object, period: int | None) -> float:
+    """MASE against a *seasonal* naive (y_t vs y_{t-m}) instead of the one-step naive.
+
+    The m=1 `_scaled` denominator is the last observation, which on a strongly seasonal
+    series is an easy baseline to beat — every model scores well and MASE stops
+    discriminating. The seasonal naive is the honest baseline there.
+
+    NaN when the period is unknown, when the history is shorter than one full cycle plus
+    one step, or when the seasonal naive is exactly flat (nothing to scale by).
+    """
+    if y_train is None or period is None or period < 1:
+        return float("nan")
+    tr = np.asarray(y_train, dtype=float)
+    if tr.size <= period:
+        return float("nan")
+    scale = float(np.mean(np.abs(tr[period:] - tr[:-period])))
+    if scale == 0:
+        return float("nan")
+    return mae / scale
+
+
+def _maape(yt: np.ndarray, abs_err: np.ndarray) -> float:
+    """Mean arctangent absolute percentage error — MAPE that survives zeros.
+
+    MAPE is NaN for the whole window if a single actual is 0. MAAPE takes the arctangent
+    of the ratio, so a zero actual contributes π/2 (the bounded worst case) instead of
+    poisoning everything: intermittent-demand series get a percentage-flavoured score
+    they can actually be ranked by. Range is [0, π/2].
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.abs(abs_err / np.abs(yt))
+    # 0/0 is a perfect match at a zero actual, not an infinite error.
+    ratio = np.where((yt == 0) & (abs_err == 0), 0.0, ratio)
+    return float(np.mean(np.arctan(ratio)))
+
+
+def _interval_score(yt: np.ndarray, lower: object, upper: object) -> float:
+    """Mean Winkler interval score at α = `_INTERVAL_ALPHA` — sharpness *and* calibration.
+
+    Coverage says whether the actuals fell inside; width says how wide the band was.
+    Either alone is trivially gamed (an infinite band covers everything, a zero-width one
+    is maximally sharp). The Winkler score is the width plus a 2/α penalty for each miss,
+    proportional to how far outside it landed, so it is the single number that ranks
+    interval quality. Lower is better.
+    """
+    if lower is None or upper is None:
+        return float("nan")
+    lo = np.asarray(lower, dtype=float)
+    up = np.asarray(upper, dtype=float)
+    penalty = 2.0 / _INTERVAL_ALPHA
+    score = (up - lo) + penalty * np.maximum(lo - yt, 0.0) + penalty * np.maximum(yt - up, 0.0)
+    return float(np.mean(score))
+
+
+def _interval_width(lower: object, upper: object) -> float:
+    """Mean width of the prediction interval — the sharpness half of `_interval_score`.
+
+    Reported on its own because it is the one number a planner reads directly: it is in
+    the units of the series, so "how uncertain is this forecast" needs no calibration
+    lesson to interpret.
+    """
+    if lower is None or upper is None:
+        return float("nan")
+    lo = np.asarray(lower, dtype=float)
+    up = np.asarray(upper, dtype=float)
+    return float(np.mean(up - lo))
 
 
 def _coverage(yt: np.ndarray, lower: object, upper: object) -> float:

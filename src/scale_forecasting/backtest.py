@@ -29,6 +29,7 @@ import pandas as pd
 from .errors import ConfigError
 from .features import build_features, invert_transform
 from .metrics import compute_metrics
+from .seasonality import seasonal_period
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -153,7 +154,14 @@ def backtest_cell(
                 }
             )
         )
-        fold_metrics.append(compute_metrics(y_true, yhat, y_train=y_train_orig))
+        fold_metrics.append(
+            compute_metrics(
+                y_true,
+                yhat,
+                y_train=y_train_orig,
+                seasonal_period=seasonal_period(cfg.data.freq),
+            )
+        )
 
     oof = (
         pd.concat(oof_parts, ignore_index=True)

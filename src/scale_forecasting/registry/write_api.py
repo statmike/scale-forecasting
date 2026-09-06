@@ -40,6 +40,8 @@ _PRED_SPEC: tuple[tuple[str, str], ...] = (
     ("yhat_lower", "D"),
     ("yhat_upper", "D"),
     ("quantiles", "S"),
+    # Reserved — declared so the deployment migration happens once; no assembler emits it yet.
+    ("created_at", "S"),
 )
 
 _OOF_SPEC: tuple[tuple[str, str], ...] = (
@@ -50,6 +52,13 @@ _OOF_SPEC: tuple[tuple[str, str], ...] = (
     ("forecast_date", "S"),
     ("y_true", "D"),
     ("yhat", "D"),
+    # Reserved, as above: the fold's origin and the step within its horizon, the interval bounds
+    # the native path already has and the Python path does not, and the write timestamp.
+    ("cutoff_date", "S"),
+    ("horizon_step", "I"),
+    ("yhat_lower", "D"),
+    ("yhat_upper", "D"),
+    ("created_at", "S"),
 )
 
 _META_SPEC: tuple[tuple[str, str], ...] = (
@@ -78,6 +87,29 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("peak_gpu_bytes", "I"),
     ("intraop_threads", "I"),
     ("n_obs", "I"),
+    # Reserved — the cell-outcome block. Today a cell that fails is absent from this table and a
+    # backtest that quietly ran fewer folds than asked leaves no trace; these columns are where
+    # that record will go, so the migration is paid once rather than per phase.
+    ("cell_status", "S"),
+    ("error_class", "S"),
+    ("error_detail", "S"),
+    ("backtest_status", "S"),
+    ("backtest_note", "S"),
+    ("n_folds_achieved", "I"),
+    ("achieved_step", "I"),
+    ("achieved_min_train", "I"),
+    ("first_val_date", "S"),
+    ("last_val_date", "S"),
+    ("interval_source", "S"),
+    ("ensemble_scoring", "S"),
+    ("hpo_scoring", "S"),
+    ("n_fits", "I"),
+    ("train_rows_total", "I"),
+    # Reserved — what hardware the cell asked for, what it found, and what it actually ran on.
+    ("device_requested", "S"),
+    ("device_available", "S"),
+    ("device_used", "S"),
+    ("device_name", "S"),
 )
 
 # Which assembler feeds which table, and its column spec. Driven in this one place so

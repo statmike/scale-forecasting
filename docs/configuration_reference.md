@@ -196,10 +196,23 @@ fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold
 | `bias` | mean(err) | Mean error — sign shows over/under-forecast. HPO minimizes \|bias\|. |
 | `coverage` | fraction of `y_true` inside [lower, upper] | **Needs prediction intervals**; want it near the nominal level. |
 | `pinball` | avg quantile loss at the 0.1 / 0.9 bounds | **Needs prediction intervals**; scores interval sharpness+calibration. |
+| `mase_seasonal` | mae / mae(seasonal naïve) | `mase` against `y_{t−m}` instead of `y_{t−1}`, where *m* is the `freq`'s cycle (7 daily, 12 monthly, 24 hourly). **Needs training history longer than one cycle.** |
+| `maape` | mean(arctan(\|err\| / \|y_true\|)) | `mape` that survives zeros — a zero actual contributes π/2 instead of NaN-ing the window. Range [0, π/2]. |
+| `interval_score` | mean Winkler score at α = 0.2 | **Needs prediction intervals**; width plus a penalty for each miss. Lower is better. |
+| `interval_width` | mean(upper − lower) | **Needs prediction intervals**; sharpness only, in the units of the series. |
 
-Pick `wape` (default) or `smape` for a robust scale-independent choice; `mase`/`rmsse` when you want
-to beat a naïve baseline; `coverage`/`pinball` only when you care about the prediction intervals
-(ensemble OOF has no intervals, so those two read NaN for ensembles).
+Pick `wape` (default) or `smape` for a robust scale-independent choice; `maape` instead of `mape`
+on intermittent-demand series that hit zero; `mase`/`rmsse` to beat a naïve baseline, or
+`mase_seasonal` when the series is strongly seasonal and the one-step naïve is too easy to beat.
+The four interval metrics — `coverage`, `pinball`, `interval_score`, `interval_width` — only mean
+something when you care about the prediction bands, and ensemble OOF has no intervals, so all four
+read NaN for ensembles.
+
+**On the two interval scores:** `coverage` and `interval_width` are each half of the story and
+each trivially gamed — an infinitely wide band covers everything, a zero-width one is maximally
+sharp. `interval_score` is the one number that combines them, which is why it is the sensible
+`decision_metric` if intervals are what you are ranking on. The other two are worth reading
+alongside it because they say *how* a model got its score.
 
 ## `model_params` — hyperparameters you set yourself
 

@@ -24,6 +24,20 @@ Schema evolution is additive: when a new NULLABLE column is added to a body belo
 the *same* bodies, so a table created under an older schema can be brought up to date
 without the CREATE and the migration ever drifting apart (``ensure_tables`` runs both).
 
+**Some columns are declared ahead of the code that fills them, on purpose.** Adding a column
+to a deployed table is a migration every existing deployment has to run, so the columns the
+next few phases need land in one batch rather than one at a time; until their producer
+ships they read NULL. Keep the list in ``tests/unit/test_registry_column_parity.py``
+(``_RESERVED_*``) in step — it is the record of which columns have no producer yet, and it must
+shrink to empty.
+Reserved today: on ``forecast_metadata``, the cell-outcome block (``cell_status`` through
+``train_rows_total``) and the four ``device_*`` columns; on ``backtest_oof``, ``cutoff_date``,
+``horizon_step``, ``yhat_lower``, ``yhat_upper`` and ``created_at``; on
+``forecast_predictions``, ``created_at``.
+
+The bodies below carry no SQL comments inside the parentheses — ``additive_columns`` splits the
+column block on commas and would read a comment line as a column.
+
 **The two families are addressable separately.** ``REGISTRY_TABLE_NAMES`` and
 ``SOURCE_TABLE_NAMES`` partition ``TABLE_NAMES``, and every renderer takes an optional ``tables``
 subset plus its own ``dataset``. That is what lets a deployment put its registry in one dataset and
@@ -98,6 +112,8 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   mae FLOAT64, rmse FLOAT64, mse FLOAT64, mape FLOAT64, smape FLOAT64,
   wape FLOAT64, mase FLOAT64, rmsse FLOAT64, bias FLOAT64,
   coverage FLOAT64, pinball FLOAT64,
+  mase_seasonal FLOAT64, maape FLOAT64,
+  interval_score FLOAT64, interval_width FLOAT64,
   fit_seconds    FLOAT64,
   best_params    JSON,
   model_artifact STRING,
@@ -109,7 +125,26 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   process_rss_bytes INT64,
   peak_gpu_bytes INT64,
   intraop_threads INT64,
-  n_obs          INT64
+  n_obs          INT64,
+  cell_status    STRING,
+  error_class    STRING,
+  error_detail   STRING,
+  backtest_status STRING,
+  backtest_note  STRING,
+  n_folds_achieved INT64,
+  achieved_step  INT64,
+  achieved_min_train INT64,
+  first_val_date DATE,
+  last_val_date  DATE,
+  interval_source STRING,
+  ensemble_scoring STRING,
+  hpo_scoring    STRING,
+  n_fits         INT64,
+  train_rows_total INT64,
+  device_requested STRING,
+  device_available STRING,
+  device_used    STRING,
+  device_name    STRING
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id, model_type""",
@@ -124,7 +159,8 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_predictions` (
   yhat          FLOAT64,
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
-  quantiles     JSON
+  quantiles     JSON,
+  created_at    TIMESTAMP
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",
@@ -136,7 +172,12 @@ CREATE TABLE IF NOT EXISTS `{d}.backtest_oof` (
   fold_id       INT64 NOT NULL,
   forecast_date DATE NOT NULL,
   y_true        FLOAT64,
-  yhat          FLOAT64
+  yhat          FLOAT64,
+  cutoff_date   DATE,
+  horizon_step  INT64,
+  yhat_lower    FLOAT64,
+  yhat_upper    FLOAT64,
+  created_at    TIMESTAMP
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id""",

@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   mae FLOAT64, rmse FLOAT64, mse FLOAT64, mape FLOAT64, smape FLOAT64,
   wape FLOAT64, mase FLOAT64, rmsse FLOAT64, bias FLOAT64,
   coverage FLOAT64, pinball FLOAT64,
+  mase_seasonal FLOAT64, maape FLOAT64,
+  interval_score FLOAT64, interval_width FLOAT64,
   fit_seconds    FLOAT64,
   best_params    JSON,
   model_artifact STRING,
@@ -62,7 +64,26 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   process_rss_bytes INT64,
   peak_gpu_bytes INT64,
   intraop_threads INT64,
-  n_obs          INT64
+  n_obs          INT64,
+  cell_status    STRING,
+  error_class    STRING,
+  error_detail   STRING,
+  backtest_status STRING,
+  backtest_note  STRING,
+  n_folds_achieved INT64,
+  achieved_step  INT64,
+  achieved_min_train INT64,
+  first_val_date DATE,
+  last_val_date  DATE,
+  interval_source STRING,
+  ensemble_scoring STRING,
+  hpo_scoring    STRING,
+  n_fits         INT64,
+  train_rows_total INT64,
+  device_requested STRING,
+  device_available STRING,
+  device_used    STRING,
+  device_name    STRING
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id, model_type;
@@ -77,7 +98,8 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_predictions` (
   yhat          FLOAT64,
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
-  quantiles     JSON
+  quantiles     JSON,
+  created_at    TIMESTAMP
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id;
@@ -89,7 +111,12 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.backtest_oof` (
   fold_id       INT64 NOT NULL,
   forecast_date DATE NOT NULL,
   y_true        FLOAT64,
-  yhat          FLOAT64
+  yhat          FLOAT64,
+  cutoff_date   DATE,
+  horizon_step  INT64,
+  yhat_lower    FLOAT64,
+  yhat_upper    FLOAT64,
+  created_at    TIMESTAMP
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id;

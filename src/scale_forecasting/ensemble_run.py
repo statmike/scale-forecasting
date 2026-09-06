@@ -317,6 +317,7 @@ def _ensemble_batch(
     from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
     from .registry.write_api import _META_SPEC, _PRED_SPEC
+    from .seasonality import seasonal_period
     from .worker import _rollup_metrics
 
     # Every table read here (forecast_predictions / backtest_oof / forecast_metadata) is a registry
@@ -418,6 +419,7 @@ def _ensemble_batch(
                     fg["y_true"].to_numpy(),
                     fg["yhat"].to_numpy(),
                     y_train=hist_by_id.get(ts_id),
+                    seasonal_period=seasonal_period(cfg.data.freq),
                 )
             )
         strategy = str(model_type).removeprefix("ensemble_")

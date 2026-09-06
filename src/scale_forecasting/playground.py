@@ -191,6 +191,7 @@ def bakeoff(
     from .ensemble_run import _apply_weights
     from .ensembler import combine_calculated, combine_oof, fit_learned
     from .metrics import METRIC_NAMES, compute_metrics
+    from .seasonality import seasonal_period
     from .worker import _rollup_metrics
 
     if models is None:
@@ -290,7 +291,12 @@ def bakeoff(
     ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
     for model_type, g in ens_oof.groupby("model_type"):
         fold_panels = [
-            compute_metrics(fg["y_true"].to_numpy(), fg["yhat"].to_numpy(), y_train=y_train)
+            compute_metrics(
+                fg["y_true"].to_numpy(),
+                fg["yhat"].to_numpy(),
+                y_train=y_train,
+                seasonal_period=seasonal_period(cfg.data.freq),
+            )
             for _fold, fg in g.sort_values("forecast_date").groupby("fold_id")
         ]
         panel = _rollup_metrics(fold_panels)

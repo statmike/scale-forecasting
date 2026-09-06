@@ -36,9 +36,28 @@ _log = get_logger(__name__)
 # --- shared vocabularies -------------------------------------------------------
 
 # The full metric panel. Kept here so the config's decision-metric field is
-# self-contained; the metrics module must match this set.
+# self-contained; the metrics module must match this set, in this order.
+#
+# Order is load-bearing and additions go at the *tail*: `registry.rows.METRIC_COLUMNS` is
+# `get_args` of this Literal, and both the `forecast_metadata` DDL and the Storage Write API
+# spec are generated from it. Widening the Literal itself is free for `run_id` — the digest
+# hashes dumped values, not the schema — but re-ordering it would move every metric column.
 DecisionMetric = Literal[
-    "mae", "rmse", "mse", "mape", "smape", "wape", "mase", "rmsse", "bias", "coverage", "pinball"
+    "mae",
+    "rmse",
+    "mse",
+    "mape",
+    "smape",
+    "wape",
+    "mase",
+    "rmsse",
+    "bias",
+    "coverage",
+    "pinball",
+    "mase_seasonal",
+    "maape",
+    "interval_score",
+    "interval_width",
 ]
 
 # Ensemble strategies. "Learned" strategies train on backtest OOF and

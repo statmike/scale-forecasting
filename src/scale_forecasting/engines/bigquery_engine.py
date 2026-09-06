@@ -112,6 +112,7 @@ def run(
     from ..registry.ids import make_run_id
     from ..registry.lifecycle import run_header
     from ..registry.write_api import _META_SPEC, _OOF_SPEC
+    from ..seasonality import seasonal_period
     from ..settings import Settings
     from ..worker import _rollup_metrics
     from .bigquery_sql import (
@@ -238,6 +239,7 @@ def run(
                             run_id=run_id,
                             model_name=model_name,
                             fold_id=fold_id,
+                            seasonal_period=seasonal_period(cfg.data.freq),
                         )
                         oof_rows.extend(fold_oof)
                         for ts_id, panel in fold_panels.items():
@@ -300,6 +302,7 @@ def _score_fold(
     run_id: str,
     model_name: str,
     fold_id: int,
+    seasonal_period: int,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
     """One fold's eval frame → its ``backtest_oof`` rows and one metric panel per series (pure).
 
@@ -311,8 +314,11 @@ def _score_fold(
       horizon in order;
     * ``y_train`` comes from the series' own history (the scale denominator MASE and RMSSE divide
       by), looked up per series rather than shared;
-    * the interval bounds are passed through, so ``coverage`` and ``pinball`` are real numbers here
-      rather than the NaNs the Python worker's OOF path produces.
+    * the interval bounds are passed through, so ``coverage``, ``pinball``, ``interval_score`` and
+      ``interval_width`` are real numbers here rather than the NaNs the Python worker's OOF path
+      produces;
+    * ``seasonal_period`` is the run frequency's cycle length, passed in rather than defaulted, so
+      ``mase_seasonal`` divides by the right naive.
 
     Panels are keyed by ``str(ts_id)`` to match `_meta_row`'s key type — the caller accumulates one
     list per series across folds and rolls them up exactly as `worker._rollup_metrics` does.
@@ -331,6 +337,7 @@ def _score_fold(
             y_train=hist_by_id.get(ts_id),
             lower=g["yhat_lower"].to_numpy(),
             upper=g["yhat_upper"].to_numpy(),
+            seasonal_period=seasonal_period,
         )
     return oof_rows, panels
 

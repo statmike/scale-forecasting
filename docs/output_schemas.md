@@ -99,7 +99,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `model_hash` | `STRING` | Content hash of the fitted model (lineage / cache key). |
 | `ensemble_id` | `STRING` | NULL for base models; the `EnsembleConfig` digest for ensemble pseudo-models (so two ensemble configs under one `run_id` stay distinct). |
 | `fold_id` | `INT64` | NULL for the final (full-fit) row; set for a backtest fold's metrics. |
-| `mae`, `rmse`, `mse`, `mape`, `smape`, `wape`, `mase`, `rmsse`, `bias`, `coverage`, `pinball` | `FLOAT64` | The metric panel. Populated only when a backtest produced out-of-fold predictions to score; otherwise NULL. |
+| `mae`, `rmse`, `mse`, `mape`, `smape`, `wape`, `mase`, `rmsse`, `bias`, `coverage`, `pinball`, `mase_seasonal`, `maape`, `interval_score`, `interval_width` | `FLOAT64` | The metric panel — every metric, every run, so choosing a different `decision_metric` never means re-running. Populated only when a backtest produced out-of-fold predictions to score; otherwise NULL. Definitions in [configuration_reference.md](./configuration_reference.md#decision_metric). |
 | `fit_seconds` | `FLOAT64` | Wall-clock to fit this cell (per-cell fit time — surfaces the straggler cells). |
 | `best_params` | `JSON` | Winning hyperparameters when HPO ran (else NULL). |
 | `model_artifact` | `STRING` | GCS ObjectRef to the persisted model (`persist_models=true`), else NULL. `no_artifact_rate=1.0` in the leaderboard = no cell produced an artifact. |
@@ -111,6 +111,16 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `peak_gpu_bytes` | `INT64` | Peak device bytes allocated. NULL means *no device*, never zero. |
 | `intraop_threads` | `INT64` | The native-thread cap in force (`OMP_NUM_THREADS`). Without it `cpu_seconds / fit_seconds` is uninterpretable — under a cap the ratio just reports the cap back. |
 | `n_obs` | `INT64` | Rows fed to the fit — the data signature a later run matches against. |
+
+### Columns that exist but are not filled yet
+
+`SELECT *` on this table also returns `cell_status`, `error_class`, `error_detail`,
+`backtest_status`, `backtest_note`, `n_folds_achieved`, `achieved_step`, `achieved_min_train`,
+`first_val_date`, `last_val_date`, `interval_source`, `ensemble_scoring`, `hpo_scoring`, `n_fits`,
+`train_rows_total`, and the four `device_*` columns. **They are all NULL today.** They are
+declared ahead of the code that writes them because adding a column to a deployed table is a
+migration every deployment has to run, and doing that once is better than doing it five times.
+Don't build a reader on them yet — `NULL` here means "not recorded", not "no".
 
 ### Sizing a future run from a past one
 
@@ -148,6 +158,7 @@ The values tier: one row per (run, series, model, **date**) over the horizon. Pa
 | `yhat_lower` | `FLOAT64` | Lower prediction-interval bound. |
 | `yhat_upper` | `FLOAT64` | Upper prediction-interval bound. |
 | `quantiles` | `JSON` | Full quantile forecast when a model emits one (e.g. `{"0.1": ..., "0.9": ...}`), else NULL. |
+| `created_at` | `TIMESTAMP` | **Declared, not yet written — NULL today.** Reserved for telling two generations of rows apart under one `run_id`; see the note under `forecast_metadata`. |
 
 ## `backtest_oof` — out-of-fold predictions (learned ensembling)
 
@@ -164,6 +175,7 @@ clustered by `run_id, ts_id`.
 | `forecast_date` | `DATE` | The held-out date. |
 | `y_true` | `FLOAT64` | The actual value (held out of training that fold). |
 | `yhat` | `FLOAT64` | The base model's prediction for it. |
+| `cutoff_date`, `horizon_step`, `yhat_lower`, `yhat_upper`, `created_at` | `DATE`, `INT64`, `FLOAT64`, `FLOAT64`, `TIMESTAMP` | **Declared, not yet written — NULL today.** The fold's origin and the step within its horizon (so error-by-horizon is a query, not a re-run), the interval bounds the BigQuery-native path already computes and discards, and the write timestamp. Same reasoning as the note under `forecast_metadata`. |
 
 ---
 

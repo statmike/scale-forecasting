@@ -269,21 +269,23 @@ def test_metadata_row_carries_artifact_link() -> None:
 
 
 def test_metadata_metric_columns_match_ddl() -> None:
-    # The assembled metric keys must be exactly the metric columns in the DDL.
-    ddl_metrics = {
-        "mae",
-        "rmse",
-        "mse",
-        "mape",
-        "smape",
-        "wape",
-        "mase",
-        "rmsse",
-        "bias",
-        "coverage",
-        "pinball",
-    }
-    assert set(METRIC_COLUMNS) == ddl_metrics
+    """Every metric is a FLOAT64 column of `forecast_metadata`, contiguous and in panel order.
+
+    Read out of the DDL rather than copied into a literal here: a hand-kept duplicate of the
+    metric list is a second source of truth, and the failure it produces ("update the list in
+    the test") teaches the wrong lesson. Contiguity is asserted because the ordering of the
+    spec is generated from `METRIC_COLUMNS`, so the DDL has to keep the block together for the
+    two to stay comparable.
+    """
+    from scale_forecasting.registry.ddl import additive_columns
+
+    ddl_cols = additive_columns("forecast_metadata")
+    metric_positions = [i for i, (name, _t) in enumerate(ddl_cols) if name in set(METRIC_COLUMNS)]
+    block = [ddl_cols[i] for i in metric_positions]
+
+    assert [name for name, _t in block] == list(METRIC_COLUMNS)
+    assert {t for _n, t in block} == {"FLOAT64"}
+    assert metric_positions == list(range(metric_positions[0], metric_positions[-1] + 1))
 
 
 # --- coercion ------------------------------------------------------------------
