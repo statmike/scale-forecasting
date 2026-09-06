@@ -55,6 +55,17 @@ class ModelContext:
     # stateless transforms. Set once per cell and shared by the backtest folds + final fit, so
     # every invert_transform in predict() uses the same λ — never refit at predict.
     transform_lambda: float | None = None
+    # Which device this cell's model should fit on. "auto" lets the library choose and can never
+    # fail, which is why it is the default and why every run before this field existed is
+    # reproduced byte-for-byte by it — but it also means "I asked for a GPU and silently got none"
+    # was structurally unobservable, and that `hardware: "cpu"` could not push a model OFF a card
+    # a mixed-hardware cluster happens to expose. "gpu"/"cpu" say it outright, and a model asked
+    # for a device that is not there raises instead of quietly running on the CPU it was billed to
+    # avoid. Set by `worker._model_context` from the job's provisioned hardware (see `hardware`),
+    # never from config intent — the config is environment-blind and would break a laptop run.
+    # A context field, not a config field: `ModelContext` is not in `cfg.model_dump`, so no run_id
+    # moves.
+    device: Literal["auto", "cpu", "gpu"] = "auto"
 
 
 # The factory registry: name → concrete model class. Populated by register() at import.

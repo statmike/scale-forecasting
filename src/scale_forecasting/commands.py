@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ._infra_args import infra_args_from
+from .hardware import hardware_args, spark_executor_env
 
 if TYPE_CHECKING:
     from .batch_infra import BatchInfra
@@ -57,6 +58,7 @@ def build_driver_args(
     *,
     models: list[str] | None = None,
     manage_header: bool = True,
+    provisioned_hardware: str | None = None,
 ) -> list[str]:
     """The on-cluster driver arg list shared by the Spark batch, the Ray entrypoint, and emission.
 
@@ -65,12 +67,19 @@ def build_driver_args(
     ``--manage-header false`` (contributor mode). Defaults omit the optional flags so a standalone
     run builds the plain arg list. Each runtime runs its single built-in engine (Spark's
     cross-join/explode strategy, Ray's), so there is no method flag.
+
+    ``provisioned_hardware`` is what the submitter actually bought for this job. It appears as
+    ``--provisioned-hardware gpu`` and **only on a GPU job** (`hardware.hardware_args`): "cpu" and
+    absent select the same device behaviour, so emitting it would change every existing command to
+    say nothing new. It is a job arg and not part of ``cfg``, so it moves no ``run_id`` — the same
+    reason ``--models`` is one.
     """
     args: list[str] = ["--config-uri", config_uri, *infra_args_from(settings)]
     if models is not None:
         args += ["--models", ",".join(models)]
     if not manage_header:
         args += ["--manage-header", "false"]
+    args += hardware_args(provisioned_hardware)
     return args
 
 
@@ -86,6 +95,7 @@ def build_spark_commands(
     models: list[str] | None = None,
     manage_header: bool = True,
     properties: dict[str, str] | None = None,
+    provisioned_hardware: str | None = None,
 ) -> LaunchCommands:
     """Both command tiers for a Dataproc Serverless (Spark) run.
 
@@ -104,8 +114,20 @@ def build_spark_commands(
     Dependency delivery is resolved through `submit.serverless_dep_properties`, so a deployment
     running the ``packed_venv`` envelope emits a command with no ``--container-image`` and the
     archive properties instead — the same batch, spelled for ``gcloud``.
+
+    ``provisioned_hardware`` reaches the batch twice, because a driver and an executor are two
+    processes: as the ``--provisioned-hardware`` driver arg, and as the
+    ``spark.executorEnv.SF_PROVISIONED_HARDWARE`` property that carries the same fact to every
+    executor (see `hardware`). Both halves are emitted here so the printed command reconstructs the
+    device behaviour of the batch and not just its shape. On a CPU job both are empty.
     """
-    driver = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
+    driver = build_driver_args(
+        config_uri,
+        settings,
+        models=models,
+        manage_header=manage_header,
+        provisioned_hardware=provisioned_hardware,
+    )
 
     from .batch_infra import serverless_dep_properties
 
@@ -135,7 +157,11 @@ def build_spark_commands(
         f"--subnet={infra.subnetwork_uri}",
         f"--ttl={infra.ttl_seconds}s",
     ]
-    props: dict[str, str] = {**dep_props, **(properties or {})}
+    props: dict[str, str] = {
+        **dep_props,
+        **(properties or {}),
+        **spark_executor_env(provisioned_hardware),
+    }
     if max_executors is not None:
         props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
     if props:

@@ -36,6 +36,7 @@ from .dataproc_cluster import (
     cluster_sizing,
 )
 from .errors import EngineError, get_logger
+from .hardware import spark_executor_env
 from .staging import stage_code, stage_config
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ def build_job(
     manage_header: bool = True,
     use_venv: bool = False,
     properties: dict[str, str] | None = None,
+    provisioned_hardware: str | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Job`` (a PySpark job placed on ``cluster``) (pure).
 
@@ -75,13 +77,26 @@ def build_job(
     a shape decision can never displace the interpreter the venv init action landed. Left
     ``None`` — every pure-builder test, and any run with profiling off — the job carries exactly
     the properties it carried before, and the cluster's own ``spark-defaults`` stand.
+
+    ``provisioned_hardware="gpu"`` states that this cluster's workers carry accelerators, as the
+    ``--provisioned-hardware`` driver arg plus the matching ``spark.executorEnv`` property (see
+    `hardware`). It matters most here, because a Dataproc cluster is the one surface that can be
+    *mixed*: a card is visible to an executor that a CPU family must not use, and only an explicit
+    device selection can keep that family off it.
     """
     from google.cloud import dataproc_v1 as dataproc
 
-    args = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
+    args = build_driver_args(
+        config_uri,
+        settings,
+        models=models,
+        manage_header=manage_header,
+        provisioned_hardware=provisioned_hardware,
+    )
     job_properties: dict[str, str] = dict(properties or {})
     if use_venv:
         job_properties.update(_VENV_JOB_PROPERTIES)
+    job_properties.update(spark_executor_env(provisioned_hardware))
     return dataproc.Job(
         placement=dataproc.JobPlacement(cluster_name=cluster),
         pyspark_job=dataproc.PySparkJob(
@@ -242,6 +257,7 @@ def submit_cluster_job(
             manage_header=manage_header,
             use_venv=True,
             properties=job_properties,
+            provisioned_hardware=hardware,
         )
         submitted_id, state_name, detail = _submit_job_and_wait(
             job_client, project_id, region, job, wait=wait

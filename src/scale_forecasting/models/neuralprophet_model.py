@@ -81,7 +81,7 @@ class NeuralProphetModel(BaseModel):
             n_lags=int(self.params.get("n_lags", 0)),
             n_forecasts=int(self.params.get("n_forecasts", 1)),
             batch_size=self._optional_int("batch_size"),
-            trainer_config={"accelerator": "auto"},
+            trainer_config=self._trainer_config(),
         )
         model.fit(self._train, freq=self.ctx.freq, progress=None)
         self._model = model
@@ -104,6 +104,24 @@ class NeuralProphetModel(BaseModel):
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
+
+    def _trainer_config(self) -> dict[str, Any]:
+        """The Lightning trainer knobs — chiefly *which device*, stated rather than guessed.
+
+        This used to be a hardcoded ``accelerator="auto"``. Auto can never fail, and that is the
+        problem: a run that paid for accelerators and got none silently fitted on CPU, which is how
+        every GPU run in the ledger came to be a CPU run without anything reporting it. It also
+        cannot push a model *off* a card — on a mixed-hardware Dataproc cluster a CPU family sees
+        whatever device its executor exposes.
+
+        ``ctx.device`` says it outright. ``"gpu"`` additionally pins ``devices=1`` so a task that
+        packs several cells onto one card does not have each of them claim every visible device.
+        ``"auto"`` reproduces the old behaviour exactly, and is what a local run, an SDK call and
+        every CPU job still get.
+        """
+        if self.ctx.device == "gpu":
+            return {"accelerator": "gpu", "devices": 1}
+        return {"accelerator": self.ctx.device}
 
     def _optional_int(self, key: str) -> int | None:
         """An authored int, or ``None`` to leave the library's own default in place."""

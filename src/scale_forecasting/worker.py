@@ -30,6 +30,7 @@ from .features import (
     fit_transform_lambda,
     holiday_frame,
 )
+from .hardware import provisioned_hardware
 from .metrics import METRIC_NAMES
 from .models import get_model
 from .models.base_model import PREDICTION_COLUMNS, BaseModel, ModelContext
@@ -159,11 +160,19 @@ def _compute_engine(model_cls: type[BaseModel], cfg: RunConfig) -> str:
     return "bigquery" if model_cls.runtime == "bigquery" else cfg.python_runtime
 
 
-def _model_context(cfg: RunConfig, transform_lambda: float | None = None) -> ModelContext:
+def _model_context(
+    cfg: RunConfig,
+    transform_lambda: float | None = None,
+    *,
+    family: str | None = None,
+) -> ModelContext:
     """Build the per-cell `ModelContext` from the run config.
 
     ``transform_lambda`` is the cell's fitted Box-Cox λ (None for stateless transforms), fit
     once in `run_cell` and shared by the backtest folds and the final fit.
+
+    ``family`` is the cell's model family, and it is what turns the job-level "this job has
+    devices" into a per-cell device. See `_resolve_device`.
     """
     holidays = holiday_frame(cfg) if cfg.features.holidays else None
     return ModelContext(
@@ -173,6 +182,51 @@ def _model_context(cfg: RunConfig, transform_lambda: float | None = None) -> Mod
         holidays=holidays,
         transform=cfg.features.transform,
         transform_lambda=transform_lambda,
+        device=_resolve_device(cfg, family),
+    )
+
+
+def _resolve_device(cfg: RunConfig, family: str | None) -> str:
+    """Which device this cell's model should fit on: ``"auto"``, ``"cpu"`` or ``"gpu"``.
+
+    Two facts have to agree before a cell is told to use a device. The **job** must have been
+    provisioned onto GPU hardware, which only the submitter knows and which arrives through the
+    environment (`hardware.provisioned_hardware`); and the **family** must resolve to ``gpu`` in
+    this config, which is the same `RunConfig.resolve_family_compute` the submitter provisioned
+    from and the DAG planned from.
+
+    Neither alone is enough, and the failure each one prevents is different. Without the job half,
+    a GPU config run on a laptop would ask Lightning for a device that is not there and crash a
+    local run that works today. Without the family half, a mixed-hardware Dataproc cluster would
+    tell a statistical cell to use the card its executor happens to expose — the case
+    ``hardware: "cpu"`` was supposed to cover and, under ``accelerator="auto"``, never did.
+
+    Anything else is ``"auto"``: the library chooses, which can never fail and is exactly what
+    every run made before this field existed did.
+    """
+    if family is None or provisioned_hardware() != "gpu":
+        return "auto"
+    return "gpu" if cfg.resolve_family_compute(family).hardware == "gpu" else "cpu"
+
+
+def _require_device(device: str, family: str, engine: str) -> None:
+    """Fail a cell fast when it was told to use a device that is not actually here.
+
+    Post-Layer-3 this should be unreachable — the submitter provisions and the engine routes off
+    one resolver — so it is a regression detector, and it has to be *fast*: the alternative is
+    discovering a missing device after the fleet-hour is spent, with forecast rows orphaned under a
+    job that failed at the end. The probe is `_peak_gpu_bytes`, which memoizes "no accelerator" per
+    process, so the check costs one failed import per worker and nothing thereafter.
+
+    Only ``device == "gpu"`` is checked. ``"cpu"`` and ``"auto"`` cannot be short of hardware.
+    """
+    if device != "gpu" or _peak_gpu_bytes() is not None:
+        return
+    raise ConfigError(
+        f"family '{family}' is set to hardware='gpu' and this {engine} job was provisioned onto "
+        f"GPU hardware, but no CUDA device is visible to this worker. Either the accelerator did "
+        f"not attach, or torch is missing its CUDA build here. Set "
+        f"compute.families.{family}.hardware to 'cpu' to run without one."
     )
 
 
@@ -296,7 +350,8 @@ def run_cell(
         # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
         # predict (the whole point of carrying it on the cell).
         lam = fit_transform_lambda(_target(series, cfg), cfg.features.transform)
-        ctx = _model_context(cfg, transform_lambda=lam)
+        ctx = _model_context(cfg, transform_lambda=lam, family=model_cls.family)
+        _require_device(ctx.device, model_cls.family, engine)
         resolved = _resolve_params(series, model_name, cfg, ctx, params)
 
         # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.

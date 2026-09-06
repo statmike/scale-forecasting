@@ -44,6 +44,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..hardware import driver_fit_scope
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -381,7 +383,11 @@ def measure_fit(
         _peak_gpu_bytes(reset=True)
         rss_before = _rss_bytes()
 
-        with _pinned_intraop_threads(_PROBE_INTRAOP_THREADS) as pinned:
+        # `driver_fit_scope` is not an optimization either: this pre-pass runs on the DRIVER, which
+        # on every one of the three services is a machine with no accelerator, while the job's
+        # environment may well say the job has devices. Without it a profiled GPU run dies at
+        # submit — Lightning raises on a missing backend rather than falling back.
+        with driver_fit_scope(), _pinned_intraop_threads(_PROBE_INTRAOP_THREADS) as pinned:
             wall_started = time.perf_counter()
             cpu_started = time.process_time()
 

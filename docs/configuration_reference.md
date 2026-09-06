@@ -630,6 +630,28 @@ The same report fires in reverse: `use_gpu: true` with no deep-learning model se
 resolves to GPU hardware at all, so the flag does nothing except make the config read as a GPU run.
 You will see these lines on a dry run, on `--quota`, from the SDK's `.dag`, and in the submit log.
 
+**At runtime, `hardware` decides the device rather than suggesting it.** Every model used to hand
+its trainer `accelerator="auto"`, which can never fail — and that is what made "I paid for a card
+and got none" invisible, and what made `hardware: "cpu"` unenforceable on a Dataproc cluster whose
+executors expose a card to every family sharing them. A cell now selects its device outright, from
+two facts that have to agree: the job must have been *provisioned* onto GPU hardware, and this
+family must resolve to `hardware="gpu"` in your config.
+
+The first fact is not in the config, because a config cannot know it — the same file runs on a
+workstation with no card and on a Vertex Ray cluster with eight. The submitter states it on the job
+it creates, as a `--provisioned-hardware gpu` driver argument plus the matching Spark
+`executorEnv` / Ray `runtime_env` entry so the executors and task workers hear it too. You will see
+it in the emitted `gcloud` command for a GPU batch; nothing else in the command changes. There is
+nothing to set: run locally, from the SDK, from a notebook, or on any CPU job and the argument is
+simply absent, which selects the old `auto` behaviour byte-for-byte.
+
+Two consequences worth knowing. A family set to `hardware="gpu"` on a job that really was
+provisioned for GPUs, but whose worker cannot see a CUDA device, now **fails that cell immediately**
+with a message naming the family and the field to change, instead of quietly fitting on the CPU for
+the rest of the fleet-hour. And the driver-side fits — the sizing pre-pass (`compute.profile`) and
+every HPO trial — stay on `auto` deliberately, because they run on a Ray head node or a Spark
+driver, which has no accelerator.
+
 **How many clusters a run creates.** One per **hardware kind** among its ephemeral cluster families,
 not one per run — a Dataproc cluster has exactly one worker machine type, so it is a CPU cluster or a
 GPU cluster and cannot be both. A run whose cluster families are all CPU gets one cluster named

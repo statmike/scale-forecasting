@@ -32,6 +32,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from .hardware import ray_env_vars
+
 # The package root that gets zipped. This file is ``…/src/scale_forecasting/code_delivery.py``, so
 # parents[1] is the ``src/`` dir, whose child ``scale_forecasting/`` is the importable package.
 # ``_SRC_DIR`` is also what Ray ships as ``working_dir`` (it contains ``scale_forecasting/``, so
@@ -124,7 +126,7 @@ def _requirements_packages() -> list[str]:
     return packages
 
 
-def build_runtime_env() -> dict[str, Any]:
+def build_runtime_env(*, provisioned_hardware: str | None = None) -> dict[str, Any]:
     """The Ray ``runtime_env``: current ``src/`` + on-cluster deps installed by uv (pure).
 
     Delivers code at RUNTIME the way the Spark path uploads a ``src/`` zip: ``working_dir`` is the
@@ -143,9 +145,15 @@ def build_runtime_env() -> dict[str, Any]:
     from that index, and ``--index-strategy unsafe-best-match`` lets uv pick it from the extra index
     even though the same name exists on PyPI (uv's default first-index strategy would stop at PyPI
     and never find the ``+cu126`` build). PyPI stays the primary index.
+
+    ``provisioned_hardware="gpu"`` adds ``env_vars`` carrying that fact to every task worker (see
+    `hardware`) — the Ray half of the seam ``spark.executorEnv`` provides on the two Spark paths. A
+    CPU job adds no ``env_vars`` key at all, so its ``runtime_env`` is byte-identical to today's.
     """
+    env_vars = ray_env_vars(provisioned_hardware)
     return {
         "working_dir": str(_SRC_DIR),
+        **({"env_vars": env_vars} if env_vars else {}),
         "uv": {
             "packages": _requirements_packages(),
             # Passed through to ``uv pip install`` — this REPLACES the plugin default

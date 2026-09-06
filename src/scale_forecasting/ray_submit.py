@@ -77,6 +77,7 @@ def build_entrypoint(
     *,
     models: list[str] | None = None,
     manage_header: bool = True,
+    provisioned_hardware: str | None = None,
 ) -> str:
     """The Ray Job entrypoint shell command — ``python -m scale_forecasting.ray_entry ...`` (pure).
 
@@ -86,9 +87,19 @@ def build_entrypoint(
     — only when non-default — ``--models m1,m2`` (executed subset) and ``--manage-header
     false`` (contributor mode; `main.run` owns the shared header). Defaults omit these
     flags so a standalone submit builds the plain command.
+
+    ``provisioned_hardware="gpu"`` adds ``--provisioned-hardware gpu``. On Ray this reaches the
+    head-node *driver*; the task workers get the same fact through ``runtime_env.env_vars``
+    (`hardware.ray_env_vars`), which is what `submit_ray` sets.
     """
     parts = ["python", "-m", "scale_forecasting.ray_entry"]
-    parts += build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
+    parts += build_driver_args(
+        config_uri,
+        settings,
+        models=models,
+        manage_header=manage_header,
+        provisioned_hardware=provisioned_hardware,
+    )
     return " ".join(parts)
 
 
@@ -186,8 +197,17 @@ def submit_ray(
     name = cluster_name or plan.cluster_name
 
     config_uri = _stage_config(cfg, run_id, infra)
-    entrypoint = build_entrypoint(config_uri, settings, models=models, manage_header=manage_header)
-    runtime_env = build_runtime_env()
+    # What this job was actually provisioned onto, read off the plan that provisions it rather than
+    # off the config that asked — an empty GPU pool means no device however the config was written.
+    provisioned_hardware = "gpu" if plan.gpu_node_count > 0 else "cpu"
+    entrypoint = build_entrypoint(
+        config_uri,
+        settings,
+        models=models,
+        manage_header=manage_header,
+        provisioned_hardware=provisioned_hardware,
+    )
+    runtime_env = build_runtime_env(provisioned_hardware=provisioned_hardware)
     regions = ray_cluster._resolve_regions(cfg, settings)
     _log.info(
         "ray submit: run_id=%s cluster=%s reuse=%s cpu_nodes=%d gpu_nodes=%d regions=%s",

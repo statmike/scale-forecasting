@@ -13,6 +13,10 @@ both runtimes share it) and ``--manage-header false`` puts the engine in contrib
 owns the single shared header). Both are optional — absent, the engine runs its standalone
 lifecycle over ``cfg.models``.
 
+``--provisioned-hardware gpu`` states what the submitter actually bought, so a model can select a
+device explicitly rather than asking its library to guess (see `hardware`). Emitted only by GPU
+jobs; absent everywhere else, which leaves device selection at ``auto`` — today's behaviour.
+
 The GCP/engine imports stay lazy so the launchers import cleanly offline.
 """
 
@@ -24,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from ._infra_args import add_infra_args, export_infra_env
 from .errors import get_logger
+from .hardware import add_hardware_arg, export_hardware_env
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -63,6 +68,7 @@ def build_parser(prog: str, description: str) -> argparse.ArgumentParser:
         help="false = contributor mode; main.run owns the shared header",
     )
     add_infra_args(p)
+    add_hardware_arg(p)
     return p
 
 
@@ -84,6 +90,10 @@ def run_entry(
     p = build_parser(prog, description)
     ns = p.parse_args(argv)
     export_infra_env(ns)
+    # The driver half of the device carrier. The executor half rides the job spec
+    # (`hardware.spark_executor_env` / `hardware.ray_env_vars`) because a driver's environment does
+    # not reach a Spark executor or a Ray task worker.
+    export_hardware_env(ns)
     models = parse_models(ns.models)
     manage_header = ns.manage_header == "true"
     engine_run, label = resolve_engine(ns)

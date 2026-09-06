@@ -108,7 +108,13 @@ def _score_params(
             # forward features and the folds' inverse (mirrors run_cell). None for none/log1p.
             target = series[cfg.data.target_col].astype(float)
             lam = fit_transform_lambda(target, cfg.features.transform)
-            series_ctx = replace(ctx, transform_lambda=lam)
+            # device="auto" is forced, not inherited. A trial may run on the driver — the Ray head
+            # node, a Spark driver, an Airflow worker — none of which has an accelerator, and
+            # Lightning raises rather than degrading when asked for one that is not there. Auto
+            # still uses a device where one exists, so a per-series study on a GPU worker is
+            # unaffected; what it gives up is forcing a search OFF a visible card, which is a
+            # property of the published fit and not of the search. See `hardware.driver_fit_scope`.
+            series_ctx = replace(ctx, transform_lambda=lam, device="auto")
             # partial binds this iteration's series_ctx (no loop-var capture; mypy-typed).
             _, fold_metrics = backtest_cell(
                 series, partial(model_cls, params, series_ctx), cfg, lam

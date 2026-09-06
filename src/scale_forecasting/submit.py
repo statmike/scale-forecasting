@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
 from .commands import build_driver_args
 from .errors import ConfigError, EngineError, get_logger
+from .hardware import spark_executor_env
 from .staging import stage_code, stage_config
 
 if TYPE_CHECKING:
@@ -246,6 +247,12 @@ def build_batch(
     L4-only; the resolver already forces this). A CPU batch adds no accelerator properties, so its
     message is unchanged.
 
+    A GPU batch also *tells the code* it has a device, twice, because a driver and an executor are
+    two processes: the ``--provisioned-hardware`` driver arg and the
+    ``spark.executorEnv.SF_PROVISIONED_HARDWARE`` property (see `hardware`). Attaching an
+    accelerator and never saying so is how a run could be billed for L4s while every cell asked
+    Lightning to pick a device and it picked the CPU.
+
     ``properties`` is the sizing overlay — `resources.serverless.translate_serverless` spelled as
     ``spark.*`` — applied *first*, so the two things a caller states explicitly still win over
     it: an explicit ``max_executors`` and the GPU attachment. Omitted (the default) the message
@@ -259,13 +266,20 @@ def build_batch(
 
     from google.cloud import dataproc_v1 as dataproc
 
-    args = build_driver_args(config_uri, settings, models=models, manage_header=manage_header)
+    args = build_driver_args(
+        config_uri,
+        settings,
+        models=models,
+        manage_header=manage_header,
+        provisioned_hardware=hardware,
+    )
     container_image, props = serverless_dep_properties(infra)
     props.update(properties or {})
     if max_executors is not None:
         props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
     if hardware == "gpu":
         props.update(_serverless_gpu_properties(gpu_type or _SERVERLESS_GPU_TYPE))
+    props.update(spark_executor_env(hardware))
 
     return dataproc.Batch(
         pyspark_batch=dataproc.PySparkBatch(
