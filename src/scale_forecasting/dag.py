@@ -17,11 +17,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .models import get_model
+from .errors import ConfigError, get_logger
+from .models import get_model, list_models
 from .registry.ids import make_run_id
 
 if TYPE_CHECKING:
     from .config import ResolvedFamilyCompute, RunConfig
+
+_log = get_logger(__name__)
 
 # The order families are listed in the DAG: the Python families first, ``native`` last, so logs and
 # manifests read consistently. Purely cosmetic — the jobs execute in parallel, not in this order.
@@ -152,6 +155,40 @@ def group_models_by_family(cfg: RunConfig) -> dict[str, list[str]]:
     for name in cfg.models:
         grouped.setdefault(get_model(name).family, []).append(name)
     return {family: grouped[family] for family in _FAMILY_ORDER if family in grouped}
+
+
+def check_model_params(cfg: RunConfig) -> None:
+    """Validate ``cfg.model_params`` against the model registry. Raises `errors.ConfigError`.
+
+    Two checks, both of which need the registry loaded and therefore cannot live in ``config.py``
+    (eager model-stack imports on the submit path have broken a live run before):
+
+    * a block keyed by a name no model is registered under is a typo, and a typo here is silent —
+      the params simply never reach a model;
+    * each selected model gets to refuse a block it cannot honour, through
+      `models.base_model.BaseModel.validate_params`. The model is told the longest horizon the run
+      will ask for, which is the forward horizon or the backtest horizon, whichever is larger.
+
+    Deliberately **not** called from `plan_dag`, which stays total so pure inspection — the SDK's
+    ``dag``, a dry run, a test — never raises. Called from the paths that are about to spend.
+    """
+    known = list_models()
+    unknown = sorted(set(cfg.model_params) - set(known))
+    if unknown:
+        raise ConfigError(
+            f"model_params names {unknown}, which are not registered models. Registered: {known}."
+        )
+    unselected = sorted(set(cfg.model_params) - set(cfg.models))
+    if unselected:
+        _log.warning(
+            "model_params carries entries for %s, which this run does not select in models; "
+            "they will have no effect.",
+            unselected,
+        )
+    max_horizon = max(cfg.data.horizon, cfg.backtest.horizon if cfg.backtest.enabled else 0)
+    for name in cfg.models:
+        authored = dict(cfg.model_params.get(name, {}))
+        get_model(name).validate_params(authored, max_horizon=max_horizon)
 
 
 def plan_dag(cfg: RunConfig) -> RunDag:

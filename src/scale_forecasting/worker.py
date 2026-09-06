@@ -185,18 +185,29 @@ def _resolve_params(
 ) -> dict[str, Any]:
     """Resolve the hyperparameters this cell builds its model with (see `run_cell`).
 
-    Pre-resolved ``params`` (the fleetwide driver pre-pass) win outright. Otherwise, per-series HPO
-    tunes on *this* series when enabled at that granularity; failing that, the ``{}`` default. Kept
-    tiny and separate so the resolution policy is one readable place and the HPO import stays lazy
-    (Optuna loads only when a run actually tunes).
+    Three sources, layered in a fixed order: the model's own defaults (whatever it reads out of an
+    absent key), then ``cfg.model_params[model_name]`` — what the config author wrote — then
+    anything HPO tuned, which wins. Pre-resolved ``params`` are the fleetwide driver pre-pass;
+    per-series HPO tunes on *this* series when enabled at that granularity; with HPO off there is
+    nothing above the authored layer.
+
+    **HPO beats an authored value on the keys it searches.** Pinning ``epochs`` while a model's
+    search space also searches ``epochs`` means the trial's value is used and the pin is ignored,
+    because a study that scored one value and shipped another would publish a metric that does not
+    belong to the fitted model. Keys the search space does not name are unaffected — that is the
+    common case, and it is how an authored ``n_lags`` survives a tuned ``learning_rate``.
+
+    Kept tiny and separate so the resolution policy is one readable place and the HPO import stays
+    lazy (Optuna loads only when a run actually tunes).
     """
+    authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
     if params is not None:
-        return params
+        return {**authored, **params}
     if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
         from .hpo import tune_model
 
-        return tune_model(model_name, [series], cfg, ctx)
-    return {}
+        return {**authored, **tune_model(model_name, [series], cfg, ctx)}
+    return authored
 
 
 def _rollup_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:

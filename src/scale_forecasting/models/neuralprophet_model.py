@@ -4,10 +4,16 @@
 model that benefits from a GPU". It does not, at the parameters we construct it with. Across 31,356
 fits on live T4s, peak device memory was 50–78 KB against a card holding 17,179,869,184, while
 ``cpu_seconds / fit_seconds`` sat between 0.93 and 0.996 on a single thread. The reason is not a
-broken install — CUDA initializes and the tensors are device-resident — it is that we never pass
-``n_lags``, so NeuralProphet's own default of 0 applies and the network is a few hundred trend and
-Fourier parameters. The Lightning loop, the dataloader and pandas dwarf the kernels. Autoregression
-(``n_lags > 0``, AR-Net) is what would make the device worth attaching, and it is not wired yet.
+broken install — CUDA initializes and the tensors are device-resident — it is that ``n_lags``
+defaults to 0, so the network is a few hundred trend and Fourier parameters. The Lightning loop,
+the dataloader and pandas dwarf the kernels. Autoregression (``n_lags > 0``, AR-Net) is what would
+make the device worth attaching.
+
+``n_lags``, ``n_forecasts`` and ``batch_size`` are authorable through
+``model_params.neuralprophet``; all three keep the library's own defaults otherwise, so nothing
+moves unless a config asks for it. **Autoregression has never been run at scale here** — no
+accuracy A/B, no live smoke — so it is an expert opt-in and not a default. Turning it on changes
+the shape of what ``predict`` reads back; see `_read_steps`.
 
 One model, one file. Runtime python, deep_learning family. NeuralProphet is
 an optional dependency, imported lazily in ``fit`` so the model registers without it (and
@@ -21,9 +27,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
-from ..errors import ModelError
+from ..errors import ConfigError, ModelError
 from ..features import invert_transform
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
@@ -59,10 +66,17 @@ class NeuralProphetModel(BaseModel):
         self._train = pd.DataFrame(
             {"ds": pd.DatetimeIndex(y.index), "y": y.astype(float).to_numpy()}
         )
+        # n_lags/n_forecasts default to NeuralProphet's own 0/1 — no autoregression, one head, the
+        # shape every run in the ledger was produced with. Both only move when a config authors
+        # them. batch_size is passed through as None (the library's "choose one") unless authored;
+        # it is measurably faster at 128-512 but has no accuracy A/B yet, so it is not a default.
         model = NeuralProphet(
             quantiles=list(_BAND),
             epochs=int(self.params.get("epochs", 50)),
             learning_rate=float(self.params.get("learning_rate", 0.01)),
+            n_lags=int(self.params.get("n_lags", 0)),
+            n_forecasts=int(self.params.get("n_forecasts", 1)),
+            batch_size=self._optional_int("batch_size"),
             trainer_config={"accelerator": "auto"},
         )
         model.fit(self._train, freq=self.ctx.freq, progress=None)
@@ -77,10 +91,7 @@ class NeuralProphetModel(BaseModel):
         from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
 
         future = self._model.make_future_dataframe(self._train, periods=horizon)
-        fc = self._model.predict(future).tail(horizon)
-        mean = fc["yhat1"].to_numpy(dtype=float)
-        lo = fc[self._band_col(_BAND[0])].to_numpy(dtype=float)
-        hi = fc[self._band_col(_BAND[1])].to_numpy(dtype=float)
+        mean, lo, hi = self._read_steps(self._model.predict(future), horizon)
         # Back out sigma from the symmetric band, then place any requested quantile.
         z = norm.ppf(_BAND[1])
         sigma = (hi - lo) / (2.0 * z)
@@ -90,10 +101,66 @@ class NeuralProphetModel(BaseModel):
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 
+    def _optional_int(self, key: str) -> int | None:
+        """An authored int, or ``None`` to leave the library's own default in place."""
+        value = self.params.get(key)
+        return None if value is None else int(value)
+
+    def _read_steps(
+        self, fc: pd.DataFrame, horizon: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Pull the mean and the band for steps 1..``horizon`` out of a forecast frame.
+
+        NeuralProphet has two output shapes and reading the wrong one is silent rather than loud.
+
+        Without autoregression (``n_lags`` unset, the shipped default) there is a single head:
+        every future row carries its forecast in ``yhat1``, and the frame is read straight down
+        that column.
+
+        With ``n_lags > 0`` the model builds ``n_forecasts`` **direct** heads and returns them on a
+        *diagonal* — the row for step ``i`` populates ``yhat{i}`` and leaves every other ``yhat``
+        column NaN. Reading ``yhat1`` down that frame yields one number followed by
+        ``horizon - 1`` NaNs.
+
+        Rows are selected by date, not by position, because ``make_future_dataframe`` returns
+        ``n_lags + n_forecasts`` rows whatever ``periods`` it was asked for: at ``n_forecasts=7``
+        with ``horizon=3``, the tail of the frame is steps 5-7, not steps 1-3.
+        """
+        future = fc[fc["ds"] > self._last_date]
+        heads = self._n_heads(fc)
+        available = len(future) if heads <= 1 else min(heads, len(future))
+        if available < horizon:
+            raise ModelError(
+                f"neuralprophet produced {available} forecast steps for a horizon of {horizon}. "
+                f"With n_lags > 0 it emits exactly n_forecasts direct steps and does not recurse, "
+                f"so model_params.neuralprophet.n_forecasts must be at least {horizon}."
+            )
+        if heads <= 1:
+            block = future.head(horizon)
+            return (
+                block["yhat1"].to_numpy(dtype=float),
+                block[self._band_col(1, _BAND[0])].to_numpy(dtype=float),
+                block[self._band_col(1, _BAND[1])].to_numpy(dtype=float),
+            )
+        rows = [future.iloc[i] for i in range(horizon)]
+        return (
+            np.array([float(r[f"yhat{i + 1}"]) for i, r in enumerate(rows)]),
+            np.array([float(r[self._band_col(i + 1, _BAND[0])]) for i, r in enumerate(rows)]),
+            np.array([float(r[self._band_col(i + 1, _BAND[1])]) for i, r in enumerate(rows)]),
+        )
+
     @staticmethod
-    def _band_col(q: float) -> str:
-        """NeuralProphet names quantile columns like ``yhat1 10.0%``."""
-        return f"yhat1 {q * 100:.1f}%"
+    def _n_heads(fc: pd.DataFrame) -> int:
+        """How many direct-forecast heads the fitted model emitted (``yhat1``…``yhatN``)."""
+        n = 0
+        while f"yhat{n + 1}" in fc.columns:
+            n += 1
+        return n
+
+    @staticmethod
+    def _band_col(step: int, q: float) -> str:
+        """NeuralProphet names quantile columns per head, like ``yhat1 10.0%``."""
+        return f"yhat{step} {q * 100:.1f}%"
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
@@ -101,6 +168,28 @@ class NeuralProphetModel(BaseModel):
             "epochs": trial.suggest_int("epochs", 20, 200),
             "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.1, log=True),
         }
+
+    @classmethod
+    def validate_params(cls, params: dict[str, Any], *, max_horizon: int) -> None:
+        """Autoregression needs one direct head per step of the horizon.
+
+        With ``n_lags > 0`` NeuralProphet builds ``n_forecasts`` direct heads and forecasts exactly
+        that far — it does **not** recurse to fill a longer request. Measured: ``n_lags=7`` with
+        the default ``n_forecasts=1``, asked for seven periods, returns one value. Left unchecked
+        the horizon comes back short (or, with the diagonal output shape, mostly NaN) after the
+        fleet has already been paid for, which is why this is refused at plan time.
+        """
+        n_lags = int(params.get("n_lags", 0) or 0)
+        if n_lags <= 0:
+            return
+        n_forecasts = int(params.get("n_forecasts", 1) or 1)
+        if n_forecasts < max_horizon:
+            raise ConfigError(
+                f"model_params.neuralprophet sets n_lags={n_lags}, which turns on autoregression, "
+                f"but n_forecasts={n_forecasts} is below this run's longest horizon of "
+                f"{max_horizon}. NeuralProphet emits exactly n_forecasts direct steps and does not "
+                f"recurse, so set n_forecasts to at least {max_horizon}."
+            )
 
 
 register(NeuralProphetModel)

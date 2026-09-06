@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from scale_forecasting.errors import ModelError
 from scale_forecasting.models import get_model, list_models
 from scale_forecasting.models.base_model import PREDICTION_COLUMNS, BaseModel, ModelContext
 
@@ -162,3 +163,50 @@ def test_deterministic_under_seed(model_name: str) -> None:
 
 def test_at_least_theta_registered() -> None:
     assert "theta" in list_models()
+
+
+# --- NeuralProphet in autoregressive mode --------------------------------------
+#
+# `n_lags > 0` puts NeuralProphet into a *different output shape* than the shipped default, and
+# reading the wrong one is silent rather than loud: it emits `n_forecasts` direct heads on a
+# diagonal (the row for step i fills `yhat{i}` and leaves every other yhat column NaN), and
+# `make_future_dataframe` returns `n_lags + n_forecasts` rows whatever `periods` it was asked for.
+# Read naively — `yhat1` straight down, `.tail(horizon)` for the rows — the first gives one number
+# followed by NaNs and the second gives the wrong steps. Both are fitted here rather than mocked,
+# because the shape is the library's behaviour and a fake would just restate our belief about it.
+# `epochs=2` keeps it to a few seconds; accuracy is not what is being asserted.
+
+_AR = {"n_lags": 14, "n_forecasts": 7, "epochs": 2}
+
+
+def _fit_ar(**over: Any) -> BaseModel:
+    if importlib.util.find_spec("neuralprophet") is None:
+        pytest.skip("optional dependency 'neuralprophet' not installed")
+    y, _ = _golden_series(n=200)
+    model = get_model("neuralprophet")({**_AR, **over}, _ctx(horizon=7))
+    model.fit(y)
+    return model
+
+
+def test_autoregression_returns_a_finite_value_for_every_step() -> None:
+    """Reading `yhat1` down the diagonal frame would give one value and six NaNs."""
+    df = _fit_ar().predict(7)
+    assert len(df) == 7
+    assert np.isfinite(df["yhat"].to_numpy()).all()
+    assert np.isfinite(df["yhat_lower"].to_numpy()).all()
+    assert np.isfinite(df["yhat_upper"].to_numpy()).all()
+
+
+def test_a_horizon_shorter_than_n_forecasts_reads_the_first_steps_not_the_last() -> None:
+    """`make_future_dataframe` clamps to n_lags + n_forecasts, so the tail is steps 5-7."""
+    model = _fit_ar()
+    short, full = model.predict(3), model.predict(7)
+    assert list(short["ds"]) == list(full["ds"][:3])
+    assert np.allclose(short["yhat"].to_numpy(), full["yhat"].to_numpy()[:3])
+
+
+def test_too_few_heads_for_the_horizon_is_an_error_not_a_frame_of_nans() -> None:
+    """`dag.check_model_params` refuses this at plan time; predict must not paper over it either."""
+    model = _fit_ar(n_forecasts=2)
+    with pytest.raises(ModelError, match="does not recurse"):
+        model.predict(7)

@@ -107,14 +107,19 @@ def begin_run(config_uri: str) -> str:
     re-running the
     same config re-derives the same ``run_id`` and appends a fresh header row (latest wins),
     matching the local re-run behavior.
+
+    The DAG's first task, so it is also where an authored `model_params` block that no model can
+    honour is refused (`dag.check_model_params`) — before any family task provisions anything.
     """
     from .config import load_config_uri
+    from .dag import check_model_params
     from .registry.header import write_header
     from .registry.ids import make_run_id
     from .registry.tables import ensure_tables
     from .settings import Settings
 
     cfg = load_config_uri(config_uri)
+    check_model_params(cfg)
     run_id = make_run_id(cfg)
     settings = Settings.resolve()
     ensure_tables(cfg, settings=settings)

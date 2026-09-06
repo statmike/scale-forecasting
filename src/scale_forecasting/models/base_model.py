@@ -128,6 +128,21 @@ class BaseModel(ABC):
         """HPO search space (optional; used only when ``hpo.enabled``). Default: no search."""
         return {}
 
+    @classmethod
+    def validate_params(cls, params: dict[str, Any], *, max_horizon: int) -> None:
+        """Refuse an authored ``model_params`` block this model cannot honour. Default: accept all.
+
+        Called at plan time, before anything is provisioned, so a parameter combination that would
+        produce a horizon of NaNs costs nothing instead of a fleet-hour. Override when a model has
+        a constraint that is only knowable from its own library's behaviour — the point of the seam
+        is that such knowledge stays in the model's file rather than leaking into the config layer.
+
+        ``max_horizon`` is the largest horizon this run will ask ``predict`` for: the forward
+        horizon and the backtest horizon, whichever is greater. Raise `ConfigError`, not
+        `ModelError` — nothing has been fitted, the config is what is wrong.
+        """
+        return  # accept: a model with no library-level constraint has nothing to refuse
+
     # --- shared helpers ---------------------------------------------------------
 
     def residual_intervals(

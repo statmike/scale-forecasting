@@ -24,7 +24,7 @@ schema) surfaces as a single `ConfigError`.
 | `data` | `DataConfig` | *required* | Where the series come from and their shape. |
 | `python_runtime` | `"spark"` \| `"ray"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
 | `models` | `list[str]` | *required* (≥1) | Model names to run (see `playground --list`). |
-| `model_params` | `dict[str, dict[str, …]]` | `{}` | Per-model hyperparameters, keyed by model name. **Accepted, not yet honoured** — see below. |
+| `model_params` | `dict[str, dict[str, …]]` | `{}` | Per-model hyperparameters, keyed by model name — see below. |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
 | `backtest` | `BacktestConfig` | `{}` | Time-series cross-validation. |
 | `hpo` | `HpoConfig` | `{}` | Hyperparameter optimization. |
@@ -169,10 +169,11 @@ we intend to keep or implementing it would move every recorded identity a second
 
 ### Fields that are accepted but not yet honoured
 
-`short_series`, `min_folds`, `min_train_floor`, `gap`, `window`, the `expanding_frozen` scheme, and
-`model_params` all validate today and change nothing today. They were added to the schema ahead of
-the code that reads them, in one commit, because a new config field moves every `run_id` that has
-ever been recorded — landing them together costs one identity break instead of seven.
+`short_series`, `min_folds`, `min_train_floor`, `gap`, `window`, and the `expanding_frozen` scheme
+all validate today and change nothing today. They were added to the schema ahead of the code that
+reads them, in one commit, because a new config field moves every `run_id` that has ever been
+recorded — landing them together costs one identity break instead of seven. (`model_params` landed
+in that same commit and *is* now honoured; it is documented below.)
 
 Setting one is therefore not harmless even though it is inert: it changes your run's `run_id`, so a
 config that sets `gap: 7` is a different run from the same config without it, producing identical
@@ -216,9 +217,6 @@ alongside it because they say *how* a model got its score.
 
 ## `model_params` — hyperparameters you set yourself
 
-**Accepted, not yet honoured.** The schema takes it today and nothing reads it; the section above
-explains why it landed early.
-
 HPO searches for hyperparameters. `model_params` is the other half of that surface: the place to
 *state* them, when you already know what you want and would rather not pay for a search.
 
@@ -235,11 +233,29 @@ Keyed by model name, then by that model's own parameter names. Values may be a s
 exactly that reason: `json.dumps` writes them as bare `NaN` / `Infinity`, which is not JSON, and a
 digest nobody else's parser can reproduce is not an identity.
 
-Unknown model names and unknown parameter names both pass validation. That is deliberate rather than
-lazy — checking a model name here would mean importing the model registry inside `config.py`, and the
-config module is imported on the job-submission path where the model stack is deliberately absent.
-The check belongs where the model is actually constructed, and that is where it will go when the
-field is wired up.
+**Where an authored value takes effect, and what beats it.** Your block is the layer underneath
+everything: it is applied at the cell, and it is also applied underneath *every HPO trial*, so a
+study tunes the same model the run will actually fit. Where the two name the same key, **HPO wins** —
+pinning `epochs` on a model whose search space also searches `epochs` means the trial's value is used
+and your pin is ignored, because a study that scored one value and shipped another would publish a
+metric that does not belong to the fitted model. Keys the search space does not name are untouched,
+which is the common case: an authored `n_lags` survives a tuned `learning_rate`. With HPO off, your
+block is simply the params, filling in over each model's own defaults.
+
+**Unknown model names are refused before anything is provisioned, not at parse time.** A block keyed
+by a name no model is registered under is a typo, and a typo here is silent — the params just never
+reach a model. It is not checked in `config.py` because that would mean importing the model registry
+on the job-submission path, where the model stack is deliberately absent (eager model imports there
+have broken a live run before). It is checked instead at plan time, on the paths that are about to
+spend: a direct `run`, a staged launch, and the Airflow DAG's first task. A block for a model your
+`models` list does not select is a warning, not an error — it has no effect.
+
+Unknown *parameter* names still pass: each model reads the specific keys it knows and ignores the
+rest. A model may also refuse a combination it cannot honour — NeuralProphet, for example, rejects
+`n_lags > 0` with an `n_forecasts` below the run's longest horizon, because in autoregressive mode it
+emits exactly `n_forecasts` direct steps and does not recurse to fill a longer request. That refusal
+happens at plan time too, so a config that would return a horizon of `NaN` costs nothing instead of a
+fleet-hour.
 
 ## `hpo` — `HpoConfig`
 
@@ -260,8 +276,23 @@ every cell** — the best accuracy a model can reach on each series, but `n_tria
 series*, so cost scales with the fleet. Start fleetwide; reach for per-series only when a model's
 optimal hyperparameters genuinely vary series to series and the accuracy is worth the spend.
 
+`sample_size: 20` means twenty series drawn from the whole fleet, not twenty per anything — the
+winner from those twenty is what every series in the run is fitted with.
+
 Tuned hyperparameters flow to the workers through the engine, **not** through the config — so HPO
 never shifts the config-derived `run_id`, keeping runs reproducible and idempotent.
+
+**A caveat worth knowing before you compare a tuned model to an untuned one.** HPO runs *by*
+backtesting: each trial runs the aligned backtest on the sampled series and is scored on
+`decision_metric`. The winning params are then handed to every cell, which backtests **again** — and
+*that* second backtest is what fills the leaderboard, `forecast_metadata`, and the `inverse_error`
+ensemble weights. Both passes use the same folds. So a tuned model's published metric is measured on
+the data its hyperparameters were selected on, which makes it optimistic; an untuned model's is not.
+Ranking tuned against untuned models on one leaderboard therefore tilts toward the tuned ones by an
+amount nothing currently reports. The fix — holding the most recent fold out of the search so the
+reported score is scored on a fold that fitted nothing — is planned and not yet shipped. Until then,
+treat a tuned model's leaderboard number as an upper bound, and prefer a like-for-like comparison
+(both tuned, or both not).
 
 ## `ensemble` — `EnsembleConfig`
 

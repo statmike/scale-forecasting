@@ -133,10 +133,19 @@ def tune_model(
     Builds a deterministic Optuna study (fixed-seed TPE) of ``cfg.hpo.n_trials`` trials whose
     objective is `_score_params`. Returns ``{}`` immediately — creating no study — when the
     model has no search space (`_has_search_space`), so an all-defaults model costs nothing.
-    The returned dict is exactly what ``search_space`` proposes for the best trial, ready to hand a
-    model constructor as ``model_cls(params, ctx)``.
+
+    **``cfg.model_params[model_name]`` sits underneath every trial.** A model tuned without the
+    hyperparameters its author pinned is a different model from the one that will be fitted, so the
+    study would optimize the wrong thing — an authored ``n_lags`` changes what ``learning_rate`` is
+    best for. Where the two name the same key the trial wins, and the winner is returned with the
+    authored layer still beneath it, so the returned dict is exactly the params the cell will build
+    with and exactly what lands in ``forecast_metadata.best_params``.
+
+    A model with no search space returns ``{}`` rather than the authored params: nothing was tuned,
+    and `worker._resolve_params` applies the authored layer at the cell either way.
     """
     model_cls = get_model(model_name)
+    authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
     if not _has_search_space(model_cls):
         return {}
 
@@ -150,7 +159,9 @@ def tune_model(
     study = optuna.create_study(direction="minimize", sampler=sampler)
 
     def objective(trial: optuna.Trial) -> float:
-        return _score_params(model_name, model_cls.search_space(trial), sample, cfg, ctx)
+        return _score_params(
+            model_name, {**authored, **model_cls.search_space(trial)}, sample, cfg, ctx
+        )
 
     study.optimize(objective, n_trials=cfg.hpo.n_trials)
     _log.info(
@@ -161,7 +172,7 @@ def tune_model(
         study.best_value,
         cfg.hpo.n_trials,
     )
-    return dict(study.best_params)
+    return {**authored, **study.best_params}
 
 
 def resolve_fleetwide(

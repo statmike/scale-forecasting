@@ -119,7 +119,7 @@ def run(
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
-    from .dag import plan_dag
+    from .dag import check_model_params, plan_dag
     from .profiling.source import check_pinned_source
     from .registry.header import header_status
     from .registry.lifecycle import run_header
@@ -128,6 +128,11 @@ def run(
     # The series-limit override is applied first so it flows into the run_id and every family — a
     # different scale is a distinct, independently-queryable run.
     cfg = cfg.with_series_limit(n_series)
+
+    # Ahead of the dry-run branch on purpose: an authored `model_params` block a model cannot
+    # honour is exactly what a dry run exists to catch, and the check needs the registry loaded,
+    # which `plan_dag` deliberately does not do on the caller's behalf.
+    check_model_params(cfg)
 
     if dry_run:
         # Single-source the offline plan: plan_run resolves the id + fanout + runtime split, reports

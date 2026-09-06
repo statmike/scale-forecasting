@@ -5,6 +5,12 @@ Six things landed on the config surface in one commit — five `backtest` fields
 deliberate: `run_id` is a digest of the whole config, so every added field moves every identity
 ever recorded, and landing them together costs one break instead of six.
 
+**`model_params` is now honoured** and has left the inert list: it is read at all three places a
+model's params resolve (`worker._resolve_params` and both halves of `hpo.tune_model`), validated
+against the registry at plan time (`dag.check_model_params`), and consumed by
+`NeuralProphetModel`. Its digest test stays. Five backtest fields and the `expanding_frozen`
+scheme remain inert.
+
 It also creates a gap between what the schema says and what the code does, and a gap nobody is
 watching becomes a lie. So this module pins both halves:
 
@@ -46,7 +52,8 @@ _INERT_BACKTEST_FIELDS: dict[str, Any] = {
 
 # Names no module outside `config.py` may mention while the field is unread. `scheme` is absent
 # because it *is* read — only its new `expanding_frozen` value is unhonoured, covered separately.
-_UNREAD_IN_SOURCE = (*_INERT_BACKTEST_FIELDS, "model_params")
+# `model_params` left this tuple when it was wired up; see the module docstring.
+_UNREAD_IN_SOURCE = tuple(_INERT_BACKTEST_FIELDS)
 
 _BASE: dict[str, Any] = {
     "run_name": "inert_fields",
@@ -121,17 +128,14 @@ def _reads_of_unhonoured_fields(tree: ast.AST) -> list[str]:
     the whole package as an offender. Matching the attribute *access* also excludes docstrings and
     comments for free, which is right — prose describing a field is not code reading it.
 
-    `backtest`/`bt` is required on the left for the five backtest fields, because `window` is a
-    legitimate attribute name elsewhere (a rolling window, a buffer window). `model_params` needs no
-    such qualifier; nothing else is called that.
+    `backtest`/`bt` is required on the left, because `window` is a legitimate attribute name
+    elsewhere (a rolling window, a buffer window).
     """
     found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute):
             continue
-        if node.attr == "model_params":
-            found.add("model_params")
-        elif node.attr in _INERT_BACKTEST_FIELDS:
+        if node.attr in _INERT_BACKTEST_FIELDS:
             owner = node.value
             name = owner.attr if isinstance(owner, ast.Attribute) else getattr(owner, "id", "")
             if name in {"backtest", "bt"}:

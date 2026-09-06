@@ -774,13 +774,16 @@ class RunConfig(BaseModel):
     # a new hyperparameter becomes a dict key rather than a schema field, and a dict key only moves
     # the ids of configs that actually set it.
     #
-    # **Accepted, not yet honoured.** Nothing reads this yet; wiring it into the three places a
-    # model's params are resolved (the cell, and both halves of HPO) is its own change, because
-    # authored params must beat HPO's search space at all three or an authored value is silently
-    # discarded under the default fleetwide granularity. Unknown model names are accepted here on
-    # purpose: validating them means importing the model registry from this module, and eager
-    # model-stack imports on the submit path have broken a live run before. That check belongs with
-    # the wiring, where the registry is already loaded.
+    # Read at all three places a model's params resolve — the cell (`worker._resolve_params`) and
+    # both halves of HPO (each trial's objective and the returned winner, in `hpo.tune_model`) — so
+    # a study tunes the same model the cell will fit. HPO wins on the keys its search space names;
+    # an authored key the search does not touch survives untouched.
+    #
+    # Unknown model names are accepted *here* on purpose: validating them means importing the model
+    # registry from this module, and eager model-stack imports on the submit path have broken a live
+    # run before. `dag.check_model_params` does that check instead, from the paths that are about to
+    # spend, where the registry is already loaded — that is also where a model gets to refuse a
+    # block it cannot honour (`models.base_model.BaseModel.validate_params`).
     model_params: dict[str, dict[str, ModelParam]] = Field(default_factory=dict)
 
     @field_validator("model_params")

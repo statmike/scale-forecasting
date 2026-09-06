@@ -485,10 +485,12 @@ def stage_run(
     from datetime import UTC, datetime
 
     from .config import estimate_fanout
-    from .dag import dag_nodes, plan_dag
+    from .dag import check_model_params, dag_nodes, plan_dag
     from .profiling.source import check_pinned_source
     from .staging import stage_config, stage_manifest
 
+    # Refuse an unhonourable `model_params` block before anything is staged or provisioned.
+    check_model_params(cfg)
     # Pin `source: "auto"` to what it resolves to *now*, before the digest — the staged config is
     # the reproducibility artifact, so what actually sized this run has to be written into it.
     settings = settings or _resolve_settings()
