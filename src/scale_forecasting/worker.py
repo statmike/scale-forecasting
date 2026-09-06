@@ -30,7 +30,7 @@ from .features import (
     fit_transform_lambda,
     holiday_frame,
 )
-from .hardware import provisioned_hardware
+from .hardware import provisioned_hardware, visible_device
 from .metrics import METRIC_NAMES
 from .models import get_model
 from .models.base_model import PREDICTION_COLUMNS, BaseModel, ModelContext
@@ -89,6 +89,14 @@ class CellResult:
     # cpu_seconds/fit_seconds is uninterpretable: under a cap the ratio reports the cap back.
     intraop_threads: int | None = None
     n_obs: int | None = None  # rows fed to the fit — the data signature a later run matches on
+    # --- device evidence (the GPU contract's Layer 4) ------------------------------------------
+    # Recorded on every cell, never inferred from `peak_gpu_bytes` — that column's None is
+    # overloaded across four causes (no torch, no CUDA build, no device, profiling off), so it
+    # cannot distinguish "the accelerator never attached" from "nobody looked". These four can.
+    device_requested: str | None = None  # what the cell was told: "auto" | "cpu" | "gpu"
+    device_available: str | None = None  # what the worker can see: "cuda" | "cpu" | "unknown"
+    device_used: str | None = None  # where the weights landed; None = the model cannot say
+    device_name: str | None = None  # e.g. "Tesla T4", when a device is visible
 
 
 def _worker_id() -> str:
@@ -312,6 +320,9 @@ def run_cell(
     # Wall-clock lane + worker identity for the trace, captured for every return path (ok or error).
     cell_started_at = datetime.now(UTC)
     worker_id = _worker_id()
+    # What this worker can see, memoized per process. Read up here so an error cell carries it too:
+    # a cell that failed *because* the accelerator was missing is the row most worth the evidence.
+    available, device_name = visible_device()
 
     def _error(msg: str, engine: str) -> CellResult:
         return CellResult(
@@ -328,6 +339,8 @@ def run_cell(
             worker_id=worker_id,
             cell_started_at=cell_started_at,
             cell_ended_at=datetime.now(UTC),
+            device_available=available,
+            device_name=device_name,
         )
 
     try:
@@ -412,6 +425,13 @@ def run_cell(
             peak_gpu_bytes=_peak_gpu_bytes(),
             intraop_threads=intraop_threads,
             n_obs=len(series) if measuring else None,
+            # Unconditional for the same reason: this is the only per-cell record of whether the
+            # device a run paid for was ever visible, and of where the fit actually landed. Both
+            # probes are memoized or trivial, and `device_used` is asked of the fitted model.
+            device_requested=ctx.device,
+            device_available=available,
+            device_used=model.device_used(),
+            device_name=device_name,
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(repr(e), engine)

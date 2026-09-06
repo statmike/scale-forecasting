@@ -117,6 +117,14 @@ def assemble_metadata_row(
         "peak_gpu_bytes": result.peak_gpu_bytes,
         "intraop_threads": result.intraop_threads,
         "n_obs": result.n_obs,
+        # Device evidence (the GPU contract's Layer 4), recorded rather than inferred. Unlike the
+        # harvest columns above these are NOT gated on profiling: whether a device the run paid for
+        # was ever visible is not a profiling question, and gating it left 8 of 21 historical GPU
+        # jobs with no evidence either way.
+        "device_requested": result.device_requested,
+        "device_available": result.device_available,
+        "device_used": result.device_used,
+        "device_name": result.device_name,
     }
     for name in METRIC_COLUMNS:
         row[name] = _as_float(result.metrics.get(name))

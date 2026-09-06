@@ -64,11 +64,6 @@ _RESERVED_METADATA = {
     "hpo_scoring",
     "n_fits",
     "train_rows_total",
-    # what the cell asked for, found, and ran on
-    "device_requested",
-    "device_available",
-    "device_used",
-    "device_name",
 }
 
 

@@ -83,7 +83,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, family`.
 | `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED` for this job. |
 | `created_at` | `TIMESTAMP` | When the job row was written. |
 | `runtime_seconds` | `FLOAT64` | The job's own compute time (excludes cluster stand-up). |
-| `job_telemetry` | `JSON` | Per-job overlay: `total_wall_s`, `dcu_milli_seconds`, and sizing. Unpacked by `v_run_jobs`. |
+| `job_telemetry` | `JSON` | Per-job overlay: `total_wall_s`, `dcu_milli_seconds`, sizing, and — for a GPU family — `device_use`, the verdict on whether the accelerator did anything ([below](#was-the-accelerator-you-paid-for-actually-used)). Unpacked by `v_run_jobs`. |
 
 ## `forecast_metadata` — one row per (run, series, model) cell
 
@@ -108,16 +108,42 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `cell_started_at`, `cell_ended_at` | `TIMESTAMP` | The cell's wall-clock bracket (Gantt/waterfall). |
 | `cpu_seconds` | `FLOAT64` | CPU time the fit consumed, summed across threads. With `fit_seconds` this gives `effective_cores` — how much parallelism the library actually used. |
 | `process_rss_bytes` | `INT64` | The worker process's **absolute** memory high-water while the cell ran — not the cell's increment. This is the number that sizes an executor slot. |
-| `peak_gpu_bytes` | `INT64` | Peak device bytes allocated. NULL means *no device*, never zero. |
+| `peak_gpu_bytes` | `INT64` | Peak device bytes allocated, never zero. **NULL is ambiguous on its own** — it covers no tensor library, a CPU-only build, no device, and `measure="off"` alike. Read it beside `device_used`, which says which. |
 | `intraop_threads` | `INT64` | The native-thread cap in force (`OMP_NUM_THREADS`). Without it `cpu_seconds / fit_seconds` is uninterpretable — under a cap the ratio just reports the cap back. |
 | `n_obs` | `INT64` | Rows fed to the fit — the data signature a later run matches against. |
+| `device_requested` | `STRING` | What the cell was *told* to use: `auto` / `cpu` / `gpu`. Set from the job's provisioned hardware and the family's `hardware`, not from config intent. |
+| `device_available` | `STRING` | What the worker could actually *see*: `cuda` / `cpu` / `unknown`. `unknown` means no tensor library was importable, so nobody asked — a different fact from "there is no card". |
+| `device_used` | `STRING` | Where the fitted weights actually *landed*, read off a parameter tensor: `cuda` / `cpu`. NULL means the model has no device concept (everything but NeuralProphet). |
+| `device_name` | `STRING` | The visible device, e.g. `Tesla T4`. NULL when none is. |
+
+### Was the accelerator you paid for actually used?
+
+Those four columns exist because that question used to be unanswerable. Every GPU run in this
+project's history was, in substance, a CPU run: the card attached, the forecasts were correct, and
+nothing recorded that the arithmetic had happened somewhere else. `device_requested` is the intent,
+`device_available` is the environment, and `device_used` is the receipt — the three disagree exactly
+when something is wrong.
+
+Each family job also gets a one-line verdict on `run_jobs.job_telemetry.device_use`, drawn from
+these columns on the driver once the job's cells are written:
+
+| Verdict | Means |
+|---------|-------|
+| `MISSING_DEVICE` | The family asked for a device and no cell reports having run on one. The run is correct and the accelerator was billed for nothing. |
+| `ENGAGED_IDLE` | Cells ran on the device and barely touched it. A cost finding, not a fault — **this is the expected verdict today** (NeuralProphet peaks at 50–78 KB on a 17 GB T4 unless `n_lags > 0`). |
+| `ENGAGED_UTILISED` | Cells ran on the device and used at least 1% of it. |
+| absent | The family never asked for a device, so there was nothing to judge. |
+
+The verdict warns and never fails a job. It is filed with the counts it was drawn from
+(`cells`, `cells_on_device`, `cells_no_device`, `max_peak_gpu_bytes`, `device_name`) so it can be
+re-checked later rather than taken on trust.
 
 ### Columns that exist but are not filled yet
 
 `SELECT *` on this table also returns `cell_status`, `error_class`, `error_detail`,
 `backtest_status`, `backtest_note`, `n_folds_achieved`, `achieved_step`, `achieved_min_train`,
 `first_val_date`, `last_val_date`, `interval_source`, `ensemble_scoring`, `hpo_scoring`, `n_fits`,
-`train_rows_total`, and the four `device_*` columns. **They are all NULL today.** They are
+and `train_rows_total`. **They are all NULL today.** They are
 declared ahead of the code that writes them because adding a column to a deployed table is a
 migration every deployment has to run, and doing that once is better than doing it five times.
 Don't build a reader on them yet — `NULL` here means "not recorded", not "no".

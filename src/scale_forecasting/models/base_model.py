@@ -186,6 +186,25 @@ class BaseModel(ABC):
         """
         return False
 
+    def device_used(self) -> str | None:
+        """After ``fit``, where did the parameters actually end up — ``"cuda"``, ``"cpu"``, None?
+
+        The evidence half of the GPU contract, and it has to come from the fitted object rather
+        than from what the run asked for. ``ModelContext.device`` records the *request*; a request
+        is not a receipt, and the whole reason this contract exists is that for twenty-one jobs
+        the two silently disagreed.
+
+        ``None`` is the default and the honest answer for every model with no tensor library under
+        it: a statsmodels fit does not run "on the CPU" in any sense worth recording, it simply has
+        no device concept. Do not return ``"cpu"`` to mean "not applicable" — a reader auditing a
+        GPU family needs to tell "this model looked and found no device" from "this model cannot
+        answer". Override only where the library can be asked; see `gpu_capable`.
+
+        Called once per cell after the final fit, and it must never raise — a probe that sank a
+        good forecast would be worse than no probe.
+        """
+        return None
+
     # --- shared helpers ---------------------------------------------------------
 
     def residual_intervals(

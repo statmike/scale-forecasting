@@ -148,6 +148,7 @@ def launch_family_job(
     worker machine type, so a mixed run gets one cluster per hardware kind. A family naming its own
     standing cluster keeps that, and every other runtime/mode ignores the dict.
     """
+    from .device_audit import audit_device_use
     from .probes.vocabulary import ProbeHandle
     from .registry.ids import make_job_key
     from .registry.jobs import next_job_attempt
@@ -283,6 +284,25 @@ def launch_family_job(
             if handle.native_id != system_job_id:
                 fields["system_job_id"] = handle.native_id
             fin.finalize(telemetry={"probe_handle": handle.to_blob()}, **fields)
+        # Did the accelerator this job paid for do anything? `launch` blocks until the job
+        # finishes, so by here the family's cells are written and the question is answerable —
+        # from the driver, off one aggregate, for every runtime alike. A CPU family short-circuits
+        # before the query. It never fails the job: a device that sat idle produced a correct run
+        # and an expensive one, and that is a cost finding rather than a fault.
+        #
+        # Filed at a plain ``device_use`` because this row is already the family's row — the
+        # ``run_jobs`` grain is (run_id, family, attempt), so nesting the family name under it
+        # again would only repeat what the row's own column says.
+        device_use = audit_device_use(
+            run_id,
+            job.family,
+            list(job.models),
+            hardware=compute.hardware,
+            gpu_type=compute.gpu_type,
+            settings=settings,
+        )
+        if device_use:
+            fin.finalize(telemetry={"device_use": device_use})
 
 
 def launch_native_job(

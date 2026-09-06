@@ -26,9 +26,14 @@ tells its statistical cells ``cpu``. A Spark batch is single-hardware anyway.
 an SDK call, a notebook and a CPU batch all leave it unset and every model keeps asking its library
 to choose. Only a GPU job sets it.
 
+**The other half of the module is what is actually here.** ``provisioned_hardware`` answers what
+was bought; `visible_device` answers what the process can see. Keeping them together is the point —
+the whole GPU contract is about the gap between those two answers, and a run where they disagree is
+exactly the run nobody noticed for twenty-one jobs.
+
 Public surface: ``PROVISIONED_HARDWARE_ENV``, ``add_hardware_arg``, ``export_hardware_env``,
 ``hardware_args``, ``provisioned_hardware``, ``spark_executor_env``, ``ray_env_vars``,
-``driver_fit_scope``.
+``driver_fit_scope``, ``visible_device``.
 """
 
 from __future__ import annotations
@@ -117,6 +122,51 @@ def ray_env_vars(hardware: str | None) -> dict[str, str]:
     if hardware != _GPU:
         return {}
     return {PROVISIONED_HARDWARE_ENV: _GPU}
+
+
+_visible: tuple[str, str | None] | None = None  # memoized; a device does not appear mid-process
+
+
+def visible_device() -> tuple[str, str | None]:
+    """What this process can actually see: ``(availability, device name)``.
+
+    Availability is one of three words and the third one is load-bearing. ``"cuda"`` means a CUDA
+    device is present and named. ``"cpu"`` means torch is here and reports no device — a positive
+    finding. ``"unknown"`` means torch could not be imported at all, so nobody asked anything and
+    the honest answer is that we do not know; a CPU-only worker with no tensor library is not
+    evidence that a GPU job lost its card.
+
+    This exists because ``peak_gpu_bytes`` cannot answer the question. Its ``None`` is overloaded
+    across four different causes — no torch, no CUDA build, no device, and profiling off — so a
+    reader cannot tell "the accelerator never attached" from "nobody looked". Layer 4 records the
+    device, it does not infer it.
+
+    Memoized for the same reason `worker._peak_gpu_bytes` is: a *failed* ``import torch`` is not
+    cached in ``sys.modules``, so at a hundred thousand cells an unmemoized probe would re-walk
+    ``sys.path`` a hundred thousand times.
+    """
+    global _visible
+    if _visible is None:
+        _visible = _probe_visible_device()
+    return _visible
+
+
+def _probe_visible_device() -> tuple[str, str | None]:
+    """The uncached probe (see `visible_device`). Torch is imported lazily and never required.
+
+    ``hardware`` is on the lean launch path — `commands` and `_entry` import it — so a top-level
+    tensor-library import here would put torch in front of every submit.
+    """
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 - no tensor library is not an error, it is an answer
+        return ("unknown", None)
+    try:
+        if not torch.cuda.is_available():
+            return ("cpu", None)
+        return ("cuda", str(torch.cuda.get_device_name(0)))
+    except Exception:  # noqa: BLE001 - a broken CUDA build must not sink a cell
+        return ("unknown", None)
 
 
 @contextmanager

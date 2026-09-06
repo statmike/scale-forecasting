@@ -105,6 +105,22 @@ class NeuralProphetModel(BaseModel):
         ds = self._future_index(self._last_date, horizon)
         return self._assemble_frame(ds, qmap)
 
+    def device_used(self) -> str | None:
+        """Where the fitted weights actually live — read off a parameter tensor, not off config.
+
+        The parameters are the receipt. Lightning's trainer can be asked what accelerator it was
+        *configured* with, but that is the request again; a tensor's ``.device`` is where the
+        arithmetic happened. NeuralProphet keeps the LightningModule on ``.model`` after ``fit``.
+
+        Never raises: an unfitted model, a library version that moved the attribute, or an empty
+        parameter list all yield ``None`` (unknown), because a probe that sank a good forecast
+        would be worse than no probe at all.
+        """
+        try:
+            return str(next(self._model.model.parameters()).device.type)
+        except Exception:  # noqa: BLE001 - the evidence is optional; the forecast is not
+            return None
+
     def _trainer_config(self) -> dict[str, Any]:
         """The Lightning trainer knobs — chiefly *which device*, stated rather than guessed.
 
