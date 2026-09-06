@@ -24,6 +24,7 @@ schema) surfaces as a single `ConfigError`.
 | `data` | `DataConfig` | *required* | Where the series come from and their shape. |
 | `python_runtime` | `"spark"` \| `"ray"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
 | `models` | `list[str]` | *required* (≥1) | Model names to run (see `playground --list`). |
+| `model_params` | `dict[str, dict[str, …]]` | `{}` | Per-model hyperparameters, keyed by model name. **Accepted, not yet honoured** — see below. |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
 | `backtest` | `BacktestConfig` | `{}` | Time-series cross-validation. |
 | `hpo` | `HpoConfig` | `{}` | Hyperparameter optimization. |
@@ -127,12 +128,17 @@ for HPO and learned ensembles.
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
 | `enabled` | `bool` | `false` | — | Turn backtesting on. |
-| `scheme` | `"expanding"` \| `"sliding"` | `"expanding"` | — | CV window scheme. |
+| `scheme` | `"expanding"` \| `"sliding"` \| `"expanding_frozen"` | `"expanding"` | — | CV window scheme. `expanding_frozen` is **accepted, not yet honoured** — it currently lays out folds exactly as `expanding`. |
 | `n_folds` | `int` | `3` | `≥ 1` | Number of folds. |
 | `horizon` | `int` | `28` | `> 0` | Per-fold forecast horizon. |
 | `step` | `int` | `28` | `> 0` | Step between folds. |
 | `min_train` | `int` | `180` | `> 0` | Minimum training length. |
 | `decision_metric` | see below | `"wape"` | — | Metric folds are judged on. |
+| `short_series` | `"adapt"` \| `"skip"` \| `"error"` | `"adapt"` | — | **Accepted, not yet honoured** — see below. |
+| `min_folds` | `int` | `1` | `≥ 1` | **Accepted, not yet honoured.** The floor `adapt` may shrink `n_folds` to. |
+| `min_train_floor` | `int \| null` | `null` | `> 0` | **Accepted, not yet honoured.** A hard training-length minimum adaptation may not cross. |
+| `gap` | `int` | `0` | `≥ 0` | **Accepted, not yet honoured.** Observations to discard between train and validation, for a known reporting lag. |
+| `window` | `int \| null` | `null` | `> 0` | **Accepted, not yet honoured.** A fixed `sliding` width, decoupled from `min_train`. |
 
 **`scheme` — how the training window moves** ([`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py)).
 Folds are anchored from the **end** of each series: the latest fold validates on the final `horizon`
@@ -146,10 +152,32 @@ in where training *starts*:
   immediately before each fold. Older history is dropped. Use when the series' behavior drifts and
   recent history is more representative than old history.
 
-`n_folds`, `horizon`, `step`, and `min_train` lay the folds out together; a series needs at least
-`min_train + horizon + (n_folds−1)·step` observations, or it's **skipped** for backtesting (it doesn't
-sink the run). Features are built once and a **fresh** model is fit per fold, so no state leaks across
-folds and `train_end == val_start` always (no leakage).
+`n_folds`, `horizon`, `step`, and `min_train` lay the folds out together, and a series needs at least
+`min_train + horizon + (n_folds−1)·step` observations. **A series shorter than that fails its cell**
+— it is recorded with an error and no forecast, and the run continues. (This paragraph used to say
+such a series was "skipped for backtesting"; that was never true, and the wrong version is worth
+naming because it is the kind of promise a reader plans around.) Features are built once and a
+**fresh** model is fit per fold, so no state leaks across folds and `train_end == val_start` always
+(no leakage).
+
+**`short_series` — what *should* happen instead, once it is implemented.** `adapt` shrinks the fold
+grid to whatever the series can support, down to `min_folds` and never training on less than
+`min_train_floor`; `skip` leaves the series out of the backtest but still produces its forecast;
+`error` is today's behaviour. The default reads `adapt` while the code still does `error`, and the
+mismatch is deliberate: `run_id` is a digest of the whole config, so the default has to be the one
+we intend to keep or implementing it would move every recorded identity a second time.
+
+### Fields that are accepted but not yet honoured
+
+`short_series`, `min_folds`, `min_train_floor`, `gap`, `window`, the `expanding_frozen` scheme, and
+`model_params` all validate today and change nothing today. They were added to the schema ahead of
+the code that reads them, in one commit, because a new config field moves every `run_id` that has
+ever been recorded — landing them together costs one identity break instead of seven.
+
+Setting one is therefore not harmless even though it is inert: it changes your run's `run_id`, so a
+config that sets `gap: 7` is a different run from the same config without it, producing identical
+numbers. `tests/unit/test_inert_config_fields.py` holds both halves of that claim, and will fail on
+the day one of these fields is wired up — at which point this section is what needs correcting.
 
 **`decision_metric` — what folds are judged on** (definitions in
 [`metrics.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics.py); `err = yhat − y_true`). This single choice drives
@@ -172,6 +200,33 @@ fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold
 Pick `wape` (default) or `smape` for a robust scale-independent choice; `mase`/`rmsse` when you want
 to beat a naïve baseline; `coverage`/`pinball` only when you care about the prediction intervals
 (ensemble OOF has no intervals, so those two read NaN for ensembles).
+
+## `model_params` — hyperparameters you set yourself
+
+**Accepted, not yet honoured.** The schema takes it today and nothing reads it; the section above
+explains why it landed early.
+
+HPO searches for hyperparameters. `model_params` is the other half of that surface: the place to
+*state* them, when you already know what you want and would rather not pay for a search.
+
+```json
+"model_params": {
+  "neuralprophet": {"n_lags": 28, "n_forecasts": 28, "learning_rate": 0.01},
+  "xgboost": {"max_depth": 6, "n_estimators": 400}
+}
+```
+
+Keyed by model name, then by that model's own parameter names. Values may be a scalar (`bool`, `int`,
+`float`, `str`, `null`) or a flat list of scalars — anything that survives a JSON round-trip, since
+`run_id` is a digest of the serialized config. `NaN` and `±inf` are rejected at parse time for
+exactly that reason: `json.dumps` writes them as bare `NaN` / `Infinity`, which is not JSON, and a
+digest nobody else's parser can reproduce is not an identity.
+
+Unknown model names and unknown parameter names both pass validation. That is deliberate rather than
+lazy — checking a model name here would mean importing the model registry inside `config.py`, and the
+config module is imported on the job-submission path where the model stack is deliberately absent.
+The check belongs where the model is actually constructed, and that is where it will go when the
+field is wired up.
 
 ## `hpo` — `HpoConfig`
 

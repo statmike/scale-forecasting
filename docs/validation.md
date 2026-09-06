@@ -34,12 +34,39 @@ old value goes stale by definition.
 | `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
-| `run_id_inputs` | `authored-config-only` | `a22e94c` (2026-09-01), after the fork below | `+compute.profile.source` (W11a) |
+| `run_id_inputs` | `authored-config-only-v2` | P3 (2026-09-05) | `authored-config-only` (`a22e94c`, after the fork below), before that `+compute.profile.source` (W11a) |
 | `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 | `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
 | `ray_slot_memory` | `harvest-only` | `efecb4c` (2026-09-04) | `driver-rss-prepass` |
 | `dl_gpu_routing` | `resolved-per-family` | P1 (2026-09-05) | `flat-compute.use_gpu` |
+
+> ### Every row in this document is STALE, on purpose, as of 2026-09-05
+>
+> `run_id_inputs` moved to `authored-config-only-v2` and every row declares that axis, so all 28
+> config rows and all 8 notebook rows went stale in one commit. That is the intended outcome of a
+> planned change, not a discovery: six new fields landed on `RunConfig` together — five `backtest`
+> knobs and `model_params` — and since `run_id` is a digest of the whole config, every recorded
+> identity moved with them.
+>
+> **Read this the right way.** Nothing here has been shown to be *wrong*. Smoke 13 demonstrated that
+> the BigQuery-native path reads a native source table, and an inert `backtest.gap` field does not
+> unprove it. What every row has lost is narrower: the `run_id` it records is now a pointer into the
+> registry that no config reproduces, so a result can no longer be tied back to the exact
+> configuration that produced it. For a document whose entire job is to say *what has been proven,
+> and on what*, that is enough to withhold the word CURRENT until a run re-earns it.
+>
+> **This reverses a precedent, which is why it is written down.** Three earlier changes (W5, W10,
+> W11a) moved every id the same way, and each time this file said the opposite: "No row was marked
+> STALE for this, deliberately — `run_id_inputs` is not an axis any of those claims rests on." That
+> reasoning was locally correct and cumulatively wrong. It let identity drift four times with no
+> mark anywhere, and the result was six rows quietly recording ids their configs no longer produced
+> for four days before anyone noticed. Grading it as staleness costs a re-run; not grading it cost
+> the ability to tell which rows were affected at all.
+>
+> The fields were batched into one break for the same reason. Adding them one per release would
+> have moved every identity six times, and the re-validation campaign that follows is the moment
+> the whole surface is proven once, together, on identities that are final.
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not
@@ -174,22 +201,22 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
-| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-01 | `smoke-01-serverless-cpu-5af5de1accf2` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | STALE | 2026-09-01 | `smoke-01-serverless-cpu-5af5de1accf2` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | STALE | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
-| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-01 | `smoke-03-serverless-gpu-a918f22d7970` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | CURRENT | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | CURRENT | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | CURRENT | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-09-01 | `smoke-03-serverless-gpu-a918f22d7970` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | STALE | 2026-09-03 | `smoke-08-ray-gpu-38e33f02fd6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | CURRENT | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | CURRENT | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | CURRENT | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | STALE | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | CURRENT | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
 
@@ -792,17 +819,17 @@ the honest starting position and the reason for adding the table at all: it is t
 | Config | Proves | Status | Date | run_id | Axes at proof |
 |--------|--------|--------|------|--------|---------------|
 | `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | STALE | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
-| `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | CURRENT | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | CURRENT | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | STALE | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | STALE | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | STALE | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | STALE | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | CURRENT | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
-| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | CURRENT | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
-| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | CURRENT | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | CURRENT | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
+| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | STALE | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `explode_100k.json` | The headline: Spark `explode` over 100,000 series | STALE | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 
 **`all_families_10k` ran twice on 2026-09-04, and the pair is the `ray_slot_memory` A/B.** The first
 pass is the run that found the defect; the second is the identical config under the fix, submitted
@@ -1221,14 +1248,14 @@ seven, so only outputs changed.
 
 | Notebook | Status | Date | Axes at proof |
 |----------|--------|------|---------------|
-| `01_spark_via_connect.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates` |
-| `02_bigquery_native.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
-| `03_combo_and_ensemble.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay` |
-| `04_ray_on_vertex.ipynb` | CURRENT | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11` |
-| `07_scale_review.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
-| `08_run_and_monitor.ipynb` | CURRENT | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay` |
-| `09_review_run.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
-| `model_playground.ipynb` | CURRENT | 2026-09-02 | `python=3.11` |
+| `01_spark_via_connect.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| `02_bigquery_native.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
+| `03_combo_and_ensemble.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| `04_ray_on_vertex.ipynb` | STALE | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
+| `07_scale_review.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
+| `08_run_and_monitor.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| `09_review_run.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
+| `model_playground.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
 
 **`03` took three attempts, and the two failures had two different causes.** Neither was a defect in
 the notebook — it reported **zero cell errors** every time.
@@ -2025,9 +2052,10 @@ Things that are true today and that no entry above covers. Keep this list short 
   decision the result depends on, and adding a config field is not a decision — it moves identity
   without touching any claim. The ledger cannot see it, and for four days nothing else could either.
 
-  Two things close it. The narrow one is that the digest-input *set* is itself worth versioning, so
-  the next deliberate break bumps this axis to `authored-config-only-v2` and every row goes stale by
-  construction rather than by inspection. The durable one already exists:
+  Two things close it. The narrow one is that the digest-input *set* is itself worth versioning:
+  the planned break bumped this axis to `authored-config-only-v2` the same day, and every row went
+  stale by construction rather than by inspection — see the note under the axis table. The durable
+  one is mechanical:
   `tests/unit/snapshots/run_ids_prebreak.json` pins today's digest for all twenty-eight shipped
   configs, and `tests/unit/test_prebreak_snapshots.py` fails the offline gate the moment an
   unplanned field moves one. Discovering this by hand, once, was the last time that should be

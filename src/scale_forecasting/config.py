@@ -13,6 +13,7 @@ Public surface:
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -58,6 +59,21 @@ JobFamily = Literal["statistical", "ml", "deep_learning", "native", "ensemble"]
 Runtime = Literal["spark", "ray"]
 SparkMode = Literal["serverless", "cluster"]
 Hardware = Literal["cpu", "gpu"]
+
+# What a `model_params` value may be. Deliberately narrow: the canonical config string is
+# ``json.dumps(model_dump(mode="json"), sort_keys=True)`` and that string *is* the ``run_id``, so a
+# value that does not round-trip through JSON either raises at digest time or hashes differently
+# depending on who serialises it. Scalars and flat lists cover every per-model knob we have
+# (``n_lags``, ``batch_size``, a SARIMAX ``order`` triple); a nested structure would fit the digest
+# fine but is not needed, and leaving it out keeps the error message useful.
+ModelParam = bool | int | float | str | None | list[bool | int | float | str | None]
+
+
+def _is_non_finite(value: Any) -> bool:
+    """True for NaN and ±inf. Bools are ints to Python, so they are excluded explicitly."""
+    return isinstance(value, float) and not math.isfinite(value)
+
+
 GpuType = Literal["T4", "L4"]
 EnsembleMode = Literal["barrier", "microbatch"]
 ProfileMode = Literal["off", "auto", "always"]
@@ -106,17 +122,46 @@ class FeaturesConfig(BaseModel):
 
 
 class BacktestConfig(BaseModel):
-    """Time-series cross-validation. Off by default (cheapest first run)."""
+    """Time-series cross-validation. Off by default (cheapest first run).
+
+    **Five of these fields are accepted but not yet honoured**, and so is the ``expanding_frozen``
+    scheme. They are declared here ahead of the methodology work that implements them, because
+    ``run_id`` is a digest of the whole config: adding a field moves every identity ever recorded,
+    so the fields land together, once, rather than one per release. Until then
+    ``make_folds`` reads exactly what it read before — ``n_folds``, ``horizon``, ``step``,
+    ``min_train``, ``scheme`` — and ``test_inert_config_fields.py`` asserts that the others change
+    nothing. See ``docs/configuration_reference.md`` for which is which.
+
+    The one to be careful with is ``short_series``. Its default reads ``"adapt"`` while the code
+    still raises on a series too short for the requested folds, i.e. it behaves as ``"error"``. The
+    default names the intended behaviour rather than today's so that implementing it is not a
+    second identity break; the honest statement of today's behaviour is the ``"error"`` branch.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = False
-    scheme: Literal["expanding", "sliding"] = "expanding"
+    scheme: Literal["expanding", "sliding", "expanding_frozen"] = "expanding"
     n_folds: int = Field(default=3, ge=1)
     horizon: int = Field(default=28, gt=0)
     step: int = Field(default=28, gt=0)
     min_train: int = Field(default=180, gt=0)
     decision_metric: DecisionMetric = "wape"
+
+    # --- accepted, not yet honoured (see the class docstring) ---------------------------
+
+    # What to do with a series too short for the requested fold grid: shrink the grid to fit,
+    # leave the series out of the backtest, or fail the cell. Today: always fails.
+    short_series: Literal["adapt", "skip", "error"] = "adapt"
+    # The floor `short_series="adapt"` may shrink `n_folds` to before it gives up.
+    min_folds: int = Field(default=1, ge=1)
+    # A hard minimum training length, independent of `min_train`, that adaptation may not go below.
+    min_train_floor: int | None = Field(default=None, gt=0)
+    # Observations discarded between train_end and val_start, breaking the `train_end == val_start`
+    # adjacency for forecasts issued with a known reporting lag.
+    gap: int = Field(default=0, ge=0)
+    # A fixed training width for `sliding`, decoupled from `min_train`'s role as a data floor.
+    window: int | None = Field(default=None, gt=0)
 
 
 class HpoConfig(BaseModel):
@@ -705,6 +750,41 @@ class RunConfig(BaseModel):
     hpo: HpoConfig = Field(default_factory=HpoConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     compute: ComputeConfig = Field(default_factory=ComputeConfig)
+    # Per-model hyperparameters, keyed by model name: {"neuralprophet": {"n_lags": 28}}. The
+    # declared home for *every* per-model knob, which is what keeps the next identity break small —
+    # a new hyperparameter becomes a dict key rather than a schema field, and a dict key only moves
+    # the ids of configs that actually set it.
+    #
+    # **Accepted, not yet honoured.** Nothing reads this yet; wiring it into the three places a
+    # model's params are resolved (the cell, and both halves of HPO) is its own change, because
+    # authored params must beat HPO's search space at all three or an authored value is silently
+    # discarded under the default fleetwide granularity. Unknown model names are accepted here on
+    # purpose: validating them means importing the model registry from this module, and eager
+    # model-stack imports on the submit path have broken a live run before. That check belongs with
+    # the wiring, where the registry is already loaded.
+    model_params: dict[str, dict[str, ModelParam]] = Field(default_factory=dict)
+
+    @field_validator("model_params")
+    @classmethod
+    def _model_params_survive_json(
+        cls, value: dict[str, dict[str, ModelParam]]
+    ) -> dict[str, dict[str, ModelParam]]:
+        """Reject non-finite floats, which the type alias cannot exclude.
+
+        ``float`` admits NaN and infinity, and ``json.dumps`` emits them as the bare tokens ``NaN``
+        and ``Infinity``. Both are invalid JSON, so the digest string stops being something another
+        reader can reproduce — and this string is the ``run_id``.
+        """
+        for model, params in value.items():
+            for key, val in params.items():
+                bad = [v for v in (val if isinstance(val, list) else [val]) if _is_non_finite(v)]
+                if bad:
+                    raise ValueError(
+                        f"model_params.{model}.{key} contains {bad[0]!r}, which is not JSON. "
+                        f"run_id is a digest of the serialized config, so a value that cannot "
+                        f"round-trip through JSON cannot be part of one."
+                    )
+        return value
 
     @model_validator(mode="after")
     def _normalize(self) -> RunConfig:

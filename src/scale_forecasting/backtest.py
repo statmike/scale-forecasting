@@ -77,7 +77,12 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
         val_start = n - horizon - (n_folds - 1 - k) * step
         val_end = val_start + horizon
         train_end = val_start
-        train_start = 0 if bt.scheme == "expanding" else max(0, train_end - min_train)
+        # Membership, not equality: `sliding` is the one scheme with a fixed-width window, and
+        # `expanding_frozen` differs from `expanding` in how the model is *refit*, not in where
+        # training starts. Written as `== "expanding"`, adding that scheme silently gave it sliding
+        # geometry — the kind of thing widening a Literal does for free in the digest and not at
+        # all in the code.
+        train_start = max(0, train_end - min_train) if bt.scheme == "sliding" else 0
         folds.append(
             Fold(
                 fold_id=k,

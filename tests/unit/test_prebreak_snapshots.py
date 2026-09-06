@@ -9,14 +9,20 @@ claims, and neither is checkable without artefacts captured *before* it lands:
 * **No output changed.** The fields arrive with defaults chosen to preserve today's behaviour, so
   the forecasts must be numerically identical on both sides of it.
 
-So this module holds both snapshots and one switch. `_BREAK_LANDED` is `False` today and the
-digest test asserts the ids still *match*; the commit that lands the break flips it to `True` and
-the same test asserts every id now *differs*. The golden panel test does not have a switch,
-because it must stay green throughout — that is the claim.
+So this module holds both snapshots and one switch. `_BREAK_LANDED` is `True` as of the break
+commit: before it, the digest test asserted the ids still *matched*; now it asserts every one
+*differs*. The golden panel test does not have a switch, because it must stay green throughout —
+that is the claim.
 
 The switch matters more than it looks. The obvious alternative is to leave a test that is known to
 fail from the break onward, and the reason not to is that a permanently-red test gets muted, and a
 muted test is worse than no test. A one-line flip is something a reviewer can see and argue with.
+
+**`run_ids.json` is the one that keeps working.** "Every id differs from the pre-break set" is
+satisfied forever once the break lands, so on its own it stops detecting anything the moment it
+goes green. The post-break snapshot is a plain equality pin against *today's* digests, and it is
+what actually fails when an unplanned field is added next. Six ledger rows recorded a `run_id` their
+config no longer produced because nothing was watching this; something is watching now.
 
 **Regenerating.** ``uv run python tests/unit/test_prebreak_snapshots.py --write``. Both snapshots
 are built by the same functions the tests read them with, so there is no second code path that can
@@ -37,12 +43,13 @@ from scale_forecasting.config import RunConfig
 from scale_forecasting.models import get_model, list_models
 from scale_forecasting.registry.ids import make_run_id
 
-# Flip to True in the commit that lands the digest break (plan P3), and in no other commit.
-_BREAK_LANDED = False
+# Flipped by the commit that landed the digest break (plan P3), and by no other commit.
+_BREAK_LANDED = True
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SNAPSHOTS = Path(__file__).parent / "snapshots"
 _RUN_IDS = _SNAPSHOTS / "run_ids_prebreak.json"
+_RUN_IDS_NOW = _SNAPSHOTS / "run_ids.json"
 _PANEL = _SNAPSHOTS / "golden_panel_prebreak.json"
 
 # Not a run config: a zone/region failover map with its own schema and no `run_name`.
@@ -159,6 +166,11 @@ def snapshot_run_ids() -> dict[str, str]:
 
 
 @pytest.fixture(scope="module")
+def snapshot_run_ids_now() -> dict[str, str]:
+    return json.loads(_RUN_IDS_NOW.read_text())
+
+
+@pytest.fixture(scope="module")
 def snapshot_panel() -> dict[str, Any]:
     return json.loads(_PANEL.read_text())
 
@@ -201,11 +213,27 @@ def test_the_digest_break_has_or_has_not_happened(snapshot_run_ids: dict[str, st
     )
 
 
+def test_current_digests_match_the_pinned_snapshot(snapshot_run_ids_now: dict[str, str]) -> None:
+    """The tripwire that survives the break, and the one that would have caught 2026-09-01.
+
+    The test above stops discriminating the moment the break lands — "differs from the pre-break
+    set" is true forever afterwards. This one is a plain equality pin against today's digests, so
+    the next unplanned field fails in the commit that adds it rather than being noticed months
+    later by someone regenerating a snapshot for an unrelated reason.
+    """
+    assert build_run_ids() == snapshot_run_ids_now, (
+        "a run_id moved. If a config field was added, the config surface is frozen — fold it into "
+        "the next planned break instead. If the break is the intent, regenerate with --write and "
+        "re-grade the affected rows in docs/validation.md, whose recorded ids are now pointers "
+        "into the registry that no config reproduces."
+    )
+
+
 # --- the numbers -----------------------------------------------------------------------
 
 
 def test_fold_geometry_is_unchanged(snapshot_panel: dict[str, Any]) -> None:
-    """Pure arithmetic, and the surface the break's four new backtest fields touch directly."""
+    """Pure arithmetic, and the surface the break's five new backtest fields touch directly."""
     assert build_folds() == snapshot_panel["folds"], (
         "fold geometry moved. The new backtest fields are supposed to be inert at their "
         "defaults; if this is intentional it is a behaviour change and needs its own decision."
@@ -249,9 +277,15 @@ def test_golden_cell_output_is_unchanged(snapshot_panel: dict[str, Any]) -> None
 
 
 def _write() -> None:
-    _RUN_IDS.write_text(json.dumps(build_run_ids(), indent=2, sort_keys=True) + "\n")
+    """Regenerate the post-break pin and the golden panel. Never rewrites the pre-break digests.
+
+    `run_ids_prebreak.json` is a historical record — it is what the ids were before the break, and
+    rewriting it would erase the only evidence that the break moved anything. Restore it from git
+    if it is ever lost.
+    """
+    _RUN_IDS_NOW.write_text(json.dumps(build_run_ids(), indent=2, sort_keys=True) + "\n")
     _PANEL.write_text(json.dumps(build_golden_panel(), indent=2, sort_keys=True) + "\n")
-    print(f"wrote {_RUN_IDS.relative_to(_ROOT)} and {_PANEL.relative_to(_ROOT)}")
+    print(f"wrote {_RUN_IDS_NOW.relative_to(_ROOT)} and {_PANEL.relative_to(_ROOT)}")
 
 
 if __name__ == "__main__":  # pragma: no cover - regeneration entrypoint
