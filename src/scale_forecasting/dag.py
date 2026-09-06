@@ -191,6 +191,130 @@ def check_model_params(cfg: RunConfig) -> None:
         get_model(name).validate_params(authored, max_horizon=max_horizon)
 
 
+def check_hardware_coherence(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> None:
+    """Refuse a plan that would buy a device nothing will route to. Raises `errors.ConfigError`.
+
+    **This is expected to be silent, and that is the point.** Provisioning and routing were made to
+    read one function (`config.RunConfig.resolve_family_compute`, via
+    `engines.ray_io.resolve_job_gpu`) precisely so they cannot disagree, and `ComputeConfig` already
+    refuses ``hardware: "gpu"`` on a family that is not ``deep_learning``. Every incoherence we know
+    about is therefore closed upstream. What this adds is a **standing tripwire**: it recomputes the
+    routing answer down the engine's own path and compares it against the hardware the DAG planned
+    — two call paths, one expected answer — so the day an edit reintroduces a flat-field read the
+    plan refuses instead of quietly paying for idle accelerators for a whole fleet-hour. That defect
+    shipped once and nothing reported it; the cost of the check is a pure function call.
+
+    No config field and no escape hatch. Incoherence has exactly one correct answer and the remedy
+    is always a config edit, so an override would only let a run buy hardware it cannot use.
+
+    Called from the spend paths only (via `preflight`) — `main.run`, `launch_plan.stage_run`,
+    `airflow_tasks.begin_run` — never from `plan_dag`, which stays total.
+    """
+    from .engines.ray_io import resolve_job_gpu, split_gpu_cpu_models
+
+    routed_gpu, routed_type = resolve_job_gpu(cfg)
+    for job in jobs:
+        if job.compute is None or job.compute.hardware != "gpu":
+            continue
+        # A GPU job must have at least one model the engine will actually send to the GPU pool.
+        # `split_gpu_cpu_models` is the function that does the sending, so ask it rather than
+        # restating its rule here — a divergence between the two is exactly what this catches.
+        gpu_models, _ = split_gpu_cpu_models(cfg, list(job.models), use_gpu=True)
+        if not gpu_models:
+            raise ConfigError(
+                f"family '{job.family}' resolves to GPU hardware but none of its models "
+                f"{list(job.models)} route to the GPU pool, so the run would provision "
+                f"accelerators that nothing schedules onto. Set "
+                f"compute.families.{job.family}.hardware to 'cpu', or select a model the pool "
+                f"can use."
+            )
+        if not routed_gpu:
+            raise ConfigError(
+                f"family '{job.family}' is planned onto GPU hardware but the engine's own routing "
+                f"resolves this run to CPU. Provisioning and routing must read one answer; they "
+                f"have diverged, which would leave the devices idle for the whole run."
+            )
+        if job.compute.gpu_type != routed_type:
+            raise ConfigError(
+                f"family '{job.family}' is planned onto {job.compute.gpu_type} but the engine "
+                f"routes to {routed_type}. The device type sets the memory denominator the GPU "
+                f"fraction is derived from, so a mismatch mis-sizes the pool."
+            )
+
+
+def gpu_usefulness_report(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> list[str]:
+    """Warnings about a device that will be paid for and barely used. Never refuses.
+
+    Returns human-readable lines for the caller to log; an empty list means nothing to say. The
+    separation from `check_hardware_coherence` is deliberate and is the difference between "this
+    plan is wrong" and "this plan is probably wasteful": a GPU that no model can use is a mistake
+    with one correct answer, while a GPU a model *can* use but will barely touch is a judgement
+    call about cost, and the only configuration that would satisfy a hard check
+    (``model_params.neuralprophet.n_lags > 0``) has never been run at scale here. Refusing on
+    usefulness would break the shipped smokes and demo configs on the day it landed, in favour of a
+    setting with no green run behind it. So: warn, loudly, with both remedies and which one is
+    proven.
+
+    Surfaced wherever a plan is shown or submitted — a dry run, the quota preflight, the SDK's
+    ``dag``, and the submit log.
+    """
+    lines: list[str] = []
+    gpu_jobs = [j for j in jobs if j.compute is not None and j.compute.hardware == "gpu"]
+
+    for job in gpu_jobs:
+        capable = [m for m in job.models if get_model(m).gpu_capable]
+        incapable = [m for m in job.models if m not in capable]
+        if incapable:
+            lines.append(
+                f"family '{job.family}' has a {job.compute.gpu_type} attached, but "
+                f"{incapable} cannot use a device at all — those cells will run on the host CPU "
+                f"while the accelerator is billed."
+            )
+        idle = [m for m in capable if not get_model(m).gpu_useful(cfg.model_params.get(m, {}))]
+        if idle:
+            lines.append(
+                f"family '{job.family}' has a {job.compute.gpu_type} attached and {idle} can use "
+                f"it, but not at the hyperparameters this config authors. Measured over 31,356 "
+                f"fits on live T4s: peak device memory 50-78 KB against a 17 GB card, and "
+                f"cpu_seconds/fit_seconds 0.93-0.996 — the device is engaged and idle, so this is "
+                f"a CPU run being billed as a GPU run. Two remedies: set "
+                f"compute.families.{job.family}.hardware to 'cpu', which is the PROVEN one and "
+                f"costs nothing in accuracy; or turn on autoregression with "
+                f"model_params.neuralprophet.n_lags, which is what would make the device earn its "
+                f"cost but has NO green run behind it yet — no accuracy A/B and no live smoke."
+            )
+
+    # The inverse: a run that asked for a device and then selected nothing that could ever use one.
+    if not gpu_jobs and cfg.compute.use_gpu:
+        lines.append(
+            "compute.use_gpu is true but no deep-learning model is selected, so no job resolves "
+            "to GPU hardware and the flag has no effect. Select a GPU-capable model or drop the "
+            "flag; leaving it set makes the config read as a GPU run when it is not one."
+        )
+    return lines
+
+
+def preflight(cfg: RunConfig) -> RunDag:
+    """Everything a run is refused or warned about before it provisions anything. Returns the DAG.
+
+    One call so the spend paths cannot drift apart on which checks they run: an authored
+    ``model_params`` block no model can honour (`check_model_params`), a plan that would buy a
+    device nothing routes to (`check_hardware_coherence`), and — logged, never fatal — a device that
+    will be billed and barely used (`gpu_usefulness_report`).
+
+    Separate from `plan_dag` on purpose. Planning is pure inspection and must stay total: the SDK's
+    ``dag``, a notebook, and several hundred tests call it and none of them are spending anything.
+    Refusing is a different act, so it is a different function, and only `main.run`,
+    `launch_plan.stage_run` and `airflow_tasks.begin_run` perform it.
+    """
+    check_model_params(cfg)
+    run_dag = plan_dag(cfg)
+    check_hardware_coherence(cfg, run_dag.jobs)
+    for line in gpu_usefulness_report(cfg, run_dag.jobs):
+        _log.warning("%s", line)
+    return run_dag
+
+
 def plan_dag(cfg: RunConfig) -> RunDag:
     """Resolve a config into its execution DAG (pure, offline — the single planner main.run uses).
 

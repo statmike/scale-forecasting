@@ -28,6 +28,8 @@ import pandas as pd
 from ..errors import ModelError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import optuna
 
 Runtime = Literal["python", "bigquery"]
@@ -84,6 +86,12 @@ class BaseModel(ABC):
     family: ClassVar[Family]
     supports_exog: ClassVar[bool] = False
     supports_native_intervals: ClassVar[bool] = False
+    # Can this model put a device to work *at all* — is there a tensor library under it? A static
+    # property of the model, not of a run. False for everything that fits on CPU by construction
+    # (statsmodels, the tree models, the naives). Distinct from `gpu_useful`, which asks the much
+    # harder question of whether a device would earn its cost at the hyperparameters actually
+    # authored. Capable-but-not-useful is the normal state, and it is what Phase 0 measured.
+    gpu_capable: ClassVar[bool] = False
 
     def __init__(self, params: dict[str, Any], ctx: ModelContext) -> None:
         self.params = dict(params)
@@ -142,6 +150,30 @@ class BaseModel(ABC):
         `ModelError` — nothing has been fitted, the config is what is wrong.
         """
         return  # accept: a model with no library-level constraint has nothing to refuse
+
+    @classmethod
+    def gpu_useful(cls, params: Mapping[str, Any]) -> bool:
+        """Would a device do meaningful work at these **authored** hyperparameters? Default: no.
+
+        `gpu_capable` says a device *can* be used; this says it would be *worth paying for*. The
+        two came apart when they were measured: across 31,356 NeuralProphet fits on live T4s, peak
+        device memory was 50–78 KB against a card holding 17 GB and ``cpu_seconds / fit_seconds``
+        sat at 0.93–0.996. The model was on the device the whole time and the device was doing
+        essentially nothing, because at the shipped defaults the network is a few hundred trend and
+        Fourier parameters. Every GPU run in the ledger was, in substance, a CPU run.
+
+        **Authored hyperparameters only** — no `ModelContext`, no config. Building a plan-time
+        context would duplicate `worker._model_context` (which does real work), and no model's
+        device use depends on the frequency or the holiday frame. Widen the signature later if a
+        model genuinely needs the horizon; that is an internal change, not a config change.
+
+        **This never feeds routing or provisioning.** Consuming it at
+        `engines.ray_io.split_gpu_cpu_models` would empty the GPU pool on every config shipped
+        today while the submitter still bought the cards — manufacturing the exact
+        provisioned-but-unrouted incoherence `dag.check_hardware_coherence` exists to refuse. It
+        feeds one thing: a warning (`dag.gpu_usefulness_report`).
+        """
+        return False
 
     # --- shared helpers ---------------------------------------------------------
 

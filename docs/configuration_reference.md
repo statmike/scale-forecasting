@@ -610,6 +610,26 @@ runs in BigQuery).
   to `runtime="ray"`.
 - `hardware="cpu"` with a `gpu_type` set → error (drop `gpu_type` or set `hardware="gpu"`).
 
+**A GPU plan is checked again at plan time, before anything is provisioned.** Two separate things
+happen there and the difference between them matters. A plan that would *buy* a device nothing can
+be scheduled onto is **refused** outright — that has one correct answer and the remedy is always a
+config edit, so there is no override for it. A plan where a device *will* be used but will barely be
+touched only **warns**, because that is a cost judgement rather than a mistake.
+
+The warning is the one you are most likely to see, and it is worth reading rather than dismissing.
+NeuralProphet is the only model with a tensor library under it, and at its shipped defaults
+(`n_lags` unset) the network is a few hundred trend and Fourier parameters. Measured across 31,356
+fits on live T4s: peak device memory 50–78 KB against a 17 GB card, and `cpu_seconds / fit_seconds`
+between 0.93 and 0.996. The card is attached, the tensors are on it, and it is doing essentially
+nothing — a CPU run being billed as a GPU run. There are two remedies and they are not equally
+proven: setting `hardware: "cpu"` costs nothing in accuracy and is what every green run in the
+ledger did, while turning on autoregression with `model_params.neuralprophet.n_lags` is what would
+actually make the device earn its cost but has no accuracy A/B and no live smoke behind it yet.
+
+The same report fires in reverse: `use_gpu: true` with no deep-learning model selected means no job
+resolves to GPU hardware at all, so the flag does nothing except make the config read as a GPU run.
+You will see these lines on a dry run, on `--quota`, from the SDK's `.dag`, and in the submit log.
+
 **How many clusters a run creates.** One per **hardware kind** among its ephemeral cluster families,
 not one per run — a Dataproc cluster has exactly one worker machine type, so it is a CPU cluster or a
 GPU cluster and cannot be both. A run whose cluster families are all CPU gets one cluster named

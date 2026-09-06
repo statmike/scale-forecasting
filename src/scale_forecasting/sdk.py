@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .config import Fanout, RunConfig, estimate_fanout, load_config
+from .errors import get_logger
 from .registry.ids import make_run_id
 from .registry.views import VIEW_NAMES
 from .router import split_by_runtime
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
 
     from .dag import DagNode
     from .settings import Settings
+
+_log = get_logger(__name__)
 
 __all__ = [
     "Forecaster",
@@ -342,10 +345,17 @@ class Forecaster:
         runtime/hardware, and its upstream dependencies. Because ``job_key``\\ s are derived from
         the config alone, this gives every job's identity *before* the run — the offline counterpart
         to `jobs`, so a caller can line up planned nodes against executed rows by ``job_key``.
-        """
-        from .dag import dag_nodes, plan_dag
 
-        return dag_nodes(plan_dag(self._config))
+        Planning never refuses — this stays total, so inspecting a config is always safe — but it
+        does log `dag.gpu_usefulness_report`, because someone reading the planned hardware is
+        exactly the person who should be told a device will be billed and barely used.
+        """
+        from .dag import dag_nodes, gpu_usefulness_report, plan_dag
+
+        run_dag = plan_dag(self._config)
+        for line in gpu_usefulness_report(self._config, run_dag.jobs):
+            _log.warning("%s", line)
+        return dag_nodes(run_dag)
 
     def emit_airflow(self, config_uri: str | None = None, *, dag_id: str | None = None) -> str:
         """Render this config's Airflow DAG as a ``dag_<run_id>.py`` source string — pure, offline.

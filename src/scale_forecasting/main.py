@@ -119,7 +119,7 @@ def run(
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
-    from .dag import check_model_params, plan_dag
+    from .dag import plan_dag, preflight
     from .profiling.source import check_pinned_source
     from .registry.header import header_status
     from .registry.lifecycle import run_header
@@ -129,10 +129,10 @@ def run(
     # different scale is a distinct, independently-queryable run.
     cfg = cfg.with_series_limit(n_series)
 
-    # Ahead of the dry-run branch on purpose: an authored `model_params` block a model cannot
-    # honour is exactly what a dry run exists to catch, and the check needs the registry loaded,
-    # which `plan_dag` deliberately does not do on the caller's behalf.
-    check_model_params(cfg)
+    # Ahead of the dry-run branch on purpose: a config a model cannot honour, or a plan that would
+    # buy a device nothing routes to, is exactly what a dry run exists to catch. The checks need the
+    # registry loaded, which `plan_dag` deliberately does not do on the caller's behalf.
+    preflight(cfg)
 
     if dry_run:
         # Single-source the offline plan: plan_run resolves the id + fanout + runtime split, reports
@@ -534,10 +534,15 @@ def _main(argv: list[str] | None = None) -> None:
         _log.info("staged: %s", result.run_id)
         return
     if ns.quota:
+        from .dag import gpu_usefulness_report, plan_dag
         from .quota import report_for_run
 
         for line in report_for_run(cfg):
             _log.info("%s", line)
+        # A device that will be billed and barely used is a cost finding, so it belongs next to the
+        # quota numbers rather than only in the submit log.
+        for line in gpu_usefulness_report(cfg, plan_dag(cfg).jobs):
+            _log.warning("%s", line)
         return
     if ns.probe:
         from .probes.reconcile import probe_run

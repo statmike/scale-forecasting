@@ -71,7 +71,9 @@ def model_catalog() -> pd.DataFrame:
                 "local": is_python,
                 "spark": is_python,
                 "ray": is_python,
-                "gpu": is_python and cls.family == "deep_learning",  # only the GPU pool needs it
+                # The model's own capability flag, not a family guess: "deep_learning" is a
+                # scheduling family, "has a tensor library under it" is what a device needs.
+                "gpu": cls.gpu_capable,
                 "bigquery": cls.runtime == "bigquery",
                 "exog": cls.supports_exog,
             }

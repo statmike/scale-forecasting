@@ -35,6 +35,8 @@ from ..features import invert_transform
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import optuna
 
 # Fixed band fit into the network; sigma is backed out of it for arbitrary quantiles.
@@ -49,6 +51,8 @@ class NeuralProphetModel(BaseModel):
     family = "deep_learning"
     supports_exog = False
     supports_native_intervals = True
+    # The only model here with a tensor library under it, and so the only one a device can serve.
+    gpu_capable = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:
@@ -168,6 +172,18 @@ class NeuralProphetModel(BaseModel):
             "epochs": trial.suggest_int("epochs", 20, 200),
             "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.1, log=True),
         }
+
+    @classmethod
+    def gpu_useful(cls, params: Mapping[str, Any]) -> bool:
+        """A device earns its cost here only under autoregression — ``n_lags > 0``.
+
+        Without it the network is a few hundred trend and Fourier parameters and the Lightning
+        loop, the dataloader and pandas dwarf the kernels; that is the shape Phase 0 measured at
+        50–78 KB of device memory and 95% CPU-bound. AR-Net is what makes the model big enough for
+        the card to matter. ``n_forecasts`` alone does not qualify: extra heads without lags are
+        extra output units on the same tiny network.
+        """
+        return int(params.get("n_lags", 0) or 0) > 0
 
     @classmethod
     def validate_params(cls, params: dict[str, Any], *, max_horizon: int) -> None:
