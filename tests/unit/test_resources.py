@@ -36,7 +36,7 @@ from scale_forecasting.engines import ray_io
 from scale_forecasting.profiling.cost import ComputeProfile, build_profile
 from scale_forecasting.profiling.measure import MeasuredFit
 from scale_forecasting.resources import audit, catalog, cluster, fleet, serverless
-from scale_forecasting.resources.catalog import machine_memory_bytes
+from scale_forecasting.resources.catalog import intraop_env_vars, machine_memory_bytes
 from scale_forecasting.resources.fleet import (
     UnitShape,
     max_slot_memory_bytes,
@@ -121,7 +121,8 @@ def test_an_unparseable_machine_type_reports_unknown_rather_than_empty() -> None
         n_cells=64,
         unit=UnitShape(cores=8, memory_bytes=machine_memory_bytes("n1-custom-8-16384")),
     )
-    assert plan.slots_per_unit == 8  # cores-only, exactly as before the memory bound existed
+    assert plan.slots_per_unit == 7  # cores-only: 8 nameplate minus the one-core reserve
+    assert plan.binding_axis == "cores"
 
 
 # --- the slot: fallback must reproduce today's behaviour -----------------------
@@ -456,8 +457,8 @@ def test_merging_nothing_is_a_caller_bug() -> None:
 # --- density: cores are not the only bound -------------------------------------
 
 
-def test_a_light_family_packs_one_cell_per_core() -> None:
-    """900 MiB x 8 fits inside 21 GiB, so cores bind and the old formula stands."""
+def test_a_light_family_packs_one_cell_per_schedulable_core() -> None:
+    """900 MiB x 7 fits inside 21 GiB, so cores bind — seven of them, not the billed eight."""
     plan = plan_resources(
         _profile(_fit(process_rss_bytes=900 * _MIB)),
         "statistical",
@@ -465,7 +466,7 @@ def test_a_light_family_packs_one_cell_per_core() -> None:
         n_cells=1000,
         unit=_N1_STANDARD_8,
     )
-    assert plan.slots_per_unit == 8
+    assert plan.slots_per_unit == 7
 
 
 def test_a_heavy_family_is_packed_by_memory_not_by_cores() -> None:
@@ -489,7 +490,7 @@ def test_a_heavy_family_is_packed_by_memory_not_by_cores() -> None:
 
 def test_an_unmeasured_memory_axis_leaves_density_exactly_where_it_was() -> None:
     """No basis → no bound. The memory rule must not shrink a fleet it knows nothing about."""
-    assert slots_per_unit(resource_slot(None, "statistical"), _N1_STANDARD_8) == 8
+    assert slots_per_unit(resource_slot(None, "statistical"), _N1_STANDARD_8) == 7  # cores only
 
 
 def test_host_memory_bounds_a_gpu_slot_too_because_ray_enforces_the_request() -> None:
@@ -506,11 +507,60 @@ def test_a_gpu_slot_that_fits_in_host_memory_is_still_bound_by_its_devices() -> 
     assert slots_per_unit(slot, unit) == 4  # 2 cards x 2 cells, not the 21 the RAM would allow
 
 
-def test_an_unmeasured_gpu_slot_packs_by_device_alone_exactly_as_before() -> None:
-    """The byte-identity guarantee reaches the GPU branch: no memory measured, no new bound."""
+def test_an_unmeasured_gpu_slot_is_still_bound_by_the_cores_its_cells_run_on() -> None:
+    """No memory measured, so no memory bound — but a card does not supply a core.
+
+    Two cards at a quarter each is eight cells by the device axis; seven schedulable cores is
+    seven. The eighth cell has a slice of a T4 waiting for it and nothing to run on.
+    """
     unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=2)
     slot = _slot("deep_learning", gpu_fraction=0.25)
-    assert slots_per_unit(slot, unit) == 8
+    assert slots_per_unit(slot, unit) == 7
+    assert fleet._binding_axis(slot, unit) == "cores"
+
+
+def test_the_node_keeps_one_core_for_itself_and_a_one_core_node_still_runs_a_cell() -> None:
+    """A flat reserve, floored at 1 — a pool that holds zero cells never starts."""
+    assert fleet.schedulable_cores(UnitShape(cores=96)) == 95
+    assert fleet.schedulable_cores(UnitShape(cores=8)) == 7
+    assert fleet.schedulable_cores(UnitShape(cores=1)) == 1
+    assert fleet.schedulable_cores(UnitShape(cores=0)) == 1
+
+
+def test_the_shipped_gpu_node_at_the_fraction_floor_is_bound_by_its_cores() -> None:
+    """The number this whole change exists to correct.
+
+    One T4 at the 0.1 fraction floor is ten cells by the device axis. The node it is bolted to
+    is an ``n1-standard-8``, which has seven cores left after the reserve, and a NeuralProphet
+    fit is 93-99.6% CPU-bound — so ten was never a density, it was three cells of queue. The
+    device bound is still *reported*; it just no longer decides on its own.
+    """
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=1)
+    slot = _slot("deep_learning", gpu_fraction=0.1)
+    assert fleet._device_bound(slot, unit) == 10
+    assert fleet._core_bound(slot, unit) == 7
+    assert slots_per_unit(slot, unit) == 7
+    assert fleet._binding_axis(slot, unit) == "cores"
+
+
+def test_a_tie_is_credited_to_the_axis_the_slot_is_defined_by() -> None:
+    """T-I. Two axes at the same number is not two answers — it is one, and attribution matters.
+
+    A GPU slot whose card and cores both allow seven cells is a GPU pool that happens to be
+    balanced. Reporting ``cores`` would send an operator to buy a wider machine type when the
+    fraction is the knob that moves the density; the arithmetic is identical either way, so the
+    only thing at stake is which lever the record points at.
+    """
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=7)
+    slot = _slot("deep_learning", gpu_fraction=1.0)
+    assert fleet._device_bound(slot, unit) == fleet._core_bound(slot, unit) == 7
+    assert fleet._binding_axis(slot, unit) == "device"
+
+    # The mirror: a CPU slot has no device axis, so a cores/memory tie goes to cores.
+    cpu = _slot("statistical", cores=1, memory_bytes=3 * _GIB, measured=_HOST_AXES)
+    tied = UnitShape(cores=8, memory_bytes=30 * _GIB)  # 21 GiB / 3 GiB == 7 == schedulable cores
+    assert fleet._memory_bound(cpu, tied) == fleet._core_bound(cpu, tied) == 7
+    assert fleet._binding_axis(cpu, tied) == "cores"
 
 
 # --- density: the axis that bound it has to say so ------------------------------
@@ -531,8 +581,24 @@ def test_a_memory_bound_pool_says_so_and_names_what_cores_would_have_packed() ->
     assert plan.binding_axis == "memory"
     note = plan.density_note
     assert note is not None
-    assert "cores alone would have packed 8" in note
+    assert "cores alone would have packed 7" in note
     assert "21.00 GiB schedulable" in note  # 0.7 x 30 GiB, the figure the packing divides
+
+
+def test_a_memory_bound_gpu_pool_names_the_devices_it_left_idle_not_its_cores() -> None:
+    """The note reports the *tightest other* axis, so it names the one worth acting on.
+
+    Four cards at a whole card each is four cells; seven cores allow seven; 8 GiB of footprint
+    against 21 GiB schedulable allows two. Saying "cores would have packed 7" would be true and
+    useless — the operator would widen a machine type and leave two of four cards idle anyway.
+    """
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=4)
+    slot = _slot("deep_learning", memory_bytes=8 * _GIB, gpu_fraction=1.0, measured=_HOST_AXES)
+    plan = fleet.plan_fleet(slot, runtime="ray", n_cells=100, unit=unit)
+    assert plan.slots_per_unit == 2
+    assert plan.binding_axis == "memory"
+    assert plan.density_note is not None
+    assert "devices alone would have packed 4" in plan.density_note
 
 
 def test_a_cores_bound_pool_stays_quiet_because_that_is_the_ordinary_case() -> None:
@@ -589,9 +655,9 @@ def test_the_fleet_widens_with_the_load_and_stops_at_the_ceiling() -> None:
             max_units=max_units,
         ).derived_units
 
-    assert units(64) == 1  # exactly one node's worth: 8 slots x 8 cells
-    assert units(65) == 2
-    assert units(6400) == 100
+    assert units(56) == 1  # exactly one node's worth: 7 slots x 8 cells
+    assert units(57) == 2
+    assert units(5600) == 100
     assert units(64_000, max_units=16) == 16
 
 
@@ -616,8 +682,8 @@ def test_the_record_shows_when_the_ceiling_and_not_the_work_bounded_the_run() ->
         max_units=4,
     )
     assert plan.derived_units == 4
-    assert plan.saturating_units == 1000
-    assert plan.total_slots == 32
+    assert plan.saturating_units == math.ceil(8000 / 7)  # 1143 nodes to run every cell at once
+    assert plan.total_slots == 28
 
 
 def test_a_run_must_produce_enough_tasks_for_its_autoscaler_to_reach_the_ceiling() -> None:
@@ -630,11 +696,16 @@ def test_a_run_must_produce_enough_tasks_for_its_autoscaler_to_reach_the_ceiling
         unit=_N1_STANDARD_8,
         max_units=10,
     )
-    assert plan.slots_at_ceiling == 80
-    assert tasks_for_ceiling(plan) == 80  # fewer than 80 chunks and the pool never grows
+    assert plan.slots_at_ceiling == 70
+    assert tasks_for_ceiling(plan) == 70  # fewer than 70 chunks and the pool never grows
 
 
 # --- the handover: what the runtime is actually given --------------------------
+
+
+def _pin(threads: int) -> dict[str, object]:
+    """The per-task thread-pin every Ray plan now carries — the four Ray does not set itself."""
+    return {"runtime_env": {"env_vars": intraop_env_vars(threads, include_omp=False)}}
 
 
 def test_a_cpu_plan_hands_ray_its_old_options_plus_the_memory_it_never_had() -> None:
@@ -645,13 +716,86 @@ def test_a_cpu_plan_hands_ray_its_old_options_plus_the_memory_it_never_had() -> 
         n_cells=100,
         unit=_N1_STANDARD_8,
     )
-    assert plan.task_options == {"num_cpus": 1, "memory": 1 * _GIB}
+    assert plan.task_options == {"num_cpus": 1, "memory": 1 * _GIB, **_pin(1)}
 
 
-def test_an_unmeasured_plan_hands_ray_exactly_what_it_handed_it_before() -> None:
-    """The no-op guarantee, stated at the seam the engine actually calls."""
+def test_an_unmeasured_plan_hands_ray_the_scheduling_request_it_always_did() -> None:
+    """The no-op guarantee, stated at the seam the engine actually calls.
+
+    The thread pin rides alongside and is deliberately not part of that guarantee: it asks the
+    scheduler for nothing, so it cannot change what is placed where. What it changes is what the
+    placed process is allowed to do once it starts, which is the gap it exists to close.
+    """
     plan = plan_resources(None, "statistical", "ray", n_cells=100, unit=_N1_STANDARD_8)
-    assert plan.task_options == {"num_cpus": 1}
+    assert plan.task_options == {"num_cpus": 1, **_pin(1)}
+    scheduling = {k: v for k, v in plan.task_options.items() if k != "runtime_env"}
+    assert scheduling == {"num_cpus": 1}
+
+
+def test_the_ray_pin_covers_the_four_libraries_ray_leaves_alone_and_not_the_one_it_sets() -> None:
+    """Spelled out rather than compared to `intraop_env_vars`, which would prove nothing.
+
+    Two failures this catches that a tautological comparison cannot. Adding ``OMP_NUM_THREADS``
+    back takes ownership of a value Ray derives from the task's assignment — its setter is a no-op
+    once the variable exists, so ours would win silently. Dropping one of the other four leaves
+    that library counting the machine's cores, which on a node running seven cells is seven times
+    the thread budget anyone intended.
+    """
+    plan = plan_resources(None, "statistical", "ray", n_cells=100, unit=_N1_STANDARD_8)
+    assert set(plan.task_options["runtime_env"]["env_vars"]) == {
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    }
+
+
+def test_a_wider_measured_slot_widens_the_thread_pin_with_it() -> None:
+    """The pin has to track the slot, or a 4-core cell runs single-threaded BLAS on 4 cores."""
+    plan = plan_resources(
+        _profile(_fit(model_type="xgboost", family="ml", cpu_s=40.0, wall_s=10.0)),
+        "ml",
+        "ray",
+        n_cells=100,
+        unit=_N1_STANDARD_8,
+    )
+    assert plan.slot.cores > 1, "this test needs a measurement that actually widens the slot"
+    assert plan.assigned_cores == plan.slot.cores
+    assert plan.task_options["runtime_env"]["env_vars"] == intraop_env_vars(
+        plan.slot.cores, include_omp=False
+    )
+
+
+def test_a_gpu_task_is_pinned_to_the_one_core_ray_will_give_it_not_to_its_slot() -> None:
+    """A GPU task requests no ``num_cpus``, so Ray assigns it one however wide the slot is.
+
+    Pinning to ``slot.cores`` here would hand the four thread pools a budget the scheduler never
+    granted, and the cells packed onto the device beside it would contend for cores nobody
+    accounted for. ``OMP_NUM_THREADS``, which Ray sets itself from the same assignment, would
+    meanwhile say 1 — the five variables disagreeing about the same task.
+    """
+    plan = plan_resources(
+        _profile(
+            _fit(
+                model_type="neuralprophet",
+                family="deep_learning",
+                peak_gpu_bytes=4 * _GIB,
+                process_rss_bytes=None,
+                cpu_s=40.0,
+                wall_s=10.0,
+            )
+        ),
+        "deep_learning",
+        "ray",
+        n_cells=100,
+        unit=UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=1),
+        use_gpu=True,
+        device_bytes=16 * _GIB,
+    )
+    assert plan.slot.cores > 1
+    assert "num_cpus" not in plan.task_options
+    assert plan.assigned_cores == 1
+    assert plan.task_options["runtime_env"]["env_vars"] == intraop_env_vars(1, include_omp=False)
 
 
 def test_a_gpu_plan_requests_a_fraction_and_lets_ray_default_the_cpu() -> None:
@@ -673,7 +817,7 @@ def test_a_gpu_plan_requests_a_fraction_and_lets_ray_default_the_cpu() -> None:
         use_gpu=True,
         device_bytes=16 * _GIB,
     )
-    assert plan.task_options == {"num_gpus": 0.25}
+    assert plan.task_options == {"num_gpus": 0.25, **_pin(1)}
 
 
 # --- provenance ----------------------------------------------------------------
@@ -880,7 +1024,7 @@ def test_the_autoscaler_starts_warm_and_fills_the_whole_gap() -> None:
     props = out.properties
     assert props["spark.dynamicAllocation.enabled"] == "true"
     assert props["spark.dynamicAllocation.minExecutors"] == "2"  # 1 is below the platform floor
-    assert props["spark.dynamicAllocation.initialExecutors"] == "16"  # the derived fleet, warm
+    assert props["spark.dynamicAllocation.initialExecutors"] == "18"  # the derived fleet, warm
     assert props["spark.dynamicAllocation.maxExecutors"] == "50"
     assert props["spark.dynamicAllocation.executorAllocationRatio"] == "1.0"
 
@@ -1037,12 +1181,12 @@ def test_an_explicit_density_overrides_what_the_slot_arithmetic_would_derive() -
     slot = _slot("cpu", cores=1)
     unit = fleet.UnitShape(cores=16, memory_bytes=64 * _GIB)
     derived = fleet.plan_fleet(slot, runtime="serverless", n_cells=64, unit=unit)
-    assert derived.slots_per_unit == 16  # what the cores alone would say
+    assert derived.slots_per_unit == 15  # what the schedulable cores alone would say
     forced = fleet.plan_fleet(
         slot, runtime="serverless", n_cells=64, unit=unit, max_units=99, density=4
     )
     assert forced.slots_per_unit == 4
-    assert forced.saturating_units == 16  # 64 cells / 4 per unit, not / 16
+    assert forced.saturating_units == 16  # 64 cells / 4 per unit, not / 15
 
 
 # --- dataproc cluster: the worker is the unit, and it is billed whole -----------

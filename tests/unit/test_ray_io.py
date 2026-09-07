@@ -24,7 +24,8 @@ from scale_forecasting.engines.spark_io import _MODEL_COL
 from scale_forecasting.profiling.cost import build_profile
 from scale_forecasting.profiling.measure import MeasuredFit
 from scale_forecasting.registry.ids import make_run_id
-from scale_forecasting.resources import catalog
+from scale_forecasting.resources import catalog, fleet
+from scale_forecasting.resources.fleet import UnitShape
 
 # theta/holtwinters = CPU (statistical); xgboost = CPU (ml); neuralprophet = GPU (deep_learning).
 _CPU = "theta"
@@ -47,6 +48,17 @@ def _compute(**over: Any) -> dict[str, Any]:
     base: dict[str, Any] = {"use_gpu": True}
     base.update(over)
     return base
+
+
+def _scheduling_request(plan: fleet.RuntimeResourcePlan) -> dict[str, Any]:
+    """``task_options`` minus the thread pin — what this file is about.
+
+    Every plan also carries a ``runtime_env`` capping the native thread pools at the cores Ray
+    assigns the task; that pin belongs to `fleet` and is asserted in ``test_resources.py``. The
+    sizing tests here care only about what the *scheduler* is asked for, so they drop it rather
+    than restate it and go stale the next time its contents change.
+    """
+    return {key: value for key, value in plan.task_options.items() if key != "runtime_env"}
 
 
 # --- split_gpu_cpu_models ------------------------------------------------------
@@ -148,6 +160,46 @@ def test_calibrate_auto_no_measurements_falls_back_to_nominal() -> None:
     assert (
         ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[]) == ray_io._NOMINAL_AUTO_FRACTION
     )
+
+
+def test_a_probe_that_measured_zero_is_a_probe_that_failed_not_a_free_model() -> None:
+    """Zeros used to survive into ``max()`` and drag the fraction to the floor.
+
+    ``torch.cuda.max_memory_allocated()`` returns 0 both when a model genuinely allocated nothing
+    and when the probe ran somewhere without a device to allocate on. The old code could not tell
+    those apart, so a pool whose probes all failed reported a peak of 0 bytes, solved to 0, and
+    clamped to `_MIN_FRACTION` — the *densest* possible packing, chosen on the strength of no
+    evidence whatsoever. The nominal fallback is the conservative answer, and it is the one an
+    absent measurement has to produce however the absence is spelled.
+    """
+    cfg = _cfg(compute=_compute(gpu_fraction="auto"))
+    for peaks in ([0, 0, 0], [None, 0], [None], [None, None]):
+        assert ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=peaks) == (
+            ray_io._NOMINAL_AUTO_FRACTION
+        ), peaks
+
+
+def test_one_real_probe_outvotes_the_ones_that_came_back_empty() -> None:
+    """A partial failure is still a measurement — the surviving probe sizes the pool."""
+    cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.2))
+    assert ray_io.calibrate_gpu_fraction(
+        cfg, measured_peaks_bytes=[None, 0, 6 * 1024**3]
+    ) == pytest.approx(0.45)
+
+
+def test_the_footprint_neuralprophet_actually_has_lands_on_the_floor_not_near_it() -> None:
+    """The Phase-0 number, run through the real arithmetic, to show what the clamp is holding up.
+
+    76 KiB is the peak device memory a live NeuralProphet fit reached on a T4 — 0.00045% of the
+    card. Solved honestly that is a fraction of about six millionths, which would ask Ray to pack
+    ~160,000 cells onto one device. Nothing in the memory arithmetic stops that; `_MIN_FRACTION`
+    does, and this test exists so that the floor is never mistaken for a rounding detail. The real
+    limit on GPU density is the node's cores, which is `resources.fleet`'s job, not this one.
+    """
+    cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.3))
+    frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[77_824], gpu_type="T4")
+    assert frac == ray_io._MIN_FRACTION
+    assert (77_824 * 1.3) / ray_io.device_memory_bytes("T4") < ray_io._MIN_FRACTION
 
 
 def test_device_memory_known_and_unknown() -> None:
@@ -420,17 +472,36 @@ def _fit(family: str, *, model_type: str, rss: int | None, gpu_bytes: int | None
     )
 
 
-def test_an_unprofiled_pool_reproduces_the_constants_the_engine_used_inline() -> None:
-    """The safety property the whole wiring rests on: no measurement, no behaviour change."""
+def test_an_unprofiled_pool_asks_for_the_same_slot_and_packs_it_onto_schedulable_cores() -> None:
+    """No measurement still means no *request* changes — but density is the three-way min now.
+
+    The old claim here was that an unprofiled pool reproduced `plan_cluster`'s inline arithmetic
+    exactly. What a cell asks Ray for (``task_options``) is untouched by the absence of a profile,
+    and that half still holds. Density is where the fleet arithmetic deliberately differs: the CPU
+    pool no longer packs a cell onto the core the raylet reports progress on, so it lands one cell
+    per node below nameplate. The GPU pool is unmoved here only because the *submit-time nominal*
+    fraction is coarse enough that two devices' worth of slots is still the scarcest axis — the
+    calibrated fraction is the case where cores take the binding over from devices, and that case
+    lives in ``test_resources.py``.
+    """
     cfg = _cfg(compute=_compute())
     cpu = ray_io.plan_pool(cfg, [_CPU, "xgboost"], 1000, gpu=False)
     gpu = ray_io.plan_pool(cfg, [_GPU], 1000, gpu=True, gpu_type="T4")
-    assert cpu.slots_per_unit == catalog.machine_cores(cfg.compute.ray_cpu_machine_type)
-    assert gpu.slots_per_unit == cfg.compute.accelerator_count * ray_io.gpu_slots_per_device(
+
+    cpu_unit = UnitShape(cores=catalog.machine_cores(cfg.compute.ray_cpu_machine_type))
+    assert cpu.slots_per_unit == fleet.schedulable_cores(cpu_unit)
+    assert cpu.binding_axis == "cores"
+
+    devices_alone = cfg.compute.accelerator_count * ray_io.gpu_slots_per_device(
         ray_io._sizing_fraction(cfg)
     )
-    assert cpu.task_options == {"num_cpus": 1}
-    assert gpu.task_options == {"num_gpus": ray_io._sizing_fraction(cfg)}
+    gpu_unit = UnitShape(cores=catalog.machine_cores(cfg.compute.ray_gpu_machine_type))
+    assert devices_alone < fleet.schedulable_cores(gpu_unit)
+    assert gpu.slots_per_unit == devices_alone
+    assert gpu.binding_axis == "device"
+
+    assert _scheduling_request(cpu) == {"num_cpus": 1}
+    assert _scheduling_request(gpu) == {"num_gpus": ray_io._sizing_fraction(cfg)}
 
 
 def test_a_shared_cpu_pool_is_sized_for_the_heaviest_family_that_lands_on_it() -> None:
@@ -487,7 +558,7 @@ def test_a_live_calibrated_fraction_beats_the_submit_time_nominal() -> None:
     plan = ray_io.plan_pool(
         _cfg(compute=_compute()), [_GPU], 1000, gpu=True, gpu_type="T4", gpu_fraction=0.2
     )
-    assert plan.task_options == {"num_gpus": 0.2}
+    assert _scheduling_request(plan) == {"num_gpus": 0.2}
     assert plan.slots_per_unit == 5
 
 

@@ -35,6 +35,7 @@ from .metrics import METRIC_NAMES
 from .models import get_model
 from .models.base_model import PREDICTION_COLUMNS, BaseModel, ModelContext
 from .registry.ids import make_model_hash, make_run_id
+from .resources.catalog import _INTRAOP_ENV_VARS
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -113,16 +114,29 @@ def _intraop_threads() -> int | None:
     """The native-thread cap this process is running under, or None when nothing caps it.
 
     Read from the environment rather than inferred, because that is where the fleet actually
-    sets it: `resources` exports ``OMP_NUM_THREADS`` (and its four siblings) to
-    ``spark.task.cpus`` on every Spark job, and Ray exports it to a task's ``num_cpus``. A cell
-    that records the cap it ran under is a cell whose `effective_cores` can be read honestly
-    later; one that does not is a number that silently repeats the pin back to you.
+    sets it: `resources` exports all five of `catalog._INTRAOP_ENV_VARS` to ``spark.task.cpus``
+    on every Spark job, and Ray exports ``OMP_NUM_THREADS`` to a task's ``num_cpus``. A cell that
+    records the cap it ran under is a cell whose `effective_cores` can be read honestly later.
+
+    **The widest cap wins, and reading only OMP was reporting the pin back to itself.** These
+    five variables cap different thread pools, and the fit uses whichever library is underneath:
+    ``OMP_NUM_THREADS=1`` beside an unset ``OPENBLAS_NUM_THREADS`` is not a one-thread process,
+    it is a process where the OpenBLAS matrix ops still take the whole node. Recording 1 there
+    made ``cpu_seconds / fit_seconds`` look like clean single-threaded occupancy when the run
+    was oversubscribed — the measurement agreeing with the assumption instead of testing it. So
+    the honest answer is the *largest* cap in force; an unset variable is no cap at all and
+    yields ``None`` for the whole process, because one uncapped pool is enough to uncap the fit.
     """
-    raw = os.environ.get("OMP_NUM_THREADS")
-    try:
-        return int(raw) if raw else None
-    except ValueError:
-        return None
+    caps: list[int] = []
+    for name in _INTRAOP_ENV_VARS:
+        raw = os.environ.get(name)
+        if not raw:
+            return None  # this pool is uncapped, so the process is
+        try:
+            caps.append(int(raw))
+        except ValueError:
+            return None
+    return max(caps) if caps else None
 
 
 def _process_rss_bytes() -> int | None:

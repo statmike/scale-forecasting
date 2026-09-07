@@ -102,6 +102,16 @@ _SCHEDULABLE_MEMORY_FRACTION = 0.7
 # legal one. Capping the ask below the node forces the packing arithmetic to stay meaningful.
 _MAX_SLOT_MEMORY_FRACTION = 0.85
 
+# Cores held back on every unit, whatever its size. The memory axis has had a schedulable share
+# since the packing arithmetic was written; the core axis has been dividing *nameplate* vCPUs,
+# which quietly assumes a node runs cells and nothing else. It does not: the raylet, the Spark
+# executor's JVM, the log shipper and the OS all want a core, and the cell that gets scheduled onto
+# the last one does not fail — it time-slices against the agent that is supposed to be reporting
+# its progress. One core is a flat reserve rather than a fraction because the overhead is roughly
+# constant per node: a 4-core node loses a quarter and a 96-core node loses one percent, which is
+# the right shape for a per-node daemon and the wrong shape for anything proportional.
+_RESERVED_CORES_PER_UNIT = 1
+
 _GIB = 1024**3
 _MIB = 1024**2
 
@@ -150,9 +160,11 @@ def machine_memory_bytes(machine_type: str) -> int:
 # the shuffle machinery and the Arrow batches crossing the boundary, and no more.
 _SPARK_JVM_MB_PER_CORE = 512
 
-# Native thread-pool caps. A Ray task inherits ``OMP_NUM_THREADS = num_cpus`` for free; a
-# Spark executor pins nothing, so N concurrent Python workers each grab the whole executor
-# and the machine thrashes on N x cores threads. The profile was measured with these pinned
+# Native thread-pool caps. Ray sets ``OMP_NUM_THREADS = num_cpus`` per task for free, but only
+# that one of the five — the other four fall back to counting the machine's cores, so the cap is
+# in force for OpenMP and absent for the libraries beside it. A Spark executor pins nothing at
+# all, so N concurrent Python workers each grab the whole executor and the machine thrashes on
+# N x cores threads. The profile was measured with these pinned
 # to one (`profiling.measure._pinned_intraop_threads`), so exporting them is also what makes the
 # measurement describe the environment it is being used to size.
 #
@@ -169,3 +181,20 @@ _INTRAOP_ENV_VARS = (
     "NUMEXPR_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
 )
+
+
+def intraop_env_vars(threads: int, *, include_omp: bool = True) -> dict[str, str]:
+    """``{var: str(threads)}`` for every native thread pool a fit might use (pure).
+
+    One definition of the pin, so the two runtimes cannot drift into capping different subsets of
+    these libraries and calling the result the same thing.
+
+    ``include_omp=False`` is the Ray caller. Ray sets ``OMP_NUM_THREADS`` itself, from the task's
+    assigned cores, and its setter is a no-op when the variable already has a value — so passing
+    our own would silently take ownership of a derivation Ray is already doing correctly, and any
+    future divergence between the two would resolve in favour of ours without a word. Leaving that
+    one variable alone keeps a single owner for it. Spark has no such setter and takes all five.
+    """
+    return {
+        name: str(threads) for name in _INTRAOP_ENV_VARS if include_omp or name != "OMP_NUM_THREADS"
+    }

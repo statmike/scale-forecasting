@@ -14,9 +14,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from scale_forecasting import worker
 from scale_forecasting.config import RunConfig
 from scale_forecasting.metrics import METRIC_NAMES
 from scale_forecasting.models.base_model import PREDICTION_COLUMNS
+from scale_forecasting.resources.catalog import _INTRAOP_ENV_VARS
 from scale_forecasting.worker import CellResult, run_cell
 
 HORIZON = 7
@@ -280,11 +282,52 @@ def test_a_failed_cell_carries_no_measurement_because_it_never_fit_anything() ->
     assert result.fit_seconds == 0.0
 
 
+def _pin(monkeypatch: Any, **caps: str | None) -> None:
+    """Set every intra-op variable to ``caps[name]``, deleting the ones passed as None."""
+    for name in _INTRAOP_ENV_VARS:
+        value = caps.get(name, "1")
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
 def test_the_thread_cap_in_force_is_recorded_so_effective_cores_can_be_read_honestly(
     monkeypatch: Any,
 ) -> None:
     """cpu/wall under a cap reports the cap back; without the cap recorded that is invisible."""
-    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    _pin(monkeypatch, **dict.fromkeys(_INTRAOP_ENV_VARS, "3"))
     assert run_cell(_series(), "theta", _cfg()).intraop_threads == 3
-    monkeypatch.delenv("OMP_NUM_THREADS")
+    _pin(monkeypatch, **dict.fromkeys(_INTRAOP_ENV_VARS, None))
     assert run_cell(_series(), "theta", _cfg()).intraop_threads is None
+
+
+def test_one_uncapped_pool_uncaps_the_process_however_many_of_the_others_are_pinned(
+    monkeypatch: Any,
+) -> None:
+    """Reading OMP alone reported the pin back to itself and called an eight-thread fit a one.
+
+    These five variables cap different native thread pools, and a fit uses whichever library sits
+    underneath it. ``OMP_NUM_THREADS=1`` next to an unset ``OPENBLAS_NUM_THREADS`` is not a
+    single-threaded process — the OpenBLAS matrix work still spreads across the node. Recording 1
+    there made ``cpu_seconds / fit_seconds`` come out at clean single-threaded occupancy on a run
+    that was oversubscribed, which is the measurement confirming the assumption rather than
+    testing it. So any one unset variable yields None for the whole process.
+    """
+    for uncapped in _INTRAOP_ENV_VARS:
+        _pin(monkeypatch, **{uncapped: None})
+        assert worker._intraop_threads() is None, uncapped
+
+
+def test_the_widest_cap_wins_because_the_loosest_pool_is_the_one_that_spreads(
+    monkeypatch: Any,
+) -> None:
+    """Four pools pinned to 1 and a fifth at 4 is a process that can reach four threads."""
+    _pin(monkeypatch, MKL_NUM_THREADS="4")
+    assert worker._intraop_threads() == 4
+
+
+def test_an_unparseable_cap_is_not_a_cap(monkeypatch: Any) -> None:
+    """``OMP_NUM_THREADS=all`` caps nothing; guessing a number from it would invent evidence."""
+    _pin(monkeypatch, OPENBLAS_NUM_THREADS="all")
+    assert worker._intraop_threads() is None

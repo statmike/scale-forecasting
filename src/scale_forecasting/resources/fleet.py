@@ -5,15 +5,23 @@ the fan-out, the autoscaling ``[min, max]``. Still runtime-neutral: a caller sup
 shape of one schedulable unit (`UnitShape` — a Ray worker node, a Spark executor, a Dataproc
 worker) and gets back a `RuntimeResourcePlan` carrying both the decision and its evidence.
 
-**Density is bounded by memory, not only by cores.** ``slots_per_unit = unit.cores //
+**Three axes bound a density, and the smallest one wins.** ``slots_per_unit = unit.cores //
 slot.cores`` is the design's formula and it is right up to the point where the cells do not
 fit: eight NeuralProphet cells at 4 GiB each do not run on a 30 GiB node no matter how many
-cores it has. When both the unit's memory and the slot's memory are known the density takes
-the **min** of the two bounds — the same rule the Serverless translation states explicitly
-(``floor(usable_python_mem / peak_rss)``), applied on the runtime that had been ignoring it.
+cores it has, and a node's *card* stops being the scarce resource as soon as the fraction is
+small enough that its cores run out first. So the density is ``min(device, cores, memory)``
+over whichever of the three have a basis — the same rule the Serverless translation states
+explicitly (``floor(usable_python_mem / peak_rss)``), applied on the runtime that had been
+taking one axis at a time.
 
-Nameplate RAM is not schedulable RAM, which is why `schedulable_memory_bytes` exists and why
-every memory bound here goes through it.
+The device axis in particular used to stand alone: a GPU slot's density was
+``accelerators x floor(1 / gpu_fraction)`` with **no core term at all**, so an
+``n1-standard-8`` with one T4 at the 0.1 fraction floor reported ten concurrent cells onto
+seven usable cores. Ten cells were never going to run; the arithmetic just never said so.
+
+**Nameplate is not schedulable, on either axis.** `schedulable_memory_bytes` takes the
+plasma store and the OS off the RAM; `schedulable_cores` takes `_RESERVED_CORES_PER_UNIT`
+off the vCPUs for the node's own agents. Every bound here goes through one of the two.
 """
 
 from __future__ import annotations
@@ -25,7 +33,9 @@ from typing import TYPE_CHECKING, Any
 from .catalog import (
     _DEFAULT_TARGET_CELLS_PER_SLOT,
     _MAX_SLOT_MEMORY_FRACTION,
+    _RESERVED_CORES_PER_UNIT,
     _SCHEDULABLE_MEMORY_FRACTION,
+    intraop_env_vars,
 )
 from .slot import ResourceSlot, resource_slot
 
@@ -127,7 +137,7 @@ class RuntimeResourcePlan:
         cause).
 
         So the memory axis has to speak up. It names both sides of the comparison and what the
-        primary axis *would* have packed, which is the difference between "this family is
+        *tightest other* axis would have packed, which is the difference between "this family is
         genuinely memory-heavy, buy bigger nodes" and "the slot is mis-measured."
         """
         schedulable = schedulable_memory_bytes(self.unit)
@@ -135,16 +145,28 @@ class RuntimeResourcePlan:
             return None
         if self.binding_axis != "memory":
             return None
-        axis = "devices" if self.slot.gpu_fraction is not None else "cores"
+        others = {a: v for a, v in _bounds(self.slot, self.unit).items() if a != "memory"}
+        axis, packed = _tightest(others, _defining_axis(self.slot))
         return (
             f"memory is holding this {self.family} pool to {self.slots_per_unit} concurrent "
             f"cells per unit: {self.slot.memory_bytes / _GIB:.2f} GiB per cell against "
-            f"{schedulable / _GIB:.2f} GiB schedulable, where {axis} alone would have packed "
-            f"{_primary_bound(self.slot, self.unit)}."
+            f"{schedulable / _GIB:.2f} GiB schedulable, where "
+            f"{'devices' if axis == 'device' else axis} alone would have packed {packed}."
         )
 
     @property
-    def task_options(self) -> dict[str, float]:
+    def assigned_cores(self) -> int:
+        """Cores Ray will actually hand this plan's task — what its thread pools may use.
+
+        Not always ``slot.cores``. A GPU task requests ``num_gpus`` and no ``num_cpus``, so Ray
+        assigns it the default of one core however wide the slot's core figure happens to be.
+        Capping the thread pools at what the task is *given* rather than at what was planned for
+        it is what keeps this number equal to the ``OMP_NUM_THREADS`` Ray sets beside it.
+        """
+        return 1 if self.slot.gpu_fraction is not None else self.slot.cores
+
+    @property
+    def task_options(self) -> dict[str, Any]:
         """The Ray ``@ray.remote.options(**...)`` mapping this plan implies.
 
         A GPU slot requests ``num_gpus`` and lets Ray default ``num_cpus`` to 1, exactly as
@@ -154,16 +176,35 @@ class RuntimeResourcePlan:
         scheduling resource, so requesting a number nobody took could leave tasks
         permanently unschedulable.
 
+        **The task also carries a per-pool thread cap, and it has to ride here rather than on the
+        job.** Ray already sets ``OMP_NUM_THREADS`` per task, to that task's assigned cores, but it
+        sets only that one — so OpenBLAS, MKL, NumExpr and vecLib fall back to counting the
+        machine's cores and each cell claims the whole node. Seven cells packed onto seven cores
+        then run forty-nine threads against seven, which costs throughput and, worse, makes
+        ``cpu_seconds / fit_seconds`` report clean occupancy on a fleet that is thrashing. The
+        remedy has to reach the worker *before* it imports numpy, because these pools are sized at
+        import and cannot be resized afterwards, which rules out setting them inside the cell.
+
+        A task-level ``runtime_env`` is the seam that works: Ray merges its ``env_vars`` over the
+        job's per key and inherits every other field, so ``working_dir`` and the ``uv`` install are
+        untouched and neither is re-staged. Putting it here rather than in
+        `code_delivery.build_runtime_env` is what lets the CPU and GPU pools carry *different*
+        caps, which a single job-level value cannot express — the cost is that the two pools stop
+        sharing worker processes.
+
         Only meaningful for ``runtime == "ray"``; the Spark translations emit properties,
         not options, and will carry their own accessor.
         """
-        options: dict[str, float] = {}
+        options: dict[str, Any] = {}
         if self.slot.gpu_fraction is not None:
             options["num_gpus"] = self.slot.gpu_fraction
         else:
             options["num_cpus"] = self.slot.cores
         if self.slot.memory_bytes is not None:
             options["memory"] = self.slot.memory_bytes
+        options["runtime_env"] = {
+            "env_vars": intraop_env_vars(self.assigned_cores, include_omp=False)
+        }
         return options
 
     def to_dict(self) -> dict[str, Any]:
@@ -183,6 +224,12 @@ class RuntimeResourcePlan:
             "total_slots": self.total_slots,
             "slots_at_ceiling": self.slots_at_ceiling,
             "binding_axis": self.binding_axis,
+            # What the runtime was actually asked for, beside what was decided. `binding_axis`
+            # says which bound won; these two say what that turned into and, when memory won,
+            # how much of another axis it left on the floor. Both were previously derivable only
+            # by re-running the arithmetic against a plan nobody had kept.
+            "task_options": self.task_options,
+            "density_note": self.density_note,
         }
 
 
@@ -217,6 +264,20 @@ def max_slot_memory_bytes(unit: UnitShape) -> int | None:
     return int(schedulable * _MAX_SLOT_MEMORY_FRACTION) if schedulable else None
 
 
+def schedulable_cores(unit: UnitShape) -> int:
+    """vCPUs a unit will actually run cells on — nameplate minus the reserve (pure; >= 1).
+
+    The core-axis twin of `schedulable_memory_bytes`, and it exists for the same reason: the
+    number on the machine type is what Google bills, not what the scheduler has left to give
+    once the node's own agents are running. See `_RESERVED_CORES_PER_UNIT` for why the reserve
+    is a flat core rather than a share.
+
+    Floored at 1 so a single-core unit still holds a cell. A unit that holds zero cells is not
+    a conservative plan, it is a pool that never starts.
+    """
+    return max(1, unit.cores - _RESERVED_CORES_PER_UNIT)
+
+
 def _memory_bound(slot: ResourceSlot, unit: UnitShape) -> int | None:
     """Cells one unit's schedulable RAM holds, or ``None`` when either side is unknown (pure)."""
     schedulable = schedulable_memory_bytes(unit)
@@ -225,48 +286,94 @@ def _memory_bound(slot: ResourceSlot, unit: UnitShape) -> int | None:
     return math.floor(schedulable / slot.memory_bytes)
 
 
-def _primary_bound(slot: ResourceSlot, unit: UnitShape) -> int:
-    """Cells one unit holds on the axis the slot is *defined* by — devices or cores (pure)."""
-    if slot.gpu_fraction is not None:
-        packed = max(1, math.floor(1.0 / slot.gpu_fraction))
-        return max(1, unit.accelerators * packed) if unit.accelerators else 1
-    return math.floor(unit.cores / slot.cores) if slot.cores > 0 else 1
+def _core_bound(slot: ResourceSlot, unit: UnitShape) -> int:
+    """Cells one unit's schedulable cores hold — ``floor(cores / slot.cores)`` (pure; >= 1)."""
+    if slot.cores <= 0:
+        return 1
+    return max(1, math.floor(schedulable_cores(unit) / slot.cores))
 
 
-def _binding_axis(slot: ResourceSlot, unit: UnitShape) -> str:
-    """Which of the two bounds in `slots_per_unit` is the one that decided (pure)."""
-    by_memory = _memory_bound(slot, unit)
-    if by_memory is not None and by_memory < _primary_bound(slot, unit):
-        return "memory"
+def _device_bound(slot: ResourceSlot, unit: UnitShape) -> int | None:
+    """Cells one unit's accelerators hold, or ``None`` when the slot has no device axis (pure).
+
+    ``accelerators x floor(1 / gpu_fraction)``: Ray schedules a fractional device by summing
+    each task's ``num_gpus`` against a capacity of 1.0 per card. A slot carrying a fraction on
+    a unit with **no** accelerators holds one cell — whatever provisioned it believed there was
+    a device, and refusing to schedule is worse than packing conservatively.
+    """
+    if slot.gpu_fraction is None:
+        return None
+    packed = max(1, math.floor(1.0 / slot.gpu_fraction))
+    return max(1, unit.accelerators * packed) if unit.accelerators else 1
+
+
+def _bounds(slot: ResourceSlot, unit: UnitShape) -> dict[str, int]:
+    """Every axis that has a basis, as cells-per-unit, keyed by axis name (pure).
+
+    Insertion order is ``device``, ``cores``, ``memory`` — scarcest-first by convention, and it
+    is what breaks a tie between two axes that are *both* non-defining.
+    """
+    bounds: dict[str, int] = {}
+    device = _device_bound(slot, unit)
+    if device is not None:
+        bounds["device"] = device
+    bounds["cores"] = _core_bound(slot, unit)
+    memory = _memory_bound(slot, unit)
+    if memory is not None:
+        bounds["memory"] = memory
+    return bounds
+
+
+def _defining_axis(slot: ResourceSlot) -> str:
+    """The axis the slot is *defined* by — ``device`` when it carries a fraction, else ``cores``."""
     return "device" if slot.gpu_fraction is not None else "cores"
 
 
+def _tightest(bounds: dict[str, int], defining: str) -> tuple[str, int]:
+    """The axis holding the density down, and by how much (pure).
+
+    Ties go to the slot's **defining** axis. That is a reporting rule, not an arithmetic one —
+    the number is the same either way — and it is the honest attribution: when a GPU slot's card
+    and its cores both allow seven cells, the pool is a GPU pool that happens to be balanced,
+    not a pool that discovered it was core-bound. Reporting the incidental axis would send an
+    operator to widen the machine type when the fraction is what moves the density.
+    """
+    smallest = min(bounds.values())
+    if bounds.get(defining) == smallest:
+        return defining, smallest
+    return next((axis, value) for axis, value in bounds.items() if value == smallest)
+
+
+def _binding_axis(slot: ResourceSlot, unit: UnitShape) -> str:
+    """Which of the three bounds in `slots_per_unit` is the one that decided (pure)."""
+    return _tightest(_bounds(slot, unit), _defining_axis(slot))[0]
+
+
 def slots_per_unit(slot: ResourceSlot, unit: UnitShape) -> int:
-    """Concurrent cells one unit holds — the min of its primary bound and its memory bound (pure).
+    """Concurrent cells one unit holds — the smallest of its three bounds (pure).
 
-    The primary bound is whichever resource the slot is *defined* by:
+    * **device** — ``accelerators x floor(1 / gpu_fraction)``, only when the slot carries a
+      fraction. A GPU node's cores and RAM are sized around its cards, so this usually binds
+      first; "usually" is exactly why it cannot be the only term.
+    * **cores** — ``floor(schedulable_cores / slot.cores)``, on **every** slot including a GPU
+      one. A cell needs a core to run on whether or not it also needs a card, and the card does
+      not supply one: an ``n1-standard-8`` + 1 T4 at the 0.1 fraction floor is ten cells by the
+      device bound and seven by this one, and seven is the number the node can actually run.
+    * **memory** — ``floor(schedulable_memory / slot.memory_bytes)``, when both sides are known.
+      What stops eight 4 GiB cells landing on a 30 GiB node. It applies to a GPU slot too,
+      because `RuntimeResourcePlan.task_options` requests ``memory`` alongside ``num_gpus`` and
+      Ray enforces it: a density this function reports but Ray will not honour is a density the
+      pool never reaches.
 
-    * **GPU slot** — ``accelerators x floor(1 / gpu_fraction)``. The device is the scarce
-      resource; a GPU node's cores and RAM are sized around its cards, so they usually do
-      not bind first. A unit with a fraction but no accelerators holds one cell (whatever
-      provisioned it believed there was a device).
-    * **CPU slot** — ``floor(cores / slot.cores)``.
-
-    Then, on **either** kind of slot, when both memory numbers are known, also
-    ``floor(schedulable_memory / slot.memory_bytes)`` — taking the smaller. The primary
-    bound alone is the design's formula and it silently over-packs a memory-heavy family;
-    the memory bound is what stops eight 4 GiB cells landing on a 30 GiB node. It has to
-    apply to the GPU slot too, because `RuntimeResourcePlan.task_options` requests
-    ``memory`` alongside ``num_gpus`` and Ray enforces it: a device bound this function
-    reported but Ray will not honour is a density the pool never reaches.
+    An axis with no basis is *absent*, not zero — an unmeasured memory footprint must not shrink
+    a fleet it knows nothing about, which is the property that keeps turning the profiler on from
+    ever making a run worse.
 
     Always at least 1. A slot too big for its unit has already been clamped to fit by
     `resource_slot`, so the floor here is a belt-and-braces guard against a caller
     that assembled a slot by hand.
     """
-    primary = _primary_bound(slot, unit)
-    by_memory = _memory_bound(slot, unit)
-    return max(1, primary if by_memory is None else min(primary, by_memory))
+    return max(1, min(_bounds(slot, unit).values()))
 
 
 def tasks_for_ceiling(plan: RuntimeResourcePlan) -> int:

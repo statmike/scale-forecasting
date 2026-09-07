@@ -216,7 +216,7 @@ def calibrate_gpu_fraction(
     cfg: RunConfig,
     *,
     sample_series: list[pd.DataFrame] | None = None,
-    measured_peaks_bytes: list[int] | None = None,
+    measured_peaks_bytes: list[int | None] | None = None,
     gpu_type: str | None = None,
 ) -> float:
     """Resolve the ``num_gpus`` fraction each NeuralProphet task requests.
@@ -240,6 +240,13 @@ def calibrate_gpu_fraction(
     `_measure_np_peak_bytes` over ``sample_series``. With nothing to measure it falls back to
     `_NOMINAL_AUTO_FRACTION`. The chosen fraction + measurements are logged to the registry so
     the sizing decision is auditable (done by the caller).
+
+    **A failed probe is not a measurement of zero, and treating it as one inverted the result.**
+    This runs on the Ray head, which has no card, so every probe raised and returned 0; ``max``
+    of three zeros is zero; and `_clamp_fraction` turns a zero raw fraction into exactly
+    ``_MIN_FRACTION`` — the *smallest legal* fraction, i.e. ten cells per device, when the honest
+    answer was two. Non-positive samples are therefore dropped before the ``max``, and a sample
+    list that empties out lands on the nominal fraction, the same as no samples at all.
     """
     fraction = cfg.compute.gpu_fraction
     if isinstance(fraction, float):
@@ -249,11 +256,11 @@ def calibrate_gpu_fraction(
     if measured_peaks_bytes is None:
         series = (sample_series or [])[: cfg.compute.gpu_calibration_samples]
         measured_peaks_bytes = [_measure_np_peak_bytes(s, cfg) for s in series]
-    if not measured_peaks_bytes:
+    usable = [peak for peak in measured_peaks_bytes if peak and peak > 0]
+    if not usable:
         return _NOMINAL_AUTO_FRACTION
 
-    peak = max(measured_peaks_bytes)
-    raw = (peak * cfg.compute.gpu_safety_margin) / device_memory_bytes(
+    raw = (max(usable) * cfg.compute.gpu_safety_margin) / device_memory_bytes(
         gpu_type or cfg.compute.gpu_type
     )
     return _clamp_fraction(raw)
@@ -261,13 +268,17 @@ def calibrate_gpu_fraction(
 
 def _measure_np_peak_bytes(
     series: pd.DataFrame, cfg: RunConfig
-) -> int:  # pragma: no cover - live GPU path, exercised only by the @gpu smoke
+) -> int | None:  # pragma: no cover - live GPU path, exercised only by the @gpu smoke
     """Fit NeuralProphet on one series and return the peak CUDA bytes it allocated.
 
     Live-only (needs a real GPU): resets the torch allocator's high-water mark, fits one cell via
-    the shared `run_cell`, and reads
-    ``torch.cuda.max_memory_allocated``. Any failure degrades to 0 (the caller's ``max`` skips it),
-    so a flaky probe never sinks the run — it just widens to the nominal fraction.
+    the shared `run_cell`, and reads ``torch.cuda.max_memory_allocated``.
+
+    Any failure returns ``None`` — *not measured* — and so does a genuine zero, because a fit that
+    allocated nothing on the device is a fit that did not run on the device. Both are dropped by
+    the caller rather than being maxed as if they were footprints. The distinction is the whole
+    bug: this probe runs on a head node with no card, so it fails every time, and returning 0 made
+    `calibrate_gpu_fraction` size every cell at the *minimum* fraction it is allowed to request.
     """
     try:
         import torch
@@ -276,9 +287,9 @@ def _measure_np_peak_bytes(
 
         torch.cuda.reset_peak_memory_stats()
         run_cell(series, "neuralprophet", cfg)
-        return int(torch.cuda.max_memory_allocated())
+        return int(torch.cuda.max_memory_allocated()) or None
     except Exception:  # noqa: BLE001 - calibration is best-effort; fall back to nominal
-        return 0
+        return None
 
 
 # --- pure: deterministic per-pool autoscaling cluster sizing -------------------
@@ -430,12 +441,14 @@ def plan_pool(
     that lands on the pool, `merge_slots` them into the one slot a shared worker needs, and
     hands the result to `plan_fleet`.
 
-    **``profile=None`` reproduces the pre-profiler arithmetic exactly**, which is the property
-    that lets this replace the old inline sizing rather than sit beside it. With no measurement a
-    slot is one core, no memory request, and — on the GPU pool — `_sizing_fraction`, so
-    ``slots_per_unit`` collapses to `resources.catalog.machine_cores` on the CPU side and to
-    ``accelerator_count x gpu_slots_per_device(fraction)`` on the GPU side: the two expressions
-    `plan_cluster` used to compute inline.
+    **``profile=None`` asks for nothing the measurement would have asked for**: a slot is one
+    core, no memory request, and — on the GPU pool — `_sizing_fraction`. What that slot then packs
+    onto a node is `resources.fleet`'s business, and its answer is the smallest of the three
+    bounds. So the CPU pool lands on `resources.fleet.schedulable_cores`, one cell per node below
+    the nameplate count the inline arithmetic used, because the reserved core is the one the raylet
+    reports progress on. The GPU pool usually still binds on devices at the coarse submit-time
+    fraction, and binds on cores once a calibrated fraction packs more slots per device than the
+    node has cores to run them on.
 
     ``gpu_fraction`` overrides the sizing fraction with one that is better known — on the cluster
     `ray_engine` has already run `calibrate_gpu_fraction` against a real device, and

@@ -25,10 +25,10 @@ from typing import TYPE_CHECKING, Any
 
 from .catalog import (
     _DEFAULT_TARGET_CELLS_PER_SLOT,
-    _INTRAOP_ENV_VARS,
     _MIB,
     _MIN_GPU_FRACTION,
     _SPARK_JVM_MB_PER_CORE,
+    intraop_env_vars,
 )
 from .fleet import RuntimeResourcePlan, UnitShape, max_slot_memory_bytes, plan_fleet
 from .slot import ResourceSlot, merge_slots, resource_slot
@@ -192,9 +192,11 @@ def translate_serverless(
     3. **A warm, fast autoscaler.** ``initialExecutors`` at the derived count instead of the
        floor of 2, and ``executorAllocationRatio`` at 1.0 instead of the default 0.3.
     4. **Concurrency stated once, consistently.** ``spark.task.cpus`` (when the family really
-       is threaded), the `_INTRAOP_ENV_VARS` pin, and the memory budget all derive from the
-       same ``tasks_per_executor``. Ray gets the pin for free; a Spark executor pins nothing,
-       so without it the sizing is sound and the run still thrashes.
+       is threaded), the `catalog.intraop_env_vars` pin, and the memory budget all derive from
+       the same ``tasks_per_executor``. A Spark executor pins nothing on its own, so without it
+       the sizing is sound and the run still thrashes. Ray reaches the same place by a different
+       route — `fleet.RuntimeResourcePlan.task_options` puts the pin on a per-task
+       ``runtime_env`` — but it does not get it for free, which is what the old note here said.
 
     Unmeasured axes stay absent, as everywhere else: with no memory measurement the memory
     properties are simply not emitted and Serverless' own defaults apply, which is exactly
@@ -231,8 +233,8 @@ def translate_serverless(
     if task_cpus > 1:
         properties["spark.task.cpus"] = str(task_cpus)
     if pin_threads:
-        for name in _INTRAOP_ENV_VARS:
-            properties[f"spark.executorEnv.{name}"] = str(task_cpus)
+        for name, value in intraop_env_vars(task_cpus).items():
+            properties[f"spark.executorEnv.{name}"] = value
     else:
         notes.append(
             "native thread pools left uncapped so effective_cores can be measured; "

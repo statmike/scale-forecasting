@@ -78,21 +78,32 @@ def _plans(cfg: RunConfig, panel: pd.DataFrame | None = None, gpu_fraction: floa
     )
 
 
+def _scheduling_request(plan: Any) -> dict[str, Any]:
+    """``task_options`` minus the thread pin — the part the scheduler reads.
+
+    Every plan also carries a ``runtime_env`` capping the native thread pools at the cores Ray
+    assigns the task. That pin asks the scheduler for nothing, so it has no bearing on which pool
+    gets what; it is owned and asserted by ``test_resources.py``. Dropping it here keeps these
+    exact-dict comparisons about routing rather than about the pin's current contents.
+    """
+    return {key: value for key, value in plan.task_options.items() if key != "runtime_env"}
+
+
 def test_task_options_gpu_pool_requests_fraction_when_gpu_on() -> None:
     _cpu, gpu = _plans(_cfg(compute=_compute(use_gpu=True)))
-    assert gpu.task_options == {"num_gpus": 0.25}
+    assert _scheduling_request(gpu) == {"num_gpus": 0.25}
 
 
 def test_task_options_cpu_pool_always_requests_one_cpu() -> None:
     cpu, _gpu = _plans(_cfg(compute=_compute(use_gpu=True)))
-    assert cpu.task_options == {"num_cpus": 1}
+    assert _scheduling_request(cpu) == {"num_cpus": 1}
 
 
 def test_task_options_gpu_pool_falls_back_to_cpu_when_gpu_off() -> None:
     # use_gpu=False: no device to schedule against, so a GPU-model chunk runs as a plain CPU task
     # (NeuralProphet falls back to CPU inside the cell).
     _cpu, gpu = _plans(_cfg(compute=_compute(use_gpu=False)))
-    assert gpu.task_options == {"num_cpus": 1}
+    assert _scheduling_request(gpu) == {"num_cpus": 1}
 
 
 def test_an_unprofiled_pool_asks_for_no_memory() -> None:

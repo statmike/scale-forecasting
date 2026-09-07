@@ -20,9 +20,9 @@ from typing import TYPE_CHECKING, Any
 
 from .catalog import (
     _DEFAULT_TARGET_CELLS_PER_SLOT,
-    _INTRAOP_ENV_VARS,
     _MIB,
     _SPARK_JVM_MB_PER_CORE,
+    intraop_env_vars,
     machine_cores,
     machine_memory_bytes,
 )
@@ -222,8 +222,8 @@ def translate_cluster(plan: RuntimeResourcePlan, *, pin_threads: bool = True) ->
     if task_cpus > 1:
         properties["spark.task.cpus"] = str(task_cpus)
     if pin_threads:
-        for name in _INTRAOP_ENV_VARS:
-            properties[f"spark.executorEnv.{name}"] = str(task_cpus)
+        for name, value in intraop_env_vars(task_cpus).items():
+            properties[f"spark.executorEnv.{name}"] = value
     else:
         notes.append(
             "native thread pools left uncapped so effective_cores can be measured; "

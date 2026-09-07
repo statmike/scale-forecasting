@@ -35,7 +35,7 @@ old value goes stale by definition.
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
 | `run_id_inputs` | `authored-config-only-v2` | P3 (2026-09-05) | `authored-config-only` (`a22e94c`, after the fork below), before that `+compute.profile.source` (W11a) |
-| `fleet_sizing` | `derived-overlay` | W7b `6f4638f` + W8 `be78bec` (2026-08-31) | `platform-defaults` |
+| `fleet_sizing` | `derived-overlay-three-way-min` | P6 (2026-09-07) | `derived-overlay` (W7b `6f4638f` + W8 `be78bec`, 2026-08-31), before that `platform-defaults` |
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 | `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
 | `ray_slot_memory` | `harvest-only` | `efecb4c` (2026-09-04) | `driver-rss-prepass` |
@@ -81,27 +81,46 @@ and the new code return the same answer for a flat config: the old path read `co
 directly, the new one asks `resolve_family_compute`, which for a config with no family override
 resolves to exactly that flat field. Only the per-family shape made the two disagree.
 
-`fleet_sizing` governs **how a Spark fleet's shape is decided**. Until W7b/W8 we stated a worker or
-executor *count* and let the platform choose everything else: Dataproc Serverless picked its own
-executor cores, memory and dynamic-allocation band, and a Dataproc cluster ran its default two
-4-core executors per worker with nothing bounding a GPU. Now `resources.translate_serverless` /
-`translate_cluster` derive an explicit shape — executor cores, memoryOverhead, the dynamic-allocation
-min/initial/max, `spark.task.cpus`, the thread pins, and a derived worker count — and submit it as a
-properties overlay. **This is a different fleet**, so any Spark result proven on the old one is a
-claim about a machine shape that no longer exists.
+`fleet_sizing` governs **how a fleet's shape is decided** — how wide a unit is, how many cells fit
+on it, and how many units the fan-out therefore needs.
 
-Two runtimes do *not* declare it. **BigQuery-native** work has no fleet of ours to shape. **Ray**
-does not, because the axis is about a Spark *properties overlay* and Ray has none — but the
-parenthetical that used to follow ("Ray is unmoved in practice") stopped being true on 2026-09-03.
-`plan_pool(profile=None)` still reproduces the pre-profiler arithmetic exactly, and every Ray row
-above `ray_100k` was sized that way; `ray_100k` is the first Ray run whose *slot* came from a
-measurement (`basis: measured`, 2 cores and 1.29 GiB per task, from a prior Ray harvest). W1's
-autoscale-ceiling derivation only fires when `ray_autoscale` is true, which until 2026-09-03 no Ray
-smoke did (the demonstration surface covered that path alone — see `ray_autoscale_demo`, which
-reached the derived ceiling of 8); the four smokes dropped the pin and re-ran on 2026-09-03/04, so
-they declare it now too.
-W2's device catalog left T4 at 16 GiB (only L4 moved). Smoke 10 declares the axis
-because it submits Serverless work alongside its Ray families.
+It began as a Spark-only axis and has moved twice. Until W7b/W8 we stated a worker or executor
+*count* and let the platform choose everything else: Dataproc Serverless picked its own executor
+cores, memory and dynamic-allocation band, and a Dataproc cluster ran its default two 4-core
+executors per worker with nothing bounding a GPU. `derived-overlay` replaced that with an explicit
+shape from `resources.translate_serverless` / `translate_cluster` — executor cores, memoryOverhead,
+the dynamic-allocation min/initial/max, `spark.task.cpus`, the thread pins, and a derived worker
+count — submitted as a properties overlay.
+
+`derived-overlay-three-way-min` (P6) changes the **packing arithmetic underneath both runtimes**, so
+the axis is no longer Spark-only. Two things moved together. A unit now holds back one core for
+itself, because the raylet, the executor JVM, the log shipper and the OS all want somewhere to run
+and the cell scheduled onto the last core does not fail — it time-slices against the agent that is
+supposed to be reporting its progress. And density is now the smallest of three bounds (devices,
+cores, memory) rather than the memory bound overlaid onto whichever single axis defined the slot.
+The device axis in particular used to stand alone: a GPU slot's density was
+`accelerators x floor(1 / gpu_fraction)` with no core term at all, so a calibrated fraction could
+promise more concurrent cells than the node had cores to run them on. **Both effects change how
+many cells land on a node and therefore how many nodes the fan-out derives**, which is the quantity
+most rows below are measuring, so a result proven on the old arithmetic is a claim about a fleet
+that no longer exists.
+
+**BigQuery-native** work still does not declare it — there is no fleet of ours to shape. **Ray** now
+does, which is the reversal P6 forces. The old text excluded Ray on the grounds that the axis was
+about a Spark properties overlay, and added that `plan_pool(profile=None)` reproduced the
+pre-profiler arithmetic exactly. That second claim is what P6 retires: an unprofiled Ray CPU pool
+now lands one cell per node below the machine's nameplate core count, so every Ray row is sized by
+arithmetic it did not run under. Ray rows are therefore re-declared with the axis at the value they
+*did* run on, `derived-overlay`, which is exactly the mark that says a re-run is owed.
+
+The Ray sizing history the old note recorded is worth keeping. `ray_100k` is the first Ray run whose
+*slot* came from a measurement (`basis: measured`, 2 cores and 1.29 GiB per task, from a prior Ray
+harvest); every Ray row above it was sized from the constants. W1's autoscale-ceiling derivation
+only fires when `ray_autoscale` is true, which until 2026-09-03 no Ray smoke did — the demonstration
+surface covered that path alone (`ray_autoscale_demo`, which reached the derived ceiling of 8) — and
+the four smokes dropped the pin and re-ran on 2026-09-03/04. W2's device catalog left T4 at 16 GiB
+(only L4 moved). Smoke 10 declared the axis even under the Spark-only reading, because it submits
+Serverless work alongside its Ray families.
 
 `ray_pool_shape` is the Ray-side counterpart: **whether a worker pool is provisioned with an
 `AutoscalingSpec` or at a fixed `node_count`.** These are two different provisioning calls, not two
@@ -837,13 +856,13 @@ the honest starting position and the reason for adding the table at all: it is t
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | STALE | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | STALE | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | STALE | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
-| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
-| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | STALE | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | STALE | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | STALE | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 
 **`all_families_10k` ran twice on 2026-09-04, and the pair is the `ray_slot_memory` A/B.** The first
 pass is the run that found the defect; the second is the identical config under the fix, submitted
@@ -1265,7 +1284,7 @@ seven, so only outputs changed.
 | `01_spark_via_connect.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | `02_bigquery_native.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
 | `03_combo_and_ensemble.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `04_ray_on_vertex.ipynb` | STALE | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `run_id_inputs=authored-config-only` |
+| `04_ray_on_vertex.ipynb` | STALE | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `07_scale_review.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
 | `08_run_and_monitor.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `09_review_run.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
