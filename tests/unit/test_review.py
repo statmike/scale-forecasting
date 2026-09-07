@@ -224,6 +224,15 @@ def test_quiet_seconds_is_none_when_unknown() -> None:
     assert no_row.last_signal_at is None and no_row.quiet_seconds is None
 
 
+def test_the_device_verdict_rides_along_from_the_job_row() -> None:
+    # It comes off `v_run_jobs.device_verdict`, which the view unpacks from the job's telemetry.
+    # A CPU family has no verdict and must read None rather than inventing a reassuring one.
+    assert _one_job(status="COMPLETED", device_verdict="ENGAGED_IDLE").device_verdict == (
+        "ENGAGED_IDLE"
+    )
+    assert _one_job(status="COMPLETED").device_verdict is None
+
+
 # --- _assemble_review (pure) ---------------------------------------------------
 
 
@@ -546,6 +555,42 @@ def test_plot_progress_prefers_a_probe_verdict_over_the_quiet_time() -> None:
     assert any("lost" in t for t in labels)
     assert any("running confirmed" in t for t in labels)
     assert not any("quiet" in t for t in labels)  # the age is superseded, not appended
+
+
+def test_plot_progress_says_on_the_bar_whether_the_card_did_anything() -> None:
+    # A GPU family's bar is otherwise pixel-identical to a CPU family's, which is how an
+    # accelerator went twenty-one jobs doing nothing without anyone noticing. Two words, on the
+    # family that has a verdict and only that one.
+    _use_agg()
+    cfg = _cfg(models=["theta", "xgboost"], ensemble={"enabled": False})
+    rp = R._assemble_progress(
+        "rid",
+        {"status": "COMPLETED", "n_series": 10},
+        cfg,
+        [
+            {"family": "statistical", "status": "COMPLETED", "device_verdict": "ENGAGED_IDLE"},
+            {"family": "ml", "status": "COMPLETED"},
+        ],
+        [],
+        now=_AT,
+    )
+    labels = _bar_labels(R.plot_progress(rp))
+    assert sum("gpu idle" in t for t in labels) == 1
+
+
+def test_plot_progress_does_not_print_a_verdict_word_nobody_defined() -> None:
+    # A label is not where a reader should first meet a verdict string; an unknown one is dropped.
+    _use_agg()
+    cfg = _cfg(models=["theta"], ensemble={"enabled": False})
+    rp = R._assemble_progress(
+        "rid",
+        {"status": "COMPLETED", "n_series": 10},
+        cfg,
+        [{"family": "statistical", "status": "COMPLETED", "device_verdict": "SOMETHING_NEW"}],
+        [],
+        now=_AT,
+    )
+    assert not any("SOMETHING_NEW" in t for t in _bar_labels(R.plot_progress(rp)))
 
 
 def test_plot_progress_drops_a_trust_registry_verdict_as_noise() -> None:

@@ -138,6 +138,12 @@ The verdict warns and never fails a job. It is filed with the counts it was draw
 (`cells`, `cells_on_device`, `cells_no_device`, `max_peak_gpu_bytes`, `device_name`) so it can be
 re-checked later rather than taken on trust.
 
+Two places read it back. `v_run_jobs.device_verdict` is the word as a column, so a fleet-wide "which
+jobs wasted their card" is one `WHERE` clause; and `review.monitor_run` carries it on each
+`FamilyProgress`, so `plot_progress` prints `gpu used` / `gpu idle` / `no gpu` at the end of that
+family's bar. A GPU family's bar is otherwise indistinguishable from a CPU family's, which is how
+the accelerator went unnoticed for twenty-one jobs in the first place.
+
 ### Columns that exist but are not filled yet
 
 `SELECT *` on this table also returns `cell_status`, `error_class`, `error_detail`,
@@ -247,7 +253,11 @@ existed, or one that left the platform's own defaults standing.
 One row per `(run_id, family)` = the run's DAG as executed: the deterministic `job_id`, the
 `attempt`, the resolved `runtime` / `spark_mode` / `hardware` / `gpu_type`, the platform's own
 `system_job_id`, the per-job `status` / `created_at` / `runtime_seconds`, and the per-job
-`job_telemetry` unpacked into `total_wall_s` and `dcu_milli_seconds`. A `--force` re-run appends a
+`job_telemetry` unpacked into `total_wall_s` and `dcu_milli_seconds`. `device_verdict` is the one
+word saying whether this row's accelerator did any work, with the counts behind it in `device_use`
+beside it — both NULL for a CPU family, so `WHERE device_verdict != 'ENGAGED_UTILISED'` is the "what
+did I pay for and not use" query ([below](#was-the-accelerator-you-paid-for-actually-used)). A
+`--force` re-run appends a
 higher-`attempt` job under the same `(run_id, family)`; the view keeps only the current one
 (`QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1`), so the `run_id → current job` map is one row
 per family.

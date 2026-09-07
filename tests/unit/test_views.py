@@ -130,6 +130,15 @@ def test_run_jobs_view_surfaces_why_a_job_failed_and_what_it_tried() -> None:
     assert "JSON_QUERY(job_telemetry, '$.capacity') AS capacity" in stmt
 
 
+def test_run_jobs_view_says_whether_the_accelerator_did_anything() -> None:
+    # The verdict is a scalar column so "which of my GPU jobs wasted the card" is a WHERE clause
+    # against a word, not a JSON walk; the blob beside it keeps the counts and the peak byte
+    # figure that word was decided from. A CPU family has neither, and reads NULL.
+    stmt = render_create_views("d")["v_run_jobs"]
+    assert "JSON_VALUE(job_telemetry, '$.device_use.verdict') AS device_verdict" in stmt
+    assert "JSON_QUERY(job_telemetry, '$.device_use') AS device_use" in stmt
+
+
 def test_run_summary_view_projects_the_shared_clusters_capacity_ledger() -> None:
     # The run-level half of the same story: a shared cluster is provisioned before any job row
     # exists, so its walk is recorded on the header instead — see `shared_capacity_path`.

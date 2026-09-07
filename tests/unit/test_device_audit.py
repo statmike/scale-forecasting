@@ -235,6 +235,19 @@ def test_engaged_utilised_is_not_worth_a_warning() -> None:
     assert lines == []
 
 
+def test_every_verdict_has_two_words_for_a_chart_and_nothing_else_does() -> None:
+    """The display vocabulary lives beside the verdicts so the two cannot drift apart.
+
+    A word nobody defined is dropped rather than printed raw — the end of a progress bar is not
+    where a reader should first meet a verdict string.
+    """
+    assert device_audit.verdict_label(MISSING_DEVICE) == "no gpu"
+    assert device_audit.verdict_label(ENGAGED_IDLE) == "gpu idle"
+    assert device_audit.verdict_label(ENGAGED_UTILISED) == "gpu used"
+    assert device_audit.verdict_label(None) is None
+    assert device_audit.verdict_label("SOMETHING_NEW") is None
+
+
 # --- the evidence half: what a worker can see, and where the weights landed -----------------
 
 

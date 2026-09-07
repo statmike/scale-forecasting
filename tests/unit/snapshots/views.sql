@@ -46,6 +46,8 @@ SELECT
   failure_reason,
   CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
+  JSON_VALUE(job_telemetry, '$.device_use.verdict') AS device_verdict,
+  JSON_QUERY(job_telemetry, '$.device_use') AS device_use,
   JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle,
   JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `proj.scale_forecasting.run_jobs`

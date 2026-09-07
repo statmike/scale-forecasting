@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from .capacity import AWAITING_CAPACITY
 from .config import RunConfig
 from .dag import group_models_by_family
+from .device_audit import verdict_label
 from .registry.reads import parse_ts
 from .registry.rows import METRIC_COLUMNS
 
@@ -87,6 +88,12 @@ class FamilyProgress:
     reported, never judged: how long a family may legitimately stay quiet depends on the family,
     and the escalation threshold that *does* judge it lives with the probe
     (`probes.reconcile._DEFAULT_STALE_S`), not here.
+
+    ``device_verdict`` is `device_audit`'s answer to whether the accelerator this family paid for
+    did any work — ``None`` for every CPU family, and for a GPU family until its job finishes,
+    because the audit runs on the driver once the cells are written. It is the only field here that
+    is about *cost* rather than progress, and it is on the progress object because this is where a
+    reader is already looking at the per-family runtime and hardware.
     """
 
     family: str
@@ -101,6 +108,7 @@ class FamilyProgress:
     runtime_seconds: float | None
     last_signal_at: datetime | None = None
     quiet_seconds: float | None = None
+    device_verdict: str | None = None
 
 
 @dataclass(frozen=True)
@@ -305,6 +313,7 @@ def _assemble_progress(
                 runtime_seconds=_num(job.get("runtime_seconds")),
                 last_signal_at=signal,
                 quiet_seconds=((at - signal).total_seconds() if signal is not None else None),
+                device_verdict=job.get("device_verdict"),
             )
         )
 
@@ -621,6 +630,11 @@ def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = 
     cry-wolf marker teaches the reader to ignore it. When a `probes.reconcile.ProbeReport` is
     attached (``monitor_run(probe=True)``), its verdict replaces the age for the families it
     covers, since a live reading beats an inference from silence.
+
+    A family that finished with a device verdict gets two more words at the end of its label
+    (``gpu used`` / ``gpu idle`` / ``no gpu``). A GPU family's bar is otherwise indistinguishable
+    from a CPU family's, which is the whole reason the accelerator went twenty-one jobs without
+    anyone noticing it was doing nothing.
     """
     import matplotlib.pyplot as plt
 
@@ -649,6 +663,10 @@ def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = 
             label += f" · {verdict.lower().replace('_', ' ')}"
         elif (f.status or "").upper() == "RUNNING" and f.quiet_seconds is not None:
             label += f" · quiet {_human_age(f.quiet_seconds)}"
+        # Appended rather than chained into the ladder above: liveness and cost are different
+        # questions, and a finished GPU family has an answer to both.
+        if (device := verdict_label(f.device_verdict)) is not None:
+            label += f" · {device}"
         ax.text(
             (f.fraction if f.fraction is not None else 0.0) + 0.01,
             y,

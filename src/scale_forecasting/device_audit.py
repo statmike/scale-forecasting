@@ -98,6 +98,23 @@ def format_verdict(family: str, blob: dict[str, Any]) -> str:
     return f"family '{family}': {verdict}"
 
 
+_LABELS = {
+    MISSING_DEVICE: "no gpu",
+    ENGAGED_IDLE: "gpu idle",
+    ENGAGED_UTILISED: "gpu used",
+}
+
+
+def verdict_label(verdict: str | None) -> str | None:
+    """Two words for a chart label — ``None`` for a family with no verdict, or an unknown one.
+
+    The vocabulary lives here rather than at the display site so the words a reader sees and the
+    words a query filters on cannot drift apart. An unknown string is dropped rather than printed
+    raw: a bar-end label is not where someone should first meet a verdict nobody defined.
+    """
+    return _LABELS.get(verdict or "")
+
+
 def read_device_use(
     run_id: str,
     models: list[str],
@@ -156,8 +173,9 @@ def audit_device_use(
 ) -> dict[str, Any] | None:  # pragma: no cover - the read half is GCP I/O
     """Read the aggregate, judge it, and return the blob to file — or ``None`` when there is none.
 
-    The blob lands on ``run_jobs.job_telemetry.$.device_use.<family>``, which is already JSON,
-    already per-family, and already sits beside the ``hardware`` column the verdict is about. No
+    The blob lands on ``run_jobs.job_telemetry.$.device_use``, which is already JSON and already
+    sits beside the ``hardware`` column the verdict is about — no ``.<family>`` nesting, because
+    ``run_jobs`` is keyed by ``(run_id, family, attempt)`` and the row is already this family's. No
     new column, no wire change, and it costs a CPU family exactly one comparison because such a
     family short-circuits before the query runs.
 

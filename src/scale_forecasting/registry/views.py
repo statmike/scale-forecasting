@@ -35,7 +35,11 @@ Three views, matched to the questions a run prompts:
   overlay from the per-job ``job_telemetry``. ``failure_reason`` says *why* a FAILED row failed
   (``CAPACITY_EXHAUSTED`` is the first token) and ``capacity`` carries the whole attempt ledger —
   every candidate tried, its verdict, and the cloud's verbatim message. Both are NULL for a job
-  that never had to wait, which is nearly all of them. A ``--force`` re-run appends a
+  that never had to wait, which is nearly all of them. ``device_verdict`` is the one word that says
+  whether the accelerator on this row's ``hardware`` did any work (`device_audit`) — NULL for every
+  CPU family, so ``WHERE device_verdict != 'ENGAGED_UTILISED'`` is the "what did I pay for and not
+  use" query — and ``device_use`` beside it carries the counts and the peak byte figure the word was
+  decided from. A ``--force`` re-run appends a
   higher-``attempt`` job under the same ``(run_id, family)``; the view keeps only the current one
   (``QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1``), so the forward ``run_id → current job``
   map is one row per family.
@@ -115,6 +119,8 @@ SELECT
   failure_reason,
   CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
   CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
+  JSON_VALUE(job_telemetry, '$.device_use.verdict') AS device_verdict,
+  JSON_QUERY(job_telemetry, '$.device_use') AS device_use,
   JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle,
   JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `{d}.run_jobs`
