@@ -133,6 +133,14 @@ def assemble_metadata_row(
         "backtest_status": result.backtest_status,
         "backtest_note": result.backtest_note,
         "n_folds_achieved": result.n_folds_achieved,
+        # How the *cell* went. `run_cell` has always computed this and thrown it away at the table
+        # boundary: an error cell was written as a row of NULL metrics with `fit_seconds = 0`, and
+        # telling it apart from a successful cell that simply was not scored meant knowing that
+        # convention. Now it says so. `error_class` is the fixed vocabulary you can GROUP BY
+        # (`worker.ERROR_CLASSES`); `error_detail` is the raw text, truncated, for reading one row.
+        "cell_status": result.status,
+        "error_class": result.error_class,
+        "error_detail": _truncate(result.error),
     }
     for name in METRIC_COLUMNS:
         row[name] = _as_float(result.metrics.get(name))
@@ -250,6 +258,19 @@ def assemble_job_row(
 
 
 # --- small pure coercers -------------------------------------------------------
+
+# How much of an error message reaches the table. `repr(exc)` is usually one line, but a library
+# that puts a DataFrame or an entire SQL statement in its message turns one bad cell into a
+# multi-megabyte column, and at fleet scale that is the row that fails an `append_rows` batch and
+# takes its neighbours with it. Diagnosis lives in the first characters; the rest is padding.
+_MAX_ERROR_DETAIL = 2000
+
+
+def _truncate(text: str | None, limit: int = _MAX_ERROR_DETAIL) -> str | None:
+    """Cap a free-text column, marking the cut so a reader is not misled by a clean-looking end."""
+    if text is None or len(text) <= limit:
+        return text
+    return f"{text[:limit]}… [truncated, {len(text)} chars]"
 
 
 def _as_float(value: Any) -> float | None:

@@ -106,6 +106,10 @@ class CellResult:
     backtest_status: str | None = None
     n_folds_achieved: int | None = None  # folds actually scored; 0 on unscored/failed
     backtest_note: str | None = None  # why it was not full — the arithmetic, or the exception
+    # `error` says what went wrong in the words of whatever raised; this says what *kind* of thing
+    # it was, from a fixed vocabulary (`ERROR_CLASSES`). One is for reading, the other for grouping
+    # and for deciding whether a retry could possibly help. None on an ok cell.
+    error_class: str | None = None
 
 
 def _worker_id() -> str:
@@ -363,7 +367,7 @@ def run_cell(
     # a cell that failed *because* the accelerator was missing is the row most worth the evidence.
     available, device_name = visible_device()
 
-    def _error(msg: str, engine: str) -> CellResult:
+    def _error(exc: BaseException, engine: str) -> CellResult:
         return CellResult(
             run_id=run_id,
             ts_id=ts_id,
@@ -371,7 +375,11 @@ def run_cell(
             compute_engine=engine,
             model_hash=model_hash,
             status="error",
-            error=msg,
+            error=repr(exc),
+            # Classified here rather than by a reader after the fact, because this is the only
+            # place the exception object still exists: `error` is a string by the time it leaves
+            # the worker, and the type is the strongest signal the table has.
+            error_class=classify_error(exc),
             predictions=_empty_predictions(),
             oof=None,
             metrics={name: float("nan") for name in METRIC_NAMES},
@@ -385,7 +393,7 @@ def run_cell(
     try:
         model_cls = get_model(model_name)
     except Exception as e:  # unknown model name → error cell, engine unknown
-        return _error(repr(e), cfg.python_runtime)
+        return _error(e, cfg.python_runtime)
 
     engine = _compute_engine(model_cls, cfg)
     # Harvest: record what this fit costs so a later run can be sized from it. Three cheap probes
@@ -500,7 +508,109 @@ def run_cell(
             backtest_note=backtest_note,
         )
     except Exception as e:  # any failure → error cell, batch survives
-        return _error(repr(e), engine)
+        return _error(e, engine)
+
+
+# --- why a cell failed ------------------------------------------------------------------------
+#
+# One flat ordered table, and it lives here because `worker.py` is the one file both Python
+# runtimes share — a Spark executor and a Ray worker classify a failure identically or the column
+# is worthless for grouping.
+#
+# Each row is ``(token, exception type names, message substrings)``. A row matches if the
+# exception's MRO contains one of the type names **or** its text contains one of the substrings.
+# Types are matched by *name*, not by class, so classifying a `CapacityExhausted` or a Google API
+# error costs no import — this table is read on every failed cell on every executor, and pulling
+# `capacity.py` or `google.api_core` into that path to identify an error we have already lost to
+# would be a poor trade.
+#
+# **First match wins, so the order is the policy**, and two orderings below are load-bearing:
+#
+# * `SHORT_HISTORY` precedes `BAD_DATA` because both are `DataError`. Short history is a fact about
+#   the series that a user can act on; "bad data" is a shrug.
+# * `CONFIG_REPAIRABLE` precedes `MODEL_ERROR` because `models.get_model` raises `ModelError` for a
+#   name that is not registered — which is a typo in the config, not a modelling failure. Filing it
+#   under `MODEL_ERROR` would send a reader to debug a model that was never constructed.
+#
+# The point of the vocabulary is triage: `OOM`, `TRANSIENT_INFRA` and `CAPACITY` describe the
+# machine and may well succeed on a retry; `BAD_DATA`, `SHORT_HISTORY` and `CONFIG_REPAIRABLE`
+# describe the input and never will; `MODEL_ERROR` is the model's own answer. Retry logic is not
+# written yet (Phase 7) — this is the evidence it will need, recorded now while it is free.
+ERROR_CLASSES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        "OOM",
+        ("MemoryError", "OutOfMemoryError"),
+        ("out of memory", "cannot allocate memory", "oom-kill", "oomkilled"),
+    ),
+    (
+        "CAPACITY",
+        ("CapacityExhausted", "ResourceExhausted"),
+        (
+            "resource_exhausted",
+            "quota exceeded",
+            "insufficient capacity",
+            "does not have enough resources",
+            "stockout",
+        ),
+    ),
+    (
+        "TRANSIENT_INFRA",
+        (
+            "ServiceUnavailable",
+            "InternalServerError",
+            "DeadlineExceeded",
+            "RetryError",
+            "ConnectionError",
+            "ConnectionResetError",
+            "BrokenPipeError",
+            "TimeoutError",
+        ),
+        (
+            "503 ",
+            "502 ",
+            "504 ",
+            "500 internal",
+            "service unavailable",
+            "deadline exceeded",
+            "connection reset",
+            "broken pipe",
+            "temporarily unavailable",
+            "try again later",
+        ),
+    ),
+    (
+        "SHORT_HISTORY",
+        (),
+        ("not enough data", "too short", "insufficient history", "needs >= "),
+    ),
+    ("CONFIG_REPAIRABLE", ("ConfigError",), ("unknown model '",)),
+    (
+        "BAD_DATA",
+        ("DataError",),
+        ("duplicate timestamp", "gap at ", "not on the freq", "contains nan", "contains inf"),
+    ),
+    (
+        "MODEL_ERROR",
+        ("ModelError", "LinAlgError", "ConvergenceError"),
+        ("did not converge", "convergence", "singular matrix", "optimization failed"),
+    ),
+)
+
+
+def classify_error(exc: BaseException) -> str:
+    """Which `ERROR_CLASSES` token describes ``exc`` — ``"UNKNOWN"`` if none does (pure).
+
+    ``UNKNOWN`` is a real answer, not a failure of the table. A token invented per stack trace
+    would make the column unqueryable, so the vocabulary stays fixed and the honest response to an
+    unrecognised failure is to say so and leave the full text in ``error_detail``. A rising
+    ``UNKNOWN`` share is the signal that this table needs a row, and it is visible in one GROUP BY.
+    """
+    names = {t.__name__ for t in type(exc).__mro__}
+    text = f"{type(exc).__name__}: {exc}".lower()
+    for token, types, needles in ERROR_CLASSES:
+        if names.intersection(types) or any(needle in text for needle in needles):
+            return token
+    return "UNKNOWN"
 
 
 def _backtest_outcome(

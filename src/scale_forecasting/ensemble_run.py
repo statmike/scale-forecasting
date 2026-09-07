@@ -492,6 +492,12 @@ def _ensemble_meta_row(
         "best_params": None if weights is None else json.dumps(weights, sort_keys=True),
         "model_artifact": artifact_uri,
         "created_at": created_at,
+        # Same reasoning as the native row: a blend that failed produces no row, so an ensemble row
+        # that exists is an "ok" one, and saying so keeps `WHERE cell_status = 'ok'` honest across
+        # every engine. The two error columns stay NULL — there is no ensemble error row to fill.
+        "cell_status": "ok",
+        "error_class": None,
+        "error_detail": None,
     }
 
 

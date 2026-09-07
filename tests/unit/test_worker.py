@@ -13,13 +13,15 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from scale_forecasting import worker
 from scale_forecasting.config import RunConfig
+from scale_forecasting.errors import ConfigError, DataError, ModelError
 from scale_forecasting.metrics import METRIC_NAMES
 from scale_forecasting.models.base_model import PREDICTION_COLUMNS
 from scale_forecasting.resources.catalog import _INTRAOP_ENV_VARS
-from scale_forecasting.worker import CellResult, run_cell
+from scale_forecasting.worker import ERROR_CLASSES, CellResult, classify_error, run_cell
 
 HORIZON = 7
 
@@ -211,6 +213,106 @@ def test_backtesting_switched_off_is_the_one_case_with_no_scoring_verdict() -> N
     assert res.backtest_status is None
     assert res.n_folds_achieved is None
     assert res.backtest_note is None
+
+
+# --- why a cell failed: the error classifier -----------------------------------
+#
+# The tokens are a fixed vocabulary so a reader can GROUP BY them. What each test really pins is
+# the *ordering* of `ERROR_CLASSES`, because first match wins and several exceptions match more
+# than one row.
+
+
+class CapacityExhausted(Exception):
+    """Stands in for `capacity.CapacityExhausted`, which needs a ledger to construct.
+
+    Named identically on purpose: the table matches type *names* rather than classes, so that the
+    classifier never imports `capacity` into the executor hot path. That makes the name the
+    contract, and `test_the_capacity_row_names_the_class_that_actually_exists` is what keeps this
+    stand-in honest if the real one is ever renamed.
+    """
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (MemoryError("Unable to allocate 4.2 GiB for an array"), "OOM"),
+        (RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB"), "OOM"),
+        (CapacityExhausted("no bounds left"), "CAPACITY"),
+        (RuntimeError("429 Quota exceeded: too many concurrent queries"), "CAPACITY"),
+        (RuntimeError("503 Service Unavailable: backend error"), "TRANSIENT_INFRA"),
+        (ConnectionResetError("connection reset by peer"), "TRANSIENT_INFRA"),
+        (TimeoutError("deadline exceeded"), "TRANSIENT_INFRA"),
+        (DataError("series 's_001' has only 5 observations, needs >= 12"), "SHORT_HISTORY"),
+        (ConfigError("not enough data for 3 folds"), "SHORT_HISTORY"),
+        (DataError("series 's_001' has duplicate timestamp 2026-01-04"), "BAD_DATA"),
+        (DataError("target column has non-numeric values"), "BAD_DATA"),
+        (ModelError("unknown model 'nope'; registered models: theta"), "CONFIG_REPAIRABLE"),
+        (ConfigError("ensemble needs at least two base models"), "CONFIG_REPAIRABLE"),
+        (ModelError("fit failed: optimization did not converge"), "MODEL_ERROR"),
+        (np.linalg.LinAlgError("Singular matrix"), "MODEL_ERROR"),
+        (ValueError("something nobody has seen before"), "UNKNOWN"),
+    ],
+)
+def test_the_classifier_files_each_failure_under_the_token_a_reader_would_act_on(
+    exc: BaseException, expected: str
+) -> None:
+    assert classify_error(exc) == expected
+
+
+def test_the_capacity_row_names_the_class_that_actually_exists() -> None:
+    """Matching by name buys a cheap classifier and costs a compile-time check — a rename in
+    `capacity.py` would leave the table matching a class nobody raises any more, and every
+    exhausted-capacity cell would silently file as `UNKNOWN`. This is that check, moved to a test.
+    """
+    from scale_forecasting.capacity import CapacityExhausted as real
+
+    named = {name for _token, types, _needles in ERROR_CLASSES for name in types}
+    assert real.__name__ in named
+
+
+def test_short_history_outranks_bad_data_because_both_are_the_same_exception_type() -> None:
+    """Order is the policy. "Too short" is actionable; "bad data" is a shrug."""
+    assert classify_error(DataError("has only 5 observations, needs >= 12")) == "SHORT_HISTORY"
+    assert classify_error(DataError("gap at 2026-01-15")) == "BAD_DATA"
+
+
+def test_a_model_name_that_is_not_registered_is_a_config_bug_not_a_model_bug() -> None:
+    """`get_model` raises ModelError for a typo, which would send a reader to debug a model that
+    was never constructed. The `unknown model '` row has to precede the ModelError row."""
+    res = run_cell(_series(), "nope", _cfg(models=["theta"]))
+    assert res.status == "error"
+    assert res.error_class == "CONFIG_REPAIRABLE"
+
+
+def test_every_token_the_table_can_return_is_in_the_documented_vocabulary() -> None:
+    # A token invented per stack trace would make the column unqueryable.
+    vocabulary = {
+        "OOM",
+        "TRANSIENT_INFRA",
+        "CAPACITY",
+        "BAD_DATA",
+        "SHORT_HISTORY",
+        "MODEL_ERROR",
+        "CONFIG_REPAIRABLE",
+    }
+    assert {token for token, _, _ in ERROR_CLASSES} == vocabulary
+    assert len({token for token, _, _ in ERROR_CLASSES}) == len(ERROR_CLASSES)  # no duplicate rows
+
+
+def test_an_ok_cell_has_no_error_class_because_there_is_nothing_to_classify() -> None:
+    res = run_cell(_series(), "theta", _cfg())
+    assert res.status == "ok"
+    assert res.error is None
+    assert res.error_class is None
+
+
+def test_a_failed_cell_carries_both_the_class_and_the_text_it_came_from() -> None:
+    # One is for grouping, the other for reading. Losing either makes the row less useful than the
+    # log line it replaced.
+    res = run_cell(_series().drop(columns=["y"]), "theta", _cfg())
+    assert res.status == "error"
+    assert res.error_class is not None
+    assert res.error and res.error_class != res.error
 
 
 # --- artifact persistence (persist_models gate) --------------------------------

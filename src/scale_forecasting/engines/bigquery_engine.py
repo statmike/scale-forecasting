@@ -429,6 +429,14 @@ def _meta_row(
         "backtest_status": status,
         "backtest_note": note,
         "n_folds_achieved": n_folds_achieved,
+        # A native row exists only because the model was built and forecast, so "ok" is a fact
+        # rather than an assumption. Filled even though `error_class`/`error_detail` are not: a
+        # native failure takes the whole job down and writes no rows at all, so there is never a
+        # native error row to describe — but leaving `cell_status` NULL would make
+        # `WHERE cell_status = 'ok'` quietly skip every native model in the run.
+        "cell_status": "ok",
+        "error_class": None,
+        "error_detail": None,
     }
 
 

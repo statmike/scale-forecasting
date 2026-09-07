@@ -115,9 +115,47 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `device_available` | `STRING` | What the worker could actually *see*: `cuda` / `cpu` / `unknown`. `unknown` means no tensor library was importable, so nobody asked — a different fact from "there is no card". |
 | `device_used` | `STRING` | Where the fitted weights actually *landed*, read off a parameter tensor: `cuda` / `cpu`. NULL means the model has no device concept (everything but NeuralProphet). |
 | `device_name` | `STRING` | The visible device, e.g. `Tesla T4`. NULL when none is. |
+| `cell_status` | `STRING` | How the *cell* went: `ok` or `error`. |
+| `error_class` | `STRING` | Which kind of failure it was, from a fixed vocabulary you can `GROUP BY` (see below). NULL on an `ok` cell. |
+| `error_detail` | `STRING` | The exception itself, as text, truncated at 2,000 characters. NULL on an `ok` cell. |
 | `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. NULL means backtesting was never asked for. |
 | `n_folds_achieved` | `INT64` | Folds actually scored (`0` on `unscored`/`failed`). |
 | `backtest_note` | `STRING` | Why the backtest was not `full` — the shortfall arithmetic, or the exception. NULL when it was. |
+
+### Why a cell failed, in a word you can group by
+
+A run of a million cells does not fail; some fraction of it does, and the only useful question is
+*of what*. Three thousand rows of `error_detail` will not answer that — every message is phrased by
+whatever library raised it, so counting them counts wording. `error_class` is the same failure
+reduced to one token from a fixed list, which is what makes `GROUP BY error_class` a report:
+
+| `error_class` | What it means | Whose problem it is |
+|---------------|---------------|---------------------|
+| `OOM` | The worker ran out of memory. | Sizing — a bigger slot or fewer cells per slot. |
+| `CAPACITY` | The platform had no room: quota, stockout, a preflight refusal. | Capacity — retry elsewhere or later. |
+| `TRANSIENT_INFRA` | A 5xx, a reset connection, a deadline. | Nobody's — the same cell would likely succeed on a retry. |
+| `SHORT_HISTORY` | The series did not have enough observations. | **Ours.** A series short enough to defeat a model should have been detected before the fit, not during it. |
+| `CONFIG_REPAIRABLE` | The config asked for something that does not exist, e.g. an unregistered model name. | The config — and it is fixable without touching data or code. |
+| `BAD_DATA` | Duplicate timestamps, a gap, a NaN, a value off the declared frequency. | The source table. |
+| `MODEL_ERROR` | The fit itself failed: no convergence, a singular matrix. | The model/series pairing. |
+| `UNKNOWN` | Nothing in the table matched. | Read `error_detail`. |
+
+`UNKNOWN` is a real answer rather than a gap in the table. A classifier that guesses is worse than
+one that admits it does not know: a wrong token sends the reader to the wrong fix, and an honest
+`UNKNOWN` with the text beside it sends them to the message. If a class of failure keeps arriving as
+`UNKNOWN`, that is the signal to add a row — not to widen an existing one.
+
+Classification happens in the worker, at the moment the exception is caught, because that is the
+last point at which the exception *object* exists; by the time the row reaches BigQuery it is a
+string, and the exception's type is the strongest evidence the table has. The vocabulary lives in
+`worker.ERROR_CLASSES`, the one module both Python runtimes share, so a Spark cell and a Ray cell
+classify the same failure identically.
+
+Native (BigQuery) and ensemble rows carry `cell_status = 'ok'` with both error columns NULL. A row
+only exists on those paths because the model was built and forecast — a native failure takes the
+whole job down and writes nothing — so there is never a native error row to describe. They are
+filled rather than left NULL so that `WHERE cell_status = 'ok'` does not quietly skip every native
+and ensemble model in the run.
 
 ### A series too short to score still has a forecast
 
@@ -177,7 +215,7 @@ the accelerator went unnoticed for twenty-one jobs in the first place.
 
 ### Columns that exist but are not filled yet
 
-`SELECT *` on this table also returns `cell_status`, `error_class`, `error_detail`,
+`SELECT *` on this table also returns
 `achieved_step`, `achieved_min_train`, `first_val_date`, `last_val_date`, `interval_source`,
 `ensemble_scoring`, `hpo_scoring`, `n_fits`, and `train_rows_total`. **They are all NULL today.**
 They are
@@ -196,8 +234,10 @@ and nothing extra is versioned — the profile is a query over a run.
 Harvest is on by default (`compute.profile.measure`, see
 [configuration_reference.md](./configuration_reference.md)); it costs three cheap probes per fit.
 All five read NULL when it is off — which is also how rows written before these columns existed read
-back, so both mean "no evidence" rather than "zero". A cell that errored has `fit_seconds = 0`,
-which is how the reader tells a failed fit from a measured one (there is no `status` column here).
+back, so both mean "no evidence" rather than "zero". A cell that errored never reached the probes,
+so its `cpu_seconds` is NULL and the harvest reader skips it on that alone; `cell_status = 'error'`
+is the readable version of the same fact, and the two must not be allowed to disagree — an error
+row counted into a cost model would size slots off fits that never happened.
 
 Consumption is on by default too: `compute.profile.source = "auto"` makes the next run look for the
 newest harvest matching its data signature and size itself from it, stamping the `run_id` it chose

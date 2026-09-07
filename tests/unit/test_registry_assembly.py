@@ -283,6 +283,53 @@ def test_a_cell_that_was_never_asked_to_score_leaves_all_three_scoring_columns_n
         assert row[column] is None, column
 
 
+def test_metadata_row_says_how_the_cell_went_instead_of_leaving_it_to_a_convention() -> None:
+    # An error cell used to be written as a row of NULL metrics with fit_seconds = 0, and telling
+    # it apart from a successful-but-unscored cell meant knowing that convention.
+    row = assemble_metadata_row(
+        _result(status="error", error="ModelError('boom')", error_class="MODEL_ERROR"),
+        _CREATED,
+    )
+    assert row["cell_status"] == "error"
+    assert row["error_class"] == "MODEL_ERROR"
+    assert row["error_detail"] == "ModelError('boom')"
+
+
+def test_an_ok_cell_says_ok_and_leaves_the_two_error_columns_null() -> None:
+    row = assemble_metadata_row(_result(), _CREATED)
+    assert row["cell_status"] == "ok"
+    assert row["error_class"] is None
+    assert row["error_detail"] is None
+
+
+def test_a_library_that_puts_a_dataframe_in_its_message_cannot_blow_up_the_row() -> None:
+    # One multi-megabyte error column is the row that fails an `append_rows` batch and takes its
+    # neighbours with it. The cut is marked so a reader is not misled by a clean-looking end.
+    huge = "x" * 50_000
+    row = assemble_metadata_row(_result(status="error", error=huge), _CREATED)
+    detail = row["error_detail"]
+    assert len(detail) < 2_100
+    assert detail.startswith("xxx")
+    assert "truncated, 50000 chars" in detail
+
+
+def test_an_error_cell_is_invisible_to_the_cost_harvest() -> None:
+    """The harvest sizes a future run from what past cells cost, and it selects on
+    ``cpu_seconds IS NOT NULL`` (`registry.harvest._HARVEST_WHERE`). An error cell never reaches
+    the measurement probes, so it has no `cpu_seconds` and that filter already excludes it — which
+    is the behaviour we want, and now the behaviour we depend on: `cell_status` makes error rows
+    easy to find, and a reader who starts counting them into a cost model would be sizing slots off
+    fits that never happened. Asserted here rather than in the harvest tests because the exclusion
+    is a property of the *row*, not of the query.
+    """
+    from scale_forecasting.registry.harvest import _HARVEST_WHERE
+
+    assert "cpu_seconds IS NOT NULL" in _HARVEST_WHERE
+    row = assemble_metadata_row(_result(status="error", error="boom", error_class="OOM"), _CREATED)
+    assert row["cell_status"] == "error"
+    assert row["cpu_seconds"] is None
+
+
 def test_metadata_row_carries_artifact_link() -> None:
     row = assemble_metadata_row(_result(), _CREATED, model_artifact="gs://wh/artifacts/x/m.pkl")
     assert row["model_artifact"] == "gs://wh/artifacts/x/m.pkl"
@@ -1037,6 +1084,10 @@ def test_a_native_row_answers_the_scoring_question_the_same_way_a_python_cell_do
     assert row(1)["n_folds_achieved"] == 1
     assert "1 of 3 folds" in row(1)["backtest_note"]
     assert row(0)["backtest_status"] == "unscored"
+    # A native row exists only because the model was built and forecast. Leaving `cell_status` NULL
+    # would make `WHERE cell_status = 'ok'` quietly skip every native model in the run.
+    assert row(3)["cell_status"] == "ok"
+    assert row(3)["error_class"] is None and row(3)["error_detail"] is None
     # Backtesting off: no count to report, so all three stay NULL — same convention as the worker.
     off = row(None)
     assert (off["backtest_status"], off["n_folds_achieved"], off["backtest_note"]) == (

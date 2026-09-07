@@ -49,9 +49,6 @@ _RESERVED_PREDICTIONS = {"created_at"}
 _RESERVED_OOF = {"cutoff_date", "horizon_step", "yhat_lower", "yhat_upper", "created_at"}
 _RESERVED_METADATA = {
     # cell outcome + backtest methodology
-    "cell_status",
-    "error_class",
-    "error_detail",
     "achieved_step",
     "achieved_min_train",
     "first_val_date",
