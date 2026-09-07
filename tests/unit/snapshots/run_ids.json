@@ -26,5 +26,8 @@
   "configs/smokes/13_native_format.json": "smoke-13-native-format-c879472d172c",
   "configs/smokes/14_full_dag.json": "smoke-14-full-dag-2f41e9c9a142",
   "configs/smokes/15_airflow_multi_engine.json": "smoke-15-airflow-multi-engine-52cd5934d8ee",
-  "configs/smokes/16_cluster_split_hardware.json": "smoke-16-cluster-split-hardware-a605c2f701a2"
+  "configs/smokes/16_cluster_split_hardware.json": "smoke-16-cluster-split-hardware-a605c2f701a2",
+  "configs/smokes/17_gpu_absent_serverless.json": "smoke-17-gpu-absent-serverless-c5c0e5274e75",
+  "configs/smokes/18_gpu_absent_cluster.json": "smoke-18-gpu-absent-cluster-314c942564c1",
+  "configs/smokes/19_gpu_absent_ray.json": "smoke-19-gpu-absent-ray-b5c365457c14"
 }

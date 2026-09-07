@@ -55,6 +55,16 @@ _PANEL = _SNAPSHOTS / "golden_panel_prebreak.json"
 # Not a run config: a zone/region failover map with its own schema and no `run_name`.
 _NON_RUNCONFIG = {"compute_fallback.json"}
 
+# Configs written *after* the break. They have no pre-break identity — there was nothing to hash —
+# so they are named here rather than given an invented row in `run_ids_prebreak.json`, which is a
+# historical record and must stay one. Naming them keeps the vacancy visible: the "every id moved"
+# claim below simply does not cover these files, and a reader can see exactly which ones.
+_POST_BREAK = {
+    "configs/smokes/17_gpu_absent_serverless.json",
+    "configs/smokes/18_gpu_absent_cluster.json",
+    "configs/smokes/19_gpu_absent_ray.json",
+}
+
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only
 # knobs are shape; 400 observations is long enough for the three-fold backtest every model runs
 # here and short enough that the whole panel builds in about twelve seconds.
@@ -180,10 +190,12 @@ def snapshot_panel() -> dict[str, Any]:
 
 def test_every_shipped_config_is_in_the_digest_snapshot(snapshot_run_ids: dict[str, str]) -> None:
     """A config added after the snapshot has no pre-break id, so the break is unprovable for it."""
-    assert sorted(snapshot_run_ids) == sorted(dict(_shipped_configs())), (
-        "the shipped configs and the pre-break digest snapshot disagree. If a config was added, "
-        "regenerate — but note that a config created after the break has no pre-break identity "
-        "and the digest claim below is vacuous for it."
+    shipped = [name for name in dict(_shipped_configs()) if name not in _POST_BREAK]
+    assert sorted(snapshot_run_ids) == sorted(shipped), (
+        "the shipped configs and the pre-break digest snapshot disagree. A config written after "
+        "the break belongs in `_POST_BREAK`, which says so out loud; one written before it should "
+        "already be in the snapshot, and its absence means the snapshot was regenerated at the "
+        "wrong time."
     )
 
 

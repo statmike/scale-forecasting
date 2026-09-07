@@ -34,6 +34,9 @@ Run them cheap → expensive; each is numbered in that order.
 | 14 | `14_full_dag.json` | The flagship: all families + native + ensemble, one run_id |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG **orchestrated by Composer/Airflow** — three engines (Spark + Ray GPU + BigQuery) under a microbatch ensemble |
 | 16 | `16_cluster_split_hardware.json` | **Two** Dataproc clusters under one run — a CPU cluster and a GPU cluster, created and torn down together |
+| 17 | `17_gpu_absent_serverless.json` | Serverless GPU with the card hidden — the run must **refuse**, not finish on CPU |
+| 18 | `18_gpu_absent_cluster.json` | The same refusal on a Dataproc cluster GPU worker |
+| 19 | `19_gpu_absent_ray.json` | The same refusal on a Ray GPU worker |
 
 Every other smoke reads the managed-Iceberg source table, so 13 gives the native-format read its own
 proof; together they validate both source formats.
@@ -50,6 +53,29 @@ the only config that forces the split, and an offline tripwire
 Smokes 01–14 launch the run directly (`main.run`); smoke 15 is the one that proves the **Airflow
 layer** actually orchestrates the same building blocks — see
 [Orchestrating on Composer](#orchestrating-on-composer-airflow-smoke) below.
+
+**Why 17–19 are expected to fail.** 03, 06 and 08 each provision an accelerator and come back
+green. That tells you the GPU check did not object; it does not tell you the check *can* object,
+and a check that cannot fail is worth nothing. 17–19 are the same three services with the card
+taken away after it was bought:
+
+```bash
+SF_HIDE_DEVICES=1 .venv/bin/python tests/smokes/smoke_harness.py \
+  configs/smokes/17_gpu_absent_serverless.json --no-rerun
+```
+
+`SF_HIDE_DEVICES` makes a **GPU** job additionally export `CUDA_VISIBLE_DEVICES=""` to its workers,
+on the same executor-env seam that already carries the provisioned-hardware fact — Spark through
+`spark.executorEnv.*`, Ray through `runtime_env.env_vars`. Torch then sees no device even though
+the hardware is attached and billing, which is exactly the state a real provisioning failure leaves
+a worker in. The expected outcome is a **failed** job whose message names the family, the service
+and the config field that turns the device off; a run that reaches `COMPLETED` is the finding. The
+harness reports a failed run as a failed smoke, so read the report rather than the exit code here.
+
+The switch is infrastructure, not config: it never enters `ComputeConfig`, so arming it does not
+move a `run_id`, and a config runs under one identity whether the card is hidden or not. Six cells
+each, because there is no reason to buy a hundred series' worth of fleet to watch a job refuse to
+start.
 
 ## Prerequisites
 

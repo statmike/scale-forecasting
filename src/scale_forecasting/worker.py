@@ -227,14 +227,26 @@ def _require_device(device: str, family: str, engine: str) -> None:
     process, so the check costs one failed import per worker and nothing thereafter.
 
     Only ``device == "gpu"`` is checked. ``"cpu"`` and ``"auto"`` cannot be short of hardware.
+
+    The message reports what the worker actually saw, because the two ways to get here need
+    different fixes and look identical from the outside: torch present and reporting no device
+    means the accelerator did not attach (or was hidden), while no importable torch at all means
+    this worker never had a tensor library to ask.
     """
     if device != "gpu" or _peak_gpu_bytes() is not None:
         return
+    available, _name = visible_device()
+    saw = (
+        "torch is installed here and reports no CUDA device, so the accelerator did not attach to "
+        "this worker"
+        if available == "cpu"
+        else "torch could not be imported on this worker, so it has no tensor library to run on a "
+        "device at all"
+    )
     raise ConfigError(
         f"family '{family}' is set to hardware='gpu' and this {engine} job was provisioned onto "
-        f"GPU hardware, but no CUDA device is visible to this worker. Either the accelerator did "
-        f"not attach, or torch is missing its CUDA build here. Set "
-        f"compute.families.{family}.hardware to 'cpu' to run without one."
+        f"GPU hardware, but {saw}. Set compute.families.{family}.hardware to 'cpu' to run "
+        f"without one."
     )
 
 

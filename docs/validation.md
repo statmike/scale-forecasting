@@ -217,6 +217,20 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
+| 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
+| 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
+
+### Why three configs exist that are designed to fail
+
+Smokes 17–19 are six-cell runs of the same shape as 03, 06 and 08, and they are the reason those
+three prove anything. A GPU rung that comes back green tells you the check did not object; it does
+not tell you the check *can* object. Run each of these with `SF_HIDE_DEVICES=1` and the accelerator
+is provisioned and then taken away from the workers, so a run that still reaches `COMPLETED` is
+reporting a contract that isn't enforced.
+
+Six cells because the expected outcome is an immediate refusal — there is no reason to buy a
+hundred series' worth of fleet to watch a job stop.
 
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
 

@@ -1,0 +1,19 @@
+{
+  "run_name": "smoke_18_gpu_absent_cluster",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 6
+  },
+  "models": ["neuralprophet"],
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "spark_mode": "cluster",
+        "hardware": "gpu",
+        "gpu_type": "T4"
+      }
+    }
+  }
+}

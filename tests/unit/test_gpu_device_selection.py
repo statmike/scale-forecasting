@@ -44,6 +44,7 @@ from scale_forecasting.errors import ConfigError
 from scale_forecasting.models import get_model
 from scale_forecasting.models.base_model import BaseModel, ModelContext
 from scale_forecasting.ray_submit import build_entrypoint
+from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
 from scale_forecasting.worker import (
     _model_context,
@@ -93,9 +94,11 @@ def _unprovisioned(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts from "nothing said" — the state a laptop and a CPU job are in.
 
     Autouse because the variable is process-global: a test that set it and a test that reads it
-    could otherwise pass or fail on collection order.
+    could otherwise pass or fail on collection order. The fault-injection switch is cleared for
+    the same reason — a developer with it exported would otherwise see a different suite.
     """
     monkeypatch.delenv(hardware.PROVISIONED_HARDWARE_ENV, raising=False)
+    monkeypatch.delenv(hardware.HIDE_DEVICES_ENV, raising=False)
 
 
 # --- the carrier: what a job puts on the wire ----------------------------------
@@ -380,6 +383,82 @@ def test_a_gpu_cell_on_a_host_with_no_device_fails_before_it_fits(
 def test_a_gpu_cell_with_a_visible_device_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("scale_forecasting.worker._peak_gpu_bytes", lambda: 0)
     _require_device("gpu", "deep_learning", "ray")
+
+
+@pytest.mark.parametrize(
+    ("available", "phrase"),
+    [
+        ("cpu", "reports no CUDA device"),
+        ("unknown", "could not be imported"),
+    ],
+)
+def test_the_failure_says_which_of_the_two_causes_it_found(
+    monkeypatch: pytest.MonkeyPatch, available: str, phrase: str
+) -> None:
+    """No card attached and no tensor library here need different fixes, and look identical.
+
+    The first is an infrastructure problem — the accelerator was bought and did not arrive, or
+    something hid it. The second is a packaging problem: this worker's environment has no torch,
+    so it was never going to run on a device whatever hardware it sat on. A message that said only
+    "no device" would send a reader to the wrong half of the system.
+    """
+    monkeypatch.setattr("scale_forecasting.worker._peak_gpu_bytes", lambda: None)
+    monkeypatch.setattr("scale_forecasting.worker.visible_device", lambda: (available, None))
+    with pytest.raises(ConfigError) as excinfo:
+        _require_device("gpu", "deep_learning", "spark")
+    assert phrase in str(excinfo.value)
+
+
+# --- the negative arm: taking the card away on purpose --------------------------
+#
+# Three live GPU rungs will each report a device. Three green lights prove nothing by themselves,
+# so each service also gets a run where the accelerator is provisioned and then hidden, and the
+# job has to stop instead of quietly finishing on CPU. `SF_HIDE_DEVICES` is how the card is taken
+# away — it rides the executor-env seams that already carry the provisioned fact.
+
+
+def test_the_switch_is_off_by_default_and_changes_not_one_byte() -> None:
+    """Every job ever submitted stays byte-identical; the arm is opt-in from the environment."""
+    assert hardware.spark_executor_env("gpu") == {
+        f"spark.executorEnv.{hardware.PROVISIONED_HARDWARE_ENV}": "gpu"
+    }
+    assert hardware.ray_env_vars("gpu") == {hardware.PROVISIONED_HARDWARE_ENV: "gpu"}
+
+
+def test_arming_it_hides_the_card_on_both_worker_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spark under the ``spark.executorEnv.`` prefix, Ray plain — the same two seams as the fact."""
+    monkeypatch.setenv(hardware.HIDE_DEVICES_ENV, "1")
+    assert hardware.spark_executor_env("gpu") == {
+        f"spark.executorEnv.{hardware.PROVISIONED_HARDWARE_ENV}": "gpu",
+        "spark.executorEnv.CUDA_VISIBLE_DEVICES": "",
+    }
+    assert hardware.ray_env_vars("gpu") == {
+        hardware.PROVISIONED_HARDWARE_ENV: "gpu",
+        "CUDA_VISIBLE_DEVICES": "",
+    }
+
+
+@pytest.mark.parametrize("value", [None, "cpu"])
+def test_arming_it_does_nothing_to_a_job_that_was_never_given_a_card(
+    monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    """Hiding a device from a CPU job tests nothing, so a CPU job still emits nothing at all."""
+    monkeypatch.setenv(hardware.HIDE_DEVICES_ENV, "1")
+    assert hardware.spark_executor_env(value) == {}
+    assert hardware.ray_env_vars(value) == {}
+
+
+def test_the_switch_stays_out_of_the_config_and_therefore_out_of_the_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Infra, like ``SF_SERVERLESS_DEPS``: a fault injected around a run must not rename it.
+
+    If it entered ``ComputeConfig`` the negative arm would carry a different ``run_id`` from the
+    positive one, and the two rungs would no longer be the same job with one thing changed.
+    """
+    before = make_run_id(_cfg(**_GPU_COMPUTE))
+    monkeypatch.setenv(hardware.HIDE_DEVICES_ENV, "1")
+    assert make_run_id(_cfg(**_GPU_COMPUTE)) == before
 
 
 # --- the model states the device instead of asking for a guess ------------------

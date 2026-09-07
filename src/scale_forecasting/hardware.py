@@ -31,9 +31,9 @@ was bought; `visible_device` answers what the process can see. Keeping them toge
 the whole GPU contract is about the gap between those two answers, and a run where they disagree is
 exactly the run nobody noticed for twenty-one jobs.
 
-Public surface: ``PROVISIONED_HARDWARE_ENV``, ``add_hardware_arg``, ``export_hardware_env``,
-``hardware_args``, ``provisioned_hardware``, ``spark_executor_env``, ``ray_env_vars``,
-``driver_fit_scope``, ``visible_device``.
+Public surface: ``PROVISIONED_HARDWARE_ENV``, ``HIDE_DEVICES_ENV``, ``add_hardware_arg``,
+``export_hardware_env``, ``hardware_args``, ``provisioned_hardware``, ``spark_executor_env``,
+``ray_env_vars``, ``driver_fit_scope``, ``visible_device``.
 """
 
 from __future__ import annotations
@@ -54,6 +54,31 @@ PROVISIONED_HARDWARE_ENV = "SF_PROVISIONED_HARDWARE"
 # The only value that changes anything. "cpu" and absent are the same state (device selection stays
 # "auto"), so a CPU job emits nothing and its command stays byte-identical to today's.
 _GPU = "gpu"
+
+# Fault injection, and the only reason it exists: to prove the GPU contract can fail.
+#
+# Three live rungs will show a Serverless L4, a cluster T4 and a Ray T4 each reporting a device.
+# Three green lights prove nothing on their own — a check that cannot fail is indistinguishable
+# from `assert True` — so each service also needs an arm where the accelerator is provisioned and
+# then taken away, and the run must stop instead of quietly finishing on CPU. Setting this makes a
+# GPU job export ``CUDA_VISIBLE_DEVICES=""`` to its workers, which is how you take a card away from
+# torch without touching the provisioning.
+#
+# Deliberately narrow rather than a general "export this environment to workers" passthrough: the
+# general form is invisible rope — it would let an operator move the thread pin, the CUDA allocator
+# or any library's behaviour from outside the config, with nothing in the run's record saying so.
+# This switch does one nameable thing.
+#
+# Infra-level, like ``SF_SERVERLESS_DEPS``, and for the same reason: it is not a property of the
+# science, so it must not enter ``ComputeConfig`` and therefore the ``run_id``. It also does nothing
+# on a CPU job — hiding a device from a job that was never given one is not a test of anything.
+HIDE_DEVICES_ENV = "SF_HIDE_DEVICES"
+_CUDA_VISIBLE = "CUDA_VISIBLE_DEVICES"
+
+
+def _fault_env() -> dict[str, str]:
+    """``{CUDA_VISIBLE_DEVICES: ""}`` when the negative arm is armed, else ``{}`` (see above)."""
+    return {_CUDA_VISIBLE: ""} if os.environ.get(HIDE_DEVICES_ENV) else {}
 
 
 def add_hardware_arg(parser: argparse.ArgumentParser) -> None:
@@ -108,7 +133,8 @@ def spark_executor_env(hardware: str | None) -> dict[str, str]:
     """
     if hardware != _GPU:
         return {}
-    return {f"spark.executorEnv.{PROVISIONED_HARDWARE_ENV}": _GPU}
+    env = {PROVISIONED_HARDWARE_ENV: _GPU, **_fault_env()}
+    return {f"spark.executorEnv.{name}": value for name, value in env.items()}
 
 
 def ray_env_vars(hardware: str | None) -> dict[str, str]:
@@ -121,7 +147,7 @@ def ray_env_vars(hardware: str | None) -> dict[str, str]:
     """
     if hardware != _GPU:
         return {}
-    return {PROVISIONED_HARDWARE_ENV: _GPU}
+    return {PROVISIONED_HARDWARE_ENV: _GPU, **_fault_env()}
 
 
 _visible: tuple[str, str | None] | None = None  # memoized; a device does not appear mid-process

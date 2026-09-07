@@ -1,0 +1,18 @@
+{
+  "run_name": "smoke_19_gpu_absent_ray",
+  "python_runtime": "ray",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 6
+  },
+  "models": ["neuralprophet"],
+  "compute": {
+    "families": {
+      "deep_learning": {
+        "hardware": "gpu",
+        "gpu_type": "T4"
+      }
+    }
+  }
+}
