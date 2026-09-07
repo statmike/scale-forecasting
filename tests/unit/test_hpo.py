@@ -83,9 +83,13 @@ def test_minimize_scalar_error_metrics_pass_through() -> None:
     assert _minimize_scalar("rmse", 12.0) == pytest.approx(12.0)
 
 
-def test_minimize_scalar_coverage_is_negated() -> None:
-    # higher coverage is better → minimize its negation
-    assert _minimize_scalar("coverage", 0.9) == pytest.approx(-0.9)
+def test_minimize_scalar_coverage_is_a_shortfall_from_perfect() -> None:
+    # Higher coverage is better, so what is minimized is how far short of 1.0 it falls. This used
+    # to be `-value`, which ranks identically (the transform is monotone decreasing either way, so
+    # every study picks the same trial) but is negative, and a negative loss cannot be turned into
+    # an inverse-error weight. Centralising the direction map made the two uses share one answer.
+    assert _minimize_scalar("coverage", 0.9) == pytest.approx(0.1)
+    assert _minimize_scalar("coverage", 0.5) > _minimize_scalar("coverage", 0.9)
 
 
 def test_minimize_scalar_bias_uses_magnitude() -> None:

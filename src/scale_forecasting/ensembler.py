@@ -31,6 +31,7 @@ from scipy.optimize import nnls
 
 from .config import CALCULATED_STRATEGIES, LEARNED_STRATEGIES
 from .errors import ConfigError, get_logger
+from .metrics import loss_of
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -59,6 +60,11 @@ def inverse_error_weights(errors: np.ndarray) -> np.ndarray:
     Lower-error models get more weight. A zero-error model would divide by zero, so zeros are
     treated as "perfectly trusted" and share the weight equally among themselves. Falls back to
     uniform weights when no error is finite and positive.
+
+    ``errors`` must be **losses** — non-negative, zero is perfect — not raw metric values. That is
+    what `metrics.loss_of` produces, and every caller here routes through it. Handing this function
+    a metric where larger is better inverts the weighting silently, which is exactly what used to
+    happen with ``decision_metric="coverage"``.
     """
     err = np.asarray(errors, dtype=float)
     if err.ndim != 1 or err.size == 0:
@@ -115,10 +121,15 @@ def combine_oof(
     Blends over whichever base models are present per ``(ts_id, fold_id, forecast_date)`` key:
     ``mean``/``median`` are unweighted; ``inverse_error`` weights each model per ``ts_id`` by
     ``1/WAPE`` over that model's OOF (self-contained — the same signal ``forecast_metadata`` would
-    carry); learned strategies apply ``learned_weights[strategy]`` (skipped if absent). Bounds are
-    not carried (OOF has none), so ensemble coverage/pinball are NaN — consistent with the Spark
-    base models, whose fold metrics also omit intervals. Returns an empty frame when the OOF is
-    empty or no strategy produces a blend.
+    carry); learned strategies apply ``learned_weights[strategy]`` (skipped if absent). Returns an
+    empty frame when the OOF is empty or no strategy produces a blend.
+
+    **Bounds are not blended, so an ensemble's ``coverage``/``pinball``/``interval_score`` are
+    NaN.** The base models' are not, any more — the OOF frame now carries ``yhat_lower`` and
+    ``yhat_upper`` per fold, and the base cells score them. Blending them is a separate question
+    with a real answer to choose (averaging two models' 80% intervals does not give an 80%
+    interval), so the columns stay NaN rather than being filled with something plausible and
+    wrong. An ensemble is compared to its base models on the point metrics.
     """
     learned_weights = learned_weights or {}
     empty = pd.DataFrame(columns=list(_OOF_BLEND_COLS))
@@ -328,7 +339,20 @@ def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
     if metric not in metric_df.columns:
         return models
     mean_by_model = metric_df.groupby("model_type")[metric].mean()
-    return [m for m in models if not (mean_by_model.get(m, float("nan")) > threshold)]
+
+    def keep(name: str) -> bool:
+        # Compared as a loss, not as the raw metric. The threshold has always meant "worse than
+        # this is not worth blending", and for the thirteen error metrics the raw value says that
+        # directly. For the other two it said the opposite: with `decision_metric="coverage"` the
+        # model with 95% coverage exceeded the threshold and was pruned while the one with 50% was
+        # kept, and with `"bias"` a large negative bias never exceeded anything at all. `loss_of`
+        # makes all fifteen answer the same question and leaves the thirteen unchanged.
+        mean = mean_by_model.get(name, float("nan"))
+        if mean != mean:  # no scored rows for this model — no evidence, so keep it (as before)
+            return True
+        return not (loss_of(metric, float(mean)) > threshold)
+
+    return [m for m in models if keep(m)]
 
 
 def _calc_blend(strategy: str, vals: np.ndarray, weights: np.ndarray | None) -> np.ndarray:
@@ -429,5 +453,13 @@ def _inverse_error_run_weights(
     if metric_df is None or metric_df.empty or metric not in metric_df.columns:
         return np.full(n, 1.0 / n)
     mean_by_model = metric_df.groupby("model_type")[metric].mean()
-    errors = np.array([mean_by_model.get(m, np.nan) for m in models], dtype=float)
+    # Weighted on the *loss*, not on the metric as stored. `inverse_error_weights` gives more
+    # weight to a smaller number, which is only what you want if smaller is better — for
+    # `coverage` it handed the 50%-covered model nearly twice the weight of the 95% one, and for
+    # `bias` it gave any negative bias a weight of exactly zero (the `err > 0` filter), punishing
+    # a model for being accurate in the wrong direction. `loss_of` is identity for the thirteen
+    # error metrics, so nothing moves for the metrics anyone actually ships with.
+    errors = np.array(
+        [loss_of(metric, float(mean_by_model.get(m, np.nan))) for m in models], dtype=float
+    )
     return inverse_error_weights(errors)

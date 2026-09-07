@@ -365,6 +365,13 @@ def _oof_row(
         "forecast_date": row["forecast_date"],
         "y_true": row["y_true"],
         "yhat": row["yhat"],
+        # `build_eval_query` has always selected these — ML.FORECAST returns them and the metric
+        # panel above is already scored on them — and this row assembler dropped them on the way
+        # to the table. `cutoff_date` and `horizon_step` are still NULL here: the native fold
+        # geometry is a single global `DATE_SUB(MAX(ds), …)` rather than a per-series one, so
+        # projecting it belongs with the ragged-panel join work, not here.
+        "yhat_lower": row.get("yhat_lower"),
+        "yhat_upper": row.get("yhat_upper"),
     }
 
 
@@ -437,6 +444,11 @@ def _meta_row(
         "cell_status": "ok",
         "error_class": None,
         "error_detail": None,
+        # BQML returns `prediction_interval_lower_bound` / `_upper_bound` from the fitted model,
+        # so a native cell's bounds are always the model's own. Filled for the same reason the
+        # Python path fills it: an interval-metric comparison between the two engines is only
+        # like-for-like if a reader can see which kind of interval each row was scored on.
+        "interval_source": "native",
     }
 
 

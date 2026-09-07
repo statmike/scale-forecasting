@@ -18,15 +18,24 @@ The switch matters more than it looks. The obvious alternative is to leave a tes
 fail from the break onward, and the reason not to is that a permanently-red test gets muted, and a
 muted test is worse than no test. A one-line flip is something a reviewer can see and argue with.
 
-**`run_ids.json` is the one that keeps working.** "Every id differs from the pre-break set" is
-satisfied forever once the break lands, so on its own it stops detecting anything the moment it
-goes green. The post-break snapshot is a plain equality pin against *today's* digests, and it is
-what actually fails when an unplanned field is added next. Six ledger rows recorded a `run_id` their
-config no longer produced because nothing was watching this; something is watching now.
+**Each pre-break snapshot has a same-shape "today" pin beside it**, and the pair does two different
+jobs. The pre-break file answers "did the thing we promised not to change, change?" — a question
+that stops discriminating once its claim is settled. The today file is a plain pin on current
+output, and it is what fails in the commit that moves something nobody meant to move. Six ledger
+rows recorded a `run_id` their config no longer produced because nothing was watching the digests;
+something is watching both now.
 
-**Regenerating.** ``uv run python tests/unit/test_prebreak_snapshots.py --write``. Both snapshots
-are built by the same functions the tests read them with, so there is no second code path that can
-drift. Do not regenerate to make a failure go away — the failures are the deliverable.
+**A deliberate change to the numbers gets named, not absorbed.** `_SCORED_AT_2_3` is the only
+exemption in the pre-break comparison, and it is written as narrowly as the change it describes:
+four named metrics, allowed to move in one direction only (from "not computed" to a number). A
+regression back to NaN still fails, and a metric that already had a value still fails. Widening
+this set, rather than adding a new one beside it, is how an exemption quietly becomes a hole.
+
+**Regenerating.** ``uv run python tests/unit/test_prebreak_snapshots.py --write``. Every snapshot is
+built by the same functions the tests read it with, so there is no second code path that can drift.
+`--write` never touches the two pre-break files: they are a historical record, and rewriting one
+erases the only evidence the break moved anything. Do not regenerate to make a failure go away —
+the failures are the deliverable.
 """
 
 from __future__ import annotations
@@ -51,6 +60,15 @@ _SNAPSHOTS = Path(__file__).parent / "snapshots"
 _RUN_IDS = _SNAPSHOTS / "run_ids_prebreak.json"
 _RUN_IDS_NOW = _SNAPSHOTS / "run_ids.json"
 _PANEL = _SNAPSHOTS / "golden_panel_prebreak.json"
+_PANEL_NOW = _SNAPSHOTS / "golden_panel.json"
+
+# The one declared movement in the numbers since the pre-break panel was captured (plan item 2.3).
+# Every model in the suite returns `yhat_lower` / `yhat_upper` on every fold, and the backtest loop
+# used to drop them, so these four interval metrics were NaN on every Python cell in every run while
+# the BigQuery-native path scored them. Scoring the folds on bounds that were already there turned
+# fifteen nulls into fifteen numbers, per metric, and moved nothing else — not a forecast value, not
+# a fold, not one of the other eleven metrics.
+_SCORED_AT_2_3 = frozenset({"coverage", "pinball", "interval_score", "interval_width"})
 
 # Not a run config: a zone/region failover map with its own schema and no `run_name`.
 _NON_RUNCONFIG = {"compute_fallback.json"}
@@ -185,6 +203,17 @@ def snapshot_panel() -> dict[str, Any]:
     return json.loads(_PANEL.read_text())
 
 
+@pytest.fixture(scope="module")
+def snapshot_panel_now() -> dict[str, Any]:
+    return json.loads(_PANEL_NOW.read_text())
+
+
+@pytest.fixture(scope="module")
+def current_panel() -> dict[str, Any]:
+    """Built once for the whole module — it runs fifteen real models and costs ~12 s."""
+    return build_golden_panel()
+
+
 # --- the digests -----------------------------------------------------------------------
 
 
@@ -252,52 +281,114 @@ def test_fold_geometry_is_unchanged(snapshot_panel: dict[str, Any]) -> None:
     )
 
 
-def test_golden_cell_output_is_unchanged(snapshot_panel: dict[str, Any]) -> None:
-    """The claim the break rests on: the forecasts are numerically the same on both sides of it.
+def _cell_complaints(
+    current: dict[str, Any],
+    expected: dict[str, Any],
+    newly_scored: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Every way the cells in `current` differ from `expected`, as sentences. Empty means same.
 
-    Slow by the standards of this suite (~12 s) because it runs the real cell for fifteen models
-    rather than a stub. That is the cost of the claim being about output rather than about
-    plumbing, and it is paid once per gate run.
+    Shared by both panel tests so that "unchanged" means one thing rather than two. Numbers are
+    compared with `_close` on both sides: a BLAS or libm difference between two machines moves the
+    last bit or two of a float, and a pin that fails on that is a pin someone switches off.
+
+    `newly_scored` names metrics allowed to have gone from "not computed" to a number since the
+    snapshot was taken. It is one-directional on purpose — the reverse move, a metric that used to
+    have a value and now reads NaN, is a regression and still reported.
     """
-    current = build_golden_panel()["cells"]
-    expected = snapshot_panel["cells"]
-    assert sorted(current) == sorted(expected), (
-        "the model registry and the golden panel disagree. A new model needs a regenerated "
-        "snapshot; a removed one needs a deliberate edit."
-    )
+    if sorted(current) != sorted(expected):
+        return [
+            "the model registry and the panel disagree: "
+            f"{sorted(set(current) - set(expected))} added, "
+            f"{sorted(set(expected) - set(current))} missing. A new model needs a regenerated "
+            "snapshot; a removed one needs a deliberate edit."
+        ]
 
+    out: list[str] = []
     for model in sorted(current):
         got, want = current[model], expected[model]
-        assert got["status"] == want["status"], f"{model}: cell status changed"
-        assert got["columns"] == want["columns"], f"{model}: prediction columns changed"
-        assert got["n_oof_rows"] == want["n_oof_rows"], f"{model}: out-of-fold row count changed"
-        assert sorted(got["metrics"]) == sorted(want["metrics"]), f"{model}: metric set changed"
+        if got["status"] != want["status"]:
+            out.append(f"{model}: cell status {want['status']!r} -> {got['status']!r}")
+        if got["columns"] != want["columns"]:
+            out.append(f"{model}: prediction columns {want['columns']} -> {got['columns']}")
+        if got["n_oof_rows"] != want["n_oof_rows"]:
+            out.append(f"{model}: out-of-fold rows {want['n_oof_rows']} -> {got['n_oof_rows']}")
+        if sorted(got["metrics"]) != sorted(want["metrics"]):
+            out.append(f"{model}: metric set changed")
+            continue
         for key in sorted(want["metrics"]):
-            assert _close(got["metrics"][key], want["metrics"][key]), (
-                f"{model}: metric {key} moved {want['metrics'][key]!r} -> {got['metrics'][key]!r}"
-            )
-        assert len(got["yhat"]) == len(want["yhat"]), f"{model}: forecast length changed"
+            w, g = want["metrics"][key], got["metrics"][key]
+            if key in newly_scored and w is None and g is not None:
+                continue  # the movement 2.3 declared, in the only direction it declared it
+            if not _close(g, w):
+                out.append(f"{model}: metric {key} moved {w!r} -> {g!r}")
+        if len(got["yhat"]) != len(want["yhat"]):
+            out.append(f"{model}: forecast length {len(want['yhat'])} -> {len(got['yhat'])}")
+            continue
         drifted = [
             (i, w, g)
             for i, (w, g) in enumerate(zip(want["yhat"], got["yhat"], strict=True))
             if not _close(g, w)
         ]
-        assert not drifted, (
-            f"{model}: {len(drifted)} of {len(want['yhat'])} forecast values moved, first at "
-            f"step {drifted[0][0]}: {drifted[0][1]!r} -> {drifted[0][2]!r}"
-        )
+        if drifted:
+            out.append(
+                f"{model}: {len(drifted)} of {len(want['yhat'])} forecast values moved, first at "
+                f"step {drifted[0][0]}: {drifted[0][1]!r} -> {drifted[0][2]!r}"
+            )
+    return out
+
+
+def test_golden_cell_output_is_unchanged(
+    current_panel: dict[str, Any], snapshot_panel: dict[str, Any]
+) -> None:
+    """The claim the break rests on: the forecasts are numerically the same on both sides of it.
+
+    Slow by the standards of this suite (~12 s) because it runs the real cell for fifteen models
+    rather than a stub. That is the cost of the claim being about output rather than about
+    plumbing, and it is paid once per gate run.
+
+    The four metrics in `_SCORED_AT_2_3` are exempt, in one direction, for the reason recorded
+    there. The exemption is deliberately not "the interval metrics may differ" — it is "these four
+    may go from unmeasured to measured", which is a thing that can only happen once.
+    """
+    complaints = _cell_complaints(
+        current_panel["cells"], snapshot_panel["cells"], newly_scored=_SCORED_AT_2_3
+    )
+    assert not complaints, "output moved across the digest break:\n" + "\n".join(complaints)
+
+
+def test_current_cell_output_matches_the_pinned_panel(
+    current_panel: dict[str, Any], snapshot_panel_now: dict[str, Any]
+) -> None:
+    """The panel's counterpart to `test_current_digests_match_the_pinned_snapshot`.
+
+    The pre-break comparison above answers a question that is settled — it carries an exemption now
+    and will carry more as more deliberate changes land, and each one narrows what it can still
+    catch. This one has no exemptions and never will: it pins today's numbers exactly, so the next
+    unintended movement fails in the commit that causes it rather than being discovered later by
+    someone regenerating a snapshot for an unrelated reason.
+
+    When a change here *is* intended, `--write` and say so in the commit body. That is the whole
+    ceremony, and it is worth having: it makes moving a number a thing somebody decided.
+    """
+    assert build_folds() == snapshot_panel_now["folds"], (
+        "fold geometry moved from the pinned panel. If this is intentional it is a behaviour "
+        "change and needs its own decision; regenerate with --write once it has one."
+    )
+    complaints = _cell_complaints(current_panel["cells"], snapshot_panel_now["cells"])
+    assert not complaints, "output moved from the pinned panel:\n" + "\n".join(complaints)
 
 
 def _write() -> None:
-    """Regenerate the post-break pin and the golden panel. Never rewrites the pre-break digests.
+    """Regenerate the two today-pins. Never rewrites either pre-break file.
 
-    `run_ids_prebreak.json` is a historical record — it is what the ids were before the break, and
-    rewriting it would erase the only evidence that the break moved anything. Restore it from git
-    if it is ever lost.
+    `run_ids_prebreak.json` and `golden_panel_prebreak.json` are a historical record — they are what
+    the ids and the numbers were before the break, and rewriting one would erase the only evidence
+    that the break moved anything. Restore them from git if they are ever lost.
     """
     _RUN_IDS_NOW.write_text(json.dumps(build_run_ids(), indent=2, sort_keys=True) + "\n")
-    _PANEL.write_text(json.dumps(build_golden_panel(), indent=2, sort_keys=True) + "\n")
-    print(f"wrote {_RUN_IDS_NOW.relative_to(_ROOT)} and {_PANEL.relative_to(_ROOT)}")
+    _PANEL_NOW.write_text(json.dumps(build_golden_panel(), indent=2, sort_keys=True) + "\n")
+    print(f"wrote {_RUN_IDS_NOW.relative_to(_ROOT)} and {_PANEL_NOW.relative_to(_ROOT)}")
 
 
 if __name__ == "__main__":  # pragma: no cover - regeneration entrypoint

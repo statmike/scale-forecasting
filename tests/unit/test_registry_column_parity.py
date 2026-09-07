@@ -46,14 +46,13 @@ _CREATED = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 # Columns the schema declares and nothing writes yet, per table. Each entry is a promise that
 # some named phase fills it; deleting the entry is part of landing that phase.
 _RESERVED_PREDICTIONS = {"created_at"}
-_RESERVED_OOF = {"cutoff_date", "horizon_step", "yhat_lower", "yhat_upper", "created_at"}
+_RESERVED_OOF = {"created_at"}
 _RESERVED_METADATA = {
     # cell outcome + backtest methodology
     "achieved_step",
     "achieved_min_train",
     "first_val_date",
     "last_val_date",
-    "interval_source",
     "ensemble_scoring",
     "hpo_scoring",
     "n_fits",

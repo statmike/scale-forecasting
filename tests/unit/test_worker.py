@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from scale_forecasting import worker
+from scale_forecasting.backtest import OOF_COLUMNS
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError, DataError, ModelError
 from scale_forecasting.metrics import METRIC_NAMES
@@ -114,10 +115,26 @@ def test_backtest_on_populates_oof_and_metrics() -> None:
     res = run_cell(_series(), "theta", cfg)
     assert res.status == "ok"
     assert res.oof is not None
-    assert list(res.oof.columns) == ["ds", "fold_id", "y_true", "yhat"]
+    assert list(res.oof.columns) == list(OOF_COLUMNS)
     assert res.oof["fold_id"].nunique() == 2
     # at least the decision metric rolled up to a finite value
     assert not math.isnan(res.metrics["wape"])
+    # And so did the interval metrics, which every Python cell reported as NaN before the folds
+    # were scored on the bounds the model had already returned.
+    assert not math.isnan(res.metrics["coverage"])
+    # theta computes its own prediction interval, so its coverage is a claim about theta's
+    # uncertainty rather than about the spread of its residuals. The column says which.
+    assert res.interval_source == "native"
+
+
+def test_a_model_without_its_own_interval_records_the_residual_provenance() -> None:
+    # xgboost has no notion of a prediction interval, so `BaseModel.residual_intervals` builds one
+    # from the spread of its in-sample residuals. Both kinds of band land in the same two columns,
+    # which is exactly why the row has to say which kind it is — a coverage number means something
+    # different when the band came from the model than when it came from its leftovers.
+    res = run_cell(_series(), "xgboost", _cfg(models=["xgboost"]))
+    assert res.status == "ok"
+    assert res.interval_source == "residual"
 
 
 # --- a scoring shortfall must never cost the forecast --------------------------

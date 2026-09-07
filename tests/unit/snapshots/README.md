@@ -7,9 +7,16 @@ the rendered output of a generator, compared verbatim by `test_ddl.py`, `test_vi
 `test_bigquery_sql.py`. They exist so a change to generated SQL shows up as a reviewable diff rather
 than as a silent deployment difference.
 
-**Identity and output snapshots** — `run_ids_prebreak.json`, `golden_panel_prebreak.json`. Written by
-`uv run python tests/unit/test_prebreak_snapshots.py --write`, read by that module's tests. They pin
-what the `run_id` digests and the model outputs were *before* the planned identity break, which is
-the only point at which "every id moved" and "no number changed" are checkable claims. Read that
-module's docstring before regenerating either one — the failures they produce are the deliverable,
-and regenerating to clear a red gate throws away the thing being measured.
+**Identity and output snapshots** — four files, in two pairs, read by `test_prebreak_snapshots.py`.
+
+`run_ids_prebreak.json` and `golden_panel_prebreak.json` pin what the `run_id` digests and the model
+outputs were *before* the planned identity break, which is the only point at which "every id moved"
+and "no number changed" are checkable claims. **They are a historical record and `--write` does not
+touch them.** Restore them from git if one is ever lost.
+
+`run_ids.json` and `golden_panel.json` pin the same two things as of *today*, and they are the pair
+that keeps working: the pre-break claims stop discriminating once they are settled, while these fail
+in the commit that moves something. Regenerate with
+`uv run python tests/unit/test_prebreak_snapshots.py --write` — but read that module's docstring
+first. The failures these produce are the deliverable, and regenerating to clear a red gate throws
+away the thing being measured.

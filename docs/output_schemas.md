@@ -118,6 +118,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `cell_status` | `STRING` | How the *cell* went: `ok` or `error`. |
 | `error_class` | `STRING` | Which kind of failure it was, from a fixed vocabulary you can `GROUP BY` (see below). NULL on an `ok` cell. |
 | `error_detail` | `STRING` | The exception itself, as text, truncated at 2,000 characters. NULL on an `ok` cell. |
+| `interval_source` | `STRING` | Where the prediction interval came from: `native` (the model computed its own) or `residual` (built from the spread of its in-sample residuals). NULL on ensemble rows, which do not carry an interval. |
 | `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. NULL means backtesting was never asked for. |
 | `n_folds_achieved` | `INT64` | Folds actually scored (`0` on `unscored`/`failed`). |
 | `backtest_note` | `STRING` | Why the backtest was not `full` — the shortfall arithmetic, or the exception. NULL when it was. |
@@ -156,6 +157,25 @@ only exists on those paths because the model was built and forecast — a native
 whole job down and writes nothing — so there is never a native error row to describe. They are
 filled rather than left NULL so that `WHERE cell_status = 'ok'` does not quietly skip every native
 and ensemble model in the run.
+
+### Where the prediction interval came from
+
+Every model in the suite emits `yhat_lower` / `yhat_upper`, but they do not all mean the same thing,
+and the two columns look identical either way. Some models compute an interval as part of their own
+arithmetic — Theta, SARIMAX, Prophet, UCM, STL-bagging, NeuralProphet, and the BigQuery-native
+models all do. The rest have no notion of uncertainty at all, so `BaseModel.residual_intervals`
+manufactures a band for them from the spread of their in-sample residuals.
+
+A residual band is a reasonable fallback and a poor measurement. It is fitted on data the model has
+already seen, so it is optimistic; and it is one constant width applied to the whole horizon, so it
+cannot widen as the forecast gets further from what the model knows. Comparing its `coverage` or
+`interval_score` against a model that computed its own interval is not a like-for-like comparison,
+and until this column existed there was nothing in the row to tell you which kind you were looking
+at. `WHERE interval_source = 'native'` makes that comparison honest.
+
+BigQuery-native rows say `native` because `ML.FORECAST` returns real bounds. Ensemble rows leave it
+NULL: combining base-model point forecasts produces no interval, so there is no provenance to
+record.
 
 ### A series too short to score still has a forecast
 
@@ -216,7 +236,7 @@ the accelerator went unnoticed for twenty-one jobs in the first place.
 ### Columns that exist but are not filled yet
 
 `SELECT *` on this table also returns
-`achieved_step`, `achieved_min_train`, `first_val_date`, `last_val_date`, `interval_source`,
+`achieved_step`, `achieved_min_train`, `first_val_date`, `last_val_date`,
 `ensemble_scoring`, `hpo_scoring`, `n_fits`, and `train_rows_total`. **They are all NULL today.**
 They are
 declared ahead of the code that writes them because adding a column to a deployed table is a
@@ -278,7 +298,30 @@ clustered by `run_id, ts_id`.
 | `forecast_date` | `DATE` | The held-out date. |
 | `y_true` | `FLOAT64` | The actual value (held out of training that fold). |
 | `yhat` | `FLOAT64` | The base model's prediction for it. |
-| `cutoff_date`, `horizon_step`, `yhat_lower`, `yhat_upper`, `created_at` | `DATE`, `INT64`, `FLOAT64`, `FLOAT64`, `TIMESTAMP` | **Declared, not yet written — NULL today.** The fold's origin and the step within its horizon (so error-by-horizon is a query, not a re-run), the interval bounds the BigQuery-native path already computes and discards, and the write timestamp. Same reasoning as the note under `forecast_metadata`. |
+| `yhat_lower` | `FLOAT64` | Lower bound of the prediction interval for that held-out date. |
+| `yhat_upper` | `FLOAT64` | Upper bound of the same interval. |
+| `cutoff_date` | `DATE` | The last date the model was allowed to see when it made this prediction — the fold's origin. Python cells only; NULL on BigQuery-native rows. |
+| `horizon_step` | `INT64` | How far ahead of `cutoff_date` this row is, counting from 1. Python cells only; NULL on BigQuery-native rows. |
+| `created_at` | `TIMESTAMP` | **Declared, not yet written — NULL today.** The write timestamp; same reasoning as the note under `forecast_metadata`. |
+
+### Error by how far ahead you asked
+
+`horizon_step` exists so that "how fast does this model decay?" is a `GROUP BY`, not a second run.
+A model that is excellent one day out and useless four weeks out has the *same* `wape` in the
+leaderboard as one that is mediocre throughout, because the leaderboard averages the whole horizon.
+Grouping the OOF rows by `horizon_step` separates them.
+
+It is also the column that makes a real weakness visible. When a model has no prediction interval of
+its own, the band around its forecast is built from the spread of its in-sample residuals, and that
+band is the **same width at every step** — as wide one day out as twenty-eight days out. Real
+uncertainty grows with distance, so such a band is too wide early and too narrow late, and the late
+under-coverage is invisible in a single averaged `coverage` number. Group by `horizon_step` and it
+shows up immediately. `forecast_metadata.interval_source` tells you which models to expect this
+from.
+
+`cutoff_date` and `horizon_step` are written by the Python engines (Spark, Ray). The
+BigQuery-native path evaluates all its folds against one global cutoff, so it has no per-series
+origin to record and leaves both NULL.
 
 ---
 

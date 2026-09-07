@@ -11,8 +11,15 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from scale_forecasting.backtest import Fold, achievable_folds, backtest_cell, make_folds
+from scale_forecasting.backtest import (
+    OOF_COLUMNS,
+    Fold,
+    achievable_folds,
+    backtest_cell,
+    make_folds,
+)
 from scale_forecasting.config import RunConfig
 from scale_forecasting.features import invert_transform
 from scale_forecasting.models.base_model import DEFAULT_QUANTILES, BaseModel, ModelContext
@@ -182,11 +189,119 @@ def test_every_clamped_fold_still_honours_the_no_leakage_and_min_train_invariant
 def test_oof_frame_shape_and_columns() -> None:
     cfg = _cfg({"n_folds": 3, "horizon": 4, "step": 4, "min_train": 10})
     oof, fold_metrics = backtest_cell(_series(40), _factory(), cfg)
-    assert list(oof.columns) == ["ds", "fold_id", "y_true", "yhat"]
+    assert list(oof.columns) == list(OOF_COLUMNS)
     assert len(oof) == 3 * 4  # n_folds × horizon
     assert oof["ds"].dtype == np.dtype("datetime64[ns]")
     assert sorted(oof["fold_id"].unique()) == [0, 1, 2]
     assert len(fold_metrics) == 3
+
+
+def test_a_series_with_no_achievable_folds_still_returns_the_full_column_set() -> None:
+    # The empty frame has to look like the populated one. A fold-less series that returned four
+    # columns while its neighbours returned eight would only surface downstream, as a concat that
+    # quietly widened with NaNs — or, in `assemble_oof_rows`, as rows missing keys.
+    cfg = _cfg({"n_folds": 3, "horizon": 4, "step": 4, "min_train": 10})
+    oof, fold_metrics = backtest_cell(_series(8), _factory(), cfg)
+    assert oof.empty and not fold_metrics
+    assert list(oof.columns) == list(OOF_COLUMNS)
+
+
+def test_each_oof_row_records_the_fold_origin_and_its_step_within_the_horizon() -> None:
+    # `fold_id` is an ordinal in one series' own plan; `cutoff_date` is the date the fold forecast
+    # from, which is what makes two series comparable when their histories end on different days.
+    # `horizon_step` is what turns "does this model decay with horizon?" into a GROUP BY.
+    cfg = _cfg({"n_folds": 2, "horizon": 4, "step": 4, "min_train": 10})
+    series = _series(40)
+    oof, _ = backtest_cell(series, _factory(), cfg)
+
+    for fold_id, block in oof.groupby("fold_id"):
+        assert list(block["horizon_step"]) == [1, 2, 3, 4]
+        # One cutoff per fold, and it is the last training date — strictly before the first
+        # validation date, which is the no-leakage invariant restated in date space.
+        assert block["cutoff_date"].nunique() == 1
+        assert block["cutoff_date"].iloc[0] < block["ds"].iloc[0], fold_id
+
+    # The two folds step back by exactly `step` days, as the geometry says they should.
+    cutoffs = sorted(oof["cutoff_date"].unique())
+    assert (cutoffs[1] - cutoffs[0]) == pd.Timedelta(days=4)
+
+
+def test_the_interval_metrics_are_finite_because_the_folds_now_score_the_bounds() -> None:
+    # Every Python cell in every run before this scored `coverage`, `pinball`, `interval_score` and
+    # `interval_width` as NaN — the model returned bounds on every fold and the fold loop dropped
+    # them. Asserting FINITE, not merely present: a NaN is present too, and that is how four of
+    # fifteen metric columns stayed empty through a green suite.
+    cfg = _cfg({"n_folds": 2, "horizon": 4, "step": 4, "min_train": 10})
+    oof, fold_metrics = backtest_cell(_series(40), _factory(), cfg)
+
+    for panel in fold_metrics:
+        for metric in ("coverage", "pinball", "interval_score", "interval_width"):
+            assert np.isfinite(panel[metric]), metric
+        assert 0.0 <= panel["coverage"] <= 1.0
+        assert panel["interval_width"] >= 0.0
+    # The bounds reach the OOF frame too, ordered, so a reader can recompute the coverage.
+    assert (oof["yhat_lower"] <= oof["yhat_upper"]).all()
+
+
+def _random_walk(n: int, seed: int = 7) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame(
+        {
+            "ds": pd.date_range("2026-01-01", periods=n, freq="D"),
+            "y": 100.0 + np.cumsum(rng.normal(0.0, 1.0, n)),
+        }
+    )
+
+
+def _real_factory(model_name: str, horizon: int) -> Any:
+    from scale_forecasting.models import get_model
+
+    model_cls = get_model(model_name)
+
+    def make() -> BaseModel:
+        return model_cls({}, ModelContext(freq="D", horizon=horizon, transform="none"))
+
+    return make
+
+
+def test_a_model_with_native_intervals_covers_near_its_nominal_rate() -> None:
+    """The bounds are the 0.1 and 0.9 quantiles, so a correctly specified model should cover
+    around 80% of the held-out points. The tolerance is deliberately wide: coverage over a few
+    hundred held-out points is a coarse estimate, and the assertion that matters is that the
+    number is *in the right neighbourhood* rather than the 0.0 a degenerate band produces or the
+    NaN every Python cell reported before the folds were scored on their intervals at all.
+    """
+    cfg = _cfg({"n_folds": 12, "horizon": 7, "step": 7, "min_train": 60})
+    _, fold_metrics = backtest_cell(_random_walk(200), _real_factory("sarimax", 7), cfg)
+
+    coverage = float(np.mean([panel["coverage"] for panel in fold_metrics]))
+    assert 0.55 <= coverage <= 1.0, coverage
+
+
+def test_a_residual_band_is_flat_across_the_horizon_so_late_steps_are_under_covered() -> None:
+    """A model without native intervals gets the empirical quantiles of its *one-step* in-sample
+    residuals added to every step of the forecast, so its band is the same width at h=1 and at
+    h=14. Real uncertainty on a random walk grows with the square root of the horizon, so the late
+    steps are systematically under-covered.
+
+    This is documented rather than fixed. It is a property of `BaseModel.residual_intervals` and
+    of the ten models that rely on it, and the honest response is to make it visible: that is what
+    `horizon_step` on the OOF rows is for, and this test is the smallest demonstration that the
+    column answers the question. Anyone comparing a residual-interval model's coverage against a
+    native-interval model's should be filtering on `interval_source` and reading it by step.
+    """
+    horizon = 14
+    cfg = _cfg({"n_folds": 20, "horizon": horizon, "step": 1, "min_train": 80})
+    oof, _ = backtest_cell(_random_walk(300), _real_factory("naive_drift", horizon), cfg)
+
+    covered = (oof["yhat_lower"] <= oof["y_true"]) & (oof["y_true"] <= oof["yhat_upper"])
+    by_step = covered.groupby(oof["horizon_step"]).mean()
+
+    # Flat band, growing truth: the last step of the horizon covers less than the first.
+    assert by_step.loc[horizon] < by_step.loc[1], by_step.to_dict()
+    # And the band really is flat — the width does not grow with the step, which is the cause.
+    width = (oof["yhat_upper"] - oof["yhat_lower"]).groupby(oof["horizon_step"]).mean()
+    assert width.loc[horizon] == pytest.approx(width.loc[1], rel=0.05)
 
 
 def test_oof_values_match_lastvalue_model() -> None:

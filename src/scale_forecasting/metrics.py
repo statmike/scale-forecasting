@@ -6,7 +6,7 @@ All values are floats, with NaN where a metric is undefined (e.g. MAPE
 with zeros, MASE/RMSSE without training history, coverage without intervals) rather than
 raising — a metric that can't be computed for one cell must not sink the batch.
 
-Public surface: ``compute_metrics``.
+Public surface: ``compute_metrics``, ``METRIC_NAMES``, ``METRIC_DIRECTION``, ``loss_of``.
 
 Definitions (n = horizon, e = yhat - y_true):
 - mae   = mean(|e|)
@@ -63,6 +63,73 @@ METRIC_NAMES: tuple[str, ...] = (
     "interval_score",
     "interval_width",
 )
+
+# Which way is better, for every metric in the panel. Three answers, not two:
+#
+#   "lower"  — an error. Smaller is better, zero is perfect. Most of the panel.
+#   "higher" — a fraction of successes. Larger is better, one is perfect. Only `coverage`.
+#   "zero"   — a signed quantity where either sign is a fault. Only `bias`.
+#
+# This table exists because three separate places used to answer the question by assuming "lower",
+# and were therefore wrong for two of the fifteen metrics — `inverse_error` gave a model with 50%
+# interval coverage nearly twice the weight of one with 95%, `prune_threshold` dropped the accurate
+# model and kept the broken one, and a model whose bias happened to be negative got weight zero for
+# being *good*. A config can name any of the fifteen as its `decision_metric`, so a lower-is-better
+# assumption is not a safe default; it is a silent inversion.
+METRIC_DIRECTION: dict[str, str] = {
+    "mae": "lower",
+    "rmse": "lower",
+    "mse": "lower",
+    "mape": "lower",
+    "smape": "lower",
+    "wape": "lower",
+    "mase": "lower",
+    "rmsse": "lower",
+    "bias": "zero",
+    "coverage": "higher",
+    "pinball": "lower",
+    "mase_seasonal": "lower",
+    "maape": "lower",
+    "interval_score": "lower",
+    "interval_width": "lower",
+}
+
+
+def loss_of(metric: str, value: float) -> float:
+    """``value`` restated as a **loss**: non-negative, zero is perfect, smaller is better (pure).
+
+    One direction map, one conversion, for every caller that has to rank models — the optimiser,
+    the inverse-error weighting and the pruner. Each of those wants the same thing, and each used
+    to hard-code its own idea of what "worse" means.
+
+    The conversions:
+
+    * ``lower`` → the value itself.
+    * ``higher`` → ``1 - value``. Coverage is the only such metric and it is a fraction, so the
+      shortfall from perfect coverage is the natural loss. Returning ``-value`` would rank
+      identically but be *negative*, and a negative loss cannot be inverted into a weight.
+    * ``zero`` → ``abs(value)``. A bias of −0.1 is better than one of +0.4, and both are worse
+      than 0.
+    * A metric this table does not know, or a NaN, → ``inf``: unrankable, so it can never win.
+
+    Two caveats worth stating rather than burying. ``coverage`` is treated as higher-is-better
+    although it is really best *at nominal* — 98% coverage from a wildly over-wide interval is not
+    better than 80% from a calibrated one. Judging it against nominal needs the interval's α,
+    which is not in the panel, and `interval_score` is the metric that already penalises width
+    honestly. And ``interval_width`` is scored lower-is-better, which in isolation rewards an
+    interval of zero width; it is a diagnostic to read beside `coverage`, not a `decision_metric`
+    to optimise alone.
+    """
+    if value != value:  # NaN — a metric that could not be computed ranks last, never first
+        return float("inf")
+    direction = METRIC_DIRECTION.get(metric)
+    if direction == "higher":
+        return 1.0 - value
+    if direction == "zero":
+        return abs(value)
+    if direction == "lower":
+        return value
+    return float("inf")  # unknown metric: no opinion is safer than a wrong one
 
 
 def compute_metrics(

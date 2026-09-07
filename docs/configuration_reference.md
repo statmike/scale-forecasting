@@ -234,7 +234,27 @@ read NaN for ensembles.
 each trivially gamed — an infinitely wide band covers everything, a zero-width one is maximally
 sharp. `interval_score` is the one number that combines them, which is why it is the sensible
 `decision_metric` if intervals are what you are ranking on. The other two are worth reading
-alongside it because they say *how* a model got its score.
+alongside it because they say *how* a model got its score. Whichever you pick, read it next to
+`forecast_metadata.interval_source`: a model that computed its own interval and one whose band was
+manufactured from its residuals are not scored on the same thing (see
+[output_schemas.md](./output_schemas.md)).
+
+**Which direction is better is not the same answer for every metric.** Thirteen of the fifteen are
+errors, so smaller is better. `coverage` is a hit rate, so larger is better. `bias` is signed, so
+what you want is *near zero* — a large negative bias is exactly as wrong as a large positive one.
+
+Three places in the system have to rank things by the chosen metric — the HPO objective, the
+`inverse_error` ensemble weights, and `prune_threshold` — and each of them needs the same
+translation into a single "smaller is better" number. `metrics.METRIC_DIRECTION` states the
+direction for each metric and `metrics.loss_of` applies it: an error passes straight through,
+`coverage` becomes `1 − coverage`, `bias` becomes `|bias|`, and a metric that could not be computed
+becomes infinity so it ranks last rather than first. That one map is why picking a different
+`decision_metric` does not require thinking about which of the three consumers handles it correctly.
+
+Two caveats the direction map deliberately does not try to fix. Coverage is really best *at* its
+nominal level, not at 1.0 — a band wide enough to cover everything scores perfectly here — and
+`interval_width` on its own rewards a band of zero width. Neither is a good `decision_metric` alone;
+`interval_score` is the one that trades them off.
 
 ## `model_params` — hyperparameters you set yourself
 
@@ -349,8 +369,14 @@ dropped at config-load with a warning, not an error). Each fitted meta-learner i
 artifact for lineage.
 
 **`prune_threshold`** applies only to the **calculated** strategies: when `> 0`, any base model whose
-mean `backtest.decision_metric` is *worse than* (greater than) the threshold is dropped from the blend
-fleet-wide before combining. `0.0` (default) prunes nothing.
+mean `backtest.decision_metric` is *worse than* the threshold is dropped from the blend fleet-wide
+before combining. `0.0` (default) prunes nothing.
+
+"Worse than" is measured as a loss (`metrics.loss_of`, above), so the comparison reads the same way
+whichever metric you chose: a threshold of `0.3` on `wape` drops models above 0.3, and the same
+`0.3` on `coverage` drops models that cover less than 70% of actuals. A model with no scored rows at
+all is kept — absence of evidence is not evidence of a bad model, and pruning on it would silently
+empty the blend on a run where the metric frame came back short.
 
 ## `compute` — `ComputeConfig`
 

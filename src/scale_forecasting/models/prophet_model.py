@@ -3,7 +3,8 @@
 One model, one file. Runtime python, statistical family. Prophet is an
 optional dependency, imported lazily in ``fit`` so the model registers without it. It emits
 its own uncertainty interval; we read the symmetric band once and place arbitrary requested
-quantiles from it (same trick as ``theta``), so any quantile set is honored. Exogenous
+quantiles from it (same trick as ``theta``), so any quantile set is honored. That band is sampled
+rather than computed, so the draw is seeded — see ``_UNCERTAINTY_SEED``. Exogenous
 regressors are wired through ``add_regressor``; ``ctx.holidays`` feeds Prophet's holiday
 frame when present.
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
 from ..errors import ModelError
@@ -22,6 +24,15 @@ if TYPE_CHECKING:
     import optuna
 
 _INTERVAL_WIDTH = 0.8  # ~10/90 band; sigma is backed out from it for arbitrary quantiles
+
+# Prophet does not compute its interval in closed form. It draws `uncertainty_samples` (1000)
+# posterior samples off numpy's *global* RNG and takes their quantiles, so two identical runs
+# produce bounds that differ in the third decimal — and the metrics scored on those bounds differ
+# with them. That is Monte Carlo noise in estimating a fixed quantity, not information, and a
+# number written to the registry has to be reproducible from the config that produced it. So the
+# draw is seeded, and the process-wide RNG state is put back exactly as it was found: seeding
+# globally on a worker that fits thousands of cells would reach well past this model.
+_UNCERTAINTY_SEED = 0
 
 
 class ProphetModel(BaseModel):
@@ -69,7 +80,13 @@ class ProphetModel(BaseModel):
 
         from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
 
-        fc = self._model.predict(future)
+        rng_state = np.random.get_state()
+        np.random.seed(_UNCERTAINTY_SEED)
+        try:
+            fc = self._model.predict(future)
+        finally:
+            np.random.set_state(rng_state)
+
         mean = fc["yhat"].to_numpy(dtype=float)
         # Back out sigma from Prophet's symmetric interval, then place any quantile.
         z = norm.ppf(0.5 + _INTERVAL_WIDTH / 2.0)

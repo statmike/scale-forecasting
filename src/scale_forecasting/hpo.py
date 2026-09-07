@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from .errors import ConfigError, get_logger
+from .metrics import loss_of
 from .models import get_model
 from .models.base_model import BaseModel
 
@@ -66,18 +67,18 @@ def _has_search_space(model_cls: type[BaseModel]) -> bool:
 def _minimize_scalar(metric: str, value: float) -> float:
     """Map a decision-metric value to a scalar to *minimize* (the study direction is fixed).
 
-    ``coverage`` is better when higher (interval coverage toward its nominal target) → minimize its
-    negation. ``bias`` is better near zero (systematic over/under-forecast) → minimize its
-    magnitude. Every other panel metric is an error, better when smaller → minimize as-is. A NaN
-    score (a trial that produced no scorable fold) becomes ``+inf`` so it can never win.
+    Now one line, because the direction of every metric lives in `metrics.METRIC_DIRECTION` and
+    the conversion in `metrics.loss_of`. This used to be the only place in the codebase that knew
+    coverage is better when higher and bias is better near zero; the ensembler's weighting and
+    pruner each assumed lower-is-better and were silently wrong for those two.
+
+    One value moved when the map was centralised: ``coverage`` now scores ``1 - value`` instead of
+    ``-value``. The two rank identically — the transform is monotone decreasing either way — so
+    every study picks the same trial; it is the recorded objective number that shifts, and it
+    shifts to something a reader can interpret (a shortfall from perfect coverage rather than a
+    negative). A NaN score, meaning a trial that produced no scorable fold, is still ``+inf``.
     """
-    if value != value:  # NaN
-        return float("inf")
-    if metric == "coverage":
-        return -value
-    if metric == "bias":
-        return abs(value)
-    return value
+    return loss_of(metric, value)
 
 
 def _score_params(

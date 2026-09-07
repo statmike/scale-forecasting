@@ -17,7 +17,11 @@ entry points:
 The no-leakage invariant is ``train_end == val_start`` for every fold: training data
 strictly precedes the validation window.
 
-Public surface: ``Fold``, ``achievable_folds``, ``make_folds``, ``backtest_cell``.
+Each fold is scored on the *intervals the model already returned*, not on the point forecast
+alone — so ``coverage``, ``pinball``, ``interval_score`` and ``interval_width`` are real numbers on
+the Python path rather than the NaNs they were for every run before this.
+
+Public surface: ``Fold``, ``OOF_COLUMNS``, ``achievable_folds``, ``make_folds``, ``backtest_cell``.
 """
 
 from __future__ import annotations
@@ -35,6 +39,22 @@ from .seasonality import seasonal_period
 if TYPE_CHECKING:
     from .config import RunConfig
     from .models.base_model import BaseModel
+
+
+# The canonical OOF frame `backtest_cell` returns, in order. Named once because the empty case has
+# to produce the same columns as the populated one — a fold-less series that returned a
+# four-column frame while every other series returned eight is the kind of difference that only
+# shows up as a concat warning in a 100k run.
+OOF_COLUMNS: tuple[str, ...] = (
+    "ds",
+    "fold_id",
+    "y_true",
+    "yhat",
+    "yhat_lower",
+    "yhat_upper",
+    "cutoff_date",
+    "horizon_step",
+)
 
 
 @dataclass(frozen=True)
@@ -140,11 +160,11 @@ def backtest_cell(
             transform here matches the inverse the folds' models apply — one λ per cell.
 
     Returns:
-        ``(oof, fold_metrics)`` where ``oof`` is the canonical OOF frame (``ds``,
-        ``fold_id``, ``y_true``, ``yhat``) concatenated across folds, and ``fold_metrics``
-        is the per-fold metric panel (list, in fold order). The registry later augments this
-        frame with ``ts_id``/``model_type`` and renames ``ds``→``forecast_date`` before the
-        ensembler consumes it (see ``ensembler._pivot_oof``) — this cell emits the bare form.
+        ``(oof, fold_metrics)`` where ``oof`` is the canonical OOF frame (`OOF_COLUMNS`)
+        concatenated across folds, and ``fold_metrics`` is the per-fold metric panel (list, in
+        fold order). The registry later augments this frame with ``ts_id``/``model_type`` and
+        renames ``ds``→``forecast_date`` before the ensembler consumes it (see
+        ``ensembler._pivot_oof``) — this cell emits the bare form.
     """
     y, X = build_features(series, cfg, lam)
     n = len(y)
@@ -167,6 +187,14 @@ def backtest_cell(
         # yhat is already in original units (predict inverts the transform), so
         # y_true / y_train are inverted here to score in the same units.
         yhat = pred["yhat"].to_numpy()[: fold.val_size]
+        # Every model returns bounds — natively if it has them, from its residual quantiles if not
+        # (`BaseModel.residual_intervals`), so these columns are never absent. They used to be
+        # computed on every fold and then dropped on the floor: `coverage`, `pinball`,
+        # `interval_score` and `interval_width` were four of the fifteen panel metrics and all four
+        # were NaN for every Python cell in every run, while the BigQuery-native path scored them.
+        # A leaderboard cannot compare the two engines on a metric only one of them fills.
+        lower = pred["yhat_lower"].to_numpy()[: fold.val_size]
+        upper = pred["yhat_upper"].to_numpy()[: fold.val_size]
         y_true = invert_transform(y_val.to_numpy(), cfg.features.transform, lam)
         y_train_orig = invert_transform(y_train.to_numpy(), cfg.features.transform, lam)
         val_dates = y_val.index
@@ -178,6 +206,19 @@ def backtest_cell(
                     "fold_id": fold.fold_id,
                     "y_true": y_true,
                     "yhat": yhat,
+                    "yhat_lower": lower,
+                    "yhat_upper": upper,
+                    # The last training date — the origin the fold forecasts from, `ds <= cutoff`.
+                    # `fold_id` is an ordinal within one series' plan and the native path derives
+                    # its folds from a single global `MAX(ds)`, so on a ragged panel the same
+                    # `fold_id` is not the same window. The date is, which is why it is recorded
+                    # here rather than reconstructed by a reader who would have to know the
+                    # geometry to do it.
+                    "cutoff_date": y.index[fold.train_end - 1],
+                    # 1-based position within this fold's horizon, so "how fast does this model
+                    # decay?" is a GROUP BY instead of a re-run. Every fold answers h=1 and h=28
+                    # in the same rows; nothing else in the schema separates them.
+                    "horizon_step": range(1, fold.val_size + 1),
                 }
             )
         )
@@ -186,6 +227,8 @@ def backtest_cell(
                 y_true,
                 yhat,
                 y_train=y_train_orig,
+                lower=lower,
+                upper=upper,
                 seasonal_period=seasonal_period(cfg.data.freq),
             )
         )
@@ -193,6 +236,6 @@ def backtest_cell(
     oof = (
         pd.concat(oof_parts, ignore_index=True)
         if oof_parts
-        else pd.DataFrame(columns=["ds", "fold_id", "y_true", "yhat"])
+        else pd.DataFrame(columns=list(OOF_COLUMNS))
     )
     return oof, fold_metrics

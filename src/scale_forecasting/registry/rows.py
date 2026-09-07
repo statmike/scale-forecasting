@@ -66,7 +66,13 @@ def assemble_prediction_rows(result: CellResult) -> list[dict[str, Any]]:
 
 
 def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
-    """Canonical OOF frame → ``backtest_oof`` rows. Empty if no backtest."""
+    """Canonical OOF frame (`backtest.OOF_COLUMNS`) → ``backtest_oof`` rows. Empty if no backtest.
+
+    Four of these columns were declared in the schema and written by nobody. They are all things
+    the fold loop had in hand and discarded: the bounds it now scores coverage on, the origin date
+    the fold forecast from, and the step within the fold's horizon. Read with ``.get`` so a frame
+    assembled by something other than `backtest_cell` still produces a valid row.
+    """
     if result.oof is None:
         return []
     rows: list[dict[str, Any]] = []
@@ -80,6 +86,12 @@ def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
                 "forecast_date": _as_date(rec["ds"]),
                 "y_true": _as_float(rec.get("y_true")),
                 "yhat": _as_float(rec.get("yhat")),
+                "yhat_lower": _as_float(rec.get("yhat_lower")),
+                "yhat_upper": _as_float(rec.get("yhat_upper")),
+                # The fold's training cutoff — its identity across a ragged panel, where the same
+                # `fold_id` covers different dates for different series (`ensembler._pivot_oof`).
+                "cutoff_date": _as_date(rec.get("cutoff_date")),
+                "horizon_step": _as_int(rec.get("horizon_step")),
             }
         )
     return rows
@@ -133,6 +145,12 @@ def assemble_metadata_row(
         "backtest_status": result.backtest_status,
         "backtest_note": result.backtest_note,
         "n_folds_achieved": result.n_folds_achieved,
+        # Where this cell's prediction bounds came from — and therefore what its `coverage`,
+        # `pinball` and `interval_score` are evidence *about*. A model with native intervals is
+        # reporting its own uncertainty; a model without one is being scored on the empirical
+        # spread of its in-sample residuals, which is a different and generally more optimistic
+        # claim. Ranking the two on coverage without this column compares two different things.
+        "interval_source": result.interval_source,
         # How the *cell* went. `run_cell` has always computed this and thrown it away at the table
         # boundary: an error cell was written as a row of NULL metrics with `fit_seconds = 0`, and
         # telling it apart from a successful cell that simply was not scored meant knowing that
@@ -319,3 +337,14 @@ def _as_date(value: Any) -> Any:
     if hasattr(value, "date"):
         return value.date()
     return value
+
+
+def _as_int(value: Any) -> int | None:
+    """Coerce to int, mapping missing/NaN to None — the INT64 counterpart of `_as_float`.
+
+    A pandas column that ever held a NaN comes back as float, so ``int(rec[...])`` on a value that
+    round-tripped through a frame is not safe on its own.
+    """
+    if value is None or value != value:  # None or NaN
+        return None
+    return int(value)

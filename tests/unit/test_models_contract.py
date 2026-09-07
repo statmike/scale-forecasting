@@ -149,16 +149,25 @@ def test_original_units_after_boxcox(model_name: str) -> None:
 
 
 def test_deterministic_under_seed(model_name: str) -> None:
+    """Same config, same data, same numbers — including the interval, not just the point.
+
+    The bounds used to be outside this check, and one model was quietly failing it: Prophet does not
+    compute its interval, it draws a thousand posterior samples and takes their quantiles, so two
+    identical runs disagreed in the third decimal. Nothing noticed while the interval metrics were
+    NaN on every Python cell. They are scored now, so an irreproducible bound is an irreproducible
+    `coverage` in the registry, and the contract has to cover the whole frame.
+    """
     y, X0 = _golden_series(with_exog=get_model(model_name).supports_exog)
 
-    def run() -> np.ndarray:
+    def run() -> pd.DataFrame:
         m = _make(model_name)
         m.fit(y, X0)
         fx = X0.iloc[:HORIZON] if (X0 is not None and m.supports_exog) else None
-        return m.predict(HORIZON, fx)["yhat"].to_numpy()
+        return m.predict(HORIZON, fx)
 
     a, b = run(), run()
-    assert np.allclose(a, b)
+    for col in ("yhat", "yhat_lower", "yhat_upper"):
+        assert np.allclose(a[col].to_numpy(), b[col].to_numpy()), f"{model_name}: {col} not stable"
 
 
 def test_at_least_theta_registered() -> None:

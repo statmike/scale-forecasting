@@ -110,6 +110,12 @@ class CellResult:
     # it was, from a fixed vocabulary (`ERROR_CLASSES`). One is for reading, the other for grouping
     # and for deciding whether a retry could possibly help. None on an ok cell.
     error_class: str | None = None
+    # Where this cell's prediction bounds came from: "native" if the model computes its own
+    # intervals, "residual" if `BaseModel.residual_intervals` built them from the empirical spread
+    # of in-sample residuals. Both are legitimate; they are not the same claim, and the interval
+    # metrics (coverage, pinball, interval_score) mean different things under each. None on an
+    # error cell, where there are no bounds to describe.
+    interval_source: str | None = None
 
 
 def _worker_id() -> str:
@@ -506,6 +512,11 @@ def run_cell(
             backtest_status=backtest_status,
             n_folds_achieved=n_folds_achieved,
             backtest_note=backtest_note,
+            # A class attribute, so this is the model's own declaration rather than an inference
+            # from the frame — a residual band on a model with no recorded residuals collapses to
+            # bounds equal to `yhat`, which is indistinguishable from a native zero-width interval
+            # by inspection and very distinguishable by what it means.
+            interval_source="native" if model_cls.supports_native_intervals else "residual",
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(e, engine)

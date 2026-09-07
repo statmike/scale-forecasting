@@ -1117,8 +1117,10 @@ def test_the_native_oof_row_emits_no_column_the_spec_would_drop() -> None:
     )
     assert set(row) <= _spec_columns(_OOF_SPEC), set(row) - _spec_columns(_OOF_SPEC)
     assert row["fold_id"] == 3  # a real fold id, not the metadata row's NULL
-    # The eval query returns interval columns too; backtest_oof does not carry them.
-    assert "yhat_lower" not in row
+    # The eval query has always returned the interval bounds — the metric panel is scored on them
+    # — and this assembler used to drop them between the query and the table.
+    assert row["yhat_lower"] == 7.0
+    assert row["yhat_upper"] is None  # absent from this fixture, not dropped by the assembler
 
 
 def test_the_ensemble_metadata_row_emits_no_column_the_spec_would_drop() -> None:
