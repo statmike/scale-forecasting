@@ -265,6 +265,23 @@ def test_run_group_tagged_one_result_per_cell() -> None:
     assert len(status) == 4
 
 
+def test_status_schema_and_status_columns_cannot_drift() -> None:
+    """The Spark ``StructType`` and the pandas column tuple are the same frame, declared twice.
+
+    `run_group` builds its status frame from `STATUS_COLUMNS`; `spark_explode` hands
+    `status_schema()` to ``applyInPandas`` as the promised return type. They are maintained by hand
+    in two places, and Spark matches by *position*, not by name — so adding a column to one and not
+    the other does not raise "unknown column", it silently reads the new column's values under the
+    old column's name, or fails deep inside an executor with an arrow conversion error nobody can
+    trace back here.
+
+    Names and order both, for that reason. Types are left alone: this pins the drift, not the
+    schema's content.
+    """
+    schema = spark_io.status_schema()
+    assert [f.name for f in schema.fields] == list(STATUS_COLUMNS)
+
+
 def test_run_group_untagged_loops_models_per_series() -> None:
     cfg = _cfg(models=["theta", "holtwinters"])
     pdf = _panel(["s0", "s1"])  # no model column — an untagged frame groups by ts_id only

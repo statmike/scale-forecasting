@@ -66,7 +66,12 @@ def test_library_covers_every_runtime_combo() -> None:
                 seen.add("ray_gpu" if rc.hardware == "gpu" else "ray_cpu")
             elif rc.runtime == "spark":
                 if rc.hardware == "gpu":
-                    seen.add("spark_gpu")
+                    # Split by launch mode, not just by hardware. Serverless attaches an L4 through
+                    # a runtime-config property; a cluster attaches a T4 through an accelerator on
+                    # the worker pool. They are two different provisioning code paths that happen
+                    # to share a word, and while one token covered both, either config could have
+                    # been deleted and this tripwire would have stayed green.
+                    seen.add(f"spark_{rc.spark_mode}_gpu")
                 elif rc.spark_mode == "cluster":
                     seen.add("spark_cluster")
                 else:
@@ -77,7 +82,8 @@ def test_library_covers_every_runtime_combo() -> None:
     required = {
         "spark_serverless",
         "spark_cluster",
-        "spark_gpu",
+        "spark_serverless_gpu",
+        "spark_cluster_gpu",
         "ray_cpu",
         "ray_gpu",
         "native",
@@ -113,6 +119,34 @@ def test_a_smoke_needs_two_dataproc_clusters_at_once() -> None:
         "no smoke config produces a multi-hardware Dataproc cluster split; add one with two "
         "ephemeral spark_mode=cluster families on different hardware"
     )
+
+
+def test_a_gpu_smoke_keeps_the_instruments_on() -> None:
+    """A smoke that pays for an accelerator must be able to say whether it used one.
+
+    Two settings decide that, and both are easy to switch off by accident. ``compute.profile``
+    with ``mode="off"`` stops recording ``peak_gpu_bytes``, which blinds the ``ENGAGED_IDLE`` /
+    ``ENGAGED_UTILISED`` half of the device verdict. And an unset ``gpu_type`` leaves the verdict's
+    denominator to a fallback, so a run on the bigger card is judged against the smaller one.
+
+    This has to be a tripwire rather than a safer default, because ``ProfileConfig`` is inside the
+    run_id digest — hardening the default would move every run_id in the ledger, which is a much
+    larger act than making it impossible to author a blind GPU smoke.
+    """
+    for path in _CONFIGS:
+        cfg = load_config(str(path))
+        gpu_families = [j.family for j in plan_dag(cfg).python_jobs if j.compute.hardware == "gpu"]
+        if not gpu_families:
+            continue
+        assert cfg.compute.profile.records_measurements, (
+            f"{path.name} routes {gpu_families} onto a GPU with compute.profile recording nothing —"
+            f" the run cannot report whether the device was used"
+        )
+        for job in plan_dag(cfg).python_jobs:
+            if job.compute.hardware == "gpu":
+                assert job.compute.gpu_type, (
+                    f"{path.name}: family {job.family} asks for a GPU without naming a gpu_type"
+                )
 
 
 def test_at_least_one_native_source_format_smoke() -> None:
