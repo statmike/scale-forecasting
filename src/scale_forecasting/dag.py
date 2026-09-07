@@ -185,10 +185,9 @@ def check_model_params(cfg: RunConfig) -> None:
             "they will have no effect.",
             unselected,
         )
-    max_horizon = max(cfg.data.horizon, cfg.backtest.horizon if cfg.backtest.enabled else 0)
     for name in cfg.models:
         authored = dict(cfg.model_params.get(name, {}))
-        get_model(name).validate_params(authored, max_horizon=max_horizon)
+        get_model(name).validate_params(authored, max_horizon=cfg.max_horizon)
 
 
 def check_hardware_coherence(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> None:

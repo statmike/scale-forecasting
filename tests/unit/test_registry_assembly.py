@@ -263,6 +263,26 @@ def test_every_measurement_column_is_declared_in_the_write_api_spec() -> None:
     assert set(assemble_metadata_row(_result(), _CREATED)) <= typed
 
 
+def test_metadata_row_carries_the_scoring_verdict_separately_from_the_cell_outcome() -> None:
+    # A cell can forecast perfectly well and still be unscorable, so the three scoring columns are
+    # what tell a reduced backtest from a full one — through the metric columns they look alike.
+    row = assemble_metadata_row(
+        _result(backtest_status="reduced", n_folds_achieved=1, backtest_note="2 of 3 folds"),
+        _CREATED,
+    )
+    assert row["backtest_status"] == "reduced"
+    assert row["n_folds_achieved"] == 1
+    assert row["backtest_note"] == "2 of 3 folds"
+
+
+def test_a_cell_that_was_never_asked_to_score_leaves_all_three_scoring_columns_null() -> None:
+    # All three NULL is the one case where a NULL metric panel is not a shortfall. A NULL panel on
+    # its own cannot say that — it is also what a series too short to score looks like.
+    row = assemble_metadata_row(_result(), _CREATED)
+    for column in ("backtest_status", "n_folds_achieved", "backtest_note"):
+        assert row[column] is None, column
+
+
 def test_metadata_row_carries_artifact_link() -> None:
     row = assemble_metadata_row(_result(), _CREATED, model_artifact="gs://wh/artifacts/x/m.pkl")
     assert row["model_artifact"] == "gs://wh/artifacts/x/m.pkl"
@@ -997,6 +1017,33 @@ def test_the_native_metadata_row_carries_every_metric_the_table_has() -> None:
     panel = {name: float(i) for i, name in enumerate(METRIC_COLUMNS)}
     row = _meta_row("r", "s", "timesfm", panel, "{}", _CREATED, _cfg())
     assert {m: row[m] for m in METRIC_COLUMNS} == panel
+
+
+def test_a_native_row_answers_the_scoring_question_the_same_way_a_python_cell_does() -> None:
+    # The point of these three columns is that one reader compares a native model against a Python
+    # one without knowing which engine wrote the row. A native family that left them NULL while it
+    # was backtesting would read as "backtesting was never asked for".
+    from scale_forecasting.engines.bigquery_engine import _meta_row
+
+    panel = dict.fromkeys(METRIC_COLUMNS, 0.5)
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 3})
+
+    def row(achieved: int | None) -> dict[str, Any]:
+        return _meta_row("r", "s", "arima_plus", panel, "{}", _CREATED, cfg, achieved)
+
+    assert row(3)["backtest_status"] == "full"
+    assert row(3)["backtest_note"] is None
+    assert row(1)["backtest_status"] == "reduced"
+    assert row(1)["n_folds_achieved"] == 1
+    assert "1 of 3 folds" in row(1)["backtest_note"]
+    assert row(0)["backtest_status"] == "unscored"
+    # Backtesting off: no count to report, so all three stay NULL — same convention as the worker.
+    off = row(None)
+    assert (off["backtest_status"], off["n_folds_achieved"], off["backtest_note"]) == (
+        None,
+        None,
+        None,
+    )
 
 
 def test_the_two_metric_vocabularies_are_the_same_vocabulary() -> None:

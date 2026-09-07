@@ -118,6 +118,101 @@ def test_backtest_on_populates_oof_and_metrics() -> None:
     assert not math.isnan(res.metrics["wape"])
 
 
+# --- a scoring shortfall must never cost the forecast --------------------------
+#
+# The whole point of this section: backtesting *scores* a model, it does not produce the forecast.
+# Every failure mode below used to surface as `status="error"` with no predictions at all, which is
+# how short history became the largest error class in the registry.
+
+
+def _bt_cfg(**over: Any) -> RunConfig:
+    bt = {"enabled": True, "n_folds": 2, "horizon": HORIZON, "step": HORIZON, "min_train": 30}
+    bt.update(over)
+    return _cfg(backtest=bt)
+
+
+def test_a_series_too_short_to_score_still_returns_its_forecast() -> None:
+    """The exit-gate case: one observation short of a single fold."""
+    res = run_cell(_series(30 + HORIZON - 1), "theta", _bt_cfg())
+    assert res.status == "ok"
+    assert res.error is None
+    assert len(res.predictions) == HORIZON
+    # Not an empty frame — that would write zero rows and read back as "not asked".
+    assert res.oof is None
+    assert res.backtest_status == "unscored"
+    assert res.n_folds_achieved == 0
+    assert all(math.isnan(v) for v in res.metrics.values())
+
+
+def test_an_unscored_cell_forecasts_exactly_what_the_same_cell_forecasts_unscored() -> None:
+    """Degrading must not perturb the forecast — the fit was never in question."""
+    short = _series(30 + HORIZON - 1)
+    degraded = run_cell(short, "theta", _bt_cfg())
+    never_asked = run_cell(short, "theta", _cfg())
+    pd.testing.assert_frame_equal(degraded.predictions, never_asked.predictions)
+
+
+def test_a_series_that_supports_some_folds_is_scored_on_them_and_says_so() -> None:
+    res = run_cell(_series(30 + HORIZON), "theta", _bt_cfg())  # room for exactly one of two folds
+    assert res.status == "ok"
+    assert res.backtest_status == "reduced"
+    assert res.n_folds_achieved == 1
+    assert res.oof is not None and res.oof["fold_id"].nunique() == 1
+    assert not math.isnan(res.metrics["wape"])  # a reduced backtest still scores
+
+
+def test_a_long_series_is_untouched_by_the_clamp_and_reports_a_full_backtest() -> None:
+    res = run_cell(_series(), "theta", _bt_cfg())
+    assert res.backtest_status == "full"
+    assert res.n_folds_achieved == 2
+    assert res.backtest_note is None  # nothing to explain when nothing was short
+    assert res.oof is not None and res.oof["fold_id"].nunique() == 2
+
+
+def test_the_note_names_the_arithmetic_so_a_reader_knows_how_much_history_was_needed() -> None:
+    """Restating the status would be useless; the actionable part is the shortfall itself."""
+    res = run_cell(_series(30 + HORIZON - 1), "theta", _bt_cfg())
+    note = res.backtest_note or ""
+    assert "0 of 2 folds" in note
+    assert "min_train=30" in note and f"horizon={HORIZON}" in note and f"step={HORIZON}" in note
+
+
+def test_a_backtest_that_raises_loses_the_score_and_nothing_else(monkeypatch: Any) -> None:
+    """The catch-all arm: whatever scoring does, the final fit below it still runs."""
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("scoring exploded")
+
+    monkeypatch.setattr(worker, "backtest_cell", boom)
+    res = run_cell(_series(), "theta", _bt_cfg())
+    assert res.status == "ok"
+    assert len(res.predictions) == HORIZON
+    assert res.oof is None
+    assert res.backtest_status == "failed"
+    assert res.n_folds_achieved == 0
+    assert "scoring exploded" in (res.backtest_note or "")
+    assert all(math.isnan(v) for v in res.metrics.values())
+
+
+def test_the_context_a_model_gets_carries_the_largest_horizon_it_will_be_asked_for() -> None:
+    """One context is shared by the backtest folds and the final fit, so it must mean the larger.
+
+    Carrying only the forward horizon made the field a trap: a model sizing anything off it would
+    be right on the final fit and short on every fold, in a run where both numbers are legal and
+    different.
+    """
+    assert worker._model_context(_bt_cfg(horizon=90)).horizon == 90  # backtest asks for more
+    assert worker._model_context(_cfg()).horizon == HORIZON  # forward only
+
+
+def test_backtesting_switched_off_is_the_one_case_with_no_scoring_verdict() -> None:
+    """All three NULL is what distinguishes "never asked" from "asked and could not"."""
+    res = run_cell(_series(), "theta", _cfg())
+    assert res.backtest_status is None
+    assert res.n_folds_achieved is None
+    assert res.backtest_note is None
+
+
 # --- artifact persistence (persist_models gate) --------------------------------
 
 

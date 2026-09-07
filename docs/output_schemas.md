@@ -115,6 +115,37 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `device_available` | `STRING` | What the worker could actually *see*: `cuda` / `cpu` / `unknown`. `unknown` means no tensor library was importable, so nobody asked — a different fact from "there is no card". |
 | `device_used` | `STRING` | Where the fitted weights actually *landed*, read off a parameter tensor: `cuda` / `cpu`. NULL means the model has no device concept (everything but NeuralProphet). |
 | `device_name` | `STRING` | The visible device, e.g. `Tesla T4`. NULL when none is. |
+| `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. NULL means backtesting was never asked for. |
+| `n_folds_achieved` | `INT64` | Folds actually scored (`0` on `unscored`/`failed`). |
+| `backtest_note` | `STRING` | Why the backtest was not `full` — the shortfall arithmetic, or the exception. NULL when it was. |
+
+### A series too short to score still has a forecast
+
+Backtesting scores a model; it does not produce the forecast. Those three columns exist because the
+two used to be welded together: a series shorter than `min_train + horizon + (n_folds−1)·step` raised,
+the cell caught it as an error, and a forecast that had not even been attempted was thrown away.
+Short history was the single largest error class in the registry, and none of it was a modelling
+failure.
+
+Now the fold grid shrinks to what the series supports — oldest folds dropped first, survivors keeping
+their original `fold_id` — and the cell fits and forecasts either way. The outcome is recorded rather
+than inferred, because through the metric columns alone these are indistinguishable:
+
+| Situation | Metrics | `backtest_status` |
+|-----------|---------|-------------------|
+| Backtesting switched off | all NULL | NULL |
+| Scored on every requested fold | populated | `full` |
+| Scored on fewer folds than requested | populated | `reduced` |
+| Too short to score at all | all NULL | `unscored` |
+| Scoring raised | all NULL | `failed` |
+
+`n_folds_achieved` is what makes a leaderboard readable across a ragged panel: two series with the
+same WAPE are not comparable if one was scored on five folds and the other on one.
+
+Base-model rows fill these whichever engine wrote them — a Python cell and a BigQuery-native cell
+answer the same question the same way. **Ensemble rows are the exception**: they leave all three
+NULL even when the ensemble was scored, because an ensemble is scored on the base models' folds
+rather than on folds of its own. That gets its own column (`ensemble_scoring`, still unfilled).
 
 ### Was the accelerator you paid for actually used?
 
@@ -147,9 +178,9 @@ the accelerator went unnoticed for twenty-one jobs in the first place.
 ### Columns that exist but are not filled yet
 
 `SELECT *` on this table also returns `cell_status`, `error_class`, `error_detail`,
-`backtest_status`, `backtest_note`, `n_folds_achieved`, `achieved_step`, `achieved_min_train`,
-`first_val_date`, `last_val_date`, `interval_source`, `ensemble_scoring`, `hpo_scoring`, `n_fits`,
-and `train_rows_total`. **They are all NULL today.** They are
+`achieved_step`, `achieved_min_train`, `first_val_date`, `last_val_date`, `interval_source`,
+`ensemble_scoring`, `hpo_scoring`, `n_fits`, and `train_rows_total`. **They are all NULL today.**
+They are
 declared ahead of the code that writes them because adding a column to a deployed table is a
 migration every deployment has to run, and doing that once is better than doing it five times.
 Don't build a reader on them yet — `NULL` here means "not recorded", not "no".

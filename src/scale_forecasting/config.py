@@ -151,10 +151,12 @@ class BacktestConfig(BaseModel):
     ``min_train``, ``scheme`` — and ``test_inert_config_fields.py`` asserts that the others change
     nothing. See ``docs/configuration_reference.md`` for which is which.
 
-    The one to be careful with is ``short_series``. Its default reads ``"adapt"`` while the code
-    still raises on a series too short for the requested folds, i.e. it behaves as ``"error"``. The
-    default names the intended behaviour rather than today's so that implementing it is not a
-    second identity break; the honest statement of today's behaviour is the ``"error"`` branch.
+    ``short_series`` is the one that has moved. The code now always adapts — `make_folds` shrinks
+    the grid to whatever the series supports, possibly to nothing, and the cell forecasts either
+    way — so the ``"adapt"`` default finally describes what happens. The field is still inert in
+    that the other two branches are unreachable: nothing yet honours ``"skip"`` or ``"error"``, and
+    adaptation ignores ``min_folds`` and ``min_train_floor``. Setting it changes the ``run_id`` and
+    nothing else.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -170,9 +172,11 @@ class BacktestConfig(BaseModel):
     # --- accepted, not yet honoured (see the class docstring) ---------------------------
 
     # What to do with a series too short for the requested fold grid: shrink the grid to fit,
-    # leave the series out of the backtest, or fail the cell. Today: always fails.
+    # leave the series out of the backtest, or fail the cell. Today: always shrinks, whatever
+    # this says — the other two branches are not wired.
     short_series: Literal["adapt", "skip", "error"] = "adapt"
-    # The floor `short_series="adapt"` may shrink `n_folds` to before it gives up.
+    # The floor `short_series="adapt"` may shrink `n_folds` to before it gives up. Today the floor
+    # is effectively 0: a series that supports no folds is left unscored, not failed.
     min_folds: int = Field(default=1, ge=1)
     # A hard minimum training length, independent of `min_train`, that adaptation may not go below.
     min_train_floor: int | None = Field(default=None, gt=0)
@@ -908,6 +912,19 @@ class RunConfig(BaseModel):
             hardware=hardware,
             gpu_type=gpu_type,
         )
+
+    @property
+    def max_horizon(self) -> int:
+        """The largest horizon any ``predict`` call in this run will be asked for.
+
+        Two different horizons exist in a config and it is easy to reach for the wrong one. The
+        forward forecast uses ``data.horizon``; every backtest fold predicts ``backtest.horizon``,
+        which may be larger. Anything sizing itself against "the horizon" — a params validator
+        refusing a model that cannot emit enough steps, a context handed to a model — has to mean
+        the larger of the two, because the run will ask for both. A property rather than a field:
+        it is derived, so it stays out of ``model_dump`` and no ``run_id`` moves.
+        """
+        return max(self.data.horizon, self.backtest.horizon if self.backtest.enabled else 0)
 
     def with_series_limit(self, n_series: int | None) -> RunConfig:
         """Return a copy with ``data.series_limit`` overridden (``self`` if ``n_series`` is None).

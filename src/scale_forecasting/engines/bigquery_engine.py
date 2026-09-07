@@ -248,7 +248,14 @@ def run(
                         rolled = _rollup_metrics(panels)
                         meta_rows.append(
                             _meta_row(
-                                run_id, ts_id, model_name, rolled, best_params, created_at, cfg
+                                run_id,
+                                ts_id,
+                                model_name,
+                                rolled,
+                                best_params,
+                                created_at,
+                                cfg,
+                                n_folds_achieved=len(panels),
                             )
                         )
             else:
@@ -369,6 +376,7 @@ def _meta_row(
     best_params: str,
     created_at: Any,
     cfg: RunConfig,
+    n_folds_achieved: int | None = None,
 ) -> dict[str, Any]:
     """Assemble one ``forecast_metadata`` row (``fold_id=NULL``) for a native model (pure).
 
@@ -383,10 +391,28 @@ def _meta_row(
     wrote NULL into — same table, same run, same meaning, two encodings. NaN also sorts *ahead* of
     every real number in a BigQuery ``ORDER BY wape``, so an unscored native model would head a
     leaderboard it had not competed in. Found live 2026-09-02 in smoke 13.
+
+    ``n_folds_achieved`` is how many folds this series was actually scored on — ``None`` when
+    backtesting was off, which is what leaves all three scoring columns NULL. The Python worker
+    fills the same three columns, and the whole point of them is that one reader can compare a
+    native model against a Python one without knowing which engine wrote the row; a native family
+    that left them NULL while backtesting would read as "never asked".
     """
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_model_hash
     from ..registry.rows import _as_float
+
+    status, note = None, None
+    if n_folds_achieved is not None:
+        requested = cfg.backtest.n_folds
+        if n_folds_achieved >= requested:
+            status = "full"
+        else:
+            # No shortfall arithmetic to quote here, unlike the Python path: the fold grid is
+            # uniform across the panel, so a native series scores short only because BigQuery ML
+            # left it out of a fold's evaluation — the reason lives on the BigQuery side.
+            status = "reduced" if n_folds_achieved else "unscored"
+            note = f"scored on {n_folds_achieved} of {requested} folds"
 
     return {
         "run_id": run_id,
@@ -400,6 +426,9 @@ def _meta_row(
         "best_params": best_params,
         "model_artifact": None,
         "created_at": created_at,
+        "backtest_status": status,
+        "backtest_note": note,
+        "n_folds_achieved": n_folds_achieved,
     }
 
 

@@ -90,9 +90,11 @@ def _score_params(
     """One trial's objective: mean decision-metric (as a minimize-scalar) over the sample.
 
     Runs the aligned backtest for ``params`` on each sampled series, averages the metric across
-    folds then across series. A series that raises (too short for the fold geometry, a fit failure)
-    is skipped rather than sinking the trial — the same fault-tolerance ``run_cell`` gives a cell.
-    An empty sample (or all-skipped) scores ``+inf``.
+    folds then across series. A series that contributes no score is skipped rather than sinking the
+    trial — the same fault-tolerance ``run_cell`` gives a cell. Two ways that happens: the fit
+    raises, or the series is too short for the fold geometry and `backtest_cell` returns no folds
+    to average (it clamps rather than raising, so the second case never reaches the ``except``).
+    An empty sample, or one where every series was skipped, scores ``+inf``.
     """
     from functools import partial
 

@@ -125,6 +125,14 @@ def assemble_metadata_row(
         "device_available": result.device_available,
         "device_used": result.device_used,
         "device_name": result.device_name,
+        # How the *scoring* went, which is not how the cell went. All three NULL means backtesting
+        # was never asked for; a NULL metric panel alone cannot say that, because it is also what a
+        # series too short to score looks like. `n_folds_achieved` is the column that makes a
+        # leaderboard readable across a ragged panel — two series with the same WAPE are not
+        # comparable if one was scored on five folds and the other on one.
+        "backtest_status": result.backtest_status,
+        "backtest_note": result.backtest_note,
+        "n_folds_achieved": result.n_folds_achieved,
     }
     for name in METRIC_COLUMNS:
         row[name] = _as_float(result.metrics.get(name))

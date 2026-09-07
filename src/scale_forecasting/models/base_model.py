@@ -47,6 +47,12 @@ class ModelContext:
     """Per-run context handed to every model so it never reads global config."""
 
     freq: str
+    # The largest horizon `predict` will be asked for in this run — `cfg.max_horizon`, which is
+    # `max(data.horizon, backtest.horizon)`. **Not the forward horizon.** One context is shared by
+    # the backtest folds and the final fit, so a field that meant only the forward horizon was
+    # wrong on every fold of any run whose backtest horizon differs. Models should predict the
+    # `horizon` argument they are *handed*; this is here for sizing decisions made at construction,
+    # before that argument exists.
     horizon: int
     seed: int = 0
     holidays: pd.DataFrame | None = None

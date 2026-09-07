@@ -7,7 +7,9 @@ entry points:
 - ``make_folds(n, cfg) -> list[Fold]`` — integer-indexed CV splits over ``n`` sorted
   observations. Folds are anchored from the end: the latest fold validates on the final
   ``horizon`` points, earlier folds step back by ``step``. ``expanding`` grows the train
-  window from 0; ``sliding`` keeps a fixed ``min_train`` window.
+  window from 0; ``sliding`` keeps a fixed ``min_train`` window. A series too short for the
+  requested folds gets as many as it supports (``achievable_folds``), possibly none — never an
+  exception, because a scoring shortfall must not cost the forecast.
 - ``backtest_cell(series, model, cfg) -> (oof, fold_metrics)`` — features are built once
   (leakage-free: lags only look backward), then a **fresh** model is fit per fold and
   scored on its validation window.
@@ -15,7 +17,7 @@ entry points:
 The no-leakage invariant is ``train_end == val_start`` for every fold: training data
 strictly precedes the validation window.
 
-Public surface: ``Fold``, ``make_folds``, ``backtest_cell``.
+Public surface: ``Fold``, ``achievable_folds``, ``make_folds``, ``backtest_cell``.
 """
 
 from __future__ import annotations
@@ -26,7 +28,6 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from .errors import ConfigError
 from .features import build_features, invert_transform
 from .metrics import compute_metrics
 from .seasonality import seasonal_period
@@ -55,26 +56,52 @@ class Fold:
         return self.val_end - self.val_start
 
 
+def achievable_folds(n: int, cfg: RunConfig) -> int:
+    """How many of the requested folds ``n`` observations can actually support (pure).
+
+    ``0`` when the series cannot even hold one fold, ``cfg.backtest.n_folds`` when it holds them
+    all. Split out from `make_folds` because two callers need the count without the folds:
+    the cell records ``n_folds_achieved``, and a reader deciding whether a run's leaderboard is
+    comparable needs to know a series was scored on fewer folds than its neighbours.
+
+    Fold ``k`` validates on ``[n - horizon - (n_folds-1-k)*step, ...)``, so the binding constraint
+    is the *oldest* surviving fold's validation start landing at or after ``min_train``.
+    """
+    bt = cfg.backtest
+    slack = n - bt.horizon - bt.min_train
+    if slack < 0:
+        return 0
+    return min(bt.n_folds, slack // bt.step + 1)
+
+
 def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
-    """Build the CV folds for ``n`` observations.
+    """Build the CV folds for ``n`` observations — as many as the series supports.
 
     Uses ``cfg.backtest``: ``n_folds``, ``horizon``, ``step``, ``min_train``, ``scheme``.
-    Raises ``ConfigError`` if ``n`` is too small to support the requested folds.
+
+    **Clamps rather than raises.** A series too short for the requested folds used to raise
+    ``ConfigError``, which `run_cell` caught as a cell error — so the forecast was thrown away
+    over a *scoring* shortfall, and short history became the single largest error class in the
+    registry. The fit itself was never in question. Now the shortest series in a panel returns the
+    folds it can support, possibly none, and the caller still fits and forecasts it.
+
+    **Survivors keep their fold_id from the full plan; the OLDEST folds are the ones dropped.**
+    Both halves matter. Dropping the oldest keeps every series scored on the most recent window it
+    can reach, which is the window a leaderboard is about. Keeping the original numbering means
+    ``fold_id`` compares across series: renumbering the survivors 0..k would make ``MAX(fold_id)``
+    meaningless in a panel of mixed-length series, and would silently align a short series' fold 0
+    against a long series' fold 0 covering a completely different date range. Fold identity is
+    anchored on the date, not the ordinal — see `ensembler._pivot_oof`.
     """
     bt = cfg.backtest
     horizon, step, n_folds, min_train = bt.horizon, bt.step, bt.n_folds, bt.min_train
 
-    # Earliest fold's validation window must start at or after min_train.
-    earliest_val_start = n - horizon - (n_folds - 1) * step
-    if earliest_val_start < min_train:
-        need = min_train + horizon + (n_folds - 1) * step
-        raise ConfigError(
-            f"not enough data for backtest: need >= {need} observations for "
-            f"{n_folds} folds (horizon={horizon}, step={step}, min_train={min_train}), got {n}"
-        )
+    achieved = achievable_folds(n, cfg)
+    if achieved == 0:
+        return []
 
     folds: list[Fold] = []
-    for k in range(n_folds):
+    for k in range(n_folds - achieved, n_folds):
         val_start = n - horizon - (n_folds - 1 - k) * step
         val_end = val_start + horizon
         train_end = val_start

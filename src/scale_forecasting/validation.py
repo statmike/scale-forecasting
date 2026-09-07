@@ -48,20 +48,16 @@ class ValidationReport:
 def _required_min_history(cfg: RunConfig) -> tuple[int, str]:
     """The minimum per-series length this run needs, and a human reason for it.
 
-    When backtesting is on, the binding constraint is the earliest fold's train window —
-    the same arithmetic ``backtest.make_folds`` uses, checked here per series so a short
-    series is caught up front rather than as a failed cell. Otherwise a series only needs
-    enough points to fit and leave room for the forecast horizon.
+    A series needs enough points to fit and to leave room for the forecast horizon. That is the
+    whole floor, backtest or not.
+
+    **Backtesting does not raise it**, though it used to. The old floor here was the full fold grid
+    (``min_train + horizon + (n_folds-1)*step``), which rejected the entire panel because one series
+    was too short to be *scored* — a run that would have forecast every series perfectly well never
+    started. `backtest.make_folds` now shrinks the grid per series instead, and the cell records how
+    far it got in ``forecast_metadata.backtest_status``. A scoring shortfall is a fact about one
+    series, reported per series; it is not a reason to refuse the panel.
     """
-    bt = cfg.backtest
-    if bt.enabled:
-        need = bt.min_train + bt.horizon + (bt.n_folds - 1) * bt.step
-        reason = (
-            f"backtest needs min_train={bt.min_train} + horizon={bt.horizon} + "
-            f"(n_folds={bt.n_folds}-1)*step={bt.step}"
-        )
-        return need, reason
-    # No backtest: need at least a few points to fit and a horizon to forecast into.
     return cfg.data.horizon + 2, f"horizon={cfg.data.horizon} + 2 to fit"
 
 

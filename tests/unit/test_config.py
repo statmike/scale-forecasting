@@ -160,6 +160,44 @@ def test_learned_strategy_with_backtest_survives() -> None:
     assert cfg.ensemble.strategies == ["median", "nnls"]
 
 
+# --- max_horizon: the one horizon anything sizing itself should read -------------
+#
+# Two horizons exist in a config and reaching for the wrong one is easy: the forward forecast uses
+# `data.horizon`, every backtest fold predicts `backtest.horizon`, and a run asks for both.
+
+
+def test_max_horizon_is_the_forward_horizon_when_nothing_is_backtested() -> None:
+    cfg = RunConfig(**_minimal_dict(data={"source_table": "p.d.s", "horizon": 14}))
+    assert cfg.max_horizon == 14
+
+
+def test_max_horizon_takes_the_larger_of_the_two_because_the_run_asks_for_both() -> None:
+    cfg = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "p.d.s", "horizon": 7},
+            backtest={"enabled": True, "horizon": 28},
+        )
+    )
+    assert cfg.max_horizon == 28
+
+
+def test_a_disabled_backtest_cannot_raise_the_ceiling_it_will_never_predict_at() -> None:
+    cfg = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "p.d.s", "horizon": 7},
+            backtest={"enabled": False, "horizon": 90},
+        )
+    )
+    assert cfg.max_horizon == 7
+
+
+def test_max_horizon_is_derived_so_it_cannot_move_a_run_id() -> None:
+    # A field would land in `model_dump` and shift every identity ever recorded; a property does
+    # not. This is why it is a property.
+    cfg = RunConfig(**_minimal_dict())
+    assert "max_horizon" not in cfg.model_dump()
+
+
 # --- HPO config ----------------------------------------------------------------
 
 

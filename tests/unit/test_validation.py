@@ -166,17 +166,33 @@ def test_too_short_for_horizon_raises() -> None:
         validate_panel(df, _cfg(horizon=10))
 
 
-def test_too_short_for_backtest_raises() -> None:
-    # backtest needs min_train + horizon + (n_folds-1)*step.
+def test_too_short_for_the_full_fold_grid_no_longer_rejects_the_panel() -> None:
+    """One unscorable series used to stop a whole run that would have forecast fine.
+
+    The floor here is what a *forecast* needs. Whether a series can carry the requested fold grid
+    is decided per series by `backtest.make_folds` and recorded on the cell, not enforced on the
+    panel — the run still produces every forecast, some of them with a reduced backtest.
+    """
     cfg = RunConfig(
         run_name="t",
         data={"source_table": "t", "horizon": 7},
         models=["theta"],
         backtest={"enabled": True, "n_folds": 3, "horizon": 7, "step": 7, "min_train": 60},
     )
-    df = _panel(n_series=1, n_days=60)  # need 60 + 7 + 14 = 81
-    with pytest.raises(DataError, match="needs >= 81.*backtest"):
-        validate_panel(df, cfg)
+    validate_panel(_panel(n_series=1, n_days=60), cfg)  # the old floor was 60 + 7 + 14 = 81
+
+
+def test_a_series_too_short_to_even_forecast_is_still_rejected() -> None:
+    # The floor that remains: enough points to fit and a horizon to forecast into. Below that
+    # there is no forecast to protect.
+    cfg = RunConfig(
+        run_name="t",
+        data={"source_table": "t", "horizon": 7},
+        models=["theta"],
+        backtest={"enabled": True, "n_folds": 3, "horizon": 7, "step": 7, "min_train": 60},
+    )
+    with pytest.raises(DataError, match="needs >= 9"):
+        validate_panel(_panel(n_series=1, n_days=8), cfg)
 
 
 def test_backtest_history_sufficient_passes() -> None:

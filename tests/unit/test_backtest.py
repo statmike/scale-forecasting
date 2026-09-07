@@ -1,7 +1,8 @@
 """Tests for backtest folds + out-of-fold predictions.
 
 Covers fold geometry, the no-leakage invariant (train_end == val_start), expanding vs
-sliding schemes, too-little-data guard, and OOF frame shape/units.
+sliding schemes, the short-series clamp (fewer folds, never an exception), and OOF frame
+shape/units.
 """
 
 from __future__ import annotations
@@ -10,11 +11,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from scale_forecasting.backtest import Fold, backtest_cell, make_folds
+from scale_forecasting.backtest import Fold, achievable_folds, backtest_cell, make_folds
 from scale_forecasting.config import RunConfig
-from scale_forecasting.errors import ConfigError
 from scale_forecasting.features import invert_transform
 from scale_forecasting.models.base_model import DEFAULT_QUANTILES, BaseModel, ModelContext
 
@@ -117,9 +116,64 @@ def test_sliding_scheme_fixed_window() -> None:
         assert f.train_size == 20
 
 
-def test_too_little_data_raises() -> None:
-    with pytest.raises(ConfigError, match="not enough data"):
-        make_folds(15, _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10}))
+def test_a_series_too_short_for_every_fold_gets_the_folds_it_can_support() -> None:
+    """It used to raise, and `run_cell` turned that into an error cell — losing the forecast.
+
+    Backtesting scores a model; it does not produce the forecast. A series with 15 observations can
+    be fit and forecast perfectly well, so a shortfall in *scoring* must cost only the score.
+    """
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    folds = make_folds(15, cfg)  # 15 - 5 - 10 = 0 slack: room for exactly one fold
+    assert len(folds) == 1
+    assert folds[0].train_size == 10  # exactly min_train, the tightest legal fold
+
+
+def test_the_folds_dropped_are_the_oldest_and_the_survivors_keep_their_original_ids() -> None:
+    """Both halves matter, and renumbering is the tempting mistake.
+
+    Dropping the oldest keeps every series scored on the most recent window it can reach — the
+    window a leaderboard is about. Keeping the original ids is what lets ``fold_id`` mean the same
+    thing across a ragged panel: renumber the survivors 0..k and a short series' fold 0 silently
+    lines up against a long series' fold 0 covering a completely different stretch of history.
+    """
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    full = make_folds(100, cfg)
+    clamped = make_folds(20, cfg)  # slack 5 → two folds
+    assert [f.fold_id for f in clamped] == [1, 2]  # fold 0, the oldest, is the one dropped
+    # The survivors are the same folds they would have been, measured from the end of the series.
+    assert [f.val_end - 20 for f in clamped] == [f.val_end - 100 for f in full[1:]]
+
+
+def test_a_series_that_cannot_support_one_fold_gets_no_folds_rather_than_an_exception() -> None:
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    assert make_folds(14, cfg) == []  # 14 - 5 = 9 < min_train
+    assert achievable_folds(14, cfg) == 0
+
+
+def test_achievable_folds_saturates_at_the_requested_count() -> None:
+    """A long series does not get bonus folds — ``n_folds`` is what was asked for."""
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    assert achievable_folds(10_000, cfg) == 3
+    assert achievable_folds(15, cfg) == 1
+    assert achievable_folds(20, cfg) == 2
+
+
+def test_achievable_folds_agrees_with_the_folds_actually_built() -> None:
+    """The count and the list must not drift; the cell records one and scores the other."""
+    cfg = _cfg({"n_folds": 4, "horizon": 7, "step": 3, "min_train": 12})
+    for n in range(0, 60):
+        assert achievable_folds(n, cfg) == len(make_folds(n, cfg)), f"disagreed at n={n}"
+
+
+def test_every_clamped_fold_still_honours_the_no_leakage_and_min_train_invariants() -> None:
+    """Clamping must not buy folds by relaxing the geometry it was protecting."""
+    cfg = _cfg({"n_folds": 4, "horizon": 7, "step": 3, "min_train": 12})
+    for n in range(0, 60):
+        for f in make_folds(n, cfg):
+            assert f.train_end == f.val_start  # no leakage
+            assert f.train_size >= 12  # min_train respected
+            assert f.val_size == 7  # full-width validation window
+            assert f.val_end <= n  # never reads past the series
 
 
 # --- backtest_cell -------------------------------------------------------------

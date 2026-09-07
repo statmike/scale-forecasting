@@ -134,7 +134,7 @@ for HPO and learned ensembles.
 | `step` | `int` | `28` | `> 0` | Step between folds. |
 | `min_train` | `int` | `180` | `> 0` | Minimum training length. |
 | `decision_metric` | see below | `"wape"` | — | Metric folds are judged on. |
-| `short_series` | `"adapt"` \| `"skip"` \| `"error"` | `"adapt"` | — | **Accepted, not yet honoured** — see below. |
+| `short_series` | `"adapt"` \| `"skip"` \| `"error"` | `"adapt"` | — | **Accepted, not yet honoured** — the code always adapts, whatever this says. See below. |
 | `min_folds` | `int` | `1` | `≥ 1` | **Accepted, not yet honoured.** The floor `adapt` may shrink `n_folds` to. |
 | `min_train_floor` | `int \| null` | `null` | `> 0` | **Accepted, not yet honoured.** A hard training-length minimum adaptation may not cross. |
 | `gap` | `int` | `0` | `≥ 0` | **Accepted, not yet honoured.** Observations to discard between train and validation, for a known reporting lag. |
@@ -153,19 +153,40 @@ in where training *starts*:
   recent history is more representative than old history.
 
 `n_folds`, `horizon`, `step`, and `min_train` lay the folds out together, and a series needs at least
-`min_train + horizon + (n_folds−1)·step` observations. **A series shorter than that fails its cell**
-— it is recorded with an error and no forecast, and the run continues. (This paragraph used to say
-such a series was "skipped for backtesting"; that was never true, and the wrong version is worth
-naming because it is the kind of promise a reader plans around.) Features are built once and a
-**fresh** model is fit per fold, so no state leaks across folds and `train_end == val_start` always
-(no leakage).
+`min_train + horizon + (n_folds−1)·step` observations to be scored on *all* of them.
 
-**`short_series` — what *should* happen instead, once it is implemented.** `adapt` shrinks the fold
-grid to whatever the series can support, down to `min_folds` and never training on less than
-`min_train_floor`; `skip` leaves the series out of the backtest but still produces its forecast;
-`error` is today's behaviour. The default reads `adapt` while the code still does `error`, and the
-mismatch is deliberate: `run_id` is a digest of the whole config, so the default has to be the one
-we intend to keep or implementing it would move every recorded identity a second time.
+**A shorter series is scored on fewer folds; it never loses its forecast.** Backtesting scores a
+model — it does not produce the forecast — so a scoring shortfall costs only the score. The fold
+grid shrinks to whatever the series supports, dropping the **oldest** folds first (so every series
+is scored on the most recent window it can reach) and keeping the survivors' original `fold_id`s
+(so `fold_id` still means the same thing across a panel of mixed-length series). A series too short
+for even one fold is fit and forecast unscored.
+
+Three columns on `forecast_metadata` record how the scoring went, separately from how the cell went:
+
+| Column | Meaning |
+|--------|---------|
+| `backtest_status` | `full` \| `reduced` \| `unscored` \| `failed`, or `NULL` when backtesting was never asked for. |
+| `n_folds_achieved` | Folds actually scored. **This is the column that makes a leaderboard readable across a ragged panel** — two series with the same WAPE are not comparable if one was scored on five folds and the other on one. |
+| `backtest_note` | Why it was not `full`: the shortfall arithmetic, or the exception. |
+
+All three `NULL` is the one case where a `NULL` metric panel is not a shortfall. Without them, a
+reduced backtest and a full one look identical through the metric columns, and an unscored series
+looks exactly like a run with backtesting switched off.
+
+(Two earlier versions of this paragraph were wrong in opposite directions: one said a short series
+was "skipped for backtesting", which was never true; the correction said it "fails its cell", which
+was true at the time and is the behaviour this change removed.)
+
+Features are built once and a **fresh** model is fit per fold, so no state leaks across folds and
+`train_end == val_start` always (no leakage).
+
+**`short_series` — what it will eventually select.** The code now always adapts, so the `adapt`
+default finally describes what happens; the field is still inert because the other two branches are
+unreachable and adaptation ignores `min_folds` and `min_train_floor`. Once implemented: `adapt`
+shrinks the grid down to `min_folds` and never trains on less than `min_train_floor`; `skip` leaves
+the series out of the backtest entirely; `error` restores the old fail-the-cell behaviour for anyone
+who wants a hard stop.
 
 ### Fields that are accepted but not yet honoured
 

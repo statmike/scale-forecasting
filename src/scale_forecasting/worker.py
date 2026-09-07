@@ -98,6 +98,14 @@ class CellResult:
     device_available: str | None = None  # what the worker can see: "cuda" | "cpu" | "unknown"
     device_used: str | None = None  # where the weights landed; None = the model cannot say
     device_name: str | None = None  # e.g. "Tesla T4", when a device is visible
+    # --- backtest outcome, separate from the cell's own outcome --------------------------------
+    # A cell can forecast perfectly well and still be unscorable, so scoring gets its own status.
+    # All three are None when backtesting was never asked for — the one case where a NULL metric
+    # panel is not a shortfall. "full" | "reduced" | "unscored" | "failed": `reduced` scored fewer
+    # folds than requested, `unscored` could not score any, `failed` raised.
+    backtest_status: str | None = None
+    n_folds_achieved: int | None = None  # folds actually scored; 0 on unscored/failed
+    backtest_note: str | None = None  # why it was not full — the arithmetic, or the exception
 
 
 def _worker_id() -> str:
@@ -199,7 +207,12 @@ def _model_context(
     holidays = holiday_frame(cfg) if cfg.features.holidays else None
     return ModelContext(
         freq=cfg.data.freq,
-        horizon=cfg.data.horizon,
+        # The LARGEST horizon this cell will be asked for, not the forward one. The same context
+        # object is handed to the backtest folds, which predict `backtest.horizon`, and to the final
+        # fit, which predicts `data.horizon`. Carrying only the forward horizon made the field a
+        # trap: a model sizing anything off it — a head count, a buffer — would be right on the
+        # final fit and short on every fold, in a run where both numbers are legal and different.
+        horizon=cfg.max_horizon,
         seed=0,
         holidays=holidays,
         transform=cfg.features.transform,
@@ -394,11 +407,35 @@ def run_cell(
         resolved = _resolve_params(series, model_name, cfg, ctx, params)
 
         # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.
+        #
+        # Its own try/except, and this is the point of the block. Backtesting *scores* a model; it
+        # does not produce the forecast. A scoring failure that propagated turned the whole cell
+        # into an error and threw away a forecast that had not even been attempted yet — which is
+        # how short history became the largest error class in the registry. Whatever happens here,
+        # the final fit below still runs, and the outcome is recorded rather than inferred from a
+        # NULL metric (which is also what "backtesting was off" looks like).
         oof: pd.DataFrame | None = None
         metrics = {name: float("nan") for name in METRIC_NAMES}
+        backtest_status: str | None = None
+        n_folds_achieved: int | None = None
+        backtest_note: str | None = None
         if cfg.backtest.enabled:
-            oof, fold_metrics = backtest_cell(series, lambda: model_cls(resolved, ctx), cfg, lam)
-            metrics = _rollup_metrics(fold_metrics)
+            try:
+                oof, fold_metrics = backtest_cell(
+                    series, lambda: model_cls(resolved, ctx), cfg, lam
+                )
+                metrics = _rollup_metrics(fold_metrics)
+                n_folds_achieved = len(fold_metrics)
+                backtest_status, backtest_note = _backtest_outcome(n_folds_achieved, cfg, series)
+                if n_folds_achieved == 0:
+                    oof = None  # an empty frame would write zero rows and read as "not asked"
+            except Exception as e:  # noqa: BLE001 - scoring is not the forecast; degrade, don't fail
+                _log.warning(
+                    "backtest failed for %s/%s (forecast unaffected): %r", ts_id, model_name, e
+                )
+                oof = None
+                metrics = {name: float("nan") for name in METRIC_NAMES}
+                backtest_status, n_folds_achieved, backtest_note = "failed", 0, repr(e)
 
         # Final fit on the full history, then forecast the horizon.
         y, X = build_features(series, cfg, lam)
@@ -458,9 +495,36 @@ def run_cell(
             device_available=available,
             device_used=model.device_used(),
             device_name=device_name,
+            backtest_status=backtest_status,
+            n_folds_achieved=n_folds_achieved,
+            backtest_note=backtest_note,
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(repr(e), engine)
+
+
+def _backtest_outcome(
+    achieved: int, cfg: RunConfig, series: pd.DataFrame
+) -> tuple[str, str | None]:
+    """Classify a completed backtest ``full``/``reduced``/``unscored``, with a reason if not full.
+
+    Separated from the metrics so a reader can tell the three apart at a glance in SQL. They look
+    identical through the metric columns — a reduced backtest and a full one both produce numbers,
+    and an unscored one produces the same NULLs as a run with backtesting switched off — yet they
+    support very different conclusions about a leaderboard. The note names the arithmetic rather
+    than restating the status, because the actionable part is *how much* history the series would
+    have needed.
+    """
+    bt = cfg.backtest
+    if achieved >= bt.n_folds:
+        return "full", None
+    need = bt.min_train + bt.horizon + (bt.n_folds - 1) * bt.step
+    shortfall = (
+        f"{len(series)} observations support {achieved} of {bt.n_folds} folds; "
+        f"{need} needed for all of them "
+        f"(min_train={bt.min_train} + horizon={bt.horizon} + (n_folds-1)*step={bt.step})"
+    )
+    return ("reduced" if achieved > 0 else "unscored"), shortfall
 
 
 def _ts_id(series: pd.DataFrame, cfg: RunConfig) -> str:
