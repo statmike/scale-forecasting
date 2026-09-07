@@ -904,6 +904,24 @@ def test_each_family_files_its_sizing_under_its_own_path() -> None:
     assert sizing_telemetry_path({}) == "sizing.run"
 
 
+def test_what_ran_is_filed_beside_what_was_planned_not_on_top_of_it() -> None:
+    """Two keys, because the pair *is* the finding.
+
+    ``sizing.<family>`` is the shape decided at submit from a config and a past run's numbers;
+    ``sizing_executed.<family>`` is what a live session or a live cluster turned that into. A
+    fan-out widened to reach a ceiling nobody passed, or a Ray pool re-planned against a device
+    that measured differently, shows up only as a difference between the two — merging them
+    would erase the very thing worth recording.
+    """
+    from scale_forecasting.registry.header import executed_sizing_path
+
+    assert executed_sizing_path("deep_learning") == "sizing_executed.deep_learning"
+    assert executed_sizing_path("statistical") != sizing_telemetry_path({"family": "statistical"})
+    # Same slugging on both sides, so a union family reads as a pair rather than two labels.
+    assert executed_sizing_path("statistical+ml") == "sizing_executed.statistical_ml"
+    assert executed_sizing_path(None) == "sizing_executed.run"
+
+
 def test_an_illegal_telemetry_path_is_a_caller_bug_not_an_escaped_string() -> None:
     from scale_forecasting.errors import RegistryError
 

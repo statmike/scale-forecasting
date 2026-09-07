@@ -71,7 +71,9 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
     return [cfg.data.ts_id_col, _MODEL_COL]
 
 
-def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int:
+def default_bucket_count(
+    cfg: RunConfig, models: list[str] | None = None, *, n_series: int | None = None
+) -> int:
     """Bucket count that keeps each ``applyInPandas`` frame bounded as scale grows.
 
     Buckets are *groups*, not executor concurrency (that's
@@ -84,20 +86,34 @@ def default_bucket_count(cfg: RunConfig, models: list[str] | None = None) -> int
     of the old ``min(cells, max_parallelism)`` which silently fattened frames past the executor
     memory budget once ``cells`` outgrew the cap (the 100k OOM). Clamped to ``[1, _MAX_BUCKETS]``.
 
-    With ``series_limit`` set the cell count is known offline (series × models); an unbounded run
-    falls back to ``max_parallelism`` buckets (best guess without a known cell count). ``models`` is
-    the executed subset; ``None`` means ``cfg.models`` — so a standalone run and a subset run size
+    With ``series_limit`` set the cell count is known offline (series × models). ``models`` is the
+    executed subset; ``None`` means ``cfg.models`` — so a standalone run and a subset run size
     buckets to the work they actually fan out.
+
+    **An unbounded run needs a series count from somewhere, and ``max_parallelism`` is not one.**
+    ``series_limit=None`` is the production shape — forecast the whole table — and it was the one
+    case still falling back to a parallelism cap, which is precisely the ``min(cells,
+    max_parallelism)`` rule the target-cells arithmetic replaced after it OOMed the 100k run. A
+    100k-series table at the default cap becomes a few hundred buckets holding hundreds of
+    histories each, so the bounded path got the fix and the unbounded path kept the bug. Callers
+    that can find out how many series there are pass ``n_series`` and get the same arithmetic; it
+    only has to be close, because the target is a frame size and not an identity. The cap remains
+    the answer when nobody knows — a guess is still better than one bucket.
+
+    Pure by construction: the count is an argument, never a lookup. The estimate costs a query
+    (`submit._estimated_series`, ``APPROX_COUNT_DISTINCT``) or a Spark aggregation
+    (`spark_explode._estimated_series`), and neither belongs inside a sizing rule that every
+    offline test calls.
 
     This is the *policy* number. `reachable_bucket_count` then raises it if the cluster it is
     about to run on is wider than the policy would keep busy.
     """
     executed = models if models is not None else cfg.models
     target = cfg.compute.bucket_target_cells
-    limit = cfg.data.series_limit
-    if limit is None:
+    series = cfg.data.series_limit if cfg.data.series_limit is not None else n_series
+    if series is None:
         return max(1, min(cfg.compute.max_parallelism, _MAX_BUCKETS))
-    cells = limit * len(executed)
+    cells = series * len(executed)
     return max(1, min(math.ceil(cells / target), _MAX_BUCKETS))
 
 

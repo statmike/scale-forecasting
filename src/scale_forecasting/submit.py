@@ -101,6 +101,43 @@ def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
     }
 
 
+def _estimated_series(
+    cfg: RunConfig, settings: Settings
+) -> int | None:  # pragma: no cover - GCP I/O, exercised by the @gcp smokes
+    """Roughly how many distinct series the source holds, or ``None`` when it need not be asked.
+
+    Only the unbounded run has to ask: with ``series_limit`` set the count is known offline and
+    `engines.spark_io.default_bucket_count` uses it directly. Without one, the alternative to
+    asking is sizing the fleet against a parallelism cap, so a thousand-series table and a
+    hundred-thousand-series table would be handed the same executors.
+
+    ``APPROX_COUNT_DISTINCT`` because the number decides a *task count*, not a result. HyperLogLog
+    is a scan of one column with no shuffle and its few-percent error moves the bucket count by a
+    few percent; an exact count would shuffle the whole id column to answer a sizing question. The
+    driver runs the same estimate again on the data it actually reads
+    (`engines.spark_explode._estimated_series`) — this one only has to be close enough to pick an
+    executor shape at submit time, before there is a session to ask.
+
+    ``None`` on any failure. A batch that cannot be sized well should still be submitted; the
+    fallback is the cap that was the only answer before this existed.
+    """
+    if cfg.data.series_limit is not None:
+        return None
+    from google.cloud import bigquery
+
+    from .engines.bigquery_names import _source_ref
+
+    table = _source_ref(cfg, settings.dataset_ref)
+    sql = f"SELECT APPROX_COUNT_DISTINCT(`{cfg.data.ts_id_col}`) AS n FROM `{table}`"
+    try:
+        rows = list(bigquery.Client(project=settings.project_id).query(sql).result())
+    except Exception as exc:  # noqa: BLE001 - an estimate is an optimisation, not a precondition
+        _log.warning("could not estimate the series count (%s); sizing off max_parallelism", exc)
+        return None
+    n = rows[0]["n"] if rows else None
+    return int(n) if n else None
+
+
 def sizing_properties(
     cfg: RunConfig,
     models: list[str] | None = None,
@@ -109,6 +146,7 @@ def sizing_properties(
     gpu_type: str | None = None,
     max_executors: int | None = None,
     profile: ComputeProfile | None = None,
+    estimated_series: int | None = None,
 ) -> dict[str, str]:
     """The ``spark.*`` overlay alone — `plan_sizing` without the audit record (pure).
 
@@ -123,6 +161,7 @@ def sizing_properties(
         gpu_type=gpu_type,
         max_executors=max_executors,
         profile=profile,
+        estimated_series=estimated_series,
     )[0]
 
 
@@ -134,6 +173,7 @@ def plan_sizing(
     gpu_type: str | None = None,
     max_executors: int | None = None,
     profile: ComputeProfile | None = None,
+    estimated_series: int | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """The ``spark.*`` overlay this batch's shape implies, **and** the audit record behind it.
 
@@ -158,6 +198,13 @@ def plan_sizing(
     and handed in. This function stays pure and is only ever *given* one; it never goes and looks.
     ``None`` (no evidence, or none wanted) leaves the memory properties unemitted and Serverless'
     own defaults standing, exactly as before.
+
+    ``estimated_series`` is how an *unbounded* run gets a task count worth sizing against.
+    ``series_limit=None`` means "forecast the whole table", and without a series count the fan-out
+    falls back to a parallelism cap — so the fleet would be sized for a few hundred tasks whether
+    the table holds a thousand series or a hundred thousand. `submit_batch` resolves it with one
+    ``APPROX_COUNT_DISTINCT`` before calling here; this function stays pure and is only ever
+    *given* the number, the same arrangement as ``profile``.
 
     **The unit sized against is a task, not a cell.** The engine shuffles cells into buckets and
     runs one task per bucket (`engines.spark_io.default_bucket_count`), each holding
@@ -198,7 +245,7 @@ def plan_sizing(
 
     gpu = hardware == "gpu"
     fraction = cfg.compute.gpu_fraction
-    n_tasks = default_bucket_count(cfg, executed)
+    n_tasks = default_bucket_count(cfg, executed, n_series=estimated_series)
     plan, translation = plan_serverless(
         profile,
         families,
@@ -376,6 +423,10 @@ def submit_batch(
         # A past run's measurements, if `compute.profile.source` points at any (memoized, so
         # every family job of one run sizes off the same evidence rather than re-discovering).
         profile=profile_for_run(cfg, settings=settings),
+        # Unbounded runs only: one APPROX_COUNT_DISTINCT so the fleet is sized against the table
+        # that exists rather than against a parallelism cap. Resolved after `with_series_limit`,
+        # so an `--n-series` override is treated as the known count it is and no query runs.
+        estimated_series=_estimated_series(cfg, settings),
     )
     batch = build_batch(
         infra=infra,

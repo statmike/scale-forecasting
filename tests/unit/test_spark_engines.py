@@ -98,10 +98,41 @@ def test_bucket_count_respects_max_buckets_ceiling() -> None:
     assert default_bucket_count(cfg) == spark_io._MAX_BUCKETS
 
 
-def test_bucket_count_defaults_to_cap_when_unlimited() -> None:
+def test_bucket_count_defaults_to_cap_when_nobody_knows_how_many_series_there_are() -> None:
     cfg = _cfg(compute={"max_parallelism": 123})
-    # series_limit unset → cell count unknown offline → fall back to the parallelism cap.
+    # series_limit unset and no estimate offered → fall back to the parallelism cap. A guess is
+    # still better than one bucket; the estimate below is how a caller does better than a guess.
     assert default_bucket_count(cfg) == 123
+
+
+def test_an_estimated_series_count_sizes_an_unbounded_run_the_way_a_limit_would() -> None:
+    """The 100k OOM guard, on the shape production actually runs.
+
+    ``series_limit=None`` means "forecast the whole table", and it was the last caller still
+    sizing off ``max_parallelism`` — the same ``min(cells, cap)`` rule that fattened frames past
+    the executor budget. The bounded path got the target-cells fix; this is the unbounded path
+    getting it, from a count the caller went and found rather than one the config declared.
+    """
+    cfg = _cfg(
+        models=["theta", "holtwinters", "sarimax", "xgboost"],
+        compute={"max_parallelism": 50, "bucket_target_cells": 8},
+    )
+    assert default_bucket_count(cfg) == 50  # the cap, as before
+    assert default_bucket_count(cfg, n_series=100_000) == 50_000  # ceil(400k cells / 8)
+
+
+def test_a_declared_limit_outranks_an_estimate_of_the_whole_table() -> None:
+    """``series_limit`` is what this run will read; the table's size is not.
+
+    An estimate is only ever an answer to "how much is there when nobody said" — letting it win
+    would size a deliberately-subsetted run against every series it chose not to touch.
+    """
+    cfg = _cfg(
+        models=["theta"],
+        data={"source_table": "t", "series_limit": 80},
+        compute={"bucket_target_cells": 8},
+    )
+    assert default_bucket_count(cfg, n_series=100_000) == 10
 
 
 # --- reachable_bucket_count: the buckets-≥-ceiling invariant --------------------
@@ -213,7 +244,7 @@ def test_widen_fanout_raises_the_count_and_pins_the_shuffle_to_the_raised_one() 
     spark = _SessionStub(
         {"spark.dynamicAllocation.maxExecutors": "50", "spark.executor.cores": "8"}
     )
-    assert spark_explode._widen_fanout(_fanout_cfg(), spark, 40) == 400
+    assert spark_explode._widen_fanout(_fanout_cfg(), spark, 40)["buckets"] == 400
     # The pin must follow the *raised* count, not the policy count it started from.
     assert spark.conf.get("spark.sql.shuffle.partitions") == "400"
 
@@ -222,19 +253,70 @@ def test_widen_fanout_still_pins_the_shuffle_when_the_count_is_already_wide_enou
     # The raise and the pin are independent: a fan-out that needs no widening still needs its
     # tasks to exist.
     spark = _SessionStub({"spark.dynamicAllocation.maxExecutors": "2", "spark.executor.cores": "4"})
-    assert spark_explode._widen_fanout(_fanout_cfg(), spark, 500) == 500
+    assert spark_explode._widen_fanout(_fanout_cfg(), spark, 500)["buckets"] == 500
     assert spark.conf.get("spark.sql.shuffle.partitions") == "500"
 
 
-def test_widen_fanout_touches_nothing_when_profiling_is_off() -> None:
+def test_the_executed_fanout_record_carries_both_counts_and_the_confs_behind_them() -> None:
+    """The shape nothing else can see.
+
+    Every other number about a batch is decided at submit and echoed back by the API. The fan-out
+    is decided on a live session against confs that may have come from `submit.sizing_properties`,
+    a ``--max-executors`` flag, or the platform's own defaults — so "we asked for 40 buckets and
+    ran 400 because something set a 50-executor ceiling" is only ever knowable here.
+    """
+    spark = _SessionStub(
+        {
+            "spark.dynamicAllocation.maxExecutors": "50",
+            "spark.executor.cores": "8",
+            "spark.task.cpus": "2",
+        }
+    )
+    record = spark_explode._widen_fanout(_fanout_cfg(), spark, 40)
+    assert record == {
+        "buckets_policy": 40,
+        "buckets": 200,  # 50 executors x (8 cores / 2 cpus-per-task)
+        "shuffle_partitions": 200,
+        "max_executors": 50,
+        "executor_cores": 8,
+        "task_cpus": 2,
+        "widened": True,
+    }
+
+
+def test_a_fanout_that_needed_no_widening_says_so_rather_than_looking_like_one_that_did() -> None:
+    spark = _SessionStub({"spark.dynamicAllocation.maxExecutors": "2", "spark.executor.cores": "4"})
+    record = spark_explode._widen_fanout(_fanout_cfg(), spark, 500)
+    assert record["widened"] is False
+    assert record["buckets_policy"] == record["buckets"] == 500
+    # An unset conf is None — "the platform default applies and we did not choose it" — not 0.
+    assert record["task_cpus"] is None
+
+
+def test_widen_fanout_does_not_widen_when_profiling_is_off() -> None:
     # The escape hatch has to survive Serverless writing its own dynamicAllocation defaults into
-    # the driver conf — which is why the gate is here and not at the call site.
+    # the driver conf — which is why the gate is here and not at the call site. A 1000-executor
+    # ceiling nobody chose would otherwise raise 500 buckets to 4000.
     spark = _SessionStub(
         {"spark.dynamicAllocation.maxExecutors": "1000", "spark.executor.cores": "4"}
     )
     cfg = _fanout_cfg(profile={"mode": "off"})
-    assert spark_explode._widen_fanout(cfg, spark, 500) == 500
-    assert spark.conf.get("spark.sql.shuffle.partitions") is None
+    assert spark_explode._widen_fanout(cfg, spark, 500)["buckets"] == 500
+
+
+def test_the_shuffle_pin_is_not_part_of_the_profiling_escape_hatch() -> None:
+    """Turning measurement off must not also turn the fan-out off.
+
+    The pin does not depend on any measurement — it says "the count we settled on is the count of
+    tasks", and without it Spark plans its default 200 however many buckets the cells were hashed
+    into. Skipping it here does not restore a pre-profiler run; it caps an unmeasured run at 200
+    tasks, which is a behaviour change smuggled in under a flag that reads as "measure nothing".
+    """
+    spark = _SessionStub({})
+    cfg = _fanout_cfg(profile={"mode": "off"})
+    assert spark_explode._widen_fanout(cfg, spark, 500)["buckets"] == 500
+    assert spark.conf.get("spark.sql.shuffle.partitions") == "500"
+    assert spark.conf.get("spark.sql.adaptive.coalescePartitions.minPartitionNum") == "500"
 
 
 # --- run_group: tagged frame (cross-joined, model column present) ---------------

@@ -579,6 +579,7 @@ class _FakeRuntimeConfig:
         "spark.executor.cores": "4",
         "spark.executor.instances": "2",
         "spark.dynamicAllocation.maxExecutors": "2",
+        "spark.task.cpus": "2",
     }
 
 
@@ -611,10 +612,33 @@ def test_extract_job_telemetry_full_batch() -> None:
     assert tel["executor_cores"] == 4
     assert tel["executor_instances"] == 2
     assert tel["max_executors"] == 2
+    assert tel["task_cpus"] == 2
     assert tel["runtime_version"] == "2.2.82"
     assert tel["container_image"].endswith("spark-runtime:latest")
     assert tel["service_account"] == "compute@p.iam.gserviceaccount.com"
     assert tel["subnetwork_uri"].endswith("/subnetworks/sf")
+
+
+def test_the_batch_echo_does_not_pretend_to_know_the_executed_fan_out() -> None:
+    """The number of tasks that actually ran is not on the batch, and must not be read off it.
+
+    ``spark.sql.shuffle.partitions`` is what turns N buckets into N tasks, so it is the most
+    interesting number in the run — and the driver sets it on the live session *after* the batch
+    exists (`engines.spark_explode._widen_fanout`). Reading it here would return None on every run
+    that pinned it, and a field that is always empty reads as "nobody set this" rather than "asked
+    in the wrong place". It is stamped from the driver, under ``sizing_executed.<family>``.
+    """
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
+
+    class _RC:
+        version = "2.2"
+        container_image = "img:tag"
+        # Even when the property is somehow present on the batch, it is not what ran.
+        properties = {"spark.executor.cores": "8", "spark.sql.shuffle.partitions": "200"}
+
+    tel = extract_job_telemetry(type("B", (), {"runtime_config": _RC()})())
+    assert "shuffle_partitions" not in tel
+    assert not any("shuffle.partitions" in str(value) for value in tel.values())
 
 
 def test_extract_job_telemetry_is_json_serializable() -> None:

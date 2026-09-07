@@ -18,7 +18,7 @@ Public surface: ``run(cfg) -> None``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..errors import get_logger
 from . import spark_io
@@ -48,8 +48,78 @@ def _conf_int(spark: SparkSession, key: str) -> int | None:
         return None
 
 
-def _widen_fanout(cfg: RunConfig, spark: SparkSession, n_buckets: int) -> int:
-    """Reconcile the bucket count with the fleet it is about to run on; return the final count.
+def _estimated_series(cfg: RunConfig, source: Any) -> int | None:
+    """Roughly how many distinct series the source holds, or ``None`` when it need not be asked.
+
+    Only the unbounded run has to ask: with ``series_limit`` set the count is already known offline
+    and `spark_io.default_bucket_count` uses it directly. Without one, the alternative to asking is
+    sizing the fan-out against a parallelism cap, which is the arithmetic that OOMs at scale.
+
+    ``approx_count_distinct`` rather than ``countDistinct`` because the number decides a frame
+    size, not a result: HyperLogLog's few-percent error moves the bucket count by a few percent
+    and nothing else, while an exact count is a full shuffle of the very column the run is about
+    to shuffle again. ``None`` on any failure — a fan-out that cannot be sized well should still
+    be sized, not refused.
+    """
+    if cfg.data.series_limit is not None:
+        return None
+    from pyspark.sql import functions as F
+
+    try:
+        row = source.select(F.approx_count_distinct(cfg.data.ts_id_col).alias("n")).first()
+    except Exception:  # noqa: BLE001 - an estimate is an optimisation; the fallback is a cap
+        _log.warning("could not estimate the series count; sizing buckets off max_parallelism")
+        return None
+    n = row["n"] if row is not None else None
+    return int(n) if n else None
+
+
+def _fanout_family(executed: list[str]) -> str:
+    """The family label the fan-out record files under — ``+``-joined, in first-seen order (pure).
+
+    One explode job may carry several families through the same buckets, and the shape it settled
+    on belongs to all of them. Joining rather than picking the first matches what
+    `resources.audit.sizing_telemetry` does for a shared cluster, so the decided record and the
+    executed one land under the same header segment and can be read as a pair.
+    """
+    from ..models import get_model
+
+    families: list[str] = []
+    for name in executed:
+        family = get_model(name).family
+        if family not in families:
+            families.append(family)
+    return "+".join(families)
+
+
+def _stamp_executed_fanout(
+    run_id: str, executed: list[str], fanout: dict[str, Any], settings: Settings
+) -> None:  # pragma: no cover - GCP I/O, exercised by the @gcp smokes
+    """File the executed fan-out under ``sizing_executed.<family>`` (best-effort).
+
+    Best-effort in the same sense as every other telemetry write: this runs inside a live run, and
+    a header that will not take an overlay is a lost record, never a lost run.
+    """
+    from ..registry.header import executed_sizing_path, merge_header_telemetry
+
+    try:
+        path = executed_sizing_path(_fanout_family(executed))
+        merge_header_telemetry(run_id, {path: {"fanout": fanout}}, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - telemetry is an overlay, never fatal
+        _log.warning("executed fan-out capture failed (non-fatal): %r", exc)
+
+
+def _widen_fanout(cfg: RunConfig, spark: SparkSession, n_buckets: int) -> dict[str, Any]:
+    """Reconcile the bucket count with the fleet it is about to run on; return what it settled on.
+
+    The record, not just the number, because this is the only place the *executed* Spark shape is
+    knowable. Everything else about the batch is decided at submit and echoed back by the API
+    (`batch_telemetry.extract_job_telemetry`); the fan-out is decided here, on a live session,
+    against confs that may have arrived from three different places. ``buckets_policy`` vs
+    ``buckets`` is the widening itself, ``shuffle_partitions`` is the number that decides how many
+    tasks actually ran, and the three conf reads are the evidence the widening used — a run whose
+    ceiling came from somewhere nobody expected says so here rather than in a driver log that
+    outlives nothing.
 
     Two halves of one identity, and both are needed. `spark_io.reachable_bucket_count` raises the
     count until it can create the pending demand the autoscaler grows on, reading the ceiling off
@@ -58,29 +128,49 @@ def _widen_fanout(cfg: RunConfig, spark: SparkSession, n_buckets: int) -> int:
     shuffle width to the result, because the group count and the task count are otherwise
     unrelated numbers and it is the task count the scheduler acts on.
 
-    ``profile.mode == "off"`` returns the count untouched. That is the documented escape hatch
-    back to the pre-profiler run, and it has to be checked *here* rather than at the call site
-    because Serverless materializes its own dynamic-allocation defaults into the driver conf:
-    read without the gate, an unsized batch reports a 1000-executor ceiling we never chose, and
-    a run nobody asked to reshape gets reshaped around it.
+    ``profile.mode == "off"`` gates **the widening only**, and the gate has to be checked *here*
+    rather than at the call site because Serverless materializes its own dynamic-allocation
+    defaults into the driver conf: read without the gate, an unsized batch reports a
+    1000-executor ceiling we never chose, and a run nobody asked to reshape gets reshaped
+    around it.
+
+    The shuffle-width pin is applied either way, because it is not a profiling decision. Whatever
+    bucket count this run ended up with — widened or the caller's own — Spark plans the shuffle at
+    ``spark.sql.shuffle.partitions`` and AQE coalesces below that, so leaving the pin off does not
+    restore some earlier behaviour; it hands 200 tasks to a run that asked for N. Gating it here
+    made ``profile.mode="off"`` quietly mean "and also stop fanning out", which is a second
+    behaviour nobody opted into by turning measurement off.
     """
+    max_executors = _conf_int(spark, "spark.dynamicAllocation.maxExecutors")
+    executor_cores = _conf_int(spark, "spark.executor.cores")
+    task_cpus = _conf_int(spark, "spark.task.cpus")
     if cfg.compute.profile.mode == "off":
-        return n_buckets
-    reachable = spark_io.reachable_bucket_count(
-        n_buckets,
-        max_executors=_conf_int(spark, "spark.dynamicAllocation.maxExecutors"),
-        executor_cores=_conf_int(spark, "spark.executor.cores"),
-        task_cpus=_conf_int(spark, "spark.task.cpus") or 1,
-    )
-    if reachable != n_buckets:
-        _log.info(
-            "buckets raised %d -> %d so the executor ceiling is reachable",
+        reachable = n_buckets
+    else:
+        reachable = spark_io.reachable_bucket_count(
             n_buckets,
-            reachable,
+            max_executors=max_executors,
+            executor_cores=executor_cores,
+            task_cpus=task_cpus or 1,
         )
-    for key, value in spark_io.fanout_properties(reachable).items():
+        if reachable != n_buckets:
+            _log.info(
+                "buckets raised %d -> %d so the executor ceiling is reachable",
+                n_buckets,
+                reachable,
+            )
+    properties = spark_io.fanout_properties(reachable)
+    for key, value in properties.items():
         spark.conf.set(key, value)
-    return reachable
+    return {
+        "buckets_policy": n_buckets,
+        "buckets": reachable,
+        "shuffle_partitions": int(properties["spark.sql.shuffle.partitions"]),
+        "max_executors": max_executors,
+        "executor_cores": executor_cores,
+        "task_cpus": task_cpus,
+        "widened": reachable != n_buckets,
+    }
 
 
 def run(
@@ -137,13 +227,11 @@ def run(
     settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
     executed = models if models is not None else cfg.models
-    n_buckets = spark_io.default_bucket_count(cfg, executed)
     _log.info(
-        "explode run start: run_id=%s series_limit=%s models=%d buckets=%d manage_header=%s",
+        "explode run start: run_id=%s series_limit=%s models=%d manage_header=%s",
         run_id,
         cfg.data.series_limit,
         len(executed),
-        n_buckets,
         manage_header,
     )
 
@@ -158,16 +246,27 @@ def run(
             spark = SparkSession.builder.appName(
                 f"scale-forecasting-explode-{run_id}"
             ).getOrCreate()
-        # Fan-out width is only decidable once there is a session to ask: the fleet's ceiling is
-        # set on the batch and read back from the live conf. See `_widen_fanout`.
-        n_buckets = _widen_fanout(cfg, spark, n_buckets)
-
         started = time.perf_counter()
         try:
             # 2. Fan cells across the cluster. The frozen Settings is captured directly in the group
             #    runner's closure (no sparkContext.broadcast — Connect has no such API);
             #    applyInPandas cloudpickles it to every executor so write_cells resolves the infra.
             source = spark_io.read_source_series(spark, cfg, settings)
+
+            # Fan-out width needs both a session and the source: the fleet's ceiling is set on the
+            # batch and read back from the live conf, and an unbounded run's series count can only
+            # come off the data. The confs `_widen_fanout` sets govern the applyInPandas shuffle
+            # below, so landing them here rather than before the read changes nothing about it.
+            fanout = _widen_fanout(
+                cfg,
+                spark,
+                spark_io.default_bucket_count(
+                    cfg, executed, n_series=_estimated_series(cfg, source)
+                ),
+            )
+            n_buckets = fanout["buckets"]
+            _log.info("explode fan-out: run_id=%s %s", run_id, fanout)
+            _stamp_executed_fanout(run_id, executed, fanout, settings)
 
             # Fleetwide HPO resolves once on the driver over a small sample, before fan-out. The
             # tuned params flow to executors through the group-runner closure (not cfg → run_id

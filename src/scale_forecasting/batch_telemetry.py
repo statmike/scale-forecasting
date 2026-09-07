@@ -65,11 +65,18 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
       warm-up + teardown), which amortizes as scale grows — the efficiency half of the scale story.
     - ``dcu_milli_seconds`` / ``shuffle_storage_gb_seconds`` — approximate usage (billing proxy +
       shuffle pressure).
-    - ``driver_cores`` / ``executor_cores`` / ``executor_instances`` / ``max_executors`` /
-      ``executor_memory`` / ``executor_memory_overhead`` — the resolved cluster sizing and the
-      autoscaling cap (the executor throttle shows up here). This is the *echoed* shape — what
-      Dataproc says it ran — as against the ``sizing`` record, which is what we asked for and why;
-      the two disagreeing is a finding, so both are kept.
+    - ``driver_cores`` / ``executor_cores`` / ``task_cpus`` / ``executor_instances`` /
+      ``max_executors`` / ``executor_memory`` / ``executor_memory_overhead`` — the resolved cluster
+      sizing and the autoscaling cap (the executor throttle shows up here). This is the *echoed*
+      shape — what Dataproc says it ran — as against the ``sizing`` record, which is what we asked
+      for and why; the two disagreeing is a finding, so both are kept.
+
+      ``spark.sql.shuffle.partitions`` is deliberately **not** among them, even though it is the
+      number that decides how many tasks the fan-out actually runs. The driver sets it on the live
+      session (`engines.spark_explode._widen_fanout`) after the batch is created, so the batch's
+      ``runtime_config`` never carries it and reading it here would report ``None`` on every run
+      that pinned it — a field that is always empty reads as "not set" rather than "asked
+      elsewhere". The executed fan-out is stamped from the driver instead, where it is known.
     - ``runtime_version`` / ``container_image`` — what actually ran (reproducibility).
     - ``service_account`` / ``subnetwork_uri`` — the identity + network the batch had access to.
 
@@ -105,6 +112,13 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
     tel["executor_cores"] = _prop_int("spark.executor.cores")
     tel["executor_instances"] = _prop_int("spark.executor.instances")
     tel["max_executors"] = _prop_int("spark.dynamicAllocation.maxExecutors")
+    # `executor_cores` alone does not say how many cells ran at once. An executor runs
+    # ``executor.cores / task.cpus`` tasks concurrently, and the thread pins are exported at
+    # ``task.cpus`` — so without this number the echoed shape cannot be turned back into either a
+    # concurrency or a thread budget, and 16 cores at 1 cpu-per-task reads identically to 16 cores
+    # at 4. It is also the divisor `reachable_bucket_count` used, so it is what makes the bucket
+    # count on the driver side reproducible from the record.
+    tel["task_cpus"] = _prop_int("spark.task.cpus")
     # The memory half of the resolved shape, and the only half a profile actually moves (§3.10):
     # cores and the executor counts follow from fan-out with or without evidence. Strings, because
     # Spark spells them ``"8g"`` / ``"3891m"`` — kept verbatim rather than parsed to bytes so the

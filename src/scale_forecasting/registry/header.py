@@ -208,9 +208,29 @@ def sizing_telemetry_path(sizing: Mapping[str, Any]) -> str:
     ``+``-joined union when several families share one cluster) so it is a legal path segment;
     a record with no plan to take a family from files under ``sizing.run``.
     """
-    family = str(sizing.get("family") or "").lower()
-    slug = re.sub(r"[^a-z0-9_]+", "_", family).strip("_")
-    return f"sizing.{slug or 'run'}"
+    return f"sizing.{_family_slug(sizing.get('family'))}"
+
+
+def executed_sizing_path(family: str | None) -> str:
+    """Where the *executed* shape is filed on the header — ``sizing_executed.<family>`` (pure).
+
+    A sibling of `sizing_telemetry_path`, and deliberately a different key rather than a merge into
+    the same one. ``sizing.<family>`` is what was decided before anything ran, from a config and a
+    past run's measurements; this is what the shape turned out to be once there was a live session
+    or a live cluster to ask. The two disagreeing is the finding — a fan-out widened to match a
+    ceiling nobody passed, a Ray pool re-planned against a device that measured differently — and
+    filing the second on top of the first would erase exactly that.
+
+    Same slugging as its sibling, so a union family (``statistical+ml`` sharing one cluster) files
+    under the same segment on both sides and the pair can be read together.
+    """
+    return f"sizing_executed.{_family_slug(family)}"
+
+
+def _family_slug(family: object) -> str:
+    """A family label as a legal telemetry path segment; empty or missing → ``run`` (pure)."""
+    slug = re.sub(r"[^a-z0-9_]+", "_", str(family or "").lower()).strip("_")
+    return slug or "run"
 
 
 def merge_header_telemetry(
