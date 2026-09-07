@@ -146,6 +146,63 @@ def test_the_chunk_count_is_floored_so_the_autoscaler_can_reach_its_ceiling() ->
     assert ray_engine._pool_chunks(cpu, 2) == cpu.slots_at_ceiling > 20
 
 
+def test_the_calibration_sample_is_the_same_series_whatever_order_the_reader_returned() -> None:
+    """These few series decide the whole run's GPU density, so they cannot depend on stream order.
+
+    ``_sample_series`` feeds `calibrate_gpu_fraction`, whose answer sets how many cells share a
+    device for the entire run. Taking whichever series arrived first made that a function of Storage
+    Read API stream ordering: two runs of the same config on the same table could size differently
+    and neither would be wrong in a way anything could catch.
+    """
+    panel = _panel(6)
+    shuffled = panel.sample(frac=1.0, random_state=0).reset_index(drop=True)
+    cfg = _cfg(compute=_compute(gpu_calibration_samples=3))
+
+    def ids(frames: list[pd.DataFrame]) -> list[str]:
+        return [frame["ts_id"].iloc[0] for frame in frames]
+
+    assert ids(ray_engine._sample_series(panel, cfg)) == ["s0", "s1", "s2"]
+    assert ids(ray_engine._sample_series(shuffled, cfg)) == ["s0", "s1", "s2"]
+
+
+def test_the_calibration_sample_is_the_same_subset_the_rest_of_the_codebase_takes() -> None:
+    """One "first k ts_ids" rule everywhere — `_limit_series` is the one this must agree with."""
+    panel = _panel(6)
+    cfg = _cfg(
+        data={"source_table": "source_series_native", "horizon": 7, "series_limit": 2},
+        compute=_compute(gpu_calibration_samples=2),
+    )
+    sample = pd.concat(ray_engine._sample_series(panel, cfg), ignore_index=True)
+    limited = ray_engine._limit_series(panel, cfg)
+    assert sorted(sample["ts_id"].unique()) == sorted(limited["ts_id"].unique())
+
+
+def test_the_executed_pool_plans_are_filed_per_family_beside_the_planned_ones() -> None:
+    """The submitter's `sizing.<family>` is what was bought; this is what the driver ran on."""
+    cpu, gpu = _plans(_cfg(compute=_compute(use_gpu=True)))
+    patch = ray_engine._executed_sizing_patch(cpu, gpu, [_CPU], [_GPU])
+    assert set(patch) == {"sizing_executed.statistical", "sizing_executed.deep_learning"}
+    assert patch["sizing_executed.statistical"] == {"cpu_pool": cpu.to_dict()}
+    assert patch["sizing_executed.deep_learning"] == {"gpu_pool": gpu.to_dict()}
+
+
+def test_a_pool_with_no_models_files_nothing_rather_than_an_empty_record() -> None:
+    """No GPU pool is a fact about the run; an entry saying "0 cells" reads as a broken one."""
+    cfg = _cfg(models=[_CPU], compute=_compute(use_gpu=False))
+    cpu, gpu = ray_engine._pool_plans(_panel(4), cfg, "rid", [_CPU], [], None, 0.5)
+    assert ray_engine._executed_sizing_patch(cpu, gpu, [_CPU], []) == {
+        "sizing_executed.statistical": {"cpu_pool": cpu.to_dict()}
+    }
+
+
+def test_two_families_sharing_the_cpu_pool_file_under_one_joined_label() -> None:
+    """The CPU pool holds everything that is not deep learning, so its label has to say so."""
+    cfg = _cfg(models=[_CPU, "xgboost", _GPU])
+    cpu, gpu = ray_engine._pool_plans(_panel(4), cfg, "rid", [_CPU, "xgboost"], [_GPU], None, 0.5)
+    patch = ray_engine._executed_sizing_patch(cpu, gpu, [_CPU, "xgboost"], [_GPU])
+    assert set(patch) == {"sizing_executed.statistical_ml", "sizing_executed.deep_learning"}
+
+
 def test_pool_cells_counts_series_times_models() -> None:
     src = _panel(4)
     cfg = _cfg()

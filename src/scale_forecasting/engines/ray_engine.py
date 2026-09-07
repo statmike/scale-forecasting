@@ -23,7 +23,7 @@ Public surface: ``run(cfg, models=None, *, manage_header=True) -> None``.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..errors import get_logger
 from ..profiling.source import resolve_profile
@@ -210,14 +210,22 @@ def _storage_dataset_path(cfg: RunConfig, settings: Settings) -> str:
 
 
 def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:
-    """The first few per-series frames, for live GPU-memory calibration (auto fraction only).
+    """The first few per-series frames, in ts_id order, for live GPU calibration (auto only).
 
     `calibrate_gpu_fraction` fits NeuralProphet on these to measure peak GPU memory;
     ``gpu_calibration_samples`` caps how many so calibration is a few fits, not the whole panel.
+
+    **Ordered by ts_id, not by arrival.** These few series decide ``gpu_fraction``, which decides
+    how many cells share a device for the whole run — so taking whichever series the reader
+    happened to return first made the fleet's density a function of Storage Read API stream
+    ordering. Two runs of the same config on the same data could size differently, and neither
+    would be wrong in a way anything could catch. Sorting is the same deterministic "first k
+    ts_ids" subset `_limit_series`, `sample_series_to_driver` and `_resolve_fleetwide_hpo` already
+    use, so every sample this codebase takes off a panel is the same sample.
     """
     id_col = cfg.data.ts_id_col
     n = cfg.compute.gpu_calibration_samples
-    ids = list(dict.fromkeys(source[id_col].tolist()))[:n]
+    ids = sorted(dict.fromkeys(source[id_col].tolist()))[:n]
     return [source[source[id_col] == tid] for tid in ids]
 
 
@@ -364,6 +372,11 @@ def run(
             for note in (cpu_plan.density_note, gpu_plan.density_note):
                 if note:
                     _log.warning("ray sizing: %s", note)
+            _stamp_executed_sizing(
+                run_id,
+                _executed_sizing_patch(cpu_plan, gpu_plan, cpu_models, gpu_models),
+                settings,
+            )
 
             # Chunk counts come from the true cell counts (series in the panel × pool models),
             # floored so the pool can actually reach its autoscaling ceiling (`tasks_for_ceiling`).
@@ -476,6 +489,61 @@ def _pool_plans(
         max_units=cluster.gpu_max_nodes,
     )
     return cpu_plan, gpu_plan
+
+
+def _executed_sizing_patch(
+    cpu_plan: RuntimeResourcePlan,
+    gpu_plan: RuntimeResourcePlan,
+    cpu_models: list[str],
+    gpu_models: list[str],
+) -> dict[str, Any]:
+    """The header patch describing the pools this driver actually sized, by family (pure).
+
+    Sizing happens twice for a Ray run, and only the first half was ever written down. The submitter
+    plans a cluster from the config's bounds and files that under ``sizing.<family>``; then the
+    driver re-plans on the head node against the panel it really read, and *that* is the shape the
+    run executed on. The two disagree whenever the panel is smaller than ``series_limit``, whenever
+    profiling changed a slot width, or whenever GPU calibration landed on a different fraction than
+    the plan assumed — which is to say, on most real runs. Filing the executed plan under its own
+    key (``sizing_executed.<family>``) rather than merging it into the decided one keeps the pair
+    readable: the disagreement is the finding, so overwriting would erase exactly the evidence
+    somebody would go looking for.
+
+    One entry per pool that has work. A pool with no models is not a pool — `split_gpu_cpu_models`
+    puts deep-learning cells on the CPU side when no device was provisioned, so an absent GPU entry
+    means "there was no GPU pool", not "the record is missing". Both pools file under the family
+    label of the models on them, joined with ``+`` the same way `plan_cluster` and
+    `resources.audit.sizing_telemetry` label a shared fleet, so the decided and executed records sit
+    on matching header segments. Nesting under ``cpu_pool``/``gpu_pool`` keeps the two apart even in
+    the case where a single family lands on both.
+    """
+    from ..registry.header import executed_sizing_path
+
+    patch: dict[str, Any] = {}
+    pools = (("cpu_pool", cpu_plan, cpu_models), ("gpu_pool", gpu_plan, gpu_models))
+    for pool, plan, models in pools:
+        if not models:
+            continue
+        path = executed_sizing_path("+".join(ray_io.pool_families(models)))
+        patch.setdefault(path, {})[pool] = plan.to_dict()
+    return patch
+
+
+def _stamp_executed_sizing(
+    run_id: str, patch: dict[str, Any], settings: Settings
+) -> None:  # pragma: no cover - GCP I/O, exercised by the @gcp smokes
+    """File the executed pool plans on the run header (best-effort).
+
+    Best-effort in the same sense as every other telemetry write, and for the same reason: this runs
+    inside a live run on the cluster head. A header that will not take an overlay costs a record,
+    never a run.
+    """
+    from ..registry.header import merge_header_telemetry
+
+    try:
+        merge_header_telemetry(run_id, patch, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - telemetry is an overlay, never fatal
+        _log.warning("executed sizing capture failed (non-fatal): %r", exc)
 
 
 def _pool_chunks(plan: RuntimeResourcePlan, target_cells: int) -> int:
