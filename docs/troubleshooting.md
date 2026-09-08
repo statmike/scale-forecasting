@@ -344,6 +344,14 @@ until executors OOM'd.
 target)` bounds per-task memory at every scale. Lower `bucket_target_cells` if a heavy model set
 still OOMs. See [configuration_reference.md](./configuration_reference.md).
 
+When a profile is available the target is applied *per model* rather than fleet-wide: a model
+measured slower than the run's typical cell gets a proportionally smaller target and therefore
+more buckets, so a bucket is closer to a fixed unit of **work** instead of a fixed number of
+cells. A model measured faster keeps the global target exactly — the weights are floored at 1.0,
+so this can only make frames smaller, never larger. The run's executed fan-out record
+(`sizing_executed.<family>.fanout`) carries `cost_weights` and `allocation`, which is where to
+look when one stage's tasks finish long after the rest.
+
 ### 100k batch cancelled at ~4 hours
 **Symptom:** a large batch is cancelled around the 4-hour mark.
 **Cause:** the default Dataproc batch TTL.

@@ -135,6 +135,157 @@ def test_a_declared_limit_outranks_an_estimate_of_the_whole_table() -> None:
     assert default_bucket_count(cfg, n_series=100_000) == 10
 
 
+# --- cost-weighted bucketing: a bucket is a unit of *work*, not of cells --------
+
+
+def _profile(**walls: float | None) -> Any:
+    """A `ComputeProfile` carrying nothing but per-model median wall times."""
+    from scale_forecasting.profiling.cost import ComputeProfile, ModelCost
+
+    models = {
+        name: ModelCost(
+            model_type=name,
+            family="statistical",
+            n_fits=1,
+            n_ok=1,
+            max_n_obs=100,
+            max_peak_rss_bytes=None,
+            max_peak_gpu_bytes=None,
+            median_wall_s=wall,
+            median_cpu_s=None,
+            max_effective_cores=None,
+        )
+        for name, wall in walls.items()
+    }
+    return ComputeProfile(
+        families={},
+        models=models,
+        memory_margin=1.0,
+        time_margin=1.0,
+        n_measurements=len(models),
+        n_ok=len(models),
+        sample_ts_ids=(),
+    )
+
+
+def test_cost_weights_are_relative_to_the_median_measured_model() -> None:
+    # naive 0.5s, theta 1.0s, neuralprophet 8.0s → median 1.0 is "typical", so the weights are the
+    # multiples of it. The median, not the mean: a mean of 3.17 would call theta a third of typical.
+    weights = spark_io.model_cost_weights(
+        ["naive", "theta", "neuralprophet"],
+        _profile(naive=0.5, theta=1.0, neuralprophet=8.0),
+    )
+    assert weights == {"naive": 0.5, "theta": 1.0, "neuralprophet": 8.0}
+
+
+def test_an_unmeasured_model_is_priced_as_a_typical_cell() -> None:
+    # xgboost was never measured → weight exactly 1.0, which is what makes it fall back to the
+    # global bucket_target_cells rather than to whatever the loudest measured model implies.
+    weights = spark_io.model_cost_weights(
+        ["naive", "neuralprophet", "xgboost"], _profile(naive=0.5, neuralprophet=8.0)
+    )
+    assert weights["xgboost"] == 1.0
+
+
+def test_an_impossible_reading_is_dropped_rather_than_believed() -> None:
+    # A zero or a negative wall time would make a model's slice one bucket wide however many
+    # series it has — the opposite of what a "free" model would need. Treated as unmeasured.
+    weights = spark_io.model_cost_weights(["naive", "theta"], _profile(naive=0.0, theta=2.0))
+    assert weights == {"naive": 1.0, "theta": 1.0}  # theta alone is the median → everything typical
+
+
+def test_no_profile_prices_every_model_the_same() -> None:
+    assert spark_io.model_cost_weights(["naive", "theta"], None) == {"naive": 1.0, "theta": 1.0}
+
+
+def test_a_slow_model_is_cut_into_more_buckets_than_a_fast_one() -> None:
+    # The whole point: 4x the cost buys 4x the buckets, so a quarter of the cells per frame and
+    # about the same wall time per bucket as everyone else's.
+    alloc = spark_io.allocate_buckets(["fast", "slow"], 100, {"fast": 1.0, "slow": 4.0})
+    assert alloc["fast"][1] == 20
+    assert alloc["slow"][1] == 80
+
+
+def test_a_cheap_model_keeps_the_global_target_instead_of_a_fatter_frame() -> None:
+    # naive at a tenth of typical must NOT get a tenth of the buckets — that is ten times the cells
+    # in one pandas frame, which is the OOM the bucket target exists to prevent. Floored at 1.0, so
+    # naive is sized as typical and only the slow model is cut finer.
+    alloc = spark_io.allocate_buckets(["naive", "slow"], 100, {"naive": 0.1, "slow": 4.0})
+    assert alloc["naive"][1] == 20  # 1 part in 5, the same as an unmeasured model would get
+    assert alloc["slow"][1] == 80
+
+
+def test_the_slices_tile_the_bucket_space_with_no_gap_and_no_overlap() -> None:
+    # The slices ARE the bucket space: a gap is a task with nothing in it, an overlap puts two
+    # models in one applyInPandas frame. Checked exhaustively over an awkward, unroundable split.
+    models = [f"m{i}" for i in range(7)]
+    weights = {"m0": 1.0, "m1": 1.3, "m2": 2.7, "m3": 5.0, "m4": 0.2, "m5": 11.1, "m6": 1.0}
+    for n_buckets in range(7, 260):
+        alloc = spark_io.allocate_buckets(models, n_buckets, weights)
+        covered: list[int] = []
+        for offset, width in alloc.values():
+            assert width >= 1
+            covered.extend(range(offset, offset + width))
+        assert sorted(covered) == list(range(n_buckets))
+
+
+def test_no_evidence_means_no_allocation_so_the_flat_hash_is_untouched() -> None:
+    # Equal weights would give equal slices, which buys nothing over the flat hash and costs the
+    # mixing it gives. Absence of an allocation is the signal to keep today's behaviour exactly.
+    assert spark_io.allocate_buckets(["a", "b", "c"], 90, {"a": 1.0, "b": 1.0, "c": 1.0}) == {}
+    assert spark_io.allocate_buckets(["a", "b"], 90, {}) == {}
+    # And below-typical models are all floored to typical, so they are uniform too.
+    assert spark_io.allocate_buckets(["a", "b"], 90, {"a": 0.2, "b": 0.9}) == {}
+
+
+def test_a_bucket_space_too_small_to_seat_every_model_declines_to_allocate() -> None:
+    # 3 buckets, 4 models: some model would get zero buckets and its cells nowhere to go.
+    assert spark_io.allocate_buckets(["a", "b", "c", "d"], 3, {"a": 9.0, "b": 1.0}) == {}
+    # One more bucket and it fits — one each, then the remainder to the expensive one.
+    alloc = spark_io.allocate_buckets(["a", "b", "c", "d"], 4, {"a": 9.0, "b": 1.0})
+    assert sorted(w for _, w in alloc.values()) == [1, 1, 1, 1]
+
+
+def test_the_same_inputs_always_produce_the_same_slices() -> None:
+    # Ties break on model name, so two equally-weighted models never swap places between the
+    # driver's allocation and anything that re-derives it from the stamped record.
+    models = ["b", "a", "c"]
+    weights = {"a": 1.0, "b": 1.0, "c": 4.0}
+    first = spark_io.allocate_buckets(models, 47, weights)
+    assert all(spark_io.allocate_buckets(models, 47, weights) == first for _ in range(5))
+    # Offsets follow the caller's model order, not sorted order — the cross-join's order.
+    assert [name for name in first] == ["b", "a", "c"]
+    assert first["b"][0] == 0
+
+
+def test_a_slow_model_raises_the_bucket_count_rather_than_fattening_its_frames() -> None:
+    # 100 series, target 8, two models. Uniform: ceil(200/8) = 25 buckets. With neuralprophet
+    # measured at 8x typical it needs its own target of 1 cell, so ceil(100/8) + ceil(100*8/8)
+    # = 13 + 100 = 113. The count rises; no frame gets bigger.
+    cfg = _cfg(
+        models=["theta", "neuralprophet"],
+        data={"source_table": "t", "series_limit": 100},
+        compute={"bucket_target_cells": 8},
+    )
+    assert default_bucket_count(cfg) == 25
+    weights = {"theta": 1.0, "neuralprophet": 8.0}
+    assert default_bucket_count(cfg, weights=weights) == 113
+
+
+def test_uniform_weights_size_the_run_byte_for_byte_the_way_no_weights_do() -> None:
+    # sum(ceil(series/target)) and ceil(series*models/target) differ by rounding, and that is not a
+    # difference worth introducing to the live-proven path.
+    cfg = _cfg(
+        models=["theta", "holtwinters", "sarimax"],
+        data={"source_table": "t", "series_limit": 100},
+        compute={"bucket_target_cells": 8},
+    )
+    flat = default_bucket_count(cfg)
+    assert default_bucket_count(cfg, weights=None) == flat
+    assert default_bucket_count(cfg, weights=dict.fromkeys(cfg.models, 1.0)) == flat
+    assert default_bucket_count(cfg, weights={"theta": 0.3}) == flat  # floored to typical
+
+
 # --- reachable_bucket_count: the buckets-≥-ceiling invariant --------------------
 
 
@@ -222,39 +373,66 @@ def test_a_session_that_rejects_the_key_outright_reads_as_none() -> None:
 # --- fanout_properties + _widen_fanout: making a bucket actually be a task ------
 
 
-def test_the_shuffle_width_is_pinned_to_the_bucket_count() -> None:
+def test_the_shuffle_width_is_set_wider_than_the_bucket_count() -> None:
     # Without this, groupBy(...).applyInPandas plans spark.sql.shuffle.partitions tasks — 200 by
-    # default — no matter how many buckets the cells were hashed into.
+    # default — no matter how many buckets the cells were hashed into. Wider than the bucket count
+    # rather than equal to it: see the occupancy test below.
     props = spark_io.fanout_properties(4000)
-    assert props["spark.sql.shuffle.partitions"] == "4000"
+    assert props["spark.sql.shuffle.partitions"] == "12000"
 
 
-def test_aqe_is_stopped_from_coalescing_the_pin_away() -> None:
-    # Pinning the partition count is not enough on its own: AQE coalesces small partitions after
-    # the fact, which is how a 200-task stage becomes a 1-task stage.
+def test_aqe_is_stopped_from_coalescing_the_width_away() -> None:
+    # Setting the partition count is not enough on its own: AQE coalesces small partitions after
+    # the fact, which is how a 200-task stage becomes a 1-task stage. The old form of this,
+    # `coalescePartitions.minPartitionNum`, is deprecated and outranked by minPartitionSize.
     props = spark_io.fanout_properties(4000)
-    assert props["spark.sql.adaptive.coalescePartitions.minPartitionNum"] == "4000"
+    assert props["spark.sql.adaptive.coalescePartitions.enabled"] == "false"
+    assert "spark.sql.adaptive.coalescePartitions.minPartitionNum" not in props
+
+
+def test_widening_the_shuffle_lifts_bucket_occupancy_from_two_thirds_to_six_sevenths() -> None:
+    """Why the factor exists, simulated on Spark's own partitioner (pure, no Spark).
+
+    A bucket lands in partition ``pmod(hash(bucket), width)``. At ``width == buckets`` that is
+    n balls into n bins, so ``(1 - 1/n)^n → 1/e`` of the bins stay empty and only ~63% of the
+    tasks in the stage do any work — the fan-out looks n-wide and runs 0.63n-wide. Widening the
+    shuffle costs nothing real (``applyInPandas`` is invoked once per group, not per partition)
+    and moves the expected non-empty count to ``3n(1 - e^(-1/3)) ≈ 0.85n``.
+    """
+
+    import zlib
+
+    def occupancy(n_buckets: int, width: int) -> float:
+        # crc32 stands in for Spark's murmur3 — the arithmetic is about a uniform hash, not about
+        # which uniform hash, and crc32 is deterministic across processes where `hash()` is not.
+        hit = {zlib.crc32(f"bucket-{i}".encode()) % width for i in range(n_buckets)}
+        return len(hit) / n_buckets
+
+    n = 4000
+    assert 0.60 < occupancy(n, n) < 0.67
+    widened = int(spark_io.fanout_properties(n)["spark.sql.shuffle.partitions"])
+    assert 0.82 < occupancy(n, widened) < 0.88
 
 
 def _fanout_cfg(**compute: Any) -> RunConfig:
     return _cfg(data={"source_table": "t", "series_limit": 100}, compute=compute)
 
 
-def test_widen_fanout_raises_the_count_and_pins_the_shuffle_to_the_raised_one() -> None:
+def test_widen_fanout_raises_the_count_and_sizes_the_shuffle_off_the_raised_one() -> None:
     spark = _SessionStub(
         {"spark.dynamicAllocation.maxExecutors": "50", "spark.executor.cores": "8"}
     )
     assert spark_explode._widen_fanout(_fanout_cfg(), spark, 40)["buckets"] == 400
-    # The pin must follow the *raised* count, not the policy count it started from.
-    assert spark.conf.get("spark.sql.shuffle.partitions") == "400"
+    # The width must follow the *raised* count, not the policy count it started from.
+    assert spark.conf.get("spark.sql.shuffle.partitions") == "1200"
 
 
-def test_widen_fanout_still_pins_the_shuffle_when_the_count_is_already_wide_enough() -> None:
-    # The raise and the pin are independent: a fan-out that needs no widening still needs its
+def test_widen_fanout_still_sets_the_shuffle_when_the_count_is_already_wide_enough() -> None:
+    # The raise and the width are independent: a fan-out that needs no widening still needs its
     # tasks to exist.
     spark = _SessionStub({"spark.dynamicAllocation.maxExecutors": "2", "spark.executor.cores": "4"})
     assert spark_explode._widen_fanout(_fanout_cfg(), spark, 500)["buckets"] == 500
-    assert spark.conf.get("spark.sql.shuffle.partitions") == "500"
+    assert spark.conf.get("spark.sql.shuffle.partitions") == "1500"
 
 
 def test_the_executed_fanout_record_carries_both_counts_and_the_confs_behind_them() -> None:
@@ -276,7 +454,7 @@ def test_the_executed_fanout_record_carries_both_counts_and_the_confs_behind_the
     assert record == {
         "buckets_policy": 40,
         "buckets": 200,  # 50 executors x (8 cores / 2 cpus-per-task)
-        "shuffle_partitions": 200,
+        "shuffle_partitions": 600,  # 3x the buckets — see fanout_properties on occupancy
         "max_executors": 50,
         "executor_cores": 8,
         "task_cpus": 2,
@@ -304,19 +482,20 @@ def test_widen_fanout_does_not_widen_when_profiling_is_off() -> None:
     assert spark_explode._widen_fanout(cfg, spark, 500)["buckets"] == 500
 
 
-def test_the_shuffle_pin_is_not_part_of_the_profiling_escape_hatch() -> None:
+def test_the_shuffle_width_is_not_part_of_the_profiling_escape_hatch() -> None:
     """Turning measurement off must not also turn the fan-out off.
 
-    The pin does not depend on any measurement — it says "the count we settled on is the count of
-    tasks", and without it Spark plans its default 200 however many buckets the cells were hashed
-    into. Skipping it here does not restore a pre-profiler run; it caps an unmeasured run at 200
-    tasks, which is a behaviour change smuggled in under a flag that reads as "measure nothing".
+    The width does not depend on any measurement — it says "the count we settled on is the count
+    of tasks", and without it Spark plans its default 200 however many buckets the cells were
+    hashed into. Skipping it here does not restore a pre-profiler run; it caps an unmeasured run
+    at 200 tasks, which is a behaviour change smuggled in under a flag that reads as "measure
+    nothing".
     """
     spark = _SessionStub({})
     cfg = _fanout_cfg(profile={"mode": "off"})
     assert spark_explode._widen_fanout(cfg, spark, 500)["buckets"] == 500
-    assert spark.conf.get("spark.sql.shuffle.partitions") == "500"
-    assert spark.conf.get("spark.sql.adaptive.coalescePartitions.minPartitionNum") == "500"
+    assert spark.conf.get("spark.sql.shuffle.partitions") == "1500"
+    assert spark.conf.get("spark.sql.adaptive.coalescePartitions.enabled") == "false"
 
 
 # --- run_group: tagged frame (cross-joined, model column present) ---------------
@@ -579,3 +758,111 @@ def test_read_source_series_caps_streams_when_read_max_streams_set(monkeypatch: 
     )
     spark_io.read_source_series(spark, cfg, _settings())
     assert spark.read.opts["maxParallelism"] == "3"
+
+
+# --- the source is cached across the driver's several actions ------------------
+
+
+class _RecordingSource:
+    """A DataFrame stand-in that records the order of the driver's calls against it.
+
+    Spark's laziness is the thing under test and it is invisible from a single call site — what
+    matters is the *sequence*: cache the relation before anything reads it, and release it after
+    the last read. A fake is the only way to see a sequence.
+    """
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+
+    def persist(self, level: Any) -> _RecordingSource:
+        self.log.append(f"persist:{level}")
+        return self
+
+    def unpersist(self) -> _RecordingSource:
+        self.log.append("unpersist")
+        return self
+
+
+def _explode_with_fakes(monkeypatch: Any, log: list[str], *, boom: bool = False) -> Any:
+    """Run the explode driver with every collaborator faked; return the recording source."""
+    from pyspark import StorageLevel
+
+    source = _RecordingSource(log)
+    cells = object()
+
+    def _read(spark: Any, cfg: Any, settings: Any) -> Any:
+        log.append("read")
+        return source
+
+    def _hpo(src: Any, cfg: Any, executed: list[str]) -> dict[str, Any]:
+        log.append("hpo")
+        assert src is source  # the cached relation, not a fresh read
+        return {}
+
+    def _cross(src: Any, cfg: Any, spark: Any, executed: list[str]) -> Any:
+        log.append("cross_join")
+        if boom:
+            raise RuntimeError("fan-out blew up")
+        return cells
+
+    class _Status:
+        def applyInPandas(self, runner: Any, schema: Any) -> Any:
+            return self
+
+        def toPandas(self) -> pd.DataFrame:
+            log.append("collect")
+            return pd.DataFrame(
+                {"ts_id": ["a"], "model_type": ["theta"], "status": ["ok"], "fit_seconds": [0.1]},
+                columns=list(STATUS_COLUMNS),
+            )
+
+    class _Cells:
+        def groupBy(self, col: str) -> _Status:
+            return _Status()
+
+    monkeypatch.setattr(spark_io, "read_source_series", _read)
+    monkeypatch.setattr(spark_io, "resolve_fleetwide_hpo", _hpo)
+    monkeypatch.setattr(spark_io, "cross_join_models", _cross)
+    monkeypatch.setattr(spark_io, "add_bucket", lambda cells, cfg, n, alloc=None: _Cells())
+    monkeypatch.setattr(spark_io, "make_group_runner", lambda *a, **k: None)
+    monkeypatch.setattr(spark_io, "status_schema", lambda: "schema")
+    # The cost weights are a registry read; this test is about the cache ordering, not evidence.
+    monkeypatch.setattr(spark_explode, "_cost_weights", lambda cfg, executed, settings: {})
+    monkeypatch.setattr(spark_explode, "_widen_fanout", lambda cfg, spark, n: {"buckets": 4})
+    monkeypatch.setattr(spark_explode, "_stamp_executed_fanout", lambda *a, **k: None)
+
+    cfg = _cfg(data={"source_table": "t", "freq": "D", "horizon": HORIZON, "series_limit": 5})
+    spark_explode.run(
+        cfg,
+        manage_header=False,  # contributor mode: no header writes, so no GCP
+        settings=_settings(),
+        spark=_SessionStub({}),  # injected → the engine must not stop it
+    )
+    assert log[1] == f"persist:{StorageLevel.MEMORY_AND_DISK}"
+    return source
+
+
+def test_the_source_is_cached_before_the_first_action_and_released_after_the_last(
+    monkeypatch: Any,
+) -> None:
+    """Persist right after the read, unpersist after the collect — nothing reads it uncached.
+
+    Four actions run against this relation (the series count, the HPO sample, the cross-join, and
+    the semi-join `series_limit` does inside it). Uncached, each one re-executes the BigQuery read.
+    """
+    log: list[str] = []
+    _explode_with_fakes(monkeypatch, log)
+    assert log[0] == "read"
+    assert log[1].startswith("persist:")
+    assert log[2:] == ["hpo", "cross_join", "collect", "unpersist"]
+
+
+def test_the_cache_is_released_even_when_the_fan_out_raises(monkeypatch: Any) -> None:
+    """An injected session outlives this call, so a leaked cache leaks in the caller's cluster."""
+    import pytest
+
+    log: list[str] = []
+    with pytest.raises(RuntimeError, match="fan-out blew up"):
+        _explode_with_fakes(monkeypatch, log, boom=True)
+    assert log[-1] == "unpersist"
+    assert "collect" not in log

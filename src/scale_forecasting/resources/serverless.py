@@ -141,13 +141,28 @@ def spark_tasks_per_executor(slot: ResourceSlot, cores: int) -> int:
     """Cells one Serverless executor runs at once (pure) — the number Spark will really honour.
 
     ``spark.task.cpus`` divides an executor's cores into task slots, and that division is the
-    *only* concurrency a Spark executor enforces. `slots_per_unit` answers the same question in
-    the plan's vocabulary and, on a GPU slot, answers it in device terms —
-    ``accelerators x floor(1 / gpu_fraction)`` — which is what the measurement *asked* for, not
-    what the legal core table *granted*: `_serverless_gpu_cores` snaps down, so the granted
-    packing is the smaller of the two. Sizing a fleet against the ask leaves it short of the
-    hardware it will actually get, so the Serverless planner and the translation both size
-    against this one number instead of each deriving their own.
+    *only* concurrency a Spark executor enforces. Nothing on the batch path tells Spark about
+    devices or about per-task memory, so the cores are the whole story here, and both the
+    Serverless planner and the translation size against this one number rather than each
+    deriving their own.
+
+    **This is the cores bound alone, and on a GPU slot it can exceed the device bound.**
+    `slots_per_unit` answers the same question for a Ray pool and takes the smallest of three
+    terms — device (``accelerators x floor(1 / gpu_fraction)``), cores, and memory. This takes
+    one. At a measured fraction of 0.5, one card seats 2 cells while an 8-core executor with a
+    1-core slot reports 8, and the extra 6 will contend for the device rather than be refused by
+    the scheduler. That divergence is deliberate, not an oversight:
+
+    * Ray is *told* a fraction and enforces it. Spark is not, so a bound stated here would have
+      to be imposed by raising ``spark.task.cpus`` — a real change to executor shape and count.
+    * The fraction is usually a nominal fallback rather than a measurement. Enforcing a
+      2-cells-per-card bound derived from a guess would multiply the GPU-executor count of every
+      unprofiled run, which is the live-green path. Whether to enforce it is therefore gated on
+      ``"gpu_fraction" in slot.measured``, and on comparing the cost both ways on live hardware —
+      correctness is offline, *value* is not.
+
+    Until then the honest reading of this number is "task slots the executor will hand out", not
+    "cells the hardware can serve".
     """
     return max(1, cores // max(1, min(slot.cores, cores)))
 

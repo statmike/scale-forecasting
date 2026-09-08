@@ -6,8 +6,8 @@ the interesting logic is offline-testable without a cluster, a GPU, or BigQuery:
 * **Pure** (no Ray, no Vertex, no GPU): `split_gpu_cpu_models` (which models want a GPU),
   `plan_cluster` (size an *autoscaling* cluster to the run's fan-out),
   `calibrate_gpu_fraction` (profile-driven ``num_gpus`` per NeuralProphet task,
-  unit-tested with injected memory numbers), `chunk_cells` (shuffle cells into task-sized
-  pandas frames), `make_chunk_runner` (the body one Ray task runs).
+  unit-tested with injected memory numbers), `chunk_cells` (shard the panel by series into
+  task-sized pandas frames), `make_chunk_runner` (the body one Ray task runs).
 * **Reuse, not re-implementation.** The executor-side work is the *exact* Spark core:
   `run_group` runs each cell, and the status roll-up is
   `aggregate_status`. A Ray "chunk" is the Spark "bucket"
@@ -673,18 +673,34 @@ def plan_cluster(
 def chunk_cells(
     source: pd.DataFrame, cfg: RunConfig, models: list[str], n_chunks: int
 ) -> list[pd.DataFrame]:
-    """Shuffle ``(series × models)`` cells into ``n_chunks`` task-sized pandas frames (pure).
+    """Shard the panel into ``n_chunks`` task-sized pandas frames, one Ray task each (pure).
 
-    The Ray analog of Spark's cross-join + bucket, done in pandas on the driver: replicate the
-    source once per model (tagging each copy with `_MODEL_COL`), then assign every
-    ``(ts_id, model)`` cell to a chunk by a stable CRC32 of its key so a cell's whole history lands
-    in one chunk. Each returned frame carries `_MODEL_COL`, so `run_group` takes its
-    per-cell explode branch over it — identical to what a Spark bucket feeds. Empty chunks are
-    dropped; an empty ``models`` or empty source yields ``[]``.
+    **Chunks are assigned by series, not by cell.** Each distinct ``ts_id`` gets a chunk index from
+    a stable CRC32 of the id (deterministic across processes, unlike ``hash()``), the index is
+    mapped back onto the panel, and one ``groupby`` splits it. The frames come back **untagged** —
+    no `_MODEL_COL` — so `run_group` takes its per-series loop over the executed model list. The
+    caller must therefore build one runner per pool, with that pool's models, or a chunk would run
+    models that belong to the other pool.
 
-    ``n_chunks`` is clamped to ``[1, _MAX_CHUNKS]``. Cross-joining in memory is bounded by
-    ``series_limit`` for demos; Ray is not the 100k hero path (that's Spark), so a
-    driver-side replicate is acceptable here.
+    The reason this is not a cross-join. Tagging cells means materializing one copy of the whole
+    panel per model on the driver before anything is shipped anywhere: at 2,000 series × 1,460 rows
+    × 4 models that measured 8.39 s and +2,416 MB of driver RAM, against 0.52 s and +185 MB for the
+    per-series shard — 16× the time and ~13× the incremental memory, for frames that then cost 4×
+    the object-store bytes because every row crosses the wire once per model. The cell set is
+    identical either way; only who does the replication changes, and a Ray task replicating its own
+    handful of series is free.
+
+    **The fallback.** When ``n_chunks > n_series`` there are not enough series to fill the requested
+    task count, and the count is not decoration — it is what keeps enough tasks pending for the pool
+    to reach its autoscaling ceiling (`tasks_for_ceiling`). So that case cross-joins as before and
+    returns *tagged* frames, buying finer-than-series granularity at the cost that made the default
+    path expensive. It only fires on small panels, where the cost does not matter.
+
+    Empty chunks are dropped; an empty ``models`` or empty source yields ``[]``. ``n_chunks`` is
+    clamped to ``[1, _MAX_CHUNKS]``. **Chunk composition is not part of the contract** — which
+    series land together, and whether frames arrive tagged, are implementation details that have
+    already changed once. What is contractual: the union of the chunks covers every
+    ``(series, model)`` cell exactly once, and each series' full history is in exactly one chunk.
     """
     import pandas as pd
 
@@ -693,20 +709,33 @@ def chunk_cells(
 
     id_col = cfg.data.ts_id_col
     n_chunks = max(1, min(n_chunks, _MAX_CHUNKS))
+    ids = source[id_col].astype(str)
+    distinct = ids.drop_duplicates()
 
-    # Cross-join: one tagged copy of the source per model (a handful of models, so this is cheap).
-    tagged = pd.concat(
-        [source.assign(**{_MODEL_COL: model}) for model in models], ignore_index=True
-    )
+    if n_chunks > len(distinct):
+        # Fallback: more tasks wanted than there are series. Cross-join to cell granularity — one
+        # tagged copy of the source per model — and shard on the (ts_id, model) key.
+        tagged = pd.concat(
+            [source.assign(**{_MODEL_COL: model}) for model in models], ignore_index=True
+        )
+        keys = tagged[id_col].astype(str) + "\x00" + tagged[_MODEL_COL].astype(str)
+        assignment = keys.map(lambda k: zlib.crc32(k.encode("utf-8")) % n_chunks)
+        return _split_on(tagged, assignment)
 
-    # Stable per-cell chunk index: CRC32 of "<ts_id>\x00<model>" (deterministic across processes,
-    # unlike hash()). Keeps a cell's full history in one chunk so run_group sees a whole series.
-    keys = tagged[id_col].astype(str) + "\x00" + tagged[_MODEL_COL].astype(str)
-    tagged["_sf_chunk"] = keys.map(lambda k: zlib.crc32(k.encode("utf-8")) % n_chunks)
+    by_id = {ts_id: zlib.crc32(ts_id.encode("utf-8")) % n_chunks for ts_id in distinct}
+    return _split_on(source, ids.map(by_id))
 
+
+def _split_on(frame: pd.DataFrame, assignment: pd.Series) -> list[pd.DataFrame]:
+    """Split ``frame`` into one frame per distinct value of ``assignment``, in index order (pure).
+
+    The assignment rides alongside rather than in a column so the returned frames carry exactly the
+    columns they arrived with — a chunk is handed straight to `run_group`, which would otherwise
+    have to know to drop a helper it never asked for.
+    """
     chunks: list[pd.DataFrame] = []
-    for _idx, frame in tagged.groupby("_sf_chunk", sort=True):
-        chunks.append(frame.drop(columns=["_sf_chunk"]).reset_index(drop=True))
+    for _idx, rows in frame.groupby(assignment.to_numpy(), sort=True):
+        chunks.append(rows.reset_index(drop=True))
     return chunks
 
 
@@ -725,9 +754,11 @@ def make_chunk_runner(
     compose), and returns only the compact status frame so no forecast payload crosses back to the
     driver.
 
-    ``models`` is forwarded to `run_group` for parity with the Spark path; since chunks always
-    carry `_MODEL_COL`, ``run_group`` takes its explode branch and the subset only matters if
-    a chunk ever arrived without the tag.
+    ``models`` is **load-bearing on the Ray path**, not the parity nicety it is on Spark. Chunks
+    from `chunk_cells` arrive untagged, so ``run_group`` takes its per-series loop and runs exactly
+    the models in this list — which means a runner must be built per pool, with that pool's models.
+    (The one exception is the small-panel fallback, where chunks do carry `_MODEL_COL` and the tag
+    wins; passing the pool's list is right either way.)
 
     ``params_by_model`` is the fleetwide-HPO resolution, captured in the closure like ``cfg`` /
     ``settings`` and forwarded to `run_group` — the Ray twin of the Spark group runner's

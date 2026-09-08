@@ -597,29 +597,68 @@ def _source(n_series: int, rows_each: int = 3) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def test_chunk_cells_tags_model_and_covers_every_cell() -> None:
-    src = _source(4)
-    chunks = ray_io.chunk_cells(src, _cfg(), [_CPU, _GPU], n_chunks=3)
-    assert all(_MODEL_COL in c.columns for c in chunks)
-    # 4 series × 2 models = 8 cells, each a distinct (ts_id, model) across all chunks.
-    seen = set()
-    for c in chunks:
-        for (ts_id, model), _sub in c.groupby(["ts_id", _MODEL_COL]):
-            seen.add((ts_id, model))
-    assert len(seen) == 8
+def _cells(chunks: list[pd.DataFrame], models: list[str]) -> list[tuple[str, str]]:
+    """Every (ts_id, model) cell the chunks will run, as a list so duplicates are visible.
+
+    Mirrors what `run_group` does with each frame: a tagged chunk runs the cells its tag column
+    names; an untagged one runs every model in the runner's list, once per series.
+    """
+    out: list[tuple[str, str]] = []
+    for chunk in chunks:
+        if _MODEL_COL in chunk.columns:
+            out += [
+                (str(a), str(b)) for a, b in chunk[["ts_id", _MODEL_COL]].drop_duplicates().values
+            ]
+        else:
+            out += [(str(ts_id), m) for ts_id in chunk["ts_id"].unique() for m in models]
+    return out
 
 
-def test_chunk_cells_keeps_a_cells_history_together() -> None:
-    src = _source(3, rows_each=5)
-    chunks = ray_io.chunk_cells(src, _cfg(), [_CPU], n_chunks=5)
-    # Every (ts_id, model) cell appears in exactly one chunk, with its full 5-row history.
-    locations: dict[tuple[str, str], int] = {}
-    for idx, c in enumerate(chunks):
-        for key, sub in c.groupby(["ts_id", _MODEL_COL]):
+def test_chunk_cells_covers_every_cell_exactly_once() -> None:
+    # The one contractual property: the chunks a pool gets, run against that pool's models, are
+    # the pool's cell set — no cell missed, no cell run twice on two workers.
+    models = [_CPU, _GPU]
+    chunks = ray_io.chunk_cells(_source(20), _cfg(), models, n_chunks=6)
+    cells = _cells(chunks, models)
+    assert sorted(cells) == sorted((f"s{i}", m) for i in range(20) for m in models)
+    assert len(cells) == len(set(cells))
+
+
+def test_chunk_cells_shards_by_series_not_by_cell() -> None:
+    # The 5.1 change itself: no cross-join, so no model tag and one copy of each row. The frames
+    # a chunk carries are a subset of the panel's rows, not a replicate of them.
+    src = _source(20)
+    chunks = ray_io.chunk_cells(src, _cfg(), [_CPU, _GPU], n_chunks=6)
+    assert all(_MODEL_COL not in c.columns for c in chunks)
+    assert sum(len(c) for c in chunks) == len(src)  # not len(src) × 2 models
+
+
+def test_chunk_cells_keeps_a_series_history_together() -> None:
+    src = _source(12, rows_each=5)
+    chunks = ray_io.chunk_cells(src, _cfg(), [_CPU], n_chunks=4)
+    # Each series is whole and in exactly one chunk — a model fit on half a history is not a
+    # slower run, it is a wrong number.
+    locations: dict[str, int] = {}
+    for idx, chunk in enumerate(chunks):
+        for ts_id, sub in chunk.groupby("ts_id"):
             assert len(sub) == 5
-            locations.setdefault(key, idx)  # type: ignore[arg-type]
-            assert locations[key] == idx  # never split across chunks
-    assert len(locations) == 3
+            assert str(ts_id) not in locations
+            locations[str(ts_id)] = idx
+    assert len(locations) == 12
+
+
+def test_chunk_cells_falls_back_to_tagging_when_more_tasks_than_series() -> None:
+    # Below one series per task, per-series sharding cannot reach the requested task count — and
+    # that count is what keeps the pool's autoscaler fed. So this case cross-joins to cell
+    # granularity and tags, buying the finer split at the cost the default path avoids.
+    models = [_CPU, _GPU]
+    chunks = ray_io.chunk_cells(_source(3), _cfg(), models, n_chunks=6)
+    assert all(_MODEL_COL in c.columns for c in chunks)
+    # More tasks than there are series, which per-series sharding could not produce at any
+    # n_chunks. Not all six: CRC32 modulo leaves some slots empty and empty chunks are dropped,
+    # which is why the count is a floor to aim at and never a promise.
+    assert len(chunks) > 3
+    assert sorted(_cells(chunks, models)) == sorted((f"s{i}", m) for i in range(3) for m in models)
 
 
 def test_chunk_cells_is_deterministic() -> None:

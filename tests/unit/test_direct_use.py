@@ -75,14 +75,14 @@ def test_run_group_untagged_runs_every_model_per_series() -> None:
     assert len(status) == 4
 
 
-# --- run_group: cell-tagged embedding via chunk_cells --------------------------
+# --- run_group: chunked embedding via chunk_cells ------------------------------
 
 
-def test_run_group_tagged_via_chunk_cells() -> None:
+def test_run_group_over_a_chunk_runs_the_pools_cells() -> None:
     cfg = _cfg()
     chunks = chunk_cells(_source("series-a", "series-b"), cfg, _MODELS, n_chunks=1)
-    assert len(chunks) == 1  # one chunk holds all 4 cells
-    results, _status = run_group(chunks[0], cfg)  # models come from the tag column, not the arg
+    assert len(chunks) == 1  # one chunk holds both series
+    results, _status = run_group(chunks[0], cfg, models=_MODELS)
     assert len(results) == 4
     assert {(r.ts_id, r.model_type) for r in results} == {
         ("series-a", "theta"),
@@ -90,6 +90,33 @@ def test_run_group_tagged_via_chunk_cells() -> None:
         ("series-b", "theta"),
         ("series-b", "holtwinters"),
     }
+
+
+def test_a_chunk_runs_the_same_cells_tagged_or_untagged() -> None:
+    """The equivalence 5.1 rests on: dropping the model tag changed the packing, not the work.
+
+    `chunk_cells` used to cross-join the panel and hand `run_group` a tagged frame; it now shards
+    by series and hands it an untagged one. Those are two different code paths inside `run_group`
+    — the tag branch and the loop branch — so the claim that this is a packing change and not a
+    behaviour change has to be demonstrated, not asserted. Same cells in, same results out,
+    including the numbers.
+    """
+    cfg = _cfg()
+    panel = _source("series-a", "series-b")
+    untagged, _ = run_group(panel, cfg, models=_MODELS)
+
+    tagged_frame = pd.concat(
+        [panel.assign(_sf_model=model) for model in _MODELS], ignore_index=True
+    )
+    tagged, _ = run_group(tagged_frame, cfg)
+
+    def _key(results: list[CellResult]) -> dict[tuple[str, str], Any]:
+        return {
+            (r.ts_id, r.model_type): (r.status, r.model_hash, tuple(r.predictions["yhat"]))
+            for r in results
+        }
+
+    assert _key(untagged) == _key(tagged)
 
 
 # --- run_cell: the unit of work never raises on a bad model --------------------

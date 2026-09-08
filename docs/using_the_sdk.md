@@ -162,14 +162,23 @@ the SDK. The stable surface is:
 | `run_group(pdf, cfg, models=None, params_by_model=None)` | pure: run every cell in one pandas frame; returns `(list[CellResult], status_frame)` |
 | `make_group_runner(cfg, settings, ...)` | builds the `applyInPandas` closure: `run_group` + write results, returns the status frame |
 | `make_chunk_runner(cfg, settings, ...)` | the Ray twin of `make_group_runner`, for a `@ray.remote` task |
-| `chunk_cells(source, cfg, models, n_chunks)` | pure: shuffle `(series × models)` into task-sized frames (advanced/explode embedding) |
+| `chunk_cells(source, cfg, models, n_chunks)` | pure: shard a panel by series into task-sized frames, one per parallel task |
 
 There are two embedding modes:
 
 - **Naive (recommended):** hand `run_group` a chunk of whole series plus `models=[...]`; it loops
   every model per series. This is the simplest shape for your own `applyInPandas` / `@ray.remote`.
-- **Explode (advanced):** pre-tag with `chunk_cells(...)` to get cell-level fan-out. Each tagged
-  frame carries one `(ts_id, model)` cell per group, so `run_group` takes its per-cell branch.
+- **Explode (advanced):** pre-tag rows with an `_sf_model` column to get cell-level fan-out. A
+  tagged frame carries one `(ts_id, model)` cell per group, so `run_group` takes its per-cell
+  branch and the `models=` argument is ignored.
+
+`chunk_cells` is the sharder the Ray engine itself uses: it assigns each distinct `ts_id` to one
+chunk, so a series' whole history stays together and the panel is split, not replicated. Pass it
+the models the *resulting runner* will run, and pass that same list to `make_chunk_runner` — the
+frames come back untagged, so the runner's model list is what each chunk actually runs. **Which
+series land in which chunk, and whether frames come back tagged, are not part of the contract**
+(below one series per chunk it falls back to tagged cell-level frames). What is guaranteed: every
+`(series, model)` cell appears exactly once across the chunks, and no series is split across two.
 
 ### Spark — your own `applyInPandas`
 
@@ -213,11 +222,12 @@ import scale_forecasting as sf
 cfg = sf.load_config("configs/ray_cpu_demo.json")
 settings = sf.Settings.resolve()
 
-# Shuffle (series × models) into task-sized chunks, then run one task per chunk.
+# Shard the panel by series into task-sized chunks, then run one task per chunk.
 source_pdf = ...  # a pandas frame with columns [ts_id, ds, y]
 chunks = sf.chunk_cells(source_pdf, cfg, cfg.models, n_chunks=64)
 
-runner = sf.make_chunk_runner(cfg, settings)
+# Same model list to both calls: the chunks are untagged, so this is what each task runs.
+runner = sf.make_chunk_runner(cfg, settings, cfg.models)
 run_remote = ray.remote(runner)
 statuses = ray.get([run_remote.remote(chunk) for chunk in chunks])
 ```

@@ -43,6 +43,7 @@ from scale_forecasting.registry.rows import (
 from scale_forecasting.registry.write_api import (
     _META_SPEC,
     _OOF_SPEC,
+    _PRED_SPEC,
     _WRITE_RETRY_ATTEMPTS,
     _append_via_write_api,
     _encode_rows,
@@ -825,6 +826,60 @@ def test_orphans_are_the_gcs_ids_the_registry_does_not_know():
 
 def test_no_orphans_when_every_prefix_has_a_row():
     assert artifacts.orphan_run_ids(["r1", "r2"], ["r1", "r2", "r3"]) == ()
+
+
+# --- the write path's per-bucket setup cost -------------------------------------
+#
+# `write_cells` runs once per Spark bucket / Ray chunk — 62,500 times on a 100k run. Everything it
+# rebuilt per call was setup to reach the same endpoint with the same three schemas.
+
+
+def test_a_repeat_call_hands_back_the_same_descriptor_rather_than_rebuilding_it() -> None:
+    first_cls, first_desc = _proto_for("backtest_oof", _OOF_SPEC)
+    second_cls, second_desc = _proto_for("backtest_oof", _OOF_SPEC)
+    assert first_cls is second_cls
+    assert first_desc is second_desc
+
+
+def test_the_cached_class_still_encodes_rows_independently() -> None:
+    """Sharing the class must not share state — every row still gets its own message."""
+    msg_cls, _desc = _proto_for("backtest_oof", _OOF_SPEC)
+    rows = [
+        {"run_id": "r", "ts_id": "s1", "model_type": "theta", "fold_id": 0},
+        {"run_id": "r", "ts_id": "s2", "model_type": "theta", "fold_id": 1},
+    ]
+    serialized = _encode_rows(msg_cls, _OOF_SPEC, rows)
+    assert len(serialized) == 2
+    assert serialized[0] != serialized[1]
+
+
+def test_distinct_specs_still_get_their_own_pool_under_the_cache() -> None:
+    """The private-pool isolation is what the cache must not break.
+
+    Each build registers a ``<table>.proto`` file. Two specs sharing one pool would collide on the
+    duplicate file name — which is why the pool is per-call — and a cache keyed on the table name
+    alone would hand the second spec the first one's class. The key is ``(table, spec)``, so even
+    the same table under two different specs stays separate.
+    """
+    pred_cls, _ = _proto_for("forecast_predictions", _PRED_SPEC)
+    oof_cls, _ = _proto_for("backtest_oof", _OOF_SPEC)
+    assert pred_cls is not oof_cls
+
+    shrunk = _OOF_SPEC[:3]
+    same_table_other_spec, _ = _proto_for("backtest_oof", shrunk)
+    assert same_table_other_spec is not oof_cls
+    assert len(same_table_other_spec.DESCRIPTOR.fields) == 3
+
+
+def test_no_write_client_exists_until_something_asks_for_one() -> None:
+    """The lazy-after-fork requirement, asserted rather than commented.
+
+    A `BigQueryWriteClient` opens a gRPC channel with background threads. PySpark forks its Python
+    workers from a daemon, and a channel built before that fork is inherited unusable. Importing
+    the module must therefore build nothing — the client appears at first *use*, inside whichever
+    process is doing the writing.
+    """
+    assert write_api._write_client is None
 
 
 # --- Storage Write API retry-on-transient (_append_via_write_api) ---------------

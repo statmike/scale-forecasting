@@ -1171,6 +1171,21 @@ def test_the_serverless_density_is_the_executors_task_slots_not_its_devices() ->
     assert serverless.spark_tasks_per_executor(slot, 8) == 8
 
 
+def test_the_serverless_density_can_exceed_what_one_card_seats_and_that_is_on_purpose() -> None:
+    """The known gap, pinned so nobody closes it by accident.
+
+    Spark is never told about the device, so this reports the executor's task slots — 8 — while
+    the measured fraction says one card seats 2. `slots_per_unit` would take the smaller; the
+    batch path deliberately does not, because imposing it means raising ``spark.task.cpus`` and
+    multiplying the GPU-executor count of every run whose fraction is a nominal fallback rather
+    than a measurement. Closing this belongs with the ``measured``-gated version and a live cost
+    comparison, not with a one-line ``min``.
+    """
+    slot = _slot("deep_learning", cores=1, gpu_fraction=0.5)
+    assert serverless.spark_tasks_per_executor(slot, 8) == 8  # cores bound
+    assert int(1 / 0.5) == 2  # device bound, not applied here
+
+
 def test_a_threaded_family_takes_whole_task_slots_at_a_time() -> None:
     slot = _slot("ml", cores=6)
     assert serverless.spark_tasks_per_executor(slot, 8) == 1

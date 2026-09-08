@@ -12,7 +12,7 @@ Split along the pure/I-O seam so the interesting logic is offline-testable:
   `add_bucket`, `cross_join_models`, `status_schema`, `make_group_runner`.
 
 **Fan-out mechanics.** The engine shuffles cells into *buckets* and runs one Spark task per bucket
-(``groupBy(bucket).applyInPandas``, with the shuffle width pinned to the bucket count by
+(``groupBy(bucket).applyInPandas``, with the shuffle width set from the bucket count by
 `fanout_properties` — Spark would otherwise plan its default 200 tasks whatever the bucket count
 is, and the fan-out would be a fiction). The bucket key is the natural unit of independence
 (`bucket_key_cols`): a cell — ``(ts_id, model_type)``. A slow ``(series, deep-model)`` cell lands in
@@ -34,6 +34,7 @@ expose (so the same engine runs both as a Dataproc batch and driven over a Conne
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
 
     from ..config import RunConfig
+    from ..profiling.cost import ComputeProfile
     from ..settings import Settings
     from ..worker import CellResult
 
@@ -72,14 +74,18 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
 
 
 def default_bucket_count(
-    cfg: RunConfig, models: list[str] | None = None, *, n_series: int | None = None
+    cfg: RunConfig,
+    models: list[str] | None = None,
+    *,
+    n_series: int | None = None,
+    weights: dict[str, float] | None = None,
 ) -> int:
     """Bucket count that keeps each ``applyInPandas`` frame bounded as scale grows.
 
     Buckets are *groups*, not executor concurrency (that's
     ``spark.dynamicAllocation.maxExecutors``): each bucket is materialized as one pandas frame in
     one ``run_group`` call, so its size — not the cluster width — is what OOMs an executor. (A
-    group only becomes a *task* because `fanout_properties` pins the shuffle width to match;
+    group only becomes a *task* because `fanout_properties` sets the shuffle width from this;
     Spark's own default would run the whole fan-out in 200 tasks whatever this returns.) We size
     buckets to hold ~``compute.bucket_target_cells`` cells each: ``buckets = ceil(cells / target)``.
     That holds ~``target`` series-histories per frame at *every* scale (1k and 100k alike), instead
@@ -105,6 +111,19 @@ def default_bucket_count(
     (`spark_explode._estimated_series`), and neither belongs inside a sizing rule that every
     offline test calls.
 
+    **``weights`` makes the target per-model** (`model_cost_weights` → `_slice_weights`). One
+    target for every model treats eight ``naive`` cells and eight deep-learning cells as the same
+    unit of work, and they are not; a model measured at 4× the typical cell gets its own target of
+    ``target / 4`` and therefore four times the buckets, so the count is
+    ``sum(ceil(series / target_m))`` instead of ``ceil(series × models / target)``. Because the
+    weights are floored at 1.0 nothing ever gets a *bigger* target than ``bucket_target_cells``, so
+    this can only raise the count — the frame-size bound this whole function exists to hold is
+    unchanged, and the extra buckets are the finer cutting of the slow models.
+
+    ``None`` weights, or weights that are all equal, take the flat arithmetic byte-for-byte: the
+    caller has no evidence, and ``sum(ceil(series/target))`` and ``ceil(series×models/target)``
+    differ by rounding alone, which is not a difference worth introducing to a live-proven path.
+
     This is the *policy* number. `reachable_bucket_count` then raises it if the cluster it is
     about to run on is wider than the policy would keep busy.
     """
@@ -113,8 +132,12 @@ def default_bucket_count(
     series = cfg.data.series_limit if cfg.data.series_limit is not None else n_series
     if series is None:
         return max(1, min(cfg.compute.max_parallelism, _MAX_BUCKETS))
-    cells = series * len(executed)
-    return max(1, min(math.ceil(cells / target), _MAX_BUCKETS))
+    if _uniform_weights(executed, weights):
+        cells = series * len(executed)
+        return max(1, min(math.ceil(cells / target), _MAX_BUCKETS))
+    shares = _slice_weights(executed, weights or {})
+    per_model = sum(math.ceil(series * share / target) for share in shares.values())
+    return max(1, min(per_model, _MAX_BUCKETS))
 
 
 def reachable_bucket_count(
@@ -144,8 +167,134 @@ def reachable_bucket_count(
     return max(1, min(max(buckets, max_executors * per_executor), _MAX_BUCKETS))
 
 
+def model_cost_weights(models: list[str], profile: ComputeProfile | None) -> dict[str, float]:
+    """What one cell of each model costs, relative to a typical cell of this run (pure).
+
+    ``1.0`` means "an average cell of this run"; ``4.0`` means "four times that". The reference is
+    the **median** of the measured per-cell wall times, not the mean, so one deep-learning model
+    fifty times slower than the rest sets its own weight to fifty rather than dragging the
+    reference up and making every other model look free.
+
+    A model the profile never measured gets exactly ``1.0`` — the typical cell — which is what
+    makes an unmeasured model fall back to the global ``bucket_target_cells``. No profile at all,
+    or a profile with no usable wall times, returns ``1.0`` for everything, and `allocate_buckets`
+    reads an all-equal mapping as "no allocation", so the run keeps today's flat hash exactly.
+
+    Non-positive and non-finite readings are dropped rather than clamped. A zero would make a
+    model's weight zero and its bucket slice one bucket wide however many series it has, which is
+    the opposite of what the number is saying; "we measured something impossible" is the same
+    state as "we measured nothing".
+    """
+    measured: dict[str, float] = {}
+    if profile is not None:
+        for name in models:
+            cost = profile.models.get(name)
+            wall = cost.median_wall_s if cost is not None else None
+            if wall is not None and math.isfinite(wall) and wall > 0:
+                measured[name] = float(wall)
+    if not measured:
+        return dict.fromkeys(models, 1.0)
+    reference = statistics.median(measured.values())
+    return {name: measured.get(name, reference) / reference for name in models}
+
+
+def _slice_weights(models: list[str], weights: dict[str, float]) -> dict[str, float]:
+    """Cost weights floored at 1.0 — the share of the bucket space each model gets (pure).
+
+    **Only expensive models are cut finer; cheap ones are never cut coarser.** The floor is what
+    keeps this a scheduling change and not a memory change. A bucket is materialized as one pandas
+    frame, and ``bucket_target_cells`` is the number that bounds it (`default_bucket_count` exists
+    because an unbounded frame OOM'd the 100k run). Honouring a weight of 0.1 literally would hand
+    ``naive`` a tenth of the buckets and therefore ten times the cells per frame — trading a
+    scheduling imbalance nobody has been hurt by for the failure mode that already cost us a run.
+    So a below-typical model keeps the global target exactly, and the balancing works by giving
+    the *slow* models more buckets rather than the fast ones fewer.
+    """
+    return {name: max(1.0, weights.get(name, 1.0)) for name in models}
+
+
+def _uniform_weights(models: list[str], weights: dict[str, float] | None) -> bool:
+    """True when the weights say nothing — no evidence, or every model measured the same (pure)."""
+    if not weights:
+        return True
+    return len({round(w, 9) for w in _slice_weights(models, weights).values()}) <= 1
+
+
+def allocate_buckets(
+    models: list[str], n_buckets: int, weights: dict[str, float]
+) -> dict[str, tuple[int, int]]:
+    """Give each model a contiguous slice of the bucket space, sized by what its cells cost (pure).
+
+    Returns ``{model: (offset, width)}``. The slices tile ``[0, n_buckets)`` exactly — no gap, no
+    overlap — because they *are* the bucket space: a cell's bucket is ``offset + pmod(hash(ts_id),
+    width)`` (`add_bucket`), so a slice that overlapped its neighbour would put two models'
+    cells in one ``applyInPandas`` frame and a gap would leave a task with nothing to do.
+
+    **Why per-model at all.** Wall clock on an embarrassingly-parallel fan-out is set by the
+    slowest bucket, not the average one. One flat hash gives every bucket the same *number* of
+    cells, which is only the same amount of *work* if every model costs the same — and they do
+    not: eight cells of a deep-learning model and eight cells of ``naive`` are a hundred-fold
+    apart. Each model keeps the same total cells either way; what changes is how finely they are
+    cut. A model whose cells cost 4× the typical one gets 4× the buckets, so ¼ the cells per
+    bucket, so a bucket of *its* cells takes about as long as a bucket of anyone else's.
+
+    Width is proportional to weight — not inversely — even though the *target cells per bucket*
+    is inversely proportional. Both statements are the same one: a model holds a fixed number of
+    cells, so cutting them into more buckets is exactly what puts fewer in each. The weights are
+    floored at 1.0 first (`_slice_weights`), so no model ends up with a *fatter* frame than the
+    flat hash would have given it.
+
+    ``n_buckets`` is the count the run settled on — `default_bucket_count` sized it from these same
+    weights, and `reachable_bucket_count` may then have raised it for the autoscaler. Taking it as
+    given rather than re-deriving it means a widened run's extra buckets are shared out in the same
+    proportions instead of landing on whichever model the arithmetic happened to round up.
+
+    **``{}`` means "no allocation, use the flat hash".** Two cases return it, and both are the
+    honest answer rather than a degenerate slice:
+
+    * Every weight equal — nothing was measured, or everything measured the same. Equal slices
+      would buy nothing over the flat hash and would cost the mixing the flat hash gives (which
+      spreads each model over the *whole* space instead of pinning it to a sixth of it).
+    * Fewer buckets than models. There is no allocation in which every model gets a bucket, and a
+      model with no bucket has nowhere to put its cells.
+
+    Apportionment is largest-remainder over the exact shares, with a floor of one bucket per
+    model, so the widths are deterministic given the same inputs and never round a model out of
+    existence. Ties break on model name, so two models with identical weights always land the
+    same way round.
+    """
+    if not models or n_buckets < len(models) or _uniform_weights(models, weights):
+        return {}
+
+    shares = _slice_weights(models, weights)
+    total = sum(shares.values())
+    exact = {m: n_buckets * shares[m] / total for m in models}
+    widths = {m: max(1, math.floor(exact[m])) for m in models}
+
+    short = n_buckets - sum(widths.values())
+    if short > 0:  # hand the leftovers to the largest fractional parts, one each
+        by_remainder = sorted(models, key=lambda m: (-(exact[m] % 1), m))
+        for i in range(short):
+            widths[by_remainder[i % len(by_remainder)]] += 1
+    while short < 0:  # the one-bucket floor overspent; take it back from the widest slice
+        widest = max(models, key=lambda m: (widths[m], m))
+        widths[widest] -= 1
+        short += 1
+
+    allocation: dict[str, tuple[int, int]] = {}
+    offset = 0
+    for name in models:
+        allocation[name] = (offset, widths[name])
+        offset += widths[name]
+    return allocation
+
+
+_SHUFFLE_WIDTH_FACTOR = 3
+"""Shuffle partitions per bucket. See `fanout_properties` for where the 3 comes from."""
+
+
 def fanout_properties(buckets: int) -> dict[str, str]:
-    """The Spark confs that make one bucket one *task* (pure).
+    """The Spark confs that make each bucket land in a task of its own (pure).
 
     ``groupBy(bucket).applyInPandas`` is a shuffle, and a shuffle stage's task count is
     ``spark.sql.shuffle.partitions`` — **not** the number of distinct groups. Nothing about
@@ -156,14 +305,27 @@ def fanout_properties(buckets: int) -> dict[str, str]:
     `reachable_bucket_count` guards from the other side, and raising the bucket count alone
     would not have moved it.
 
-    So the width is stated outright. The AQE floor goes with it because coalescing would undo
-    the pin from underneath: each partition here holds a whole bucket's cells, and merging
-    partitions serialises cells that were meant to run side by side. It costs nothing when the
-    partitions are genuinely small — that is what `default_bucket_count` is for.
+    So the width is stated outright — and stated **wider than the bucket count**, because setting
+    it *equal* was still leaving a third of the fleet idle. Buckets hash into partitions, and
+    hashing n items into n slots leaves ``(1 - 1/n)^n → 1/e`` of the slots empty: only ~0.63n
+    partitions carry anything, so ~0.63n tasks run and the rest of the stage is empty tasks. Widen
+    the shuffle to 3n and the expected non-empty count rises to ``3n(1 - e^(-1/3)) ≈ 0.85n``. The
+    extra partitions are free in the way that matters here: ``applyInPandas`` invokes the runner
+    once per *group*, not per partition, so the pandas frames, the per-bucket ``write_cells`` calls
+    and the total work are all unchanged — only the container they are scheduled in gets finer.
+    Raising the bucket count instead would buy the same occupancy by making the actual work
+    finer-grained, which multiplies the per-bucket write cost. This is the cheaper half.
+
+    AQE coalescing is turned off outright rather than floored. The old floor key
+    ``coalescePartitions.minPartitionNum`` is deprecated (Spark honours
+    ``minPartitionSize``/``parallelismFirst`` ahead of it), and a floor
+    was always the wrong shape anyway: a partition here holds a whole bucket's cells, so merging
+    partitions serialises cells that were meant to run side by side. ``enabled=false`` says that
+    once, in the currently supported key.
     """
     return {
-        "spark.sql.shuffle.partitions": str(buckets),
-        "spark.sql.adaptive.coalescePartitions.minPartitionNum": str(buckets),
+        "spark.sql.shuffle.partitions": str(buckets * _SHUFFLE_WIDTH_FACTOR),
+        "spark.sql.adaptive.coalescePartitions.enabled": "false",
     }
 
 
@@ -178,10 +340,11 @@ def run_group(
 ) -> tuple[list[CellResult], pd.DataFrame]:
     """Run every cell in one group's pandas frame; pure — no Spark, no BigQuery.
 
-    The frame is one bucket's rows. If it carries the internal model column (the series were
-    cross-joined with the model list, as the Spark/Ray fan-out does), each ``(ts_id, model_type)``
-    sub-frame is one cell. Otherwise — an untagged frame, e.g. direct SDK use — every model in the
-    executed list is run for each ``ts_id`` in a loop. Helper columns are dropped so each sub-frame
+    The frame is one bucket's (Spark) or one chunk's (Ray) rows. If it carries the internal model
+    column — the series were cross-joined with the model list, as the Spark fan-out does — each
+    ``(ts_id, model_type)`` sub-frame is one cell. On an untagged frame — the Ray fan-out, which
+    shards by series, and direct SDK use — every model in the executed list is run for each
+    ``ts_id`` in a loop. Helper columns are dropped so each sub-frame
     is a clean series frame for `run_cell` (which derives the run_id from ``cfg`` itself, so no
     id needs threading here). Returns the `CellResult` list (for the writer) and the compact
     `STATUS_COLUMNS` frame (for the driver's header roll-up). Never raises per cell —
@@ -408,17 +571,43 @@ def cross_join_models(
     return df.crossJoin(F.broadcast(models_df))
 
 
-def add_bucket(df: DataFrame, cfg: RunConfig, n_buckets: int) -> DataFrame:
-    """Add ``_BUCKET_COL`` = ``pmod(hash(<key cols>), n_buckets)`` (see `bucket_key_cols`).
+def add_bucket(
+    df: DataFrame,
+    cfg: RunConfig,
+    n_buckets: int,
+    allocation: dict[str, tuple[int, int]] | None = None,
+) -> DataFrame:
+    """Add ``_BUCKET_COL`` — the ``groupBy`` key the engines run one task per.
 
+    Without an ``allocation``: ``pmod(hash(<key cols>), n_buckets)`` (see `bucket_key_cols`).
     Spark's ``hash`` keeps identical keys together (so a cell's full history shares a bucket) and
-    ``pmod`` folds it into ``[0, n_buckets)`` non-negative. The bucket is the ``groupBy`` key the
-    engines run one task per.
+    ``pmod`` folds it into ``[0, n_buckets)`` non-negative. Every model is spread over the whole
+    bucket space, so a bucket holds a mix of them.
+
+    With one (see `allocate_buckets`): each model is confined to its own contiguous slice, and its
+    cells hash on ``ts_id`` *within* that slice — ``offset + pmod(hash(ts_id), width)``. The model
+    is no longer part of the hash key because the slice already carries it, and the slices tile the
+    space, so the result is still exactly ``[0, n_buckets)``. What changes is that an expensive
+    model gets a wider slice and therefore fewer cells per bucket.
+
+    A model that somehow reaches here without a slice falls back to the flat rule rather than to
+    an arbitrary slice — the allocation is built from the same executed list as the cross-join, so
+    this cannot happen, and if it ever does the cell should still run.
     """
     from pyspark.sql import functions as F
 
     key = [F.col(c) for c in bucket_key_cols(cfg)]
-    return df.withColumn(_BUCKET_COL, F.pmod(F.hash(*key), F.lit(n_buckets)))
+    flat = F.pmod(F.hash(*key), F.lit(n_buckets))
+    if not allocation:
+        return df.withColumn(_BUCKET_COL, flat)
+
+    series_hash = F.hash(F.col(cfg.data.ts_id_col))
+    bucket = None
+    for name, (offset, width) in allocation.items():
+        sliced = F.lit(offset) + F.pmod(series_hash, F.lit(width))
+        condition = F.col(_MODEL_COL) == F.lit(name)
+        bucket = F.when(condition, sliced) if bucket is None else bucket.when(condition, sliced)
+    return df.withColumn(_BUCKET_COL, bucket.otherwise(flat))
 
 
 def status_schema() -> Any:

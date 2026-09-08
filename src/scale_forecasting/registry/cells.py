@@ -20,6 +20,7 @@ from .write_api import (
     _append_via_write_api,
     _encode_rows,
     _proto_for,
+    get_write_client,
 )
 
 if TYPE_CHECKING:
@@ -49,8 +50,6 @@ def write_cells(
     `RegistryError` on any BigQuery/GCS failure.
     """
     from datetime import UTC, datetime
-
-    from google.cloud import bigquery_storage_v1
 
     from ..errors import RegistryError
     from . import artifacts
@@ -92,8 +91,10 @@ def write_cells(
         "forecast_metadata": _META_SPEC,
     }
 
-    # 2. Append via the Storage Write API (no DELETE — append-only, dedupe-on-read).
-    write_client = bigquery_storage_v1.BigQueryWriteClient()
+    # 2. Append via the Storage Write API (no DELETE — append-only, dedupe-on-read). The client is
+    #    the process's, built on first use and kept: this runs once per bucket, and a fresh gRPC
+    #    channel per bucket is setup cost paid thousands of times to reach the same endpoint.
+    write_client = get_write_client()
     for table in _CELL_TABLES:
         rows = rows_by_table[table]
         if not rows:

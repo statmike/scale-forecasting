@@ -23,13 +23,20 @@ Public surface: ``run(cfg, models=None, *, manage_header=True) -> None``.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from ..errors import get_logger
 from ..profiling.source import resolve_profile
 from ..resources.fleet import RuntimeResourcePlan, tasks_for_ceiling
 from . import ray_io
-from .spark_io import STATUS_COLUMNS, _needed_columns, _resolve_source_table, _snapshot_millis
+from .spark_io import (
+    _MODEL_COL,
+    STATUS_COLUMNS,
+    _needed_columns,
+    _resolve_source_table,
+    _snapshot_millis,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -39,6 +46,18 @@ if TYPE_CHECKING:
     from ..settings import Settings
 
 _log = get_logger(__name__)
+
+# How many Storage Read API streams `_read_driver_collect` consumes at once. The reads are network-
+# and Arrow-decode-bound rather than compute-bound, so this is a concurrency cap, not a core count;
+# it exists to keep a large stream count from opening an unbounded number of gRPC channels on the
+# driver. Deliberately a constant and not a config field: `compute.read_max_streams` already caps
+# how many streams the *session* asks for, and every ComputeConfig field moves the run_id digest.
+_MAX_READ_THREADS = 16
+
+# Ray-level retries for a chunk task, and only for the two failures where no Python `except` ever
+# runs (see the call site). Small on purpose: a crash that repeats twice is a real defect, and each
+# replay re-runs a chunk's whole model fit.
+_CHUNK_MAX_RETRIES = 2
 
 
 def _storage_table_path(cfg: RunConfig, settings: Settings) -> str:
@@ -63,11 +82,16 @@ def _storage_table_path(cfg: RunConfig, settings: Settings) -> str:
 def _limit_series(source: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame:
     """Keep the first ``series_limit`` ts_ids (ordered); pass-through when unset (pure).
 
-    The pandas twin of `_limit_series`: distinct ts_ids →
-    ordered → first N → filter, so Ray and Spark subset the *same* series at every scale — the
-    property that makes the "10 vs 100 vs 100k" runtime comparison apples-to-apples.
-    Applied client-side (not as a Storage Read ``row_restriction``, which can't express an ordered
-    first-N over distinct ids), exactly as the Spark connector applies its limit after the read.
+    The pandas twin of `spark_io._limit_series`: distinct ts_ids → ordered → first N → filter, so
+    Ray and Spark subset the *same* series at every scale — the property that makes the
+    "10 vs 100 vs 100k" runtime comparison apples-to-apples.
+
+    Still applied client-side, but no longer as the *only* limiter. `build_series_bound` now pushes
+    an equivalent bound into the read as a ``row_restriction`` (see there for why a range and not
+    an ``IN`` list), so on the default reader this usually has nothing left to drop and costs one
+    pass over an already-subset frame. It stays because it is the cheap idempotent check that the
+    two rules agree, and because the ``ray_data`` reader has no restriction knob on its table-scan
+    form — there, this is still what enforces the limit.
     """
     limit = cfg.data.series_limit
     if limit is None:
@@ -75,6 +99,34 @@ def _limit_series(source: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame:
     id_col = cfg.data.ts_id_col
     keep = sorted(source[id_col].unique())[:limit]
     return source[source[id_col].isin(keep)].reset_index(drop=True)
+
+
+def build_series_bound(ids: Iterable[Any], limit: int | None, id_col: str) -> str | None:
+    """The Storage Read ``row_restriction`` that keeps the first ``limit`` series ids (pure).
+
+    ``None`` means "read everything": no limit was asked for, the source is empty, or the limit
+    already covers every id there is — a filter that excludes nothing is worse than no filter.
+
+    **A range bound, not a set.** The obvious encoding of "these N series" is
+    ``ts_id IN ('a','b',…)``, and it does not survive contact with the sizes this runs at: 10,000
+    ids is roughly 130 KB of filter text, well past what the service will accept in a read session.
+    A bound is one comparison however many series it selects. It works because the subset rule is
+    already an *ordered* first-N — ``sorted(distinct)[:N]`` — so "the first N ids" and "every id
+    ``<=`` the Nth" describe the same set. Python orders strings by code point and BigQuery
+    compares STRING by UTF-8 bytes, which is the same order, so the boundary the driver picks is
+    the boundary the service applies.
+
+    The value is a SQL string literal, so a backslash or a quote in a series id has to be escaped
+    or the filter is a syntax error at best.
+    """
+    if limit is None:
+        return None
+    distinct = sorted({str(i) for i in ids})
+    if not distinct or limit >= len(distinct):
+        return None
+    boundary = distinct[limit - 1]
+    escaped = boundary.replace("\\", "\\\\").replace("'", "\\'")
+    return f"{id_col} <= '{escaped}'"
 
 
 def _read_source_series(cfg: RunConfig, settings: Settings) -> pd.DataFrame:
@@ -106,24 +158,49 @@ def _read_driver_collect(
     Like the Spark connector, this reads through the **Storage Read API**, *not* ``client.query()``:
     a direct columnar table read over the storage layer, so it consumes no BigQuery query slots and
     streams Arrow straight to the driver (matching Spark). The read is column-projected
-    to only what a cell needs (`_needed_columns` → ``selected_fields``). Returns the raw
-    panel; the caller (`_read_source_series`) applies the ``series_limit`` subset.
+    to only what a cell needs (`_needed_columns` → ``selected_fields``), and **row-restricted** to
+    the ``series_limit`` subset (`_series_bound`) so a 100-series run off a 100k-series table
+    transfers 100 series rather than reading the table and throwing 99.9% of it away on the driver.
 
     Pinned to the run's input snapshot (`_snapshot_millis`) via the read session's
     ``table_modifiers.snapshot_time`` — the Storage Read API's native time-travel field, so the
     read consumes no query slots yet still sees the identical source state every other job in the
     run does. Unset snapshot → an un-pinned live read (the pre-snapshot behavior).
     """
-    # Runtime import: pandas is TYPE_CHECKING-only at module scope (offline import parity), so every
-    # function that touches pandas at runtime must import it locally.
-    import pandas as pd
-    from google.cloud.bigquery_storage_v1 import BigQueryReadClient, types
+    from google.cloud.bigquery_storage_v1 import BigQueryReadClient
 
     read_client = BigQueryReadClient()
+    restriction = _series_bound(read_client, cfg, settings)
+    session = _create_read_session(
+        read_client, cfg, settings, fields=_needed_columns(cfg), row_restriction=restriction
+    )
+    return _read_streams(read_client, session, _needed_columns(cfg))
+
+
+def _create_read_session(
+    read_client: Any,
+    cfg: RunConfig,
+    settings: Settings,
+    *,
+    fields: list[str],
+    row_restriction: str | None,
+) -> Any:  # pragma: no cover - GCP I/O, exercised by the @gpu smoke
+    """One Storage Read session over the source table, column-projected and optionally filtered.
+
+    Pinned to the run's input snapshot (`_snapshot_millis`) when the run has one, so every session
+    this module opens — the boundary pass and the panel read alike — time-travels to the identical
+    instant. That matters more than it looks: a bound resolved against a table that then gains a
+    series would otherwise select a different set than the driver thinks it did.
+    """
+    from google.cloud.bigquery_storage_v1 import types
+
+    options = types.ReadSession.TableReadOptions(selected_fields=fields)
+    if row_restriction:
+        options.row_restriction = row_restriction
     requested = types.ReadSession(
         table=_storage_table_path(cfg, settings),
         data_format=types.DataFormat.ARROW,
-        read_options=types.ReadSession.TableReadOptions(selected_fields=_needed_columns(cfg)),
+        read_options=options,
     )
     ms = _snapshot_millis(cfg, settings)
     if ms is not None:
@@ -134,7 +211,7 @@ def _read_driver_collect(
         requested.table_modifiers = types.ReadSession.TableModifiers(
             snapshot_time=datetime.fromtimestamp(ms / 1000, tz=UTC)
         )
-    session = read_client.create_read_session(
+    return read_client.create_read_session(
         parent=f"projects/{settings.project_id}",
         read_session=requested,
         # 0 (default) lets the server pick the stream count from the table size;
@@ -142,12 +219,59 @@ def _read_driver_collect(
         max_stream_count=cfg.compute.read_max_streams,
     )
 
-    frames = [
-        read_client.read_rows(stream.name).to_dataframe(session) for stream in session.streams
-    ]
-    if not frames:  # empty table → an empty, correctly-typed frame from the session schema
-        return pd.DataFrame(columns=_needed_columns(cfg))
-    return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
+def _read_streams(
+    read_client: Any, session: Any, columns: list[str]
+) -> pd.DataFrame:  # pragma: no cover - GCP I/O, exercised by the @gpu smoke
+    """Drain a read session's streams concurrently into one pandas frame, in stream order.
+
+    The service splits the table into N independent streams precisely so they can be consumed
+    concurrently; reading them one at a time serializes the parallelism it just handed us. Each
+    ``read_rows()`` is gRPC transfer plus Arrow decode and both release the GIL, so threads are the
+    right tool. ``map`` yields in input order, so the concatenated panel is byte-identical to the
+    serial read — which matters because `_limit_series` subsets off this frame's row order.
+    """
+    # Runtime import: pandas is TYPE_CHECKING-only at module scope (offline import parity), so every
+    # function that touches pandas at runtime must import it locally.
+    from concurrent.futures import ThreadPoolExecutor
+
+    import pandas as pd
+
+    stream_names = [stream.name for stream in session.streams]
+    if not stream_names:  # empty table → an empty, correctly-typed frame from the session schema
+        return pd.DataFrame(columns=columns)
+
+    def _stream_frame(name: str) -> pd.DataFrame:
+        return read_client.read_rows(name).to_dataframe(session)
+
+    if len(stream_names) == 1:
+        return _stream_frame(stream_names[0])
+    with ThreadPoolExecutor(max_workers=min(len(stream_names), _MAX_READ_THREADS)) as pool:
+        frames = list(pool.map(_stream_frame, stream_names))
+    return pd.concat(frames, ignore_index=True)
+
+
+def _series_bound(
+    read_client: Any, cfg: RunConfig, settings: Settings
+) -> str | None:  # pragma: no cover - GCP I/O, exercised by the @gpu smoke
+    """Resolve ``series_limit`` to a ``row_restriction``, or ``None`` if the read needs no filter.
+
+    Costs one extra read session, and it is worth being honest about when: the boundary pass reads
+    a *single column* but the table's full height, so it pays roughly ``1/n_columns`` of a scan to
+    avoid ``1 - series_limit/table_series`` of the real one. Reading 100 series out of 100,000 is
+    an enormous win; reading 90,000 out of 100,000 is a small loss. Runs that subset at all
+    normally subset hard, and a run with no ``series_limit`` skips this entirely.
+    """
+    if cfg.data.series_limit is None:
+        return None
+    id_col = cfg.data.ts_id_col
+    session = _create_read_session(
+        read_client, cfg, settings, fields=[id_col], row_restriction=None
+    )
+    ids = _read_streams(read_client, session, [id_col])
+    bound = build_series_bound(ids[id_col], cfg.data.series_limit, id_col)
+    _log.info("ray read: series_limit pushed into the read as %s", bound or "no filter (limit ≥ n)")
+    return bound
 
 
 def _read_ray_data(
@@ -161,6 +285,11 @@ def _read_ray_data(
     then materialize to a single driver-side pandas panel with ``.to_pandas()`` so the rest of the
     fan-out is identical to the default path. Column projection is applied in pandas after the read
     (the reader takes no ``selected_fields``), keeping the two readers' outputs the same shape.
+
+    No ``series_limit`` pushdown here, for the same reason as the column projection: the
+    ``dataset=`` table-scan form exposes no row-restriction knob. This path reads the whole table
+    and lets `_limit_series` drop the excess on the driver, which is one more reason it stays
+    opt-in — a subsetting run is cheaper on the default reader.
 
     When the run pins an input snapshot (`_snapshot_millis`) we instead pass ``query=`` with a
     ``FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS(...)`` clause — the reader's ``dataset=`` table-scan
@@ -283,12 +412,13 @@ def run(
        (`split_gpu_cpu_models`), calibrate the per-task GPU fraction
        (`calibrate_gpu_fraction` — live NeuralProphet memory profiling when ``auto``),
        measure what the models cost (`profiling.source.resolve_profile`) and size each pool from
-       that measurement (`_pool_plans`), chunk each pool's cells (`chunk_cells`),
+       that measurement (`_pool_plans`), shard the panel per pool (`chunk_cells`),
        and dispatch one Ray task per chunk — GPU chunks as ``@ray.remote(num_gpus=fraction)``
        (packed onto T4s), CPU chunks as ``num_cpus=1`` plus, when it was measured, the host
-       ``memory`` the family needs. Every task runs the shared chunk runner
-       (`make_chunk_runner`), which calls the exact `run_group` + `write_cells`
-       and returns only the compact status frame.
+       ``memory`` the family needs. Each pool has **its own** chunk runner
+       (`make_chunk_runner`), carrying that pool's model list, because chunks arrive
+       untagged and the runner's list is what a chunk runs. Every runner calls the exact
+       `run_group` + `write_cells` and returns only the compact status frame.
     3. Concatenate the statuses, `aggregate_status`, and — in owner mode —
        ``update_header`` (COMPLETED/PARTIAL/FAILED, wall-clock, ``n_series``).
 
@@ -308,7 +438,6 @@ def run(
     """
     import time
 
-    import pandas as pd
     import ray
 
     from ..registry.ids import make_run_id
@@ -347,7 +476,13 @@ def run(
             # None unless HPO is enabled at fleetwide granularity. Tuned params flow through the
             # chunk-runner closure to every task (not cfg → run_id stable).
             params_by_model = _resolve_fleetwide_hpo(source, cfg, executed)
-            runner = ray_io.make_chunk_runner(cfg, settings, executed, params_by_model)
+
+            # One runner per pool, not one for the job. Chunks arrive untagged, so the runner's
+            # model list *is* what a chunk runs — hand the CPU pool the full executed list and it
+            # would run the GPU models on CPU hardware as well, twice-running every deep-learning
+            # cell. The pool lists are already disjoint and together exactly ``executed``.
+            cpu_runner = ray_io.make_chunk_runner(cfg, settings, cpu_models, params_by_model)
+            gpu_runner = ray_io.make_chunk_runner(cfg, settings, gpu_models, params_by_model)
 
             # The per-task GPU fraction: fixed float passthrough, or live NeuralProphet profiling
             # when "auto". Sample series only when auto (profiling costs) and a GPU is present.
@@ -390,20 +525,36 @@ def run(
             # provisioned there are no GPU chunks at all — those cells are in ``cpu_chunks``, and
             # NeuralProphet falls back to CPU inside the task.
             @ray.remote
-            def _task(chunk: pd.DataFrame) -> pd.DataFrame:
-                return runner(chunk)
+            def _cpu_task(chunk: pd.DataFrame) -> pd.DataFrame:
+                return cpu_runner(chunk)
 
-            cpu_opts = cpu_plan.task_options
-            gpu_opts = gpu_plan.task_options
-            futures = [_task.options(**cpu_opts).remote(c) for c in cpu_chunks]
-            futures += [_task.options(**gpu_opts).remote(c) for c in gpu_chunks]
+            @ray.remote
+            def _gpu_task(chunk: pd.DataFrame) -> pd.DataFrame:
+                return gpu_runner(chunk)
 
-            status_frames = ray.get(futures) if futures else []
-            status_pdf = (
-                pd.concat(status_frames, ignore_index=True)
-                if status_frames
-                else pd.DataFrame(columns=list(STATUS_COLUMNS))
-            )
+            # Retry only the failures where no Python `except` ever runs: the worker process died
+            # or the node went away, which on a preemptible autoscaling pool is a scheduling event
+            # rather than a bug. An application exception is deliberately NOT retried — the task
+            # writes its cells before returning, so replaying it would duplicate durable work to
+            # reach the same exception.
+            from ray.exceptions import NodeDiedError, WorkerCrashedError
+
+            retry = {
+                "max_retries": _CHUNK_MAX_RETRIES,
+                "retry_exceptions": [WorkerCrashedError, NodeDiedError],
+            }
+            cpu_opts = {**cpu_plan.task_options, **retry}
+            gpu_opts = {**gpu_plan.task_options, **retry}
+            pending: dict[Any, tuple[pd.DataFrame, list[str]]] = {}
+            for chunk in cpu_chunks:
+                pending[_cpu_task.options(**cpu_opts).remote(chunk)] = (chunk, cpu_models)
+            for chunk in gpu_chunks:
+                pending[_gpu_task.options(**gpu_opts).remote(chunk)] = (chunk, gpu_models)
+
+            status_pdf, failures = _collect_chunks(ray, pending, cfg)
+            if failures:
+                _log.warning("ray run: %d chunk(s) failed; run will close PARTIAL", len(failures))
+                _stamp_executed_sizing(run_id, {"chunk_failures": failures}, settings)
         finally:
             if owns_ray:
                 ray.shutdown()
@@ -489,6 +640,82 @@ def _pool_plans(
         max_units=cluster.gpu_max_nodes,
     )
     return cpu_plan, gpu_plan
+
+
+def _collect_chunks(
+    ray_mod: Any, pending: dict[Any, tuple[pd.DataFrame, list[str]]], cfg: RunConfig
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Collect chunk statuses one at a time; a chunk that raises costs its cells, not the run.
+
+    ``ray.get(futures)`` on the whole list is all-or-nothing: the first exception propagates and the
+    driver never sees the frames the other tasks already returned. That is the wrong shape here,
+    because a chunk task writes its cells to BigQuery *before* it returns. By the time one chunk
+    raises, every other chunk's forecasts are already durable in the registry — aborting the driver
+    over them means the run closes FAILED and the header disowns work that is sitting in the table.
+
+    So: wait for one future at a time, and treat a raising future as a per-chunk outcome rather
+    than a control-flow event. The chunk's cells are recorded as ``status="error"`` so
+    `aggregate_status` sees them, which is what makes the run close **PARTIAL** — some cells landed,
+    some did not — instead of FAILED. The exception text comes back as the second return value for
+    the caller to file on the header.
+
+    ``ray_mod`` is passed in rather than imported so this is testable with a fake: everything here
+    is scheduling logic, and none of it needs a real cluster to be wrong.
+    """
+    import pandas as pd
+
+    frames: list[pd.DataFrame] = []
+    failures: list[dict[str, Any]] = []
+    remaining = dict(pending)
+    while remaining:
+        done, _not_done = ray_mod.wait(list(remaining), num_returns=1)
+        for ref in done:
+            chunk, models = remaining.pop(ref)
+            try:
+                frames.append(ray_mod.get(ref))
+            except Exception as exc:  # noqa: BLE001 - one chunk's failure is one chunk's outcome
+                _log.warning("ray chunk failed (cells recorded as error): %r", exc)
+                failures.append(
+                    {
+                        "error": repr(exc),
+                        "n_series": int(chunk[cfg.data.ts_id_col].nunique()),
+                        "models": list(models),
+                    }
+                )
+                frames.append(_failed_chunk_status(chunk, cfg, models, exc))
+    if not frames:
+        return pd.DataFrame(columns=list(STATUS_COLUMNS)), failures
+    return pd.concat(frames, ignore_index=True), failures
+
+
+def _failed_chunk_status(
+    chunk: pd.DataFrame, cfg: RunConfig, models: list[str], exc: BaseException
+) -> pd.DataFrame:
+    """One ``status="error"`` row per cell the failed chunk was carrying (pure).
+
+    The cells are reconstructed the same way `run_group` would have expanded them — from the model
+    tag when the chunk has one, otherwise the pool's model list once per series — so the roll-up
+    counts exactly the cells that were lost, not an approximation of them. ``STATUS_COLUMNS`` is
+    deliberately not widened to carry the exception: it doubles as the Spark UDF's ``StructType``,
+    so a column added here changes a schema on the other engine. The text goes on the header.
+    """
+    import pandas as pd
+
+    id_col = cfg.data.ts_id_col
+    if _MODEL_COL in chunk.columns:
+        pairs = chunk[[id_col, _MODEL_COL]].drop_duplicates().to_numpy()
+        cells = [(str(ts_id), str(model)) for ts_id, model in pairs]
+    else:
+        cells = [(str(ts_id), m) for ts_id in chunk[id_col].drop_duplicates() for m in models]
+    return pd.DataFrame(
+        {
+            "ts_id": pd.Series([c[0] for c in cells], dtype="object"),
+            "model_type": pd.Series([c[1] for c in cells], dtype="object"),
+            "status": pd.Series(["error"] * len(cells), dtype="object"),
+            "fit_seconds": pd.Series([0.0] * len(cells), dtype="float64"),
+        },
+        columns=list(STATUS_COLUMNS),
+    )
 
 
 def _executed_sizing_patch(

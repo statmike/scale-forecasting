@@ -16,11 +16,12 @@ for where the *results* go see [output_schemas.md](./output_schemas.md); for the
 
 1. **Column projection.** A cell needs only the id, date, and target columns plus any configured
    `features.exog`, so every reader projects to exactly those columns — never `SELECT *`. Narrow rows
-   matter because the Spark/Ray fan-out cross-joins each series once per model, so an unused column is
-   paid for on every cell. (The projection is order-preserving and de-duplicated.)
+   matter because the Spark fan-out cross-joins each series once per model, so an unused column is
+   paid for on every cell (Ray shards by series instead, but still pays it on every row). (The projection is order-preserving and de-duplicated.)
 2. **Deterministic subset.** With `data.series_limit` set, each reader keeps the *same* first N series
    — distinct ids, ordered, first N — so "10 vs 100 vs 100k series" is a clean apples-to-apples
-   runtime comparison rather than a different sample each time. Unset = the whole panel.
+   runtime comparison rather than a different sample each time. Unset = the whole panel. *Where* the
+   subset is applied varies by reader (below); *which* series survive it never does.
 3. **Snapshot pinning.** A run records one input snapshot on its header (a BigQuery time-travel
    instant, taken with a small safety margin). Every family job of that run pins its read to that
    instant, so all families read **byte-identical** source data even if the table is written to
@@ -48,14 +49,27 @@ on a connector default), applies the column projection with `.select(...)`, and 
 
 `_read_driver_collect` reads with the `BigQueryReadClient` (`create_read_session`) directly, in
 `DataFormat.ARROW`. The snapshot pin is the Storage Read API's native `table_modifiers.snapshot_time`
-field. This is the proven default path.
+field. Streams are drained concurrently and reassembled in stream order, so the panel is identical
+to a serial read. This is the proven default path.
+
+`series_limit` is pushed **into** the read as a `row_restriction`, so a 100-series run off a
+100k-series table transfers 100 series rather than the whole table. Resolving the boundary costs one
+extra read session over the id column alone, at the same snapshot; the filter is then a single range
+comparison (`ts_id <= '<the Nth id>'`), not an `IN` list — ten thousand ids would be well over a
+hundred kilobytes of filter text, which the service will not accept. The range is exact because the
+subset rule is already an *ordered* first N, and BigQuery compares `STRING` by UTF-8 bytes in the
+same order Python sorts by. The honest cost: the boundary pass reads one column at the table's full
+height, so the pushdown wins big when the subset is a small fraction of the table and loses slightly
+when it is most of it.
 
 ### Ray — `ray_data` (opt-in)
 
 `_read_ray_data` uses the Ray-native `ray.data.read_bigquery` reader, which reads over the **same**
 Storage Read API underneath. Because that reader's table-scan form doesn't expose a snapshot option,
 a *pinned* read falls back to a `FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS(...)` query; an unpinned read
-stays a pure table scan. Select it with `compute.ray_read_mode="ray_data"`.
+stays a pure table scan. For the same reason it takes no `row_restriction`, so `series_limit` is
+applied on the driver *after* the read rather than pushed into it — one more reason a subsetting run
+is cheaper on the default reader. Select it with `compute.ray_read_mode="ray_data"`.
 
 ### BigQuery-native (`arima_plus`, `arima_plus_xreg`, `timesfm`)
 

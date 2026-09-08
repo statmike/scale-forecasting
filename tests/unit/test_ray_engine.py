@@ -211,6 +211,120 @@ def test_pool_cells_counts_series_times_models() -> None:
     assert ray_engine._pool_cells(pd.DataFrame(), cfg, [_CPU]) == 0  # empty panel
 
 
+# --- offline: one chunk failing costs its cells, not the run -------------------
+
+
+class _FakeRay:
+    """The two `ray` calls `_collect_chunks` makes, over pre-decided per-future outcomes.
+
+    A future here is just a key into ``outcomes``: either a status frame to hand back or an
+    exception to raise. That is the whole surface `_collect_chunks` touches, which is the point of
+    passing ``ray_mod`` in — the salvage logic is scheduling bookkeeping and a real cluster would
+    only make it slower to get wrong.
+    """
+
+    def __init__(self, outcomes: dict[str, Any]) -> None:
+        self.outcomes = outcomes
+
+    def wait(self, refs: list[str], num_returns: int = 1) -> tuple[list[str], list[str]]:
+        return refs[:num_returns], refs[num_returns:]
+
+    def get(self, ref: str) -> pd.DataFrame:
+        outcome = self.outcomes[ref]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _ok_status(chunk: pd.DataFrame, models: list[str]) -> pd.DataFrame:
+    """What a chunk task returns on the happy path: one ``ok`` row per cell it ran."""
+    cells = [(ts_id, model) for ts_id in chunk["ts_id"].drop_duplicates() for model in models]
+    return pd.DataFrame(
+        {
+            "ts_id": [c[0] for c in cells],
+            "model_type": [c[1] for c in cells],
+            "status": ["ok"] * len(cells),
+            "fit_seconds": [0.1] * len(cells),
+        },
+        columns=list(STATUS_COLUMNS),
+    )
+
+
+def test_one_failing_chunk_still_yields_the_other_chunks_and_closes_partial() -> None:
+    """Three chunks, one raises: the other two land, the lost cells are error, run is PARTIAL.
+
+    `ray.get(futures)` on the list would have propagated the first exception and thrown away the
+    two frames already in hand — while those chunks' forecasts sit written in BigQuery. Salvaging
+    them is what turns a FAILED run that disowns durable work into a PARTIAL one that reports it.
+    """
+    cfg = _cfg()
+    chunks = [_panel(1).assign(ts_id=f"s{i}") for i in range(3)]
+    fake = _FakeRay(
+        {
+            "a": _ok_status(chunks[0], [_CPU]),
+            "b": RuntimeError("worker blew up mid-fit"),
+            "c": _ok_status(chunks[2], [_CPU]),
+        }
+    )
+    pending = {
+        "a": (chunks[0], [_CPU]),
+        "b": (chunks[1], [_CPU]),
+        "c": (chunks[2], [_CPU]),
+    }
+
+    status_pdf, failures = ray_engine._collect_chunks(fake, pending, cfg)
+
+    assert len(status_pdf) == 3  # every cell accounted for, including the lost one
+    assert dict(status_pdf.groupby("status").size()) == {"ok": 2, "error": 1}
+    outcome = ray_io.aggregate_status(status_pdf)
+    assert outcome.status == "PARTIAL"
+    assert (outcome.n_ok, outcome.n_error) == (2, 1)
+    assert len(failures) == 1
+    assert "worker blew up mid-fit" in failures[0]["error"]
+    assert failures[0] == {
+        "error": failures[0]["error"],
+        "n_series": 1,
+        "models": [_CPU],
+    }
+
+
+def test_every_chunk_failing_closes_failed_rather_than_looking_empty() -> None:
+    cfg = _cfg()
+    chunk = _panel(2)
+    fake = _FakeRay({"a": RuntimeError("boom"), "b": RuntimeError("boom")})
+    pending = {"a": (chunk, [_CPU]), "b": (chunk, [_GPU])}
+
+    status_pdf, failures = ray_engine._collect_chunks(fake, pending, cfg)
+
+    assert len(failures) == 2
+    assert set(status_pdf["status"]) == {"error"}
+    assert ray_io.aggregate_status(status_pdf).status == "FAILED"
+
+
+def test_a_failed_chunk_reports_the_cells_it_lost_not_the_rows_it_held() -> None:
+    """The error rows are cells — series × the pool's models — not one row per source row."""
+    cfg = _cfg()
+    chunk = _panel(3, rows_each=10)  # 30 rows, 3 series, 2 pool models → 6 cells
+    lost = ray_engine._failed_chunk_status(chunk, cfg, [_CPU, _GPU], RuntimeError("boom"))
+    assert len(lost) == 6
+    assert list(lost.columns) == list(STATUS_COLUMNS)
+    assert set(lost["model_type"]) == {_CPU, _GPU}
+    assert set(lost["status"]) == {"error"}
+
+
+def test_a_failed_tagged_chunk_takes_its_cells_from_the_tag_not_the_pool_list() -> None:
+    """Below one series per chunk `chunk_cells` falls back to tagged frames — honor the tag.
+
+    A tagged chunk carries one model per row, so expanding it against the pool's full model list
+    would invent cells that chunk was never going to run and over-count the loss.
+    """
+    cfg = _cfg()
+    tagged = _panel(2).assign(**{_MODEL_COL: _GPU})
+    lost = ray_engine._failed_chunk_status(tagged, cfg, [_CPU, _GPU], RuntimeError("boom"))
+    assert len(lost) == 2  # 2 series × the one tagged model
+    assert set(lost["model_type"]) == {_GPU}
+
+
 # --- offline: Storage Read API read helpers ------------------------------------
 
 
@@ -287,6 +401,93 @@ def test_limit_series_matches_spark_ordered_subset() -> None:
     assert sorted(out["ts_id"].unique()) == ["s1", "s2"]  # s1,s2 ordered-first, s3 dropped
 
 
+# --- offline: series_limit as a read-side row_restriction ----------------------
+
+
+def test_the_bound_names_the_nth_id_so_one_comparison_selects_the_whole_subset() -> None:
+    # 5 ids, limit 3 → "<= the third", which is one comparison however many series it selects.
+    ids = ["s4", "s0", "s3", "s1", "s2"]
+    assert ray_engine.build_series_bound(ids, 3, "ts_id") == "ts_id <= 's2'"
+
+
+def test_no_limit_means_no_filter_rather_than_a_filter_that_matches_everything() -> None:
+    assert ray_engine.build_series_bound(["s0", "s1"], None, "ts_id") is None
+
+
+def test_a_limit_the_table_cannot_reach_reads_unfiltered() -> None:
+    # Asking for more series than exist: a bound at the last id excludes nothing, so it is pure
+    # cost — the service still has to evaluate it against every row.
+    assert ray_engine.build_series_bound(["s0", "s1"], 2, "ts_id") is None
+    assert ray_engine.build_series_bound(["s0", "s1"], 99, "ts_id") is None
+
+
+def test_an_empty_source_reads_unfiltered_rather_than_indexing_off_the_end() -> None:
+    assert ray_engine.build_series_bound([], 3, "ts_id") is None
+
+
+def test_the_id_column_is_the_configured_one_not_a_hardcoded_ts_id() -> None:
+    assert ray_engine.build_series_bound(["a", "b", "c"], 1, "series_key") == "series_key <= 'a'"
+
+
+def test_a_quote_in_a_series_id_is_escaped_instead_of_ending_the_literal() -> None:
+    # Without escaping this is `ts_id <= 'o'brien'` — a syntax error, and the read session is
+    # rejected. Series ids come from the deployer's own keyspace; apostrophes are ordinary.
+    assert ray_engine.build_series_bound(["o'brien", "z"], 1, "ts_id") == "ts_id <= 'o\\'brien'"
+
+
+def test_a_backslash_is_escaped_before_the_quotes_are() -> None:
+    # Order matters: escaping quotes first would then double the backslash they introduced.
+    assert ray_engine.build_series_bound(["a\\b", "z"], 1, "ts_id") == "ts_id <= 'a\\\\b'"
+
+
+def test_the_pushed_bound_selects_exactly_what_the_client_side_subset_would_have() -> None:
+    # The two rules must agree or the pushdown silently changes which series a run covers. Apply the
+    # bound the way BigQuery would (a string <= comparison) and compare frames.
+    src = pd.DataFrame(
+        {
+            "ts_id": ["s10", "s2", "s1", "s10", "s2", "s1"],
+            "ds": pd.date_range("2024-01-01", periods=6),
+            "y": range(6),
+        }
+    )
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7, "series_limit": 2})
+    bound = ray_engine.build_series_bound(src["ts_id"], 2, "ts_id")
+    assert bound == "ts_id <= 's10'"  # lexical, not numeric: s1, s10 come before s2
+    boundary = bound.split(" <= ")[1].strip("'")
+    pushed = src[src["ts_id"] <= boundary].reset_index(drop=True)
+    pd.testing.assert_frame_equal(pushed, ray_engine._limit_series(src, cfg))
+
+
+def test_a_subsetting_run_resolves_the_boundary_first_then_reads_only_that_far(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two sessions: a narrow single-column pass to find the Nth id, then the panel read carrying the
+    # bound. The point of the whole item is that the second session is filtered server-side.
+    captured: dict[str, Any] = {}
+    _install_fake_read_client(monkeypatch, [_panel(4)], captured=captured)
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7, "series_limit": 2})
+    out = ray_engine._read_source_series(cfg, _settings())
+    boundary, panel = captured["sessions"]
+    assert boundary["fields"] == ["ts_id"]  # id column only — the cheap pass
+    assert boundary["row_restriction"] is None
+    assert panel["row_restriction"] == "ts_id <= 's1'"
+    assert "y" in panel["fields"]  # the real read, column-projected as before
+    # The fake server ignores the restriction, so `_limit_series` still has work to do here — which
+    # is exactly the idempotence the client-side subset is kept for.
+    assert sorted(out["ts_id"].unique()) == ["s0", "s1"]
+
+
+def test_a_run_with_no_series_limit_opens_one_session_and_pushes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_fake_read_client(monkeypatch, [_panel(3)], captured=captured)
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 7})
+    ray_engine._read_source_series(cfg, _settings())
+    assert len(captured["sessions"]) == 1  # no boundary pass to pay for
+    assert captured["sessions"][0]["row_restriction"] is None
+
+
 # --- _read_source_series: Storage Read stream assembly (no GCP) -----------------
 
 
@@ -330,6 +531,17 @@ def _install_fake_read_client(
             if captured is not None:
                 captured["max_stream_count"] = max_stream_count
                 captured["data_format"] = read_session.data_format
+                # One list entry per session opened, in order: a subsetting run opens the narrow
+                # boundary session first and the panel session second, so the sequence is the
+                # evidence that the bound was resolved and then pushed down.
+                captured.setdefault("sessions", []).append(
+                    {
+                        "fields": list(read_session.read_options.selected_fields),
+                        "row_restriction": getattr(
+                            read_session.read_options, "row_restriction", None
+                        ),
+                    }
+                )
             return _Session(len(per_stream_frames))
 
         def read_rows(self, name: str) -> _Reader:

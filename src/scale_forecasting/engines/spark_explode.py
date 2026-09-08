@@ -109,6 +109,30 @@ def _stamp_executed_fanout(
         _log.warning("executed fan-out capture failed (non-fatal): %r", exc)
 
 
+def _cost_weights(cfg: RunConfig, executed: list[str], settings: Settings) -> dict[str, float]:
+    """What one cell of each executed model costs, relative to a typical cell of this run.
+
+    The arithmetic is pure (`spark_io.model_cost_weights`); the only thing this adds is *finding
+    the evidence*, which is a registry read. Same profile the batch was sized from —
+    `profiling.source.profile_for_run`, memoized, honouring ``compute.profile.source`` — so the
+    fan-out is cut by the same numbers the fleet was shaped by rather than by a second opinion.
+
+    Evidence is an optimisation, so this never fails a run: profiling turned off, a registry that
+    will not answer, or a profile with nothing usable in it all come back as all-1.0 weights, which
+    every consumer reads as "no evidence" and answers with today's uniform behaviour.
+    """
+    if cfg.compute.profile.mode == "off":
+        return dict.fromkeys(executed, 1.0)
+    try:
+        from ..profiling.source import profile_for_run
+
+        profile = profile_for_run(cfg, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - sizing evidence is optional, never fatal
+        _log.warning("bucket cost weights: no profile (non-fatal): %r", exc)
+        return dict.fromkeys(executed, 1.0)
+    return spark_io.model_cost_weights(executed, profile)
+
+
 def _widen_fanout(cfg: RunConfig, spark: SparkSession, n_buckets: int) -> dict[str, Any]:
     """Reconcile the bucket count with the fleet it is about to run on; return what it settled on.
 
@@ -119,13 +143,18 @@ def _widen_fanout(cfg: RunConfig, spark: SparkSession, n_buckets: int) -> dict[s
     ``buckets`` is the widening itself, ``shuffle_partitions`` is the number that decides how many
     tasks actually ran, and the three conf reads are the evidence the widening used — a run whose
     ceiling came from somewhere nobody expected says so here rather than in a driver log that
-    outlives nothing.
+    outlives nothing. ``shuffle_partitions`` is deliberately a multiple of ``buckets`` rather than
+    equal to it (`spark_io.fanout_properties` explains the occupancy arithmetic), so the two
+    numbers in this record are not meant to match. The caller adds two more fields after this
+    returns — ``cost_weights`` and ``allocation``, the per-model cut of the bucket space
+    (`spark_io.allocate_buckets`) — for the same reason: an imbalanced run is diagnosed from what
+    the fan-out believed each model cost, and nothing else keeps that.
 
     Two halves of one identity, and both are needed. `spark_io.reachable_bucket_count` raises the
     count until it can create the pending demand the autoscaler grows on, reading the ceiling off
     the live conf so it holds however that number got onto the batch — `submit.sizing_properties`,
-    ``--max-executors``, or the operator's own property. `spark_io.fanout_properties` then pins the
-    shuffle width to the result, because the group count and the task count are otherwise
+    ``--max-executors``, or the operator's own property. `spark_io.fanout_properties` then sets the
+    shuffle width from the result, because the group count and the task count are otherwise
     unrelated numbers and it is the task count the scheduler acts on.
 
     ``profile.mode == "off"`` gates **the widening only**, and the gate has to be checked *here*
@@ -134,7 +163,7 @@ def _widen_fanout(cfg: RunConfig, spark: SparkSession, n_buckets: int) -> dict[s
     1000-executor ceiling we never chose, and a run nobody asked to reshape gets reshaped
     around it.
 
-    The shuffle-width pin is applied either way, because it is not a profiling decision. Whatever
+    The shuffle width is set either way, because it is not a profiling decision. Whatever
     bucket count this run ended up with — widened or the caller's own — Spark plans the shuffle at
     ``spark.sql.shuffle.partitions`` and AQE coalesces below that, so leaving the pin off does not
     restore some earlier behaviour; it hands 200 tasks to a run that asked for N. Gating it here
@@ -188,7 +217,9 @@ def run(
     1. Resolve infra `Settings` from the environment,
        ``ensure_tables``, and ``write_header`` (status RUNNING) with a ``run_id`` derived from the
        config — computed once here so every executor's ``write_cells`` shares it.
-    2. Read + subset the source series, cross-join the model list, hash into per-cell buckets, and
+    2. Read + subset the source series (and cache the relation — several driver actions run
+       against it, and Spark would otherwise re-read BigQuery for each), cross-join the model
+       list, hash into per-cell buckets, and
        ``groupBy(bucket).applyInPandas`` the group runner (`spark_io.make_group_runner`),
        which runs each cell and appends its results executor-side. Only the compact status frame
        returns to the driver.
@@ -218,6 +249,7 @@ def run(
     """
     import time
 
+    from pyspark import StorageLevel
     from pyspark.sql import SparkSession
 
     from ..registry.ids import make_run_id
@@ -247,24 +279,40 @@ def run(
                 f"scale-forecasting-explode-{run_id}"
             ).getOrCreate()
         started = time.perf_counter()
+        source = None
         try:
             # 2. Fan cells across the cluster. The frozen Settings is captured directly in the group
             #    runner's closure (no sparkContext.broadcast — Connect has no such API);
             #    applyInPandas cloudpickles it to every executor so write_cells resolves the infra.
             source = spark_io.read_source_series(spark, cfg, settings)
+            # Spark is lazy, so `source` is a recipe, not data: every action below re-executes the
+            # BigQuery read from scratch. There are four of them — the series count, the HPO
+            # sample, the cross-join, and the semi-join `series_limit` performs against its own
+            # distinct ids *inside* this relation. Persisting is unconditional because even the
+            # do-nothing path reads twice. MEMORY_AND_DISK rather than MEMORY_ONLY: the panel is
+            # sized to be bigger than the executors, and spilling beats re-reading.
+            source.persist(StorageLevel.MEMORY_AND_DISK)
 
             # Fan-out width needs both a session and the source: the fleet's ceiling is set on the
             # batch and read back from the live conf, and an unbounded run's series count can only
             # come off the data. The confs `_widen_fanout` sets govern the applyInPandas shuffle
             # below, so landing them here rather than before the read changes nothing about it.
+            # Measured per-cell cost feeds both halves of the fan-out: how many buckets there are
+            # (a slow model needs a smaller target to hold its frame time down) and which slice of
+            # them each model gets. All-1.0 weights — no evidence — leave both at today's answer.
+            weights = _cost_weights(cfg, executed, settings)
             fanout = _widen_fanout(
                 cfg,
                 spark,
                 spark_io.default_bucket_count(
-                    cfg, executed, n_series=_estimated_series(cfg, source)
+                    cfg, executed, n_series=_estimated_series(cfg, source), weights=weights
                 ),
             )
             n_buckets = fanout["buckets"]
+            allocation = spark_io.allocate_buckets(executed, n_buckets, weights)
+            # Lists, not tuples: this record is serialized into the header's telemetry JSON.
+            fanout["cost_weights"] = {m: round(w, 4) for m, w in weights.items()}
+            fanout["allocation"] = {m: list(slice_) for m, slice_ in allocation.items()}
             _log.info("explode fan-out: run_id=%s %s", run_id, fanout)
             _stamp_executed_fanout(run_id, executed, fanout, settings)
 
@@ -274,7 +322,7 @@ def run(
             params_by_model = spark_io.resolve_fleetwide_hpo(source, cfg, executed)
 
             cells = spark_io.cross_join_models(source, cfg, spark, executed)
-            cells = spark_io.add_bucket(cells, cfg, n_buckets)
+            cells = spark_io.add_bucket(cells, cfg, n_buckets, allocation)
 
             runner = spark_io.make_group_runner(cfg, settings, executed, params_by_model)
             status_sdf = cells.groupBy(spark_io._BUCKET_COL).applyInPandas(
@@ -282,6 +330,10 @@ def run(
             )
             status_pdf = status_sdf.toPandas()  # compact: 4 cols × n_cells, no forecast payload
         finally:
+            # Release the cached blocks before the session goes (and *whatever* happens, since an
+            # injected session outlives this call and would otherwise carry the panel around).
+            if source is not None:
+                source.unpersist()
             if owns_session:
                 spark.stop()
 

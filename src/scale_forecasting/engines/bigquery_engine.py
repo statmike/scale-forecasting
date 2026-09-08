@@ -506,13 +506,16 @@ def _append_rows(  # pragma: no cover - GCP I/O, @gcp smoke
     ``assemble_*`` wrappers, not the write path, so the native engine feeds ``_*_SPEC``-shaped dicts
     directly. Empty input is a no-op.
     """
-    from google.cloud import bigquery_storage_v1
-
-    from ..registry.write_api import _append_via_write_api, _encode_rows, _proto_for
+    from ..registry.write_api import (
+        _append_via_write_api,
+        _encode_rows,
+        _proto_for,
+        get_write_client,
+    )
 
     if not rows:
         return
-    write_client = bigquery_storage_v1.BigQueryWriteClient()
+    write_client = get_write_client()
     msg_cls, proto_descriptor = _proto_for(table, spec)
     serialized = _encode_rows(msg_cls, spec, rows)
     _append_via_write_api(

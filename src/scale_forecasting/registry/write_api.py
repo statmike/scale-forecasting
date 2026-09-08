@@ -9,6 +9,7 @@ writes big enough to be worth the Write API rather than a parameterized INSERT.
 from __future__ import annotations
 
 import time
+from functools import cache
 from typing import Any
 
 from ..errors import get_logger
@@ -144,12 +145,45 @@ _WRITE_RETRY_ATTEMPTS = 5  # total attempts per append (1 initial + 4 retries)
 _WRITE_RETRY_BACKOFF_SECONDS = 2.0  # exponential base: 2, 4, 8, 16s
 
 
+_write_client: Any = None
+
+
+def get_write_client() -> Any:  # pragma: no cover - constructs a real gRPC client
+    """The process's `BigQueryWriteClient`, built on first use and reused after that.
+
+    **Lazy on purpose, and it must stay lazy.** A `BigQueryWriteClient` owns a gRPC channel with
+    background threads; PySpark forks its Python workers from a daemon process, and a channel
+    created before that fork is inherited broken — the child gets file descriptors whose threads
+    did not come with them. Building it at first *use* means it is always built inside the process
+    that will use it. That is also why this is a function and not a module-level constant: import
+    happens wherever the module is imported, which on Spark is the daemon.
+
+    Reuse matters at fan-out scale. Each bucket's `write_cells` was constructing a fresh client —
+    channel setup, credential resolution and all — so 62,500 buckets paid 62,500 client
+    constructions of pure setup on the critical path, to talk to the same endpoint every time.
+    """
+    global _write_client
+    if _write_client is None:
+        from google.cloud import bigquery_storage_v1
+
+        _write_client = bigquery_storage_v1.BigQueryWriteClient()
+    return _write_client
+
+
+@cache
 def _proto_for(table_name: str, spec: tuple[tuple[str, str], ...]) -> tuple[Any, Any]:
     """Build a protobuf message class + descriptor matching a table's column spec.
 
     Fields are proto2-optional (so an unset field → BigQuery NULL) and numbered by write
     order. A private `DescriptorPool` isolates the registration so repeated calls (or
     two tables in one process) never collide on a duplicate proto file name.
+
+    Cached on ``(table_name, spec)``, both of which are immutable and few — three specs exist and
+    they are module constants. The result is a message *class* and a descriptor, neither of which
+    carries per-call state, so callers share them freely: `_encode_rows` instantiates the class
+    per row and the descriptor is only ever read. Uncached, a 62,500-bucket run rebuilt three
+    descriptor pools per bucket. The private-pool isolation is unaffected — a distinct key still
+    gets its own pool; the cache just stops the *same* key from building one twice.
     """
     from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
