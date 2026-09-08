@@ -33,6 +33,9 @@ class ThetaModel(BaseModel):
     family = "statistical"
     supports_exog = False
     supports_native_intervals = True
+    # Extrapolate only. `ThetaModelResults` exposes no way to absorb an observation: the theta
+    # decomposition and the SES level are both properties of the fitted sample.
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).
@@ -57,16 +60,19 @@ class ThetaModel(BaseModel):
     ) -> pd.DataFrame:
         from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
 
-        mean = np.asarray(self._fitted.forecast(horizon), dtype=float)
+        steps = self._forecast_steps(horizon)
+        mean = np.asarray(self._fitted.forecast(steps), dtype=float)[-horizon:]
         # Theta's forecast SE ≈ (upper − lower) / (2 z) from a symmetric PI; use it to
-        # place arbitrary requested quantiles, so the frame honors any quantile set.
-        pi = self._fitted.prediction_intervals(horizon, alpha=0.2)  # ~10/90
+        # place arbitrary requested quantiles, so the frame honors any quantile set. Taken over the
+        # same step span as the mean so the band widens with distance from the *fit*, not from the
+        # advanced origin — which is the honest reading: a stale forecast is less certain.
+        pi = self._fitted.prediction_intervals(steps, alpha=0.2)  # ~10/90
         z90 = norm.ppf(0.9)
-        sigma = (pi["upper"].to_numpy() - pi["lower"].to_numpy()) / (2.0 * z90)
+        sigma = ((pi["upper"].to_numpy() - pi["lower"].to_numpy()) / (2.0 * z90))[-horizon:]
 
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     @classmethod

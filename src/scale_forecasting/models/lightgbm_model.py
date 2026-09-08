@@ -30,6 +30,9 @@ class LightgbmModel(BaseModel):
     family = "ml"
     supports_exog = True
     supports_native_intervals = False
+    # Same seam as `xgboost`: the trees are the estimate, the lag buffer is not.
+    supports_recondition = True
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:
@@ -61,12 +64,21 @@ class LightgbmModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        ds = self._future_index(self._last_date, horizon)
-        mean = lf.recursive_predict(self._model, self._history, ds, self._features, X)
+        # Rolled from the fit's last observation across any skipped span, then tailed — see the
+        # note in `xgboost`; the three lag models share this recursion.
+        full_index = self._future_index(self._last_date, self._forecast_steps(horizon))
+        mean = lf.recursive_predict(
+            self._model, self._history, full_index, self._features, self._forecast_exog(X)
+        )[-horizon:]
+        ds = full_index[-horizon:]
         qmap_t = self.residual_intervals(mean, quantiles)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+
+    def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:
+        self._history = pd.concat([self._history, y_new.astype(float)])
+        self._last_date = y_new.index[-1]
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:

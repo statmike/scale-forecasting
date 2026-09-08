@@ -33,6 +33,10 @@ class StlBagging(BaseModel):
     family = "statistical"
     supports_exog = False
     supports_native_intervals = True
+    # Extrapolate only. The STL decomposition is a property of the fitted sample and the bagged
+    # remainder is drawn from that sample's residuals; neither can take in a new observation without
+    # being recomputed, which is a refit by any honest reading.
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).
@@ -63,11 +67,14 @@ class StlBagging(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        base = np.asarray(self._arima.forecast(horizon), dtype=float)
+        # Both halves are projected across the skipped span and then tailed, so the seasonal tiling
+        # keeps its phase against the fit rather than restarting at the advanced origin.
+        steps = self._forecast_steps(horizon)
+        base = np.asarray(self._arima.forecast(steps), dtype=float)
         # Project the seasonal component forward by repeating the last full period.
         last_season = self._seasonal[-self._period :]
-        seasonal_future = np.resize(last_season, horizon)
-        center = base + seasonal_future
+        seasonal_future = np.resize(last_season, steps)
+        center = (base + seasonal_future)[-horizon:]
 
         # Bagging: add block-bootstrapped remainder draws to the point path.
         rng = np.random.default_rng(self.ctx.seed)
@@ -81,7 +88,7 @@ class StlBagging(BaseModel):
         # ordered by construction.
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(np.quantile(paths, q, axis=0), t, lam) for q in quantiles}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         # `center` is the raw path: the bootstrap draws are added *on top* of it, so this model's
         # 0.5 quantile is `center + median(draw)` and is shifted like a residual-interval model's,
         # even though it declares a native band. That is exactly the asymmetry `yhat_raw` exists

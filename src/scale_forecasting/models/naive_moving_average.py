@@ -29,6 +29,11 @@ class NaiveMovingAverage(BaseModel):
     family = "statistical"
     supports_exog = False
     supports_native_intervals = False
+    # The window is configuration and the level is an average — nothing is estimated. `recondition`
+    # holds the fit's window fixed and re-averages over the newer tail.
+    supports_recondition = True
+    # The forecast is flat, so advancing the origin moves only the dates.
+    supports_extrapolate = True
 
     def _resolve_window(self, n: int) -> int:
         period = seasonal_period(self.ctx.freq)
@@ -41,6 +46,10 @@ class NaiveMovingAverage(BaseModel):
         if len(vals) < 1:
             raise ModelError("naive_moving_average requires at least 1 observation")
         window = self._resolve_window(len(vals))
+        # Frozen at fit: `recondition` must not let a longer history quietly widen the window, which
+        # would be a different model rather than the same one carried forward.
+        self._window = window
+        self._history = vals
         self._level = float(np.mean(vals[-window:]))
         self._last_date = y.index[-1]
         # In-sample one-step residuals: actual[t] minus the mean of the ``window`` values
@@ -61,8 +70,20 @@ class NaiveMovingAverage(BaseModel):
         qmap_t = self.residual_intervals(mean, quantiles)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+
+    def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:
+        vals = np.concatenate([self._history, y_new.astype(float).to_numpy()])
+        self._history = vals
+        window = self._window
+        self._level = float(np.mean(vals[-window:]))
+        self._last_date = y_new.index[-1]
+        if len(vals) > window:
+            prefix = np.concatenate([[0.0], np.cumsum(vals)])
+            t = np.arange(window, len(vals))
+            preds = (prefix[t] - prefix[t - window]) / window
+            self._set_residuals(vals[window:] - preds)
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:

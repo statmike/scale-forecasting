@@ -123,12 +123,27 @@ class BaseModel(ABC):
     # harder question of whether a device would earn its cost at the hyperparameters actually
     # authored. Capable-but-not-useful is the normal state, and it is what Phase 0 measured.
     gpu_capable: ClassVar[bool] = False
+    # --- frozen-backtest capabilities (see `recondition` / `advance_origin`) ---
+    #
+    # Both default to False so an out-of-tree model is never *assumed* capable of something it has
+    # not implemented. A model that declines is not broken: under a frozen scheme it refits per fold
+    # and the cell records `backtest_refit="unsupported"`, which is a fact a reader can filter on
+    # rather than a silent substitution of a weaker estimand.
+    supports_recondition: ClassVar[bool] = False
+    supports_extrapolate: ClassVar[bool] = False
 
     def __init__(self, params: dict[str, Any], ctx: ModelContext) -> None:
         self.params = dict(params)
         self.ctx = ctx
         # Residuals stashed by fit() for models that lean on the residual-interval helper.
         self._residuals: np.ndarray | None = None
+        # How far past the fit's last observation this model now forecasts from — see
+        # `advance_origin`. Zero for every ordinary fit-then-predict cell, which is what makes the
+        # offset arithmetic in each model's predict() a no-op on the default path.
+        self._origin_offset: int = 0
+        # Exog covering the skipped span, for the models that forecast by recursion and so have to
+        # be rolled through it. None everywhere else, and None whenever the offset is 0.
+        self._gap_exog: pd.DataFrame | None = None
 
     @abstractmethod
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
@@ -142,6 +157,59 @@ class BaseModel(ABC):
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
         """Return the canonical prediction frame in original units."""
+
+    # --- frozen backtesting: moving the forecast origin without refitting ------------
+
+    def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:
+        """Take in observations that arrived *after* the current origin, without re-estimating.
+
+        This is the seam behind ``backtest.scheme="expanding_frozen"``: the model is fit once on the
+        oldest fold's window and then walked forward, so each fold's score answers "what does
+        refitting less often cost me?" rather than "how good is this model freshly trained?".
+        Parameters stay exactly as fitted; only what the model is *conditioned on* moves.
+
+        ``y_new`` is the **new observations only** — not the whole window. That is
+        ``statsmodels``' own ``append`` contract, and it is the contract worth matching because
+        getting it wrong there is silent: appending a span twice corrupts the state filter and
+        raises nothing. Models that would rather hold the whole history (the naives, ``croston``,
+        the lag models) accumulate it themselves in one line, and those are exactly the models where
+        the operation is cheap and hard to get wrong.
+
+        Default: refuse. A model that has no way to absorb an observation without re-estimating
+        should say so rather than approximate, and `supports_recondition` is how the driver knows
+        in advance.
+        """
+        raise ModelError(f"{type(self).name} cannot re-condition; it must be refit")
+
+    def advance_origin(self, periods: int, X_gap: pd.DataFrame | None = None) -> None:
+        """Move the forecast origin ``periods`` steps forward *blind* — no new actuals.
+
+        The seam behind ``backtest.scheme="expanding_stale"``: the model's already-fitted curve is
+        evaluated at later dates and never told what actually happened in between, so its score
+        measures **staleness, not skill**. It cannot notice a level shift. That is a real question
+        ("how fast does a fitted model decay if nobody touches it?") and a different one from
+        `recondition`'s, which is why the two never share a leaderboard slice.
+
+        ``periods`` is **absolute** — counted from the last observation the fit saw, not from
+        wherever the origin currently is. So the driver sets it per fold instead of accumulating,
+        and setting it twice is idempotent. ``0`` restores the as-fitted origin.
+
+        ``X_gap`` is exog over the skipped span, for the models whose forecast is a recursion that
+        has to be rolled through it. Handing it over is not leakage: exog is known-in-advance by
+        construction here — `features.build_future_features` fabricates it for the forward forecast
+        too. Only the *target* is withheld.
+
+        Unlike `recondition`, this one has a real default: it records the offset and the gap exog,
+        and each model honours them in ``predict`` (the base helper `_forecast_index` does the date
+        half). There is nothing model-specific left to override, so a model opts in by setting
+        `supports_extrapolate` rather than by reimplementing the same four lines sixteen times.
+        """
+        if not self.supports_extrapolate:
+            raise ModelError(f"{type(self).name} cannot advance its forecast origin")
+        if periods < 0:
+            raise ModelError(f"advance_origin: periods must be >= 0, got {periods}")
+        self._origin_offset = int(periods)
+        self._gap_exog = X_gap
 
     def get_params(self) -> dict[str, Any]:
         """Resolved params actually used (post-HPO). Logged to ``forecast_metadata.best_params``."""
@@ -253,6 +321,38 @@ class BaseModel(ABC):
         return pd.date_range(start=last_date, periods=horizon + 1, freq=self.ctx.freq)[1:].as_unit(
             "ns"
         )
+
+    def _forecast_index(self, horizon: int) -> pd.DatetimeIndex:
+        """The ``horizon`` dates this prediction covers, honouring any advanced origin.
+
+        At the default offset of 0 this is exactly ``_future_index(self._last_date, horizon)`` —
+        which is what every model's ``predict`` used to call directly, and why swapping the call is
+        safe across the whole suite. After `advance_origin(k)` it is the same date grid walked ``k``
+        further out, so the fold's validation dates line up without the model needing to know what a
+        fold is.
+        """
+        offset = self._origin_offset
+        return self._future_index(self._last_date, offset + horizon)[offset:]
+
+    def _forecast_steps(self, horizon: int) -> int:
+        """How many steps a step-indexed forecaster must produce to cover `_forecast_index`.
+
+        The companion to `_forecast_index` for the models whose library counts *steps from the fit*
+        rather than taking dates: ask for this many, then keep the last ``horizon``. Reads as
+        ``horizon`` at the default offset.
+        """
+        return self._origin_offset + horizon
+
+    def _forecast_exog(self, X: pd.DataFrame | None) -> pd.DataFrame | None:
+        """Exog covering the whole step span: the skipped gap first, then the requested window.
+
+        Returns ``X`` untouched at the default offset, so the ordinary path allocates nothing. When
+        the origin has been advanced past a span the caller supplied exog for, the two are stacked
+        in date order — which is the order every consumer here reads them in.
+        """
+        if self._origin_offset == 0 or self._gap_exog is None:
+            return X
+        return self._gap_exog if X is None else pd.concat([self._gap_exog, X])
 
     def _assemble_frame(
         self,

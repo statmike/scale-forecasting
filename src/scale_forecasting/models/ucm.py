@@ -30,6 +30,10 @@ class Ucm(BaseModel):
     family = "statistical"
     supports_exog = True
     supports_native_intervals = True
+    # State-space, like `sarimax`: `append(refit=False)` filters the new observations through the
+    # already-estimated structural components without touching them.
+    supports_recondition = True
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).
@@ -61,13 +65,17 @@ class Ucm(BaseModel):
     ) -> pd.DataFrame:
         from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
 
-        fc = self._fitted.get_forecast(horizon, exog=X)
-        mean = np.asarray(fc.predicted_mean, dtype=float)
-        sigma = np.asarray(fc.se_mean, dtype=float)
+        fc = self._fitted.get_forecast(self._forecast_steps(horizon), exog=self._forecast_exog(X))
+        mean = np.asarray(fc.predicted_mean, dtype=float)[-horizon:]
+        sigma = np.asarray(fc.se_mean, dtype=float)[-horizon:]
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+
+    def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:
+        self._fitted = self._fitted.append(y_new.astype(float), exog=X_new, refit=False)
+        self._last_date = y_new.index[-1]
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:

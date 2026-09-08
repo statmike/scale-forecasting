@@ -34,6 +34,12 @@ class AutoETS(BaseModel):
     family = "statistical"
     supports_exog = False
     supports_native_intervals = False
+    # Extrapolate only. `ExponentialSmoothing` results carry no `append`, so there is no way to feed
+    # this model a new observation without re-estimating the smoothing parameters — and re-selecting
+    # the ETS structure, which is the expensive half. Running its fitted recursion further out is
+    # exactly the staleness question, so it participates in `expanding_stale` and declines
+    # `expanding_frozen`.
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).
@@ -79,11 +85,12 @@ class AutoETS(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        mean = np.asarray(self._fitted.forecast(horizon), dtype=float)
+        steps = self._forecast_steps(horizon)
+        mean = np.asarray(self._fitted.forecast(steps), dtype=float)[-horizon:]
         qmap_t = self.residual_intervals(mean, quantiles)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     @classmethod

@@ -43,6 +43,10 @@ class ProphetModel(BaseModel):
     family = "statistical"
     supports_exog = True
     supports_native_intervals = True
+    # Extrapolate only. Prophet is a curve in time, so evaluating it further out is free and exact —
+    # but there is no way to hand the fitted curve a new observation short of `Prophet.fit` again,
+    # which is a refit. It therefore answers the staleness question and declines the frozen one.
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:
@@ -71,7 +75,9 @@ class ProphetModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        ds = self._future_index(self._last_date, horizon)
+        # No slicing needed: Prophet evaluates whatever dates it is handed, so an advanced origin is
+        # just a later set of dates — nothing has to be rolled across the skipped span.
+        ds = self._forecast_index(horizon)
         future = pd.DataFrame({"ds": ds})
         for col in self._exog_cols:
             if X is None or col not in X.columns:

@@ -39,6 +39,12 @@ class Croston(BaseModel):
     family = "statistical"
     supports_exog = False
     supports_native_intervals = False
+    # `alpha` and `variant` are configuration, not estimates — nothing here is fit to the data, so
+    # re-running the filter over a longer history conditions the level forward without re-estimating
+    # anything. That is a genuine re-condition, not a refit wearing a different name.
+    supports_recondition = True
+    # The forecast is flat, so advancing the origin moves only the dates.
+    supports_extrapolate = True
 
     def _estimate(self, vals: np.ndarray) -> tuple[float, np.ndarray]:
         """Return ``(level, in_sample_one_step)`` for the configured variant."""
@@ -88,6 +94,9 @@ class Croston(BaseModel):
         if self._variant not in _VARIANTS:
             raise ModelError(f"croston variant must be one of {_VARIANTS}, got '{self._variant}'")
         self._level, fitted = self._estimate(vals)
+        # Kept so `recondition` can re-run the filter over fit history + the new observations. The
+        # filter is sequential, so it needs the whole run from the start, not just the tail.
+        self._history = vals
         self._last_date = y.index[-1]
         self._set_residuals(vals - fitted)
 
@@ -101,8 +110,14 @@ class Croston(BaseModel):
         qmap_t = self.residual_intervals(mean, quantiles)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+
+    def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:
+        self._history = np.concatenate([self._history, y_new.astype(float).to_numpy()])
+        self._level, fitted = self._estimate(self._history)
+        self._last_date = y_new.index[-1]
+        self._set_residuals(self._history - fitted)
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:

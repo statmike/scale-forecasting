@@ -28,6 +28,9 @@ class HoltWinters(BaseModel):
     family = "statistical"
     supports_exog = False
     supports_native_intervals = False
+    # Extrapolate only — same reason as `autoets`: `ExponentialSmoothing` has no `append`, so the
+    # level/trend/seasonal states cannot be advanced by one observation without a refit.
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).
@@ -60,11 +63,12 @@ class HoltWinters(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        mean = np.asarray(self._fitted.forecast(horizon), dtype=float)
+        steps = self._forecast_steps(horizon)
+        mean = np.asarray(self._fitted.forecast(steps), dtype=float)[-horizon:]
         qmap_t = self.residual_intervals(mean, quantiles)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     @classmethod

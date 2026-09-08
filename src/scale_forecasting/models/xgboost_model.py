@@ -31,6 +31,12 @@ class XgboostModel(BaseModel):
     family = "ml"
     supports_exog = True
     supports_native_intervals = False
+    # The trees are the estimate; the lag buffer is not. Re-pointing the history at newer actuals
+    # feeds the *same* trees better inputs without retraining one of them, which is exactly the
+    # re-conditioned question. Blind mode instead rolls the recursion across the skipped span, so
+    # the model forecasts off its own predictions the way it would if nobody refreshed it.
+    supports_recondition = True
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:
@@ -61,12 +67,22 @@ class XgboostModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        ds = self._future_index(self._last_date, horizon)
-        mean = lf.recursive_predict(self._model, self._history, ds, self._features, X)
+        # The recursion is rolled from the fit's last observation across any skipped span and then
+        # tailed, so a blind forecast is genuinely feeding on its own predictions rather than
+        # restarting from actuals it was never given.
+        full_index = self._future_index(self._last_date, self._forecast_steps(horizon))
+        mean = lf.recursive_predict(
+            self._model, self._history, full_index, self._features, self._forecast_exog(X)
+        )[-horizon:]
+        ds = full_index[-horizon:]
         qmap_t = self.residual_intervals(mean, quantiles)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+
+    def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:
+        self._history = pd.concat([self._history, y_new.astype(float)])
+        self._last_date = y_new.index[-1]
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:

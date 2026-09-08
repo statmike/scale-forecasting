@@ -53,6 +53,11 @@ class NeuralProphetModel(BaseModel):
     supports_native_intervals = True
     # The only model here with a tensor library under it, and so the only one a device can serve.
     gpu_capable = True
+    # Extrapolate only. The network's weights are the estimate and there is no partial-fit seam that
+    # absorbs an observation without training, so it declines the frozen scheme and answers the
+    # staleness one. Under autoregression (`n_lags > 0`) the reach is bounded by `n_forecasts`: the
+    # span it must cover is the horizon *plus* the skipped gap, and `_read_steps` says so if short.
+    supports_extrapolate = True
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:
@@ -94,15 +99,18 @@ class NeuralProphetModel(BaseModel):
     ) -> pd.DataFrame:
         from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
 
-        future = self._model.make_future_dataframe(self._train, periods=horizon)
-        mean, lo, hi = self._read_steps(self._model.predict(future), horizon)
+        # Read the whole span from the fit's last observation and keep the tail, so an advanced
+        # origin lands on the right steps of the network's own output rather than re-anchoring it.
+        steps = self._forecast_steps(horizon)
+        future = self._model.make_future_dataframe(self._train, periods=steps)
+        mean, lo, hi = (a[-horizon:] for a in self._read_steps(self._model.predict(future), steps))
         # Back out sigma from the symmetric band, then place any requested quantile.
         z = norm.ppf(_BAND[1])
         sigma = (hi - lo) / (2.0 * z)
 
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
-        ds = self._future_index(self._last_date, horizon)
+        ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     def device_used(self) -> str | None:
@@ -145,9 +153,12 @@ class NeuralProphetModel(BaseModel):
         return None if value is None else int(value)
 
     def _read_steps(
-        self, fc: pd.DataFrame, horizon: int
+        self, fc: pd.DataFrame, steps: int
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Pull the mean and the band for steps 1..``horizon`` out of a forecast frame.
+        """Pull the mean and the band for steps 1..``steps`` out of a forecast frame.
+
+        ``steps`` is the span from the *fit's* last observation, which is the horizon on the
+        ordinary path and horizon-plus-gap when the forecast origin has been advanced.
 
         NeuralProphet has two output shapes and reading the wrong one is silent rather than loud.
 
@@ -167,20 +178,20 @@ class NeuralProphetModel(BaseModel):
         future = fc[fc["ds"] > self._last_date]
         heads = self._n_heads(fc)
         available = len(future) if heads <= 1 else min(heads, len(future))
-        if available < horizon:
+        if available < steps:
             raise ModelError(
-                f"neuralprophet produced {available} forecast steps for a horizon of {horizon}. "
+                f"neuralprophet produced {available} forecast steps for a span of {steps}. "
                 f"With n_lags > 0 it emits exactly n_forecasts direct steps and does not recurse, "
-                f"so model_params.neuralprophet.n_forecasts must be at least {horizon}."
+                f"so model_params.neuralprophet.n_forecasts must be at least {steps}."
             )
         if heads <= 1:
-            block = future.head(horizon)
+            block = future.head(steps)
             return (
                 block["yhat1"].to_numpy(dtype=float),
                 block[self._band_col(1, _BAND[0])].to_numpy(dtype=float),
                 block[self._band_col(1, _BAND[1])].to_numpy(dtype=float),
             )
-        rows = [future.iloc[i] for i in range(horizon)]
+        rows = [future.iloc[i] for i in range(steps)]
         return (
             np.array([float(r[f"yhat{i + 1}"]) for i, r in enumerate(rows)]),
             np.array([float(r[self._band_col(i + 1, _BAND[0])]) for i, r in enumerate(rows)]),
