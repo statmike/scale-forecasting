@@ -89,6 +89,45 @@ def inverse_error_weights(errors: np.ndarray) -> np.ndarray:
 _OOF_BLEND_COLS = ("ts_id", "model_type", "fold_id", "forecast_date", "y_true", "yhat")
 
 
+def _fold_key(oof_df: pd.DataFrame) -> list[str]:
+    """The columns that identify one fold's one forecast date, for joining models to each other.
+
+    `cutoff_date` — the fold's last training date — rather than `fold_id`, because `fold_id` is an
+    ordinal within one series' own plan and the two engines number from different anchors. The
+    Python path anchors each series on its own last observation; the BigQuery-native path anchors
+    every series on a single global ``MAX(ds)``. On a panel where series end on different dates
+    those disagree, and the disagreement is silent: rows pair up on a matching ordinal that stands
+    for different training windows, and the rows that *should* have paired fall out of the join.
+    Two models blend only when they saw the same history and forecast the same date, which is what
+    the cutoff says and the ordinal does not.
+
+    Falls back to `fold_id` when `cutoff_date` is absent or not fully populated, which is the state
+    of any OOF written before it was projected on both engines. Blending on the ordinal is what the
+    product did for its whole history — the fallback is that behaviour, not a new risk — and it
+    beats dropping every row of an older run on the floor.
+    """
+    date_col = "forecast_date" if "forecast_date" in oof_df.columns else "ds"
+    if "cutoff_date" in oof_df.columns and oof_df["cutoff_date"].notna().all():
+        return ["ts_id", "cutoff_date", date_col]
+    return ["ts_id", "fold_id", date_col]
+
+
+def _carried_fold_ids(aligned: pd.DataFrame, keys: list[str]) -> pd.Series:
+    """The `fold_id` to write on each ensemble row, wherever the join key left it.
+
+    `_fold_key` decides what the ensemble joins on; `fold_id` is written out either way, because it
+    is the ordinal a reader recognises and the ensemble rows sit in the same table as the base rows.
+    When the fallback key is in use `fold_id` *is* one of the index levels; when the join went on
+    the cutoff it is still an ordinary column. Reading it from the wrong side is how it silently
+    comes out all-NaN.
+    """
+    if "fold_id" in keys:
+        return pd.Series(aligned.index.get_level_values("fold_id"), index=aligned.index)
+    if "fold_id" in aligned.columns:
+        return aligned["fold_id"]
+    return pd.Series(index=aligned.index, dtype="float64")
+
+
 def _weighted_blend(vals: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Row-wise weighted mean over the *present* (non-NaN) models, weights renormalized per row.
 
@@ -118,7 +157,8 @@ def combine_oof(
     ``(ts_id, model_type='ensemble_<s>', fold_id, forecast_date, y_true, yhat)`` for the caller to
     score with `metrics.compute_metrics`.
 
-    Blends over whichever base models are present per ``(ts_id, fold_id, forecast_date)`` key:
+    Blends over whichever base models are present per ``(ts_id, cutoff_date, forecast_date)`` key
+    (see `_fold_key` for why the cutoff and not the fold ordinal):
     ``mean``/``median`` are unweighted; ``inverse_error`` weights each model per ``ts_id`` by
     ``1/WAPE`` over that model's OOF (self-contained — the same signal ``forecast_metadata`` would
     carry); learned strategies apply ``learned_weights[strategy]`` (skipped if absent). Returns an
@@ -136,13 +176,19 @@ def combine_oof(
     if oof_df.empty:
         return empty
     models = list(cfg.models)
-    keys = ["ts_id", "fold_id", "forecast_date"]
+    keys = _fold_key(oof_df)
     wide = oof_df.pivot_table(index=keys, columns="model_type", values="yhat", aggfunc="first")
     present_models = [m for m in models if m in wide.columns]
     if not present_models:
         return empty
     vals = wide.reindex(columns=present_models).to_numpy(dtype=float)
-    truth = oof_df.drop_duplicates(keys).set_index(keys)["y_true"].reindex(wide.index).to_numpy()
+    aligned = oof_df.drop_duplicates(keys).set_index(keys).reindex(wide.index)
+    truth = aligned["y_true"].to_numpy()
+    # `fold_id` is still written out — it is the ordinal a reader recognises and the ensemble rows
+    # have to line up with the base rows in the same table. It is carried, not joined on, so it is
+    # read off whichever side of `aligned` the key put it on: the index when the fallback key is in
+    # use, a column when the join went on the cutoff.
+    fold_ids = _carried_fold_ids(aligned, keys)
     ts_ids = wide.index.get_level_values("ts_id").to_numpy()
 
     parts: list[pd.DataFrame] = []
@@ -154,8 +200,8 @@ def combine_oof(
             {
                 "ts_id": wide.index.get_level_values("ts_id"),
                 "model_type": f"ensemble_{strategy}",
-                "fold_id": wide.index.get_level_values("fold_id"),
-                "forecast_date": wide.index.get_level_values("forecast_date"),
+                "fold_id": fold_ids.to_numpy(),
+                "forecast_date": wide.index.get_level_values(keys[-1]),
                 "y_true": truth,
                 "yhat": yhat,
             }
@@ -220,12 +266,15 @@ def _pivot_oof(oof_df: pd.DataFrame, models: list[str]) -> tuple[np.ndarray, np.
     """Reshape long OOF rows into ``(X, y)`` for stacking.
 
     ``X`` is ``(n_samples, n_models)`` of base-model OOF forecasts, ``y`` the aligned truth.
-    Samples are ``(ts_id, fold_id, forecast_date)`` keys; rows missing any base model are
-    dropped so every column is comparable. Column order follows ``models`` (stable weights).
+    Samples are `_fold_key` keys — ``(ts_id, cutoff_date, forecast_date)`` — and rows missing any
+    base model are dropped so every column is comparable. That `dropna` is why the key matters
+    here more than anywhere else: a key that fails to align two engines does not merely blend the
+    wrong things, it silently deletes the training rows a meta-learner would have fitted on.
+    Column order follows ``models`` (stable weights).
     """
-    date_col = "forecast_date" if "forecast_date" in oof_df.columns else "ds"
+    keys = _fold_key(oof_df)
     wide = oof_df.pivot_table(
-        index=["ts_id", "fold_id", date_col],
+        index=keys,
         columns="model_type",
         values="yhat",
         aggfunc="first",
@@ -235,11 +284,7 @@ def _pivot_oof(oof_df: pd.DataFrame, models: list[str]) -> tuple[np.ndarray, np.
         raise ConfigError(f"OOF is missing base models {missing}; cannot fit learned ensemble")
     wide = wide[models].dropna()
 
-    truth = (
-        oof_df.drop_duplicates(["ts_id", "fold_id", date_col])
-        .set_index(["ts_id", "fold_id", date_col])["y_true"]
-        .reindex(wide.index)
-    )
+    truth = oof_df.drop_duplicates(keys).set_index(keys)["y_true"].reindex(wide.index)
     return wide.to_numpy(dtype=float), truth.to_numpy(dtype=float)
 
 

@@ -367,9 +367,7 @@ def _oof_row(
         "yhat": row["yhat"],
         # `build_eval_query` has always selected these — ML.FORECAST returns them and the metric
         # panel above is already scored on them — and this row assembler dropped them on the way
-        # to the table. `cutoff_date` and `horizon_step` are still NULL here: the native fold
-        # geometry is a single global `DATE_SUB(MAX(ds), …)` rather than a per-series one, so
-        # projecting it belongs with the ragged-panel join work, not here.
+        # to the table.
         # One arm, said twice. BigQuery ML applies no bias correction, so `yhat_raw` and
         # `yhat_adjusted` are both the forecast it returned. Copying the value rather than leaving
         # the pair NULL keeps `y_true - yhat_raw` a valid residual for every engine, which is what
@@ -378,6 +376,11 @@ def _oof_row(
         "yhat_adjusted": row["yhat"],
         "yhat_lower": row.get("yhat_lower"),
         "yhat_upper": row.get("yhat_upper"),
+        # The fold's real geometry, not its ordinal. `cutoff_date` is what an ensemble joins on
+        # across engines — this path's fold `k` and the Python path's fold `k` are the same window
+        # only when every series ends on the same date. See `ensembler._fold_key`.
+        "cutoff_date": row.get("cutoff_date"),
+        "horizon_step": row.get("horizon_step"),
     }
 
 

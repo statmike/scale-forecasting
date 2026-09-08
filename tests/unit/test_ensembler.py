@@ -16,7 +16,10 @@ import pytest
 
 from scale_forecasting.config import RunConfig
 from scale_forecasting.ensembler import (
+    _fold_key,
+    _pivot_oof,
     combine_calculated,
+    combine_oof,
     fit_learned,
     inverse_error_weights,
     mean_combine,
@@ -268,3 +271,133 @@ def test_learned_strategies_are_ignored_by_calculated_blender() -> None:
     base = _base_df([("s1", "theta", "d1", 10.0), ("s1", "sarimax", "d1", 20.0)])
     rows = combine_calculated(base, _cfg(["mean", "nnls"]))
     assert {r["model_type"] for r in rows} == {"ensemble_mean"}
+
+
+# --- fold identity on a ragged panel (plan item 2.6) ---------------------------------
+#
+# `fold_id` is an ordinal within one series' own plan, and the two engines number from different
+# anchors: `backtest.make_folds` counts back from each series' last observation, while
+# `bigquery_sql.fold_plan` counts back from one global `MAX(ds)`. Where series end on different
+# dates those disagree, and the disagreement is invisible — the join simply finds nothing, and
+# `_pivot_oof`'s `dropna()` deletes the rows a meta-learner would have learned from.
+
+_HORIZON, _N_FOLDS = 7, 3
+_GLOBAL_END = pd.Timestamp("2026-03-31")
+# The short series stops one whole fold-step earlier than the long one. That offset is the entire
+# defect: it is what makes "fold 1" name a different training window on each engine.
+_SERIES_END = {"long": _GLOBAL_END, "short": _GLOBAL_END - pd.Timedelta(days=_HORIZON)}
+
+
+def _ragged_two_engine_oof() -> pd.DataFrame:
+    """Two series ending a fold apart, scored by one Python model and one BigQuery-native model.
+
+    Each row is written the way its engine writes it: `theta` anchors each series on that series'
+    own last observation, `arima_plus` anchors both on the panel's last observation and loses the
+    rows with no actual to join to. Both record the cutoff they actually trained to.
+    """
+    rows = []
+    for model, per_series_anchor in (("theta", True), ("arima_plus", False)):
+        for ts_id, end in _SERIES_END.items():
+            anchor = end if per_series_anchor else _GLOBAL_END
+            for fold_id in range(_N_FOLDS):
+                cutoff = anchor - pd.Timedelta(days=_HORIZON * (_N_FOLDS - fold_id))
+                for step in range(1, _HORIZON + 1):
+                    date = cutoff + pd.Timedelta(days=step)
+                    if date > end:
+                        continue  # no actual to join to; this engine writes no row
+                    rows.append(
+                        {
+                            "ts_id": ts_id,
+                            "model_type": model,
+                            "fold_id": fold_id,
+                            "forecast_date": date,
+                            "cutoff_date": cutoff,
+                            "horizon_step": step,
+                            "y_true": 100.0 + date.day,
+                            "yhat": 100.0 + date.day + (0.5 if model == "theta" else -0.5),
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def test_the_cutoff_is_the_join_key_and_the_ordinal_is_the_fallback() -> None:
+    oof = _ragged_two_engine_oof()
+    assert _fold_key(oof) == ["ts_id", "cutoff_date", "forecast_date"]
+    # An OOF written before the native path projected its cutoff — the ordinal is all there is,
+    # which is what the product did for its whole history.
+    assert _fold_key(oof.drop(columns=["cutoff_date"])) == ["ts_id", "fold_id", "forecast_date"]
+    # Partially populated counts as absent: half a key is worse than the old one, because the
+    # rows that do have it would pair while the rest silently would not.
+    partial = oof.copy()
+    partial.loc[partial.index[0], "cutoff_date"] = pd.NaT
+    assert _fold_key(partial) == ["ts_id", "fold_id", "forecast_date"]
+
+
+def test_a_ragged_panel_keeps_the_short_series_when_folds_are_keyed_on_the_cutoff() -> None:
+    """The exit gate. On the ordinal the short series contributes nothing at all."""
+    oof = _ragged_two_engine_oof()
+    models = ["theta", "arima_plus"]
+
+    x_cut, y_cut = _pivot_oof(oof, models)
+    x_ord, y_ord = _pivot_oof(oof.drop(columns=["cutoff_date"]), models)
+
+    # The long series is anchored the same way by both engines, so it pairs either way: three
+    # folds of seven dates. That is the whole of what the ordinal key recovers.
+    assert len(x_ord) == _N_FOLDS * _HORIZON
+    # The short series shares two of its windows with the native path — same cutoff, same dates,
+    # same information — and the ordinal names them differently on each engine, so none of them
+    # pair. Keyed on the cutoff, all fourteen do.
+    assert len(x_cut) == _N_FOLDS * _HORIZON + 2 * _HORIZON
+    assert len(y_cut) == len(x_cut) and len(y_ord) == len(x_ord)
+    assert np.isfinite(x_cut).all(), "a paired row must have both models, not a filled NaN"
+
+
+def test_the_ensemble_blends_both_models_on_the_short_series_of_a_ragged_panel() -> None:
+    """Same defect one layer up, and here it is worse than a dropped row — it is a wrong number.
+
+    `combine_oof` blends over whichever models are present per key, so an unpaired row does not
+    disappear: it produces a two-model ensemble's row from one model's forecast. The short series
+    still shows up on the leaderboard, still labelled `ensemble_mean`, and nothing about the row
+    says it was a consensus of one.
+    """
+    cfg = RunConfig(
+        **{
+            "run_name": "ens ragged",
+            "data": {"source_table": "t"},
+            "models": ["theta", "arima_plus"],
+            "ensemble": {"enabled": True, "strategies": ["mean"]},
+            "backtest": {"enabled": True, "n_folds": _N_FOLDS, "decision_metric": "wape"},
+        }
+    )
+    oof = _ragged_two_engine_oof()
+
+    blended = combine_oof(oof, cfg)
+    on_ordinal = combine_oof(oof.drop(columns=["cutoff_date"]), cfg)
+
+    # The two models straddle the truth by ±0.5, so a row that blended both is the truth exactly
+    # and a row that blended one is half a unit off. That makes "how many models entered this
+    # blend" readable straight off the number.
+    def _two_model_rows(df: pd.DataFrame, ts_id: str) -> int:
+        rows = df[df["ts_id"] == ts_id]
+        return int(np.isclose(rows["yhat"], rows["y_true"]).sum())
+
+    # The long series is anchored identically by both engines, so it is unaffected either way.
+    assert _two_model_rows(blended, "long") == _N_FOLDS * _HORIZON
+    assert _two_model_rows(on_ordinal, "long") == _N_FOLDS * _HORIZON
+
+    # The short series shares two windows with the native path. Keyed on the cutoff, both blend
+    # two models; keyed on the ordinal, **not one row does** — and the rows are still there,
+    # wearing an ensemble's name over a single model's forecast. A dropped row would at least be
+    # visible.
+    assert _two_model_rows(blended, "short") == 2 * _HORIZON
+    assert _two_model_rows(on_ordinal, "short") == 0, "the defect this item fixes"
+    assert not on_ordinal[on_ordinal["ts_id"] == "short"].empty
+
+    # The short series' oldest window has no native counterpart at all — the native path never
+    # trained a fold that far back. That row is a one-model blend under either key, and honestly
+    # so: this item aligns the folds that exist, it does not invent one.
+    assert len(blended[blended["ts_id"] == "short"]) == _N_FOLDS * _HORIZON
+
+    # `fold_id` is still written, because it is the ordinal a reader recognises and the ensemble
+    # rows sit in the same table as the base rows. It is carried, not joined on.
+    assert blended["fold_id"].notna().all()

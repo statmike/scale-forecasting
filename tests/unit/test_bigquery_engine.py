@@ -37,6 +37,11 @@ def _eval_df() -> pd.DataFrame:
             "yhat": [12.5, 9.5, 11.2, 99.0, 103.0, 101.0],
             "yhat_lower": [11.0, 8.0, 10.0, 95.0, 99.0, 97.0],
             "yhat_upper": [14.0, 11.0, 12.5, 104.0, 107.0, 105.0],
+            # One cutoff for the whole fold — the native path trains every series to the same
+            # global origin — with the step counted from it, so the geometry travels with the row
+            # even though the frame arrives shuffled.
+            "cutoff_date": ["2026-01-31"] * 6,
+            "horizon_step": [3, 1, 2, 2, 3, 1],
         }
     )
 
@@ -141,3 +146,33 @@ def test_an_empty_fold_scores_nothing_rather_than_raising() -> None:
     )
     assert oof == []
     assert panels == {}
+
+
+def test_the_folds_geometry_travels_from_the_eval_frame_onto_the_oof_rows() -> None:
+    # `fold_id` is an ordinal, and the two engines number their folds from different anchors: the
+    # Python path counts back from each series' own last observation, this path from one global
+    # MAX(ds). On a ragged panel the same ordinal is therefore a different training window per
+    # engine, so an ensemble joining on it pairs nothing and silently blends one model. The cutoff
+    # is what makes the two comparable, which is why it has to reach the table rather than stay in
+    # the query. See `ensembler._fold_key`.
+    oof, _ = _score_fold(
+        _eval_df(), _HIST, run_id="r", model_name="arima_plus", fold_id=2, seasonal_period=7
+    )
+    assert {r["cutoff_date"] for r in oof} == {"2026-01-31"}
+    by_date = {(r["ts_id"], r["forecast_date"]): r["horizon_step"] for r in oof}
+    assert by_date[("a", "2026-02-01")] == 1
+    assert by_date[("a", "2026-02-03")] == 3
+    # The step is the row's own, not the position it happened to land at after the sort.
+    assert by_date[("b", "2026-02-02")] == 2
+
+
+def test_a_fold_without_the_geometry_columns_still_produces_rows() -> None:
+    # A run whose OOF rows predate the two columns, or a hand-built frame, must not raise here --
+    # the ensemble's join key falls back to the ordinal when the cutoff is missing.
+    bare = _eval_df().drop(columns=["cutoff_date", "horizon_step"])
+    oof, _ = _score_fold(
+        bare, _HIST, run_id="r", model_name="arima_plus", fold_id=0, seasonal_period=7
+    )
+    assert len(oof) == 6
+    assert {r["cutoff_date"] for r in oof} == {None}
+    assert {r["horizon_step"] for r in oof} == {None}

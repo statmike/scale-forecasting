@@ -362,8 +362,8 @@ clustered by `run_id, ts_id`.
 | `yhat_adjusted` | `FLOAT64` | The corrected arm for that date. |
 | `yhat_lower` | `FLOAT64` | Lower bound of the prediction interval for that held-out date. |
 | `yhat_upper` | `FLOAT64` | Upper bound of the same interval. |
-| `cutoff_date` | `DATE` | The last date the model was allowed to see when it made this prediction — the fold's origin. Python cells only; NULL on BigQuery-native rows. |
-| `horizon_step` | `INT64` | How far ahead of `cutoff_date` this row is, counting from 1. Python cells only; NULL on BigQuery-native rows. |
+| `cutoff_date` | `DATE` | The last date the model was allowed to see when it made this prediction — the fold's origin, and the column that identifies a fold across engines. |
+| `horizon_step` | `INT64` | How far ahead of `cutoff_date` this row is, counting from 1. |
 | `created_at` | `TIMESTAMP` | **Declared, not yet written — NULL today.** The write timestamp; same reasoning as the note under `forecast_metadata`. |
 
 ### Error by how far ahead you asked
@@ -382,9 +382,21 @@ residuals by `horizon_step` is what lets the shipped band widen with distance in
 `oof-flat`, the flat-band weakness is still there, and grouping by `horizon_step` shows it
 immediately.
 
-`cutoff_date` and `horizon_step` are written by the Python engines (Spark, Ray). The
-BigQuery-native path evaluates all its folds against one global cutoff, so it has no per-series
-origin to record and leaves both NULL.
+### Which fold is this, really
+
+`fold_id` is an ordinal within one series' own backtest plan, and the two engines number from
+different anchors. The Python engines count folds back from **each series' own last observation**;
+the BigQuery-native path counts back from **one global `MAX(ds)`** across the whole panel. On a
+panel where every series ends on the same date those agree exactly. On a ragged panel they do not,
+and the disagreement is silent — the same `fold_id` names a different training window on each
+engine, so a join on the ordinal pairs nothing and an ensemble quietly blends fewer models than it
+claims to.
+
+`cutoff_date` is the fix and the reason both engines now write it: two rows describe comparable
+forecasts when the models saw the same history and predicted the same date, which is what the
+cutoff says and the ordinal does not. The ensemble joins on `(ts_id, cutoff_date, forecast_date)`.
+`fold_id` is still written — it is the ordinal a reader recognises, and it is what
+`n_folds_achieved` counts — it is simply not what anything joins on.
 
 ---
 

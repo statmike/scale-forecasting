@@ -375,8 +375,13 @@ def test_snapshot_clause_pins_eval_join_actuals() -> None:
     )
     # The actuals join reads the source and must time-travel with the rest of the run.
     assert f"`{_SRC}{_SNAP}" in sql
-    # ML.FORECAST(MODEL ...) reads the fold model object, which is not time-travelled.
-    assert sql.count("FOR SYSTEM_TIME AS OF") == 1
+    # Twice, once for each source read: the actuals join and the cutoff-date scalar. Both are
+    # reads of the source table, and a cutoff computed off an un-pinned `MAX(ds)` would name a
+    # different fold from the one the model was trained for the moment a row lands mid-run.
+    assert sql.count(f"`{_SRC}{_SNAP}") == 2
+    # ML.FORECAST(MODEL ...) reads the fold model object, which is not time-travelled — so the
+    # count above is the *total*: no third occurrence has crept in on the model reference.
+    assert sql.count("FOR SYSTEM_TIME AS OF") == 2
 
 
 def test_snapshot_clause_threads_through_setup_and_fold_builders() -> None:

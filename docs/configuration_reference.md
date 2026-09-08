@@ -159,9 +159,17 @@ in where training *starts*:
 **A shorter series is scored on fewer folds; it never loses its forecast.** Backtesting scores a
 model — it does not produce the forecast — so a scoring shortfall costs only the score. The fold
 grid shrinks to whatever the series supports, dropping the **oldest** folds first (so every series
-is scored on the most recent window it can reach) and keeping the survivors' original `fold_id`s
-(so `fold_id` still means the same thing across a panel of mixed-length series). A series too short
-for even one fold is fit and forecast unscored.
+is scored on the most recent window it can reach) and keeping the survivors' original `fold_id`s, so
+a fold is never renumbered by the series that happens to be short. A series too short for even one
+fold is fit and forecast unscored.
+
+`fold_id` is an ordinal within one series' own plan, and it is counted back from that series' last
+observation — so on a ragged panel two series' fold 3 are two different date windows, and the
+BigQuery-native path (which counts back from one global `MAX(ds)`) numbers differently again. Each
+out-of-fold row therefore also carries `cutoff_date`, the last date the model was allowed to see.
+That is what identifies a fold when rows have to be compared across series or across engines, and
+it is what the ensemble joins on — see
+[output_schemas.md](./output_schemas.md#which-fold-is-this-really).
 
 Three columns on `forecast_metadata` record how the scoring went, separately from how the cell went:
 

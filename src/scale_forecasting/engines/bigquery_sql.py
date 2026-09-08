@@ -397,11 +397,20 @@ def build_eval_query(
 ) -> str:
     """A read-back ``SELECT`` of a **backtest fold's** forecast joined to actuals (OOF + metrics).
 
-    Returns ``(ts_id, forecast_date, y_true, yhat, yhat_lower, yhat_upper)`` for the fold's
-    validation window (the ``backtest.horizon`` dates after ``cutoff``, all of which have ground
-    truth). The engine groups these by ``ts_id`` and feeds `metrics.compute_metrics` — so the
-    metric math is byte-identical to the Python models. Intervals are carried so coverage/pinball
-    are real. ``@run_id`` only names the model here; this query writes no row.
+    Returns ``(ts_id, forecast_date, y_true, yhat, yhat_lower, yhat_upper, cutoff_date,
+    horizon_step)`` for the fold's validation window (the ``backtest.horizon`` dates after
+    ``cutoff``, all of which have ground truth). The engine groups these by ``ts_id`` and feeds
+    `metrics.compute_metrics` — so the metric math is byte-identical to the Python models.
+    Intervals are carried so coverage/pinball are real. ``@run_id`` only names the model here;
+    this query writes no row.
+
+    ``cutoff_date`` is the fold's last training date, selected rather than left for a reader to
+    reconstruct: it is what identifies a fold across engines. ``fold_id`` cannot, because this
+    path derives its folds from one global ``MAX(ds)`` while the Python path anchors each series
+    on its own last observation, so on a ragged panel the same ordinal is a different window.
+    ``horizon_step`` is how many cadence units past that cutoff each forecast date is, which is
+    the same 1-based position `backtest.py` records — computed by date difference rather than by
+    row position so a missing actual shifts nothing.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
@@ -415,15 +424,22 @@ def build_eval_query(
         snapshot_millis=snapshot_millis,
     )
     snap = _snapshot_clause(snapshot_millis)
+    _, unit = _freq(cfg)
+    # Cross-joined once rather than inlined twice: the same scalar feeds both new columns, and a
+    # single named source is what makes the two agree by construction instead of by review.
+    cutoff = _cutoff_expr(cfg, source, back_steps, snapshot_millis=snapshot_millis)
     return (
         f"SELECT\n"
         f"  f.{idc} AS ts_id, DATE(f.forecast_timestamp) AS forecast_date,\n"
         f"  s.{targetc} AS y_true, f.forecast_value AS yhat,\n"
         f"  f.prediction_interval_lower_bound AS yhat_lower,\n"
-        f"  f.prediction_interval_upper_bound AS yhat_upper\n"
+        f"  f.prediction_interval_upper_bound AS yhat_upper,\n"
+        f"  c.cutoff_date AS cutoff_date,\n"
+        f"  DATE_DIFF(DATE(f.forecast_timestamp), c.cutoff_date, {unit}) AS horizon_step\n"
         f"FROM {forecast} f\n"
         f"JOIN `{source}`{snap} s\n"
         f"  ON s.{idc} = f.{idc} AND s.{datec} = DATE(f.forecast_timestamp)\n"
+        f"CROSS JOIN (SELECT {cutoff} AS cutoff_date) c\n"
         f"ORDER BY ts_id, forecast_date;"
     )
 
