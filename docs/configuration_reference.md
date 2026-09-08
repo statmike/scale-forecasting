@@ -228,6 +228,11 @@ on `forecast_metadata` rather than pretending otherwise. Every model answers `ex
 which is what makes it the scheme where a cross-model leaderboard compares like with like. The
 BigQuery-native models always report `per_fold` — `CREATE MODEL` is the only way to fit them.
 
+An ensemble row inherits `backtest_refit` from the members its blend was built from: their mode
+when they agree, and `mixed` when they do not. A blend is only as frozen as its least-frozen
+member, and `mixed` is how you see that a consensus sitting on an `expanding_frozen` leaderboard
+is not comparable to the single-model rows around it.
+
 Both frozen schemes additionally score a **control arm**: the same fit walked forward blind, on the
 same dates. It costs a forecast, not a fit. It lands in `backtest_oof.yhat_stale` per row, and is
 summarised per cell as `forecast_metadata.staleness_gap` — the blind arm's loss minus the primary

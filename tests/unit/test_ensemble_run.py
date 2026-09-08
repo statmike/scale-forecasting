@@ -26,6 +26,7 @@ from scale_forecasting.ensemble_run import (
     _apply_weights,
     _override_ensemble,
     base_read_sql,
+    ensemble_refit_mode,
     ensemble_scoring_basis,
     run_ensemble_scoring,
     run_ensembles,
@@ -569,3 +570,25 @@ def test_the_runs_ensemble_claim_takes_the_weakest_answer() -> None:
     assert run_ensemble_scoring([None, None]) is None
     assert run_ensemble_scoring([None, "holdout"]) == "holdout"
     assert run_ensemble_scoring(["holdout", "in_sample"]) == "in_sample"
+
+
+def test_an_ensemble_inherits_its_members_backtest_when_they_all_agree() -> None:
+    # A blend of three frozen models is a frozen result, and it should be readable as one on the
+    # leaderboard beside its members rather than sitting in a blank column.
+    assert ensemble_refit_mode(["recondition", "recondition", "recondition"]) == "recondition"
+    assert ensemble_refit_mode(["per_fold"]) == "per_fold"
+
+
+def test_an_ensemble_over_disagreeing_members_says_mixed_rather_than_picking_one() -> None:
+    # This is the row a reader most needs to see: it sits on an expanding_frozen leaderboard, but
+    # one of the models underneath it refit at every origin, so it is not comparable to the rest.
+    assert ensemble_refit_mode(["recondition", "per_fold"]) == "mixed"
+    assert ensemble_refit_mode(["recondition", "unsupported", "recondition"]) == "mixed"
+
+
+def test_an_ensemble_with_no_backtested_members_has_no_refit_mode_rather_than_mixed() -> None:
+    # NULL already means "no backtest happened here". A member row whose own column is NULL adds
+    # no disagreement, so it must not be what tips an otherwise-unanimous blend into "mixed".
+    assert ensemble_refit_mode([]) is None
+    assert ensemble_refit_mode([None, None]) is None
+    assert ensemble_refit_mode([None, "extrapolate"]) == "extrapolate"

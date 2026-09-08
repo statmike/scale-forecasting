@@ -179,6 +179,7 @@ def _metadata_producers() -> set[str]:
             created_at=_CREATED,
             cfg=_cfg(),
             ensemble_scoring="holdout",
+            backtest_refit="recondition",
         )
     )
     return emitted

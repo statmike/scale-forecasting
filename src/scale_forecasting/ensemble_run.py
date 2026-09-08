@@ -397,7 +397,10 @@ def _ensemble_batch(
     metric_sql = base_read_sql(
         dataset,
         "forecast_metadata",
-        f"ts_id, model_type, {metric}",
+        # `backtest_refit` rides along on the read the decision metric already needs, so the
+        # ensemble can say how its members were scored without a fourth query — see
+        # `ensemble_refit_mode`.
+        f"ts_id, model_type, backtest_refit, {metric}",
         model_list,
         ts_filter,
         extra=" AND fold_id IS NULL",
@@ -478,6 +481,10 @@ def _ensemble_batch(
     }
 
     period = seasonal_period(cfg.data.freq)
+    # Per-series list of how each base model was actually backtested, for `ensemble_refit_mode`.
+    refit_by_id: dict[str, list[str | None]] = {
+        tid: list(g["backtest_refit"]) for tid, g in metric_df.groupby("ts_id")
+    }
     meta_rows: list[dict[str, Any]] = []
     for (model_type, ts_id), g in ens_oof.groupby(["model_type", "ts_id"]):
         # Score per fold, then roll up (NaN-ignoring mean) — identical to the base-model path
@@ -512,6 +519,7 @@ def _ensemble_batch(
                 created_at=created_at,
                 cfg=cfg,
                 ensemble_scoring=ensemble_scoring_basis(strategy, oof_df, cfg, learned_basis),
+                backtest_refit=ensemble_refit_mode(refit_by_id.get(str(ts_id), [])),
             )
         )
     bigquery_engine._append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)
@@ -546,6 +554,26 @@ def run_ensemble_scoring(bases: Iterable[str | None]) -> str | None:
     if not seen:
         return None
     return "in_sample" if "in_sample" in seen else "holdout"
+
+
+def ensemble_refit_mode(modes: Iterable[str | None]) -> str | None:
+    """How this ensemble's *members* were scored, rolled up into one answer (pure).
+
+    A blend inherits its members' backtest — an ``ensemble_mean`` over three frozen models is a
+    frozen result, and over two frozen models and one that refit at every origin it is neither.
+    So: unanimous members give the ensemble their mode, disagreement gives ``"mixed"``, and no
+    member rows at all give ``None``.
+
+    ``"mixed"`` is a fifth value that only ensemble rows can carry, and it is the point of the
+    exercise. NULL already means "no backtest happened here", so reusing it for disagreement would
+    hide the one case a reader most needs to see: a row on an ``expanding_frozen`` leaderboard
+    whose members were not all frozen. Saying so is the same instinct as `run_ensemble_scoring`
+    refusing to report the best case.
+    """
+    seen = {m for m in modes if m is not None}
+    if not seen:
+        return None
+    return seen.pop() if len(seen) == 1 else "mixed"
 
 
 def ensemble_scoring_basis(
@@ -584,6 +612,7 @@ def _ensemble_meta_row(
     created_at: Any,
     cfg: RunConfig,
     ensemble_scoring: str | None,
+    backtest_refit: str | None,
 ) -> dict[str, Any]:
     """Assemble one ``forecast_metadata`` row for an ``ensemble_<strategy>`` pseudo-model (pure).
 
@@ -628,6 +657,12 @@ def _ensemble_meta_row(
         # Whether the metrics above were earned with the newest fold kept out of whatever this
         # strategy fitted. NULL where the strategy fits nothing — see `ensemble_scoring_basis`.
         "ensemble_scoring": ensemble_scoring,
+        # Inherited from the members this series' blend was built from — see `ensemble_refit_mode`.
+        "backtest_refit": backtest_refit,
+        # No ensemble control arm exists to compare against: `ensembler.combine_oof` blends the
+        # primary arm's ``yhat`` and never reads ``yhat_stale``, so there is no blind blend whose
+        # loss this could be the difference from. NULL is the honest answer, not zero.
+        "staleness_gap": None,
     }
 
 

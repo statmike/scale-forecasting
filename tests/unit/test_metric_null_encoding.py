@@ -65,6 +65,7 @@ def _ensemble_row(panel: dict[str, float]) -> dict[str, Any]:
         created_at=_CREATED_AT,
         cfg=_cfg(),
         ensemble_scoring=None,
+        backtest_refit=None,
     )
 
 

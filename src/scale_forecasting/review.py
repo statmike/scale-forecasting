@@ -164,7 +164,9 @@ class BacktestCohort:
     every origin), ``recondition`` (one fit carried forward on the new observations),
     ``extrapolate`` (one fit, never told what happened next), and ``unsupported`` (a frozen scheme
     was asked for and this model had no seam for it, so those series refit anyway). A model showing
-    ``unsupported`` on a frozen run is not answering the same question as its neighbours.
+    ``unsupported`` on a frozen run is not answering the same question as its neighbours. Ensemble
+    cohorts inherit their members' mode, or ``mixed`` where the members disagreed — see
+    `ensemble_run.ensemble_refit_mode`.
 
     ``staleness_gap`` is what never refreshing the model cost this panel, in the run's decision
     metric, averaged over the series that ran a control arm and weighted by cohort size. Positive
