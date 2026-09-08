@@ -339,11 +339,12 @@ def read_arm_comparison(
 ) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Per-model rollup of the point-forecast arm choice and what it was worth.
 
-    One row per ``model_type``: which arm the run shipped, how its band was calibrated, how many
-    series the corrected arm beat the raw one on, and the mean/median relative margin over this
-    run's ``decision_metric``. ``point_forecast_margin`` is signed the same way for every row —
-    positive means the correction helped — so the counts and the average are comparable across
-    models that chose different arms.
+    One row per ``model_type``: how many of its series shipped the raw arm, how many had that arm
+    chosen for them rather than configured, how its band was calibrated, how many series the
+    corrected arm beat the raw one on, and the mean/median relative margin over this run's
+    ``decision_metric``. ``point_forecast_margin`` is signed the same way for every row — positive
+    means the correction helped — so the counts and the average are comparable across models, and
+    across series within a model that selected differently under ``point_forecast="auto"``.
 
     Aggregated server-side for the same reason as `read_metric_aggregates`: at 100k series this is
     the difference between a summary and a download. Raises `RegistryError` on failure.
@@ -363,7 +364,12 @@ def read_arm_comparison(
         ") "
         "SELECT model_type, "
         "ANY_VALUE(compute_engine) AS compute_engine, "
-        "ANY_VALUE(point_forecast_source) AS point_forecast_source, "
+        # Not ANY_VALUE for the arm: under `point_forecast="auto"` the cells of one model can
+        # legitimately disagree, and picking one at random to stand for all of them would report
+        # the split as unanimous. The count is the honest summary, and it degrades correctly —
+        # a fleetwide arm gives 0 or n_series, which reads as the unanimity it is.
+        "COUNTIF(point_forecast_source = 'raw') AS n_raw_arm, "
+        "COUNTIF(STARTS_WITH(point_forecast_decision, 'auto')) AS n_auto_decided, "
         "ANY_VALUE(interval_calibration) AS interval_calibration, "
         "COUNT(*) AS n_series, "
         "COUNTIF(point_forecast_margin > 0) AS n_corrected_wins, "

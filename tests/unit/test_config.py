@@ -526,3 +526,67 @@ def test_raw_against_a_squared_error_metric_does_not_warn(
             )
         )
     assert "leaderboard rewards" not in caplog.text
+
+
+def test_auto_requires_a_backtest_and_the_error_names_the_alternatives() -> None:
+    """There are no held-out folds to choose from, and silently choosing anyway would be a lie."""
+    with pytest.raises(ValueError, match="'auto' requires backtest.enabled"):
+        RunConfig(**_minimal_dict(backtest={"enabled": False}, output={"point_forecast": "auto"}))
+
+
+def test_auto_survives_normalization_unresolved() -> None:
+    """The one arm that stays as written: the resolution is per cell, so the config cannot hold it.
+
+    `median`/`mean`/`raw` are decided once for the run and land in the serialized config.
+    `auto` is decided per series+model at fit time and lands in `forecast_metadata`
+    (`point_forecast_source` and `point_forecast_decision`) instead. The config records that
+    selection was *asked for*, which is what the run_id needs to distinguish.
+    """
+    cfg = RunConfig(
+        **_minimal_dict(
+            backtest={"enabled": True, "decision_metric": "rmse"},
+            output={"point_forecast": "auto"},
+        )
+    )
+    assert cfg.model_dump()["output"]["point_forecast"] == "auto"
+
+
+def test_auto_is_a_different_run_from_every_fixed_arm() -> None:
+    from scale_forecasting.registry.ids import make_run_id
+
+    base = _minimal_dict(backtest={"enabled": True, "decision_metric": "wape"})
+    ids = {
+        arm: make_run_id(RunConfig(**{**base, "output": {"point_forecast": arm}}))
+        for arm in ("raw", "median", "mean", "auto")
+    }
+    assert len(set(ids.values())) == 4, ids
+
+
+def test_auto_does_not_warn_about_the_decision_metric(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`auto` weighs the metric's own arm against raw, so there is no mismatch to warn about."""
+    with caplog.at_level("WARNING"):
+        RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": True, "decision_metric": "rmse"},
+                output={"point_forecast": "auto"},
+            )
+        )
+    assert "leaderboard rewards" not in caplog.text
+
+
+def test_corrected_arm_for_is_the_single_rule_both_callers_read() -> None:
+    """Config resolution and per-cell selection must agree on what "corrected" means.
+
+    Two copies of this rule would let a fleetwide default and an `auto` cell disagree — the run
+    would compute a median shift and grade it under a column the rest of the run reads as the mean
+    one, and nothing would say so.
+    """
+    from scale_forecasting.config import corrected_arm_for
+
+    assert corrected_arm_for("wape") == "median"
+    assert corrected_arm_for("rmse") == "mean"
+    for metric in ("wape", "rmse", "mse", "mae"):
+        cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": metric}))
+        assert cfg.output.point_forecast == corrected_arm_for(metric), metric

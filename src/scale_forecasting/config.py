@@ -69,6 +69,22 @@ DecisionMetric = Literal[
 # so leaving a user to discover it by reading forecasting literature would be a poor default.
 _SQUARED_ERROR_METRICS = frozenset({"rmse", "mse", "rmsse", "bias"})
 
+
+def corrected_arm_for(decision_metric: str) -> str:
+    """Which *corrected* point-forecast arm a decision metric implies — `"mean"` or `"median"`.
+
+    One rule, two callers. `RunConfig._normalize` uses it to resolve `output.point_forecast=None`
+    into a concrete arm; `calibration.select_arm` uses it under `point_forecast="auto"` to know
+    which arm it is weighing `raw` against. Splitting the rule across those two would let a
+    fleetwide default and a per-series selection disagree about what "corrected" means, which is
+    the kind of drift nobody notices until a leaderboard reads oddly.
+
+    Says nothing about whether a backtest exists — that is the caller's guard, and the two callers
+    handle its absence differently (one raises, one falls back).
+    """
+    return "mean" if decision_metric in _SQUARED_ERROR_METRICS else "median"
+
+
 # Ensemble strategies. "Learned" strategies train on backtest OOF and
 # therefore require backtesting to be ON; "calculated" ones work either way.
 CALCULATED_STRATEGIES = frozenset({"mean", "median", "inverse_error"})
@@ -228,7 +244,13 @@ class OutputConfig(BaseModel):
     #            construction. **Requires a backtest**: the mean shift is estimated from
     #            out-of-fold residuals and there is no in-sample equivalent for a model that
     #            builds its band from quantiles.
-    point_forecast: Literal["raw", "median", "mean"] | None = None
+    #   auto   — decide per series+model from that cell's own held-out folds, defaulting to the
+    #            corrected arm and dropping to `raw` only on evidence. **Requires a backtest** —
+    #            there is nothing to decide from otherwise. Unlike the other three this stays
+    #            unresolved in the serialized config, because the resolution is per cell; the
+    #            run_id records that selection was asked for, and `forecast_metadata` records what
+    #            each cell chose. See `calibration.select_arm`.
+    point_forecast: Literal["raw", "median", "mean", "auto"] | None = None
 
 
 class HpoConfig(BaseModel):
@@ -897,11 +919,20 @@ class RunConfig(BaseModel):
         #     is a mismatch nothing used to mention. Resolved here rather than read lazily so the
         #     serialized config carries the concrete arm — the run_id then records what was
         #     actually computed, not an instruction to go and decide later.
+        #
+        #     `auto` is the exception, and deliberately so: its resolution is per series+model, so
+        #     there is no single arm to write down here. It stays in the serialized config, which
+        #     means the run_id records "selection was requested" — the right thing to record, since
+        #     two runs that both selected per series are the same run even if the cells chose
+        #     differently.
         if self.output.point_forecast is None:
-            wants_mean = self.backtest.decision_metric in _SQUARED_ERROR_METRICS
             # The mean shift only exists out-of-fold, so without a backtest the honest resolution
             # of "you want squared-error behaviour" is the correction we can actually compute.
-            resolved = "mean" if (wants_mean and self.backtest.enabled) else "median"
+            resolved = (
+                corrected_arm_for(self.backtest.decision_metric)
+                if self.backtest.enabled
+                else "median"
+            )
             object.__setattr__(
                 self, "output", self.output.model_copy(update={"point_forecast": resolved})
             )
@@ -910,6 +941,12 @@ class RunConfig(BaseModel):
                 "output.point_forecast='mean' requires backtest.enabled: the mean residual shift "
                 "is estimated from out-of-fold residuals, and there is no in-sample equivalent. "
                 "Use 'median' (the model's own correction) or 'raw' (no correction)."
+            )
+        elif self.output.point_forecast == "auto" and not self.backtest.enabled:
+            raise ValueError(
+                "output.point_forecast='auto' requires backtest.enabled: the arm is chosen from "
+                "each series' own held-out folds, and without a backtest there are none to choose "
+                "from. Use 'median' (the model's own correction) or 'raw' (no correction)."
             )
         elif self.output.point_forecast == "median" and (
             self.backtest.decision_metric in _SQUARED_ERROR_METRICS

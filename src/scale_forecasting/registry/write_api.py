@@ -109,6 +109,7 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("last_val_date", "S"),
     ("interval_source", "S"),
     ("point_forecast_source", "S"),
+    ("point_forecast_decision", "S"),
     ("interval_calibration", "S"),
     ("point_forecast_margin", "D"),
     ("ensemble_scoring", "S"),

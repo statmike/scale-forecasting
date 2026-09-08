@@ -188,6 +188,51 @@ def test_a_backtest_recalibrates_the_band_and_grades_the_arm() -> None:
     assert res.point_forecast_margin is not None  # a number, sign not asserted — it is measured
 
 
+def _auto_cfg(n_folds: int) -> RunConfig:
+    """A backtested config that asks for per-cell arm selection rather than naming an arm."""
+    return _cfg(
+        backtest={
+            "enabled": True,
+            "n_folds": n_folds,
+            "horizon": HORIZON,
+            "step": HORIZON,
+            "min_train": 30,
+        },
+        output={"point_forecast": "auto"},
+    )
+
+
+def test_a_fixed_arm_records_that_nothing_was_decided() -> None:
+    """`point_forecast_decision` separates "you asked for this" from "the folds picked it"."""
+    for arm in ("raw", "median"):
+        res = run_cell(_series(200), "theta", _cfg(output={"point_forecast": arm}))
+        assert res.point_forecast_source == arm
+        assert res.point_forecast_decision == "configured"
+
+
+def test_auto_picks_an_arm_per_cell_and_records_how() -> None:
+    """End-to-end: the arm shipped in the row is the one the cell's own held-out folds chose."""
+    res = run_cell(_series(300), "theta", _auto_cfg(4))
+    assert res.status == "ok"
+    assert res.point_forecast_source in ("raw", "median")
+    assert res.point_forecast_decision in ("auto-raw", "auto-corrected")
+    # Whichever way it went, the shipped column has to match the arm the row claims.
+    shipped = "yhat_raw" if res.point_forecast_source == "raw" else "yhat_adjusted"
+    assert np.allclose(res.predictions["yhat"], res.predictions[shipped])
+    # The diagnostic is still corrected-vs-raw regardless of what was selected, so a fleetwide
+    # average over cells that chose differently stays a single comparable number.
+    assert res.point_forecast_margin is not None
+
+
+def test_auto_on_an_unscorable_series_falls_back_and_says_so() -> None:
+    """Item 2.1 kept the forecast when scoring fails; `auto` has to keep it too, not error."""
+    res = run_cell(_series(30 + HORIZON - 1), "theta", _auto_cfg(2))
+    assert res.status == "ok"
+    assert len(res.predictions) == HORIZON
+    assert res.point_forecast_source == "median"  # the fleetwide arm for the default metric
+    assert res.point_forecast_decision == "auto-no-backtest"
+
+
 # --- a scoring shortfall must never cost the forecast --------------------------
 #
 # The whole point of this section: backtesting *scores* a model, it does not produce the forecast.

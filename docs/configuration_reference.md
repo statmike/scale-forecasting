@@ -263,7 +263,7 @@ What the number in `yhat` actually *is*. One field.
 
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
-| `point_forecast` | `"raw"` \| `"median"` \| `"mean"` | derived from `backtest.decision_metric` | Which arm ships in `yhat`. |
+| `point_forecast` | `"raw"` \| `"median"` \| `"mean"` \| `"auto"` | derived from `backtest.decision_metric` | Which arm ships in `yhat`. |
 
 Every model emits one number per future date, so something decides what that number is:
 
@@ -274,6 +274,10 @@ Every model emits one number per future date, so something decides what that num
   construction. **Requires `backtest.enabled`**: the mean shift is estimated from out-of-fold
   residuals and there is no in-sample equivalent for a model that builds its band from quantiles.
   Asking for it without a backtest is an error, not a silent downgrade.
+- **`auto`** — decide per series *and* model, from that cell's own held-out folds. The three above
+  are one setting for the whole fleet; this one is the admission that a fleet is not uniform. Also
+  **requires `backtest.enabled`**, for the same reason and more sharply: there is nothing to decide
+  from otherwise. See *Letting each series choose* below.
 
 `yhat_raw` and `yhat_adjusted` are both written to `forecast_predictions` and `backtest_oof`
 whatever you set here, so the choice is never destructive — you can re-score a finished run on the
@@ -296,6 +300,50 @@ was comparing corrected models against uncorrected ones. Measuring it on ten mod
 correction was worth keeping (it moved fleet WAPE by 5.7%), so it stayed the default. This field is
 what turns it from an accident into a default: the alternative is now sayable, and
 `sf.calibration_report(run_id)` reports what the choice was worth on your data.
+
+### Letting each series choose — `point_forecast: "auto"`
+
+The 5.7% figure above is a fleet average, and a fleet average is the thing that hides the series it
+does not apply to. The residual correction helps a model that is genuinely biased on a given series
+and hurts one that is not, because on an unbiased series the shift is fitted noise. `auto` asks the
+question per cell instead of once for everybody: for each series-and-model pair, does the corrected
+arm beat the raw arm on that cell's own held-out folds?
+
+**The rule.** The corrected arm keeps its place only if it wins on a **strict majority of the cell's
+held-out folds**, with a minimum of **three** folds. Fewer than three, or no usable backtest at all,
+and the fleetwide arm applies unchanged. A tie goes to `raw`.
+
+Three things about that rule are worth stating because none of them is the obvious choice:
+
+- **There is no margin threshold**, although the natural design has one ("switch only if the
+  correction wins by more than 5%"). At three folds it cannot work. In a simulation with no real
+  effect at all, the pooled margin's 90th percentile is 0.113 — an 11% apparent improvement out of
+  pure noise — and under a real effect the margin stays negative until the bias is roughly half a
+  standard deviation, so the two distributions overlap almost completely. Every threshold tried
+  (2%, 5%, 10%) came out *worse* than no threshold at every fold count. Counting how many folds
+  agree is the robust form of the same question, and it measured better.
+- **Three folds, not five.** Two is not merely weak, it is wrong in a known direction: with two
+  folds the comparison has a single fold to grade on and grades the correction on the residuals it
+  was fitted from, which flatters it systematically. Three is where the evidence becomes honest, and
+  it is also where selection posts its largest gain — a minimum of five would have discarded that.
+- **A tie goes to `raw`.** Not a coin flip: in the folds where the two arms genuinely cannot be told
+  apart, the corrected arm is still carrying the estimation variance of a shift it did not need, so
+  equal *measured* loss is not equal *expected* loss. Sending ties the other way was measured and
+  cost about 3% of fleet error.
+
+**What it costs and what it buys.** One extra pass over the out-of-fold residuals per cell, no
+re-fitting. On a ten-model fleet it beat both fleetwide arms at every fold count tried, on both the
+absolute-error and squared-error pairings, capturing roughly 45% of the gap to an oracle that knows
+the answer in advance.
+
+**What lands in the record.** `auto` is the one arm that stays unresolved in the serialized config,
+because the resolution is per cell — the `run_id` records that selection was asked for, and
+`forecast_metadata` records what each cell did with it:
+`point_forecast_source` names the arm that shipped, and `point_forecast_decision` says how it got
+there (`auto-raw`, `auto-corrected`, `auto-few-folds`, `auto-no-backtest`, and `configured` on a run
+that named an arm). `sf.calibration_report(run_id)` rolls that up per model as `raw_arm_rate` — the
+share of a model's series that ended up on the raw arm, which is 0 or 1 under a fleetwide setting
+and anything in between under `auto`.
 
 ## `model_params` — hyperparameters you set yourself
 

@@ -76,6 +76,39 @@ POINT_FORECAST_ARMS: tuple[str, ...] = ("raw", "median", "mean")
 # genuinely held-out band from the in-sample fallback without inferring it from the config.
 CALIBRATION_SOURCES: tuple[str, ...] = ("oof-per-step", "oof-flat", "in-sample", "native")
 
+# How a cell's arm got chosen — the companion to `point_forecast_source`, which says only *what* was
+# chosen. Under a fleetwide setting every cell reads "configured" and the column is dull, which is
+# correct; under `auto` it is the record of how much evidence each cell actually had.
+ARM_DECISIONS: tuple[str, ...] = (
+    "configured",  # the config named a concrete arm; nothing was decided here
+    "auto-raw",  # enough held-out folds, and they favoured the raw arm
+    "auto-corrected",  # enough held-out folds, and they favoured the correction
+    "auto-few-folds",  # fewer than `_MIN_FOLDS_FOR_AUTO` usable folds; fleetwide default applied
+    "auto-no-backtest",  # the cell's backtest degraded to nothing; fleetwide default applied
+    "engine-native",  # BigQuery ML: one arm exists, so there was never a choice to make
+)
+
+# How many held-out folds `auto` needs before it will act on their verdict.
+#
+# Three, and the number is measured rather than chosen for caution. The selection rule below is a
+# per-fold sign test, and at two folds it degenerates: the inner comparison has a single fold to
+# grade on, so it grades the correction on the residuals it was fitted from, and the verdict is
+# optimistic exactly where it is least informed. Three is the smallest count at which every inner
+# comparison is genuinely held out.
+#
+# The temptation is to set this higher — a sign test on three folds is a weak instrument. Measured
+# fleet MAE on the ten no-native-interval models over 24 series, scored nested leave-one-fold-out
+# so no rule is graded on the folds it selected from:
+#
+#             always raw   always corrected   auto   oracle
+#   3 folds      20.09          19.87        18.75    17.41
+#   5 folds      20.00          17.85        17.38    16.00
+#   8 folds      19.57          17.96        17.43    16.36
+#
+# Selection beats both fleetwide arms at every fold count, and its *largest* relative win is at
+# three — the fold count most runs actually use. A minimum of five would have discarded it.
+_MIN_FOLDS_FOR_AUTO = 3
+
 # The prediction frame after calibration: `models.base_model.PREDICTION_COLUMNS` plus the one
 # column only this module can produce. A model cannot emit `yhat_adjusted` — the correction is
 # estimated from folds the model itself never sees — so putting it in the model contract would mean
@@ -398,7 +431,13 @@ def compare_arms(oof: pd.DataFrame, metric: str, arm: str = "median") -> dict[st
     from .metrics import compute_metrics, loss_of
     from .models.base_model import DEFAULT_QUANTILES
 
-    blank = {"loss_raw": float("nan"), "loss_adjusted": float("nan"), "margin": float("nan")}
+    blank = {
+        "loss_raw": float("nan"),
+        "loss_adjusted": float("nan"),
+        "margin": float("nan"),
+        "fold_win_rate": float("nan"),
+        "n_folds_compared": 0,
+    }
     needed = {"y_true", "yhat_raw", "yhat_adjusted"}
     if oof is None or oof.empty or not needed.issubset(oof.columns):
         return {**blank, "basis": float("nan")}
@@ -419,15 +458,92 @@ def compare_arms(oof: pd.DataFrame, metric: str, arm: str = "median") -> dict[st
     if not keep.any():
         return {**blank, "basis": basis}
 
-    losses = {
-        name: loss_of(metric, compute_metrics(y[keep], arr[keep]).get(metric, float("nan")))
-        for name, arr in (("raw", raw), ("adjusted", adjusted))
-    }
-    raw_loss, adj_loss = losses["raw"], losses["adjusted"]
+    def _loss(y_arr: np.ndarray, pred: np.ndarray) -> float:
+        return loss_of(metric, compute_metrics(y_arr, pred).get(metric, float("nan")))
+
+    raw_loss, adj_loss = _loss(y[keep], raw[keep]), _loss(y[keep], adjusted[keep])
     # Relative improvement of the adjusted arm over raw. Positive means the correction helped.
     # Always measured in that direction, whichever arm the run selected, so a fleet-wide average
     # over cells that chose differently is still a single comparable number.
     margin = float("nan")
     if np.isfinite(raw_loss) and np.isfinite(adj_loss) and raw_loss > 0:
         margin = (raw_loss - adj_loss) / raw_loss
-    return {"loss_raw": raw_loss, "loss_adjusted": adj_loss, "margin": margin, "basis": basis}
+
+    # The same comparison again, fold by fold. Two numbers out of one leave-one-fold-out pass,
+    # because the pooled margin and the count of folds that agree with it are different evidence
+    # and measurement says the count is the better of the two — see `select_arm`.
+    wins, compared = 0, 0
+    folds = pd.to_numeric(df.get("fold_id"), errors="coerce") if "fold_id" in df else None
+    for fold in sorted(set(folds.dropna())) if folds is not None else []:
+        m = (folds == fold).to_numpy() & keep
+        if not m.any():
+            continue
+        lr, la = _loss(y[m], raw[m]), _loss(y[m], adjusted[m])
+        if np.isfinite(lr) and np.isfinite(la):
+            compared += 1
+            wins += int(la < lr)
+    return {
+        "loss_raw": raw_loss,
+        "loss_adjusted": adj_loss,
+        "margin": margin,
+        "fold_win_rate": (wins / compared) if compared else float("nan"),
+        "n_folds_compared": compared,
+        "basis": basis,
+    }
+
+
+def select_arm(oof: pd.DataFrame | None, metric: str, fallback: str) -> tuple[str, str]:
+    """Choose this cell's point-forecast arm from its own held-out folds. Returns (arm, decision).
+
+    `fallback` is the fleetwide arm the run would have used — `config.corrected_arm_for(metric)`,
+    so `"median"` or `"mean"`. The question is only ever whether *this* series is better off
+    without the correction, and the answer comes from the folds rather than from a global setting.
+
+    **The rule is a per-fold sign test: the corrected arm keeps its place only if it beats raw on a
+    strict majority of the cell's held-out folds.** No margin threshold, which is not the design the
+    plan called for — measurement removed it. Fleet MAE over ten models × 24 series, nested
+    leave-one-fold-out so no rule is graded on the folds it selected from:
+
+    ==========================  =========  =========  =========
+    rule                          3 folds    5 folds    8 folds
+    ==========================  =========  =========  =========
+    always raw                     20.09      20.00      19.57
+    always corrected (2.5)         19.87      17.85      17.96
+    margin < 0                     19.17      17.38      17.45
+    margin < -0.05                 19.23      17.46      17.43
+    **fold sign test**           **18.75**  **17.38**  **17.43**
+    oracle (cheating)              17.41      16.00      16.36
+    ==========================  =========  =========  =========
+
+    Every selection rule beats both fleetwide arms, so per-series selection is worth doing at all.
+    Among them the sign test is best or tied-best everywhere and clearly best at three folds, which
+    is the fold count most runs use. A margin threshold makes things *worse* at every setting tried:
+    the pooled margin is one noisy number, and a simulation on frames with no true bias put its 90th
+    percentile at 0.11 — an 11% apparent improvement out of pure noise at three folds — so no
+    threshold can separate a real effect from a lucky one. Counting how many folds agree is the
+    robust version of the same question.
+
+    Below `_MIN_FOLDS_FOR_AUTO` the sign test is not merely weak, it is wrong in a specific
+    direction: at two folds the inner comparison has one fold to grade on, so it grades the
+    correction on the residuals it was fitted from and reports the correction winning 85% of the
+    time when an oracle says it wins 36%. Those cells take the fleetwide default and say so.
+    """
+    if fallback not in POINT_FORECAST_ARMS or fallback == "raw":
+        raise ValueError(f"select_arm fallback must be a corrected arm, got {fallback!r}")
+    if oof is None or oof.empty:
+        return fallback, "auto-no-backtest"
+
+    ev = compare_arms(oof, metric, fallback)
+    win_rate = ev.get("fold_win_rate", float("nan"))
+    enough = (
+        ev.get("basis") == "leave-one-fold-out"
+        and int(ev.get("n_folds_compared") or 0) >= _MIN_FOLDS_FOR_AUTO
+        and isinstance(win_rate, float)
+        and math.isfinite(win_rate)
+    )
+    if not enough:
+        return fallback, "auto-few-folds"
+    # A tie goes to raw. Not a coin-flip default: in the folds where the two arms genuinely cannot
+    # be told apart, the corrected arm is still carrying the estimation variance of a shift it did
+    # not need, so equal measured loss is not equal expected loss.
+    return (fallback, "auto-corrected") if win_rate > 0.5 else ("raw", "auto-raw")

@@ -34,6 +34,7 @@ from scale_forecasting.calibration import (
     calibrate_from_oof,
     compare_arms,
     coverage_by_step,
+    select_arm,
 )
 from scale_forecasting.models.base_model import DEFAULT_QUANTILES, PREDICTION_COLUMNS
 
@@ -332,3 +333,115 @@ def test_single_fold_falls_back_to_the_stored_arm_and_names_it() -> None:
 def test_arm_comparison_is_blank_without_both_arms() -> None:
     out = compare_arms(_oof().drop(columns=["yhat_adjusted"]), "wape")
     assert np.isnan(out["loss_raw"]) and np.isnan(out["margin"])
+
+
+# --- picking the arm per series (plan item 2.5b) -----------------------------------------
+#
+# The rule is a per-fold sign test with a minimum fold count and no margin threshold, and every
+# part of that is measured rather than chosen — `select_arm`'s docstring carries the table. These
+# tests pin the three behaviours a later reader could plausibly "simplify" away: the tie goes to
+# raw, two folds is not enough evidence, and the choice is a function of the data alone.
+
+
+def _folds_biased(biases: list[float]) -> pd.DataFrame:
+    """An out-of-fold frame where each fold carries its own constant bias.
+
+    Selection reads *agreement between folds*, so the fixture has to be able to make the folds
+    disagree with each other. A single scalar bias cannot — it makes every fold say the same thing,
+    which is the easy case. Constant within a fold keeps the arithmetic exact, so these tests pin a
+    stated win count rather than a seed that happened to come out the right way.
+    """
+    return pd.concat(
+        [_oof(folds=1, bias=b).assign(fold_id=fold) for fold, b in enumerate(biases)],
+        ignore_index=True,
+    )
+
+
+def test_auto_keeps_the_correction_when_the_folds_back_it() -> None:
+    """A real, consistent bias: every fold agrees the correction helps, so it ships."""
+    arm, decision = select_arm(_oof(folds=6, bias=8.0), "wape", "median")
+    assert (arm, decision) == ("median", "auto-corrected")
+
+
+def test_auto_drops_the_correction_when_the_folds_do_not_back_it() -> None:
+    """A cell whose bias is not stable across folds: the shift fitted on some is wrong on the rest.
+
+    This is the case a fleetwide setting cannot express. Item 2.5 measured the correction as worth
+    5.7% of fleet WAPE *on average*, which says nothing about the series where it is actively
+    harmful, and averaging is exactly what hides those.
+    """
+    # Half the folds run +8 and half −8, so the shift estimated from the others always points the
+    # wrong way for the fold it is graded on. Zero of four folds back the correction.
+    oof = _folds_biased([8.0, 8.0, -8.0, -8.0])
+    assert compare_arms(oof, "wape")["fold_win_rate"] == 0.0
+    assert select_arm(oof, "wape", "median") == ("raw", "auto-raw")
+
+
+def test_the_choice_is_a_function_of_the_data_and_nothing_else() -> None:
+    """Re-running an unchanged config on unchanged data must not move the forecast.
+
+    Selection introduces a second thing that could vary between runs, on top of model fitting. It
+    must not: a run that is re-submitted for an unrelated reason would otherwise come back with
+    different numbers under the same run_id, which is the one thing the registry cannot survive.
+    """
+    oof = _oof(folds=5, bias=0.4, noise_at_step=1.0, seed=11)
+    assert select_arm(oof, "wape", "median") == select_arm(oof.copy(), "wape", "median")
+    # Row order is not part of the data. It changes with a shuffled read and must not change this.
+    shuffled = oof.sample(frac=1.0, random_state=5).reset_index(drop=True)
+    assert select_arm(shuffled, "wape", "median") == select_arm(oof, "wape", "median")
+
+
+def test_a_tie_goes_to_raw_because_the_correction_is_not_free() -> None:
+    """Equal measured loss is not equal expected loss, and the measurement agrees.
+
+    Sending ties to the corrected arm instead was tried on the fixture that set the rule: it cost
+    3% of fleet MAE at three folds (19.32 against 18.75) and 3.4% of fleet RMSE (29.74 against
+    28.77). The corrected arm in a tie is carrying the estimation variance of a shift it did not
+    need, so the tie is only a tie in the sample.
+    """
+    # Four folds chosen so the leave-one-out shift helps on exactly two of them: the two large
+    # like-signed folds are corrected towards each other, and the two odd ones out are dragged
+    # further from the truth than they started.
+    oof = _folds_biased([10.0, 10.0, 1.0, -21.0])
+    assert compare_arms(oof, "wape")["fold_win_rate"] == 0.5, "the fixture has to be a real tie"
+    assert select_arm(oof, "wape", "median") == ("raw", "auto-raw")
+
+
+def test_two_folds_is_not_evidence_and_the_row_says_which_way_it_went() -> None:
+    """Below the minimum the fleetwide arm applies, and `point_forecast_decision` records that.
+
+    Two folds is not merely weak, it is wrong in a known direction: the inner comparison has one
+    fold to grade on, so it grades the correction on the residuals it was fitted from. Measured on
+    the fixture, the rule then sends 15% of cells to the raw arm where an oracle sends 64%.
+    """
+    arm, decision = select_arm(_oof(folds=2, bias=0.0, noise_at_step=1.0, seed=3), "wape", "median")
+    assert (arm, decision) == ("median", "auto-few-folds")
+
+
+def test_a_cell_whose_backtest_produced_nothing_takes_the_fleetwide_arm() -> None:
+    """Item 2.1 made a per-cell backtest failure survivable, so `auto` has to survive it too."""
+    assert select_arm(None, "rmse", "mean") == ("mean", "auto-no-backtest")
+    assert select_arm(pd.DataFrame(), "wape", "median") == ("median", "auto-no-backtest")
+
+
+def test_the_fallback_must_be_a_corrected_arm() -> None:
+    """A `raw` fallback would collapse "not enough evidence" and "evidence says raw" into one."""
+    with pytest.raises(ValueError, match="corrected arm"):
+        select_arm(_oof(), "wape", "raw")
+
+
+def test_the_comparison_reports_how_many_folds_agreed_with_its_own_verdict() -> None:
+    """The count is what `select_arm` reads; the pooled margin is what a human reads."""
+    out = compare_arms(_oof(folds=6, bias=8.0), "wape")
+    assert out["n_folds_compared"] == 6
+    assert out["fold_win_rate"] == 1.0, "a constant bias should be corrected on every fold"
+
+    noisy = compare_arms(_oof(folds=6, bias=0.0, noise_at_step=1.0, seed=3), "wape")
+    assert 0.0 <= noisy["fold_win_rate"] <= 1.0
+    assert noisy["n_folds_compared"] == 6
+
+
+def test_a_single_fold_reports_no_agreement_to_read() -> None:
+    """`n_folds_compared` gates `select_arm`, so the degenerate case must not report a majority."""
+    out = compare_arms(_oof(folds=1), "wape")
+    assert out["n_folds_compared"] <= 1

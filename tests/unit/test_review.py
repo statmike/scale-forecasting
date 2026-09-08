@@ -481,9 +481,10 @@ def _arm(model: str, **over: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "model_type": model,
         "compute_engine": "spark",
-        "point_forecast_source": "median",
         "interval_calibration": "oof-per-step",
         "n_series": 3,
+        "n_raw_arm": 0,
+        "n_auto_decided": 0,
         "n_compared": 3,
         "n_corrected_wins": 2,
         "mean_margin": 0.04,

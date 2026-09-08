@@ -119,7 +119,8 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `error_class` | `STRING` | Which kind of failure it was, from a fixed vocabulary you can `GROUP BY` (see below). NULL on an `ok` cell. |
 | `error_detail` | `STRING` | The exception itself, as text, truncated at 2,000 characters. NULL on an `ok` cell. |
 | `interval_source` | `STRING` | Where the prediction interval came from **as the model produced it**: `native` (the model computed its own) or `residual` (built from the spread of its in-sample residuals). NULL on ensemble rows, which do not carry an interval. |
-| `point_forecast_source` | `STRING` | Which arm the shipped `yhat` is: `raw` (the model's own number) or `median` / `mean` (that number plus the corresponding residual shift). Set from `output.point_forecast`. |
+| `point_forecast_source` | `STRING` | Which arm the shipped `yhat` is: `raw` (the model's own number) or `median` / `mean` (that number plus the corresponding residual shift). |
+| `point_forecast_decision` | `STRING` | *How* that arm was picked, which the column above cannot say on its own: `configured` (the config named it), `auto-corrected` / `auto-raw` (`output.point_forecast: "auto"`, and the cell's held-out folds went that way), `auto-few-folds` / `auto-no-backtest` (selection was asked for but there was not enough held out to decide, so the fleetwide arm applied), or `engine-native` (BigQuery-native rows, where only one arm exists). |
 | `interval_calibration` | `STRING` | What happened to the band *after* the model produced it: `oof-per-step` (re-estimated per horizon step from out-of-fold residuals), `oof-flat` (one pooled out-of-fold band, too few residuals to resolve per step), `in-sample` (no backtest ran; the model's own band shipped unchanged), or `native` (BigQuery-native rows). |
 | `point_forecast_margin` | `FLOAT64` | How much the corrected arm beat the raw one by on this cell, as a fraction of the raw arm's loss in the run's `decision_metric`. Positive means the correction helped. NULL when there was no backtest to grade it on. |
 | `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. NULL means backtesting was never asked for. |
@@ -217,12 +218,15 @@ columns record the decision rather than leaving it implicit:
 - **`yhat_raw`** — the model's own output, untouched.
 - **`yhat_adjusted`** — that output plus a residual shift, either the median (minimises absolute
   error) or the mean (minimises squared error, and drives `bias` to zero by construction).
-- **`yhat`** — whichever of the two the run shipped, chosen by `output.point_forecast`.
+- **`yhat`** — whichever of the two the run shipped, chosen by `output.point_forecast` — either once
+  for the whole run, or per series and model when that is set to `auto`.
 
 Both arms are always written, so the choice is never destructive: a run that shipped the corrected
 arm can still be scored on the raw one months later without re-fitting anything.
-`forecast_metadata.point_forecast_source` says which arm `yhat` is, and `point_forecast_margin` says
-what the choice was worth on that cell. `sf.calibration_report(run_id)` rolls both up per model
+`forecast_metadata.point_forecast_source` says which arm `yhat` is,
+`point_forecast_decision` says how that arm was picked, and `point_forecast_margin` says
+what the choice was worth on that cell. The margin is always measured corrected-minus-raw whichever
+arm shipped, so averaging it over cells that chose differently still means something. `sf.calibration_report(run_id)` rolls both up per model
 alongside the coverage panel — the win rate matters more than the average margin, because a
 correction that helps half the series a lot and hurts the other half a lot is a different
 proposition from one that helps everything a little.

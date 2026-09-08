@@ -218,13 +218,18 @@ class ArmComparison:
     means the correction lost. ``win_rate`` is the share of compared series where it won — the
     number that matters more than the average, because a correction that helps 51% of series by a
     lot and hurts 49% by a lot is a different proposition from one that helps everything a little.
+
+    ``n_raw_arm`` and ``n_auto_decided`` are counts rather than a single label because under
+    ``output.point_forecast="auto"`` the series of one model do not have to agree, and that
+    disagreement is the feature — reporting one of them as if it spoke for all would hide it.
     """
 
     model_type: str
     compute_engine: str | None
-    point_forecast_source: str | None
     interval_calibration: str | None
     n_series: int
+    n_raw_arm: int
+    n_auto_decided: int
     n_compared: int
     n_corrected_wins: int
     mean_margin: float | None
@@ -234,6 +239,15 @@ class ArmComparison:
     def win_rate(self) -> float | None:
         """Share of compared series the corrected arm won, or None when nothing was compared."""
         return None if not self.n_compared else self.n_corrected_wins / self.n_compared
+
+    @property
+    def raw_arm_rate(self) -> float | None:
+        """Share of this model's series shipping the raw arm, or None when there are none.
+
+        1.0 or 0.0 under a fleetwide setting; anything between means selection actually split the
+        model's series, which is the thing `auto` exists to do and the thing worth looking at.
+        """
+        return None if not self.n_series else self.n_raw_arm / self.n_series
 
 
 @dataclass(frozen=True)
@@ -295,9 +309,10 @@ def _assemble_calibration(
         ArmComparison(
             model_type=r["model_type"],
             compute_engine=r.get("compute_engine"),
-            point_forecast_source=r.get("point_forecast_source"),
             interval_calibration=r.get("interval_calibration"),
             n_series=int(r.get("n_series") or 0),
+            n_raw_arm=int(r.get("n_raw_arm") or 0),
+            n_auto_decided=int(r.get("n_auto_decided") or 0),
             n_compared=int(r.get("n_compared") or 0),
             n_corrected_wins=int(r.get("n_corrected_wins") or 0),
             mean_margin=_num(r.get("mean_margin")),

@@ -248,7 +248,7 @@ import scale_forecasting as sf
 
 rep = sf.calibration_report("YOUR_RUN_ID")
 for arm in rep.arms:
-    print(arm.model_type, arm.point_forecast_source, arm.win_rate, arm.mean_margin)
+    print(arm.model_type, arm.raw_arm_rate, arm.win_rate, arm.mean_margin)
 print(rep.mean_coverage, "against nominal", rep.nominal_coverage)
 print("worst step:", rep.worst_step)
 ```
@@ -260,6 +260,15 @@ which arm shipped, and what the choice was worth. Read `win_rate` before `mean_m
 correction that helps 51% of series by a lot and hurts 49% by a lot is a different proposition from
 one that helps everything a little, and the average cannot tell them apart. The margin is estimated
 leave-one-fold-out, so a correction is never graded on the folds it was fitted on.
+
+`raw_arm_rate` is the share of that model's series that shipped the uncorrected number. Under a
+fleetwide setting it is 0 or 1, which reads as the unanimity it is. Under
+`output.point_forecast: "auto"` it is the interesting number: anything strictly between the two
+means selection actually split the model's series, and a rate near 1 says the correction is not
+earning its place on this data even though the fleet average may still look positive.
+`n_auto_decided` counts how many of those rows were decided from held-out folds rather than falling
+back to the fleetwide arm for want of enough of them — a low count against a large `n_series` means
+the run is not backtesting deeply enough for selection to do anything.
 
 **The interval.** `rep.coverage` is achieved coverage per horizon step per model, against
 `rep.nominal_coverage` — the span of the run's quantile set, 0.8 for the shipped default. Read

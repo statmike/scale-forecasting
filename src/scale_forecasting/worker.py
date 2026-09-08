@@ -23,7 +23,8 @@ import numpy as np
 import pandas as pd
 
 from .backtest import backtest_cell
-from .calibration import apply_calibration, calibrate_from_oof, compare_arms
+from .calibration import apply_calibration, calibrate_from_oof, compare_arms, select_arm
+from .config import corrected_arm_for
 from .errors import ConfigError, get_logger
 from .features import (
     build_features,
@@ -128,6 +129,11 @@ class CellResult:
     # This exists because for a long time the answer was "median", nobody had chosen it, and
     # nothing recorded it.
     point_forecast_source: str | None = None
+    # *How* that arm was picked, which `point_forecast_source` alone cannot say: a cell shipping
+    # "median" may have been told to, or may have weighed both arms on its own folds and kept the
+    # default. Same two-column shape as `interval_source`/`interval_calibration` next door — one
+    # column for what the number is, one for where it came from. See `calibration.ARM_DECISIONS`.
+    point_forecast_decision: str | None = None
     # Where the band came from: "oof-per-step" (held-out residuals, resolved by horizon distance),
     # "oof-flat" (held-out, pooled — too few residuals per step to say more), or "in-sample" (the
     # model's own band; no backtest ran). The three are ranked, and the distinction is the whole
@@ -496,12 +502,24 @@ def run_cell(
         # it when it is available, per horizon step where there are enough residuals to support
         # one, and the provenance is recorded either way rather than left to be inferred from the
         # fold count. `cal is None` leaves the model's own band untouched.
-        arm = cfg.output.point_forecast or "median"
+        #
+        # Which arm ships is a separate question from how the band was built, and under
+        # `point_forecast="auto"` it is answered per series from this cell's own folds rather than
+        # once for the whole fleet. The margin is always reported corrected-minus-raw whatever the
+        # cell chose, so a fleet-wide average stays comparable across cells that chose differently.
+        metric = cfg.backtest.decision_metric
+        corrected = corrected_arm_for(metric)
+        arm, arm_decision = cfg.output.point_forecast or "median", "configured"
+        if arm == "auto":
+            arm, arm_decision = select_arm(oof, metric, corrected)
         cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
         predictions, interval_calibration = apply_calibration(predictions, cal, arm)
-        arm_comparison = (
-            compare_arms(oof, cfg.backtest.decision_metric, arm) if oof is not None else {}
-        )
+        # `corrected`, not `arm`: the margin has to mean the same thing on every row for a
+        # fleet-wide GROUP BY to be worth reading, so the comparison is always
+        # corrected-vs-raw under the metric's own functional. Passing the selected arm would
+        # have made a `raw`-configured run with `decision_metric="rmse"` report a *median*
+        # comparison under a column the rest of the run reads as the mean one.
+        arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}
 
         # Persist the fitted model as an artifact only when the run opts in (model-artifact
         # lineage). A serialize failure must not sink an otherwise-good forecast, so it degrades to
@@ -560,6 +578,7 @@ def run_cell(
             # Which functional `yhat` carries, and where the band came from. Two separate facts:
             # a run can select the raw arm and still ship an OOF-calibrated interval.
             point_forecast_source=arm,
+            point_forecast_decision=arm_decision,
             interval_calibration=interval_calibration,
             # The arm comparison, scored on the folds. Held-out by construction — each fold's
             # correction came from that fold's own training window and never saw the slice it is

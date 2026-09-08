@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   last_val_date  DATE,
   interval_source STRING,
   point_forecast_source STRING,
+  point_forecast_decision STRING,
   interval_calibration STRING,
   point_forecast_margin FLOAT64,
   ensemble_scoring STRING,

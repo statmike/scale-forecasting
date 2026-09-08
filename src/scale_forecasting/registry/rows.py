@@ -170,13 +170,16 @@ def assemble_metadata_row(
         # native-interval model and a residual-interval model indistinguishable after calibration,
         # which is the one comparison the column exists to support.
         "interval_source": result.interval_source,
-        # Which arm `yhat` is (`raw` / `median` / `mean`), how its band was calibrated
-        # (`oof-per-step` / `oof-flat` / `in-sample`), and by how much the chosen arm beat the
-        # other on this cell's own out-of-fold folds, in the run's `decision_metric`. The margin
-        # is signed: positive means the arm `yhat` carries won. A fleet-wide GROUP BY on these
-        # three is the diagnostic — whether the correction is earning its place is a question
+        # Which arm `yhat` is (`raw` / `median` / `mean`), how that arm was decided
+        # (`configured` or one of the `auto-*` outcomes), how its band was calibrated
+        # (`oof-per-step` / `oof-flat` / `in-sample`), and by how much the corrected arm beat the
+        # raw one on this cell's own out-of-fold folds, in the run's `decision_metric`. The margin
+        # is signed and always measured corrected-minus-raw, whichever arm the cell selected, so
+        # it stays comparable across cells that chose differently. A fleet-wide GROUP BY on these
+        # four is the diagnostic — whether the correction is earning its place is a question
         # about this run's data, and nothing but this run's data can answer it.
         "point_forecast_source": result.point_forecast_source,
+        "point_forecast_decision": result.point_forecast_decision,
         "interval_calibration": result.interval_calibration,
         "point_forecast_margin": result.point_forecast_margin,
         # How the *cell* went. `run_cell` has always computed this and thrown it away at the table

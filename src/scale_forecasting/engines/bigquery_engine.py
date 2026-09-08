@@ -461,6 +461,11 @@ def _meta_row(
         # the whole use of these columns is a fleet-wide GROUP BY that mixes engines. There is no
         # margin to report: a comparison needs two arms and this engine produces one.
         "point_forecast_source": "raw",
+        # Not "configured": nothing chose this, the engine has no other arm to offer. Saying
+        # `configured` would imply an `output.point_forecast` setting was honoured here, and a
+        # run set to `auto` would then look as though the native models had opted out of selection
+        # rather than never having been eligible for it.
+        "point_forecast_decision": "engine-native",
         "interval_calibration": "native",
         "point_forecast_margin": None,
     }
