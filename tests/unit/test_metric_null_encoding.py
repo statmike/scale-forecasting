@@ -64,6 +64,7 @@ def _ensemble_row(panel: dict[str, float]) -> dict[str, Any]:
         artifact_uri=None,
         created_at=_CREATED_AT,
         cfg=_cfg(),
+        ensemble_scoring=None,
     )
 
 

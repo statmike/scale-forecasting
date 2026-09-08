@@ -70,7 +70,7 @@ import pandas as pd
 from .ensembler import combine_calculated, fit_learned
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from .config import RunConfig
     from .settings import Settings
@@ -332,6 +332,7 @@ def _ensemble_batch(
     from .ensembler import combine_oof
     from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
+    from .registry.header import merge_header_telemetry
     from .registry.write_api import _META_SPEC, _PRED_SPEC
     from .seasonality import seasonal_period
     from .worker import _rollup_metrics
@@ -384,7 +385,7 @@ def _ensemble_batch(
 
     # 2. Learned ensembles — fit on the OOF, apply the weights in pandas, append prediction rows.
     artifact_uris: dict[str, str] = {}
-    learned_weights, artifacts = fit_learned(oof_df, cfg)
+    learned_weights, artifacts, learned_basis = fit_learned(oof_df, cfg)
     for strategy, wmap in learned_weights.items():
         for row in _apply_weights(base_df, wmap, run_id, strategy):
             row["ensemble_id"] = ensemble_id
@@ -450,9 +451,19 @@ def _ensemble_batch(
                 artifact_uri=artifact_uris.get(strategy),
                 created_at=created_at,
                 cfg=cfg,
+                ensemble_scoring=ensemble_scoring_basis(strategy, oof_df, cfg, learned_basis),
             )
         )
     bigquery_engine._append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)
+    # The run-level counterpart of the per-row `ensemble_scoring`, next to `$.scoring.hpo` that
+    # `main.run` writes. Best-effort: the rows are already written and they carry the same answer
+    # per strategy, so a failed merge costs legibility, not evidence.
+    claim = run_ensemble_scoring(row["ensemble_scoring"] for row in meta_rows)
+    if claim is not None:
+        try:
+            merge_header_telemetry(run_id, {"scoring.ensemble": claim}, settings=settings)
+        except Exception as exc:  # noqa: BLE001 - telemetry is never worth failing a run over
+            log.warning("ensemble scoring telemetry not recorded for %s: %s", run_id, exc)
     log.info(
         "ensemble run done: run_id=%s ensemble_id=%s scored=%d models=%s",
         run_id,
@@ -460,6 +471,45 @@ def _ensemble_batch(
         len(meta_rows),
         sorted(ens_oof["model_type"].unique()),
     )
+
+
+def run_ensemble_scoring(bases: Iterable[str | None]) -> str | None:
+    """Roll the per-strategy scoring bases up into one claim for the run (pure).
+
+    ``None`` when nothing in the run fit anything — a mean/median-only ensemble has no fold to
+    reserve, so there is no claim to make and the header stays quiet rather than saying "holdout"
+    about a fit that never happened. Otherwise the **weakest** answer wins: one strategy that fell
+    back to ``in_sample`` makes the run's ensemble metrics partly in-sample, and a header that
+    reported the best case would be exactly the reassurance this column exists to withhold.
+    """
+    seen = {b for b in bases if b is not None}
+    if not seen:
+        return None
+    return "in_sample" if "in_sample" in seen else "holdout"
+
+
+def ensemble_scoring_basis(
+    strategy: str, oof_df: pd.DataFrame, cfg: RunConfig, learned_basis: str
+) -> str | None:
+    """Whether this strategy's metrics were earned with the newest fold held out of its fit (pure).
+
+    ``None`` for ``mean`` and ``median``: they fit nothing, so there is no fold to reserve and no
+    honesty question to answer. Writing ``"holdout"`` there would be a claim about a split that
+    played no part in the number.
+
+    ``inverse_error`` fits per-series weights inside `ensembler.combine_oof`, so it takes the OOF
+    frame's own verdict. The learned strategies take ``learned_basis``, which
+    `ensembler.fit_learned` already resolved — including the case where the inner folds existed
+    but produced no complete training row.
+    """
+    from .config import LEARNED_STRATEGIES
+    from .ensembler import inner_fold_mask
+
+    if strategy in LEARNED_STRATEGIES:
+        return learned_basis
+    if strategy == "inverse_error":
+        return inner_fold_mask(oof_df, cfg)[1]
+    return None
 
 
 def _ensemble_meta_row(
@@ -473,6 +523,7 @@ def _ensemble_meta_row(
     artifact_uri: str | None,
     created_at: Any,
     cfg: RunConfig,
+    ensemble_scoring: str | None,
 ) -> dict[str, Any]:
     """Assemble one ``forecast_metadata`` row for an ``ensemble_<strategy>`` pseudo-model (pure).
 
@@ -514,6 +565,9 @@ def _ensemble_meta_row(
         "cell_status": "ok",
         "error_class": None,
         "error_detail": None,
+        # Whether the metrics above were earned with the newest fold kept out of whatever this
+        # strategy fitted. NULL where the strategy fits nothing — see `ensemble_scoring_basis`.
+        "ensemble_scoring": ensemble_scoring,
     }
 
 

@@ -261,7 +261,36 @@ same WAPE are not comparable if one was scored on five folds and the other on on
 Base-model rows fill these whichever engine wrote them — a Python cell and a BigQuery-native cell
 answer the same question the same way. **Ensemble rows are the exception**: they leave all three
 NULL even when the ensemble was scored, because an ensemble is scored on the base models' folds
-rather than on folds of its own. That gets its own column (`ensemble_scoring`, still unfilled).
+rather than on folds of its own. That gets its own column, `ensemble_scoring`, described next.
+
+### Was this number earned on a fold the fit had already seen?
+
+Two columns answer that, and they exist because a metric column cannot answer it by itself. An
+in-sample number and an honest one look identical once they are sitting side by side under
+`wape`.
+
+The rule the run enforces is one sentence: **the newest fold — the one with the smallest step-back,
+`n_folds - 1` — is never used to fit anything.** Not stacker weights, not `inverse_error` weights,
+not a hyperparameter search. Everything that learns from the backtest learns from the older
+*inner* folds and is then judged on the newest one. Scoring is unaffected; every fold is still
+scored. Only *fitting* is restricted.
+
+| Column | On which rows | Values |
+|--------|---------------|--------|
+| `ensemble_scoring` | `ensemble_*` rows | `holdout`, `in_sample`, or NULL for `mean`/`median`, which fit nothing |
+| `hpo_scoring` | base-model rows whose params came from a search | `holdout`, `in_sample`, or NULL when no search ran |
+
+`in_sample` is not an error. There are two ordinary ways the split fails to exist: the run asked
+for `n_folds: 1`, or a short series in a ragged panel achieved only the newest fold. In both cases
+the fit falls back to using everything — refusing would cost the run a whole ensemble over a fold
+count — and the column records that it did. That is the entire point: the fallback is *said*, not
+inferred.
+
+The run header carries the same claim once for the whole run, on
+`run_registry.job_telemetry.$.scoring`: `hpo` is `off`, `holdout`, or `in_sample` from the run's
+fold geometry, and `ensemble` is the **weakest** answer across the strategies that fitted anything
+(one `in_sample` strategy makes the run's ensemble metrics partly in-sample, and a header that
+reported the best case would be exactly the reassurance these columns exist to withhold).
 
 ### Was the accelerator you paid for actually used?
 
@@ -294,9 +323,8 @@ the accelerator went unnoticed for twenty-one jobs in the first place.
 ### Columns that exist but are not filled yet
 
 `SELECT *` on this table also returns
-`achieved_step`, `achieved_min_train`, `first_val_date`, `last_val_date`,
-`ensemble_scoring`, `hpo_scoring`, `n_fits`, and `train_rows_total`. **They are all NULL today.**
-They are
+`achieved_step`, `achieved_min_train`, `first_val_date`, `last_val_date`, `n_fits`, and
+`train_rows_total`. **They are all NULL today.** They are
 declared ahead of the code that writes them because adding a column to a deployed table is a
 migration every deployment has to run, and doing that once is better than doing it five times.
 Don't build a reader on them yet — `NULL` here means "not recorded", not "no".

@@ -25,6 +25,8 @@ from scale_forecasting.ensemble_run import (
     OOF_READ_COLUMNS,
     _apply_weights,
     _override_ensemble,
+    ensemble_scoring_basis,
+    run_ensemble_scoring,
     run_ensembles,
 )
 from scale_forecasting.ensembler import _fold_key, combine_oof
@@ -429,3 +431,58 @@ def test_the_oof_read_carries_enough_to_join_folds_on_the_cutoff() -> None:
         {c: ["x"] if c != "y_true" and c != "yhat" else [1.0] for c in OOF_READ_COLUMNS}
     )
     assert _fold_key(frame) == ["ts_id", "cutoff_date", "forecast_date"]
+
+
+# --- what the ensemble rows say about how they were scored ---------------------
+
+
+def _oof_two_folds() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts_id": ["s1"] * 4,
+            "model_type": ["theta", "theta", "arima_plus", "arima_plus"],
+            "fold_id": [0, 1, 0, 1],
+            "cutoff_date": ["2026-01-01", "2026-01-08"] * 2,
+            "forecast_date": ["2026-01-02", "2026-01-09"] * 2,
+            "y_true": [10.0, 11.0, 10.0, 11.0],
+            "yhat": [9.0, 10.5, 11.0, 11.5],
+        }
+    )
+
+
+def test_a_strategy_that_fits_nothing_makes_no_scoring_claim() -> None:
+    # mean and median have no parameters, so no fold was reserved from anything and the honest
+    # value is NULL — not "holdout", which would read as a guarantee about a fit that never ran.
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean", "median"]})
+    oof = _oof_two_folds()
+    assert ensemble_scoring_basis("mean", oof, cfg, "holdout") is None
+    assert ensemble_scoring_basis("median", oof, cfg, "holdout") is None
+
+
+def test_inverse_error_and_the_learned_strategies_each_report_their_own_basis() -> None:
+    cfg = _cfg(
+        backtest={"enabled": True, "n_folds": 2},
+        ensemble={"enabled": True, "strategies": ["inverse_error", "nnls"]},
+    )
+    oof = _oof_two_folds()
+    assert ensemble_scoring_basis("inverse_error", oof, cfg, "holdout") == "holdout"
+    # The learned answer comes from the fit that actually happened, not from the config: a
+    # coverage gap can push a stacker onto every fold even when the geometry allowed a split.
+    assert ensemble_scoring_basis("nnls", oof, cfg, "in_sample") == "in_sample"
+
+
+def test_a_single_fold_run_reports_in_sample_for_the_weighted_strategies() -> None:
+    cfg = _cfg(
+        backtest={"enabled": True, "n_folds": 1},
+        ensemble={"enabled": True, "strategies": ["inverse_error"]},
+    )
+    oof = _oof_two_folds().query("fold_id == 0")
+    assert ensemble_scoring_basis("inverse_error", oof, cfg, "in_sample") == "in_sample"
+
+
+def test_the_runs_ensemble_claim_takes_the_weakest_answer() -> None:
+    # One strategy fitting in-sample makes the run's ensemble metrics partly in-sample; the
+    # header must not report the best case. All-None means nothing fit, so there is no claim.
+    assert run_ensemble_scoring([None, None]) is None
+    assert run_ensemble_scoring([None, "holdout"]) == "holdout"
+    assert run_ensemble_scoring(["holdout", "in_sample"]) == "in_sample"

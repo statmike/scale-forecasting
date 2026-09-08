@@ -21,6 +21,7 @@ from scale_forecasting.ensembler import (
     combine_calculated,
     combine_oof,
     fit_learned,
+    inner_fold_mask,
     inverse_error_weights,
     mean_combine,
     median_combine,
@@ -97,7 +98,7 @@ def test_inverse_error_rejects_empty() -> None:
 
 def test_nnls_weights_are_nonnegative() -> None:
     cfg = _cfg(["nnls"])
-    weights, artifacts = fit_learned(_oof(cfg.models), cfg)
+    weights, artifacts, _ = fit_learned(_oof(cfg.models), cfg)
     assert set(weights) == {"nnls"}
     assert all(w >= 0.0 for w in weights["nnls"].values())
     assert "nnls" in artifacts and isinstance(artifacts["nnls"], bytes)
@@ -106,7 +107,7 @@ def test_nnls_weights_are_nonnegative() -> None:
 def test_learned_trusts_the_better_model_more() -> None:
     # theta is the least-noisy base model → should earn the largest nnls weight.
     cfg = _cfg(["nnls"])
-    weights, _ = fit_learned(_oof(cfg.models, seed=7), cfg)
+    weights, _, _ = fit_learned(_oof(cfg.models, seed=7), cfg)
     w = weights["nnls"]
     assert w["theta"] >= w["sarimax"]
     assert w["theta"] >= w["xgboost"]
@@ -114,20 +115,20 @@ def test_learned_trusts_the_better_model_more() -> None:
 
 def test_ridge_returns_weight_per_model() -> None:
     cfg = _cfg(["ridge"])
-    weights, _ = fit_learned(_oof(cfg.models), cfg)
+    weights, _, _ = fit_learned(_oof(cfg.models), cfg)
     assert set(weights["ridge"]) == set(cfg.models)
 
 
 def test_multi_strategy_fits_each_learned() -> None:
     cfg = _cfg(["nnls", "ridge"])
-    weights, artifacts = fit_learned(_oof(cfg.models), cfg)
+    weights, artifacts, _ = fit_learned(_oof(cfg.models), cfg)
     assert set(weights) == {"nnls", "ridge"}
     assert set(artifacts) == {"nnls", "ridge"}
 
 
 def test_calculated_only_config_fits_nothing() -> None:
     cfg = _cfg(["mean", "median"])
-    weights, artifacts = fit_learned(_oof(cfg.models), cfg)
+    weights, artifacts, _ = fit_learned(_oof(cfg.models), cfg)
     assert weights == {} and artifacts == {}
 
 
@@ -155,6 +156,97 @@ def test_learned_missing_a_base_model_is_rejected() -> None:
     partial = _oof(["theta", "sarimax"])  # xgboost absent from OOF
     with pytest.raises(ConfigError, match="missing base models"):
         fit_learned(partial, cfg)
+
+
+# --- the newest fold is never fit on ------------------------------------------
+
+
+def _two_fold_oof(n_per: int = 200) -> pd.DataFrame:
+    """OOF over two folds where ``xgboost`` is *exact* on the newest fold and the worst on the old.
+
+    This is the shape the invariant exists for, and the arithmetic is deliberate. Averaged over
+    every row xgboost looks like the best base model — half its residuals are zero. Averaged over
+    the inner fold alone it is the worst of the three. So a fit that sees all the folds prefers it
+    and is then scored on the very rows that earned it the preference; a fit that reserves fold 1
+    prefers theta. The noise levels sit inside the window where those two answers disagree
+    (``theta_sd < xgboost_sd < theta_sd * sqrt(2)``), which is what makes the test a test.
+    """
+    rng = np.random.default_rng(11)
+    dates = pd.date_range("2024-01-01", periods=n_per, freq="D")
+    truth = np.linspace(10, 60, n_per) + rng.normal(0, 1, n_per)
+    folds = np.where(np.arange(n_per) < n_per // 2, 0, 1)
+    noise = {"theta": 2.0, "sarimax": 2.8, "xgboost": 2.5}
+    rows = []
+    for m in ("theta", "sarimax", "xgboost"):
+        yhat = truth + rng.normal(0, noise[m], n_per)
+        if m == "xgboost":
+            yhat = np.where(folds == 1, truth, yhat)
+        for f, d, yt, yh in zip(folds, dates, truth, yhat, strict=True):
+            rows.append(
+                {
+                    "ts_id": "s1",
+                    "model_type": m,
+                    "fold_id": int(f),
+                    "ds": d,
+                    "y_true": yt,
+                    "yhat": yh,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_a_model_that_is_perfect_only_on_the_newest_fold_does_not_win_the_stacker() -> None:
+    from scipy.optimize import nnls
+
+    cfg = _cfg(["nnls"])  # n_folds=2 → fold 1 is the holdout
+    oof = _two_fold_oof()
+    # What fitting on everything would have done — the same NNLS on the unfiltered pivot. It is
+    # here so the test fails loudly if the fixture ever stops posing the question.
+    naive_x, naive_y = _pivot_oof(oof, cfg.models)
+    naive = dict(zip(cfg.models, nnls(naive_x, naive_y)[0], strict=True))
+    assert naive["xgboost"] > naive["theta"]
+
+    weights, _artifacts, basis = fit_learned(oof, cfg)
+    assert basis == "holdout"
+    assert weights["nnls"]["theta"] > weights["nnls"]["xgboost"]
+
+
+def test_inverse_error_weights_are_earned_on_the_inner_folds_only() -> None:
+    cfg = _cfg(["inverse_error"])
+    oof = _two_fold_oof()
+    # The same call with the holdout pointed at a fold that does not exist: every row becomes an
+    # inner row, so this is the leaking behaviour reproduced through the shipping code path rather
+    # than re-implemented in the test.
+    leaky = cfg.model_copy(update={"backtest": cfg.backtest.model_copy(update={"n_folds": 3})})
+
+    def _holdout_error(config: RunConfig) -> float:
+        blended = combine_oof(oof, config, learned_weights={})
+        hold = blended[blended["fold_id"] == 1]
+        assert not hold.empty
+        return float(np.abs(hold["yhat"].to_numpy() - hold["y_true"].to_numpy()).mean())
+
+    # Leaked weights flatter themselves on the holdout — they were partly chosen by it. The point
+    # is not that the honest blend is *better*; it is that its number is not self-congratulatory.
+    assert _holdout_error(cfg) > _holdout_error(leaky) * 1.1
+
+
+def test_a_single_fold_run_falls_back_and_says_so() -> None:
+    cfg = _cfg(["nnls"])
+    one = cfg.model_copy(update={"backtest": cfg.backtest.model_copy(update={"n_folds": 1})})
+    oof = _oof(one.models)  # every row is fold 0, which is now the holdout
+    mask, basis = inner_fold_mask(oof, one)
+    assert basis == "in_sample" and mask.all()
+    weights, _artifacts, learned_basis = fit_learned(oof, one)
+    # It still produces an ensemble — refusing would cost the run its whole learned blend over a
+    # config choice — but the run records that the number is in-sample rather than held out.
+    assert set(weights) == {"nnls"} and learned_basis == "in_sample"
+
+
+def test_an_oof_frame_without_fold_ids_cannot_claim_a_holdout() -> None:
+    cfg = _cfg(["nnls"])
+    oof = _oof(cfg.models).drop(columns=["fold_id"])
+    mask, basis = inner_fold_mask(oof, cfg)
+    assert basis == "in_sample" and mask.all()
 
 
 # --- combine_calculated: the pandas blend (Write-API path) ---------------------

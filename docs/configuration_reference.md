@@ -171,6 +171,16 @@ That is what identifies a fold when rows have to be compared across series or ac
 it is what the ensemble joins on — see
 [output_schemas.md](./output_schemas.md#which-fold-is-this-really).
 
+**The newest fold is reserved from every fit.** Fold `n_folds − 1` — the one with the smallest
+step-back — trains no stacker, sets no `inverse_error` weight, and is never in a hyperparameter
+search's objective. It is still *scored*, like every other fold; it is simply not *fit on*, so the
+things this run learns are judged on a window they never saw. That is why `n_folds: 1` is worth a
+second thought before you pick it: it is legal, it works, and it leaves nothing to reserve, so
+every learned weight and every tuned parameter is scored on the fold it was chosen by. The run says
+so rather than hiding it — `ensemble_scoring` / `hpo_scoring` read `in_sample`, and the run header
+carries the same claim under `job_telemetry.$.scoring`. `n_folds: 2` is the smallest setting that
+buys an honest number.
+
 Three columns on `forecast_metadata` record how the scoring went, separately from how the cell went:
 
 | Column | Meaning |

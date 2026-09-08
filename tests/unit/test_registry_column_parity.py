@@ -53,8 +53,6 @@ _RESERVED_METADATA = {
     "achieved_min_train",
     "first_val_date",
     "last_val_date",
-    "ensemble_scoring",
-    "hpo_scoring",
     "n_fits",
     "train_rows_total",
 }
@@ -173,6 +171,7 @@ def _metadata_producers() -> set[str]:
             artifact_uri="gs://b/e.pkl",
             created_at=_CREATED,
             cfg=_cfg(),
+            ensemble_scoring="holdout",
         )
     )
     return emitted

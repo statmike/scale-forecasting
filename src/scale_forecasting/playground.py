@@ -266,7 +266,7 @@ def bakeoff(
     ens_pred_rows: list[dict[str, Any]] = []
     for r in combine_calculated(base_df, cfg, metric_df):
         ens_pred_rows.append(r)
-    learned_weights, _artifacts = fit_learned(oof_df, cfg)
+    learned_weights, _artifacts, _basis = fit_learned(oof_df, cfg)
     for strategy, wmap in learned_weights.items():
         ens_pred_rows.extend(_apply_weights(base_df, wmap, cfg.run_name, strategy))
 

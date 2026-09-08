@@ -91,15 +91,23 @@ def _score_params(
     """One trial's objective: mean decision-metric (as a minimize-scalar) over the sample.
 
     Runs the aligned backtest for ``params`` on each sampled series, averages the metric across
-    folds then across series. A series that contributes no score is skipped rather than sinking the
-    trial — the same fault-tolerance ``run_cell`` gives a cell. Two ways that happens: the fit
-    raises, or the series is too short for the fold geometry and `backtest_cell` returns no folds
-    to average (it clamps rather than raising, so the second case never reaches the ``except``).
-    An empty sample, or one where every series was skipped, scores ``+inf``.
+    the **inner** folds then across series. A series that contributes no score is skipped rather
+    than sinking the trial — the same fault-tolerance ``run_cell`` gives a cell. Two ways that
+    happens: the fit raises, or the series is too short for the fold geometry and `backtest_cell`
+    returns no folds to average (it clamps rather than raising, so the second case never reaches
+    the ``except``). An empty sample, or one where every series was skipped, scores ``+inf``.
+
+    **The newest fold is not in the objective.** A search that optimises against every fold is
+    then scored on those same folds by `worker.run_cell`, so the winning trial's advantage is
+    partly the search having seen the answer — and the cell's metric panel, which is what the
+    leaderboard ranks, carries that advantage without saying so. Reserving the fold
+    `backtest.holdout_fold_id` names leaves the search a window it never touched. A series with
+    only that one fold has nothing left to search on, so it falls back to using it — recorded as
+    ``hpo_scoring='in_sample'``, never assumed.
     """
     from functools import partial
 
-    from .backtest import backtest_cell
+    from .backtest import backtest_cell, holdout_fold_id
     from .features import fit_transform_lambda
 
     model_cls = get_model(model_name)
@@ -125,7 +133,11 @@ def _score_params(
         except Exception as e:  # noqa: BLE001 - a bad series must not sink the whole trial
             _log.debug("hpo: skipping a series for %s: %r", model_name, e)
             continue
-        vals = [fm.get(metric, float("nan")) for fm in fold_metrics]
+        inner = [fm for fm in fold_metrics if fm.get("fold_id") != holdout_fold_id(cfg)]
+        # Only this series falls back, not the trial: one short series must not put the whole
+        # search back on the fold everything else is reserving.
+        scored = inner or fold_metrics
+        vals = [fm.get(metric, float("nan")) for fm in scored]
         finite = [v for v in vals if v == v]  # drop NaN folds
         if finite:
             per_series.append(float(np.mean(finite)))

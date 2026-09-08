@@ -182,6 +182,12 @@ def assemble_metadata_row(
         "point_forecast_decision": result.point_forecast_decision,
         "interval_calibration": result.interval_calibration,
         "point_forecast_margin": result.point_forecast_margin,
+        # Whether the hyperparameter search behind `best_params` reserved the newest fold, or had
+        # no inner fold left and scored on all of them. NULL on the majority of cells, where no
+        # search ran at all. It is here rather than derivable because the answer depends on this
+        # series' own length under per-series tuning, and a reader comparing two rows of the same
+        # run cannot recover that from the config.
+        "hpo_scoring": result.hpo_scoring,
         # How the *cell* went. `run_cell` has always computed this and thrown it away at the table
         # boundary: an error cell was written as a row of NULL metrics with `fit_seconds = 0`, and
         # telling it apart from a successful cell that simply was not scored meant knowing that

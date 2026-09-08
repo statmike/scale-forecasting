@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import nnls
 
+from .backtest import holdout_fold_id
 from .config import CALCULATED_STRATEGIES, LEARNED_STRATEGIES
 from .errors import ConfigError, get_logger
 from .metrics import loss_of
@@ -39,6 +40,11 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _RIDGE_ALPHA = 1.0  # L2 strength for the ridge meta-learner
+
+# Stand-ins for "the inner-fold fit was not attempted", so the fallback below is one
+# `X.shape[0] == 0` check rather than two branches that have to stay in step.
+_EMPTY_X = np.empty((0, 0))
+_EMPTY_Y = np.empty(0)
 
 
 # --- pure combine helpers (calculated) -----------------------------------------
@@ -110,6 +116,30 @@ def _fold_key(oof_df: pd.DataFrame) -> list[str]:
     if "cutoff_date" in oof_df.columns and oof_df["cutoff_date"].notna().all():
         return ["ts_id", "cutoff_date", date_col]
     return ["ts_id", "fold_id", date_col]
+
+
+def inner_fold_mask(oof_df: pd.DataFrame, cfg: RunConfig) -> tuple[np.ndarray, str]:
+    """Which OOF rows a fit is allowed to see, and what that says about the resulting numbers.
+
+    Returns ``(mask, basis)``. ``mask`` is True on the rows belonging to a fold other than
+    `backtest.holdout_fold_id` — the folds a stacker, an ``inverse_error`` weight or a
+    hyperparameter search may learn from. ``basis`` is ``"holdout"`` when a real split exists and
+    ``"in_sample"`` when it does not, in which case the mask is all-True and the caller fits on
+    everything it will later be scored on.
+
+    Two ways the split can fail to exist, and both are ordinary rather than exceptional: the run
+    asked for ``n_folds: 1``, or a short series in a ragged panel achieved only the newest fold.
+    Falling back is the right behaviour — a stacker with no rows is worse than an optimistic one --
+    but it has to be *said*, because an in-sample number is indistinguishable from an honest one
+    once it is sitting in a metric column. That is what ``basis`` is written to the registry for.
+    """
+    holdout = holdout_fold_id(cfg)
+    if "fold_id" not in oof_df.columns:
+        return np.ones(len(oof_df), dtype=bool), "in_sample"
+    mask = (oof_df["fold_id"] != holdout).to_numpy(dtype=bool)
+    if not mask.any():
+        return np.ones(len(oof_df), dtype=bool), "in_sample"
+    return mask, "holdout"
 
 
 def _carried_fold_ids(aligned: pd.DataFrame, keys: list[str]) -> pd.Series:
@@ -190,10 +220,17 @@ def combine_oof(
     # use, a column when the join went on the cutoff.
     fold_ids = _carried_fold_ids(aligned, keys)
     ts_ids = wide.index.get_level_values("ts_id").to_numpy()
+    # `inverse_error` is the one calculated strategy that *fits* something — a per-series weight
+    # off these very rows — so it is held to the same rule as the meta-learners and only sees the
+    # inner folds. Every strategy is then scored on all of them: the holdout is reserved from the
+    # fit, not from the score. `mean` and `median` fit nothing, so the mask does not reach them.
+    fit_rows = (fold_ids != holdout_fold_id(cfg)).to_numpy(dtype=bool)
 
     parts: list[pd.DataFrame] = []
     for strategy in cfg.ensemble.strategies:
-        yhat = _blend_oof_strategy(strategy, vals, present_models, ts_ids, truth, learned_weights)
+        yhat = _blend_oof_strategy(
+            strategy, vals, present_models, ts_ids, truth, learned_weights, fit_rows
+        )
         if yhat is None:
             continue
         part = pd.DataFrame(
@@ -217,18 +254,20 @@ def _blend_oof_strategy(
     ts_ids: np.ndarray,
     truth: np.ndarray,
     learned_weights: dict[str, dict[str, float]],
+    fit_rows: np.ndarray,
 ) -> np.ndarray | None:
     """The blended yhat for one strategy over the OOF value matrix, or ``None`` to skip it.
 
-    ``vals`` is ``(n_rows, n_models)`` of base OOF yhats aligned to ``models``; ``ts_ids`` and
-    ``truth`` are per-row. Skips (returns ``None``) a learned strategy with no fitted weights.
+    ``vals`` is ``(n_rows, n_models)`` of base OOF yhats aligned to ``models``; ``ts_ids``,
+    ``truth`` and ``fit_rows`` are per-row, the last marking the folds a weight may be estimated
+    from. Skips (returns ``None``) a learned strategy with no fitted weights.
     """
     if strategy == "mean":
         return _weighted_blend(vals, np.ones(len(models)))
     if strategy == "median":
         return np.nanmedian(vals, axis=1)
     if strategy == "inverse_error":
-        return _inverse_error_blend(vals, ts_ids, truth)
+        return _inverse_error_blend(vals, ts_ids, truth, fit_rows)
     wmap = learned_weights.get(strategy)
     if not wmap:  # learned strategy not fitted (e.g. backtest off) → nothing to score
         return None
@@ -236,23 +275,36 @@ def _blend_oof_strategy(
     return _weighted_blend(vals, weights)
 
 
-def _inverse_error_blend(vals: np.ndarray, ts_ids: np.ndarray, truth: np.ndarray) -> np.ndarray:
+def _inverse_error_blend(
+    vals: np.ndarray, ts_ids: np.ndarray, truth: np.ndarray, fit_rows: np.ndarray
+) -> np.ndarray:
     """Inverse-WAPE-weighted blend, weights computed **per ts_id** from the OOF itself.
 
-    For each series, every base model's WAPE over its OOF rows sets its weight
-    (`inverse_error_weights`); the blend then renormalizes over the models present per row.
+    For each series, every base model's WAPE over its **inner-fold** OOF rows sets its weight
+    (`inverse_error_weights`); the blend then applies those weights to *all* of that series' rows,
+    renormalizing over the models present per row. Estimating the weight on the same rows it is
+    scored on is what made this strategy flatter than it deserved: a model that happened to fit the
+    newest window well was rewarded with the weight that then produced the number it was judged by.
     Self-contained — computed straight from the OOF rather than read back from
     ``forecast_metadata`` — so scoring needs no registry round-trip. (WAPE is the natural error for
     this weighting; it need not equal ``backtest.decision_metric``, which drives the *future*
     ``inverse_error`` blend — this is the scored counterpart, not a byte-for-byte replay.)
+
+    ``fit_rows`` is the run-wide inner-fold mask. A series that achieved only the holdout has no
+    inner row of its own, so it falls back to weighting on everything it has — per series, not per
+    run, because one short series must not push the whole panel back to in-sample weights.
     """
     out = np.full(vals.shape[0], np.nan)
     for tid in np.unique(ts_ids):
         rows = ts_ids == tid
         block = vals[rows]
-        denom = np.nansum(np.abs(truth[rows]))
+        weight_rows = rows & fit_rows
+        if not weight_rows.any():
+            weight_rows = rows
+        wblock = vals[weight_rows]
+        denom = np.nansum(np.abs(truth[weight_rows]))
         # Per-model WAPE over this series' OOF (NaN where the model never forecast the series).
-        abs_err = np.abs(block - truth[rows][:, None])
+        abs_err = np.abs(wblock - truth[weight_rows][:, None])
         wape = np.nansum(abs_err, axis=0) / denom if denom > 0 else np.nansum(abs_err, axis=0)
         weights = inverse_error_weights(wape)
         out[rows] = _weighted_blend(block, weights)
@@ -317,12 +369,20 @@ def _fit_xgb(X: np.ndarray, y: np.ndarray, seed: int) -> tuple[np.ndarray, objec
 
 def fit_learned(
     oof_df: pd.DataFrame, cfg: RunConfig
-) -> tuple[dict[str, dict[str, float]], dict[str, bytes]]:
-    """Fit every learned strategy in ``cfg`` on the backtest OOF.
+) -> tuple[dict[str, dict[str, float]], dict[str, bytes], str]:
+    """Fit every learned strategy in ``cfg`` on the backtest OOF's **inner** folds.
 
-    Returns ``(weights, artifacts)``:
+    Returns ``(weights, artifacts, scoring_basis)``:
       * ``weights[strategy]`` maps base-model name → learned weight,
-      * ``artifacts[strategy]`` is the pickled, uploadable meta-learner payload.
+      * ``artifacts[strategy]`` is the pickled, uploadable meta-learner payload,
+      * ``scoring_basis`` is ``"holdout"`` when the newest fold was successfully reserved from the
+        fit and ``"in_sample"`` when it could not be — the caller writes it to the registry beside
+        the metrics it qualifies.
+
+    **The newest fold is not in ``X``.** A meta-learner that trains and is scored on the same folds
+    reports a fit statistic, and it lands in the same leaderboard column as the base models'
+    genuinely out-of-fold numbers, where nothing distinguishes the two. Holding the newest fold out
+    of the fit is what makes ``ensemble_nnls`` comparable to ``theta`` — see `inner_fold_mask`.
 
     Refuses to run when backtesting is off — a learned ensemble has no legitimate,
     leakage-free data to train on (the guard that keeps stacking honest). Base models come
@@ -330,7 +390,7 @@ def fit_learned(
     """
     learned = [s for s in cfg.ensemble.strategies if s in LEARNED_STRATEGIES]
     if not learned:
-        return {}, {}
+        return {}, {}, "holdout"
     if not cfg.backtest.enabled:
         raise ConfigError(
             "learned ensemble strategies require backtest.enabled=true (they train on OOF)"
@@ -339,7 +399,14 @@ def fit_learned(
         raise ConfigError("cannot fit a learned ensemble: backtest_oof is empty")
 
     models = list(cfg.models)
-    X, y = _pivot_oof(oof_df, models)
+    inner, basis = inner_fold_mask(oof_df, cfg)
+    X, y = _pivot_oof(oof_df[inner], models) if basis == "holdout" else (_EMPTY_X, _EMPTY_Y)
+    if X.shape[0] == 0:
+        # The inner folds exist but no *complete* row survives across every base model there --
+        # one model only forecast the newest window, say. Refusing would cost the run its whole
+        # learned ensemble over a fold-coverage gap; fitting on everything and saying so does not.
+        basis = "in_sample"
+        X, y = _pivot_oof(oof_df, models)
     if X.shape[0] == 0:
         raise ConfigError("no complete OOF rows across all base models to train on")
 
@@ -356,9 +423,9 @@ def fit_learned(
             w, payload = _fit_xgb(X, y, seed=0)
         weights[strategy] = {m: float(wi) for m, wi in zip(models, w, strict=True)}
         artifacts[strategy] = pickle.dumps(payload)
-        _log.info("fit %s ensemble on %d OOF rows", strategy, X.shape[0])
+        _log.info("fit %s ensemble on %d %s OOF rows", strategy, X.shape[0], basis)
 
-    return weights, artifacts
+    return weights, artifacts, basis
 
 
 # --- calculated ensembles in pandas (Write-API path) ---------------------------

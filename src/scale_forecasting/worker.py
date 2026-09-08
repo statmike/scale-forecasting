@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from .backtest import backtest_cell
+from .backtest import achievable_folds, backtest_cell
 from .calibration import apply_calibration, calibrate_from_oof, compare_arms, select_arm
 from .config import corrected_arm_for
 from .errors import ConfigError, get_logger
@@ -144,6 +144,12 @@ class CellResult:
     # backtest to measure it on. This is the per-series evidence that a single global setting
     # cannot express, and it is what 2.5b's automatic per-series selection will read.
     point_forecast_margin: float | None = None
+    # Whether the hyperparameter search that produced `best_params` was scored with the newest
+    # fold held out of it. "holdout" = yes, "in_sample" = there was no inner fold to search on so
+    # it used every fold (and the cell's own metrics therefore include a window the search
+    # optimised against). None = no search ran for this cell, which is the common case. The
+    # ensemble's counterpart lives on the run's ensemble rows as `ensemble_scoring`.
+    hpo_scoring: str | None = None
 
 
 def _worker_id() -> str:
@@ -347,6 +353,29 @@ def _resolve_params(
 
         return {**authored, **tune_model(model_name, [series], cfg, ctx)}
     return authored
+
+
+def hpo_scoring_basis(n_obs: int, cfg: RunConfig, params: dict[str, Any] | None) -> str | None:
+    """Whether the search behind this cell's params reserved the newest fold (pure).
+
+    ``None`` when no search ran, which is most cells. Otherwise ``"holdout"`` when an inner fold
+    existed for the search to score on, or ``"in_sample"`` when it did not and the search fell
+    back to every fold — a distinction that decides whether the cell's own metrics are honest,
+    since the search and the leaderboard would otherwise be reading the same window.
+
+    The two granularities are asked different questions. Per-series tuning searched *this* series,
+    so the split exists only if this series is long enough for two folds. Fleetwide tuning searched
+    a sample the cell never saw, so the only thing the cell can honestly report is the run's fold
+    geometry; a short series inside that sample fell back on its own, and it is the run header's
+    ``scoring`` block, not this column, that would show it.
+    """
+    if not cfg.hpo.enabled:
+        return None
+    if params is not None:
+        return "holdout" if cfg.backtest.n_folds >= 2 else "in_sample"
+    if cfg.hpo.granularity != "per_series":
+        return None
+    return "holdout" if achievable_folds(n_obs, cfg) >= 2 else "in_sample"
 
 
 def _rollup_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -585,6 +614,7 @@ def run_cell(
             # measured against. This is the number that says whether the correction earned its
             # keep *for this series*, rather than asking anyone to trust a fleetwide average.
             point_forecast_margin=arm_comparison.get("margin"),
+            hpo_scoring=hpo_scoring_basis(len(series), cfg, params),
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(e, engine)

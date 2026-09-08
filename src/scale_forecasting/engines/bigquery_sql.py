@@ -130,6 +130,11 @@ def fold_plan(cfg: RunConfig) -> list[tuple[int, int]]:
     earliest / largest step-back), so native and Python OOF fold ids line up. The per-series
     min-train feasibility guard ``make_folds`` enforces is *not* replicated in SQL (BQML trains on
     whatever history precedes the cutoff); series too short for a fold simply train on less.
+
+    The **last** entry is therefore the smallest step-back — `backtest.holdout_fold_id` — and the
+    role is left implicit here rather than carried in the tuple: this function's whole contract is
+    that its numbering matches ``make_folds``, so restating the derived value would give the two
+    engines two places to disagree. ``test_bigquery_sql`` asserts the identity instead.
     """
     bt = cfg.backtest
     return [(k, bt.horizon + (bt.n_folds - 1 - k) * bt.step) for k in range(bt.n_folds)]

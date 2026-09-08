@@ -333,7 +333,11 @@ def test_fold_metrics_have_full_panel() -> None:
     cfg = _cfg({"n_folds": 2, "horizon": 4, "step": 4, "min_train": 10})
     _, fold_metrics = backtest_cell(_series(40), _factory(), cfg)
     for m in fold_metrics:
-        assert set(m) == set(METRIC_NAMES)
+        # The panel, plus which fold earned it. `fold_id` rides along rather than being inferred
+        # from list position because a short series is exactly where position stops being the
+        # fold id — and a short series is exactly where the holdout question gets interesting.
+        assert set(m) == set(METRIC_NAMES) | {"fold_id"}
+    assert [m["fold_id"] for m in fold_metrics] == [0, 1]
 
 
 def test_fold_dataclass_helpers() -> None:

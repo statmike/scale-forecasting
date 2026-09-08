@@ -21,7 +21,8 @@ Each fold is scored on the *intervals the model already returned*, not on the po
 alone — so ``coverage``, ``pinball``, ``interval_score`` and ``interval_width`` are real numbers on
 the Python path rather than the NaNs they were for every run before this.
 
-Public surface: ``Fold``, ``OOF_COLUMNS``, ``achievable_folds``, ``make_folds``, ``backtest_cell``.
+Public surface: ``Fold``, ``OOF_COLUMNS``, ``achievable_folds``, ``holdout_fold_id``,
+``hpo_scoring_claim``, ``make_folds``, ``backtest_cell``.
 """
 
 from __future__ import annotations
@@ -73,6 +74,8 @@ class Fold:
     train_end: int  # == val_start (no leakage)
     val_start: int
     val_end: int
+    # "holdout" for the newest fold, "fit" for every older one. See `holdout_fold_id`.
+    role: str = "fit"
 
     @property
     def train_size(self) -> int:
@@ -81,6 +84,47 @@ class Fold:
     @property
     def val_size(self) -> int:
         return self.val_end - self.val_start
+
+
+def holdout_fold_id(cfg: RunConfig) -> int:
+    """The fold id reserved from every fit — the newest one, ``n_folds - 1`` (pure).
+
+    **The invariant this exists to state: the fold with the smallest step-back is never used to fit
+    anything.** Not stacker weights, not ``inverse_error`` weights, not hyperparameters. Everything
+    that learns from the backtest learns from the *inner* folds; the newest fold is what those
+    learned things are then judged on. Without it, a learned ensemble's leaderboard number is an
+    in-sample fit statistic sitting in the same column as the base models' out-of-fold numbers, and
+    a per-series hyperparameter search is scored on the exact folds it optimised against.
+
+    It is a pure function of ``cfg`` — not of the series — and that is what makes it usable as a
+    join key rather than a per-cell lookup. Two facts make it safe: `make_folds` keeps a survivor's
+    original ``fold_id`` and drops the **oldest** folds first, so every series that achieved any
+    fold at all achieved this one; and `engines.bigquery_sql.fold_plan` numbers folds identically,
+    so the two runtimes agree on which fold is the holdout without having to compare dates.
+
+    A series that achieved exactly one fold has *only* the holdout, so it has nothing to fit on --
+    callers fall back to using every fold and record ``ensemble_scoring`` / ``hpo_scoring`` as
+    ``'in_sample'`` rather than pretending. Same at ``n_folds == 1``, where that is true of the
+    whole run.
+    """
+    return cfg.backtest.n_folds - 1
+
+
+def hpo_scoring_claim(cfg: RunConfig) -> str:
+    """The run-level answer to "did the hyperparameter search reserve the newest fold?" (pure).
+
+    ``"off"`` when no search runs at all, ``"holdout"`` when the run's fold geometry leaves an
+    inner fold for one to score on, ``"in_sample"`` when ``n_folds == 1`` and it cannot. Written
+    once onto the run header's ``job_telemetry`` under ``$.scoring.hpo`` so the claim is legible
+    for the whole run without reading a per-cell column — the per-cell ``hpo_scoring`` still says
+    what happened for an individual short series under per-series tuning, which this cannot.
+
+    Lives here rather than in `hpo` because `main` needs it on the submit path, and importing
+    `hpo` there would drag the whole model stack in behind ``models.get_model``.
+    """
+    if not cfg.hpo.enabled:
+        return "off"
+    return "holdout" if cfg.backtest.n_folds >= 2 else "in_sample"
 
 
 def achievable_folds(n: int, cfg: RunConfig) -> int:
@@ -119,6 +163,10 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
     meaningless in a panel of mixed-length series, and would silently align a short series' fold 0
     against a long series' fold 0 covering a completely different date range. Fold identity is
     anchored on the date, not the ordinal — see `ensembler._pivot_oof`.
+
+    Dropping the oldest is also what makes the holdout universal: fold ``n_folds - 1`` survives for
+    every series that achieved any fold at all, so `holdout_fold_id` can be a function of the config
+    instead of a per-series lookup. Each fold carries that verdict as ``role``.
     """
     bt = cfg.backtest
     horizon, step, n_folds, min_train = bt.horizon, bt.step, bt.n_folds, bt.min_train
@@ -145,6 +193,7 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
                 train_end=train_end,
                 val_start=val_start,
                 val_end=val_end,
+                role="holdout" if k == n_folds - 1 else "fit",
             )
         )
     return folds
@@ -242,14 +291,22 @@ def backtest_cell(
             )
         )
         fold_metrics.append(
-            compute_metrics(
-                y_true,
-                yhat,
-                y_train=y_train_orig,
-                lower=lower,
-                upper=upper,
-                seasonal_period=seasonal_period(cfg.data.freq),
-            )
+            {
+                **compute_metrics(
+                    y_true,
+                    yhat,
+                    y_train=y_train_orig,
+                    lower=lower,
+                    upper=upper,
+                    seasonal_period=seasonal_period(cfg.data.freq),
+                ),
+                # Which fold this panel belongs to, so a caller can hold the newest one out of a
+                # fit (`holdout_fold_id`). The list is in fold order and a survivor keeps its
+                # original id, so position would *usually* work and would be wrong exactly when a
+                # series is short — the case the invariant is most delicate on. `_rollup_metrics`
+                # walks `METRIC_NAMES`, so this extra key is carried, never averaged.
+                "fold_id": fold.fold_id,
+            }
         )
 
     oof = (

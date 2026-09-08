@@ -196,6 +196,26 @@ def test_fold_plan_mirrors_make_folds_geometry() -> None:
     assert fold_plan(cfg) == [(0, 84), (1, 56), (2, 28)]
 
 
+def test_the_native_plans_holdout_is_the_fold_the_python_engines_reserve() -> None:
+    # The holdout is a pure function of the config (`backtest.holdout_fold_id`), and the native
+    # plan does not carry a role of its own — it just numbers folds the same way. That agreement
+    # is the whole reason a run can reserve one fold across two runtimes without comparing dates,
+    # so it is asserted here rather than assumed by both sides.
+    from scale_forecasting.backtest import holdout_fold_id
+
+    for n_folds in (1, 2, 5):
+        cfg = RunConfig(
+            run_name="bq test",
+            data={"source_table": "src"},
+            models=["arima_plus"],
+            backtest={"enabled": True, "n_folds": n_folds, "horizon": 28, "step": 28},
+        )
+        plan = fold_plan(cfg)
+        assert plan[-1][0] == holdout_fold_id(cfg)
+        # …and it is the newest window, not merely the last row of the list.
+        assert plan[-1][1] == min(steps for _k, steps in plan)
+
+
 def test_fold_create_and_drop_target_the_same_object() -> None:
     # Every fold trains a fold-suffixed object; the matching DROP must name that exact object so
     # backtest runs leave no orphaned sf_model_*_f{k} models behind.

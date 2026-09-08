@@ -119,9 +119,10 @@ def run(
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
+    from .backtest import hpo_scoring_claim
     from .dag import plan_dag, preflight
     from .profiling.source import check_pinned_source
-    from .registry.header import header_status
+    from .registry.header import header_status, merge_header_telemetry
     from .registry.lifecycle import run_header
     from .settings import Settings
 
@@ -278,6 +279,16 @@ def run(
         fields: dict[str, object] = {"bq_models": list(native.models) if native else []}
         if bq_outcome is not None:
             fields["n_series"] = bq_outcome.n_series
+        # The run-level honesty claim, alongside the per-cell `hpo_scoring` / `ensemble_scoring`
+        # columns: one place a reader can look to see whether anything this run *learned* was
+        # scored on a fold it had already optimised against. Best-effort — a telemetry merge that
+        # fails must not turn a green run red, and the per-cell columns still carry the answer.
+        try:
+            merge_header_telemetry(
+                run_id, {"scoring.hpo": hpo_scoring_claim(cfg)}, settings=settings
+            )
+        except Exception as exc:  # noqa: BLE001 - telemetry is never worth failing a run over
+            _log.warning("scoring telemetry not recorded for run %s: %s", run_id, exc)
         hdr.finalize(status=status, **fields)
 
     first_error = next(iter(job_errors.values()), None) or ensemble_error

@@ -20,6 +20,7 @@ import pytest
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.hpo import (
+    _context,
     _has_search_space,
     _minimize_scalar,
     require_backtest,
@@ -190,3 +191,72 @@ def test_resolve_fleetwide_all_calculated_models_is_empty_map() -> None:
     # a config of only no-search-space models → empty resolution (every cell uses {} defaults).
     cfg = _cfg(models=["naive_mean"])
     assert resolve_fleetwide(_sample(), cfg) == {}
+
+
+# --- the search never scores itself on the fold the run is scored on -----------
+
+
+def test_the_objective_and_the_leaderboard_read_disjoint_folds() -> None:
+    """The search's fold set and the fold the cell is judged on must not overlap.
+
+    Stated on the objective directly rather than through a study, because it is an arithmetic
+    claim: with three folds, the trial's score is the mean of folds 0 and 1 and never touches
+    fold 2 — which is the fold `worker.run_cell` will later report a metric for.
+    """
+    import scale_forecasting.backtest as backtest_mod
+    from scale_forecasting.backtest import holdout_fold_id
+    from scale_forecasting.hpo import _score_params
+
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "horizon": 7, "step": 7, "min_train": 60})
+    # wape per fold: the holdout is made to look spectacular, so an objective that saw it would
+    # score far below the inner-fold mean and the assertion below would catch it.
+    panels = [
+        {"fold_id": 0, "wape": 0.40},
+        {"fold_id": 1, "wape": 0.60},
+        {"fold_id": 2, "wape": 0.01},
+    ]
+    seen: list[int] = []
+
+    def _fake_backtest_cell(series, factory, cfg_, lam=None):  # type: ignore[no-untyped-def]
+        seen.extend(p["fold_id"] for p in panels)
+        return pd.DataFrame(), panels
+
+    ctx = _context(cfg)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backtest_mod, "backtest_cell", _fake_backtest_cell)
+        score = _score_params("xgboost", {}, [_series()], cfg, ctx)
+
+    assert set(seen) == {0, 1, 2}  # the backtest still *scores* every fold
+    assert score == pytest.approx(0.50)  # the objective averaged only 0 and 1
+    assert holdout_fold_id(cfg) == 2
+
+
+def test_a_series_with_only_the_holdout_fold_scores_on_it_rather_than_dropping_out() -> None:
+    # One short series must not vanish from the sample, and must not drag the whole trial back
+    # onto the holdout either — the fallback is per series.
+    import scale_forecasting.backtest as backtest_mod
+    from scale_forecasting.hpo import _score_params
+
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 2, "horizon": 7, "step": 7, "min_train": 60})
+    by_id = {
+        "s0": [{"fold_id": 0, "wape": 0.30}, {"fold_id": 1, "wape": 0.90}],
+        "s1": [{"fold_id": 1, "wape": 0.50}],  # achieved only the newest fold
+    }
+
+    def _fake_backtest_cell(series, factory, cfg_, lam=None):  # type: ignore[no-untyped-def]
+        return pd.DataFrame(), by_id[str(series["ts_id"].iloc[0])]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(backtest_mod, "backtest_cell", _fake_backtest_cell)
+        score = _score_params("xgboost", {}, [_series("s0"), _series("s1")], cfg, _context(cfg))
+
+    assert score == pytest.approx((0.30 + 0.50) / 2)
+
+
+def test_the_run_level_hpo_claim_names_the_three_cases() -> None:
+    from scale_forecasting.backtest import hpo_scoring_claim
+
+    assert hpo_scoring_claim(_cfg(hpo={"enabled": False})) == "off"
+    assert hpo_scoring_claim(_cfg()) == "holdout"
+    one = _cfg(backtest={"enabled": True, "n_folds": 1, "horizon": 7, "step": 7, "min_train": 60})
+    assert hpo_scoring_claim(one) == "in_sample"

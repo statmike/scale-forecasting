@@ -1138,6 +1138,7 @@ def test_the_ensemble_metadata_row_emits_no_column_the_spec_would_drop() -> None
         artifact_uri="gs://bkt/warehouse/artifacts/p/d/r/ensemble_ens-abc123_nnls.pkl",
         created_at=_CREATED,
         cfg=_cfg(),
+        ensemble_scoring="holdout",
     )
     assert set(row) <= _spec_columns(_META_SPEC), set(row) - _spec_columns(_META_SPEC)
     assert row["compute_engine"] == "ensemble"
@@ -1161,6 +1162,7 @@ def test_a_calculated_ensemble_is_distinguishable_from_one_that_fitted_nothing()
         "artifact_uri": None,
         "created_at": _CREATED,
         "cfg": _cfg(),
+        "ensemble_scoring": None,
     }
     assert _ensemble_meta_row(weights=None, **common)["best_params"] is None
     assert _ensemble_meta_row(weights={}, **common)["best_params"] == "{}"
@@ -1186,6 +1188,7 @@ def test_all_three_metadata_producers_agree_on_the_identity_columns() -> None:
             artifact_uri=None,
             created_at=_CREATED,
             cfg=_cfg(),
+            ensemble_scoring=None,
         ),
     ]
     for row in rows:

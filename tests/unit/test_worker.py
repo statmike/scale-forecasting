@@ -9,6 +9,7 @@ the backtest toggle (OOF present/absent, metrics populated/NaN), and the error p
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -641,3 +642,51 @@ def test_an_unparseable_cap_is_not_a_cap(monkeypatch: Any) -> None:
     """``OMP_NUM_THREADS=all`` caps nothing; guessing a number from it would invent evidence."""
     _pin(monkeypatch, OPENBLAS_NUM_THREADS="all")
     assert worker._intraop_threads() is None
+
+
+# --- what the cell says about the search behind its params ---------------------
+
+
+def _hpo_cfg(**over: Any) -> RunConfig:
+    base: dict[str, Any] = {
+        "backtest": {"enabled": True, "n_folds": 3, "horizon": 7, "step": 7, "min_train": 30},
+        "hpo": {"enabled": True, "granularity": "fleetwide", "n_trials": 2},
+    }
+    base.update(over)
+    return _cfg(**base)
+
+
+def test_a_cell_that_never_searched_claims_nothing() -> None:
+    # The common case, and the reason the column is nullable: no search ran, so there is no
+    # honesty question to answer and "holdout" would be a claim about something that never
+    # happened. Passing params with HPO off is the fleetwide map absent, not a silent search.
+    assert worker.hpo_scoring_basis(500, _cfg(), None) is None
+    assert worker.hpo_scoring_basis(500, _cfg(), {"n_estimators": 10}) is None
+
+
+def test_fleetwide_tuning_reports_the_runs_fold_geometry() -> None:
+    # The cell did not run the search — the driver did, on a sample it never saw — so the only
+    # honest thing it can report is whether the run had an inner fold at all.
+    cfg = _hpo_cfg()
+    assert worker.hpo_scoring_basis(500, cfg, {"n_estimators": 10}) == "holdout"
+    one = cfg.model_copy(update={"backtest": cfg.backtest.model_copy(update={"n_folds": 1})})
+    assert worker.hpo_scoring_basis(500, one, {"n_estimators": 10}) == "in_sample"
+
+
+def test_per_series_tuning_reports_this_series_own_fold_count() -> None:
+    # Here the search really did run on this series, so a series too short for two folds has
+    # tuned on the very window it will be scored on — and says so, per series.
+    cfg = _hpo_cfg(hpo={"enabled": True, "granularity": "per_series", "n_trials": 2})
+    assert worker.hpo_scoring_basis(200, cfg, None) == "holdout"
+    assert worker.hpo_scoring_basis(38, cfg, None) == "in_sample"  # exactly one fold fits
+
+
+def test_a_tuned_cell_carries_the_basis_onto_its_registry_row() -> None:
+    from scale_forecasting.registry.rows import assemble_metadata_row
+
+    cfg = _hpo_cfg(hpo={"enabled": True, "granularity": "per_series", "n_trials": 2})
+    res = run_cell(_series(n=200), "naive_mean", cfg)
+    assert res.status == "ok"
+    assert res.hpo_scoring == "holdout"
+    row = assemble_metadata_row(res, datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+    assert row["hpo_scoring"] == "holdout"
