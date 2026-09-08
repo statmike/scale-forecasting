@@ -20,7 +20,12 @@ import numpy as np
 import pytest
 
 from scale_forecasting.config import DecisionMetric
-from scale_forecasting.metrics import METRIC_NAMES, compute_metrics
+from scale_forecasting.metrics import (
+    METRIC_DIRECTION,
+    METRIC_NAMES,
+    compute_metrics,
+    loss_of,
+)
 
 # A tiny fixed window with easy-to-verify arithmetic.
 #   y_true = [10, 20, 30, 40];  yhat = [12, 18, 33, 36]
@@ -47,6 +52,16 @@ def test_metric_names_match_config_decision_metric() -> None:
     # The panel metrics.py produces must be exactly the DecisionMetric vocabulary in the
     # config — same order, one source of truth (metrics ↔ config ↔ DDL).
     assert METRIC_NAMES == get_args(DecisionMetric)
+
+
+def test_every_panel_metric_has_a_direction() -> None:
+    # The third leg of the same lockstep. A config may name any panel metric as its
+    # `decision_metric`, and `loss_of` answers "unknown metric" with inf — so a metric added to the
+    # panel but not to the direction map does not raise, it makes every model equally unrankable:
+    # HPO picks trial 0, `inverse_error` weights nothing, the pruner keeps everything. Ordered, not
+    # just set-equal, so the map stays readable alongside the panel it mirrors.
+    assert tuple(METRIC_DIRECTION) == METRIC_NAMES
+    assert set(METRIC_DIRECTION.values()) <= {"lower", "higher", "zero"}
 
 
 # --- point-error metrics vs hand-computed --------------------------------------
@@ -255,6 +270,51 @@ def test_interval_metrics_nan_without_intervals() -> None:
     m = compute_metrics(_YT, _YH)
     assert math.isnan(m["interval_score"])
     assert math.isnan(m["interval_width"])
+
+
+# --- loss_of: the panel restated so one comparison ranks all of it ---------------
+#
+# Three consumers rank models — HPO's objective, `inverse_error` weighting, `prune_threshold` — and
+# all three go through `loss_of`. Its contract is narrow and load-bearing: non-negative, zero is
+# perfect, smaller is better, for every metric in the panel. The hpo tests exercise it through the
+# optimiser; these pin the conversion itself, because two of the fifteen metrics are not
+# lower-is-better and getting either backwards inverts a ranking silently.
+
+
+def test_a_lower_is_better_metric_passes_through_unchanged() -> None:
+    assert loss_of("wape", 0.25) == pytest.approx(0.25)
+
+
+def test_coverage_becomes_the_shortfall_from_perfect() -> None:
+    # 1 - v, not -v: `inverse_error_weights` filters on err > 0, so a negative loss is unusable.
+    assert loss_of("coverage", 0.8) == pytest.approx(0.2)
+    assert loss_of("coverage", 1.0) == pytest.approx(0.0)
+    assert loss_of("coverage", 0.5) > loss_of("coverage", 0.95)
+
+
+def test_bias_is_scored_on_its_magnitude_in_either_direction() -> None:
+    assert loss_of("bias", -0.4) == pytest.approx(0.4)
+    assert loss_of("bias", 0.4) == pytest.approx(0.4)
+    assert loss_of("bias", -0.1) < loss_of("bias", 0.4)
+
+
+def test_every_panel_metric_converts_to_a_non_negative_loss() -> None:
+    # The property the three consumers actually rely on, asserted across the whole panel rather
+    # than metric by metric. Coverage is the one that would break it if it were mapped to -value.
+    for name in METRIC_NAMES:
+        assert loss_of(name, 0.75) >= 0.0, name
+
+
+def test_an_uncomputable_metric_ranks_last_rather_than_first() -> None:
+    # NaN is how the panel says "undefined for this cell". Ranked as inf it can never win; left as
+    # NaN it would compare False against everything and win a min() by accident.
+    assert loss_of("wape", float("nan")) == float("inf")
+    assert loss_of("coverage", float("nan")) == float("inf")
+
+
+def test_a_metric_outside_the_map_gets_no_opinion() -> None:
+    assert "not_a_metric" not in METRIC_DIRECTION
+    assert loss_of("not_a_metric", 0.1) == float("inf")
 
 
 # --- guards --------------------------------------------------------------------

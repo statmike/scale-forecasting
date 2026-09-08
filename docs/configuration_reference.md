@@ -232,7 +232,7 @@ fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold
 | `mape` | mean(\|err\| / \|y_true\|) | % error. **NaN if any `y_true == 0`.** |
 | `smape` | mean(2\|err\| / (\|y_true\|+\|yhat\|)) | Symmetric %; bounded, handles zeros gracefully. |
 | `wape` | Σ\|err\| / Σ\|y_true\| | Weighted absolute % error — the scale-safe default. NaN only if the series sums to 0. |
-| `mase` | mae / mae(naïve-1-step) | Scaled vs. a naïve forecast; **needs training history**. <1 beats naïve. |
+| `mase` | mae / mae(naïve-1-step) | Scaled vs. a naïve forecast; **needs training history**. <1 beats naïve. The canonical Hyndman–Koehler definition, whose naïve is always the one-step one — `mase_seasonal` below is an *additional* metric, not a correction to this one. |
 | `rmsse` | rmse / rmse(naïve-1-step) | Squared analog of `mase`; **needs training history**. |
 | `bias` | mean(err) | Mean error — sign shows over/under-forecast. HPO minimizes \|bias\|. |
 | `coverage` | fraction of `y_true` inside [lower, upper] | **Needs prediction intervals**; want it near the nominal level. |
