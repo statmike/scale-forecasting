@@ -104,6 +104,11 @@ def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
                 # `fold_id` covers different dates for different series (`ensembler._pivot_oof`).
                 "cutoff_date": _as_date(rec.get("cutoff_date")),
                 "horizon_step": _as_int(rec.get("horizon_step")),
+                # What a model that was never refreshed predicted for this same date, on the frozen
+                # schemes. NULL elsewhere. Persisted per row rather than only as the cell-level
+                # `staleness_gap` so the decay can be read by horizon step and by fold, which is
+                # where a refit cadence is actually decided.
+                "yhat_stale": _as_float(rec.get("yhat_stale")),
             }
         )
     return rows
@@ -191,6 +196,12 @@ def assemble_metadata_row(
         "backtest_status": result.backtest_status,
         "backtest_note": result.backtest_note,
         "n_folds_achieved": result.n_folds_achieved,
+        # And *how* it was scored: whether each fold got a fresh fit, or one fit was carried
+        # forward, and what carrying it forward cost. `backtest_refit` is per cell rather than read
+        # off the config because a model without the seam falls back to refitting — a leaderboard
+        # that mixed frozen and refit rows without saying so would be comparing two questions.
+        "backtest_refit": result.backtest_refit,
+        "staleness_gap": _as_float(result.staleness_gap),
         # Where this cell's prediction bounds came from — and therefore what its `coverage`,
         # `pinball` and `interval_score` are evidence *about*. A model with native intervals is
         # reporting its own uncertainty; a model without one is being scored on the empirical

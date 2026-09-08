@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from scale_forecasting.backtest import BacktestOutcome
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.hpo import (
@@ -219,7 +220,7 @@ def test_the_objective_and_the_leaderboard_read_disjoint_folds() -> None:
 
     def _fake_backtest_cell(series, factory, cfg_, lam=None):  # type: ignore[no-untyped-def]
         seen.extend(p["fold_id"] for p in panels)
-        return pd.DataFrame(), panels
+        return pd.DataFrame(), panels, BacktestOutcome("per_fold", None)
 
     ctx = _context(cfg)
     with pytest.MonkeyPatch.context() as mp:
@@ -244,7 +245,11 @@ def test_a_series_with_only_the_holdout_fold_scores_on_it_rather_than_dropping_o
     }
 
     def _fake_backtest_cell(series, factory, cfg_, lam=None):  # type: ignore[no-untyped-def]
-        return pd.DataFrame(), by_id[str(series["ts_id"].iloc[0])]
+        return (
+            pd.DataFrame(),
+            by_id[str(series["ts_id"].iloc[0])],
+            BacktestOutcome("per_fold", None),
+        )
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(backtest_mod, "backtest_cell", _fake_backtest_cell)

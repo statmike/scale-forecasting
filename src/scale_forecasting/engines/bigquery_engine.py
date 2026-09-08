@@ -490,6 +490,13 @@ def _meta_row(
         "point_forecast_decision": "engine-native",
         "interval_calibration": "native",
         "point_forecast_margin": None,
+        # BigQuery ML rebuilds the model for every fold's cutoff — `CREATE MODEL` is the only way
+        # to fit it — so the native path is `per_fold` by construction, whatever `backtest.scheme`
+        # the config names. Stated rather than left NULL for the same reason as `cell_status`: a
+        # reader grouping the leaderboard by `backtest_refit` would otherwise drop every native
+        # model out of the comparison. There is no frozen arm to compare against, so no gap.
+        "backtest_refit": "per_fold" if n_folds_achieved is not None else None,
+        "staleness_gap": None,
     }
 
 

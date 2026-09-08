@@ -70,6 +70,9 @@ _OOF_SPEC: tuple[tuple[str, str], ...] = (
     # Only the ensemble path fills this: base-model rows leave it NULL, exactly as they do in
     # `forecast_predictions`. It is what keeps two ensemble configs under one run_id apart.
     ("ensemble_id", "S"),
+    # The blind control arm's forecast for this same date, on the frozen backtest schemes. NULL
+    # everywhere else — see `backtest.OOF_COLUMNS`.
+    ("yhat_stale", "D"),
 )
 
 _META_SPEC: tuple[tuple[str, str], ...] = (
@@ -125,6 +128,10 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("device_available", "S"),
     ("device_used", "S"),
     ("device_name", "S"),
+    # How the model was carried between fold origins, and what going stale cost in the run's
+    # decision metric — see `backtest.BacktestOutcome`.
+    ("backtest_refit", "S"),
+    ("staleness_gap", "D"),
 )
 
 # Which assembler feeds which table, and its column spec. Driven in this one place so

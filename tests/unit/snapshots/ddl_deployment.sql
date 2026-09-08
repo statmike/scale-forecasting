@@ -87,7 +87,9 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   device_requested STRING,
   device_available STRING,
   device_used    STRING,
-  device_name    STRING
+  device_name    STRING,
+  backtest_refit STRING,
+  staleness_gap  FLOAT64
 )
 PARTITION BY DATE(created_at)
 CLUSTER BY run_id, model_type;
@@ -125,7 +127,8 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.backtest_oof` (
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
   created_at    TIMESTAMP,
-  ensemble_id   STRING
+  ensemble_id   STRING,
+  yhat_stale    FLOAT64
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id;

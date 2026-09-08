@@ -55,7 +55,10 @@ Five views, matched to the questions a run prompts:
   re-append a cell), so — like the two views above — the leaderboard first collapses to one row
   per cell (``ROW_NUMBER() … PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id ORDER BY
   created_at DESC = 1``, latest write wins) before aggregating; otherwise a duplicated cell would
-  double-count and skew ``mean_wape`` / ``mean_mae`` / ``n_cells``.
+  double-count and skew ``mean_wape`` / ``mean_mae`` / ``n_cells``. ``mean_staleness_gap`` is
+  non-NULL only under the frozen backtest schemes, and reads as "what this model loses, in the
+  run's decision metric, if it is never refit" — the column that turns refit cadence from a guess
+  into a number.
 
 - ``v_backtest_coverage`` — *how much of the panel did each model actually get scored on?* The
   question ``v_model_leaderboard`` cannot answer, and the one that decides whether its ranking
@@ -70,6 +73,14 @@ Five views, matched to the questions a run prompts:
   ``full`` / ``reduced`` / ``unscored`` / ``failed``, or NULL where the run never asked for a
   backtest at all. Read it beside the leaderboard: a model whose panel is mostly ``reduced`` won on
   an easier question.
+
+  ``backtest_refit`` is in the grouping for the same reason ``n_folds_achieved`` is — it is the
+  other way two rows of the same leaderboard can be answers to different questions. Under
+  ``expanding_frozen`` a model without the re-conditioning seam falls back to a fresh fit per fold
+  and lands here as ``unsupported``; that row's error is a refit model's error sitting next to
+  frozen ones. Under the two refit schemes every row reads ``per_fold`` and the column adds
+  nothing, which is the correct amount for it to add. ``mean_staleness_gap`` rides along on the
+  same rows: what that cohort loses, in the run's decision metric, when the model is never refit.
 
 - ``v_model_leaderboard_comparable`` — *which model won, holding the question fixed?* The same
   ranking as ``v_model_leaderboard``, rebuilt so the numbers are comparable across models rather
@@ -182,7 +193,8 @@ SELECT
   SAFE_DIVIDE(COUNTIF(model_artifact IS NULL), COUNT(*)) AS no_artifact_rate,
   APPROX_QUANTILES(fit_seconds, 2)[OFFSET(1)] AS median_fit_seconds,
   AVG(wape) AS mean_wape,
-  AVG(mae) AS mean_mae
+  AVG(mae) AS mean_mae,
+  AVG(staleness_gap) AS mean_staleness_gap
 FROM deduped
 WHERE fold_id IS NULL
 GROUP BY run_id, model_type, ensemble_id""",
@@ -202,14 +214,16 @@ SELECT
   ensemble_id,
   backtest_status,
   n_folds_achieved,
+  backtest_refit,
   COUNT(*) AS n_series,
+  AVG(staleness_gap) AS mean_staleness_gap,
   SAFE_DIVIDE(
     COUNT(*),
     SUM(COUNT(*)) OVER (PARTITION BY run_id, model_type, ensemble_id)
   ) AS series_share
 FROM deduped
 WHERE fold_id IS NULL
-GROUP BY run_id, model_type, ensemble_id, backtest_status, n_folds_achieved""",
+GROUP BY run_id, model_type, ensemble_id, backtest_status, n_folds_achieved, backtest_refit""",
     "v_model_leaderboard_comparable": """\
 CREATE OR REPLACE VIEW `{d}.v_model_leaderboard_comparable` AS
 WITH deduped AS (

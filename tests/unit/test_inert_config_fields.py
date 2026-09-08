@@ -8,8 +8,11 @@ ever recorded, and landing them together costs one break instead of six.
 **`model_params` is now honoured** and has left the inert list: it is read at all three places a
 model's params resolve (`worker._resolve_params` and both halves of `hpo.tune_model`), validated
 against the registry at plan time (`dag.check_model_params`), and consumed by
-`NeuralProphetModel`. Its digest test stays. Five backtest fields and the `expanding_frozen`
-scheme remain inert.
+`NeuralProphetModel`. **`expanding_frozen` is now honoured too** — `backtest._walk_folds` carries
+one fit across origins for it, and `expanding_stale` joined the Literal alongside it. What remains
+of that scheme here is the geometry invariant, which is not a "not yet" but a standing fact: the
+frozen schemes change how a model is *carried*, never where a fold starts. Five backtest fields
+remain inert.
 
 It also creates a gap between what the schema says and what the code does, and a gap nobody is
 watching becomes a lie. So this module pins both halves:
@@ -51,8 +54,8 @@ _INERT_BACKTEST_FIELDS: dict[str, Any] = {
 }
 
 # Names no module outside `config.py` may mention while the field is unread. `scheme` is absent
-# because it *is* read — only its new `expanding_frozen` value is unhonoured, covered separately.
-# `model_params` left this tuple when it was wired up; see the module docstring.
+# because it is read, and every one of its values is now honoured. `model_params` left this tuple
+# when it was wired up; see the module docstring.
 _UNREAD_IN_SOURCE = tuple(_INERT_BACKTEST_FIELDS)
 
 _BASE: dict[str, Any] = {
@@ -87,8 +90,9 @@ def test_the_new_backtest_fields_are_accepted(field: str, value: Any) -> None:
     assert getattr(_cfg(backtest={field: value}).backtest, field) == value
 
 
-def test_expanding_frozen_is_accepted_as_a_scheme() -> None:
-    assert _cfg(backtest={"scheme": "expanding_frozen"}).backtest.scheme == "expanding_frozen"
+@pytest.mark.parametrize("scheme", ["expanding_frozen", "expanding_stale"])
+def test_the_frozen_schemes_are_accepted(scheme: str) -> None:
+    assert _cfg(backtest={"scheme": scheme}).backtest.scheme == scheme
 
 
 def test_model_params_accepts_scalars_and_flat_lists() -> None:
@@ -113,9 +117,17 @@ def test_the_new_backtest_fields_change_no_fold(field: str, value: Any) -> None:
     assert _folds(_cfg(backtest={field: value})) == _folds(_cfg())
 
 
-def test_expanding_frozen_lays_out_folds_exactly_as_expanding() -> None:
-    """It names an intent — freeze the fitted model and re-condition — not a different grid."""
-    assert _folds(_cfg(backtest={"scheme": "expanding_frozen"})) == _folds(
+@pytest.mark.parametrize("scheme", ["expanding_frozen", "expanding_stale"])
+def test_a_frozen_scheme_lays_out_folds_exactly_as_expanding(scheme: str) -> None:
+    """Not a "not yet" — a standing invariant, and the reason the comparison is fair.
+
+    The frozen schemes change how the model is *carried* between origins, never where a fold
+    starts or what it is scored on. If the grids diverged, a frozen leaderboard and a refit
+    leaderboard would be scored on different windows and the staleness gap would be measuring the
+    geometry. `make_folds` writes this as a membership test rather than ``== "expanding"``, which
+    is what keeps a newly-added scheme from silently inheriting sliding's fixed-width window.
+    """
+    assert _folds(_cfg(backtest={"scheme": scheme})) == _folds(
         _cfg(backtest={"scheme": "expanding"})
     )
 

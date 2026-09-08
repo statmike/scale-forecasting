@@ -113,6 +113,14 @@ class CellResult:
     backtest_status: str | None = None
     n_folds_achieved: int | None = None  # folds actually scored; 0 on unscored/failed
     backtest_note: str | None = None  # why it was not full — the arithmetic, or the exception
+    # How the model was carried between fold origins, from `backtest.BacktestOutcome`:
+    # "per_fold" | "recondition" | "extrapolate" | "unsupported". Recorded per cell rather than read
+    # off the config's `scheme` because a model without the seam falls back to refitting, and a
+    # leaderboard that mixed the two silently would be comparing two different questions.
+    backtest_refit: str | None = None
+    # What the blind control arm cost, in the run's decision metric: blind loss minus primary loss,
+    # positive when never refreshing the model hurts. Only the frozen schemes run a control arm.
+    staleness_gap: float | None = None
     # `error` says what went wrong in the words of whatever raised; this says what *kind* of thing
     # it was, from a fixed vocabulary (`ERROR_CLASSES`). One is for reading, the other for grouping
     # and for deciding whether a retry could possibly help. None on an ok cell.
@@ -490,14 +498,20 @@ def run_cell(
         backtest_status: str | None = None
         n_folds_achieved: int | None = None
         backtest_note: str | None = None
+        # How the model was carried between fold origins, and what the blind control arm cost.
+        # NULL when backtesting is off or failed, because "refit per fold" is a claim about a loop
+        # that never ran.
+        backtest_refit: str | None = None
+        staleness_gap: float | None = None
         if cfg.backtest.enabled:
             try:
-                oof, fold_metrics = backtest_cell(
+                oof, fold_metrics, bt = backtest_cell(
                     series, lambda: model_cls(resolved, ctx), cfg, lam
                 )
                 metrics = _rollup_metrics(fold_metrics)
                 n_folds_achieved = len(fold_metrics)
                 backtest_status, backtest_note = _backtest_outcome(n_folds_achieved, cfg, series)
+                backtest_refit, staleness_gap = bt.refit_mode, bt.staleness_gap
                 if n_folds_achieved == 0:
                     oof = None  # an empty frame would write zero rows and read as "not asked"
             except Exception as e:  # noqa: BLE001 - scoring is not the forecast; degrade, don't fail
@@ -507,6 +521,7 @@ def run_cell(
                 oof = None
                 metrics = {name: float("nan") for name in METRIC_NAMES}
                 backtest_status, n_folds_achieved, backtest_note = "failed", 0, repr(e)
+                backtest_refit, staleness_gap = None, None
 
         # Final fit on the full history, then forecast the horizon.
         y, X = build_features(series, cfg, lam)
@@ -599,6 +614,8 @@ def run_cell(
             backtest_status=backtest_status,
             n_folds_achieved=n_folds_achieved,
             backtest_note=backtest_note,
+            backtest_refit=backtest_refit,
+            staleness_gap=staleness_gap,
             # A class attribute, so this is the model's own declaration rather than an inference
             # from the frame — a residual band on a model with no recorded residuals collapses to
             # bounds equal to `yhat`, which is indistinguishable from a native zero-width interval

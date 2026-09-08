@@ -436,9 +436,9 @@ def read_backtest_coverage(
 ) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
     """Return the ``v_backtest_coverage`` rows for ``run_id`` — the panel behind each model's score.
 
-    One row per ``(model_type, ensemble_id, backtest_status, n_folds_achieved)``, so a model with a
-    ragged panel returns several. Ordered so a reader walking the rows sees each model's healthiest
-    cohort first. Raises `RegistryError` on failure.
+    One row per ``(model_type, ensemble_id, backtest_status, n_folds_achieved, backtest_refit)``, so
+    a model with a ragged panel returns several. Ordered so a reader walking the rows sees each
+    model's healthiest cohort first. Raises `RegistryError` on failure.
     """
     from google.cloud import bigquery
 

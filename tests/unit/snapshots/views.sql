@@ -74,7 +74,8 @@ SELECT
   SAFE_DIVIDE(COUNTIF(model_artifact IS NULL), COUNT(*)) AS no_artifact_rate,
   APPROX_QUANTILES(fit_seconds, 2)[OFFSET(1)] AS median_fit_seconds,
   AVG(wape) AS mean_wape,
-  AVG(mae) AS mean_mae
+  AVG(mae) AS mean_mae,
+  AVG(staleness_gap) AS mean_staleness_gap
 FROM deduped
 WHERE fold_id IS NULL
 GROUP BY run_id, model_type, ensemble_id;
@@ -94,14 +95,16 @@ SELECT
   ensemble_id,
   backtest_status,
   n_folds_achieved,
+  backtest_refit,
   COUNT(*) AS n_series,
+  AVG(staleness_gap) AS mean_staleness_gap,
   SAFE_DIVIDE(
     COUNT(*),
     SUM(COUNT(*)) OVER (PARTITION BY run_id, model_type, ensemble_id)
   ) AS series_share
 FROM deduped
 WHERE fold_id IS NULL
-GROUP BY run_id, model_type, ensemble_id, backtest_status, n_folds_achieved;
+GROUP BY run_id, model_type, ensemble_id, backtest_status, n_folds_achieved, backtest_refit;
 
 CREATE OR REPLACE VIEW `proj.scale_forecasting.v_model_leaderboard_comparable` AS
 WITH deduped AS (

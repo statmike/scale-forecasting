@@ -191,7 +191,7 @@ def test_every_clamped_fold_still_honours_the_no_leakage_and_min_train_invariant
 
 def test_oof_frame_shape_and_columns() -> None:
     cfg = _cfg({"n_folds": 3, "horizon": 4, "step": 4, "min_train": 10})
-    oof, fold_metrics = backtest_cell(_series(40), _factory(), cfg)
+    oof, fold_metrics, _ = backtest_cell(_series(40), _factory(), cfg)
     assert list(oof.columns) == list(OOF_COLUMNS)
     assert len(oof) == 3 * 4  # n_folds × horizon
     assert oof["ds"].dtype == np.dtype("datetime64[ns]")
@@ -204,7 +204,7 @@ def test_a_series_with_no_achievable_folds_still_returns_the_full_column_set() -
     # columns while its neighbours returned eight would only surface downstream, as a concat that
     # quietly widened with NaNs — or, in `assemble_oof_rows`, as rows missing keys.
     cfg = _cfg({"n_folds": 3, "horizon": 4, "step": 4, "min_train": 10})
-    oof, fold_metrics = backtest_cell(_series(8), _factory(), cfg)
+    oof, fold_metrics, _ = backtest_cell(_series(8), _factory(), cfg)
     assert oof.empty and not fold_metrics
     assert list(oof.columns) == list(OOF_COLUMNS)
 
@@ -215,7 +215,7 @@ def test_each_oof_row_records_the_fold_origin_and_its_step_within_the_horizon() 
     # `horizon_step` is what turns "does this model decay with horizon?" into a GROUP BY.
     cfg = _cfg({"n_folds": 2, "horizon": 4, "step": 4, "min_train": 10})
     series = _series(40)
-    oof, _ = backtest_cell(series, _factory(), cfg)
+    oof, _, _ = backtest_cell(series, _factory(), cfg)
 
     for fold_id, block in oof.groupby("fold_id"):
         assert list(block["horizon_step"]) == [1, 2, 3, 4]
@@ -235,7 +235,7 @@ def test_the_interval_metrics_are_finite_because_the_folds_now_score_the_bounds(
     # them. Asserting FINITE, not merely present: a NaN is present too, and that is how four of
     # fifteen metric columns stayed empty through a green suite.
     cfg = _cfg({"n_folds": 2, "horizon": 4, "step": 4, "min_train": 10})
-    oof, fold_metrics = backtest_cell(_series(40), _factory(), cfg)
+    oof, fold_metrics, _ = backtest_cell(_series(40), _factory(), cfg)
 
     for panel in fold_metrics:
         for metric in ("coverage", "pinball", "interval_score", "interval_width"):
@@ -275,7 +275,7 @@ def test_a_model_with_native_intervals_covers_near_its_nominal_rate() -> None:
     NaN every Python cell reported before the folds were scored on their intervals at all.
     """
     cfg = _cfg({"n_folds": 12, "horizon": 7, "step": 7, "min_train": 60})
-    _, fold_metrics = backtest_cell(_random_walk(200), _real_factory("sarimax", 7), cfg)
+    _, fold_metrics, _ = backtest_cell(_random_walk(200), _real_factory("sarimax", 7), cfg)
 
     coverage = float(np.mean([panel["coverage"] for panel in fold_metrics]))
     assert 0.55 <= coverage <= 1.0, coverage
@@ -295,7 +295,7 @@ def test_a_residual_band_is_flat_across_the_horizon_so_late_steps_are_under_cove
     """
     horizon = 14
     cfg = _cfg({"n_folds": 20, "horizon": horizon, "step": 1, "min_train": 80})
-    oof, _ = backtest_cell(_random_walk(300), _real_factory("naive_drift", horizon), cfg)
+    oof, _, _ = backtest_cell(_random_walk(300), _real_factory("naive_drift", horizon), cfg)
 
     covered = (oof["yhat_lower"] <= oof["y_true"]) & (oof["y_true"] <= oof["yhat_upper"])
     by_step = covered.groupby(oof["horizon_step"]).mean()
@@ -311,7 +311,7 @@ def test_oof_values_match_lastvalue_model() -> None:
     # series is 1..40; last-value model on fold 0 (val at positions 32..36 for the
     # earliest window) predicts the value at the split point, flat.
     cfg = _cfg({"n_folds": 1, "horizon": 4, "step": 4, "min_train": 10})
-    oof, _ = backtest_cell(_series(40), _factory(), cfg)
+    oof, _, _ = backtest_cell(_series(40), _factory(), cfg)
     # last training value is y at position val_start-1 = 35 → value 36.0
     assert np.allclose(oof["yhat"].to_numpy(), 36.0)
     # y_true is the actual future window: positions 36..39 → values 37..40
@@ -324,7 +324,7 @@ def test_oof_in_original_units_under_log1p() -> None:
         backtest={"n_folds": 1, "horizon": 4, "step": 4, "min_train": 10},
         features={"transform": "log1p"},
     )
-    oof, _ = backtest_cell(_series(40), _factory("log1p"), cfg)
+    oof, _, _ = backtest_cell(_series(40), _factory("log1p"), cfg)
     assert np.allclose(oof["y_true"].to_numpy(), [37.0, 38.0, 39.0, 40.0])
     # last-value model fit on log1p target, inverted → original last value 36.0
     assert np.allclose(oof["yhat"].to_numpy(), 36.0)
@@ -334,13 +334,160 @@ def test_fold_metrics_have_full_panel() -> None:
     from scale_forecasting.metrics import METRIC_NAMES
 
     cfg = _cfg({"n_folds": 2, "horizon": 4, "step": 4, "min_train": 10})
-    _, fold_metrics = backtest_cell(_series(40), _factory(), cfg)
+    _, fold_metrics, _ = backtest_cell(_series(40), _factory(), cfg)
     for m in fold_metrics:
         # The panel, plus which fold earned it. `fold_id` rides along rather than being inferred
         # from list position because a short series is exactly where position stops being the
         # fold id — and a short series is exactly where the holdout question gets interesting.
         assert set(m) == set(METRIC_NAMES) | {"fold_id"}
     assert [m["fold_id"] for m in fold_metrics] == [0, 1]
+
+
+# --- the four schemes, and what each one is a measurement of ---------------------------------
+#
+# The geometry is identical across all four bar `sliding` (asserted in
+# `test_inert_config_fields.py`), so everything below is about how the *model* is carried between
+# origins — which is the only thing that changes, and the whole reason the schemes exist.
+
+
+def _scheme_cfg(scheme: str) -> RunConfig:
+    return _cfg({"scheme": scheme, "n_folds": 3, "horizon": 5, "step": 5, "min_train": 20})
+
+
+def _shifted(n: int, at: int, jump: float) -> pd.DataFrame:
+    """A flat series that steps up by ``jump`` at position ``at`` — a level shift a blind model
+    cannot know about and a re-conditioned one can."""
+    y = np.full(n, 100.0)
+    y[at:] += jump
+    return pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=n, freq="D"), "y": y})
+
+
+@pytest.mark.parametrize("scheme", ["expanding", "sliding"])
+def test_a_refit_scheme_says_so_and_runs_no_control_arm(scheme: str) -> None:
+    oof, _, outcome = backtest_cell(
+        _random_walk(200), _real_factory("naive_mean", 5), _scheme_cfg(scheme)
+    )
+
+    assert outcome.refit_mode == "per_fold"
+    # Nothing to compare a fresh fit against: there is no second arm, so no gap and no column.
+    assert outcome.staleness_gap is None
+    assert oof["yhat_stale"].isna().all()
+
+
+def test_a_frozen_scheme_fits_twice_for_the_whole_cell_not_once_per_fold() -> None:
+    """The efficiency claim, stated as a count. Three folds, two fits: one for the primary arm
+    carried forward on re-conditioning, one held blind for the control arm."""
+    cfg = _scheme_cfg("expanding_frozen")
+    inner, fits = _real_factory("naive_mean", 5), 0
+
+    def counting() -> BaseModel:
+        nonlocal fits
+        fits += 1
+        return inner()
+
+    _, fold_metrics, outcome = backtest_cell(_random_walk(200), counting, cfg)
+    assert len(fold_metrics) == 3
+    assert fits == 2
+    assert outcome.refit_mode == "recondition"
+
+
+def test_the_stale_scheme_fits_once_and_never_looks_again() -> None:
+    cfg = _scheme_cfg("expanding_stale")
+    inner, fits = _real_factory("theta", 5), 0
+
+    def counting() -> BaseModel:
+        nonlocal fits
+        fits += 1
+        return inner()
+
+    oof, fold_metrics, outcome = backtest_cell(_random_walk(200), counting, cfg)
+    assert len(fold_metrics) == 3
+    assert fits == 1
+    assert outcome.refit_mode == "extrapolate"
+    # The primary arm already *is* the blind arm, so there is nothing for a control arm to add.
+    assert oof["yhat_stale"].isna().all()
+    assert outcome.staleness_gap is None
+
+
+def test_the_frozen_control_arm_lands_on_the_same_rows_as_the_primary_one() -> None:
+    """A gap between the two is only a staleness measurement if they are scored on the same
+    dates, the same actuals and the same training window. Every row carries both."""
+    oof, _, outcome = backtest_cell(
+        _random_walk(200), _real_factory("naive_mean", 5), _scheme_cfg("expanding_frozen")
+    )
+
+    assert oof["yhat_stale"].notna().all()
+    assert outcome.staleness_gap is not None
+    # Fold 0 is the fold both arms were fit on, so at that origin they have not diverged yet.
+    fold0 = oof[oof["fold_id"] == 0]
+    assert np.allclose(fold0["yhat"].to_numpy(), fold0["yhat_stale"].to_numpy())
+    # By the last fold the primary arm has absorbed two steps of new data and the blind one has not.
+    last = oof[oof["fold_id"] == oof["fold_id"].max()]
+    assert not np.allclose(last["yhat"].to_numpy(), last["yhat_stale"].to_numpy())
+
+
+def test_the_gap_is_positive_when_the_series_moves_under_a_model_that_cannot_see_it() -> None:
+    """The diagnostic earning its place: a level shift after the first origin costs the blind arm
+    real accuracy, and `staleness_gap` is how much."""
+    # Fold cutoffs are 185 / 190 / 195. The shift lands at 188: after the origin both arms were fit
+    # on, and inside the last two folds' new observations — so only a model told about it follows.
+    # A trailing-mean model is the clearest read, because its whole state is the recent level.
+    series = _shifted(200, at=188, jump=60.0)
+    _, _, outcome = backtest_cell(
+        series, _real_factory("naive_moving_average", 5), _scheme_cfg("expanding_frozen")
+    )
+
+    assert outcome.staleness_gap is not None
+    assert outcome.staleness_gap > 0.0
+
+
+def test_a_model_without_the_seam_refits_and_records_that_it_did() -> None:
+    """`theta` re-estimates on every fit and has no way to absorb an observation, so asking for
+    `expanding_frozen` gets an honest refit rather than an approximation wearing the name. The
+    control arm still runs — the blind fit is already paid for and costs only a forecast."""
+    oof, _, outcome = backtest_cell(
+        _random_walk(200), _real_factory("theta", 5), _scheme_cfg("expanding_frozen")
+    )
+
+    assert outcome.refit_mode == "unsupported"
+    assert oof["yhat_stale"].notna().all()
+    assert outcome.staleness_gap is not None
+
+
+def test_a_model_that_cannot_even_extrapolate_degrades_instead_of_raising() -> None:
+    """`_LastValue` is a local stub that opts into neither seam, standing in for an out-of-tree
+    model written before the frozen schemes existed. A frozen run must fall back to refitting, not
+    fail the cell — scoring is never allowed to cost the forecast."""
+    oof, fold_metrics, outcome = backtest_cell(
+        _series(200), _factory(), _scheme_cfg("expanding_frozen")
+    )
+
+    assert outcome.refit_mode == "unsupported"
+    assert len(fold_metrics) == 3
+    assert oof["yhat_stale"].isna().all()
+    assert outcome.staleness_gap is None
+
+
+@pytest.mark.parametrize(
+    ("scheme", "mode"),
+    [
+        ("expanding", "per_fold"),
+        ("sliding", "per_fold"),
+        ("expanding_frozen", "recondition"),
+        ("expanding_stale", "extrapolate"),
+    ],
+)
+def test_a_series_too_short_to_score_still_names_the_scheme_it_would_have_used(
+    scheme: str, mode: str
+) -> None:
+    """No fold ran, so nothing was carried anywhere. The column reports the intent; the row's
+    `backtest_status` is what says nothing was scored."""
+    oof, fold_metrics, outcome = backtest_cell(_series(8), _factory(), _scheme_cfg(scheme))
+
+    assert fold_metrics == []
+    assert list(oof.columns) == list(OOF_COLUMNS)
+    assert outcome.refit_mode == mode
+    assert outcome.staleness_gap is None
 
 
 def test_fold_dataclass_helpers() -> None:

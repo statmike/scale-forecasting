@@ -127,7 +127,10 @@ def _score_params(
             # property of the published fit and not of the search. See `hardware.driver_fit_scope`.
             series_ctx = replace(ctx, transform_lambda=lam, device="auto")
             # partial binds this iteration's series_ctx (no loop-var capture; mypy-typed).
-            _, fold_metrics = backtest_cell(
+            # The search scores the primary arm only. Its job is to rank parameter sets under the
+            # run's own scheme, and the control arm answers a question about refit cadence that no
+            # choice of hyperparameter changes.
+            _, fold_metrics, _ = backtest_cell(
                 series, partial(model_cls, params, series_ctx), cfg, lam
             )
         except Exception as e:  # noqa: BLE001 - a bad series must not sink the whole trial

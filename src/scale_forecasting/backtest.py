@@ -10,18 +10,36 @@ entry points:
   window from 0; ``sliding`` keeps a fixed ``min_train`` window. A series too short for the
   requested folds gets as many as it supports (``achievable_folds``), possibly none — never an
   exception, because a scoring shortfall must not cost the forecast.
-- ``backtest_cell(series, model, cfg) -> (oof, fold_metrics)`` — features are built once
-  (leakage-free: lags only look backward), then a **fresh** model is fit per fold and
-  scored on its validation window.
+- ``backtest_cell(series, model, cfg) -> (oof, fold_metrics, outcome)`` — features are built once
+  (leakage-free: lags only look backward), then each fold is scored on its validation window.
+
+``backtest.scheme`` decides what a fold's score is a score *of*, and the three answers are
+different numbers rather than cheaper approximations of one number:
+
+* ``expanding`` (the default) and ``sliding`` fit a **fresh** model per fold, so a score answers
+  "how good is this model when freshly trained?".
+* ``expanding_frozen`` fits once on the oldest fold's window and then hands the model the
+  observations that arrived between origins, parameters held fixed — "what does refitting less
+  often cost me?". Ten of the sixteen Python models have that seam; the rest refit and say so.
+* ``expanding_stale`` fits once and never tells the model what happened next — "how fast does this
+  decay if nobody touches it?". Every model supports this one, which is what makes it the scheme
+  where a leaderboard compares like with like.
+
+The frozen schemes also run a **control arm**: the same fitted model walked forward blind, scored
+on the same dates, written to ``yhat_stale`` and summarised as `BacktestOutcome.staleness_gap`. It
+is a second ``predict`` rather than a second fit, so the comparison costs a forecast.
 
 The no-leakage invariant is ``train_end == val_start`` for every fold: training data
-strictly precedes the validation window.
+strictly precedes the validation window. Freezing is anchored on the **oldest** surviving fold,
+whose training window is a subset of every later fold's, so a frozen model's parameters have never
+seen anything a later fold is scored on.
 
 Each fold is scored on the *intervals the model already returned*, not on the point forecast
 alone — so ``coverage``, ``pinball``, ``interval_score`` and ``interval_width`` are real numbers on
 the Python path rather than the NaNs they were for every run before this.
 
-Public surface: ``Fold``, ``OOF_COLUMNS``, ``achievable_folds``, ``holdout_fold_id``,
+Public surface: ``Fold``, ``BacktestOutcome``, ``OOF_COLUMNS``, ``achievable_folds``,
+``holdout_fold_id``,
 ``hpo_scoring_claim``, ``make_folds``, ``fit_rows``, ``suggest_min_train``, ``training_window``,
 ``backtest_cell``.
 """
@@ -37,7 +55,7 @@ import numpy as np
 import pandas as pd
 
 from .features import build_features, invert_transform
-from .metrics import compute_metrics
+from .metrics import compute_metrics, loss_of
 from .seasonality import seasonal_period
 
 if TYPE_CHECKING:
@@ -65,7 +83,51 @@ OOF_COLUMNS: tuple[str, ...] = (
     "yhat_upper",
     "cutoff_date",
     "horizon_step",
+    # The control arm: what the *blind* model predicted for this same date — one fit, never told
+    # what happened after it. NULL on the refit schemes (nothing to compare) and on
+    # ``expanding_stale`` (the primary arm already *is* the blind arm). Appended rather than slotted
+    # next to ``yhat_adjusted`` so this tuple keeps the same order as the table it writes to.
+    "yhat_stale",
 )
+
+# What the fold loop nominally does under each scheme, before a model gets a say. `_walk_folds`
+# returns what actually happened, which can be `"unsupported"` for either frozen scheme.
+_NOMINAL_MODE: dict[str, str] = {
+    "expanding": "per_fold",
+    "sliding": "per_fold",
+    "expanding_frozen": "recondition",
+    "expanding_stale": "extrapolate",
+}
+
+
+@dataclass(frozen=True)
+class BacktestOutcome:
+    """How the fold loop carried the model between origins — which is not always what was asked.
+
+    ``refit_mode`` is one of:
+
+    * ``"per_fold"`` — a fresh model was fit for every fold. What ``expanding`` and ``sliding`` do.
+    * ``"recondition"`` — fit once, then handed the observations that arrived between origins with
+      its parameters held fixed.
+    * ``"extrapolate"`` — fit once and walked forward blind; the model never saw the newer actuals.
+    * ``"unsupported"`` — a frozen scheme was requested and this model has no seam for it, so the
+      cell refit per fold instead. Recorded rather than silently substituted: someone comparing two
+      models on an ``expanding_frozen`` leaderboard has to be able to see that one of them was not
+      actually frozen, or the comparison is between two different questions.
+
+    ``staleness_gap`` is ``loss(blind arm) - loss(primary arm)`` under the run's
+    ``decision_metric``, both restated through `metrics.loss_of` so the sign means the same thing
+    for ``coverage`` and ``bias`` as it does for ``wape``. Positive is the ordinary reading: never
+    refreshing the model costs you that much accuracy. ``None`` whenever no control arm ran —
+    which is every refit scheme, ``expanding_stale`` (whose primary arm is the control arm), and
+    any cell where the metric came back non-finite.
+
+    A cell that achieved zero folds still reports the nominal mode for its scheme; nothing was
+    scored, and ``backtest_status`` on the same row already says so.
+    """
+
+    refit_mode: str
+    staleness_gap: float | None
 
 
 @dataclass(frozen=True)
@@ -283,45 +345,177 @@ def training_window(ds: np.ndarray, y: np.ndarray, cutoff: object, cfg: RunConfi
     return window
 
 
+def _cut(X: pd.DataFrame | None, start: int, end: int) -> pd.DataFrame | None:
+    """``X[start:end]``, tolerating the no-exog case so callers need no branch of their own."""
+    return None if X is None else X.iloc[start:end]
+
+
+def _fit_predict(
+    model_factory: Callable[[], BaseModel],
+    y: pd.Series,
+    X: pd.DataFrame | None,
+    fold: Fold,
+) -> pd.DataFrame:
+    """A fresh model fit on this fold's training window and asked for its validation window."""
+    est = model_factory()
+    est.fit(y.iloc[fold.train_start : fold.train_end], _cut(X, fold.train_start, fold.train_end))
+    return est.predict(fold.val_size, _cut(X, fold.val_start, fold.val_end))
+
+
+def _predict_blind(
+    model: BaseModel, X: pd.DataFrame | None, base: Fold, fold: Fold
+) -> pd.DataFrame:
+    """Push one already-fitted model's forecast origin out to ``fold`` and forecast from there.
+
+    Nothing is refit and nothing is observed: the model is told only *how far the clock moved*, and
+    any exogenous values covering the skipped span, which are inputs rather than outcomes.
+    `BaseModel.advance_origin` sets an absolute offset, so the same instance can be reused across
+    every fold in ascending order without the offsets compounding.
+    """
+    model.advance_origin(
+        fold.train_end - base.train_end, X_gap=_cut(X, base.train_end, fold.train_end)
+    )
+    return model.predict(fold.val_size, _cut(X, fold.val_start, fold.val_end))
+
+
+def _walk_folds(
+    folds: list[Fold],
+    y: pd.Series,
+    X: pd.DataFrame | None,
+    model_factory: Callable[[], BaseModel],
+    cfg: RunConfig,
+) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame | None]], str]:
+    """Produce each fold's forecast frames, and report how the model was carried between them.
+
+    Returns ``(arms, refit_mode)``, where ``arms[i]`` is ``(primary, blind_or_None)`` for
+    ``folds[i]`` and ``refit_mode`` is one of `BacktestOutcome`'s four values.
+
+    Freezing is anchored on ``folds[0]`` — the **oldest** surviving fold. Its training window is a
+    prefix of every later fold's, so a model fit there has seen nothing any fold is scored on.
+    Anchoring on the newest fold instead would be cheaper to write and would leak the future into
+    every earlier score.
+
+    A model that declares `supports_recondition` can still refuse a particular series at runtime —
+    a state-space filter can fail to converge on the extension. That drops the whole cell to
+    ``"unsupported"`` and refits the remaining folds, which slightly over-reports: the folds already
+    walked really were re-conditioned. Erring that way is deliberate. "Some of this cell was frozen"
+    is not a claim a leaderboard column can carry, and the honest summary of a cell that fell back
+    partway is that it is not cleanly frozen.
+    """
+    scheme = cfg.backtest.scheme
+    if scheme in ("expanding", "sliding"):
+        return [(_fit_predict(model_factory, y, X, f), None) for f in folds], "per_fold"
+
+    base = folds[0]
+    blind = model_factory()
+    if not blind.supports_extrapolate:
+        # No blind seam at all, so neither frozen scheme can be honoured. Checked before the fit is
+        # paid for. No model in this tree lands here — all sixteen opt in — but an out-of-tree model
+        # inherits the ``False`` default, and it has to degrade to a refit rather than raise.
+        return [(_fit_predict(model_factory, y, X, f), None) for f in folds], "unsupported"
+    blind.fit(y.iloc[base.train_start : base.train_end], _cut(X, base.train_start, base.train_end))
+
+    if scheme == "expanding_stale":
+        # The primary arm *is* the blind arm here, so there is no second arm and ``yhat_stale``
+        # stays NULL. That is the whole point of the scheme: one identical question, asked of all
+        # sixteen models, with nothing varying between them but the model.
+        return [(_predict_blind(blind, X, base, f), None) for f in folds], "extrapolate"
+
+    if not blind.supports_recondition:
+        # `expanding_frozen` on a model that cannot absorb an observation. It refits per fold and
+        # says so — but the blind arm is already fitted and costs only a forecast, so the control
+        # arm still runs and the staleness diagnostic is still available for this model.
+        arms = [
+            (_fit_predict(model_factory, y, X, f), _predict_blind(blind, X, base, f)) for f in folds
+        ]
+        return arms, "unsupported"
+
+    # The frozen arm proper: a second fit on the same window, then walked forward on the real
+    # observations between origins with its parameters held fixed.
+    frozen = model_factory()
+    frozen.fit(y.iloc[base.train_start : base.train_end], _cut(X, base.train_start, base.train_end))
+
+    arms: list[tuple[pd.DataFrame, pd.DataFrame | None]] = []
+    mode, cursor = "recondition", base.train_end
+    for fold in folds:
+        if mode == "recondition" and fold.train_end > cursor:
+            try:
+                frozen.recondition(y.iloc[cursor : fold.train_end], _cut(X, cursor, fold.train_end))
+                cursor = fold.train_end
+            except Exception:  # noqa: BLE001 - see the docstring: fall back, never fail the cell
+                mode = "unsupported"
+        primary = (
+            frozen.predict(fold.val_size, _cut(X, fold.val_start, fold.val_end))
+            if mode == "recondition"
+            else _fit_predict(model_factory, y, X, fold)
+        )
+        arms.append((primary, _predict_blind(blind, X, base, fold)))
+    return arms, mode
+
+
+def _mean_loss(metric: str, panels: list[dict[str, float]]) -> float | None:
+    """One arm's average loss across folds under ``metric``, or ``None`` if nothing is finite."""
+    losses = [loss_of(metric, p[metric]) for p in panels if np.isfinite(p.get(metric, np.nan))]
+    return float(np.mean(losses)) if losses else None
+
+
+def _staleness_gap(
+    primary: list[dict[str, float]], stale: list[dict[str, float]], cfg: RunConfig
+) -> float | None:
+    """What never refreshing cost, in the run's decision metric — see `BacktestOutcome`."""
+    if not stale:
+        return None
+    metric = cfg.backtest.decision_metric
+    kept, blind = _mean_loss(metric, primary), _mean_loss(metric, stale)
+    return None if kept is None or blind is None else blind - kept
+
+
 def backtest_cell(
     series: pd.DataFrame,
     model_factory: Callable[[], BaseModel],
     cfg: RunConfig,
     lam: float | None = None,
-) -> tuple[pd.DataFrame, list[dict[str, float]]]:
+) -> tuple[pd.DataFrame, list[dict[str, float]], BacktestOutcome]:
     """Run CV for one series and model factory.
 
     Args:
         series: one ts_id's raw rows (date/target/exog columns).
-        model_factory: returns a freshly-constructed model, called once per fold so no
-            fitted state leaks across folds.
-        cfg: the run config (drives features and fold geometry).
+        model_factory: returns a freshly-constructed model. Called once per fold on the refit
+            schemes, so no fitted state leaks across folds; once or twice for the whole cell on the
+            frozen schemes, where carrying the fit forward *is* the measurement.
+        cfg: the run config (drives features, fold geometry and `backtest.scheme`).
         lam: the cell's fitted Box-Cox λ (None for stateless transforms), so the forward
             transform here matches the inverse the folds' models apply — one λ per cell.
 
     Returns:
-        ``(oof, fold_metrics)`` where ``oof`` is the canonical OOF frame (`OOF_COLUMNS`)
-        concatenated across folds, and ``fold_metrics`` is the per-fold metric panel (list, in
-        fold order). The registry later augments this frame with ``ts_id``/``model_type`` and
-        renames ``ds``→``forecast_date`` before the ensembler consumes it (see
-        ``ensembler._pivot_oof``) — this cell emits the bare form.
+        ``(oof, fold_metrics, outcome)`` where ``oof`` is the canonical OOF frame (`OOF_COLUMNS`)
+        concatenated across folds, ``fold_metrics`` is the per-fold metric panel (list, in
+        fold order) for the **primary** arm, and ``outcome`` is the `BacktestOutcome` describing how
+        the model was carried between origins. The registry later augments this frame with
+        ``ts_id``/``model_type`` and renames ``ds``→``forecast_date`` before the ensembler consumes
+        it (see ``ensembler._pivot_oof``) — this cell emits the bare form.
+
+        The control arm is never scored into ``fold_metrics``: everything downstream — arm
+        selection, calibration, the leaderboard — reads that panel, and a second set of numbers in
+        it would be picked up as if it were a second model. It lives in ``oof["yhat_stale"]`` and is
+        summarised once as ``outcome.staleness_gap``.
     """
     y, X = build_features(series, cfg, lam)
     n = len(y)
     folds = make_folds(n, cfg)
+    arms, refit_mode = (
+        _walk_folds(folds, y, X, model_factory, cfg)
+        if folds
+        else ([], _NOMINAL_MODE[cfg.backtest.scheme])
+    )
 
     oof_parts: list[pd.DataFrame] = []
     fold_metrics: list[dict[str, float]] = []
+    stale_metrics: list[dict[str, float]] = []
 
-    for fold in folds:
+    for fold, (pred, blind_pred) in zip(folds, arms, strict=True):
         y_train = y.iloc[fold.train_start : fold.train_end]
-        X_train = X.iloc[fold.train_start : fold.train_end] if X is not None else None
         y_val = y.iloc[fold.val_start : fold.val_end]
-        X_val = X.iloc[fold.val_start : fold.val_end] if X is not None else None
-
-        est = model_factory()
-        est.fit(y_train, X_train)
-        pred = est.predict(fold.val_size, X_val)
 
         # Align yhat to the true validation dates by position (folds are contiguous).
         # yhat is already in original units (predict inverts the transform), so
@@ -348,6 +542,17 @@ def backtest_cell(
         y_true = invert_transform(y_val.to_numpy(), cfg.features.transform, lam)
         y_train_orig = invert_transform(y_train.to_numpy(), cfg.features.transform, lam)
         val_dates = y_val.index
+        # The control arm, selected by the same rule as the primary one so the two are comparable:
+        # a gap between a raw forecast and a bias-corrected one would be measuring the correction.
+        yhat_stale = (
+            np.full(fold.val_size, np.nan)
+            if blind_pred is None
+            else (
+                blind_pred["yhat_raw" if cfg.output.point_forecast == "raw" else "yhat"].to_numpy()[
+                    : fold.val_size
+                ]
+            )
+        )
 
         oof_parts.append(
             pd.DataFrame(
@@ -371,6 +576,7 @@ def backtest_cell(
                     # decay?" is a GROUP BY instead of a re-run. Every fold answers h=1 and h=28
                     # in the same rows; nothing else in the schema separates them.
                     "horizon_step": range(1, fold.val_size + 1),
+                    "yhat_stale": yhat_stale,
                 }
             )
         )
@@ -392,10 +598,28 @@ def backtest_cell(
                 "fold_id": fold.fold_id,
             }
         )
+        if blind_pred is not None:
+            # Scored on the same dates, the same actuals and the same training window as the
+            # primary arm, so the difference between the two panels is the staleness and nothing
+            # else. Kept out of `fold_metrics` — see the note in this function's docstring.
+            stale_metrics.append(
+                compute_metrics(
+                    y_true,
+                    yhat_stale,
+                    y_train=y_train_orig,
+                    # Its own bounds, not the primary arm's — an interval that widens as the model
+                    # goes stale is part of what the control arm has to say, and borrowing the
+                    # fresh arm's band would score `coverage` against the wrong interval.
+                    lower=blind_pred["yhat_lower"].to_numpy()[: fold.val_size],
+                    upper=blind_pred["yhat_upper"].to_numpy()[: fold.val_size],
+                    seasonal_period=seasonal_period(cfg.data.freq),
+                )
+            )
 
     oof = (
         pd.concat(oof_parts, ignore_index=True)
         if oof_parts
         else pd.DataFrame(columns=list(OOF_COLUMNS))
     )
-    return oof, fold_metrics
+    outcome = BacktestOutcome(refit_mode, _staleness_gap(fold_metrics, stale_metrics, cfg))
+    return oof, fold_metrics, outcome

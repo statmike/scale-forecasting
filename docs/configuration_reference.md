@@ -129,7 +129,7 @@ for HPO and learned ensembles.
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
 | `enabled` | `bool` | `false` | — | Turn backtesting on. |
-| `scheme` | `"expanding"` \| `"sliding"` \| `"expanding_frozen"` | `"expanding"` | — | CV window scheme. `expanding_frozen` is **accepted, not yet honoured** — it currently lays out folds exactly as `expanding`. |
+| `scheme` | `"expanding"` \| `"sliding"` \| `"expanding_frozen"` \| `"expanding_stale"` | `"expanding"` | — | How the model is carried between fold origins. See [Backtest schemes](#backtest-schemes) below. |
 | `n_folds` | `int` | `3` | `≥ 1` | Number of folds. |
 | `horizon` | `int` | `28` | `> 0` | Per-fold forecast horizon. |
 | `step` | `int` | `28` | `> 0` | Step between folds. |
@@ -207,13 +207,39 @@ shrinks the grid down to `min_folds` and never trains on less than `min_train_fl
 the series out of the backtest entirely; `error` restores the old fail-the-cell behaviour for anyone
 who wants a hard stop.
 
+### Backtest schemes
+
+`scheme` decides what a fold's score is a score *of*. The four answers are different numbers, not
+cheaper approximations of one number, so pick the one that matches the question you are asking.
+
+| `scheme` | What happens at each origin | The question it answers |
+|----------|-----------------------------|-------------------------|
+| `expanding` (default) | A fresh model is fit on all history up to the cutoff. | How good is this model when freshly trained? |
+| `sliding` | A fresh model is fit on a fixed-width `min_train` window. | Same, but with a bounded memory. |
+| `expanding_frozen` | One fit on the oldest fold's window, then handed the observations that arrived since, parameters held fixed. | What does refitting less often cost me? |
+| `expanding_stale` | One fit, and the model is never told what happened next. | How fast does this decay if nobody touches it? |
+
+Fold *geometry* is identical across all four except `sliding`, which is the only one with a
+fixed-width training window. What changes is how the model is carried between origins.
+
+Ten of the sixteen Python models can absorb a new observation without re-estimating, so they can
+answer `expanding_frozen`; the rest refit for that fold and record `backtest_refit = 'unsupported'`
+on `forecast_metadata` rather than pretending otherwise. Every model answers `expanding_stale`,
+which is what makes it the scheme where a cross-model leaderboard compares like with like. The
+BigQuery-native models always report `per_fold` — `CREATE MODEL` is the only way to fit them.
+
+Both frozen schemes additionally score a **control arm**: the same fit walked forward blind, on the
+same dates. It costs a forecast, not a fit. It lands in `backtest_oof.yhat_stale` per row, and is
+summarised per cell as `forecast_metadata.staleness_gap` — the blind arm's loss minus the primary
+arm's, under this run's `decision_metric`, positive when never refreshing the model hurts.
+
 ### Fields that are accepted but not yet honoured
 
-`short_series`, `min_folds`, `min_train_floor`, `gap`, `window`, and the `expanding_frozen` scheme
-all validate today and change nothing today. They were added to the schema ahead of the code that
-reads them, in one commit, because a new config field moves every `run_id` that has ever been
-recorded — landing them together costs one identity break instead of seven. (`model_params` landed
-in that same commit and *is* now honoured; it is documented below.)
+`short_series`, `min_folds`, `min_train_floor`, `gap` and `window` all validate today and change
+nothing today. They were added to the schema ahead of the code that reads them, in one commit,
+because a new config field moves every `run_id` that has ever been recorded — landing them together
+costs one identity break instead of seven. (`model_params` landed in that same commit and *is* now
+honoured; it is documented below. So is the `expanding_frozen` scheme, above.)
 
 Setting one is therefore not harmless even though it is inert: it changes your run's `run_id`, so a
 config that sets `gap: 7` is a different run from the same config without it, producing identical

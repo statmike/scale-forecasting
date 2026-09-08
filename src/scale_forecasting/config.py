@@ -171,13 +171,22 @@ class FeaturesConfig(BaseModel):
 class BacktestConfig(BaseModel):
     """Time-series cross-validation. Off by default (cheapest first run).
 
-    **Five of these fields are accepted but not yet honoured**, and so is the ``expanding_frozen``
-    scheme. They are declared here ahead of the methodology work that implements them, because
-    ``run_id`` is a digest of the whole config: adding a field moves every identity ever recorded,
-    so the fields land together, once, rather than one per release. Until then
-    ``make_folds`` reads exactly what it read before — ``n_folds``, ``horizon``, ``step``,
-    ``min_train``, ``scheme`` — and ``test_inert_config_fields.py`` asserts that the others change
-    nothing. See ``docs/configuration_reference.md`` for which is which.
+    **Five of these fields are accepted but not yet honoured.** They are declared here ahead of the
+    methodology work that implements them, because ``run_id`` is a digest of the whole config:
+    adding a field moves every identity ever recorded, so the fields land together, once, rather
+    than one per release. Until then ``make_folds`` reads exactly what it read before — ``n_folds``,
+    ``horizon``, ``step``, ``min_train``, ``scheme`` — and ``test_inert_config_fields.py`` asserts
+    that the others change nothing. See ``docs/configuration_reference.md`` for which is which.
+
+    ``scheme`` is the one that is fully honoured, and it decides *what a fold's score is a score
+    of*. ``expanding`` and ``sliding`` refit at every origin, so a score is about a freshly-trained
+    model. ``expanding_frozen`` fits once and then feeds the model the observations that arrive
+    between origins with its parameters held fixed, which measures what refitting less often costs.
+    ``expanding_stale`` fits once and never tells the model what happened next, which measures how
+    fast it decays untouched — the only one of the three every model can answer identically, and so
+    the one where a cross-model leaderboard is comparing like with like. Both frozen schemes also
+    score a blind control arm alongside the primary one; see `backtest.BacktestOutcome`. Widening
+    this Literal moves no existing ``run_id`` — the digest hashes dumped values, not the schema.
 
     ``short_series`` is the one that has moved. The code now always adapts — `make_folds` shrinks
     the grid to whatever the series supports, possibly to nothing, and the cell forecasts either
@@ -190,7 +199,7 @@ class BacktestConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = False
-    scheme: Literal["expanding", "sliding", "expanding_frozen"] = "expanding"
+    scheme: Literal["expanding", "sliding", "expanding_frozen", "expanding_stale"] = "expanding"
     n_folds: int = Field(default=3, ge=1)
     horizon: int = Field(default=28, gt=0)
     step: int = Field(default=28, gt=0)

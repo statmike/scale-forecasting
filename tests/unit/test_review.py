@@ -314,7 +314,14 @@ def test_assemble_review_falls_back_to_leaderboard_when_no_aggregates() -> None:
 # --- cohorts: the panel behind the score ---------------------------------------
 
 
-def _cohort_row(model: str, status: str | None, folds: int | None, n: int) -> dict[str, Any]:
+def _cohort_row(
+    model: str,
+    status: str | None,
+    folds: int | None,
+    n: int,
+    refit: str | None = None,
+    gap: float | None = None,
+) -> dict[str, Any]:
     """One `v_backtest_coverage` row: a cohort of ``n`` series for one model."""
     return {
         "model_type": model,
@@ -322,6 +329,8 @@ def _cohort_row(model: str, status: str | None, folds: int | None, n: int) -> di
         "backtest_status": status,
         "n_folds_achieved": folds,
         "n_series": n,
+        "backtest_refit": refit,
+        "mean_staleness_gap": gap,
     }
 
 
@@ -340,6 +349,41 @@ def test_cohorts_sum_the_split_rows_back_into_one_per_model() -> None:
     assert (theta.n_full, theta.n_reduced, theta.n_unscored) == (40, 35, 5)
     # The histogram keeps the shape of the raggedness, ordered, and leaves out the NULL-fold rows.
     assert theta.fold_histogram == {1: 10, 2: 25, 3: 40}
+
+
+def test_the_cohort_says_how_the_panel_was_scored_not_just_how_much_of_it() -> None:
+    # A frozen run where two thirds of the panel really was frozen and the rest fell back to a
+    # refit. Both facts have to survive the fold-up: the counts say the model is not answering one
+    # question, and the gap says what freezing cost the part that was frozen.
+    cohorts = R._cohorts_by_model(
+        [
+            _cohort_row("sarimax", "full", 3, 60, refit="recondition", gap=0.03),
+            _cohort_row("sarimax", "full", 3, 30, refit="unsupported", gap=None),
+        ]
+    )
+    sarimax = cohorts[("sarimax", None)]
+    assert sarimax.refit_modes == {"recondition": 60, "unsupported": 30}
+    assert sarimax.staleness_gap == pytest.approx(0.03)
+
+
+def test_the_staleness_gap_is_weighted_by_cohort_size() -> None:
+    # The view already averaged within each cohort, so a plain mean of the cohort means would let
+    # a two-series row weigh as much as a two-thousand-series one.
+    cohorts = R._cohorts_by_model(
+        [
+            _cohort_row("theta", "full", 3, 900, refit="extrapolate", gap=0.10),
+            _cohort_row("theta", "reduced", 1, 100, refit="extrapolate", gap=0.50),
+        ]
+    )
+    assert cohorts[("theta", None)].staleness_gap == pytest.approx(0.14)
+
+
+def test_a_refit_run_has_no_staleness_gap_rather_than_a_zero_one() -> None:
+    # Zero would read as "refitting buys nothing", which is a finding. No control arm ran.
+    cohorts = R._cohorts_by_model([_cohort_row("theta", "full", 3, 40, refit="per_fold")])
+    theta = cohorts[("theta", None)]
+    assert theta.staleness_gap is None
+    assert theta.refit_modes == {"per_fold": 40}
 
 
 def test_a_null_backtest_status_means_never_requested_not_failed() -> None:

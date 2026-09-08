@@ -158,6 +158,17 @@ class BacktestCohort:
     ``fold_histogram`` maps achieved fold count → series count, so the shape of the raggedness is
     visible and not just its worst case. Keyed by the achieved count as an ``int``; series with a
     NULL ``n_folds_achieved`` are left out of it (they are still counted in ``n_series``).
+
+    ``refit_modes`` is the other axis of the same question — not how *much* of the panel was
+    scored, but on what. It maps ``backtest_refit`` → series count: ``per_fold`` (a fresh fit at
+    every origin), ``recondition`` (one fit carried forward on the new observations),
+    ``extrapolate`` (one fit, never told what happened next), and ``unsupported`` (a frozen scheme
+    was asked for and this model had no seam for it, so those series refit anyway). A model showing
+    ``unsupported`` on a frozen run is not answering the same question as its neighbours.
+
+    ``staleness_gap`` is what never refreshing the model cost this panel, in the run's decision
+    metric, averaged over the series that ran a control arm and weighted by cohort size. Positive
+    means refitting earns its keep. ``None`` on the two refit schemes, which run no control arm.
     """
 
     n_series: int = 0
@@ -167,6 +178,8 @@ class BacktestCohort:
     n_failed: int = 0
     n_not_requested: int = 0
     fold_histogram: dict[int, int] = field(default_factory=dict)
+    refit_modes: dict[str, int] = field(default_factory=dict)
+    staleness_gap: float | None = None
 
 
 @dataclass(frozen=True)
@@ -641,15 +654,21 @@ def _cohorts_by_model(
 ) -> dict[tuple[str, str | None], BacktestCohort]:
     """Fold `registry.reads.read_backtest_coverage` rows up into one `BacktestCohort` per model.
 
-    The view emits one row per ``(model, ensemble_id, backtest_status, n_folds_achieved)``; a model
-    with a ragged panel therefore arrives as several rows that have to be summed back together. A
+    The view emits one row per
+    ``(model, ensemble_id, backtest_status, n_folds_achieved, backtest_refit)``; a model with a
+    ragged panel therefore arrives as several rows that have to be summed back together. A
     ``backtest_status`` this function does not recognise still lands in ``n_series`` — the total is
     the panel, so an unfamiliar status must not quietly vanish from it.
+
+    ``staleness_gap`` is the one field that is averaged rather than summed, and it is weighted by
+    each row's series count: the view already averaged within a cohort, so an unweighted mean of
+    the cohorts would let a two-series row count as much as a two-thousand-series one.
     """
     totals: dict[tuple[str, str | None], dict[str, Any]] = {}
+    weighted: dict[tuple[str, str | None], tuple[float, int]] = {}
     for row in coverage_rows:
         key = (row["model_type"], row.get("ensemble_id"))
-        acc = totals.setdefault(key, {"n_series": 0, "fold_histogram": {}})
+        acc = totals.setdefault(key, {"n_series": 0, "fold_histogram": {}, "refit_modes": {}})
         n = int(row.get("n_series") or 0)
         acc["n_series"] += n
         field_name = _STATUS_FIELDS.get(row.get("backtest_status") or "", "n_not_requested")
@@ -658,9 +677,22 @@ def _cohorts_by_model(
         if folds is not None:
             hist = acc["fold_histogram"]
             hist[int(folds)] = hist.get(int(folds), 0) + n
+        refit = row.get("backtest_refit")
+        if refit is not None:
+            modes = acc["refit_modes"]
+            modes[str(refit)] = modes.get(str(refit), 0) + n
+        gap = _num(row.get("mean_staleness_gap"))
+        if gap is not None and n:
+            total, count = weighted.get(key, (0.0, 0))
+            weighted[key] = (total + gap * n, count + n)
     return {
         key: BacktestCohort(
-            **{**acc, "fold_histogram": dict(sorted(acc["fold_histogram"].items()))}
+            **{
+                **acc,
+                "fold_histogram": dict(sorted(acc["fold_histogram"].items())),
+                "refit_modes": dict(sorted(acc["refit_modes"].items())),
+                "staleness_gap": (weighted[key][0] / weighted[key][1] if key in weighted else None),
+            }
         )
         for key, acc in totals.items()
     }
