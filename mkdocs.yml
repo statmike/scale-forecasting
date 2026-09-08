@@ -121,6 +121,7 @@ nav:
       - Errors: api/errors.md
       - Metrics: api/metrics.md
       - Backtest: api/backtest.md
+      - Calibration: api/calibration.md
       - Model factory: api/models.md
       - BaseModel: api/models_base_model.md
       - Spark core: api/engines_spark_io.md

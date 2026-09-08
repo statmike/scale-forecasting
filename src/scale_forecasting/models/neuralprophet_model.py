@@ -103,7 +103,7 @@ class NeuralProphetModel(BaseModel):
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
-        return self._assemble_frame(ds, qmap)
+        return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     def device_used(self) -> str | None:
         """Where the fitted weights actually live — read off a parameter tensor, not off config.

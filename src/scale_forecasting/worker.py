@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .backtest import backtest_cell
+from .calibration import apply_calibration, calibrate_from_oof, compare_arms
 from .errors import ConfigError, get_logger
 from .features import (
     build_features,
@@ -33,7 +34,12 @@ from .features import (
 from .hardware import provisioned_hardware, visible_device
 from .metrics import METRIC_NAMES
 from .models import get_model
-from .models.base_model import PREDICTION_COLUMNS, BaseModel, ModelContext
+from .models.base_model import (
+    DEFAULT_QUANTILES,
+    PREDICTION_COLUMNS,
+    BaseModel,
+    ModelContext,
+)
 from .registry.ids import make_model_hash, make_run_id
 from .resources.catalog import _INTRAOP_ENV_VARS
 
@@ -116,6 +122,22 @@ class CellResult:
     # metrics (coverage, pinball, interval_score) mean different things under each. None on an
     # error cell, where there are no bounds to describe.
     interval_source: str | None = None
+    # Which functional `yhat` carries: "raw" (the model's own output), "median" or "mean" (plus the
+    # corresponding residual statistic). Distinct from `interval_source`, which describes the
+    # *band* — a run can ship the raw point forecast inside an out-of-fold calibrated interval.
+    # This exists because for a long time the answer was "median", nobody had chosen it, and
+    # nothing recorded it.
+    point_forecast_source: str | None = None
+    # Where the band came from: "oof-per-step" (held-out residuals, resolved by horizon distance),
+    # "oof-flat" (held-out, pooled — too few residuals per step to say more), or "in-sample" (the
+    # model's own band; no backtest ran). The three are ranked, and the distinction is the whole
+    # difference between a coverage number that means something and one that flatters itself.
+    interval_calibration: str | None = None
+    # Relative improvement of the corrected arm over the raw one on this cell's folds, in units of
+    # the decision metric's loss: positive means the correction helped. NaN/None when there was no
+    # backtest to measure it on. This is the per-series evidence that a single global setting
+    # cannot express, and it is what 2.5b's automatic per-series selection will read.
+    point_forecast_margin: float | None = None
 
 
 def _worker_id() -> str:
@@ -463,6 +485,24 @@ def run_cell(
         future_exog = build_future_features(y, X, cfg)
         predictions = model.predict(cfg.data.horizon, future_exog)
 
+        # Recalibrate the forward forecast against held-out error.
+        #
+        # The model's own band comes from *in-sample* residuals, which are one-step-ahead by
+        # construction and are systematically too small for any model that fits its training data
+        # tightly. Measured consequence: fleet coverage of 0.601 against a nominal 0.8. The OOF
+        # frame above is a genuine held-out sample that this run has already paid for, and it
+        # carries `horizon_step`, so it can also say how the error *grows* — which in-sample
+        # residuals structurally cannot. Both the band and the bias correction are re-derived from
+        # it when it is available, per horizon step where there are enough residuals to support
+        # one, and the provenance is recorded either way rather than left to be inferred from the
+        # fold count. `cal is None` leaves the model's own band untouched.
+        arm = cfg.output.point_forecast or "median"
+        cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
+        predictions, interval_calibration = apply_calibration(predictions, cal, arm)
+        arm_comparison = (
+            compare_arms(oof, cfg.backtest.decision_metric, arm) if oof is not None else {}
+        )
+
         # Persist the fitted model as an artifact only when the run opts in (model-artifact
         # lineage). A serialize failure must not sink an otherwise-good forecast, so it degrades to
         # no artifact rather than turning the cell into an error.
@@ -517,6 +557,15 @@ def run_cell(
             # bounds equal to `yhat`, which is indistinguishable from a native zero-width interval
             # by inspection and very distinguishable by what it means.
             interval_source="native" if model_cls.supports_native_intervals else "residual",
+            # Which functional `yhat` carries, and where the band came from. Two separate facts:
+            # a run can select the raw arm and still ship an OOF-calibrated interval.
+            point_forecast_source=arm,
+            interval_calibration=interval_calibration,
+            # The arm comparison, scored on the folds. Held-out by construction — each fold's
+            # correction came from that fold's own training window and never saw the slice it is
+            # measured against. This is the number that says whether the correction earned its
+            # keep *for this series*, rather than asking anyone to trust a fleetwide average.
+            point_forecast_margin=arm_comparison.get("margin"),
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(e, engine)

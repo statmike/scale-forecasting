@@ -332,3 +332,92 @@ def read_cell_metrics(
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"read_cell_metrics failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
+
+
+def read_arm_comparison(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Per-model rollup of the point-forecast arm choice and what it was worth.
+
+    One row per ``model_type``: which arm the run shipped, how its band was calibrated, how many
+    series the corrected arm beat the raw one on, and the mean/median relative margin over this
+    run's ``decision_metric``. ``point_forecast_margin`` is signed the same way for every row —
+    positive means the correction helped — so the counts and the average are comparable across
+    models that chose different arms.
+
+    Aggregated server-side for the same reason as `read_metric_aggregates`: at 100k series this is
+    the difference between a summary and a download. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        "WITH deduped AS ("
+        "  SELECT * FROM `" + resolved.registry_table_ref("forecast_metadata") + "`"
+        "  WHERE run_id=@run_id AND fold_id IS NULL AND ensemble_id IS NULL"
+        "  QUALIFY ROW_NUMBER() OVER ("
+        "    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id"
+        "    ORDER BY created_at DESC) = 1"
+        ") "
+        "SELECT model_type, "
+        "ANY_VALUE(compute_engine) AS compute_engine, "
+        "ANY_VALUE(point_forecast_source) AS point_forecast_source, "
+        "ANY_VALUE(interval_calibration) AS interval_calibration, "
+        "COUNT(*) AS n_series, "
+        "COUNTIF(point_forecast_margin > 0) AS n_corrected_wins, "
+        "COUNTIF(point_forecast_margin IS NOT NULL) AS n_compared, "
+        "AVG(point_forecast_margin) AS mean_margin, "
+        "APPROX_QUANTILES(point_forecast_margin, 10)[OFFSET(5)] AS median_margin "
+        "FROM deduped GROUP BY model_type ORDER BY model_type"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_arm_comparison failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_coverage_by_step(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Achieved interval coverage per model per horizon step, over the whole out-of-fold panel.
+
+    The receipt for the calibrated band, and the one number a fleet average hides: a band can sit
+    at nominal on average while step 1 is over-covered and step 28 badly under-covered, which is
+    precisely what a horizon-flat band does. ``mean_width`` comes along because coverage alone is
+    gameable — an infinitely wide band covers everything.
+
+    Rows with a NULL ``horizon_step`` are excluded rather than pooled: the BigQuery-native path does
+    not project a per-series step yet, and folding its rows into step ``NULL`` would put a bucket
+    in the middle of a chart that is otherwise ordered by distance. Raises `RegistryError`.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        "SELECT model_type, horizon_step, "
+        "COUNT(*) AS n, "
+        "AVG(CAST(y_true BETWEEN yhat_lower AND yhat_upper AS INT64)) AS coverage, "
+        "AVG(yhat_upper - yhat_lower) AS mean_width "
+        "FROM `" + resolved.registry_table_ref("backtest_oof") + "` "
+        "WHERE run_id=@run_id AND horizon_step IS NOT NULL "
+        "AND yhat_lower IS NOT NULL AND yhat_upper IS NOT NULL "
+        "GROUP BY model_type, horizon_step ORDER BY model_type, horizon_step"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_coverage_by_step failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]

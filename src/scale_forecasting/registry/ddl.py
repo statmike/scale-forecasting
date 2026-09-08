@@ -30,10 +30,10 @@ next few phases need land in one batch rather than one at a time; until their pr
 ships they read NULL. Keep the list in ``tests/unit/test_registry_column_parity.py``
 (``_RESERVED_*``) in step — it is the record of which columns have no producer yet, and it must
 shrink to empty.
-Reserved today: on ``forecast_metadata``, the cell-outcome block (``cell_status`` through
-``train_rows_total``) and the four ``device_*`` columns; on ``backtest_oof``, ``cutoff_date``,
-``horizon_step``, ``yhat_lower``, ``yhat_upper`` and ``created_at``; on
-``forecast_predictions``, ``created_at``.
+Reserved today: on ``forecast_metadata``, the backtest-methodology block (``achieved_step``,
+``achieved_min_train``, ``first_val_date``, ``last_val_date``, ``n_fits``, ``train_rows_total``)
+and the two ``*_scoring`` columns; on ``backtest_oof`` and ``forecast_predictions``, only
+``created_at``.
 
 The bodies below carry no SQL comments inside the parentheses — ``additive_columns`` splits the
 column block on commas and would read a comment line as a column.
@@ -137,6 +137,9 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   first_val_date DATE,
   last_val_date  DATE,
   interval_source STRING,
+  point_forecast_source STRING,
+  interval_calibration STRING,
+  point_forecast_margin FLOAT64,
   ensemble_scoring STRING,
   hpo_scoring    STRING,
   n_fits         INT64,
@@ -157,6 +160,8 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_predictions` (
   ensemble_id   STRING,
   forecast_date DATE NOT NULL,
   yhat          FLOAT64,
+  yhat_raw      FLOAT64,
+  yhat_adjusted FLOAT64,
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
   quantiles     JSON,
@@ -173,6 +178,8 @@ CREATE TABLE IF NOT EXISTS `{d}.backtest_oof` (
   forecast_date DATE NOT NULL,
   y_true        FLOAT64,
   yhat          FLOAT64,
+  yhat_raw      FLOAT64,
+  yhat_adjusted FLOAT64,
   cutoff_date   DATE,
   horizon_step  INT64,
   yhat_lower    FLOAT64,

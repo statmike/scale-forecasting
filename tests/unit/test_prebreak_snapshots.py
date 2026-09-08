@@ -9,10 +9,11 @@ claims, and neither is checkable without artefacts captured *before* it lands:
 * **No output changed.** The fields arrive with defaults chosen to preserve today's behaviour, so
   the forecasts must be numerically identical on both sides of it.
 
-So this module holds both snapshots and one switch. `_BREAK_LANDED` is `True` as of the break
+So this module holds both snapshots and two switches. `_BREAK_LANDED` is `True` as of the break
 commit: before it, the digest test asserted the ids still *matched*; now it asserts every one
-*differs*. The golden panel test does not have a switch, because it must stay green throughout —
-that is the claim.
+*differs*. `_MOVED_AT_2_5` is `True` as of the commit that changed what a point forecast means:
+before it, the golden panel test compared the numbers, which was the second claim above; now it
+compares everything about the cells except the numbers, and says in one place why.
 
 The switch matters more than it looks. The obvious alternative is to leave a test that is known to
 fail from the break onward, and the reason not to is that a permanently-red test gets muted, and a
@@ -69,6 +70,28 @@ _PANEL_NOW = _SNAPSHOTS / "golden_panel.json"
 # fifteen nulls into fifteen numbers, per metric, and moved nothing else — not a forecast value, not
 # a fold, not one of the other eleven metrics.
 _SCORED_AT_2_3 = frozenset({"coverage", "pinball", "interval_score", "interval_width"})
+
+# The second declared movement, and the first one that reaches the forecast itself (plan item 2.5,
+# 2026-09-08). `yhat` used to be the model's own prediction plus the median of its *in-sample*
+# residuals — an accident of `residual_intervals` returning a 0.5 quantile that `_assemble_frame`
+# then read as the point forecast. Measured on a backtest, that shift cost 5.7% of WAPE, and the
+# band it came from achieved 0.601 coverage against a nominal 0.8. Item 2.5 replaced both: when a
+# backtest ran, the correction and the band are estimated per horizon step from out-of-fold
+# residuals, and the model's own output is kept beside them as `yhat_raw`.
+#
+# So every forecast value in the panel moves, and no config reproduces the old behaviour to let the
+# pre-break comparison make its numeric claim any more. Rather than mute the test or widen
+# `_SCORED_AT_2_3` until it means nothing, the claim is narrowed once and in writing: the pre-break
+# panel now checks *structure* — same models, same cell status, same out-of-fold row counts, same
+# metric set, same forecast length, and columns differing from the pre-break set by exactly the two
+# names below. That is the half that still catches a plumbing regression, and it is the half 2.5
+# did not touch.
+#
+# The numeric pin is not lost, it moved: `golden_panel.json` carries it, exactly, with no
+# exemptions, and `test_current_cell_output_matches_the_pinned_panel` is now the only test in this
+# module that reads a forecast value. That test is the one to keep sharp.
+_MOVED_AT_2_5 = True
+_COLUMNS_ADDED_AT_2_5 = frozenset({"yhat_raw", "yhat_adjusted"})
 
 # Not a run config: a zone/region failover map with its own schema and no `run_name`.
 _NON_RUNCONFIG = {"compute_fallback.json"}
@@ -285,6 +308,8 @@ def _cell_complaints(
     current: dict[str, Any],
     expected: dict[str, Any],
     newly_scored: frozenset[str] = frozenset(),
+    columns_added: frozenset[str] = frozenset(),
+    compare_values: bool = True,
 ) -> list[str]:
     """Every way the cells in `current` differ from `expected`, as sentences. Empty means same.
 
@@ -295,6 +320,13 @@ def _cell_complaints(
     `newly_scored` names metrics allowed to have gone from "not computed" to a number since the
     snapshot was taken. It is one-directional on purpose — the reverse move, a metric that used to
     have a value and now reads NaN, is a regression and still reported.
+
+    `columns_added` names prediction columns a declared change introduced: the current column set
+    must be the expected one plus exactly those, so an *extra* new column, or a lost old one, still
+    fails. `compare_values=False` drops the forecast and metric *values* from the comparison while
+    keeping every structural check — the state the pre-break panel is in once a change deliberately
+    moves the numbers. Both are here rather than at the call site so the two panel tests keep
+    disagreeing in exactly one place, which is the whole point of sharing this function.
     """
     if sorted(current) != sorted(expected):
         return [
@@ -309,7 +341,7 @@ def _cell_complaints(
         got, want = current[model], expected[model]
         if got["status"] != want["status"]:
             out.append(f"{model}: cell status {want['status']!r} -> {got['status']!r}")
-        if got["columns"] != want["columns"]:
+        if set(got["columns"]) != set(want["columns"]) | columns_added:
             out.append(f"{model}: prediction columns {want['columns']} -> {got['columns']}")
         if got["n_oof_rows"] != want["n_oof_rows"]:
             out.append(f"{model}: out-of-fold rows {want['n_oof_rows']} -> {got['n_oof_rows']}")
@@ -320,10 +352,12 @@ def _cell_complaints(
             w, g = want["metrics"][key], got["metrics"][key]
             if key in newly_scored and w is None and g is not None:
                 continue  # the movement 2.3 declared, in the only direction it declared it
-            if not _close(g, w):
+            if compare_values and not _close(g, w):
                 out.append(f"{model}: metric {key} moved {w!r} -> {g!r}")
         if len(got["yhat"]) != len(want["yhat"]):
             out.append(f"{model}: forecast length {len(want['yhat'])} -> {len(got['yhat'])}")
+            continue
+        if not compare_values:
             continue
         drifted = [
             (i, w, g)
@@ -341,18 +375,29 @@ def _cell_complaints(
 def test_golden_cell_output_is_unchanged(
     current_panel: dict[str, Any], snapshot_panel: dict[str, Any]
 ) -> None:
-    """The claim the break rests on: the forecasts are numerically the same on both sides of it.
+    """The claim the break rests on: the forecasts are the same on both sides of it.
 
     Slow by the standards of this suite (~12 s) because it runs the real cell for fifteen models
     rather than a stub. That is the cost of the claim being about output rather than about
     plumbing, and it is paid once per gate run.
+
+    "The same" meant *numerically* the same until item 2.5 deliberately moved every forecast value
+    (`_MOVED_AT_2_5`). It now means structurally the same, which is a real claim and a smaller one:
+    the same fifteen models still run, still succeed, still produce the same number of out-of-fold
+    rows over the same fold grid, still score the same metric set, and still return a horizon-length
+    frame whose columns are the pre-break set plus exactly `_COLUMNS_ADDED_AT_2_5`. What it can no
+    longer catch, `test_current_cell_output_matches_the_pinned_panel` catches instead.
 
     The four metrics in `_SCORED_AT_2_3` are exempt, in one direction, for the reason recorded
     there. The exemption is deliberately not "the interval metrics may differ" — it is "these four
     may go from unmeasured to measured", which is a thing that can only happen once.
     """
     complaints = _cell_complaints(
-        current_panel["cells"], snapshot_panel["cells"], newly_scored=_SCORED_AT_2_3
+        current_panel["cells"],
+        snapshot_panel["cells"],
+        newly_scored=_SCORED_AT_2_3,
+        columns_added=_COLUMNS_ADDED_AT_2_5 if _MOVED_AT_2_5 else frozenset(),
+        compare_values=not _MOVED_AT_2_5,
     )
     assert not complaints, "output moved across the digest break:\n" + "\n".join(complaints)
 

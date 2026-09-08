@@ -12,6 +12,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 import scale_forecasting as sf
 from scale_forecasting import review as R
 from scale_forecasting.config import RunConfig
@@ -471,6 +473,133 @@ def test_forecaster_monitor_passes_probe_through(monkeypatch: Any) -> None:
     assert seen["mon"] == (f.run_id, True)
 
 
+# --- calibration report --------------------------------------------------------
+
+
+def _arm(model: str, **over: Any) -> dict[str, Any]:
+    """One `read_arm_comparison` row, defaulting to a correction that won two series in three."""
+    row: dict[str, Any] = {
+        "model_type": model,
+        "compute_engine": "spark",
+        "point_forecast_source": "median",
+        "interval_calibration": "oof-per-step",
+        "n_series": 3,
+        "n_compared": 3,
+        "n_corrected_wins": 2,
+        "mean_margin": 0.04,
+        "median_margin": 0.05,
+    }
+    row.update(over)
+    return row
+
+
+def _cov(model: str, step: int, coverage: float | None, n: int = 100) -> dict[str, Any]:
+    """One `read_coverage_by_step` row."""
+    return {
+        "model_type": model,
+        "horizon_step": step,
+        "n": n,
+        "coverage": coverage,
+        "mean_width": 2.0 + step,
+    }
+
+
+def test_calibration_assembles_both_halves() -> None:
+    rep = R._assemble_calibration(
+        "rid", "wape", 0.8, [_arm("theta"), _arm("xgboost")], [_cov("theta", 1, 0.79)]
+    )
+    assert rep.run_id == "rid" and rep.decision_metric == "wape" and rep.nominal_coverage == 0.8
+    assert [a.model_type for a in rep.arms] == ["theta", "xgboost"]
+    assert rep.coverage[0].horizon_step == 1 and rep.coverage[0].mean_width == 3.0
+
+
+def test_win_rate_is_a_share_not_a_count() -> None:
+    # The average margin can look healthy while most series lose; the win rate is the check.
+    arm = R._assemble_calibration("rid", "wape", 0.8, [_arm("theta")], []).arms[0]
+    assert arm.win_rate == pytest.approx(2 / 3)
+
+
+def test_win_rate_is_none_when_nothing_was_compared() -> None:
+    # A run with one fold has no out-of-fold estimate to grade, so there is no rate to report —
+    # and reporting 0.0 would read as "the correction lost every time".
+    arm = R._assemble_calibration(
+        "rid", "wape", 0.8, [_arm("theta", n_compared=0, n_corrected_wins=0)], []
+    ).arms[0]
+    assert arm.win_rate is None
+
+
+def test_arm_row_tolerates_missing_and_null_fields() -> None:
+    # BigQuery hands back NULLs for a native-engine row that never ran an arm comparison.
+    arm = R._assemble_calibration(
+        "rid", "wape", 0.8, [{"model_type": "arima_plus", "mean_margin": None}], []
+    ).arms[0]
+    assert arm.compute_engine is None and arm.mean_margin is None
+    assert arm.n_series == 0 and arm.n_compared == 0 and arm.win_rate is None
+
+
+def test_mean_coverage_weights_by_row_count() -> None:
+    # A step with ten residuals must not swing the fleet number as hard as one with a thousand.
+    rep = R._assemble_calibration(
+        "rid", "wape", 0.8, [], [_cov("theta", 1, 0.9, n=900), _cov("theta", 2, 0.5, n=100)]
+    )
+    assert rep.mean_coverage == pytest.approx(0.86)
+
+
+def test_mean_coverage_ignores_null_and_empty_steps() -> None:
+    rep = R._assemble_calibration(
+        "rid",
+        "wape",
+        0.8,
+        [],
+        [_cov("theta", 1, 0.8), _cov("theta", 2, None), _cov("t", 3, 0.4, 0)],
+    )
+    assert rep.mean_coverage == pytest.approx(0.8)
+    assert R._assemble_calibration("rid", "wape", 0.8, [], []).mean_coverage is None
+
+
+def test_worst_step_is_the_furthest_from_nominal_in_either_direction() -> None:
+    # Over-covering is a defect too: a band wide enough to always contain the truth says nothing.
+    rep = R._assemble_calibration(
+        "rid",
+        "wape",
+        0.8,
+        [],
+        [_cov("theta", 1, 0.78), _cov("theta", 28, 0.55), _cov("xgboost", 1, 1.0)],
+    )
+    worst = rep.worst_step
+    assert worst is not None
+    assert (worst.model_type, worst.horizon_step) == ("theta", 28)
+    assert R._assemble_calibration("rid", "wape", 0.8, [], []).worst_step is None
+
+
+def test_calibration_report_composes_readers(monkeypatch: Any) -> None:
+    from scale_forecasting.registry import reads
+
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "decision_metric": "mae"})
+    monkeypatch.setattr(reads, "read_run_config", lambda rid, *, settings=None: cfg.model_dump())
+    monkeypatch.setattr(reads, "read_arm_comparison", lambda rid, *, settings=None: [_arm("theta")])
+    monkeypatch.setattr(
+        reads, "read_coverage_by_step", lambda rid, *, settings=None: [_cov("theta", 1, 0.79)]
+    )
+
+    rep = R.calibration_report("rid", settings=_SETTINGS)
+    assert rep.decision_metric == "mae"  # taken from the run's own config, like `review_run`
+    assert rep.nominal_coverage == pytest.approx(0.8)  # span of DEFAULT_QUANTILES, not a constant
+    assert rep.arms[0].win_rate == pytest.approx(2 / 3)
+    assert rep.mean_coverage == pytest.approx(0.79)
+
+
+def test_calibration_report_falls_back_when_the_run_has_no_config(monkeypatch: Any) -> None:
+    from scale_forecasting.registry import reads
+
+    monkeypatch.setattr(reads, "read_run_config", lambda rid, *, settings=None: None)
+    monkeypatch.setattr(reads, "read_arm_comparison", lambda rid, *, settings=None: [])
+    monkeypatch.setattr(reads, "read_coverage_by_step", lambda rid, *, settings=None: [])
+
+    rep = R.calibration_report("rid", settings=_SETTINGS)
+    assert rep.decision_metric == "wape" and rep.arms == () and rep.coverage == ()
+
+
 # --- plots (headless smoke) ----------------------------------------------------
 
 
@@ -669,5 +798,7 @@ def test_review_surface_is_exported_from_package() -> None:
         "plot_progress",
         "plot_leaderboard",
         "plot_metric_distribution",
+        "calibration_report",
+        "CalibrationReport",
     ):
         assert hasattr(sf, name), name

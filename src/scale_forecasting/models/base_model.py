@@ -36,7 +36,21 @@ Runtime = Literal["python", "bigquery"]
 Family = Literal["statistical", "ml", "deep_learning", "native"]
 
 # Canonical prediction-frame columns, in order.
-PREDICTION_COLUMNS: tuple[str, ...] = ("ds", "yhat", "yhat_lower", "yhat_upper", "quantiles")
+#
+# `yhat_raw` is the model's own point forecast, always preserved. `yhat` may differ from it: for a
+# model that builds its band from residual quantiles, `yhat` is the 0.5 quantile, which is
+# `prediction + median(residual)` — a real bias correction that measurement says earns its keep,
+# but one that must never be the *only* number stored. Keeping both is what lets `calibration.py`
+# score the two arms against each other on held-out folds instead of asking anyone to take the
+# choice on faith.
+PREDICTION_COLUMNS: tuple[str, ...] = (
+    "ds",
+    "yhat",
+    "yhat_raw",
+    "yhat_lower",
+    "yhat_upper",
+    "quantiles",
+)
 
 # Default quantile set for predict() and the residual helper.
 DEFAULT_QUANTILES: tuple[float, ...] = (0.1, 0.5, 0.9)
@@ -244,11 +258,20 @@ class BaseModel(ABC):
         self,
         ds: pd.DatetimeIndex | pd.Series,
         quantile_map: dict[float, np.ndarray],
+        raw: np.ndarray | None = None,
     ) -> pd.DataFrame:
         """Build the canonical prediction frame from a quantile map.
 
         ``yhat`` is the 0.5 quantile (median); bounds are the min/max quantiles so they
         stay ordered. ``quantiles`` is the full map serialized to a JSON string per row.
+
+        ``raw`` is the model's own point forecast **in original units** — pass
+        ``invert_transform(mean, t, lam)``, the same value the quantile map is built around. It
+        matters only for the models whose band comes from residual quantiles, where the 0.5
+        quantile is `prediction + median(residual)` rather than the prediction; for a model with a
+        symmetric native band the two coincide. Optional, defaulting to the median, so an
+        out-of-tree model written against the older contract still assembles — but such a model
+        forfeits the arm comparison, because there is nothing to compare against.
         """
         qs = sorted(quantile_map)
         if not qs:
@@ -256,6 +279,7 @@ class BaseModel(ABC):
         median = quantile_map.get(0.5, quantile_map[qs[len(qs) // 2]])
         lower = quantile_map[qs[0]]
         upper = quantile_map[qs[-1]]
+        raw_values = median if raw is None else np.asarray(raw, dtype=float)
         n = len(median)
         # Drop non-finite quantile values per step. json.dumps defaults to allow_nan=True, minting
         # the bare literals NaN/Infinity — invalid JSON that BigQuery's JSON-column parser rejects
@@ -274,6 +298,7 @@ class BaseModel(ABC):
             {
                 "ds": ds_ns,
                 "yhat": np.asarray(median, dtype=float),
+                "yhat_raw": np.asarray(raw_values, dtype=float),
                 "yhat_lower": np.asarray(lower, dtype=float),
                 "yhat_upper": np.asarray(upper, dtype=float),
                 "quantiles": pd.array(quantiles_json, dtype="string"),

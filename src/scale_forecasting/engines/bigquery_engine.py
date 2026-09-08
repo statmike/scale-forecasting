@@ -370,6 +370,12 @@ def _oof_row(
         # to the table. `cutoff_date` and `horizon_step` are still NULL here: the native fold
         # geometry is a single global `DATE_SUB(MAX(ds), …)` rather than a per-series one, so
         # projecting it belongs with the ragged-panel join work, not here.
+        # One arm, said twice. BigQuery ML applies no bias correction, so `yhat_raw` and
+        # `yhat_adjusted` are both the forecast it returned. Copying the value rather than leaving
+        # the pair NULL keeps `y_true - yhat_raw` a valid residual for every engine, which is what
+        # lets a cross-engine calibration diagnostic be one query instead of two.
+        "yhat_raw": row["yhat"],
+        "yhat_adjusted": row["yhat"],
         "yhat_lower": row.get("yhat_lower"),
         "yhat_upper": row.get("yhat_upper"),
     }
@@ -449,6 +455,14 @@ def _meta_row(
         # Python path fills it: an interval-metric comparison between the two engines is only
         # like-for-like if a reader can see which kind of interval each row was scored on.
         "interval_source": "native",
+        # The native path ships BigQuery ML's own point forecast, uncorrected, and BigQuery ML's own
+        # band, uncalibrated. Both columns say so rather than reading NULL, because NULL here would
+        # be indistinguishable from "an older run wrote this row before the columns existed", and
+        # the whole use of these columns is a fleet-wide GROUP BY that mixes engines. There is no
+        # margin to report: a comparison needs two arms and this engine produces one.
+        "point_forecast_source": "raw",
+        "interval_calibration": "native",
+        "point_forecast_margin": None,
     }
 
 

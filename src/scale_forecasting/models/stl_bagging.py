@@ -82,7 +82,11 @@ class StlBagging(BaseModel):
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(np.quantile(paths, q, axis=0), t, lam) for q in quantiles}
         ds = self._future_index(self._last_date, horizon)
-        return self._assemble_frame(ds, qmap)
+        # `center` is the raw path: the bootstrap draws are added *on top* of it, so this model's
+        # 0.5 quantile is `center + median(draw)` and is shifted like a residual-interval model's,
+        # even though it declares a native band. That is exactly the asymmetry `yhat_raw` exists
+        # to expose — the declared capability and the actual point forecast were not the same fact.
+        return self._assemble_frame(ds, qmap, raw=invert_transform(center, t, lam))
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:

@@ -60,6 +60,15 @@ DecisionMetric = Literal[
     "interval_width",
 ]
 
+# Metrics whose loss is quadratic in the error, and for which the *mean* is therefore the optimal
+# point forecast. Everything else in the panel is absolute-error-shaped (or a proper interval
+# score), where the median is optimal. `bias` belongs here for a different reason that lands in the
+# same place: adding the mean residual drives mean error to zero by construction.
+#
+# This is what `output.point_forecast` defaults from — the pairing is a theorem, not a preference,
+# so leaving a user to discover it by reading forecasting literature would be a poor default.
+_SQUARED_ERROR_METRICS = frozenset({"rmse", "mse", "rmsse", "bias"})
+
 # Ensemble strategies. "Learned" strategies train on backtest OOF and
 # therefore require backtesting to be ON; "calculated" ones work either way.
 CALCULATED_STRATEGIES = frozenset({"mean", "median", "inverse_error"})
@@ -185,6 +194,41 @@ class BacktestConfig(BaseModel):
     gap: int = Field(default=0, ge=0)
     # A fixed training width for `sliding`, decoupled from `min_train`'s role as a data floor.
     window: int | None = Field(default=None, gt=0)
+
+
+class OutputConfig(BaseModel):
+    """What the numbers we ship *mean* — the functional behind ``yhat``.
+
+    Its own section rather than a field on `BacktestConfig`, even though both of its rules involve
+    the backtest, because a reader asking "how do I control the point forecast?" will not look
+    under `backtest`, and the docs are a product surface here.
+
+    Every model emits one number per future date, so something decides what that number is. For a
+    long time this project decided by accident: ten of sixteen models built their band from
+    residual quantiles, the frame assembler took the 0.5 quantile as ``yhat``, and the shipped
+    forecast was silently ``prediction + median(in-sample residual)`` — un-named, un-configurable,
+    and applied to some models and not others. Measurement said the correction was worth keeping
+    (it moved fleet WAPE by 5.7%), so it is the default. This field is what turns it from an
+    opinion into a default: the alternative is now sayable.
+
+    ``yhat_raw`` is written alongside ``yhat`` whatever this is set to, so the choice is never
+    destructive and the two arms can always be compared after the fact. See `calibration.py`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # None means "derive from backtest.decision_metric" — resolved in `RunConfig._normalize`, so
+    # the serialized config (and therefore the run_id) always carries the concrete arm rather than
+    # a placeholder whose meaning would depend on the code that read it.
+    #
+    #   raw    — the model's own output, untouched.
+    #   median — plus the median residual. Minimises absolute error; the default for the
+    #            absolute-error metrics, which is most of them.
+    #   mean   — plus the mean residual. Minimises squared error, and drives `bias` to zero by
+    #            construction. **Requires a backtest**: the mean shift is estimated from
+    #            out-of-fold residuals and there is no in-sample equivalent for a model that
+    #            builds its band from quantiles.
+    point_forecast: Literal["raw", "median", "mean"] | None = None
 
 
 class HpoConfig(BaseModel):
@@ -770,6 +814,7 @@ class RunConfig(BaseModel):
     models: list[str] = Field(min_length=1)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    output: OutputConfig = Field(default_factory=OutputConfig)
     hpo: HpoConfig = Field(default_factory=HpoConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     compute: ComputeConfig = Field(default_factory=ComputeConfig)
@@ -845,6 +890,37 @@ class RunConfig(BaseModel):
                 object.__setattr__(
                     self, "ensemble", self.ensemble.model_copy(update={"strategies": kept})
                 )
+
+        # 3b. Resolve the point-forecast arm from the decision metric, so `yhat` and the metric it
+        #     is judged on cannot disagree. The median minimises absolute error and the mean
+        #     minimises squared error; shipping a median point forecast to a user scored on RMSE
+        #     is a mismatch nothing used to mention. Resolved here rather than read lazily so the
+        #     serialized config carries the concrete arm — the run_id then records what was
+        #     actually computed, not an instruction to go and decide later.
+        if self.output.point_forecast is None:
+            wants_mean = self.backtest.decision_metric in _SQUARED_ERROR_METRICS
+            # The mean shift only exists out-of-fold, so without a backtest the honest resolution
+            # of "you want squared-error behaviour" is the correction we can actually compute.
+            resolved = "mean" if (wants_mean and self.backtest.enabled) else "median"
+            object.__setattr__(
+                self, "output", self.output.model_copy(update={"point_forecast": resolved})
+            )
+        elif self.output.point_forecast == "mean" and not self.backtest.enabled:
+            raise ValueError(
+                "output.point_forecast='mean' requires backtest.enabled: the mean residual shift "
+                "is estimated from out-of-fold residuals, and there is no in-sample equivalent. "
+                "Use 'median' (the model's own correction) or 'raw' (no correction)."
+            )
+        elif self.output.point_forecast == "median" and (
+            self.backtest.decision_metric in _SQUARED_ERROR_METRICS
+        ):
+            _log.warning(
+                "output.point_forecast='median' with decision_metric=%r: the median minimises "
+                "absolute error while %r penalises squared error, so the shipped point forecast "
+                "is not the one the leaderboard rewards. 'mean' is the coherent pair.",
+                self.backtest.decision_metric,
+                self.backtest.decision_metric,
+            )
 
         # 4. Harden every per-family compute override by resolving it now, so an incoherent
         #    combination the per-block validator can't see (e.g. a T4 GPU inherited onto Dataproc

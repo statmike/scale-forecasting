@@ -17,10 +17,10 @@ import pytest
 
 from scale_forecasting import worker
 from scale_forecasting.backtest import OOF_COLUMNS
+from scale_forecasting.calibration import CALIBRATED_COLUMNS
 from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError, DataError, ModelError
 from scale_forecasting.metrics import METRIC_NAMES
-from scale_forecasting.models.base_model import PREDICTION_COLUMNS
 from scale_forecasting.resources.catalog import _INTRAOP_ENV_VARS
 from scale_forecasting.worker import ERROR_CLASSES, CellResult, classify_error, run_cell
 
@@ -63,7 +63,7 @@ def test_ok_cell_is_complete() -> None:
 def test_ok_cell_predictions_are_canonical() -> None:
     res = run_cell(_series(), "theta", _cfg())
     df = res.predictions
-    assert list(df.columns) == list(PREDICTION_COLUMNS)
+    assert list(df.columns) == list(CALIBRATED_COLUMNS)
     assert len(df) == HORIZON
     assert df["ds"].dtype == np.dtype("datetime64[ns]")
     assert (df["yhat_lower"] <= df["yhat"] + 1e-6).all()
@@ -135,6 +135,57 @@ def test_a_model_without_its_own_interval_records_the_residual_provenance() -> N
     res = run_cell(_series(), "xgboost", _cfg(models=["xgboost"]))
     assert res.status == "ok"
     assert res.interval_source == "residual"
+
+
+# --- which number ships in `yhat` ----------------------------------------------
+#
+# End to end through `run_cell`, because the unit tests in `test_calibration.py` exercise the
+# arithmetic on hand-built frames and this is the seam where a config field has to reach it.
+
+
+def _flat_series(n: int = 120, level: float = 50.0) -> pd.DataFrame:
+    """Constant level plus symmetric noise that sums to exactly zero — so the mean is known."""
+    idx = pd.date_range("2023-01-01", periods=n, freq="D")
+    noise = np.tile([1.0, -1.0], n // 2)
+    return pd.DataFrame({"ts_id": "flat", "ds": idx, "y": level + noise})
+
+
+def test_raw_arm_on_constant_plus_noise_returns_the_analytic_value() -> None:
+    """`naive_mean` on a level with zero-sum noise forecasts the level. Under `raw` it says so.
+
+    The check that `raw` really is raw: any residual shift leaking in would move this off 50.0, and
+    it is the one case where the right answer is known without running anything.
+    """
+    cfg = _cfg(models=["naive_mean"], output={"point_forecast": "raw"})
+    res = run_cell(_flat_series(), "naive_mean", cfg)
+    assert res.status == "ok"
+    assert np.allclose(res.predictions["yhat"], 50.0)
+    assert np.allclose(res.predictions["yhat_raw"], 50.0)
+    assert res.point_forecast_source == "raw"
+
+
+def test_both_arms_are_written_whichever_one_ships() -> None:
+    """The choice is never destructive: the arm not taken is still in the row."""
+    for arm in ("raw", "median"):
+        res = run_cell(_series(), "theta", _cfg(output={"point_forecast": arm}))
+        df = res.predictions
+        assert res.point_forecast_source == arm
+        assert df["yhat_raw"].notna().all() and df["yhat_adjusted"].notna().all()
+        shipped = "yhat_raw" if arm == "raw" else "yhat_adjusted"
+        assert np.allclose(df["yhat"], df[shipped])
+
+
+def test_without_a_backtest_the_band_is_the_models_own_and_the_row_says_so() -> None:
+    res = run_cell(_series(), "theta", _cfg())
+    assert res.interval_calibration == "in-sample"
+    assert res.point_forecast_margin is None  # nothing held out to grade the correction on
+
+
+def test_a_backtest_recalibrates_the_band_and_grades_the_arm() -> None:
+    res = run_cell(_series(200), "theta", _bt_cfg(n_folds=3))
+    assert res.status == "ok"
+    assert res.interval_calibration in ("oof-per-step", "oof-flat")
+    assert res.point_forecast_margin is not None  # a number, sign not asserted — it is measured
 
 
 # --- a scoring shortfall must never cost the forecast --------------------------

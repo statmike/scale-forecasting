@@ -65,7 +65,7 @@ class HoltWinters(BaseModel):
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
         ds = self._future_index(self._last_date, horizon)
-        return self._assemble_frame(ds, qmap)
+        return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:

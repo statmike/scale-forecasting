@@ -60,6 +60,27 @@ bounds (`lower ≤ yhat ≤ upper`). The base class does the assembly for you:
 - call `self._assemble_frame(ds, qmap)` (use `self._future_index(last_date, horizon)` for the
   dates).
 
+### What the system does with your frame afterwards
+
+Your `yhat` is the **raw** arm. Downstream, `calibration.apply_calibration` may ship a corrected
+number in its place — `yhat` plus a residual shift, per `output.point_forecast` — writing both arms
+to `yhat_raw` and `yhat_adjusted` so the choice is recorded and reversible. Two consequences for a
+model author:
+
+- **`yhat` should be your model's honest central estimate, not a pre-corrected one.** If you shift
+  it yourself, the system's correction stacks on top of yours and neither is visible in the row.
+  Where the model library you wrap offers a choice, return the untouched forecast.
+- **Your band may be replaced.** When a backtest runs, `yhat_lower` / `yhat_upper` / `quantiles` are
+  re-estimated per horizon step from out-of-fold residuals, whatever your model produced.
+  `forecast_metadata.interval_source` still records that your model computed its own bounds
+  (`supports_native_intervals`), and `interval_calibration` records that they were re-estimated;
+  they are separate columns because they are separate facts. With no backtest, your band ships
+  untouched.
+
+Nothing here changes what `predict` must return. It is worth knowing because it is why the honest
+version of both numbers is the useful one: the system can always correct a clean estimate, and can
+never recover one from an estimate that was already adjusted.
+
 ### Rules that keep the product coherent
 
 - **One model, one file.** No model imports another model. Shared machinery goes in a helper

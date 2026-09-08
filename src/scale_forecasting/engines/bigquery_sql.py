@@ -339,7 +339,7 @@ def _forecast_source(
 # Columns written to forecast_predictions, in DDL order (shared by the INSERT).
 _PRED_COLS = (
     "run_id, ts_id, model_type, compute_engine, forecast_date, "
-    "yhat, yhat_lower, yhat_upper, quantiles"
+    "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles"
 )
 
 
@@ -359,6 +359,12 @@ def build_forecast_insert_sql(
     ``forecast_timestamp`` → ``DATE()`` → ``forecast_date``; the interval bounds map to
     ``yhat_lower`` / ``yhat_upper``;
     ``quantiles`` is NULL (native models emit an interval, not an arbitrary quantile set).
+
+    ``forecast_value`` is written three times, into ``yhat``, ``yhat_raw`` and ``yhat_adjusted``.
+    BigQuery ML applies no bias correction, so this engine has one arm and the three columns are
+    genuinely the same number — writing it out is what keeps ``yhat_raw`` meaning "the model's own
+    output" for every row in the table, rather than "the model's own output, unless a native model
+    wrote the row, in which case NULL".
     """
     dataset_q = f"`{_registry_of(dataset, registry_dataset)}.forecast_predictions`"
     forecast = _forecast_source(
@@ -373,7 +379,7 @@ def build_forecast_insert_sql(
         f"  ({_PRED_COLS})\n"
         f"SELECT\n"
         f"  @run_id, {cfg.data.ts_id_col}, '{model_name}', 'bigquery',\n"
-        f"  DATE(forecast_timestamp), forecast_value,\n"
+        f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
         f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL\n"
         f"FROM {forecast};"
     )

@@ -57,6 +57,13 @@ def assemble_prediction_rows(result: CellResult) -> list[dict[str, Any]]:
                 "compute_engine": result.compute_engine,
                 "forecast_date": _as_date(rec["ds"]),
                 "yhat": _as_float(rec.get("yhat")),
+                # The two arms `yhat` was chosen between. `yhat_raw` is the model's own output;
+                # `yhat_adjusted` adds the out-of-fold bias correction. Written side by side so
+                # that switching `output.point_forecast` on a delivered run is a query, not a
+                # re-run — and so the comparison between them is a fact in the registry rather
+                # than a claim in a docstring.
+                "yhat_raw": _as_float(rec.get("yhat_raw")),
+                "yhat_adjusted": _as_float(rec.get("yhat_adjusted")),
                 "yhat_lower": _as_float(rec.get("yhat_lower")),
                 "yhat_upper": _as_float(rec.get("yhat_upper")),
                 "quantiles": _as_json(rec.get("quantiles")),
@@ -86,6 +93,11 @@ def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
                 "forecast_date": _as_date(rec["ds"]),
                 "y_true": _as_float(rec.get("y_true")),
                 "yhat": _as_float(rec.get("yhat")),
+                # These are the residual source. `calibration.calibrate_from_oof` learns the
+                # correction from `y_true - yhat_raw`, so the column it learns from has to be in
+                # the registry for the number to be auditable after the fact.
+                "yhat_raw": _as_float(rec.get("yhat_raw")),
+                "yhat_adjusted": _as_float(rec.get("yhat_adjusted")),
                 "yhat_lower": _as_float(rec.get("yhat_lower")),
                 "yhat_upper": _as_float(rec.get("yhat_upper")),
                 # The fold's training cutoff — its identity across a ragged panel, where the same
@@ -150,7 +162,23 @@ def assemble_metadata_row(
         # reporting its own uncertainty; a model without one is being scored on the empirical
         # spread of its in-sample residuals, which is a different and generally more optimistic
         # claim. Ranking the two on coverage without this column compares two different things.
+        #
+        # It describes what the *model* produced. `interval_calibration` below describes what
+        # happened to it afterwards, and the two are independent: when a backtest ran, the shipped
+        # band is re-estimated per horizon step from out-of-fold residuals regardless of which of
+        # the two the model started with. Folding that into `interval_source` would have made a
+        # native-interval model and a residual-interval model indistinguishable after calibration,
+        # which is the one comparison the column exists to support.
         "interval_source": result.interval_source,
+        # Which arm `yhat` is (`raw` / `median` / `mean`), how its band was calibrated
+        # (`oof-per-step` / `oof-flat` / `in-sample`), and by how much the chosen arm beat the
+        # other on this cell's own out-of-fold folds, in the run's `decision_metric`. The margin
+        # is signed: positive means the arm `yhat` carries won. A fleet-wide GROUP BY on these
+        # three is the diagnostic — whether the correction is earning its place is a question
+        # about this run's data, and nothing but this run's data can answer it.
+        "point_forecast_source": result.point_forecast_source,
+        "interval_calibration": result.interval_calibration,
+        "point_forecast_margin": result.point_forecast_margin,
         # How the *cell* went. `run_cell` has always computed this and thrown it away at the table
         # boundary: an error cell was written as a row of NULL metrics with `fit_seconds = 0`, and
         # telling it apart from a successful cell that simply was not scored meant knowing that

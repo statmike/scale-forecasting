@@ -37,6 +37,11 @@ _PRED_SPEC: tuple[tuple[str, str], ...] = (
     ("ensemble_id", "S"),
     ("forecast_date", "S"),
     ("yhat", "D"),
+    # Both arms, always. `yhat` is whichever one the run selected (`output.point_forecast`);
+    # these two say what the choice was between, so a reader can re-score the other one without
+    # re-running the forecast.
+    ("yhat_raw", "D"),
+    ("yhat_adjusted", "D"),
     ("yhat_lower", "D"),
     ("yhat_upper", "D"),
     ("quantiles", "S"),
@@ -52,6 +57,8 @@ _OOF_SPEC: tuple[tuple[str, str], ...] = (
     ("forecast_date", "S"),
     ("y_true", "D"),
     ("yhat", "D"),
+    ("yhat_raw", "D"),
+    ("yhat_adjusted", "D"),
     # Reserved, as above: the fold's origin and the step within its horizon, the interval bounds
     # the native path already has and the Python path does not, and the write timestamp.
     ("cutoff_date", "S"),
@@ -101,6 +108,9 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("first_val_date", "S"),
     ("last_val_date", "S"),
     ("interval_source", "S"),
+    ("point_forecast_source", "S"),
+    ("interval_calibration", "S"),
+    ("point_forecast_margin", "D"),
     ("ensemble_scoring", "S"),
     ("hpo_scoring", "S"),
     ("n_fits", "I"),

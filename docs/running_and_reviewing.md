@@ -237,6 +237,38 @@ side by side, [`08_run_and_monitor`](https://github.com/statmike/scale-forecasti
 a run and watches it land, and [`09_review_run`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_review_run.ipynb)
 reviews any finished run in data-science detail.
 
+### Was the correction worth it, and does the band mean what it says?
+
+The leaderboard answers "which model won". It does not answer either question a forecaster asks next
+about the numbers themselves, and both are answerable from the run's own held-out folds rather than
+from a claim in a doc. `review.calibration_report(run_id)` answers them together:
+
+```python
+import scale_forecasting as sf
+
+rep = sf.calibration_report("YOUR_RUN_ID")
+for arm in rep.arms:
+    print(arm.model_type, arm.point_forecast_source, arm.win_rate, arm.mean_margin)
+print(rep.mean_coverage, "against nominal", rep.nominal_coverage)
+print("worst step:", rep.worst_step)
+```
+
+**The point forecast.** Every model's `yhat` is either its raw output or that output plus a residual
+shift, chosen by `output.point_forecast` (see
+[configuration_reference.md](./configuration_reference.md)). `rep.arms` gives one row per model:
+which arm shipped, and what the choice was worth. Read `win_rate` before `mean_margin` — a
+correction that helps 51% of series by a lot and hurts 49% by a lot is a different proposition from
+one that helps everything a little, and the average cannot tell them apart. The margin is estimated
+leave-one-fold-out, so a correction is never graded on the folds it was fitted on.
+
+**The interval.** `rep.coverage` is achieved coverage per horizon step per model, against
+`rep.nominal_coverage` — the span of the run's quantile set, 0.8 for the shipped default. Read
+`worst_step` beside `mean_coverage`: a run whose average looks fine while one end of the horizon is
+badly wrong should not read as healthy, and an average will always say it does. That is also the
+number to watch when a model's `interval_calibration` is `in-sample` or `oof-flat` rather than
+`oof-per-step` — a flat band is too wide early and too narrow late, and only the per-step view shows
+it.
+
 These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or
 per-fold OOF truth — see [output_schemas.md](./output_schemas.md) for every column and how the tiers

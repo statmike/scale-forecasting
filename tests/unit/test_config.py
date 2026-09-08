@@ -456,3 +456,73 @@ def test_profile_is_part_of_the_run_id() -> None:
     baseline = make_run_id(RunConfig(**_minimal_dict()))
     profiled = make_run_id(RunConfig(**_minimal_dict(compute={"profile": {"mode": "always"}})))
     assert baseline != profiled
+
+
+# --- output.point_forecast — the arm resolution ----------------------------------
+
+
+def test_point_forecast_defaults_to_median_for_absolute_error_metrics() -> None:
+    cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": "wape"}))
+    assert cfg.output.point_forecast == "median"
+
+
+def test_point_forecast_defaults_to_mean_for_squared_error_metrics() -> None:
+    """The pairing is a theorem: the mean minimises squared error, the median absolute error."""
+    for metric in ("rmse", "mse", "rmsse", "bias"):
+        cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": metric}))
+        assert cfg.output.point_forecast == "mean", metric
+
+
+def test_squared_error_metric_without_a_backtest_resolves_to_median_not_mean() -> None:
+    """The mean shift only exists out-of-fold, so 'mean' is not an available default here."""
+    cfg = RunConfig(**_minimal_dict(backtest={"enabled": False, "decision_metric": "rmse"}))
+    assert cfg.output.point_forecast == "median"
+
+
+def test_the_resolved_arm_is_what_lands_in_the_serialized_config() -> None:
+    """`None` must not survive into the run_id: the record has to say which arm was computed."""
+    cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": "rmse"}))
+    assert cfg.model_dump()["output"]["point_forecast"] == "mean"
+
+
+def test_the_arm_is_part_of_the_run_id() -> None:
+    from scale_forecasting.registry.ids import make_run_id
+
+    base = _minimal_dict(backtest={"enabled": True, "decision_metric": "wape"})
+    default = make_run_id(RunConfig(**base))
+    raw = make_run_id(RunConfig(**{**base, "output": {"point_forecast": "raw"}}))
+    assert default != raw  # different numbers shipped → a different run
+
+
+def test_mean_without_a_backtest_is_an_error_not_a_silent_downgrade() -> None:
+    with pytest.raises(ValueError, match="requires backtest.enabled"):
+        RunConfig(**_minimal_dict(backtest={"enabled": False}, output={"point_forecast": "mean"}))
+
+
+def test_an_explicit_median_against_a_squared_error_metric_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Allowed — you may have a reason — but the mismatch is stated rather than left to be found."""
+    with caplog.at_level("WARNING"):
+        cfg = RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": True, "decision_metric": "rmse"},
+                output={"point_forecast": "median"},
+            )
+        )
+    assert cfg.output.point_forecast == "median"  # honoured, not overridden
+    assert "not the one the leaderboard rewards" in caplog.text
+
+
+def test_raw_against_a_squared_error_metric_does_not_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """'raw' is opting out of correction entirely, not choosing the wrong correction."""
+    with caplog.at_level("WARNING"):
+        RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": True, "decision_metric": "rmse"},
+                output={"point_forecast": "raw"},
+            )
+        )
+    assert "leaderboard rewards" not in caplog.text

@@ -118,7 +118,10 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `cell_status` | `STRING` | How the *cell* went: `ok` or `error`. |
 | `error_class` | `STRING` | Which kind of failure it was, from a fixed vocabulary you can `GROUP BY` (see below). NULL on an `ok` cell. |
 | `error_detail` | `STRING` | The exception itself, as text, truncated at 2,000 characters. NULL on an `ok` cell. |
-| `interval_source` | `STRING` | Where the prediction interval came from: `native` (the model computed its own) or `residual` (built from the spread of its in-sample residuals). NULL on ensemble rows, which do not carry an interval. |
+| `interval_source` | `STRING` | Where the prediction interval came from **as the model produced it**: `native` (the model computed its own) or `residual` (built from the spread of its in-sample residuals). NULL on ensemble rows, which do not carry an interval. |
+| `point_forecast_source` | `STRING` | Which arm the shipped `yhat` is: `raw` (the model's own number) or `median` / `mean` (that number plus the corresponding residual shift). Set from `output.point_forecast`. |
+| `interval_calibration` | `STRING` | What happened to the band *after* the model produced it: `oof-per-step` (re-estimated per horizon step from out-of-fold residuals), `oof-flat` (one pooled out-of-fold band, too few residuals to resolve per step), `in-sample` (no backtest ran; the model's own band shipped unchanged), or `native` (BigQuery-native rows). |
+| `point_forecast_margin` | `FLOAT64` | How much the corrected arm beat the raw one by on this cell, as a fraction of the raw arm's loss in the run's `decision_metric`. Positive means the correction helped. NULL when there was no backtest to grade it on. |
 | `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. NULL means backtesting was never asked for. |
 | `n_folds_achieved` | `INT64` | Folds actually scored (`0` on `unscored`/`failed`). |
 | `backtest_note` | `STRING` | Why the backtest was not `full` — the shortfall arithmetic, or the exception. NULL when it was. |
@@ -176,6 +179,57 @@ at. `WHERE interval_source = 'native'` makes that comparison honest.
 BigQuery-native rows say `native` because `ML.FORECAST` returns real bounds. Ensemble rows leave it
 NULL: combining base-model point forecasts produces no interval, so there is no provenance to
 record.
+
+### What happened to the band afterwards
+
+`interval_source` describes what the *model* handed over. `interval_calibration` describes what the
+system did with it, and the two are independent — when a backtest ran, the band that ships is
+re-estimated from out-of-fold residuals regardless of which kind the model started with.
+
+That re-estimation is the fix for both weaknesses above at once. The residuals come from held-out
+folds rather than from data the model has already seen, so the band is no longer optimistic by
+construction; and they are bucketed by `horizon_step`, so the band is allowed to widen with distance
+instead of being one width for the whole horizon.
+
+Measured on ten models × 24 series, scored leave-one-fold-out so nothing is graded on the residuals
+it was fitted from: the in-sample band achieved **0.601** coverage against a nominal 0.8, the
+recalibrated band **0.790**. The average is the smaller half of the result. Per-model coverage ran
+from 0.053 to 0.837 before and from 0.755 to 0.821 after — so a column that meant something
+different for every model now means the same thing across the leaderboard, which is what makes
+`coverage` usable as a `decision_metric` at all.
+
+| `interval_calibration` | What you are looking at |
+|---|---|
+| `oof-per-step` | Re-estimated per horizon step from out-of-fold residuals. The band widens with distance because the measured error does. |
+| `oof-flat` | Out-of-fold, but too few residuals to resolve per step, so one pooled band covers the horizon. Honest about being flat rather than dressed up as per-step. |
+| `in-sample` | No backtest ran, so the model's own band shipped untouched — whatever `interval_source` says it was. |
+| `native` | A BigQuery-native row. `ML.FORECAST` computes its own bounds and nothing downstream rewrites them. |
+
+Per-step estimation needs enough residuals per step to be worth the name; below that floor the
+window over neighbouring steps widens until it has them, and if it swallows the whole horizon the
+row says `oof-flat` rather than claiming a resolution it does not have.
+
+### Which number `yhat` is
+
+Every model emits one number per future date, and something has to decide what that number is. Three
+columns record the decision rather than leaving it implicit:
+
+- **`yhat_raw`** — the model's own output, untouched.
+- **`yhat_adjusted`** — that output plus a residual shift, either the median (minimises absolute
+  error) or the mean (minimises squared error, and drives `bias` to zero by construction).
+- **`yhat`** — whichever of the two the run shipped, chosen by `output.point_forecast`.
+
+Both arms are always written, so the choice is never destructive: a run that shipped the corrected
+arm can still be scored on the raw one months later without re-fitting anything.
+`forecast_metadata.point_forecast_source` says which arm `yhat` is, and `point_forecast_margin` says
+what the choice was worth on that cell. `sf.calibration_report(run_id)` rolls both up per model
+alongside the coverage panel — the win rate matters more than the average margin, because a
+correction that helps half the series a lot and hurts the other half a lot is a different
+proposition from one that helps everything a little.
+
+On BigQuery-native rows all three columns hold the same number: `ML.FORECAST` returns one forecast,
+there is no second arm, and writing it three times keeps `y_true - yhat_raw` a valid residual on
+every engine so a cross-engine query needs no special case.
 
 ### A series too short to score still has a forecast
 
@@ -277,7 +331,9 @@ The values tier: one row per (run, series, model, **date**) over the horizon. Pa
 | `compute_engine` | `STRING` | Where it ran (`spark` / `ray` / `bigquery`). |
 | `ensemble_id` | `STRING` | NULL for base models; the ensemble digest for ensemble rows. |
 | `forecast_date` | `DATE` | The future date this point forecasts (partition key). |
-| `yhat` | `FLOAT64` | The point forecast. |
+| `yhat` | `FLOAT64` | The point forecast that shipped — whichever arm `output.point_forecast` selected. |
+| `yhat_raw` | `FLOAT64` | The model's own output, before any residual correction. |
+| `yhat_adjusted` | `FLOAT64` | The corrected arm: `yhat_raw` plus the residual shift. Equal to `yhat_raw` on BigQuery-native rows, which have only one arm. |
 | `yhat_lower` | `FLOAT64` | Lower prediction-interval bound. |
 | `yhat_upper` | `FLOAT64` | Upper prediction-interval bound. |
 | `quantiles` | `JSON` | Full quantile forecast when a model emits one (e.g. `{"0.1": ..., "0.9": ...}`), else NULL. |
@@ -297,7 +353,9 @@ clustered by `run_id, ts_id`.
 | `fold_id` | `INT64` | Which backtest fold. |
 | `forecast_date` | `DATE` | The held-out date. |
 | `y_true` | `FLOAT64` | The actual value (held out of training that fold). |
-| `yhat` | `FLOAT64` | The base model's prediction for it. |
+| `yhat` | `FLOAT64` | The base model's prediction for it, on the arm the run shipped. |
+| `yhat_raw` | `FLOAT64` | The model's own output for that date, uncorrected. This is the column the calibration reads: `y_true - yhat_raw` is the residual that both the point-forecast shift and the per-step band are estimated from. |
+| `yhat_adjusted` | `FLOAT64` | The corrected arm for that date. |
 | `yhat_lower` | `FLOAT64` | Lower bound of the prediction interval for that held-out date. |
 | `yhat_upper` | `FLOAT64` | Upper bound of the same interval. |
 | `cutoff_date` | `DATE` | The last date the model was allowed to see when it made this prediction — the fold's origin. Python cells only; NULL on BigQuery-native rows. |
@@ -311,13 +369,14 @@ A model that is excellent one day out and useless four weeks out has the *same* 
 leaderboard as one that is mediocre throughout, because the leaderboard averages the whole horizon.
 Grouping the OOF rows by `horizon_step` separates them.
 
-It is also the column that makes a real weakness visible. When a model has no prediction interval of
-its own, the band around its forecast is built from the spread of its in-sample residuals, and that
-band is the **same width at every step** — as wide one day out as twenty-eight days out. Real
+It is also the column the interval calibration is built on. A band estimated once for the whole
+horizon is the **same width at every step** — as wide one day out as twenty-eight days out. Real
 uncertainty grows with distance, so such a band is too wide early and too narrow late, and the late
-under-coverage is invisible in a single averaged `coverage` number. Group by `horizon_step` and it
-shows up immediately. `forecast_metadata.interval_source` tells you which models to expect this
-from.
+under-coverage is invisible in a single averaged `coverage` number. Bucketing the out-of-fold
+residuals by `horizon_step` is what lets the shipped band widen with distance instead; a run whose
+`interval_calibration` says `oof-per-step` has had that done to it. Where it says `in-sample` or
+`oof-flat`, the flat-band weakness is still there, and grouping by `horizon_step` shows it
+immediately.
 
 `cutoff_date` and `horizon_step` are written by the Python engines (Spark, Ray). The
 BigQuery-native path evaluates all its folds against one global cutoff, so it has no per-series

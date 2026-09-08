@@ -50,6 +50,13 @@ OOF_COLUMNS: tuple[str, ...] = (
     "fold_id",
     "y_true",
     "yhat",
+    # The model's own point forecast, before any residual bias correction. Both arms are stored
+    # because the comparison between them is a deliverable, and a comparison cannot be run after
+    # the fact against a number that was never written down. These are also the residuals
+    # `calibration.calibrate_from_oof` learns from — measured against the model's *own* output, so
+    # the correction is never estimated from data it has already been applied to.
+    "yhat_raw",
+    "yhat_adjusted",
     "yhat_lower",
     "yhat_upper",
     "cutoff_date",
@@ -186,7 +193,17 @@ def backtest_cell(
         # Align yhat to the true validation dates by position (folds are contiguous).
         # yhat is already in original units (predict inverts the transform), so
         # y_true / y_train are inverted here to score in the same units.
-        yhat = pred["yhat"].to_numpy()[: fold.val_size]
+        # Both arms, always. `pred["yhat"]` is the model's own corrected point — for a
+        # residual-band model that is `prediction + median(in-sample residual)` computed from *this
+        # fold's* training window, so scoring it against this fold's validation slice is honest.
+        # `yhat` is then whichever arm the run selected, and it is what `fold_metrics` scores.
+        #
+        # `mean` scores as `median` here on purpose: the mean shift is an out-of-fold statistic
+        # (`calibration.StepCalibration.mean`) and a fold's model never computed one. Both arms
+        # mean "corrected"; only the final forecast can tell them apart.
+        yhat_raw = pred["yhat_raw"].to_numpy()[: fold.val_size]
+        yhat_adjusted = pred["yhat"].to_numpy()[: fold.val_size]
+        yhat = yhat_raw if cfg.output.point_forecast == "raw" else yhat_adjusted
         # Every model returns bounds — natively if it has them, from its residual quantiles if not
         # (`BaseModel.residual_intervals`), so these columns are never absent. They used to be
         # computed on every fold and then dropped on the floor: `coverage`, `pinball`,
@@ -206,6 +223,8 @@ def backtest_cell(
                     "fold_id": fold.fold_id,
                     "y_true": y_true,
                     "yhat": yhat,
+                    "yhat_raw": yhat_raw,
+                    "yhat_adjusted": yhat_adjusted,
                     "yhat_lower": lower,
                     "yhat_upper": upper,
                     # The last training date — the origin the fold forecasts from, `ds <= cutoff`.

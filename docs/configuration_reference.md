@@ -27,6 +27,7 @@ schema) surfaces as a single `ConfigError`.
 | `model_params` | `dict[str, dict[str, …]]` | `{}` | Per-model hyperparameters, keyed by model name — see below. |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
 | `backtest` | `BacktestConfig` | `{}` | Time-series cross-validation. |
+| `output` | `OutputConfig` | `{}` | What the shipped `yhat` means — see below. |
 | `hpo` | `HpoConfig` | `{}` | Hyperparameter optimization. |
 | `ensemble` | `EnsembleConfig` | `{}` | Consensus across base models. |
 | `compute` | `ComputeConfig` | `{}` | Runtime scale + cost guardrails. |
@@ -255,6 +256,46 @@ Two caveats the direction map deliberately does not try to fix. Coverage is real
 nominal level, not at 1.0 — a band wide enough to cover everything scores perfectly here — and
 `interval_width` on its own rewards a band of zero width. Neither is a good `decision_metric` alone;
 `interval_score` is the one that trades them off.
+
+## `output` — `OutputConfig`
+
+What the number in `yhat` actually *is*. One field.
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `point_forecast` | `"raw"` \| `"median"` \| `"mean"` | derived from `backtest.decision_metric` | Which arm ships in `yhat`. |
+
+Every model emits one number per future date, so something decides what that number is:
+
+- **`raw`** — the model's own output, untouched.
+- **`median`** — that output plus the median residual. Minimises absolute error, which is what most
+  of the metric panel measures.
+- **`mean`** — plus the mean residual. Minimises squared error, and drives `bias` to zero by
+  construction. **Requires `backtest.enabled`**: the mean shift is estimated from out-of-fold
+  residuals and there is no in-sample equivalent for a model that builds its band from quantiles.
+  Asking for it without a backtest is an error, not a silent downgrade.
+
+`yhat_raw` and `yhat_adjusted` are both written to `forecast_predictions` and `backtest_oof`
+whatever you set here, so the choice is never destructive — you can re-score a finished run on the
+other arm without re-fitting anything.
+
+**The default is derived, not fixed.** Leave `point_forecast` unset and it resolves from
+`backtest.decision_metric`: `mean` for the squared-error metrics (`rmse`, `mse`, `rmsse`, `bias`)
+when a backtest is enabled, `median` otherwise. The pairing is a theorem rather than a preference —
+the median minimises absolute error and the mean minimises squared error — so shipping a median
+point forecast to a run scored on RMSE is a mismatch, and setting that combination explicitly logs a
+warning saying so. The resolution happens at parse time and the concrete arm is what lands in the
+serialized config, so the `run_id` records which arm was computed rather than an instruction to
+decide later.
+
+**Why this field exists at all.** For a long time the project decided this by accident: ten of the
+sixteen models built their band from residual quantiles, the frame assembler took the 0.5 quantile
+as `yhat`, and the shipped forecast was silently the model's prediction plus its median in-sample
+residual — un-named, un-configurable, and applied to some models and not others, so the leaderboard
+was comparing corrected models against uncorrected ones. Measuring it on ten models found the
+correction was worth keeping (it moved fleet WAPE by 5.7%), so it stayed the default. This field is
+what turns it from an accident into a default: the alternative is now sayable, and
+`sf.calibration_report(run_id)` reports what the choice was worth on your data.
 
 ## `model_params` — hyperparameters you set yourself
 

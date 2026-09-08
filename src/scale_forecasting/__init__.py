@@ -61,6 +61,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "review_run": (".review", "review_run"),
     "RunProgress": (".review", "RunProgress"),
     "RunReview": (".review", "RunReview"),
+    "calibration_report": (".review", "calibration_report"),
+    "CalibrationReport": (".review", "CalibrationReport"),
     "plot_progress": (".review", "plot_progress"),
     "plot_leaderboard": (".review", "plot_leaderboard"),
     "plot_metric_distribution": (".review", "plot_metric_distribution"),
@@ -112,8 +114,10 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .main import run  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
     from .review import (  # noqa: F401
+        CalibrationReport,
         RunProgress,
         RunReview,
+        calibration_report,
         monitor_run,
         plot_leaderboard,
         plot_metric_distribution,

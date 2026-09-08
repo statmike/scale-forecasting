@@ -11,6 +11,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from scale_forecasting.calibration import CALIBRATED_COLUMNS
 from scale_forecasting.playground import (
     available_models,
     bakeoff,
@@ -115,14 +116,9 @@ def test_run_model_theta_ok() -> None:
     run = run_model("theta", freq="D", horizon=14)
     assert run.result.status == "ok"
     assert len(run.result.predictions) == 14
-    # Canonical frame columns present.
-    assert list(run.result.predictions.columns) == [
-        "ds",
-        "yhat",
-        "yhat_lower",
-        "yhat_upper",
-        "quantiles",
-    ]
+    # Canonical frame columns present — the post-calibration set, since a cell always runs the
+    # point-forecast selection even when there is no backtest to calibrate from.
+    assert list(run.result.predictions.columns) == list(CALIBRATED_COLUMNS)
 
 
 def test_run_model_backtest_populates_metrics() -> None:

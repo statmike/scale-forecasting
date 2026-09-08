@@ -21,6 +21,10 @@ layer reads the run's own ``raw_config`` back to recover what it *planned* to do
 - `review_run` — *how did a finished run do, in data-science detail?* The best model per family and
   overall, the full metric panel aggregated across every series (mean + p10/p50/p90), and each
   ensemble's lift over the best base model.
+- `calibration_report` — *should you believe the numbers `review_run` just showed you?* Whether the
+  point-forecast correction earned its place on this run's own held-out folds, per model, and
+  whether the prediction interval achieves the coverage it claims — broken out by horizon step,
+  because a band that averages to nominal can still be wrong at both ends.
 
 Same pure/I-O seam as `sdk`: the ``_assemble_*`` functions are pure (turn reader dicts into the
 result dataclasses, unit-tested offline), while `monitor_run` / `review_run` are the thin I/O
@@ -55,9 +59,13 @@ __all__ = [
     "ModelReview",
     "EnsembleLift",
     "RunReview",
+    "ArmComparison",
+    "CoveragePoint",
+    "CalibrationReport",
     "family_of",
     "monitor_run",
     "review_run",
+    "calibration_report",
     "best_overall",
     "best_per_family",
     "ensemble_lift",
@@ -199,6 +207,147 @@ class RunReview:
     best_overall: ModelReview | None
     ensembles: tuple[ModelReview, ...]
     ensemble_lift: tuple[EnsembleLift, ...]
+
+
+@dataclass(frozen=True)
+class ArmComparison:
+    """One model's point-forecast arm choice on a finished run, and what the choice was worth.
+
+    ``margin`` is always "how much the corrected arm beat the raw one by", as a fraction of the raw
+    arm's loss in the run's ``decision_metric``, whichever arm the run actually shipped. Negative
+    means the correction lost. ``win_rate`` is the share of compared series where it won — the
+    number that matters more than the average, because a correction that helps 51% of series by a
+    lot and hurts 49% by a lot is a different proposition from one that helps everything a little.
+    """
+
+    model_type: str
+    compute_engine: str | None
+    point_forecast_source: str | None
+    interval_calibration: str | None
+    n_series: int
+    n_compared: int
+    n_corrected_wins: int
+    mean_margin: float | None
+    median_margin: float | None
+
+    @property
+    def win_rate(self) -> float | None:
+        """Share of compared series the corrected arm won, or None when nothing was compared."""
+        return None if not self.n_compared else self.n_corrected_wins / self.n_compared
+
+
+@dataclass(frozen=True)
+class CoveragePoint:
+    """Achieved interval coverage at one horizon step for one model."""
+
+    model_type: str
+    horizon_step: int
+    n: int
+    coverage: float | None
+    mean_width: float | None
+
+
+@dataclass(frozen=True)
+class CalibrationReport:
+    """What the run's own data says about its point forecast and its prediction interval.
+
+    Two questions a forecaster asks of any system that corrects a model's output, answered from the
+    run's held-out folds rather than from a claim in a doc:
+
+    * **Was the correction worth applying?** ``arms``, per model — win rate and margin.
+    * **Does the band mean what it says?** ``coverage`` per horizon step against ``nominal``,
+      which is the width of the run's quantile set (0.8 for the shipped default of 0.1/0.5/0.9).
+
+    ``worst_step`` is the single largest deviation from nominal across every model and step: a run
+    whose average coverage looks fine while one end of the horizon is badly wrong should not read
+    as healthy, and an average will always say it does.
+    """
+
+    run_id: str
+    decision_metric: str
+    nominal_coverage: float
+    arms: tuple[ArmComparison, ...]
+    coverage: tuple[CoveragePoint, ...]
+
+    @property
+    def mean_coverage(self) -> float | None:
+        """Row-count-weighted achieved coverage across every model and step."""
+        pts = [p for p in self.coverage if p.coverage is not None and p.n]
+        total = sum(p.n for p in pts)
+        return None if not total else sum(p.coverage * p.n for p in pts) / total  # type: ignore[misc]
+
+    @property
+    def worst_step(self) -> CoveragePoint | None:
+        """The model/step furthest from nominal — the thing an average is designed to hide."""
+        pts = [p for p in self.coverage if p.coverage is not None]
+        return max(pts, key=lambda p: abs(p.coverage - self.nominal_coverage), default=None)  # type: ignore[arg-type]
+
+
+def _assemble_calibration(
+    run_id: str,
+    decision_metric: str,
+    nominal_coverage: float,
+    arm_rows: list[dict[str, Any]],
+    coverage_rows: list[dict[str, Any]],
+) -> CalibrationReport:
+    """Compose a `CalibrationReport` from the two reader payloads (pure)."""
+    arms = tuple(
+        ArmComparison(
+            model_type=r["model_type"],
+            compute_engine=r.get("compute_engine"),
+            point_forecast_source=r.get("point_forecast_source"),
+            interval_calibration=r.get("interval_calibration"),
+            n_series=int(r.get("n_series") or 0),
+            n_compared=int(r.get("n_compared") or 0),
+            n_corrected_wins=int(r.get("n_corrected_wins") or 0),
+            mean_margin=_num(r.get("mean_margin")),
+            median_margin=_num(r.get("median_margin")),
+        )
+        for r in arm_rows
+    )
+    coverage = tuple(
+        CoveragePoint(
+            model_type=r["model_type"],
+            horizon_step=int(r["horizon_step"]),
+            n=int(r.get("n") or 0),
+            coverage=_num(r.get("coverage")),
+            mean_width=_num(r.get("mean_width")),
+        )
+        for r in coverage_rows
+    )
+    return CalibrationReport(
+        run_id=run_id,
+        decision_metric=decision_metric,
+        nominal_coverage=nominal_coverage,
+        arms=arms,
+        coverage=coverage,
+    )
+
+
+def calibration_report(run_id: str, *, settings: Settings | None = None) -> CalibrationReport:
+    """Read a finished run's point-forecast and interval diagnostic.
+
+    Reads the config (for the decision metric and the quantile set that defines nominal coverage),
+    the per-model arm rollup (`registry.reads.read_arm_comparison`) and the per-step coverage panel
+    (`registry.reads.read_coverage_by_step`), then composes via `_assemble_calibration`.
+    """
+    from .registry.reads import read_arm_comparison, read_coverage_by_step, read_run_config
+
+    raw = read_run_config(run_id, settings=settings)
+    cfg = RunConfig.model_validate(raw) if raw else None
+    decision_metric = cfg.backtest.decision_metric if cfg else "wape"
+    # Nominal is the span of the shipped quantile set, not a constant: a run that widened its
+    # quantiles is not under-covering just because it left the default behind.
+    from .models.base_model import DEFAULT_QUANTILES
+
+    nominal = max(DEFAULT_QUANTILES) - min(DEFAULT_QUANTILES)
+    return _assemble_calibration(
+        run_id,
+        decision_metric,
+        nominal,
+        read_arm_comparison(run_id, settings=settings),
+        read_coverage_by_step(run_id, settings=settings),
+    )
 
 
 def _num(value: Any) -> float | None:

@@ -94,7 +94,7 @@ class ProphetModel(BaseModel):
 
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
-        return self._assemble_frame(ds, qmap)
+        return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
