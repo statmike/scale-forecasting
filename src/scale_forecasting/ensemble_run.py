@@ -76,6 +76,22 @@ if TYPE_CHECKING:
     from .settings import Settings
 
 
+# The `backtest_oof` columns the ensemble reads back before blending. `cutoff_date` earns its place
+# here: it is the key `ensembler._fold_key` joins models on, and leaving it out of the SELECT does
+# not fail anything — it silently drops the ensemble back to the fold ordinal, which on a ragged
+# panel pairs nothing across engines and emits a one-model blend under an ensemble's name. A column
+# list that has to be right is a column list worth naming once and asserting on.
+OOF_READ_COLUMNS: tuple[str, ...] = (
+    "ts_id",
+    "model_type",
+    "fold_id",
+    "cutoff_date",
+    "forecast_date",
+    "y_true",
+    "yhat",
+)
+
+
 def run_ensembles(
     cfg: RunConfig, run_id: str, *, settings: Settings, job_id_prefix: str | None = None
 ) -> None:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
@@ -341,7 +357,7 @@ def _ensemble_batch(
         f"WHERE run_id = @run_id AND model_type IN ({model_list}){ts_filter}"
     )
     oof_sql = (
-        "SELECT ts_id, model_type, fold_id, forecast_date, y_true, yhat\n"
+        f"SELECT {', '.join(OOF_READ_COLUMNS)}\n"
         f"FROM `{dataset}.backtest_oof`\n"
         f"WHERE run_id = @run_id{ts_filter}"
     )

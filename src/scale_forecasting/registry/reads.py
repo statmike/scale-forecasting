@@ -399,9 +399,11 @@ def read_coverage_by_step(
     precisely what a horizon-flat band does. ``mean_width`` comes along because coverage alone is
     gameable — an infinitely wide band covers everything.
 
-    Rows with a NULL ``horizon_step`` are excluded rather than pooled: the BigQuery-native path does
-    not project a per-series step yet, and folding its rows into step ``NULL`` would put a bucket
-    in the middle of a chart that is otherwise ordered by distance. Raises `RegistryError`.
+    Rows with a NULL ``horizon_step`` are excluded rather than pooled — folding them into a
+    ``NULL`` bucket would put an unordered bar in the middle of a chart that is otherwise ordered
+    by distance. Both engines project the step now, so on a current run the exclusion should catch
+    nothing; it stays because runs written before they did are still in the table.
+    Raises `RegistryError`.
     """
     from google.cloud import bigquery
 

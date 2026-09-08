@@ -21,8 +21,13 @@ import pandas as pd
 import pytest
 
 from scale_forecasting.config import RunConfig
-from scale_forecasting.ensemble_run import _apply_weights, _override_ensemble, run_ensembles
-from scale_forecasting.ensembler import combine_oof
+from scale_forecasting.ensemble_run import (
+    OOF_READ_COLUMNS,
+    _apply_weights,
+    _override_ensemble,
+    run_ensembles,
+)
+from scale_forecasting.ensembler import _fold_key, combine_oof
 from scale_forecasting.registry.ids import make_ensemble_id
 from scale_forecasting.settings import Settings
 
@@ -412,3 +417,15 @@ def test_drain_ready_bounded_by_max_polls() -> None:
         max_polls=5,
     )
     assert out == set()
+
+
+def test_the_oof_read_carries_enough_to_join_folds_on_the_cutoff() -> None:
+    # The blend's join key is chosen from the columns present on the frame, and the frame is
+    # whatever the OOF read returned. A SELECT missing `cutoff_date` therefore does not raise --
+    # it quietly demotes every ensemble in the product to the fold ordinal, which is exactly the
+    # key that pairs nothing across engines on a ragged panel. So the read list is asserted
+    # against the chooser rather than eyeballed.
+    frame = pd.DataFrame(
+        {c: ["x"] if c != "y_true" and c != "yhat" else [1.0] for c in OOF_READ_COLUMNS}
+    )
+    assert _fold_key(frame) == ["ts_id", "cutoff_date", "forecast_date"]
