@@ -27,22 +27,31 @@ the real id back once the platform assigns one; ``launch_native_job`` runs the B
 inline on the driver; ``launch_ensemble_job`` runs the blend inline on the driver. The BigQuery
 pair need no stamp-back — their coordinates are fully known up front.
 
-Public surface: ``launch_family_job``, ``launch_native_job``, ``launch_ensemble_job``.
+``submit_retry`` is the fourth entry point and runs no fifth recipe: it takes a *narrowed* DAG
+(`dag.narrow_to_models`) and walks it through the same two family launchers with ``force=True``, so
+a repair is attempt N+1 of the jobs that already exist rather than a second way of running them.
+
+Public surface: ``launch_family_job``, ``launch_native_job``, ``launch_ensemble_job``,
+``submit_retry``.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .capacity import AWAITING_CAPACITY, CAPACITY_EXHAUSTED, CapacityExhausted, publishing_to
+from .errors import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .capacity import CapacityLedger
     from .config import RunConfig
-    from .dag import FamilyJob
+    from .dag import FamilyJob, RunDag
     from .settings import Settings
+
+_log = get_logger(__name__)
 
 
 def _system_job_id(job_key: str, runtime: str) -> str:
@@ -428,3 +437,106 @@ def launch_ensemble_job(
             )
         else:
             run_ensembles(cfg, run_id, settings=settings, job_id_prefix=prefix)
+
+
+@dataclass(frozen=True)
+class RetryOutcome:
+    """What a repair submission did: which families it re-ran, and which of those failed again.
+
+    ``errors`` keyed by family, empty when every submitted job went terminal green. Returned rather
+    than raised because a repair is a *report* first: an operator who resubmitted three families
+    needs to know that two recovered even though the third did not, and an exception thrown out of
+    the first failure would have hidden both facts.
+    """
+
+    families: tuple[str, ...] = ()
+    errors: dict[str, BaseException] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        """Did every family this repair submitted finish green?"""
+        return not self.errors
+
+
+def submit_retry(
+    cfg: RunConfig,
+    retry_dag: RunDag,
+    run_id: str,
+    settings: Settings,
+    spark: object | None = None,
+    *,
+    max_executors: int | None = None,
+) -> RetryOutcome:
+    """Submit a narrowed DAG as attempt N+1 under an existing ``run_id`` — the repair launch.
+
+    ``retry_dag`` is a `dag.narrow_to_models` result: the original DAG with each job's ``models``
+    cut to the subset a repair should re-ask, and jobs with nothing left dropped. Every job runs
+    through the *same* two launchers a first attempt uses — `launch_family_job` on a worker thread
+    per Python family, `launch_native_job` inline for BigQuery — so a repaired family is submitted
+    by the code path that has been proven live, not by a parallel one written for repairs.
+
+    Native routes to `launch_native_job` explicitly rather than falling into the family loop:
+    `launch_family_job` asserts ``job.compute is not None``, and a native job never has compute
+    because it takes no runtime choice. Routing it wrongly is an `AssertionError` on the driver
+    thread, which is exactly the failure a repair path must not introduce.
+
+    ``force=True`` on every launcher, unconditionally, and that is the whole point of the function.
+    Attempt resolution (`registry.jobs.next_job_attempt`) reuses the existing attempt unless forced,
+    so an unforced repair would write its rows *over* the attempt that failed and erase the record
+    of what went wrong. Forced, each repair is attempt N+1: a new ``run_jobs`` row beside the old
+    one, and a trace that still shows both.
+
+    **No header, no ensemble.** The run's ``run_registry`` row belongs to the driver that opened it,
+    and a repair joining an existing run must not reopen it as RUNNING — `main.run`'s
+    ``manage_header`` contract has exactly one owner per run. The ensemble is likewise not this
+    function's call; `narrow_to_models` already returns ``ensemble_enabled=False``, and node
+    ordering around a repair is the emitted DAG's job.
+
+    Shared clusters are provisioned from the *narrowed* DAG, so a repair of two Ray families still
+    gets one cluster between them and a repair of one gets none — the same rule as a first attempt,
+    applied to the smaller job list.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import shared_clusters
+
+    python_jobs = retry_dag.python_jobs
+    native = retry_dag.native_job
+    errors: dict[str, BaseException] = {}
+    _log.info(
+        "retry %s: families=%s models=%s",
+        run_id,
+        retry_dag.families,
+        {job.family: list(job.models) for job in retry_dag.jobs},
+    )
+    with (
+        shared_clusters.shared_ray_cluster(cfg, retry_dag, run_id, settings) as ray_cluster,
+        shared_clusters.shared_spark_cluster(cfg, retry_dag, run_id, settings) as spark_cluster,
+        ThreadPoolExecutor(max_workers=max(1, len(python_jobs))) as pool,
+    ):
+        futures = {
+            pool.submit(
+                launch_family_job,
+                cfg,
+                job,
+                run_id,
+                settings,
+                spark,
+                force=True,
+                max_executors=max_executors,
+                ray_cluster=ray_cluster,
+                spark_cluster=spark_cluster,
+            ): job
+            for job in python_jobs
+        }
+        if native is not None:
+            try:
+                launch_native_job(cfg, native, run_id, settings, force=True)
+            except Exception as exc:  # noqa: BLE001 - captured, reported, never hides the others
+                errors["native"] = exc
+        for future, job in futures.items():
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001 - captured, reported, never hides the others
+                errors[job.family] = exc
+    return RetryOutcome(families=tuple(retry_dag.families), errors=errors)

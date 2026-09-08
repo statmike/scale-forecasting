@@ -497,3 +497,106 @@ def test_launch_ensemble_job_microbatch_mode(monkeypatch: pytest.MonkeyPatch) ->
     job_launch.launch_ensemble_job(cfg, "run-abc", _SETTINGS)
     assert calls.get("microbatch") is True
     assert "barrier" not in calls
+
+
+# --- submit_retry: the repair launch reuses the two family launchers -----------
+
+
+def _record_launchers(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
+    """Replace both family launchers with recorders. Returns ``[(which, kwargs+job), ...]``."""
+    seen: list[tuple[str, Any]] = []
+
+    def _family(cfg: RunConfig, job: Any, run_id: str, settings: Any, spark: Any = None, **kw: Any):
+        seen.append(("family", {"job": job, "run_id": run_id, **kw}))
+
+    def _native(cfg: RunConfig, job: Any, run_id: str, settings: Any, **kw: Any) -> None:
+        seen.append(("native", {"job": job, "run_id": run_id, **kw}))
+
+    monkeypatch.setattr(job_launch, "launch_family_job", _family)
+    monkeypatch.setattr(job_launch, "launch_native_job", _native)
+    return seen
+
+
+def test_a_repair_submits_only_the_narrowed_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _record_launchers(monkeypatch)
+    cfg = _cfg(models=[_SPARK, "sarimax", *_NATIVE])
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), ["sarimax"])
+    outcome = job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
+    assert [which for which, _ in seen] == ["family"]
+    assert seen[0][1]["job"].models == ("sarimax",)
+    assert outcome.families == ("statistical",) and outcome.ok
+
+
+def test_the_native_family_never_reaches_the_python_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `launch_family_job` asserts job.compute is not None and native never has compute, so routing
+    # it into the family loop is an AssertionError on the driver thread -- the one new failure a
+    # repair path must not introduce.
+    seen = _record_launchers(monkeypatch)
+    cfg = _cfg()
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK, "arima_plus"])
+    job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
+    routed = {which: kw["job"].family for which, kw in seen}
+    assert routed == {"family": "statistical", "native": "native"}
+
+
+def test_every_repair_is_a_new_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unforced, `next_job_attempt` reuses the failed attempt's number and the repair's rows land on
+    # top of the record of what went wrong. force=True is not a caller's option here.
+    seen = _record_launchers(monkeypatch)
+    cfg = _cfg()
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK, "arima_plus"])
+    job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
+    assert [kw["force"] for _, kw in seen] == [True, True]
+
+
+def test_one_family_failing_does_not_hide_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _family(cfg: RunConfig, job: Any, *a: Any, **kw: Any) -> None:
+        raise RuntimeError("statistical fell over again")
+
+    def _native(cfg: RunConfig, job: Any, *a: Any, **kw: Any) -> None:
+        return None
+
+    monkeypatch.setattr(job_launch, "launch_family_job", _family)
+    monkeypatch.setattr(job_launch, "launch_native_job", _native)
+    cfg = _cfg()
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK, "arima_plus"])
+    outcome = job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
+    # Reported, not raised: the operator needs to know native recovered even though the other did
+    # not, and an exception out of the first failure would have hidden both facts.
+    assert not outcome.ok
+    assert set(outcome.errors) == {"statistical"}
+    assert "fell over again" in str(outcome.errors["statistical"])
+
+
+def test_a_repair_never_reopens_the_run_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One header owner per run. A repair joining an existing run_id that wrote RUNNING over the
+    # driver's finalized row would rewrite the run's outcome from a job that is not the run.
+    from scale_forecasting.registry import lifecycle
+
+    _record_launchers(monkeypatch)
+    monkeypatch.setattr(
+        lifecycle,
+        "run_header",
+        lambda *a, **k: pytest.fail("submit_retry must not open the run header"),
+    )
+    cfg = _cfg(models=[_SPARK])
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK])
+    assert job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS).ok
+
+
+def test_a_repair_runs_no_ensemble_however_the_config_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _record_launchers(monkeypatch)
+    monkeypatch.setattr(
+        job_launch,
+        "launch_ensemble_job",
+        lambda *a, **k: pytest.fail("a repair does not decide when the ensemble re-runs"),
+    )
+    cfg = _cfg(models=[_SPARK], ensemble={"enabled": True, "strategies": ["mean"]})
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK])
+    assert narrowed.ensemble_enabled is False
+    job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
+    assert [which for which, _ in seen] == ["family"]

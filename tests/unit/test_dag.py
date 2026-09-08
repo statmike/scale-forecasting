@@ -179,3 +179,77 @@ def test_dag_nodes_no_ensemble_node_when_disabled() -> None:
 def test_dag_nodes_is_pure_and_deterministic() -> None:
     cfg = _cfg()
     assert dag.dag_nodes(dag.plan_dag(cfg)) == dag.dag_nodes(dag.plan_dag(cfg))
+
+
+# --- narrowing: the repair's submission grain ----------------------------------
+
+
+def test_narrowing_keeps_only_the_models_asked_for() -> None:
+    cfg = _cfg(models=[_STAT, "sarimax", _ML, _NATIVE])
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), ["sarimax", _NATIVE])
+    assert {job.family: job.models for job in narrowed.jobs} == {
+        "statistical": ("sarimax",),
+        "native": (_NATIVE,),
+    }
+
+
+def test_a_family_left_with_nothing_is_dropped_rather_than_submitted_empty() -> None:
+    # An empty --models would run the whole family, which is the opposite of a repair.
+    narrowed = dag.narrow_to_models(dag.plan_dag(_cfg()), [_ML])
+    assert narrowed.families == ["ml"]
+
+
+def test_narrowing_carries_the_resolved_compute_through_untouched() -> None:
+    # A repaired family has to land on the runtime and hardware the original attempt chose --
+    # re-resolving it would let a repair quietly move a job to different hardware.
+    cfg = _cfg(models=[_STAT, _DL], compute={"families": {"deep_learning": {"runtime": "ray"}}})
+    planned = {job.family: job.compute for job in dag.plan_dag(cfg).jobs}
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_DL])
+    assert narrowed.jobs[0].compute == planned["deep_learning"]
+
+
+def test_a_narrowed_dag_advertises_no_ensemble_node() -> None:
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    assert dag.plan_dag(cfg).ensemble_enabled is True
+    assert dag.narrow_to_models(dag.plan_dag(cfg), [_STAT]).ensemble_enabled is False
+
+
+def test_narrowing_keeps_the_run_id_it_was_given() -> None:
+    # A repair is attempt N+1 of the *same* run. A different run_id here would file the repaired
+    # cells under a run nobody asked about.
+    planned = dag.plan_dag(_cfg())
+    assert dag.narrow_to_models(planned, [_STAT]).run_id == planned.run_id
+
+
+def test_narrowing_to_a_model_the_run_never_planned_is_refused() -> None:
+    import pytest
+
+    from scale_forecasting.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="not planned by this run"):
+        dag.narrow_to_models(dag.plan_dag(_cfg(models=[_STAT])), ["sarimax"])
+
+
+def test_a_narrowed_job_produces_the_driver_args_a_hand_written_subset_would() -> None:
+    """The exit-gate equivalence: narrowing is only useful if it reaches the driver as ``--models``.
+
+    `commands.build_driver_args` is the single place a subset becomes a flag, for every runtime, so
+    asserting the narrowed job's ``models`` builds the same arg list an operator typing
+    ``--models sarimax`` would get is what ties the pure narrowing to the thing that executes.
+    """
+    from scale_forecasting.commands import build_driver_args
+    from scale_forecasting.settings import Settings
+
+    settings = Settings(
+        project_id="proj-x",
+        connection="proj-x.us-central1.conn",
+        warehouse_uri="gs://bkt/warehouse",
+    )
+    cfg = _cfg(models=[_STAT, "sarimax", _ML])
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), ["sarimax"])
+    from_dag = build_driver_args(
+        "gs://b/c.json", settings, models=list(narrowed.jobs[0].models), manage_header=False
+    )
+    by_hand = build_driver_args("gs://b/c.json", settings, models=["sarimax"], manage_header=False)
+    assert from_dag == by_hand
+    assert "--models" in from_dag and from_dag[from_dag.index("--models") + 1] == "sarimax"

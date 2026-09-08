@@ -46,9 +46,11 @@ from scale_forecasting.retry_policy import (
     VERDICTS,
     CellState,
     FamilyState,
+    RetryTargets,
     Worklist,
     build_worklist,
     classify_cell,
+    narrow_to_submittable,
 )
 from scale_forecasting.sdk import _TERMINAL_STATUSES
 from scale_forecasting.worker import ERROR_CLASSES
@@ -428,3 +430,58 @@ def test_trust_registry_is_deliberately_on_neither_side() -> None:
     assert FamilyState("ml", status="COMPLETED", probe_verdict=VERDICT_TRUST_REGISTRY).is_live is (
         False
     )
+
+
+# --- the submission grain: what v1 can safely re-ask ---------------------------
+
+
+def _worklist_over(*models: str) -> Worklist:
+    return build_worklist([CellState(f"s{i}", m) for i, m in enumerate(models)])
+
+
+def test_a_model_that_produced_nothing_is_the_case_v1_repairs() -> None:
+    targets = narrow_to_submittable(_worklist_over("theta", "xgboost"), {})
+    assert targets.models == ("theta", "xgboost") and targets.blocked == ()
+
+
+def test_a_single_landed_forecast_blocks_the_whole_model() -> None:
+    # Stricter than the per-cell invariant, and it has to be: v1 submits `--models theta`, which
+    # re-runs theta across the run's whole series universe. Repairing forty cells that way would
+    # append a second forecast beside every one that already landed.
+    targets = narrow_to_submittable(_worklist_over("theta", "xgboost"), {"theta": 1})
+    assert targets.models == ("xgboost",)
+    assert targets.blocked == ("theta",)
+
+
+def test_a_model_with_no_landed_rows_at_all_is_not_blocked_by_a_zero() -> None:
+    # A model whose every cell failed writes metadata but zero predictions, so it shows up in the
+    # count map with 0 -- which is exactly the model repair exists for.
+    targets = narrow_to_submittable(_worklist_over("theta"), {"theta": 0, "xgboost": 900})
+    assert targets.models == ("theta",) and targets.blocked == ()
+
+
+def test_a_landed_model_nobody_asked_about_changes_nothing() -> None:
+    targets = narrow_to_submittable(_worklist_over("theta"), {"sarimax": 500})
+    assert targets.models == ("theta",) and targets.blocked == ()
+
+
+def test_what_the_grain_cannot_reach_is_reported_rather_than_dropped() -> None:
+    # The silent version of this is the bad one: an operator told "40 cells need repair" who then
+    # watches nothing happen has been misled about a system behaving correctly.
+    targets = narrow_to_submittable(_worklist_over("theta", "xgboost"), {"theta": 1, "xgboost": 1})
+    assert targets.models == ()
+    assert targets.blocked == ("theta", "xgboost")
+
+
+def test_a_clean_run_asks_for_no_models_and_blocks_none() -> None:
+    clean = build_worklist([CellState("s1", "theta", has_metadata=True, has_predictions=True)])
+    targets = narrow_to_submittable(clean, {"theta": 400})
+    assert targets == RetryTargets()
+
+
+def test_nothing_is_submittable_that_the_worklist_did_not_ask_for() -> None:
+    # The narrowing only ever subtracts. A model absent from the worklist cannot enter the
+    # submission by way of the count map.
+    worklist = _worklist_over("theta")
+    targets = narrow_to_submittable(worklist, {"xgboost": 0})
+    assert set(targets.models) <= set(worklist.models)

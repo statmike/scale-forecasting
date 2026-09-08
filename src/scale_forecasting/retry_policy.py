@@ -226,6 +226,47 @@ class Worklist:
         return {v: len(cells) for v, cells in self.by_verdict.items() if cells}
 
 
+@dataclass(frozen=True)
+class RetryTargets:
+    """The worklist's model wish-list, split by what v1's submission grain can actually honour.
+
+    ``models`` is what a retry submits — ``FamilyJob.models`` narrowed, which becomes ``--models``.
+    ``blocked`` is the difference between that and what the worklist asked for, and it exists so the
+    gap is *reported* rather than silently dropped: an operator who is told "40 cells need repair"
+    and then watches nothing happen has been misled about a system that was working correctly.
+    """
+
+    models: tuple[str, ...] = ()
+    blocked: tuple[str, ...] = ()
+
+
+def narrow_to_submittable(worklist: Worklist, landed_counts: Mapping[str, int]) -> RetryTargets:
+    """Split the worklist's models into what v1 can safely resubmit and what it cannot (pure).
+
+    **Why a model can be blocked while its cells are legitimately retryable.** The no-overlap
+    invariant is per *cell*, but v1 submits per *model*: `FamilyJob.models` narrowed to ``--models``
+    re-runs that model across the run's whole series universe. So a model that landed ninety-nine
+    thousand forecasts and lost forty cannot be repaired at this grain at all — resubmitting it to
+    fix the forty would append a second forecast beside each of the ninety-nine thousand, which is
+    exactly what `build_worklist` refuses to let happen one cell at a time. The rule is therefore
+    stricter than the invariant: **any** landed prediction blocks the whole model.
+
+    That leaves v1 useful for the failure it was built for — a family or a model that produced
+    *nothing*, because its job died, never started, or never found room — and honest about the one
+    it cannot reach yet. The per-cell manifest that would fix the rest is step two, and the
+    ``blocked`` list is the measurement that says how much it is worth.
+
+    ``landed_counts`` is ``{model_type: prediction row count}`` — what
+    `registry.reads.read_prediction_counts` returns from a single GROUP BY rather than a per-cell
+    scan. It is read from the table rather than inferred from the worklist on purpose: the
+    worklist's view of what landed is only as complete as the cell set the caller assembled, and
+    the table's is not an inference at all.
+    """
+    wanted = worklist.models
+    blocked = tuple(m for m in wanted if landed_counts.get(m, 0) > 0)
+    return RetryTargets(models=tuple(m for m in wanted if m not in set(blocked)), blocked=blocked)
+
+
 def classify_cell(state: CellState, family: FamilyState | None = None) -> str:
     """What to do about one cell — one of `VERDICTS` (pure, total).
 

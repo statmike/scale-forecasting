@@ -14,6 +14,7 @@ is a pure function of the config (no clocks, no GCP), so the same config always 
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -291,6 +292,44 @@ def gpu_usefulness_report(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> list[s
             "flag; leaving it set makes the config read as a GPU run when it is not one."
         )
     return lines
+
+
+def narrow_to_models(run_dag: RunDag, models: Iterable[str]) -> RunDag:
+    """The same DAG with every job narrowed to ``models``, dropping jobs left with nothing (pure).
+
+    This is how a repair submits less than a run: `job_launch.submit_retry` walks the narrowed DAG
+    and each surviving job carries a shorter `FamilyJob.models`, which reaches the driver as
+    ``--models`` (`commands.build_driver_args`) — the subset seam that already existed for
+    per-family execution, reused rather than reinvented. Resolved compute rides along untouched, so
+    a repaired family lands on the same runtime and hardware the original attempt chose.
+
+    ``ensemble_enabled`` is always ``False`` on the result. A repair re-runs base models; whether
+    the ensemble is recomputed afterwards is a question about the *run*, answered by the node
+    ordering in `airflow_emit` rather than by a narrowed job list, and a DAG that advertised an
+    ensemble node nobody was going to run would be a lie in the one structure the trace reads from.
+
+    Raises `errors.ConfigError` if ``models`` names anything the DAG does not plan — a repair can
+    only re-ask a question this run already asked, and quietly ignoring the name would submit a
+    smaller job than the caller believes they asked for.
+    """
+    keep = set(models)
+    planned = {m for job in run_dag.jobs for m in job.models}
+    unknown = keep - planned
+    if unknown:
+        raise ConfigError(
+            f"cannot narrow run {run_dag.run_id} to {sorted(unknown)}: not planned by "
+            f"this run (it runs {sorted(planned)})"
+        )
+    jobs = tuple(
+        FamilyJob(
+            family=job.family,
+            models=tuple(m for m in job.models if m in keep),
+            compute=job.compute,
+        )
+        for job in run_dag.jobs
+        if any(m in keep for m in job.models)
+    )
+    return RunDag(run_id=run_dag.run_id, jobs=jobs, ensemble_enabled=False)
 
 
 def preflight(cfg: RunConfig) -> RunDag:
