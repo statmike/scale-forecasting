@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import retry_policy
 from .errors import get_logger
+from .registry.ids import base_family, is_repair_family
 from .retry_policy import (
     CellState,
     FamilyState,
@@ -144,19 +145,33 @@ def family_states(
     Two sources because neither is complete: the job row carries the status and the failure token,
     the probe carries the reconciled reading of whether that status is still true. A family the
     probe did not escalate simply has no verdict and its registry status stands alone.
+
+    **A repair row folds onto the family it repairs, and wins.** After one ``--retry`` the run holds
+    a ``statistical`` row *and* a ``statistical_repair`` row (`registry.ids.REPAIR_JOB_FAMILIES`),
+    and the classifier keys on the family a *cell* belongs to, which is always the base one. Keyed
+    raw, a second ``--retry`` fired while the first repair is still in flight would find only the
+    base family's stale ``FAILED`` and submit the same cells again — duplicating live work, which is
+    the one thing the family axis exists to prevent. Folded, the in-flight repair is what the base
+    family reads as, and those cells come back ``SKIP_NOT_FINISHED``.
+
+    Rows arrive newest-family-last in no guaranteed order, so the win is explicit rather than
+    positional: a repair row overwrites a base row, and a base row never overwrites a repair.
     """
     verdicts = verdicts or {}
     states: dict[str, FamilyState] = {}
     for row in rows:
-        family = str(row.get("family") or "")
-        if not family:
+        token = str(row.get("family") or "")
+        if not token:
+            continue
+        family = base_family(token)
+        if family in states and not is_repair_family(token):
             continue
         reason = row.get("failure_reason")
         states[family] = FamilyState(
             family=family,
             status=(str(row["status"]) if row.get("status") else None),
             failure_reason=(str(reason).strip() or None if reason else None),
-            probe_verdict=verdicts.get(family),
+            probe_verdict=verdicts.get(token),
         )
     return states
 
@@ -419,11 +434,11 @@ def retry_run(
     ensemble node, since a partial re-blend is a different question) and handed to
     `job_launch.submit_retry`, which forces a fresh attempt number on every family it touches.
 
-    The audit blob lands on the **repair attempt's** rows — ``read_run_jobs`` reads ``v_run_jobs``,
-    which keeps the highest attempt per family, and by the time `submit_retry` returns that is
-    attempt N+1. That is the right row: the record answers "why does this attempt exist", and it is
-    the row anyone looking at the run finds first. The attempt it replaced keeps its own history
-    untouched, which is what ``run_jobs`` being append-only is for.
+    The audit blob lands on the **repair job's own rows** — ``narrow_to_models`` files each of them
+    under a repair family token (``statistical_repair``), so ``read_run_jobs`` returns them beside
+    the families they repair rather than in place of them. That is the right row: the record answers
+    "why does this job exist", and the attempt it was launched to fix keeps its own row and its own
+    failure reason, which is what ``run_jobs`` being append-only is for.
     """
     plan = build_retry_plan(cfg, settings=settings)
     if not confirm:

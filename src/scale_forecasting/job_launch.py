@@ -326,10 +326,15 @@ def launch_native_job(
 
     Native models execute as SQL in BigQuery — no Python runtime, no worker thread — so this runs on
     the run driver's main thread, overlapping the Python family jobs. Like `launch_family_job` it
-    resolves the ``native`` attempt, maps the deterministic ``job_key`` to the BigQuery job id
+    resolves the family's attempt, maps the deterministic ``job_key`` to the BigQuery job id
     (`_system_job_id`), and opens the per-job lifecycle (`registry.lifecycle.run_job`, ``runtime``
     fixed to ``"bigquery"``, carrying that id), then runs the engine in contributor mode. Returns
     the engine's `BqOutcome` so the caller can stamp the observed ``n_series`` onto the header.
+
+    The family token comes off ``job`` rather than being written ``"native"`` here, because a repair
+    arrives as ``native_repair`` (`dag.narrow_to_models`) and has to file its own ``run_jobs`` row.
+    Hardcoding the name would have filed it as a second attempt of ``native``, which is the exact
+    row-replacement `registry.ids.REPAIR_JOB_FAMILIES` exists to prevent.
     """
     from .engines import bigquery_engine
     from .probes.vocabulary import ProbeHandle
@@ -337,8 +342,8 @@ def launch_native_job(
     from .registry.jobs import next_job_attempt
     from .registry.lifecycle import run_job
 
-    attempt, _ = next_job_attempt(run_id, "native", force=force, settings=settings)
-    system_job_id = _system_job_id(make_job_key(run_id, "native", attempt), "bigquery")
+    attempt, _ = next_job_attempt(run_id, job.family, force=force, settings=settings)
+    system_job_id = _system_job_id(make_job_key(run_id, job.family, attempt), "bigquery")
     # BigQuery coordinates are fully known up front (jobs share the deterministic id prefix), so the
     # entry handle is the only one — there is no stamp-back site for the native family.
     native_handle = ProbeHandle(
@@ -349,7 +354,7 @@ def launch_native_job(
     )
     with run_job(
         run_id,
-        "native",
+        job.family,
         attempt,
         runtime="bigquery",
         system_job_id=system_job_id,

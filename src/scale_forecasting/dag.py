@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from .errors import ConfigError, get_logger
 from .models import get_model, list_models
-from .registry.ids import make_run_id
+from .registry.ids import base_family, make_run_id, repair_family
 
 if TYPE_CHECKING:
     from .config import ResolvedFamilyCompute, RunConfig
@@ -71,13 +71,18 @@ class RunDag:
 
     @property
     def python_jobs(self) -> list[FamilyJob]:
-        """The jobs that run on a Python runtime (everything but ``native``)."""
-        return [job for job in self.jobs if job.family != "native"]
+        """The jobs that run on a Python runtime (everything but ``native``).
+
+        Asks `registry.ids.base_family`, so a repair DAG's ``native_repair`` job routes to BigQuery
+        like the family it repairs. Splitting them here — the one place the two launchers are
+        chosen — is what keeps the repair token an identity concern and nothing more.
+        """
+        return [job for job in self.jobs if base_family(job.family) != "native"]
 
     @property
     def native_job(self) -> FamilyJob | None:
         """The BigQuery-native job, if the run has native models — else ``None``."""
-        return next((job for job in self.jobs if job.family == "native"), None)
+        return next((job for job in self.jobs if base_family(job.family) == "native"), None)
 
 
 @dataclass(frozen=True)
@@ -303,6 +308,14 @@ def narrow_to_models(run_dag: RunDag, models: Iterable[str]) -> RunDag:
     per-family execution, reused rather than reinvented. Resolved compute rides along untouched, so
     a repaired family lands on the same runtime and hardware the original attempt chose.
 
+    Each surviving job is re-stamped with its **repair family token** (`registry.ids.repair_family`
+    — ``statistical`` becomes ``statistical_repair``), which is how the repair gets a ``run_jobs``
+    row of its own instead of overwriting the row of the attempt it repairs. `v_run_jobs` keeps the
+    highest attempt per (run_id, family), so a forty-cell repair filed under ``statistical`` would
+    become the only ``statistical`` row the registry shows and report the whole family COMPLETED.
+    Nothing downstream has to know: every routing decision asks `registry.ids.base_family`, so the
+    job runs on the runtime, hardware, and launcher the original attempt chose.
+
     ``ensemble_enabled`` is always ``False`` on the result. A repair re-runs base models; whether
     the ensemble is recomputed afterwards is a question about the *run*, answered by the node
     ordering in `airflow_emit` rather than by a narrowed job list, and a DAG that advertised an
@@ -322,7 +335,7 @@ def narrow_to_models(run_dag: RunDag, models: Iterable[str]) -> RunDag:
         )
     jobs = tuple(
         FamilyJob(
-            family=job.family,
+            family=repair_family(job.family),
             models=tuple(m for m in job.models if m in keep),
             compute=job.compute,
         )

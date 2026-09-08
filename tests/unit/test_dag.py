@@ -188,15 +188,44 @@ def test_narrowing_keeps_only_the_models_asked_for() -> None:
     cfg = _cfg(models=[_STAT, "sarimax", _ML, _NATIVE])
     narrowed = dag.narrow_to_models(dag.plan_dag(cfg), ["sarimax", _NATIVE])
     assert {job.family: job.models for job in narrowed.jobs} == {
-        "statistical": ("sarimax",),
-        "native": (_NATIVE,),
+        "statistical_repair": ("sarimax",),
+        "native_repair": (_NATIVE,),
     }
 
 
 def test_a_family_left_with_nothing_is_dropped_rather_than_submitted_empty() -> None:
     # An empty --models would run the whole family, which is the opposite of a repair.
     narrowed = dag.narrow_to_models(dag.plan_dag(_cfg()), [_ML])
-    assert narrowed.families == ["ml"]
+    assert narrowed.families == ["ml_repair"]
+
+
+def test_a_narrowed_job_files_under_its_own_family_token() -> None:
+    """The repair's row must not be the family's row — that is the whole point of the token.
+
+    `v_run_jobs` keeps the highest attempt per (run_id, family), so a repair filed as attempt 2 of
+    ``statistical`` would erase the failed attempt it was launched to fix and report the whole
+    family COMPLETED. The distinct token gives it a row beside the original instead.
+    """
+    from scale_forecasting.registry.ids import make_job_key
+
+    narrowed = dag.narrow_to_models(dag.plan_dag(_cfg(models=[_STAT, _ML])), [_STAT])
+    (job,) = narrowed.jobs
+    assert job.family == "statistical_repair"
+    # And the token is a real member of the id vocabulary, so the launch path needs no special case.
+    assert make_job_key(narrowed.run_id, job.family, 1).endswith("-statistical_repair-a1")
+
+
+def test_a_repaired_native_family_still_routes_to_bigquery() -> None:
+    """Routing asks `base_family`, so ``native_repair`` reaches the BigQuery launcher, not a thread.
+
+    `job_launch.launch_family_job` asserts ``job.compute is not None`` and a native job never has
+    compute, so mis-routing here is an AssertionError on the driver thread — the exact failure a
+    repair path must not introduce.
+    """
+    narrowed = dag.narrow_to_models(dag.plan_dag(_cfg(models=[_STAT, _NATIVE])), [_STAT, _NATIVE])
+    assert narrowed.native_job is not None
+    assert narrowed.native_job.family == "native_repair"
+    assert [j.family for j in narrowed.python_jobs] == ["statistical_repair"]
 
 
 def test_narrowing_carries_the_resolved_compute_through_untouched() -> None:

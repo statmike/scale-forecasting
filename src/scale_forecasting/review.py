@@ -46,6 +46,7 @@ from .capacity import AWAITING_CAPACITY
 from .config import RunConfig
 from .dag import group_models_by_family
 from .device_audit import verdict_label
+from .registry.ids import base_family, is_repair_family
 from .registry.reads import parse_ts
 from .registry.rows import METRIC_COLUMNS
 
@@ -76,8 +77,15 @@ __all__ = [
 ]
 
 # Display order for families in a progress/review readout: the base families in DAG order, then the
-# downstream ensemble node last. (Mirrors dag._FAMILY_ORDER + the ensemble node it appends.)
+# downstream ensemble node last. (Mirrors dag._FAMILY_ORDER + the ensemble node it appends.) Repair
+# jobs are listed after all of these, in the same order as the families they repair.
 _FAMILY_ORDER: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native", "ensemble")
+
+
+def _family_rank(family: str) -> int:
+    """Where a family token sorts in a readout — a repair beside the family it repairs."""
+    base = base_family(family)
+    return _FAMILY_ORDER.index(base) if base in _FAMILY_ORDER else len(_FAMILY_ORDER)
 
 
 @dataclass(frozen=True)
@@ -536,11 +544,50 @@ def _assemble_progress(
     expected_known = [f.n_expected for f in families if f.n_expected is not None]
     total_expected = sum(expected_known) if len(expected_known) == len(families) else None
     fraction = (total_done / total_expected) if total_expected else None
+
+    # Repair jobs are listed after the families they repair, and after the run totals are taken.
+    #
+    # A repair is a *job*, not a family: it re-asks a narrowed subset of one family's cells
+    # (`dag.narrow_to_models`), and its ``run_jobs`` row carries no record of how large that subset
+    # was. So it contributes a job state — runtime, status, quiet time — and deliberately no
+    # denominator. Giving it the whole family's expected count would report a finished forty-cell
+    # repair as 0.04% done forever, and would poison the run-level fraction with a second copy of a
+    # denominator already counted once. Leaving it out of the list entirely was the other option and
+    # is worse: `probes.reconcile` and `--cancel` read this snapshot and nothing else, so an omitted
+    # repair is a live job neither of them can see or stop.
+    #
+    # Landed cells are not attributed to it either. The progress rows are per *model*, and a
+    # repaired cell and an original cell of the same model are the same row to that query — so a
+    # split would have to be invented, and `n_done` on the base family already counts both.
+    repairs: list[FamilyProgress] = []
+    for r in sorted(job_rows, key=lambda r: _family_rank(str(r.get("family") or ""))):
+        fam = str(r.get("family") or "")
+        if not is_repair_family(fam):
+            continue
+        signal = _last_signal(r)
+        repairs.append(
+            FamilyProgress(
+                family=fam,
+                runtime=r.get("runtime"),
+                hardware=r.get("hardware"),
+                status=r.get("status"),
+                models=models_by_family.get(base_family(fam), ()),
+                n_expected=None,
+                n_done=0,
+                fraction=None,
+                avg_fit_seconds=None,
+                runtime_seconds=_num(r.get("runtime_seconds")),
+                last_signal_at=signal,
+                quiet_seconds=((at - signal).total_seconds() if signal is not None else None),
+                device_verdict=r.get("device_verdict"),
+            )
+        )
+
     return RunProgress(
         run_id=run_id,
         status=status,
         n_series=n_series,
-        families=tuple(families),
+        families=tuple(families + repairs),
         n_done=total_done,
         n_expected=total_expected,
         fraction=fraction,

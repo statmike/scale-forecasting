@@ -34,15 +34,43 @@ if TYPE_CHECKING:
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
-# The families that can own a job in the run DAG: every model family plus the downstream ensemble
-# node. Mirrors ``config.JobFamily``; duplicated as a runtime tuple here (a ``Literal`` isn't
-# iterable) so the key helpers can validate without importing config at runtime.
-JOB_FAMILIES: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native", "ensemble")
+# The families a *config* can plan: every model family plus the downstream ensemble node. Mirrors
+# ``config.JobFamily``; duplicated as a runtime tuple here (a ``Literal`` isn't iterable) so the key
+# helpers can validate without importing config at runtime.
+BASE_JOB_FAMILIES: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native", "ensemble")
+
+# The families a *repair* can plan. A repair re-asks a subset of a family's models, and it submits
+# under its own family token — ``statistical_repair`` beside ``statistical`` — rather than as a
+# second attempt of the family it repairs.
+#
+# The reason is `v_run_jobs`. That view keeps one row per (run_id, family), highest attempt wins, so
+# a repair filed as attempt 2 of ``statistical`` *replaces* the row for attempt 1. A repair of forty
+# cells that succeeds would then be the only ``statistical`` row the registry shows, reporting a
+# hundred-thousand-cell family COMPLETED and dragging the run header to COMPLETED with it — the run
+# would claim to have produced work that was never produced. Under a distinct token both rows
+# survive the view: the base family keeps whatever it actually ended as, and the repair reports only
+# on itself. The rollup then reads FAILED + COMPLETED and answers PARTIAL, which is the truth.
+#
+# No ``ensemble_repair``: a repair never re-runs the ensemble (`dag.narrow_to_models` returns
+# ``ensemble_enabled=False``), because whether to re-ensemble after a repair is a question about the
+# run's node ordering rather than about a narrowed job list.
+REPAIR_SUFFIX = "_repair"
+REPAIRABLE_FAMILIES: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native")
+REPAIR_JOB_FAMILIES: tuple[str, ...] = tuple(f + REPAIR_SUFFIX for f in REPAIRABLE_FAMILIES)
+
+# Every family token that can own a job row — what `make_job_key` validates against and what
+# `_JOB_KEY_RE` anchors on.
+JOB_FAMILIES: tuple[str, ...] = BASE_JOB_FAMILIES + REPAIR_JOB_FAMILIES
 
 # A job id: ``sf-<run_id>-<family>-a<attempt>``. The family is anchored to a known member and the
 # attempt to ``a<digits>`` at the very end, so the (variable-length, hyphen-bearing) run_id is
 # recovered unambiguously by a greedy leading match — run_id always ends in ``-<12 hex>``, which
 # never itself matches a trailing ``-<family>-a<n>`` (hex carries no hyphen).
+#
+# ``statistical`` is listed before ``statistical_repair`` and that is harmless: the alternation
+# backtracks, so on ``…-statistical_repair-a1`` the shorter branch is tried first, fails to reach
+# ``-a<n>``, and the longer one matches. A run_id can never be confused for the ``_repair`` part
+# either — ``_slug`` maps every non-alphanumeric to a hyphen, so a run_id carries no underscore.
 _JOB_KEY_RE = re.compile(
     r"^sf-(?P<run_id>.+)-(?P<family>" + "|".join(JOB_FAMILIES) + r")-a(?P<attempt>\d+)$"
 )
@@ -134,6 +162,34 @@ def make_ensemble_id(ensemble: EnsembleConfig) -> str:
 
 
 # --- job identity --------------------------------------------------------------
+
+
+def is_repair_family(family: str) -> bool:
+    """Is this family token a repair's, rather than the family a config planned?"""
+    return family in REPAIR_JOB_FAMILIES
+
+
+def repair_family(family: str) -> str:
+    """The repair token for a planned family — ``statistical`` → ``statistical_repair``.
+
+    Idempotent on a token that is already a repair's, so narrowing a DAG twice is not an error.
+    Raises ``ValueError`` for a family that cannot be repaired (``ensemble``, or anything unknown).
+    """
+    if is_repair_family(family):
+        return family
+    if family not in REPAIRABLE_FAMILIES:
+        raise ValueError(f"family {family!r} has no repair token; expected {REPAIRABLE_FAMILIES}")
+    return family + REPAIR_SUFFIX
+
+
+def base_family(family: str) -> str:
+    """The family a token belongs to — ``statistical_repair`` → ``statistical``; else unchanged.
+
+    What every *routing* decision asks, because a repair runs on the same runtime, the same
+    hardware, and through the same launcher as the attempt it repairs. Only the identity layer
+    (the ``job_key``, the ``run_jobs`` row) cares that it is a repair at all.
+    """
+    return family[: -len(REPAIR_SUFFIX)] if is_repair_family(family) else family
 
 
 def make_job_key(run_id: str, family: str, attempt: int = 1) -> str:

@@ -524,7 +524,8 @@ def test_a_repair_submits_only_the_narrowed_models(monkeypatch: pytest.MonkeyPat
     outcome = job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
     assert [which for which, _ in seen] == ["family"]
     assert seen[0][1]["job"].models == ("sarimax",)
-    assert outcome.families == ("statistical",) and outcome.ok
+    # The repair token, not the family's own name: it is the family this job files its row under.
+    assert outcome.families == ("statistical_repair",) and outcome.ok
 
 
 def test_the_native_family_never_reaches_the_python_launcher(
@@ -532,13 +533,14 @@ def test_the_native_family_never_reaches_the_python_launcher(
 ) -> None:
     # `launch_family_job` asserts job.compute is not None and native never has compute, so routing
     # it into the family loop is an AssertionError on the driver thread -- the one new failure a
-    # repair path must not introduce.
+    # repair path must not introduce. The repair token does not change that: the split asks
+    # `registry.ids.base_family`, so ``native_repair`` still routes to BigQuery.
     seen = _record_launchers(monkeypatch)
     cfg = _cfg()
     narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK, "arima_plus"])
     job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
     routed = {which: kw["job"].family for which, kw in seen}
-    assert routed == {"family": "statistical", "native": "native"}
+    assert routed == {"family": "statistical_repair", "native": "native_repair"}
 
 
 def test_every_repair_is_a_new_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -566,8 +568,8 @@ def test_one_family_failing_does_not_hide_the_others(monkeypatch: pytest.MonkeyP
     # Reported, not raised: the operator needs to know native recovered even though the other did
     # not, and an exception out of the first failure would have hidden both facts.
     assert not outcome.ok
-    assert set(outcome.errors) == {"statistical"}
-    assert "fell over again" in str(outcome.errors["statistical"])
+    assert set(outcome.errors) == {"statistical_repair"}
+    assert "fell over again" in str(outcome.errors["statistical_repair"])
 
 
 def test_a_repair_never_reopens_the_run_header(monkeypatch: pytest.MonkeyPatch) -> None:

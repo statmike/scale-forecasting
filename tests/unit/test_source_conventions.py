@@ -96,3 +96,31 @@ def test_the_shadowing_check_knows_what_a_stdlib_name_looks_like() -> None:
     # Guard the guard: if `sys.stdlib_module_names` ever came back empty the check above would pass
     # vacuously and we would learn about it on a cluster instead of here.
     assert {"numbers", "json", "types"} <= sys.stdlib_module_names
+
+
+# --- the deliberately-duplicated terminal-status set ---------------------------
+
+
+def test_every_copy_of_the_terminal_status_set_agrees() -> None:
+    """Four modules each keep their own copy of "a run/job has stopped changing". They must match.
+
+    The duplication is on purpose and stays: `probes` is imported low and `sdk` high, so a shared
+    constant would mean importing the SDK from the probe layer (and the registry layer from the
+    probes package) purely to name one frozenset. Each site says so in its own comment.
+
+    What duplication costs is drift, and drift here is not cosmetic — the four copies answer
+    "should I keep waiting?", "should I probe the runtime?", "may I close this header?", and "did
+    this family finish?". A status added to one and not the others makes `Forecaster.wait` hang on
+    a run the registry considers settled, or lets close-runs write a verdict on a live job. This
+    test is the cheap thing that makes the deliberate copy safe; it is not a hint to merge them.
+    """
+    from scale_forecasting.airflow_tasks import _TERMINAL_STATUSES as airflow_set
+    from scale_forecasting.probes.vocabulary import _TERMINAL as probe_set
+    from scale_forecasting.registry.ops import _TERMINAL_JOB_STATUSES as ops_set
+    from scale_forecasting.sdk import _TERMINAL_STATUSES as sdk_set
+
+    assert sdk_set == airflow_set == probe_set == ops_set
+    # Named outright rather than compared to each other alone: four copies of the *wrong* set would
+    # also be equal, and CANCELLED is the member most likely to be dropped by someone reasoning that
+    # a stopped run "never finished".
+    assert sdk_set == frozenset({"COMPLETED", "FAILED", "PARTIAL", "CANCELLED"})

@@ -483,6 +483,77 @@ def test_close_runs_will_not_settle_a_run_that_is_still_waiting_for_capacity():
     assert "AWAITING_CAPACITY" in reason
 
 
+# --- a repair must not close a family it only partly repaired ----------------------
+#
+# ``roll_up_job_statuses`` is deliberately untouched by the repair work: its contract is that it
+# writes the status the run itself would have written, and "a repair succeeded" is not one of those.
+# What changes is *which rows it is handed*, and that is decided upstream by `v_run_jobs`' grain.
+# These tests pin the grain, because the whole repair-token design rests on it.
+
+
+def _v_run_jobs(rows):
+    """The rows `v_run_jobs` yields from ``run_jobs`` — one per (run_id, family), top attempt wins.
+
+    Mirrors the view's ``QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id, family ORDER BY attempt
+    DESC …) = 1``. Reproduced rather than queried so the arithmetic that makes a repair token
+    necessary is checkable offline; `test_the_view_still_partitions_on_family` keeps the two honest.
+    """
+    top = {}
+    for family, attempt, status in rows:
+        if family not in top or attempt > top[family][0]:
+            top[family] = (attempt, status)
+    return {f: s for f, (_a, s) in top.items()}
+
+
+def test_the_view_still_partitions_on_family() -> None:
+    """If the view's grain ever loses ``family``, the helper above is a lie and so is the design."""
+    from scale_forecasting.registry.views import _VIEW_BODIES
+
+    assert "PARTITION BY run_id, family ORDER BY attempt DESC" in _VIEW_BODIES["v_run_jobs"]
+
+
+@pytest.mark.parametrize(
+    ("base_status", "repair_status"),
+    [("FAILED", "COMPLETED"), ("COMPLETED", "FAILED")],
+)
+def test_a_repair_leaves_the_status_of_the_family_it_repaired_alone(base_status, repair_status):
+    """Both directions, because the guarantee is about the *row*, not about which outcome is nicer.
+
+    A repair that succeeds must not promote a family that failed; a repair that fails must not
+    demote a family that succeeded. Under a distinct token neither can happen — they are different
+    rows of the view — and the run rolls up to PARTIAL, which is what a partly-repaired run is.
+    """
+    visible = _v_run_jobs(
+        [("statistical", 1, base_status), ("statistical_repair", 1, repair_status)]
+    )
+    assert visible["statistical"] == base_status
+    assert visible["statistical_repair"] == repair_status
+    assert ops.roll_up_job_statuses(list(visible.values()))[0] == "PARTIAL"
+
+
+def test_without_the_token_a_forty_cell_repair_would_close_a_hundred_thousand_cell_family():
+    """The bug the repair token exists to prevent, written down so it stays prevented.
+
+    Filed as attempt 2 of ``statistical``, a successful repair is the only ``statistical`` row the
+    view returns — the FAILED attempt disappears and the run reads COMPLETED, claiming work that was
+    never produced.
+    """
+    visible = _v_run_jobs([("statistical", 1, "FAILED"), ("statistical", 2, "COMPLETED")])
+    assert visible == {"statistical": "COMPLETED"}
+    assert ops.roll_up_job_statuses(list(visible.values()))[0] == "COMPLETED"
+
+
+def test_a_repair_still_in_flight_keeps_the_run_open():
+    """A RUNNING repair row is a non-terminal job like any other — close-runs refuses the whole run.
+
+    Free, and correct for the right reason: the repair's cells are neither landed nor abandoned, so
+    a header written now would be a verdict on work still happening.
+    """
+    visible = _v_run_jobs([("statistical", 1, "FAILED"), ("statistical_repair", 1, "RUNNING")])
+    status, reason = ops.roll_up_job_statuses(list(visible.values()))
+    assert status is None and "not terminal" in reason
+
+
 # --- ClosePlan and its preview -----------------------------------------------------
 
 

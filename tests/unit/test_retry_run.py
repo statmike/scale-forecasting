@@ -74,6 +74,49 @@ def test_family_states_survive_a_row_with_no_family() -> None:
     assert retry_run.family_states([{"family": None, "status": "RUNNING"}]) == {}
 
 
+def test_an_in_flight_repair_is_what_the_family_it_repairs_reads_as() -> None:
+    """The guard against a second ``--retry`` re-submitting cells a first repair is already fitting.
+
+    Cells always carry the *base* family, so if the repair row stayed keyed under its own token the
+    classifier would find only the base family's stale FAILED and target those cells again.
+    """
+    states = retry_run.family_states(
+        [
+            {"family": "statistical", "status": "FAILED", "failure_reason": None},
+            {"family": "statistical_repair", "status": "RUNNING", "failure_reason": None},
+        ]
+    )
+    assert set(states) == {"statistical"}
+    assert states["statistical"].status == "RUNNING" and states["statistical"].is_live
+
+
+def test_the_repair_wins_regardless_of_which_row_arrives_first() -> None:
+    rows = [
+        {"family": "statistical_repair", "status": "RUNNING"},
+        {"family": "statistical", "status": "FAILED"},
+    ]
+    assert retry_run.family_states(rows)["statistical"].status == "RUNNING"
+
+
+def test_a_repair_verdict_is_read_under_the_token_the_probe_used() -> None:
+    """The probe reports per job row, so its key is the repair token; the fold must not lose it."""
+    states = retry_run.family_states(
+        [{"family": "ml_repair", "status": "RUNNING"}], {"ml_repair": "ABANDONED_WAIT"}
+    )
+    assert states["ml"].probe_verdict == "ABANDONED_WAIT"
+
+
+def test_a_finished_repair_leaves_its_cells_classifiable_again() -> None:
+    """A repair that ended is not a reason to stop repairing — a second pass must be allowed."""
+    states = retry_run.family_states(
+        [
+            {"family": "ml", "status": "FAILED"},
+            {"family": "ml_repair", "status": "COMPLETED"},
+        ]
+    )
+    assert states["ml"].status == "COMPLETED" and not states["ml"].is_live
+
+
 # --- assembling states: the grouped rows, and the cells with no row at all ------
 
 

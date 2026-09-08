@@ -169,6 +169,47 @@ def test_assemble_progress_unknown_series_count_yields_none_fractions() -> None:
     assert rp.n_expected is None and rp.fraction is None
 
 
+def test_a_repair_job_is_listed_after_the_family_it_repairs() -> None:
+    """`probes.reconcile` and ``--cancel`` read this snapshot and nothing else.
+
+    Leaving a repair job out of it would leave a live job neither of them can see or stop, which is
+    the data-integrity property the cancel path is built on.
+    """
+    cfg = _cfg(models=["theta", "xgboost"], ensemble={"enabled": False})
+    jobs = [
+        {"family": "statistical", "runtime": "spark", "status": "FAILED"},
+        {"family": "statistical_repair", "runtime": "spark", "status": "RUNNING"},
+        {"family": "ml", "runtime": "spark", "status": "COMPLETED"},
+    ]
+    rp = R._assemble_progress("rid", {"n_series": 10}, cfg, jobs, [])
+    assert [f.family for f in rp.families] == ["statistical", "ml", "statistical_repair"]
+    repair = rp.families[-1]
+    assert repair.status == "RUNNING" and repair.runtime == "spark"
+    assert repair.models == ("theta",)  # the family's models, so a readout can name the subject
+
+
+def test_a_repair_job_carries_no_denominator_and_does_not_move_the_run_total() -> None:
+    """A repair's row records no subset size, so any expected count for it would be invented.
+
+    The whole family's count is the tempting wrong answer twice over: it would report a finished
+    forty-cell repair as 0.04% done, and it would add a second copy of a denominator the base
+    family already contributed to the run-level fraction.
+    """
+    cfg = _cfg(models=["theta"], ensemble={"enabled": False})
+    base = [{"family": "statistical", "status": "FAILED"}]
+    progress = [
+        {"model_type": "theta", "ensemble_id": None, "n_cells_done": 6, "mean_fit_seconds": 1.0}
+    ]
+    without = R._assemble_progress("rid", {"n_series": 10}, cfg, base, progress)
+    with_repair = R._assemble_progress(
+        "rid", {"n_series": 10}, cfg, [*base, {"family": "statistical_repair"}], progress
+    )
+    repair = with_repair.families[-1]
+    assert repair.n_expected is None and repair.n_done == 0 and repair.fraction is None
+    assert (with_repair.n_expected, with_repair.n_done) == (without.n_expected, without.n_done)
+    assert with_repair.fraction == without.fraction == 0.6
+
+
 def test_assemble_progress_no_config_is_status_only_snapshot() -> None:
     rp = R._assemble_progress("rid", {"status": "PENDING"}, None, [], [])
     assert rp.status == "PENDING" and rp.families == () and rp.n_done == 0
