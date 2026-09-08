@@ -344,7 +344,7 @@ def _forecast_source(
 # Columns written to forecast_predictions, in DDL order (shared by the INSERT).
 _PRED_COLS = (
     "run_id, ts_id, model_type, compute_engine, forecast_date, "
-    "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles"
+    "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, created_at"
 )
 
 
@@ -364,6 +364,11 @@ def build_forecast_insert_sql(
     ``forecast_timestamp`` → ``DATE()`` → ``forecast_date``; the interval bounds map to
     ``yhat_lower`` / ``yhat_upper``;
     ``quantiles`` is NULL (native models emit an interval, not an arbitrary quantile set).
+
+    ``created_at`` is ``CURRENT_TIMESTAMP()`` — the statement's own clock rather than a value
+    passed in, because this path writes rows from inside BigQuery and has no Python row to stamp.
+    It is what lets a re-run of this INSERT beat its predecessor on read; see
+    `registry.rows.cell_dedup_key`.
 
     ``forecast_value`` is written three times, into ``yhat``, ``yhat_raw`` and ``yhat_adjusted``.
     BigQuery ML applies no bias correction, so this engine has one arm and the three columns are
@@ -385,7 +390,8 @@ def build_forecast_insert_sql(
         f"SELECT\n"
         f"  @run_id, {cfg.data.ts_id_col}, '{model_name}', 'bigquery',\n"
         f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
-        f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL\n"
+        f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,\n"
+        f"  CURRENT_TIMESTAMP()\n"
         f"FROM {forecast};"
     )
 

@@ -14,6 +14,7 @@ The GCP path (``run_ensembles`` executing SQL + Write API) is the ``@gcp`` smoke
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import numpy as np
@@ -24,6 +25,7 @@ from scale_forecasting.config import RunConfig
 from scale_forecasting.ensemble_run import (
     OOF_READ_COLUMNS,
     _apply_weights,
+    _ensemble_batch,
     _override_ensemble,
     base_read_sql,
     ensemble_refit_mode,
@@ -515,6 +517,51 @@ def test_the_base_read_scopes_to_a_microbatch_and_keeps_the_extra_clause() -> No
         "AND fold_id IS NULL AND ts_id IN UNNEST(@ts_ids)"
     )
     assert sql.count("WHERE") == 1
+
+
+def test_a_read_without_a_grain_does_not_dedupe_at_all() -> None:
+    # The default is off, so every existing caller keeps the read it had. Opting in is per-call
+    # because only the caller knows the table's cell grain.
+    sql = base_read_sql("p.ds", "forecast_predictions", "ts_id, yhat", "'theta'", "")
+    assert "QUALIFY" not in sql
+
+
+def test_a_deduping_read_keeps_the_newest_row_per_cell() -> None:
+    sql = base_read_sql(
+        "p.ds",
+        "forecast_predictions",
+        "ts_id, model_type, yhat",
+        "'theta'",
+        "",
+        dedupe_by="run_id, ts_id, model_type, ensemble_id, forecast_date",
+    )
+    assert "PARTITION BY run_id, ts_id, model_type, ensemble_id, forecast_date" in sql
+    assert "ROW_NUMBER() OVER (" in sql
+    assert sql.rstrip().endswith(") = 1")
+
+
+def test_the_dedupe_prefers_a_stamped_row_over_an_unstamped_one() -> None:
+    # NULLS LAST is the whole reason this is safe to turn on mid-life: rows written before
+    # `created_at` had a writer carry NULL, and BigQuery sorts NULL *first* under a plain
+    # `DESC`. Without the modifier the migration would make every old row win over its repair.
+    sql = base_read_sql(
+        "p.ds",
+        "backtest_oof",
+        "ts_id, yhat",
+        "'theta'",
+        "",
+        dedupe_by="run_id, ts_id, model_type, ensemble_id, fold_id, forecast_date",
+    )
+    assert "ORDER BY created_at DESC NULLS LAST" in sql
+
+
+def test_every_ensemble_source_read_asks_for_one_row_per_cell() -> None:
+    # `combine_calculated` pivots with the pandas default `aggfunc="mean"`, `_inverse_error_run_
+    # weights` takes an ungrouped mean, and the blended OOF is appended straight back into
+    # `backtest_oof` -- three quiet ways a duplicated base row corrupts a consensus rather than
+    # erroring. All three are fixed by the reads, so all three reads have to opt in.
+    src = inspect.getsource(_ensemble_batch)
+    assert src.count("dedupe_by=") == 3
 
 
 # --- what the ensemble rows say about how they were scored ---------------------

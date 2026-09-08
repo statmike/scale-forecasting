@@ -275,21 +275,23 @@ AS (
 );
 
 INSERT INTO `proj.scale_forecasting.forecast_predictions`
-  (run_id, ts_id, model_type, compute_engine, forecast_date, yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles)
+  (run_id, ts_id, model_type, compute_engine, forecast_date, yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, created_at)
 SELECT
   @run_id, ts_id, 'arima_plus', 'bigquery',
   DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,
-  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
+  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,
+  CURRENT_TIMESTAMP()
 FROM ML.FORECAST(MODEL `proj.scale_forecasting.sf_model_arima_plus_bq_test_072a4378a6dd`, STRUCT(28 AS horizon, 0.8 AS confidence_level));
 
 -- ===== next model =====
 
 INSERT INTO `proj.scale_forecasting.forecast_predictions`
-  (run_id, ts_id, model_type, compute_engine, forecast_date, yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles)
+  (run_id, ts_id, model_type, compute_engine, forecast_date, yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, created_at)
 SELECT
   @run_id, ts_id, 'timesfm', 'bigquery',
   DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,
-  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL
+  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,
+  CURRENT_TIMESTAMP()
 FROM AI.FORECAST(
     (SELECT ts_id, ds, y FROM `proj.scale_forecasting.source_series_native` WHERE ts_id IN (SELECT ts_id FROM `proj.scale_forecasting.source_series_native` GROUP BY ts_id ORDER BY ts_id LIMIT 100)),
     data_col => 'y',

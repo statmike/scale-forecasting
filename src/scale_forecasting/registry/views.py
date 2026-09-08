@@ -26,7 +26,8 @@ Five views, matched to the questions a run prompts:
   (`shared_clusters.shared_capacity_path`), recording every region tried before one had room. A
   per-family walk is on the family's row instead — see ``v_run_jobs``. A forced re-run of an
   unchanged config appends a second header row under the same ``run_id``; the view keeps only the
-  latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC = 1``) so one run is always one row.
+  latest (``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC NULLS LAST = 1``) so one run is always
+  one row.
 
 - ``v_run_jobs`` — *what jobs ran for this run, on what runtime/hardware, and how did each fare?*
   One row per ``(run_id, family)`` = the run's DAG as executed: the deterministic ``job_id``, the
@@ -54,12 +55,13 @@ Five views, matched to the questions a run prompts:
   Result writes are append-only and at-least-once (a task retry or a ``--force`` re-run can
   re-append a cell), so — like the two views above — the leaderboard first collapses to one row
   per cell (``ROW_NUMBER() … PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id ORDER BY
-  created_at DESC = 1``, latest write wins) before aggregating; otherwise a duplicated cell would
-  double-count and skew ``mean_wape`` / ``mean_mae`` / ``n_cells``. ``mean_staleness_gap`` is
-  non-NULL only under the frozen backtest schemes, and reads as "what this model loses, in the
-  run's decision metric, if it is never refit" — the column that turns refit cadence from a guess
-  into a number. ``refit_modes`` beside it says whether the cohort earned that ranking the way the
-  run asked; see the note under ``v_model_leaderboard_comparable``, which carries the same column.
+  created_at DESC NULLS LAST = 1``, latest write wins) before aggregating; otherwise a duplicated
+  cell would double-count and skew ``mean_wape`` / ``mean_mae`` / ``n_cells``.
+  ``mean_staleness_gap`` is non-NULL only under the frozen backtest schemes, and reads as "what
+  this model loses, in the run's decision metric, if it is never refit" — the column that turns
+  refit cadence from a guess into a number. ``refit_modes`` beside it says whether the cohort
+  earned that ranking the way the run asked; see the note under
+  ``v_model_leaderboard_comparable``, which carries the same column.
 
 - ``v_backtest_coverage`` — *how much of the panel did each model actually get scored on?* The
   question ``v_model_leaderboard`` cannot answer, and the one that decides whether its ranking
@@ -100,9 +102,12 @@ Five views, matched to the questions a run prompts:
   evidence that the models answered the same question, and unequal ``n_series`` is a finding.
   Like the views above it collapses to one row per cell before aggregating, because a task
   retry can re-append rows and a *partial* duplication skews a pooled ratio (a uniform one does
-  not — it doubles both sides). ``backtest_oof.created_at`` has no writer yet, so the
-  ``ORDER BY created_at DESC`` tiebreak picks arbitrarily among duplicates today; that is harmless
-  while duplicates are byte-identical, which append-only + deterministic rows make them.
+  not — it doubles both sides). Every cell-table writer now stamps ``created_at``, so the
+  ``ORDER BY created_at DESC NULLS LAST`` tiebreak is a real newest-wins rule rather than an
+  arbitrary pick: a repaired cell re-fits the model, and a stochastic learner does not reproduce
+  its old numbers to the bit, so the duplicate pair is a genuine conflict and the repair has to
+  win it. ``NULLS LAST`` is what makes that hold across the seam — rows written before the
+  stamp existed carry NULL and must lose to any row that carries a timestamp.
 
   ``refit_modes`` is on both leaderboards, as a sorted ``STRING_AGG(DISTINCT …)`` rather than in
   the grouping. It is the answer to "was every row in this ranking scored the same way?" without
@@ -155,7 +160,7 @@ SELECT
   JSON_QUERY(job_telemetry, '$.sizing') AS sizing,
   JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `{d}.run_registry`
-QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1""",
+QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1""",
     "v_run_jobs": """\
 CREATE OR REPLACE VIEW `{d}.v_run_jobs` AS
 SELECT
@@ -191,7 +196,7 @@ WITH deduped AS (
   FROM `{d}.forecast_metadata`
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC NULLS LAST
   ) = 1
 )
 SELECT
@@ -217,7 +222,7 @@ WITH deduped AS (
   FROM `{d}.forecast_metadata`
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC NULLS LAST
   ) = 1
 )
 SELECT
@@ -243,7 +248,7 @@ WITH deduped AS (
   FROM `{d}.backtest_oof`
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC NULLS LAST
   ) = 1
 ),
 holdout AS (

@@ -245,6 +245,29 @@ def test_ensemble_oof_rows_empty_frame_is_no_rows() -> None:
     assert assemble_ensemble_oof_rows(_ens_oof().iloc[0:0], "r", "e") == []
 
 
+# --- the created_at stamp ------------------------------------------------------
+
+
+def test_every_cell_assembler_stamps_the_write_time_it_was_given() -> None:
+    # `created_at` is what makes dedupe-on-read mean *newest wins*. A repair re-fits the cell, and
+    # a stochastic learner lands somewhere slightly different, so the duplicate pair is a real
+    # conflict — without the stamp the views pick arbitrarily and a run's forecast depends on
+    # which copy the optimiser happened to reach first.
+    stamp = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+    assert all(r["created_at"] == stamp for r in assemble_prediction_rows(_result(), stamp))
+    assert all(r["created_at"] == stamp for r in assemble_oof_rows(_result(), stamp))
+    rows = assemble_ensemble_oof_rows(_ens_oof(), "r", "e", stamp)
+    assert all(r["created_at"] == stamp for r in rows)
+
+
+def test_the_stamp_defaults_to_unset_so_assembled_rows_stay_comparable() -> None:
+    # The default is None rather than `datetime.now`, so a caller assembling rows to diff them
+    # gets a deterministic frame; `write_cells` is the one place a real clock is read.
+    assert assemble_prediction_rows(_result())[0]["created_at"] is None
+    assert assemble_oof_rows(_result())[0]["created_at"] is None
+    assert assemble_ensemble_oof_rows(_ens_oof(), "r", "e")[0]["created_at"] is None
+
+
 # --- metadata row --------------------------------------------------------------
 
 

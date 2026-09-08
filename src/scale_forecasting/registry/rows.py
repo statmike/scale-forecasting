@@ -32,20 +32,36 @@ def cell_dedup_key(result: CellResult) -> dict[str, str]:
     never DELETEs — a DELETE that matches rows still in the Storage Write API streaming buffer
     is rejected for the whole buffer window (~90 min), so a clear-then-append is not viable
     against the default stream. Instead we rely on
-    ``run_id`` being a pure function of the config (``make_run_id``): the same ``run_id`` implies
-    the same config implies byte-identical rows, so a re-run's "duplicates" are exact copies.
-    Serving views dedupe with ``DISTINCT``/``GROUP BY`` on ``run_id`` (+ cell keys); no write-time
-    delete is needed. ``model_hash`` uniquely identifies the cell on ``forecast_metadata`` for
-    lineage.
+    ``run_id`` being a pure function of the config (``make_run_id``): the same ``run_id`` means the
+    same config, which for a deterministic model means byte-identical rows — a re-run's
+    "duplicates" are exact copies. Serving views dedupe with ``DISTINCT``/``GROUP BY`` on ``run_id``
+    (+ cell keys); no write-time delete is needed. ``model_hash`` uniquely identifies the cell on
+    ``forecast_metadata`` for lineage.
+
+    **Byte-identity is the easy case, and it is no longer the only one.** A repair re-fits a cell
+    that a first attempt left incomplete, possibly on different hardware, and a stochastic learner
+    does not reproduce itself to the bit. Those duplicates are not exact copies and picking
+    arbitrarily among them means a run's forecast depends on which copy the optimiser reached
+    first. So every row on all three cell tables now carries ``created_at``, and every consumer
+    that dedupes orders by it, ``DESC NULLS LAST`` — newest write wins, and a row written before
+    the column had a writer loses to any row written after. The append-only rule is unchanged; what
+    changed is that dedupe-on-read now resolves a genuine conflict rather than only a redundancy.
     """
     return {"run_id": result.run_id}
 
 
-def assemble_prediction_rows(result: CellResult) -> list[dict[str, Any]]:
+def assemble_prediction_rows(
+    result: CellResult, created_at: datetime | None = None
+) -> list[dict[str, Any]]:
     """Canonical prediction frame → ``forecast_predictions`` rows.
 
     Stamps run/series/model/engine onto each row and maps ``ds`` → ``forecast_date``.
     ``quantiles`` is serialized to a JSON string (or None).
+
+    ``created_at`` is the write's timestamp, and it is what lets a later attempt at a cell beat an
+    earlier one on read — see `cell_dedup_key`. It defaults to ``None`` rather than to
+    ``datetime.now`` so that a caller assembling rows for comparison gets a deterministic frame,
+    and so nothing silently stamps a row with the time it happened to be re-assembled.
     """
     rows: list[dict[str, Any]] = []
     for rec in result.predictions.to_dict("records"):
@@ -67,12 +83,15 @@ def assemble_prediction_rows(result: CellResult) -> list[dict[str, Any]]:
                 "yhat_lower": _as_float(rec.get("yhat_lower")),
                 "yhat_upper": _as_float(rec.get("yhat_upper")),
                 "quantiles": _as_json(rec.get("quantiles")),
+                "created_at": created_at,
             }
         )
     return rows
 
 
-def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
+def assemble_oof_rows(
+    result: CellResult, created_at: datetime | None = None
+) -> list[dict[str, Any]]:
     """Canonical OOF frame (`backtest.OOF_COLUMNS`) → ``backtest_oof`` rows. Empty if no backtest.
 
     Four of these columns were declared in the schema and written by nobody. They are all things
@@ -109,12 +128,15 @@ def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
                 # `staleness_gap` so the decay can be read by horizon step and by fold, which is
                 # where a refit cadence is actually decided.
                 "yhat_stale": _as_float(rec.get("yhat_stale")),
+                "created_at": created_at,
             }
         )
     return rows
 
 
-def assemble_ensemble_oof_rows(ens_oof: Any, run_id: str, ensemble_id: str) -> list[dict[str, Any]]:
+def assemble_ensemble_oof_rows(
+    ens_oof: Any, run_id: str, ensemble_id: str, created_at: datetime | None = None
+) -> list[dict[str, Any]]:
     """Blended OOF frame (`ensembler.combine_oof`) → ``backtest_oof`` rows.
 
     The ensemble counterpart of `assemble_oof_rows`. Its reason to exist is the comparable
@@ -143,6 +165,7 @@ def assemble_ensemble_oof_rows(ens_oof: Any, run_id: str, ensemble_id: str) -> l
                 "cutoff_date": _as_date(rec.get("cutoff_date")),
                 "horizon_step": _as_int(rec.get("horizon_step")),
                 "ensemble_id": ensemble_id,
+                "created_at": created_at,
             }
         )
     return rows

@@ -71,7 +71,10 @@ def test_run_summary_keeps_one_row_per_run_after_a_forced_rerun() -> None:
     stmt = render_create_views("d")["v_run_summary"]
     # A forced re-run appends a second header under the same run_id; keep only the latest so one
     # run is always one row.
-    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1" in stmt
+    assert (
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1"
+        in stmt
+    )
 
 
 def test_leaderboard_is_per_run_model_full_fit_only() -> None:

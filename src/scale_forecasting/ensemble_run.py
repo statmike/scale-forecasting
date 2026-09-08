@@ -13,9 +13,9 @@ already-completed run — see `_main`).
 **Config-keyed ensembles.** Every ensemble row carries an ``ensemble_id =
 make_ensemble_id(cfg.ensemble)`` — a digest of the ensemble configuration alone — so *several*
 ensemble configs can be scored under one ``run_id`` without their ``ensemble_<strategy>``
-pseudo-models colliding. Re-running the *same* ensemble config lands the same ``ensemble_id`` (and,
-being deterministic, byte-identical rows); a *different* config lands a different ``ensemble_id``
-and sits beside the first on the leaderboard, distinctly keyed. The leaderboard view groups by
+pseudo-models colliding. Re-running the *same* ensemble config lands the same ``ensemble_id`` (and
+so the same cells, deduped newest-first on read); a *different* config lands a different
+``ensemble_id`` and sits beside the first on the leaderboard, distinctly keyed. The view groups by
 ``(run_id, model_type, ensemble_id)`` so the two never merge.
 
 Three responsibilities, in order:
@@ -51,12 +51,14 @@ Three responsibilities, in order:
    ``ensemble_id`` group key.
 
 **Idempotency (append-only + dedupe-on-read).** Every ensemble row is now written through the
-Write API and is deterministic in ``(run_id, ensemble_id, ts_id, model_type)``, so a re-run of the
-same ensemble config lands byte-identical rows — correct-but-wasteful (a re-append is a duplicate):
-the leaderboard view dedupes on read (``GROUP BY run_id, model_type, ensemble_id``), and duplicated
-identical ``(y_true, yhat)`` pairs leave the ratio/mean metrics unchanged, so the leaderboard is
-unaffected. No pre-delete — a ``DELETE`` matching rows still in the ~90-min Write API streaming
-buffer is rejected for the whole window (the constraint every cell writer already lives under).
+Write API and is keyed in ``(run_id, ensemble_id, ts_id, model_type)``, so a re-run of the same
+ensemble config re-appends the same cells — correct-but-wasteful when the numbers repeat, and a
+genuine conflict when they don't (``xgb`` is a stochastic meta-learner, and a repair re-fits). Both
+cases resolve the same way: every ensemble row carries a ``created_at``, and each read dedupes to
+one row per cell by ``ORDER BY created_at DESC NULLS LAST`` — see `base_read_sql`, and
+`registry.rows.cell_dedup_key` for the same rule on the base tables. No pre-delete — a ``DELETE``
+matching rows still in the ~90-min Write API streaming buffer is rejected for the whole window
+(the constraint every cell writer already lives under).
 A *different* ensemble config keys distinctly (different ``ensemble_id``), so it never overwrites
 and never collides — both coexist.
 
@@ -100,7 +102,13 @@ OOF_READ_COLUMNS: tuple[str, ...] = (
 
 
 def base_read_sql(
-    dataset: str, table: str, columns: str, model_list: str, ts_filter: str, extra: str = ""
+    dataset: str,
+    table: str,
+    columns: str,
+    model_list: str,
+    ts_filter: str,
+    extra: str = "",
+    dedupe_by: str = "",
 ) -> str:
     """One run-, model- and series-scoped SELECT over a registry table (pure).
 
@@ -113,11 +121,35 @@ def base_read_sql(
 
     ``extra`` is for a clause only one read needs (``forecast_metadata`` wants the full-fit rows
     only); ``ts_filter`` is the microbatch's ``AND ts_id IN UNNEST(@ts_ids)``, empty for a barrier.
+
+    ``dedupe_by`` names the cell grain of the table, and turns the read into "one row per cell,
+    newest write wins" via ``QUALIFY ROW_NUMBER() … ORDER BY created_at DESC NULLS LAST``. Three
+    things downstream need this and none of them fail loudly without it:
+    `ensembler.combine_calculated` pivots with ``pivot_table``, whose default ``aggfunc`` is
+    ``mean``, so a duplicated base row is silently *averaged* with itself — harmless for two
+    identical copies, wrong the moment a repair re-fit one of them. ``_inverse_error_run_weights``
+    takes an ungrouped mean of the decision metric, so a model with duplicate metadata rows is
+    weighted by an average of its attempts. And the blended OOF is appended back into
+    ``backtest_oof``, so a duplicate on the way in becomes a duplicate on the way out.
+
+    ``NULLS LAST`` is the part that matters for old data: ``created_at`` has only had a writer on
+    these two tables since P10, so every row from before it is NULL, and a NULL must lose to any
+    real timestamp rather than sorting first and winning permanently.
     """
+    qualify = (
+        ""
+        if not dedupe_by
+        else (
+            f"\nQUALIFY ROW_NUMBER() OVER ("
+            f"\n  PARTITION BY {dedupe_by}"
+            f"\n  ORDER BY created_at DESC NULLS LAST"
+            f"\n) = 1"
+        )
+    )
     return (
         f"SELECT {columns}\n"
         f"FROM `{dataset}.{table}`\n"
-        f"WHERE run_id = @run_id AND model_type IN ({model_list}){extra}{ts_filter}"
+        f"WHERE run_id = @run_id AND model_type IN ({model_list}){extra}{ts_filter}{qualify}"
     )
 
 
@@ -390,9 +422,18 @@ def _ensemble_batch(
         "ts_id, model_type, forecast_date, yhat, yhat_lower, yhat_upper",
         model_list,
         ts_filter,
+        # The base models' rows carry a NULL `ensemble_id`, and the `model_type IN (...)` filter
+        # already excludes the ensemble's own; the grain is still partitioned on it so a future
+        # caller that widens the model list cannot collapse two ensembles into one row.
+        dedupe_by="run_id, ts_id, model_type, ensemble_id, forecast_date",
     )
     oof_sql = base_read_sql(
-        dataset, "backtest_oof", ", ".join(OOF_READ_COLUMNS), model_list, ts_filter
+        dataset,
+        "backtest_oof",
+        ", ".join(OOF_READ_COLUMNS),
+        model_list,
+        ts_filter,
+        dedupe_by="run_id, ts_id, model_type, ensemble_id, fold_id, forecast_date",
     )
     metric_sql = base_read_sql(
         dataset,
@@ -404,6 +445,10 @@ def _ensemble_batch(
         model_list,
         ts_filter,
         extra=" AND fold_id IS NULL",
+        # `fold_id` stays in the grain even though `extra` pins it to NULL: the partition describes
+        # the table's cell identity, and a read that changes its filter should not silently change
+        # what counts as a duplicate.
+        dedupe_by="run_id, ts_id, model_type, ensemble_id, fold_id",
     )
     base_df = _query(base_pred_sql).to_dataframe()
     oof_df = _query(oof_sql).to_dataframe()
@@ -461,7 +506,7 @@ def _ensemble_batch(
     # rows it summarizes, and they are what `v_model_leaderboard_comparable` pools over — an
     # ensemble that only ever wrote its panel is missing from every comparison computed from
     # `backtest_oof`, which is not the same as ranking badly in one.
-    oof_rows = assemble_ensemble_oof_rows(ens_oof, run_id, ensemble_id)
+    oof_rows = assemble_ensemble_oof_rows(ens_oof, run_id, ensemble_id, created_at)
     bigquery_engine._append_rows(settings, "backtest_oof", _OOF_SPEC, oof_rows)
     log.info(
         "ensemble OOF appended: run_id=%s ensemble_id=%s rows=%d",

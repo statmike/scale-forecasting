@@ -2,7 +2,10 @@
 
 Idempotency is **append-only + dedupe-on-read**: this only appends (never DELETEs — a DELETE
 against rows still in the ~90-min streaming buffer is rejected), and the serving views dedupe with
-``DISTINCT``/``GROUP BY`` on ``run_id`` (+ cell keys). Assembly is `registry.rows`, transport is
+``DISTINCT``/``GROUP BY`` on ``run_id`` (+ cell keys). Every row gets a ``created_at`` stamp here
+so "dedupe" can mean *newest wins* rather than *pick any*: a re-run of an unchanged config repeats
+itself, but a repair re-fits, and a stochastic learner does not reproduce its old numbers to the
+bit — see `registry.rows.cell_dedup_key`. Assembly is `registry.rows`, transport is
 `registry.write_api`; what is here is the per-table orchestration between them.
 """
 
@@ -36,9 +39,10 @@ def write_cells(
     Idempotency is **append-only + dedupe-on-read** (see `cell_dedup_key`): this appends
     and never DELETEs. A DELETE that matches rows still in the Storage Write API streaming buffer
     is rejected for the whole buffer window (~90 min), so a clear-then-append against the default
-    stream is not viable. Instead, ``run_id`` is a pure function of the
-    config, so a re-run of the same config writes byte-identical rows; serving views dedupe on
-    ``run_id`` (+ cell keys). Steps:
+    stream is not viable. Instead, ``run_id`` is a pure function of the config, so a re-run of the
+    same config writes rows that mean the same thing; where they don't — a repair re-fits, and a
+    stochastic learner lands somewhere slightly different — the ``created_at`` stamped here is what
+    lets the serving views prefer the newer of the two. Steps:
 
     1. Assemble rows via the pure assemblers; upload each cell's serialized model bytes (if any,
        when the run set ``persist_models``) and stamp the returned URI onto its
@@ -68,8 +72,8 @@ def write_cells(
     oof_rows: list[dict[str, Any]] = []
     meta_rows: list[dict[str, Any]] = []
     for result in results:
-        pred_rows.extend(assemble_prediction_rows(result))
-        oof_rows.extend(assemble_oof_rows(result))
+        pred_rows.extend(assemble_prediction_rows(result, created_at))
+        oof_rows.extend(assemble_oof_rows(result, created_at))
         model_artifact: str | None = None
         if result.artifact_bytes is not None:
             model_artifact = artifacts.upload_artifact_bytes(

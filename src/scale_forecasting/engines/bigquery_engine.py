@@ -246,6 +246,7 @@ def run(
                             model_name=model_name,
                             fold_id=fold_id,
                             cfg=cfg,
+                            created_at=created_at,
                         )
                         oof_rows.extend(fold_oof)
                         for ts_id, panel in fold_panels.items():
@@ -316,6 +317,7 @@ def _score_fold(
     model_name: str,
     fold_id: int,
     cfg: RunConfig,
+    created_at: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
     """One fold's eval frame → its ``backtest_oof`` rows and one metric panel per series (pure).
 
@@ -351,7 +353,7 @@ def _score_fold(
     for ts_id, g in eval_df.groupby("ts_id"):
         g = g.sort_values("forecast_date")
         for _, row in g.iterrows():
-            oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, row))
+            oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, row, created_at))
         hist = hist_by_id.get(ts_id)
         # One cutoff per fold — the native path trains every series to the same global origin — so
         # any row of the group carries it. Absent on a hand-built or pre-cutoff frame, in which
@@ -369,7 +371,12 @@ def _score_fold(
 
 
 def _oof_row(
-    run_id: str, ts_id: str, model_name: str, fold_id: int, row: Mapping[str, Any]
+    run_id: str,
+    ts_id: str,
+    model_name: str,
+    fold_id: int,
+    row: Mapping[str, Any],
+    created_at: Any = None,
 ) -> dict[str, Any]:
     """Assemble one ``backtest_oof`` row from a fold's eval-query result row (pure).
 
@@ -400,6 +407,9 @@ def _oof_row(
         # only when every series ends on the same date. See `ensembler._fold_key`.
         "cutoff_date": row.get("cutoff_date"),
         "horizon_step": row.get("horizon_step"),
+        # The write's clock, so a re-scored fold beats the fold it re-scored on any dedupe-on-read.
+        # See `registry.rows.cell_dedup_key`.
+        "created_at": created_at,
     }
 
 

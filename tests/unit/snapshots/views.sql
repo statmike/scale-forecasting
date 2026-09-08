@@ -25,7 +25,7 @@ SELECT
   JSON_QUERY(job_telemetry, '$.sizing') AS sizing,
   JSON_QUERY(job_telemetry, '$.capacity') AS capacity
 FROM `proj.scale_forecasting.run_registry`
-QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC) = 1;
+QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1;
 
 CREATE OR REPLACE VIEW `proj.scale_forecasting.v_run_jobs` AS
 SELECT
@@ -61,7 +61,7 @@ WITH deduped AS (
   FROM `proj.scale_forecasting.forecast_metadata`
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC NULLS LAST
   ) = 1
 )
 SELECT
@@ -87,7 +87,7 @@ WITH deduped AS (
   FROM `proj.scale_forecasting.forecast_metadata`
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC NULLS LAST
   ) = 1
 )
 SELECT
@@ -113,7 +113,7 @@ WITH deduped AS (
   FROM `proj.scale_forecasting.backtest_oof`
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC NULLS LAST
   ) = 1
 ),
 holdout AS (
