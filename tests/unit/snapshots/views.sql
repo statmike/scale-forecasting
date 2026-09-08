@@ -75,7 +75,8 @@ SELECT
   APPROX_QUANTILES(fit_seconds, 2)[OFFSET(1)] AS median_fit_seconds,
   AVG(wape) AS mean_wape,
   AVG(mae) AS mean_mae,
-  AVG(staleness_gap) AS mean_staleness_gap
+  AVG(staleness_gap) AS mean_staleness_gap,
+  STRING_AGG(DISTINCT backtest_refit ORDER BY backtest_refit) AS refit_modes
 FROM deduped
 WHERE fold_id IS NULL
 GROUP BY run_id, model_type, ensemble_id;
@@ -119,18 +120,33 @@ holdout AS (
   SELECT *
   FROM deduped
   QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)
+),
+refit AS (
+  SELECT
+    run_id,
+    model_type,
+    ensemble_id,
+    STRING_AGG(DISTINCT backtest_refit ORDER BY backtest_refit) AS refit_modes
+  FROM `proj.scale_forecasting.forecast_metadata`
+  WHERE fold_id IS NULL
+  GROUP BY run_id, model_type, ensemble_id
 )
 SELECT
-  run_id,
-  model_type,
-  ensemble_id,
-  ANY_VALUE(fold_id) AS holdout_fold_id,
-  COUNT(DISTINCT ts_id) AS n_series,
+  h.run_id,
+  h.model_type,
+  h.ensemble_id,
+  ANY_VALUE(h.fold_id) AS holdout_fold_id,
+  COUNT(DISTINCT h.ts_id) AS n_series,
   COUNT(*) AS n_points,
-  SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape,
-  AVG(ABS(y_true - yhat)) AS pooled_mae,
-  MIN(forecast_date) AS first_forecast_date,
-  MAX(forecast_date) AS last_forecast_date
-FROM holdout
-WHERE y_true IS NOT NULL AND yhat IS NOT NULL
-GROUP BY run_id, model_type, ensemble_id;
+  SAFE_DIVIDE(SUM(ABS(h.y_true - h.yhat)), SUM(ABS(h.y_true))) AS pooled_wape,
+  AVG(ABS(h.y_true - h.yhat)) AS pooled_mae,
+  MIN(h.forecast_date) AS first_forecast_date,
+  MAX(h.forecast_date) AS last_forecast_date,
+  ANY_VALUE(r.refit_modes) AS refit_modes
+FROM holdout AS h
+LEFT JOIN refit AS r
+  ON h.run_id = r.run_id
+  AND h.model_type = r.model_type
+  AND COALESCE(h.ensemble_id, '') = COALESCE(r.ensemble_id, '')
+WHERE h.y_true IS NOT NULL AND h.yhat IS NOT NULL
+GROUP BY h.run_id, h.model_type, h.ensemble_id;

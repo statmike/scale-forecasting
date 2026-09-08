@@ -58,7 +58,8 @@ Five views, matched to the questions a run prompts:
   double-count and skew ``mean_wape`` / ``mean_mae`` / ``n_cells``. ``mean_staleness_gap`` is
   non-NULL only under the frozen backtest schemes, and reads as "what this model loses, in the
   run's decision metric, if it is never refit" — the column that turns refit cadence from a guess
-  into a number.
+  into a number. ``refit_modes`` beside it says whether the cohort earned that ranking the way the
+  run asked; see the note under ``v_model_leaderboard_comparable``, which carries the same column.
 
 - ``v_backtest_coverage`` — *how much of the panel did each model actually get scored on?* The
   question ``v_model_leaderboard`` cannot answer, and the one that decides whether its ranking
@@ -102,6 +103,16 @@ Five views, matched to the questions a run prompts:
   not — it doubles both sides). ``backtest_oof.created_at`` has no writer yet, so the
   ``ORDER BY created_at DESC`` tiebreak picks arbitrarily among duplicates today; that is harmless
   while duplicates are byte-identical, which append-only + deterministic rows make them.
+
+  ``refit_modes`` is on both leaderboards, as a sorted ``STRING_AGG(DISTINCT …)`` rather than in
+  the grouping. It is the answer to "was every row in this ranking scored the same way?" without
+  splitting a model into two rows to say so: ``recondition`` means the whole cohort was frozen,
+  ``recondition,unsupported`` means some of it refit instead and this ranking is mixing two
+  questions. The comparable view has to reach into ``forecast_metadata`` for it — ``backtest_oof``
+  is per-row truth and carries no per-cell refit mode — and joins on ``COALESCE(ensemble_id, '')``
+  because ``ensemble_id`` is NULL on every base model and NULL never equals NULL. A ``LEFT`` join
+  so a model whose metadata row is missing still ranks, with a NULL ``refit_modes`` rather than
+  vanishing from the leaderboard.
 
 ``JSON_VALUE`` reads scalars straight out of the native ``JSON`` ``job_telemetry`` column (the
 registry is native BigQuery, so the column is the real ``JSON`` type — ``JSON_VALUE`` works on it
@@ -194,7 +205,8 @@ SELECT
   APPROX_QUANTILES(fit_seconds, 2)[OFFSET(1)] AS median_fit_seconds,
   AVG(wape) AS mean_wape,
   AVG(mae) AS mean_mae,
-  AVG(staleness_gap) AS mean_staleness_gap
+  AVG(staleness_gap) AS mean_staleness_gap,
+  STRING_AGG(DISTINCT backtest_refit ORDER BY backtest_refit) AS refit_modes
 FROM deduped
 WHERE fold_id IS NULL
 GROUP BY run_id, model_type, ensemble_id""",
@@ -238,21 +250,36 @@ holdout AS (
   SELECT *
   FROM deduped
   QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)
+),
+refit AS (
+  SELECT
+    run_id,
+    model_type,
+    ensemble_id,
+    STRING_AGG(DISTINCT backtest_refit ORDER BY backtest_refit) AS refit_modes
+  FROM `{d}.forecast_metadata`
+  WHERE fold_id IS NULL
+  GROUP BY run_id, model_type, ensemble_id
 )
 SELECT
-  run_id,
-  model_type,
-  ensemble_id,
-  ANY_VALUE(fold_id) AS holdout_fold_id,
-  COUNT(DISTINCT ts_id) AS n_series,
+  h.run_id,
+  h.model_type,
+  h.ensemble_id,
+  ANY_VALUE(h.fold_id) AS holdout_fold_id,
+  COUNT(DISTINCT h.ts_id) AS n_series,
   COUNT(*) AS n_points,
-  SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape,
-  AVG(ABS(y_true - yhat)) AS pooled_mae,
-  MIN(forecast_date) AS first_forecast_date,
-  MAX(forecast_date) AS last_forecast_date
-FROM holdout
-WHERE y_true IS NOT NULL AND yhat IS NOT NULL
-GROUP BY run_id, model_type, ensemble_id""",
+  SAFE_DIVIDE(SUM(ABS(h.y_true - h.yhat)), SUM(ABS(h.y_true))) AS pooled_wape,
+  AVG(ABS(h.y_true - h.yhat)) AS pooled_mae,
+  MIN(h.forecast_date) AS first_forecast_date,
+  MAX(h.forecast_date) AS last_forecast_date,
+  ANY_VALUE(r.refit_modes) AS refit_modes
+FROM holdout AS h
+LEFT JOIN refit AS r
+  ON h.run_id = r.run_id
+  AND h.model_type = r.model_type
+  AND COALESCE(h.ensemble_id, '') = COALESCE(r.ensemble_id, '')
+WHERE h.y_true IS NOT NULL AND h.yhat IS NOT NULL
+GROUP BY h.run_id, h.model_type, h.ensemble_id""",
 }
 
 VIEW_NAMES: tuple[str, ...] = tuple(_VIEW_BODIES)

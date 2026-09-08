@@ -182,33 +182,56 @@ def test_comparable_leaderboard_restricts_to_the_holdout_fold() -> None:
     # at all achieved. Derived from the rows (`make_folds` drops from the oldest end, keeping the
     # survivor's original fold_id) because a view has no config to read the holdout out of.
     assert "QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)" in stmt
-    assert "ANY_VALUE(fold_id) AS holdout_fold_id" in stmt
+    assert "ANY_VALUE(h.fold_id) AS holdout_fold_id" in stmt
 
 
 def test_comparable_leaderboard_pools_the_error_and_reports_its_panel() -> None:
     stmt = render_create_views("d")["v_model_leaderboard_comparable"]
     # Pooled, not averaged: one WAPE of the whole panel, where a near-zero series cannot dominate
     # the way it does in a mean of per-series WAPEs.
-    assert "SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape" in stmt
+    assert "SAFE_DIVIDE(SUM(ABS(h.y_true - h.yhat)), SUM(ABS(h.y_true))) AS pooled_wape" in stmt
     # And the panel it was pooled over, so a reader can see whether two rows answered the same
     # question. Equal n_series across models is the evidence; unequal n_series is the finding.
-    assert "COUNT(DISTINCT ts_id) AS n_series" in stmt
+    assert "COUNT(DISTINCT h.ts_id) AS n_series" in stmt
     # Unscorable rows are excluded rather than half-counted: a NULL yhat would drop out of the
     # numerator while its y_true stayed in the denominator, quietly flattering the model.
-    assert "WHERE y_true IS NOT NULL AND yhat IS NOT NULL" in stmt
+    assert "WHERE h.y_true IS NOT NULL AND h.yhat IS NOT NULL" in stmt
 
 
 def test_comparable_leaderboard_reads_oof_and_keeps_ensembles_distinct() -> None:
     stmt = render_create_views("d")["v_model_leaderboard_comparable"]
-    # backtest_oof, not forecast_metadata: only the OOF table holds per-fold truth, and
-    # forecast_metadata's rolled-up rows cannot be restricted to a fold after the fact.
+    # The ranking comes from backtest_oof, not forecast_metadata: only the OOF table holds
+    # per-fold truth, and forecast_metadata's rolled-up rows cannot be restricted to a fold after
+    # the fact. (forecast_metadata is still read, but only by the `refit` CTE, which contributes a
+    # label and never a number.)
     assert "FROM `d.backtest_oof`" in stmt
-    assert "GROUP BY run_id, model_type, ensemble_id" in stmt
+    assert "GROUP BY h.run_id, h.model_type, h.ensemble_id" in stmt
     # Two ensemble configs under one run_id stay apart, here as everywhere else.
     assert "ensemble_id" in stmt.split("PARTITION BY")[1].split("\n")[0]
     # Dedupe precedes the holdout restriction, which precedes the aggregate.
     assert stmt.index("WITH deduped AS (") < stmt.index("holdout AS (")
-    assert stmt.index("holdout AS (") < stmt.index("GROUP BY run_id, model_type, ensemble_id")
+    assert stmt.index("holdout AS (") < stmt.index("GROUP BY h.run_id, h.model_type, h.ensemble_id")
+
+
+def test_both_leaderboards_say_whether_the_ranking_was_scored_one_way() -> None:
+    # A frozen run whose models could not all freeze produces a ranking that mixes two questions.
+    # `refit_modes` is how a reader sees that without the view splitting one model into two rows:
+    # "recondition" is a clean cohort, "recondition,unsupported" is a warning.
+    for name in ("v_model_leaderboard", "v_model_leaderboard_comparable"):
+        stmt = render_create_views("d")[name]
+        assert "STRING_AGG(DISTINCT backtest_refit ORDER BY backtest_refit) AS refit_modes" in stmt
+
+
+def test_the_comparable_leaderboard_joins_refit_modes_without_dropping_base_models() -> None:
+    stmt = render_create_views("d")["v_model_leaderboard_comparable"]
+    # ensemble_id is NULL on every base model, and NULL never equals NULL — an equality join would
+    # silently hand back a leaderboard of ensembles only. COALESCE is what keeps the base models in.
+    assert "COALESCE(h.ensemble_id, '') = COALESCE(r.ensemble_id, '')" in stmt
+    # LEFT, so a model whose metadata row never landed still ranks with a NULL label rather than
+    # disappearing: the ranking is the product here, and the label is the annotation.
+    assert "LEFT JOIN refit AS r" in stmt
+    # The label is joined in at the cell grain the metadata table actually has.
+    assert "  FROM `d.forecast_metadata`\n  WHERE fold_id IS NULL" in stmt
 
 
 def test_views_snapshot() -> None:
