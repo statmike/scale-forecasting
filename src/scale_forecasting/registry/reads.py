@@ -429,3 +429,62 @@ def read_coverage_by_step(
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"read_coverage_by_step failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
+
+
+def read_backtest_coverage(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the ``v_backtest_coverage`` rows for ``run_id`` — the panel behind each model's score.
+
+    One row per ``(model_type, ensemble_id, backtest_status, n_folds_achieved)``, so a model with a
+    ragged panel returns several. Ordered so a reader walking the rows sees each model's healthiest
+    cohort first. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_backtest_coverage')}` "
+        "WHERE run_id=@run_id "
+        "ORDER BY model_type, ensemble_id NULLS FIRST, n_folds_achieved DESC NULLS LAST"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_backtest_coverage failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_comparable_leaderboard(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """Return the ``v_model_leaderboard_comparable`` rows — one per (model, ensemble) on ``run_id``.
+
+    The holdout-fold, pooled-WAPE ranking (see `registry.views`), ordered best-first with an
+    unscorable model last. Read ``n_series`` alongside the score: rows that disagree on it are not
+    yet comparable, whatever the ranking says. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_model_leaderboard_comparable')}` "
+        "WHERE run_id=@run_id ORDER BY pooled_wape ASC NULLS LAST"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_comparable_leaderboard failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]

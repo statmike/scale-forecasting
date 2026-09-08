@@ -6,7 +6,7 @@ where "rows in BigQuery" become "assets you review". They are pure ``CREATE OR R
 strings (no client), so they render + snapshot-test offline exactly like the table DDL, and
 ``registry.tables.ensure_views`` executes what this renders.
 
-Three views, matched to the questions a run prompts:
+Five views, matched to the questions a run prompts:
 
 - ``v_run_summary`` — *how did each run go, and how efficiently?* One row per run: the scaling
   knobs (``n_series``, ``n_models``), the engine's own ``runtime_seconds``, and the Dataproc
@@ -56,6 +56,41 @@ Three views, matched to the questions a run prompts:
   per cell (``ROW_NUMBER() … PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id ORDER BY
   created_at DESC = 1``, latest write wins) before aggregating; otherwise a duplicated cell would
   double-count and skew ``mean_wape`` / ``mean_mae`` / ``n_cells``.
+
+- ``v_backtest_coverage`` — *how much of the panel did each model actually get scored on?* The
+  question ``v_model_leaderboard`` cannot answer, and the one that decides whether its ranking
+  means anything. A ragged panel does not give every series the same number of folds:
+  `backtest.make_folds` drops the oldest folds a short series cannot afford, so one model's
+  ``mean_wape`` can be an average over ten folds of two thousand series while its neighbour's is
+  an average over one fold of two hundred. One row per ``(run_id, model_type, ensemble_id,
+  backtest_status, n_folds_achieved)`` with the series count and its share of that model's panel —
+  long-format rather than one wide row per model, because the achieved-fold histogram has no fixed
+  width and a wide shape would need a self-join that breaks on the NULL ``ensemble_id`` of every
+  base model. ``backtest_status`` is
+  ``full`` / ``reduced`` / ``unscored`` / ``failed``, or NULL where the run never asked for a
+  backtest at all. Read it beside the leaderboard: a model whose panel is mostly ``reduced`` won on
+  an easier question.
+
+- ``v_model_leaderboard_comparable`` — *which model won, holding the question fixed?* The same
+  ranking as ``v_model_leaderboard``, rebuilt so the numbers are comparable across models rather
+  than merely present. Two differences, and both are the point. First, it is restricted to the
+  **holdout fold** — the newest one, ``MAX(fold_id) OVER (PARTITION BY run_id)``, which every series
+  that achieved any fold achieved, because `backtest.make_folds` keeps a survivor's original
+  ``fold_id`` and drops from the oldest end. That is derived from the rows rather than from the
+  config on purpose: the view has no config to read. Second, the error is **pooled, not averaged** —
+  ``SUM(|y_true − yhat|) / SUM(|y_true|)`` over every series at once, so a fleet number is one WAPE
+  of the whole panel instead of the mean of per-series WAPEs, where a single near-zero series can
+  dominate. It reads ``backtest_oof`` rather than ``forecast_metadata`` because that is the only
+  table holding per-fold truth; ``forecast_metadata`` stores one rolled-up row per cell and cannot
+  be restricted to a fold after the fact. Ensembles appear here beside the base models because
+  `ensemble_run` writes its blended OOF into the same table (keyed by ``ensemble_id``). Carry
+  ``n_series`` into any comparison you draw from it — equal ``n_series`` across the rows is the
+  evidence that the models answered the same question, and unequal ``n_series`` is a finding.
+  Like the views above it collapses to one row per cell before aggregating, because a task
+  retry can re-append rows and a *partial* duplication skews a pooled ratio (a uniform one does
+  not — it doubles both sides). ``backtest_oof.created_at`` has no writer yet, so the
+  ``ORDER BY created_at DESC`` tiebreak picks arbitrarily among duplicates today; that is harmless
+  while duplicates are byte-identical, which append-only + deterministic rows make them.
 
 ``JSON_VALUE`` reads scalars straight out of the native ``JSON`` ``job_telemetry`` column (the
 registry is native BigQuery, so the column is the real ``JSON`` type — ``JSON_VALUE`` works on it
@@ -150,6 +185,59 @@ SELECT
   AVG(mae) AS mean_mae
 FROM deduped
 WHERE fold_id IS NULL
+GROUP BY run_id, model_type, ensemble_id""",
+    "v_backtest_coverage": """\
+CREATE OR REPLACE VIEW `{d}.v_backtest_coverage` AS
+WITH deduped AS (
+  SELECT *
+  FROM `{d}.forecast_metadata`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+    ORDER BY created_at DESC
+  ) = 1
+)
+SELECT
+  run_id,
+  model_type,
+  ensemble_id,
+  backtest_status,
+  n_folds_achieved,
+  COUNT(*) AS n_series,
+  SAFE_DIVIDE(
+    COUNT(*),
+    SUM(COUNT(*)) OVER (PARTITION BY run_id, model_type, ensemble_id)
+  ) AS series_share
+FROM deduped
+WHERE fold_id IS NULL
+GROUP BY run_id, model_type, ensemble_id, backtest_status, n_folds_achieved""",
+    "v_model_leaderboard_comparable": """\
+CREATE OR REPLACE VIEW `{d}.v_model_leaderboard_comparable` AS
+WITH deduped AS (
+  SELECT *
+  FROM `{d}.backtest_oof`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
+    ORDER BY created_at DESC
+  ) = 1
+),
+holdout AS (
+  SELECT *
+  FROM deduped
+  QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)
+)
+SELECT
+  run_id,
+  model_type,
+  ensemble_id,
+  ANY_VALUE(fold_id) AS holdout_fold_id,
+  COUNT(DISTINCT ts_id) AS n_series,
+  COUNT(*) AS n_points,
+  SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape,
+  AVG(ABS(y_true - yhat)) AS pooled_mae,
+  MIN(forecast_date) AS first_forecast_date,
+  MAX(forecast_date) AS last_forecast_date
+FROM holdout
+WHERE y_true IS NOT NULL AND yhat IS NOT NULL
 GROUP BY run_id, model_type, ensemble_id""",
 }
 

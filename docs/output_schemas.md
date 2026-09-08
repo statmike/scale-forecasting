@@ -393,6 +393,26 @@ clustered by `run_id, ts_id`.
 | `cutoff_date` | `DATE` | The last date the model was allowed to see when it made this prediction — the fold's origin, and the column that identifies a fold across engines. |
 | `horizon_step` | `INT64` | How far ahead of `cutoff_date` this row is, counting from 1. |
 | `created_at` | `TIMESTAMP` | **Declared, not yet written — NULL today.** The write timestamp; same reasoning as the note under `forecast_metadata`. |
+| `ensemble_id` | `STRING` | NULL on a base model's row; the `EnsembleConfig` digest on a blended row. Two ensemble configs scored under one `run_id` stay distinct instead of overwriting each other. |
+
+### Ensembles land here too
+
+An ensemble is a model like any other, so it writes its blended out-of-fold predictions back into
+this same table — one row per `(ts_id, fold_id, forecast_date)` under `model_type =
+'ensemble_<strategy>'`, with `ensemble_id` set. Only the blended columns are filled: `y_true`,
+`yhat`, `cutoff_date` and `horizon_step` carry through from the base rows the blend was computed
+from, and `yhat_raw` / `yhat_adjusted` / the two bounds stay NULL, because a weighted combination of
+corrected predictions has no separate "uncorrected arm" to report.
+
+The reason this matters is comparability. `v_model_leaderboard_comparable` pools error over rows of
+*this* table, so before ensembles wrote here they were simply **absent** from that ranking — not
+ranked poorly, missing. Writing them here puts base models and ensembles on one fold, one pooling
+rule and one column.
+
+Two consequences worth knowing. The reads that feed the ensembler filter to the run's base models
+(`model_type IN (…)`), so a re-ensemble or a microbatch drain never blends a previous consensus back
+into the next one. And every per-horizon query — anything grouping by `horizon_step` — now sees
+ensembles alongside the models they were built from.
 
 ### Error by how far ahead you asked
 
@@ -428,9 +448,9 @@ cutoff says and the ordinal does not. The ensemble joins on `(ts_id, cutoff_date
 
 ---
 
-## The read surface — three views
+## The read surface — five views
 
-You rarely query the raw tables. Three `CREATE OR REPLACE VIEW`s are the curated read surface (and they
+You rarely query the raw tables. Five `CREATE OR REPLACE VIEW`s are the curated read surface (and they
 apply the dedupe-on-read). Full operator loop in
 [running_and_reviewing.md](./running_and_reviewing.md).
 
@@ -486,6 +506,47 @@ One row per `(run_id, model_type, ensemble_id)`: `n_cells`, `n_no_artifact` /
 `median_fit_seconds`, and `mean_wape` / `mean_mae` where a backtest populated them. The entry point
 for "is this model worth keeping" before ensembling. Reads only the final rows (`fold_id IS NULL`),
 so per-fold metrics don't double-count.
+
+### `v_backtest_coverage` — how much of the panel did each model get scored on?
+
+The question the leaderboard cannot answer, and the one that decides whether its ranking means
+anything. A ragged panel does not give every series the same number of folds: `backtest.make_folds`
+drops the oldest folds a short series cannot afford. So one model's `mean_wape` might be an average
+over ten folds of two thousand series while its neighbour's is an average over one fold of two
+hundred — two different questions, printed in the same column.
+
+One row per `(run_id, model_type, ensemble_id, backtest_status, n_folds_achieved)`, with `n_series`
+and `series_share` (that cohort's fraction of the model's panel). `backtest_status` is `full`,
+`reduced`, `unscored` or `failed`, or NULL where the run never asked for a backtest at all. The
+shape is long rather than one wide row per model because the achieved-fold histogram has no fixed
+width, and because a wide shape would need a self-join that breaks on the NULL `ensemble_id` every
+base model carries.
+
+Read it beside the leaderboard. A model whose panel is mostly `reduced` won on an easier question.
+
+### `v_model_leaderboard_comparable` — which model won, holding the question fixed?
+
+The same ranking as `v_model_leaderboard`, rebuilt so the numbers are comparable across models
+rather than merely present. Two differences, and both are the point.
+
+First, it is restricted to the **holdout fold** — the newest one, `MAX(fold_id) OVER (PARTITION BY
+run_id)`. Every series that achieved any fold at all achieved that one, because `make_folds` keeps a
+survivor's original `fold_id` and drops from the oldest end. The fold is derived from the rows
+rather than read from the config on purpose: a view has no config to read.
+
+Second, the error is **pooled, not averaged**: `SUM(|y_true − yhat|) / SUM(|y_true|)` over every
+series at once. That gives one WAPE for the whole panel, instead of the mean of per-series WAPEs
+where a single near-zero series can dominate the average.
+
+Columns: `holdout_fold_id`, `n_series`, `n_points`, `pooled_wape`, `pooled_mae`, and the
+`first_forecast_date` / `last_forecast_date` bounding the window that was scored. Carry `n_series`
+into any comparison you draw — equal `n_series` across the rows is the evidence that the models
+answered the same question, and unequal `n_series` is itself a finding.
+
+It reads `backtest_oof` rather than `forecast_metadata` because that is the only table holding
+per-fold truth; `forecast_metadata` stores one rolled-up row per cell and cannot be restricted to a
+fold after the fact. Ensembles appear here beside the base models, because they write their blended
+out-of-fold rows into that same table.
 
 ---
 

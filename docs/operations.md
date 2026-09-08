@@ -167,10 +167,11 @@ teardown is a `bq` one-liner nobody needs us to wrap, and wrapping it invites th
 # The registry has its own dataset (you set SF_REGISTRY_DATASET_ID) — delete the dataset:
 bq rm -r -f <project>:<registry_dataset>
 
-# The registry shares SF_DATASET_ID with the source panel — drop the eight objects by name,
+# The registry shares SF_DATASET_ID with the source panel — drop the ten objects by name,
 # because deleting the dataset would take the seeded source panel with it:
 DS=<project>:<dataset>
-for v in v_run_summary v_run_jobs v_model_leaderboard; do bq rm -f -t "$DS.$v"; done
+for v in v_run_summary v_run_jobs v_model_leaderboard v_backtest_coverage \
+         v_model_leaderboard_comparable; do bq rm -f -t "$DS.$v"; done
 for t in run_registry run_jobs forecast_metadata forecast_predictions backtest_oof; do
   bq rm -f -t "$DS.$t"
 done

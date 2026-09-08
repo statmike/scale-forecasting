@@ -8,7 +8,7 @@ serialization, and the model_hash idempotency key.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pandas as pd
@@ -32,6 +32,7 @@ from scale_forecasting.registry.params import (
 )
 from scale_forecasting.registry.rows import (
     METRIC_COLUMNS,
+    assemble_ensemble_oof_rows,
     assemble_header_row,
     assemble_job_row,
     assemble_metadata_row,
@@ -189,6 +190,58 @@ def test_oof_rows_carry_fold_and_truth() -> None:
 
 def test_oof_rows_empty_when_no_backtest() -> None:
     assert assemble_oof_rows(_result(oof=None)) == []
+
+
+# --- ensemble oof rows ---------------------------------------------------------
+
+
+def _ens_oof() -> pd.DataFrame:
+    """A blended OOF frame in the shape `ensembler.combine_oof` returns."""
+    return pd.DataFrame(
+        {
+            "ts_id": ["s1", "s1"],
+            "model_type": ["ensemble_mean", "ensemble_mean"],
+            "fold_id": [1.0, 1.0],  # float: a pandas column that ever held a NaN comes back float
+            "cutoff_date": [date(2026, 1, 1), date(2026, 1, 1)],
+            "forecast_date": [date(2026, 1, 2), date(2026, 1, 3)],
+            "horizon_step": [1.0, 2.0],
+            "y_true": [9.0, 10.0],
+            "yhat": [8.5, 10.5],
+        }
+    )
+
+
+def test_ensemble_oof_rows_carry_the_ensemble_id_and_no_column_the_spec_would_drop() -> None:
+    rows = assemble_ensemble_oof_rows(_ens_oof(), "my-run-abc123def456", "ens-9f2")
+    assert len(rows) == 2
+    assert set(rows[0]) <= _spec_columns(_OOF_SPEC), set(rows[0]) - _spec_columns(_OOF_SPEC)
+    # The whole reason the column exists: two ensemble configs under one run_id stay apart.
+    assert all(r["ensemble_id"] == "ens-9f2" for r in rows)
+    assert all(r["run_id"] == "my-run-abc123def456" for r in rows)
+    # fold_id and horizon_step are written as INT64, not as the float the frame carried.
+    assert rows[0]["fold_id"] == 1 and isinstance(rows[0]["fold_id"], int)
+    assert rows[0]["horizon_step"] == 1 and isinstance(rows[0]["horizon_step"], int)
+
+
+def test_ensemble_oof_rows_leave_the_unblended_columns_unset() -> None:
+    # `yhat_raw`/`yhat_adjusted` describe a bias correction only a base cell performs, and the
+    # interval bounds are deliberately not blended (averaging two 80% bands is not an 80% band).
+    # They must be *absent*, so the encoder writes NULL rather than a plausible-looking number.
+    row = assemble_ensemble_oof_rows(_ens_oof(), "r", "e")[0]
+    for col in ("yhat_raw", "yhat_adjusted", "yhat_lower", "yhat_upper"):
+        assert col not in row
+
+
+def test_ensemble_oof_rows_survive_a_frame_with_no_horizon_step() -> None:
+    # `_carried` yields an all-NaN column when the base OOF never populated it (an older run), and
+    # `int(nan)` raises — which would fail the whole append, not just the column.
+    frame = _ens_oof().assign(horizon_step=[float("nan"), float("nan")])
+    rows = assemble_ensemble_oof_rows(frame, "r", "e")
+    assert [r["horizon_step"] for r in rows] == [None, None]
+
+
+def test_ensemble_oof_rows_empty_frame_is_no_rows() -> None:
+    assert assemble_ensemble_oof_rows(_ens_oof().iloc[0:0], "r", "e") == []
 
 
 # --- metadata row --------------------------------------------------------------

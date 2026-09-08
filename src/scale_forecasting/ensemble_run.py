@@ -34,7 +34,10 @@ Three responsibilities, in order:
    beyond-data forecast** (the base predictions they blend are, too), so — like the base
    models — they carry no ground truth of their own.
 3. **Score** — blend the base ``backtest_oof`` into an **ensemble OOF** with the same consensus
-   rules (`ensembler.combine_oof`) and run the shared `metrics.compute_metrics` per
+   rules (`ensembler.combine_oof`), **append those blended rows back into ``backtest_oof``** (same
+   table as the base rows, keyed apart by ``ensemble_id``, so anything computed from that
+   table — the pooled comparable leaderboard, a per-horizon coverage read — sees the consensuses
+   and the base models on identical footing), and run the shared `metrics.compute_metrics` per
    ``(model, ts_id)`` → ``forecast_metadata`` rows with ``fold_id=NULL`` and
    ``compute_engine='ensemble'``. Scoring lives on the OOF window because the base
    predictions (and therefore every ensemble prediction) are a true beyond-data forecast with no
@@ -87,9 +90,35 @@ OOF_READ_COLUMNS: tuple[str, ...] = (
     "fold_id",
     "cutoff_date",
     "forecast_date",
+    # Read only so it can be carried back out: the blended rows are written into `backtest_oof`
+    # beside the base rows, and a per-horizon read that finds it NULL on the ensembles reports on
+    # the base models only. Nothing in the blend itself joins or aggregates on it.
+    "horizon_step",
     "y_true",
     "yhat",
 )
+
+
+def base_read_sql(
+    dataset: str, table: str, columns: str, model_list: str, ts_filter: str, extra: str = ""
+) -> str:
+    """One run-, model- and series-scoped SELECT over a registry table (pure).
+
+    All three reads this module makes share a shape, and the ``model_type IN (...)`` clause is the
+    part that has to be in every one of them. Two of the tables read here — ``forecast_predictions``
+    and now ``backtest_oof`` — hold *the ensemble's own rows* beside the base models', so a read
+    that omits the filter blends consensuses of consensuses on any second pass over a run: a
+    microbatch drain, a ``--force`` re-ensemble, a standalone re-score. Building the clause in one
+    place is what stops that from being a thing to remember at each call site.
+
+    ``extra`` is for a clause only one read needs (``forecast_metadata`` wants the full-fit rows
+    only); ``ts_filter`` is the microbatch's ``AND ts_id IN UNNEST(@ts_ids)``, empty for a barrier.
+    """
+    return (
+        f"SELECT {columns}\n"
+        f"FROM `{dataset}.{table}`\n"
+        f"WHERE run_id = @run_id AND model_type IN ({model_list}){extra}{ts_filter}"
+    )
 
 
 def run_ensembles(
@@ -334,7 +363,8 @@ def _ensemble_batch(
     from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
     from .registry.header import merge_header_telemetry
-    from .registry.write_api import _META_SPEC, _PRED_SPEC
+    from .registry.rows import assemble_ensemble_oof_rows
+    from .registry.write_api import _META_SPEC, _OOF_SPEC, _PRED_SPEC
     from .seasonality import seasonal_period
     from .worker import _rollup_metrics
 
@@ -353,21 +383,24 @@ def _ensemble_batch(
 
     models = list(cfg.models)
     model_list = ", ".join(f"'{m}'" for m in models)
-    base_pred_sql = (
-        "SELECT ts_id, model_type, forecast_date, yhat, yhat_lower, yhat_upper\n"
-        f"FROM `{dataset}.forecast_predictions`\n"
-        f"WHERE run_id = @run_id AND model_type IN ({model_list}){ts_filter}"
-    )
-    oof_sql = (
-        f"SELECT {', '.join(OOF_READ_COLUMNS)}\n"
-        f"FROM `{dataset}.backtest_oof`\n"
-        f"WHERE run_id = @run_id{ts_filter}"
-    )
     metric = cfg.backtest.decision_metric
-    metric_sql = (
-        f"SELECT ts_id, model_type, {metric}\n"
-        f"FROM `{dataset}.forecast_metadata`\n"
-        f"WHERE run_id = @run_id AND fold_id IS NULL AND model_type IN ({model_list}){ts_filter}"
+    base_pred_sql = base_read_sql(
+        dataset,
+        "forecast_predictions",
+        "ts_id, model_type, forecast_date, yhat, yhat_lower, yhat_upper",
+        model_list,
+        ts_filter,
+    )
+    oof_sql = base_read_sql(
+        dataset, "backtest_oof", ", ".join(OOF_READ_COLUMNS), model_list, ts_filter
+    )
+    metric_sql = base_read_sql(
+        dataset,
+        "forecast_metadata",
+        f"ts_id, model_type, {metric}",
+        model_list,
+        ts_filter,
+        extra=" AND fold_id IS NULL",
     )
     base_df = _query(base_pred_sql).to_dataframe()
     oof_df = _query(oof_sql).to_dataframe()
@@ -420,6 +453,19 @@ def _ensemble_batch(
     if ens_oof.empty:
         log.warning("ensemble scoring: no ensemble OOF produced for run_id=%s", run_id)
         return
+
+    # Persist the blended OOF before scoring it. The metrics panel below is a summary; these are the
+    # rows it summarizes, and they are what `v_model_leaderboard_comparable` pools over — an
+    # ensemble that only ever wrote its panel is missing from every comparison computed from
+    # `backtest_oof`, which is not the same as ranking badly in one.
+    oof_rows = assemble_ensemble_oof_rows(ens_oof, run_id, ensemble_id)
+    bigquery_engine._append_rows(settings, "backtest_oof", _OOF_SPEC, oof_rows)
+    log.info(
+        "ensemble OOF appended: run_id=%s ensemble_id=%s rows=%d",
+        run_id,
+        ensemble_id,
+        len(oof_rows),
+    )
 
     # y_train (for MASE/RMSSE scale) is per-series history; the base OOF has no in-sample rows, so
     # read the full series history once, matching the natives' history read. The dates come with it

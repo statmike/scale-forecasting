@@ -237,6 +237,49 @@ side by side, [`08_run_and_monitor`](https://github.com/statmike/scale-forecasti
 a run and watches it land, and [`09_review_run`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_review_run.ipynb)
 reviews any finished run in data-science detail.
 
+### Did every model answer the same question?
+
+A leaderboard row is only meaningful next to the row below it if both models were scored on the same
+series over the same folds, and on a ragged panel they often were not. `backtest.make_folds` drops
+the oldest folds a short series cannot afford, so `mean_wape` can be an average over ten folds of two
+thousand series on one row and one fold of two hundred on the next. Two views make that visible:
+
+```sql
+-- who got scored on what
+SELECT model_type, ensemble_id, backtest_status, n_folds_achieved, n_series, series_share
+FROM `PROJECT.DATASET.v_backtest_coverage`
+WHERE run_id = 'YOUR_RUN_ID'
+ORDER BY model_type, n_folds_achieved DESC;
+
+-- the ranking with the question held fixed
+SELECT model_type, ensemble_id, n_series, n_points, pooled_wape, pooled_mae
+FROM `PROJECT.DATASET.v_model_leaderboard_comparable`
+WHERE run_id = 'YOUR_RUN_ID'
+ORDER BY pooled_wape;
+```
+
+`v_backtest_coverage` is the panel behind each score: one row per cohort of series that shared a
+`backtest_status` (`full` / `reduced` / `unscored` / `failed`, or NULL where no backtest was asked
+for) and an achieved fold count. `v_model_leaderboard_comparable` is the ranking rebuilt on one
+fold — the newest, which every series that achieved any fold achieved — with the error pooled across
+the panel rather than averaged over series. Ensembles are ranked there beside the base models. Full
+definitions in [output_schemas.md](./output_schemas.md).
+
+Read `n_series` on the comparable board first: equal across the rows means the models answered the
+same question, and unequal is a finding, not a footnote.
+
+`review_run` folds both in, so you get them without the SQL. Every `ModelReview` carries:
+
+- `cohort` — a `BacktestCohort` with `n_series` and the split into `n_full` / `n_reduced` /
+  `n_unscored` / `n_failed` / `n_not_requested`, plus `fold_histogram`, a `{n_folds: n_series}` map.
+- `pooled_wape` and `n_comparable_series` — that model's number and panel size from the comparable
+  board.
+
+All three are `None` when the model has no coverage row at all, which is deliberate: "no backtest
+ran" and "a cohort of zero series" are different facts and should not print the same. The underlying
+readers are `registry.reads.read_backtest_coverage(run_id)` and
+`registry.reads.read_comparable_leaderboard(run_id)` if you want the frames directly.
+
 ### Was the correction worth it, and does the band mean what it says?
 
 The leaderboard answers "which model won". It does not answer either question a forecaster asks next
@@ -307,6 +350,11 @@ python -m scale_forecasting.ensemble_run \
 Learned strategies (`nnls`/`ridge`/`xgb`) need the base run to have had `backtest.enabled` (they fit
 on the OOF); calculated ones (`mean`/`median`/`inverse_error`) don't.
 
+When the base run was backtested, each ensemble also writes its own blended out-of-fold rows back
+into `backtest_oof` under its `ensemble_id` — which is what puts it on
+`v_model_leaderboard_comparable` beside the models it blends. The reads that feed the blend filter
+to the run's base models, so re-ensembling never folds a previous consensus into the next one.
+
 ## 6. Managing the registry
 
 Runs accumulate. `registry.ops` is the operator surface over the one registry your `SF_*`
@@ -329,7 +377,7 @@ reg.drop_run("abc123", yes=True)
 
 | Verb | What it does |
 |------|--------------|
-| `init` | Create this registry's five tables + three views (idempotent). Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
+| `init` | Create this registry's five tables + five views (idempotent). Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
 | `doctor` | Read-only report: per-table row counts, runs still marked `RUNNING`, and artifact prefixes with no `run_registry` row. Touches nothing. |
 | `close-runs` | Finalize abandoned `RUNNING` headers to the status their own job rows already imply. Deletes nothing. Names no runs = every stuck header. |
 | `drop-run` | Delete named run(s) from every tier — GCS artifacts, BQML `sf_model_*` objects, then registry rows. Takes as many ids as you like. |

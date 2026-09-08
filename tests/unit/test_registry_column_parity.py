@@ -137,6 +137,8 @@ def _prediction_producers() -> set[str]:
 def _oof_producers() -> set[str]:
     """Every key any engine emits for ``backtest_oof``."""
     from scale_forecasting.engines.bigquery_engine import _oof_row
+    from scale_forecasting.ensembler import _OOF_BLEND_COLS
+    from scale_forecasting.registry.rows import assemble_ensemble_oof_rows
 
     emitted = set(assemble_oof_rows(_result())[0])
     emitted |= set(
@@ -148,6 +150,11 @@ def _oof_producers() -> set[str]:
             {"forecast_date": "2026-02-01", "y_true": 9.0, "yhat": 8.5, "yhat_lower": 7.0},
         )
     )
+    # The ensemble writes into this table too, and it is the only producer of `ensemble_id` here —
+    # exactly the asymmetry this module exists for. Built from `_OOF_BLEND_COLS` so a column added
+    # to the blend frame reaches the parity check without anyone remembering to widen this fixture.
+    blend = pd.DataFrame([dict.fromkeys(_OOF_BLEND_COLS, 1)])
+    emitted |= set(assemble_ensemble_oof_rows(blend, "r", "e")[0])
     return emitted
 
 

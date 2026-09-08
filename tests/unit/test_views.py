@@ -22,7 +22,13 @@ def _render_all() -> str:
 def test_all_views_rendered() -> None:
     stmts = render_create_views("proj.scale_forecasting")
     assert set(stmts) == set(VIEW_NAMES)
-    assert set(VIEW_NAMES) == {"v_run_summary", "v_run_jobs", "v_model_leaderboard"}
+    assert set(VIEW_NAMES) == {
+        "v_run_summary",
+        "v_run_jobs",
+        "v_model_leaderboard",
+        "v_backtest_coverage",
+        "v_model_leaderboard_comparable",
+    }
 
 
 def test_every_statement_is_replace_and_terminated() -> None:
@@ -144,6 +150,65 @@ def test_run_summary_view_projects_the_shared_clusters_capacity_ledger() -> None
     # exists, so its walk is recorded on the header instead — see `shared_capacity_path`.
     stmt = render_create_views("d")["v_run_summary"]
     assert "JSON_QUERY(job_telemetry, '$.capacity') AS capacity" in stmt
+
+
+# --- the two cohort views: is the ranking comparable at all? --------------------
+
+
+def test_backtest_coverage_is_a_long_cohort_table_over_full_fit_rows() -> None:
+    stmt = render_create_views("d")["v_backtest_coverage"]
+    assert "FROM `d.forecast_metadata`" in stmt
+    # Same full-fit restriction the leaderboard uses: one row per cell, not one per fold, or the
+    # cohort counts would be fold counts wearing a series count's name.
+    assert "fold_id IS NULL" in stmt
+    # Long-format grain: the achieved-fold histogram has no fixed width, so it is rows, not columns.
+    assert "GROUP BY run_id, model_type, ensemble_id, backtest_status, n_folds_achieved" in stmt
+    assert "COUNT(*) AS n_series" in stmt
+    # Each cohort's share of that model's own panel — a window over the group, not over the run.
+    assert "SUM(COUNT(*)) OVER (PARTITION BY run_id, model_type, ensemble_id)" in stmt
+
+
+def test_backtest_coverage_dedupes_cells_before_counting_them() -> None:
+    stmt = render_create_views("d")["v_backtest_coverage"]
+    # A re-appended cell would be counted twice as two series. Dedupe first, like every other view.
+    assert "WITH deduped AS (" in stmt
+    assert "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id" in stmt
+    assert stmt.index("QUALIFY ROW_NUMBER()") < stmt.index("GROUP BY run_id, model_type")
+
+
+def test_comparable_leaderboard_restricts_to_the_holdout_fold() -> None:
+    stmt = render_create_views("d")["v_model_leaderboard_comparable"]
+    # The whole point of the view: every model scored on the one fold every series that backtested
+    # at all achieved. Derived from the rows (`make_folds` drops from the oldest end, keeping the
+    # survivor's original fold_id) because a view has no config to read the holdout out of.
+    assert "QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)" in stmt
+    assert "ANY_VALUE(fold_id) AS holdout_fold_id" in stmt
+
+
+def test_comparable_leaderboard_pools_the_error_and_reports_its_panel() -> None:
+    stmt = render_create_views("d")["v_model_leaderboard_comparable"]
+    # Pooled, not averaged: one WAPE of the whole panel, where a near-zero series cannot dominate
+    # the way it does in a mean of per-series WAPEs.
+    assert "SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape" in stmt
+    # And the panel it was pooled over, so a reader can see whether two rows answered the same
+    # question. Equal n_series across models is the evidence; unequal n_series is the finding.
+    assert "COUNT(DISTINCT ts_id) AS n_series" in stmt
+    # Unscorable rows are excluded rather than half-counted: a NULL yhat would drop out of the
+    # numerator while its y_true stayed in the denominator, quietly flattering the model.
+    assert "WHERE y_true IS NOT NULL AND yhat IS NOT NULL" in stmt
+
+
+def test_comparable_leaderboard_reads_oof_and_keeps_ensembles_distinct() -> None:
+    stmt = render_create_views("d")["v_model_leaderboard_comparable"]
+    # backtest_oof, not forecast_metadata: only the OOF table holds per-fold truth, and
+    # forecast_metadata's rolled-up rows cannot be restricted to a fold after the fact.
+    assert "FROM `d.backtest_oof`" in stmt
+    assert "GROUP BY run_id, model_type, ensemble_id" in stmt
+    # Two ensemble configs under one run_id stay apart, here as everywhere else.
+    assert "ensemble_id" in stmt.split("PARTITION BY")[1].split("\n")[0]
+    # Dedupe precedes the holdout restriction, which precedes the aggregate.
+    assert stmt.index("WITH deduped AS (") < stmt.index("holdout AS (")
+    assert stmt.index("holdout AS (") < stmt.index("GROUP BY run_id, model_type, ensemble_id")
 
 
 def test_views_snapshot() -> None:

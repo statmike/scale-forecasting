@@ -109,6 +109,40 @@ def assemble_oof_rows(result: CellResult) -> list[dict[str, Any]]:
     return rows
 
 
+def assemble_ensemble_oof_rows(ens_oof: Any, run_id: str, ensemble_id: str) -> list[dict[str, Any]]:
+    """Blended OOF frame (`ensembler.combine_oof`) → ``backtest_oof`` rows.
+
+    The ensemble counterpart of `assemble_oof_rows`. Its reason to exist is the comparable
+    leaderboard: that view pools ``SUM(|y_true - yhat|)`` over one fold of ``backtest_oof``, so a
+    consensus whose blended rows were only ever scored into ``forecast_metadata`` and then thrown
+    away is invisible to it — not "ranked lower", *absent*, which reads as a run that produced no
+    ensemble at all.
+
+    ``ensemble_id`` is what keeps two ensemble configs under one ``run_id`` apart, exactly as it
+    does on ``forecast_predictions``. The columns left unset are unset on purpose: ``yhat_raw`` and
+    ``yhat_adjusted`` describe a bias correction only a base cell performs, and the interval
+    bounds are not blended at all (`ensembler.combine_oof` explains why averaging two 80% intervals
+    does not give an 80% interval).
+    """
+    rows: list[dict[str, Any]] = []
+    for rec in ens_oof.to_dict("records"):
+        rows.append(
+            {
+                "run_id": run_id,
+                "ts_id": rec["ts_id"],
+                "model_type": rec["model_type"],
+                "fold_id": _as_int(rec.get("fold_id")),
+                "forecast_date": _as_date(rec.get("forecast_date")),
+                "y_true": _as_float(rec.get("y_true")),
+                "yhat": _as_float(rec.get("yhat")),
+                "cutoff_date": _as_date(rec.get("cutoff_date")),
+                "horizon_step": _as_int(rec.get("horizon_step")),
+                "ensemble_id": ensemble_id,
+            }
+        )
+    return rows
+
+
 def assemble_metadata_row(
     result: CellResult, created_at: datetime, model_artifact: str | None = None
 ) -> dict[str, Any]:

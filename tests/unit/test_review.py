@@ -311,6 +311,94 @@ def test_assemble_review_falls_back_to_leaderboard_when_no_aggregates() -> None:
     assert rr.models[0].metric_means == {}  # no panel without aggregates
 
 
+# --- cohorts: the panel behind the score ---------------------------------------
+
+
+def _cohort_row(model: str, status: str | None, folds: int | None, n: int) -> dict[str, Any]:
+    """One `v_backtest_coverage` row: a cohort of ``n`` series for one model."""
+    return {
+        "model_type": model,
+        "ensemble_id": None,
+        "backtest_status": status,
+        "n_folds_achieved": folds,
+        "n_series": n,
+    }
+
+
+def test_cohorts_sum_the_split_rows_back_into_one_per_model() -> None:
+    # The view emits one row per (status, achieved-folds); a ragged panel therefore arrives split.
+    cohorts = R._cohorts_by_model(
+        [
+            _cohort_row("theta", "full", 3, 40),
+            _cohort_row("theta", "reduced", 2, 25),
+            _cohort_row("theta", "reduced", 1, 10),
+            _cohort_row("theta", "unscored", None, 5),
+        ]
+    )
+    theta = cohorts[("theta", None)]
+    assert theta.n_series == 80  # every cohort counts toward the panel
+    assert (theta.n_full, theta.n_reduced, theta.n_unscored) == (40, 35, 5)
+    # The histogram keeps the shape of the raggedness, ordered, and leaves out the NULL-fold rows.
+    assert theta.fold_histogram == {1: 10, 2: 25, 3: 40}
+
+
+def test_a_null_backtest_status_means_never_requested_not_failed() -> None:
+    # NULL is "the run did not ask for a backtest", which is not the same fact as "one was
+    # attempted and produced nothing" — collapsing them would invent failures on every run that
+    # simply had backtesting off.
+    cohorts = R._cohorts_by_model([_cohort_row("theta", None, None, 12)])
+    theta = cohorts[("theta", None)]
+    assert theta.n_not_requested == 12
+    assert (theta.n_failed, theta.n_unscored, theta.n_series) == (0, 0, 12)
+
+
+def test_an_unrecognised_status_still_counts_toward_the_panel() -> None:
+    # A status this code does not know about must not silently shrink n_series — the total is the
+    # panel, and a panel that quietly loses series is worse than one with an unfamiliar bucket.
+    cohorts = R._cohorts_by_model([_cohort_row("theta", "quarantined", 1, 7)])
+    assert cohorts[("theta", None)].n_series == 7
+
+
+def test_assemble_review_hangs_the_cohort_and_pooled_score_on_each_model() -> None:
+    aggs = [_agg("theta", None, 0.20), _agg("xgboost", None, 0.30)]
+    coverage = [_cohort_row("theta", "full", 3, 100), _cohort_row("xgboost", "reduced", 1, 20)]
+    comparable = [
+        {"model_type": "theta", "ensemble_id": None, "pooled_wape": 0.19, "n_series": 100},
+        {"model_type": "xgboost", "ensemble_id": None, "pooled_wape": 0.11, "n_series": 20},
+    ]
+    rr = R._assemble_review(
+        "rid", {"status": "COMPLETED"}, "wape", 100, [], aggs, {}, coverage, comparable
+    )
+    theta = next(m for m in rr.models if m.model_type == "theta")
+    xgb = next(m for m in rr.models if m.model_type == "xgboost")
+    # This is the whole reason the cohort rides along: xgboost has the better pooled score and the
+    # worse claim to it — 20 series of one fold against theta's 100 of three. The ranking cannot
+    # say that; the two numbers beside it can.
+    assert xgb.pooled_wape < theta.pooled_wape
+    assert (xgb.n_comparable_series, theta.n_comparable_series) == (20, 100)
+    assert theta.cohort.n_full == 100 and xgb.cohort.n_reduced == 20
+
+
+def test_a_model_with_no_coverage_row_keeps_none_rather_than_a_zero_cohort() -> None:
+    # "No backtest was run" and "a cohort of zero series" are different facts, and only the first
+    # is true of a run with backtesting off. A zeroed cohort would read as a total failure.
+    rr = R._assemble_review(
+        "rid", {"status": "COMPLETED"}, "wape", 10, [], [_agg("theta", None, 0.2)], {}
+    )
+    assert rr.models[0].cohort is None
+    assert rr.models[0].pooled_wape is None and rr.models[0].n_comparable_series is None
+
+
+def test_cohorts_key_on_the_ensemble_id_so_two_configs_stay_apart() -> None:
+    rows = [
+        {**_cohort_row("ensemble_mean", "full", 3, 50), "ensemble_id": "e1"},
+        {**_cohort_row("ensemble_mean", "reduced", 1, 8), "ensemble_id": "e2"},
+    ]
+    cohorts = R._cohorts_by_model(rows)
+    assert cohorts[("ensemble_mean", "e1")].n_full == 50
+    assert cohorts[("ensemble_mean", "e2")].n_reduced == 8
+
+
 # --- I/O entry points ----------------------------------------------------------
 
 
@@ -423,11 +511,35 @@ def test_review_run_composes_readers(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         reads, "read_prediction_counts", lambda rid, *, settings=None: {"theta": 70}
     )
+    monkeypatch.setattr(
+        reads,
+        "read_backtest_coverage",
+        lambda rid, *, settings=None: [
+            {
+                "model_type": "theta",
+                "ensemble_id": None,
+                "backtest_status": "full",
+                "n_folds_achieved": 3,
+                "n_series": 10,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        reads,
+        "read_comparable_leaderboard",
+        lambda rid, *, settings=None: [
+            {"model_type": "theta", "ensemble_id": None, "pooled_wape": 0.18, "n_series": 10}
+        ],
+    )
 
     rr = R.review_run("rid", settings=_SETTINGS)
     assert rr.decision_metric == "mae"  # taken from the run's own config
     assert rr.best_overall.model_type == "theta" and rr.best_overall.score == 1.5
     assert rr.models[0].n_predictions == 70
+    # The cohort context rides along with the ranking, keyed on (model_type, ensemble_id).
+    assert rr.models[0].cohort.n_full == 10
+    assert rr.models[0].pooled_wape == 0.18
+    assert rr.models[0].n_comparable_series == 10
 
 
 def test_forecaster_monitor_and_review_run_delegate(monkeypatch: Any) -> None:

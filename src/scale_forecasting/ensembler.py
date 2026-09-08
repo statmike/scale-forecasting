@@ -102,6 +102,11 @@ _OOF_BLEND_COLS = (
     # comparable to the base models it sits beside on the leaderboard.
     "cutoff_date",
     "forecast_date",
+    # Carried for the same reason `fold_id` is: the blended rows are written into the same
+    # `backtest_oof` table as the base rows, and a per-horizon read (`reads.read_coverage_by_step`)
+    # that finds this NULL on the ensembles can only report on the base models. NaN when the base
+    # OOF did not carry it — an older run, or an engine that never filled it.
+    "horizon_step",
     "y_true",
     "yhat",
 )
@@ -234,6 +239,7 @@ def combine_oof(
     # use, a column when the join went on the cutoff.
     fold_ids = _carried(aligned, keys, "fold_id", "float64")
     cutoffs = _carried(aligned, keys, "cutoff_date", "object")
+    steps = _carried(aligned, keys, "horizon_step", "float64")
     ts_ids = wide.index.get_level_values("ts_id").to_numpy()
     # `inverse_error` is the one calculated strategy that *fits* something — a per-series weight
     # off these very rows — so it is held to the same rule as the meta-learners and only sees the
@@ -255,6 +261,7 @@ def combine_oof(
                 "fold_id": fold_ids.to_numpy(),
                 "cutoff_date": cutoffs.to_numpy(),
                 "forecast_date": wide.index.get_level_values(keys[-1]),
+                "horizon_step": steps.to_numpy(),
                 "y_true": truth,
                 "yhat": yhat,
             }

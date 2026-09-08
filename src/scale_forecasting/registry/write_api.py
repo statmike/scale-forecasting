@@ -66,6 +66,9 @@ _OOF_SPEC: tuple[tuple[str, str], ...] = (
     ("yhat_lower", "D"),
     ("yhat_upper", "D"),
     ("created_at", "S"),
+    # Only the ensemble path fills this: base-model rows leave it NULL, exactly as they do in
+    # `forecast_predictions`. It is what keeps two ensemble configs under one run_id apart.
+    ("ensemble_id", "S"),
 )
 
 _META_SPEC: tuple[tuple[str, str], ...] = (

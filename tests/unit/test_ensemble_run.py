@@ -25,6 +25,7 @@ from scale_forecasting.ensemble_run import (
     OOF_READ_COLUMNS,
     _apply_weights,
     _override_ensemble,
+    base_read_sql,
     ensemble_scoring_basis,
     run_ensemble_scoring,
     run_ensembles,
@@ -467,6 +468,52 @@ def test_the_oof_read_carries_enough_to_join_folds_on_the_cutoff() -> None:
         {c: ["x"] if c != "y_true" and c != "yhat" else [1.0] for c in OOF_READ_COLUMNS}
     )
     assert _fold_key(frame) == ["ts_id", "cutoff_date", "forecast_date"]
+
+
+def test_the_oof_read_carries_the_horizon_step_out_to_the_written_rows() -> None:
+    # The blended rows land in `backtest_oof` beside the base rows, and a per-horizon read
+    # (`reads.read_coverage_by_step`) excludes a NULL step — so an ensemble whose step was never
+    # read back is simply missing from every per-horizon answer rather than visibly empty in one.
+    assert "horizon_step" in OOF_READ_COLUMNS
+    assert "horizon_step" in _OOF_BLEND_COLS
+
+
+# --- base_read_sql: every read is scoped to the base models --------------------
+
+
+@pytest.mark.parametrize(
+    ("table", "columns"),
+    [
+        ("forecast_predictions", "ts_id, model_type, yhat"),
+        ("backtest_oof", ", ".join(OOF_READ_COLUMNS)),
+        ("forecast_metadata", "ts_id, model_type, wape"),
+    ],
+)
+def test_every_ensemble_source_read_filters_to_the_base_models(table: str, columns: str) -> None:
+    # The ensemble now writes into two of the three tables it reads. Without the model filter, a
+    # second pass over the same run — a microbatch drain, a `--force` re-ensemble — reads
+    # `ensemble_mean` back as if it were a base model and blends consensuses of consensuses. The
+    # filter is in the shared builder precisely so it cannot be forgotten on one call site.
+    sql = base_read_sql("p.ds", table, columns, "'theta', 'xgboost'", "")
+    assert "WHERE run_id = @run_id AND model_type IN ('theta', 'xgboost')" in sql
+    assert f"FROM `p.ds.{table}`" in sql
+
+
+def test_the_base_read_scopes_to_a_microbatch_and_keeps_the_extra_clause() -> None:
+    sql = base_read_sql(
+        "p.ds",
+        "forecast_metadata",
+        "ts_id, model_type, wape",
+        "'theta'",
+        " AND ts_id IN UNNEST(@ts_ids)",
+        extra=" AND fold_id IS NULL",
+    )
+    # Both clauses land, and the model filter still precedes them — one WHERE, no stray AND.
+    assert sql.endswith(
+        "WHERE run_id = @run_id AND model_type IN ('theta') "
+        "AND fold_id IS NULL AND ts_id IN UNNEST(@ts_ids)"
+    )
+    assert sql.count("WHERE") == 1
 
 
 # --- what the ensemble rows say about how they were scored ---------------------

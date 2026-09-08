@@ -40,7 +40,7 @@ print(plan.bq_models)       # models routed to BigQuery-native
 # Run it. Spark/Ray and BigQuery-native run in parallel under one run_id.
 result = forecaster.run()
 print(result.run_id, result.dataset_ref)
-print(result.views)         # v_run_summary, v_run_jobs, v_model_leaderboard — query by run_id
+print(result.views)         # the five registry views — query any of them by run_id
 ```
 
 `Forecaster` construction:

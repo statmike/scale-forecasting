@@ -78,3 +78,56 @@ SELECT
 FROM deduped
 WHERE fold_id IS NULL
 GROUP BY run_id, model_type, ensemble_id;
+
+CREATE OR REPLACE VIEW `proj.scale_forecasting.v_backtest_coverage` AS
+WITH deduped AS (
+  SELECT *
+  FROM `proj.scale_forecasting.forecast_metadata`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+    ORDER BY created_at DESC
+  ) = 1
+)
+SELECT
+  run_id,
+  model_type,
+  ensemble_id,
+  backtest_status,
+  n_folds_achieved,
+  COUNT(*) AS n_series,
+  SAFE_DIVIDE(
+    COUNT(*),
+    SUM(COUNT(*)) OVER (PARTITION BY run_id, model_type, ensemble_id)
+  ) AS series_share
+FROM deduped
+WHERE fold_id IS NULL
+GROUP BY run_id, model_type, ensemble_id, backtest_status, n_folds_achieved;
+
+CREATE OR REPLACE VIEW `proj.scale_forecasting.v_model_leaderboard_comparable` AS
+WITH deduped AS (
+  SELECT *
+  FROM `proj.scale_forecasting.backtest_oof`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
+    ORDER BY created_at DESC
+  ) = 1
+),
+holdout AS (
+  SELECT *
+  FROM deduped
+  QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)
+)
+SELECT
+  run_id,
+  model_type,
+  ensemble_id,
+  ANY_VALUE(fold_id) AS holdout_fold_id,
+  COUNT(DISTINCT ts_id) AS n_series,
+  COUNT(*) AS n_points,
+  SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape,
+  AVG(ABS(y_true - yhat)) AS pooled_mae,
+  MIN(forecast_date) AS first_forecast_date,
+  MAX(forecast_date) AS last_forecast_date
+FROM holdout
+WHERE y_true IS NOT NULL AND yhat IS NOT NULL
+GROUP BY run_id, model_type, ensemble_id;

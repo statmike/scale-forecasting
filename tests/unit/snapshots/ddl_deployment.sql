@@ -124,7 +124,8 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.backtest_oof` (
   horizon_step  INT64,
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
-  created_at    TIMESTAMP
+  created_at    TIMESTAMP,
+  ensemble_id   STRING
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id;

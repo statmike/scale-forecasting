@@ -57,6 +57,7 @@ __all__ = [
     "FamilyProgress",
     "RunProgress",
     "ModelReview",
+    "BacktestCohort",
     "EnsembleLift",
     "RunReview",
     "ArmComparison",
@@ -143,6 +144,32 @@ class RunProgress:
 
 
 @dataclass(frozen=True)
+class BacktestCohort:
+    """How much of the panel one model was actually scored on, split by outcome.
+
+    The context a leaderboard score is meaningless without. A ragged panel does not give every
+    series the same backtest: `backtest.make_folds` drops the folds a short series cannot afford,
+    so ``full`` (every requested fold), ``reduced`` (some), ``unscored`` (none — too short to
+    backtest at all) and ``failed`` are all ordinary outcomes within a single run, and a model
+    whose mean error came mostly off ``reduced`` series won an easier contest than its neighbour.
+    ``n_not_requested`` counts series whose ``backtest_status`` is NULL, which means the run never
+    asked for a backtest rather than that one was attempted and produced nothing.
+
+    ``fold_histogram`` maps achieved fold count → series count, so the shape of the raggedness is
+    visible and not just its worst case. Keyed by the achieved count as an ``int``; series with a
+    NULL ``n_folds_achieved`` are left out of it (they are still counted in ``n_series``).
+    """
+
+    n_series: int = 0
+    n_full: int = 0
+    n_reduced: int = 0
+    n_unscored: int = 0
+    n_failed: int = 0
+    n_not_requested: int = 0
+    fold_histogram: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ModelReview:
     """One model's (or ensemble pseudo-model's) outcome on a finished run, across all its series.
 
@@ -170,6 +197,15 @@ class ModelReview:
     median_fit_seconds: float | None = None
     no_artifact_rate: float | None = None
     n_predictions: int = 0
+    # The cohort behind the score, and the score recomputed so that cohort is held fixed. `score`
+    # above is a mean of per-series errors over whatever panel each model happened to get;
+    # `pooled_wape` is one WAPE of the whole panel on the holdout fold alone, and
+    # `n_comparable_series` is how many series went into it. Two models with different
+    # `n_comparable_series` are not yet comparable, whatever their scores say. All three are None on
+    # a run with no backtest, and on any run reviewed before these views existed.
+    cohort: BacktestCohort | None = None
+    pooled_wape: float | None = None
+    n_comparable_series: int | None = None
 
 
 @dataclass(frozen=True)
@@ -592,6 +628,73 @@ def ensemble_lift(
     return sorted(lifts, key=lambda x: x.lift, reverse=True)
 
 
+_STATUS_FIELDS: dict[str, str] = {
+    "full": "n_full",
+    "reduced": "n_reduced",
+    "unscored": "n_unscored",
+    "failed": "n_failed",
+}
+
+
+def _cohorts_by_model(
+    coverage_rows: list[dict[str, Any]],
+) -> dict[tuple[str, str | None], BacktestCohort]:
+    """Fold `registry.reads.read_backtest_coverage` rows up into one `BacktestCohort` per model.
+
+    The view emits one row per ``(model, ensemble_id, backtest_status, n_folds_achieved)``; a model
+    with a ragged panel therefore arrives as several rows that have to be summed back together. A
+    ``backtest_status`` this function does not recognise still lands in ``n_series`` — the total is
+    the panel, so an unfamiliar status must not quietly vanish from it.
+    """
+    totals: dict[tuple[str, str | None], dict[str, Any]] = {}
+    for row in coverage_rows:
+        key = (row["model_type"], row.get("ensemble_id"))
+        acc = totals.setdefault(key, {"n_series": 0, "fold_histogram": {}})
+        n = int(row.get("n_series") or 0)
+        acc["n_series"] += n
+        field_name = _STATUS_FIELDS.get(row.get("backtest_status") or "", "n_not_requested")
+        acc[field_name] = acc.get(field_name, 0) + n
+        folds = row.get("n_folds_achieved")
+        if folds is not None:
+            hist = acc["fold_histogram"]
+            hist[int(folds)] = hist.get(int(folds), 0) + n
+    return {
+        key: BacktestCohort(
+            **{**acc, "fold_histogram": dict(sorted(acc["fold_histogram"].items()))}
+        )
+        for key, acc in totals.items()
+    }
+
+
+def _attach_cohorts(
+    models: list[ModelReview],
+    coverage_rows: list[dict[str, Any]],
+    comparable_rows: list[dict[str, Any]],
+) -> list[ModelReview]:
+    """Hang the cohort counts and the holdout-pooled score on each `ModelReview` (pure).
+
+    Both inputs are keyed on ``(model_type, ensemble_id)`` — the same key the leaderboard and the
+    aggregates join on — and both are optional: a model missing from either keeps ``None`` there
+    rather than a zero, because "no backtest coverage row" and "a cohort of zero series" are
+    different facts and only the first one is true of a run that never backtested.
+    """
+    cohorts = _cohorts_by_model(coverage_rows)
+    comparable = {(r["model_type"], r.get("ensemble_id")): r for r in comparable_rows}
+    out: list[ModelReview] = []
+    for m in models:
+        key = (m.model_type, m.ensemble_id)
+        row = comparable.get(key, {})
+        out.append(
+            replace(
+                m,
+                cohort=cohorts.get(key),
+                pooled_wape=_num(row.get("pooled_wape")),
+                n_comparable_series=row.get("n_series"),
+            )
+        )
+    return out
+
+
 def _model_review_from_aggregate(
     agg: dict[str, Any],
     decision_metric: str,
@@ -656,11 +759,16 @@ def _assemble_review(
     leaderboard_rows: list[dict[str, Any]],
     aggregate_rows: list[dict[str, Any]],
     prediction_counts: dict[str, int],
+    coverage_rows: list[dict[str, Any]] | None = None,
+    comparable_rows: list[dict[str, Any]] | None = None,
 ) -> RunReview:
     """Compose a `RunReview` from the leaderboard, metric aggregates, and prediction counts (pure).
 
     Aggregates are the primary source (full metric panel); the leaderboard supplies artifact rate +
     median fit time and is the fallback when a run had no backtest (no aggregates), scoring on WAPE.
+    ``coverage_rows`` and ``comparable_rows`` are the cohort context beside the ranking
+    (`registry.reads.read_backtest_coverage`, `registry.reads.read_comparable_leaderboard`);
+    both default to empty so an older caller composes exactly as it did.
     """
     lb = {(r["model_type"], r.get("ensemble_id")): r for r in leaderboard_rows}
     if aggregate_rows:
@@ -675,6 +783,7 @@ def _assemble_review(
         ]
     else:
         models = [_model_review_from_leaderboard(r, prediction_counts) for r in leaderboard_rows]
+    models = _attach_cohorts(models, coverage_rows or [], comparable_rows or [])
     # best-first: scored models by ascending error, unscored last (stable within group).
     models.sort(key=lambda m: (m.score is None, m.score if m.score is not None else 0.0))
     return RunReview(
@@ -697,10 +806,14 @@ def review_run(
 
     Reads the header (`registry.reads.read_run_summary`), the config (for the decision metric and
     series count), the leaderboard (`registry.reads.read_leaderboard`), the cross-series aggregates
-    (`registry.reads.read_metric_aggregates`) and per-model prediction counts
-    (`registry.reads.read_prediction_counts`), then composes via `_assemble_review`.
+    (`registry.reads.read_metric_aggregates`), per-model prediction counts
+    (`registry.reads.read_prediction_counts`), and the two cohort reads that say whether the
+    ranking is comparable at all — `registry.reads.read_backtest_coverage` and
+    `registry.reads.read_comparable_leaderboard` — then composes via `_assemble_review`.
     """
     from .registry.reads import (
+        read_backtest_coverage,
+        read_comparable_leaderboard,
         read_leaderboard,
         read_metric_aggregates,
         read_prediction_counts,
@@ -716,6 +829,8 @@ def review_run(
     leaderboard_rows = read_leaderboard(run_id, settings=settings)
     aggregate_rows = read_metric_aggregates(run_id, settings=settings)
     prediction_counts = read_prediction_counts(run_id, settings=settings)
+    coverage_rows = read_backtest_coverage(run_id, settings=settings)
+    comparable_rows = read_comparable_leaderboard(run_id, settings=settings)
     return _assemble_review(
         run_id,
         summary,
@@ -724,6 +839,8 @@ def review_run(
         leaderboard_rows,
         aggregate_rows,
         prediction_counts,
+        coverage_rows,
+        comparable_rows,
     )
 
 

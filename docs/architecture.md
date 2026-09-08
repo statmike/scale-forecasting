@@ -52,7 +52,8 @@ statistical    ml         deep_learning       native      (each on its
                                │
                         ensemble node  ── ensemble_run  ── blends base predictions
                                │
-          v_run_summary · v_run_jobs · v_model_leaderboard  (analyst views)
+     v_run_summary · v_run_jobs · v_model_leaderboard · v_backtest_coverage
+                     · v_model_leaderboard_comparable   (analyst views)
 ```
 
 ---
@@ -363,10 +364,13 @@ The files:
   `<artifact_root>/<run_id>/<basename>`, in both directions: upload for serialized models (lineage),
   and reading the layout back — which run owns a blob, which prefixes the registry has no row for,
   and deleting them. `registry/ops.py`'s destructive verbs run on that second half.
-- [`views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) — the three analyst views: `v_run_summary`
+- [`views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) — the five analyst views: `v_run_summary`
   (per-run scaling/efficiency, unpacking the telemetry JSON), `v_run_jobs` (the per-family-job trace —
-  latest attempt per family, its runtime/hardware/system job id/status/telemetry), and
-  `v_model_leaderboard` (per-model accuracy). These are what notebook 07 reads.
+  latest attempt per family, its runtime/hardware/system job id/status/telemetry),
+  `v_model_leaderboard` (per-model accuracy), `v_backtest_coverage` (how much of the panel each
+  model was actually scored on), and `v_model_leaderboard_comparable` (the same ranking restricted
+  to the holdout fold, with the error pooled across the panel). The first three are what notebook 07
+  reads.
 
 ---
 
