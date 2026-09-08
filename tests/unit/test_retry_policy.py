@@ -8,27 +8,49 @@ fixed vocabulary, never an exception and never a token nobody has seen).
 
 from __future__ import annotations
 
+import ast
 import itertools
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
+from scale_forecasting import retry_policy
+from scale_forecasting.capacity import AWAITING_CAPACITY
+from scale_forecasting.capacity import CAPACITY_EXHAUSTED as _CAPACITY_EXHAUSTED
 from scale_forecasting.errors import RegistryError
+from scale_forecasting.probes import vocabulary as probe_vocabulary
+from scale_forecasting.probes.vocabulary import (
+    VERDICT_ABANDONED_WAIT,
+    VERDICT_LOST,
+    VERDICT_RUNNING,
+    VERDICT_STALE_REGISTRY,
+    VERDICT_TRUST_REGISTRY,
+)
 from scale_forecasting.retry_policy import (
+    CAPACITY_EXHAUSTED,
     CONFIG_REPAIRABLE,
     ERROR_CLASS_VERDICTS,
+    LIVE_JOB_STATUSES,
+    PROBE_FINISHED_VERDICTS,
+    PROBE_RUNNING_VERDICT,
     RETRY_AS_IS,
     RETRY_LATER,
     RETRY_VERDICTS,
     RETRY_WITH_MORE_MEMORY,
     SKIP_ALREADY_DONE,
     SKIP_DETERMINISTIC,
+    SKIP_NOT_FINISHED,
     UNKNOWN,
     VERDICTS,
     CellState,
+    FamilyState,
     Worklist,
     build_worklist,
     classify_cell,
 )
+from scale_forecasting.sdk import _TERMINAL_STATUSES
 from scale_forecasting.worker import ERROR_CLASSES
 
 # Every value each input can take, including the ones a healthy run never produces. The
@@ -72,7 +94,7 @@ def test_the_worklist_refuses_to_return_a_target_that_already_landed() -> None:
     import scale_forecasting.retry_policy as rp
 
     original = rp.classify_cell
-    rp.classify_cell = lambda state: RETRY_AS_IS  # type: ignore[assignment]
+    rp.classify_cell = lambda state, family=None: RETRY_AS_IS  # type: ignore[assignment]
     try:
         with pytest.raises(RegistryError, match="already have predictions"):
             build_worklist([CellState("s1", "theta", has_metadata=True, has_predictions=True)])
@@ -203,3 +225,206 @@ def test_targets_read_in_a_stable_order_whatever_order_the_rows_arrive_in() -> N
 def test_a_hand_built_worklist_has_no_targets_by_default() -> None:
     # The dataclass default has to be the safe one: an empty worklist submits nothing.
     assert Worklist().targets == () and Worklist().models == ()
+
+
+# --- the family axis -----------------------------------------------------------
+
+
+def _never_ran(family: str | None = "statistical") -> CellState:
+    return CellState("s1", "theta", family=family)
+
+
+def test_a_cell_under_a_running_family_is_pending_not_missing() -> None:
+    # The single most expensive mistake this classifier could make: an operator runs the report
+    # mid-flight, sees a hundred thousand "never ran" cells, and submits a duplicate of the run
+    # that is at that moment producing them.
+    running = FamilyState("statistical", status="RUNNING")
+    assert classify_cell(_never_ran(), running) == SKIP_NOT_FINISHED
+
+
+def test_a_family_still_waiting_for_hardware_has_not_finished_either() -> None:
+    # AWAITING_CAPACITY is not a failure -- the job has not started. Same answer as RUNNING.
+    waiting = FamilyState("deep_learning", status=AWAITING_CAPACITY)
+    assert classify_cell(_never_ran("deep_learning"), waiting) == SKIP_NOT_FINISHED
+
+
+def test_the_probe_overrules_a_registry_row_that_never_caught_up() -> None:
+    # A killed job's last word was RUNNING and it will stay RUNNING forever. Without the probe
+    # taking precedence, repair would be frozen on every run that ended by being killed.
+    stale = FamilyState("ml", status="RUNNING", probe_verdict=VERDICT_STALE_REGISTRY)
+    assert stale.is_live is False
+    assert classify_cell(_never_ran("ml"), stale) == RETRY_AS_IS
+
+
+def test_the_probe_also_overrules_a_registry_row_that_gave_up_too_early() -> None:
+    # The mirror case: the registry says the job is gone, the runtime says it is still there.
+    live = FamilyState("ml", status="FAILED", probe_verdict=VERDICT_RUNNING)
+    assert live.is_live is True
+    assert classify_cell(_never_ran("ml"), live) == SKIP_NOT_FINISHED
+
+
+@pytest.mark.parametrize("verdict", sorted(PROBE_FINISHED_VERDICTS))
+def test_every_finished_probe_verdict_lets_the_cell_speak_for_itself(verdict: str) -> None:
+    assert FamilyState("ml", status="RUNNING", probe_verdict=verdict).is_live is False
+
+
+def test_a_capacity_wall_turns_a_resubmission_into_a_later_one() -> None:
+    # The cell's own row cannot see this: it never ran, so it reads RETRY_AS_IS, and resubmitting
+    # it immediately walks straight back into the wall the family just hit.
+    walled = FamilyState("deep_learning", status="FAILED", failure_reason=CAPACITY_EXHAUSTED)
+    assert classify_cell(_never_ran("deep_learning"), walled) == RETRY_LATER
+
+
+def test_an_abandoned_capacity_walk_is_read_the_same_way() -> None:
+    abandoned = FamilyState("deep_learning", probe_verdict=VERDICT_ABANDONED_WAIT)
+    assert classify_cell(_never_ran("deep_learning"), abandoned) == RETRY_LATER
+
+
+def test_the_capacity_downgrade_never_turns_a_refusal_into_work() -> None:
+    # It only ever moves a retry to a later retry. A short series under a capacity-bound family is
+    # still a short series.
+    walled = FamilyState("statistical", status="FAILED", failure_reason=CAPACITY_EXHAUSTED)
+    short = CellState(
+        "s1",
+        "theta",
+        has_metadata=True,
+        cell_status="error",
+        error_class="SHORT_HISTORY",
+        family="statistical",
+    )
+    assert classify_cell(short, walled) == SKIP_DETERMINISTIC
+
+
+def test_a_cancelled_family_is_not_quietly_resurrected() -> None:
+    # Someone stopped that work on purpose. Offering to undo a human decision without saying so is
+    # the kind of surprise a repair tool cannot afford; UNKNOWN reports it and submits nothing.
+    cancelled = FamilyState("ml", status="CANCELLED")
+    assert classify_cell(_never_ran("ml"), cancelled) == UNKNOWN
+
+
+def test_a_landed_cell_outranks_every_family_reading() -> None:
+    # The invariant is checked before the family is consulted, in both directions: a running family
+    # cannot make a landed cell pending, and a dead one cannot make it retryable.
+    landed = CellState("s1", "theta", has_metadata=True, has_predictions=True, family="statistical")
+    for family in (
+        FamilyState("statistical", status="RUNNING"),
+        FamilyState("statistical", status="FAILED", failure_reason=CAPACITY_EXHAUSTED),
+        FamilyState("statistical", status="CANCELLED", probe_verdict=VERDICT_LOST),
+    ):
+        assert classify_cell(landed, family) == SKIP_ALREADY_DONE
+
+
+def test_a_family_with_nothing_known_about_it_leaves_the_cell_reading_alone() -> None:
+    assert classify_cell(_never_ran(), FamilyState("statistical")) == RETRY_AS_IS
+    assert classify_cell(_never_ran(), None) == RETRY_AS_IS
+
+
+def test_the_worklist_joins_each_cell_to_its_own_family() -> None:
+    states = [
+        CellState("s1", "theta", family="statistical"),
+        CellState("s1", "neuralprophet", family="deep_learning"),
+    ]
+    families = {
+        "statistical": FamilyState("statistical", status="COMPLETED"),
+        "deep_learning": FamilyState("deep_learning", status="RUNNING"),
+    }
+    worklist = build_worklist(states, families)
+    assert worklist.models == ("theta",)
+    assert worklist.counts == {RETRY_AS_IS: 1, SKIP_NOT_FINISHED: 1}
+
+
+def test_a_cell_whose_family_is_missing_from_the_map_is_still_classified() -> None:
+    # Dropping it would silently shrink the report; the per-cell rules still have an answer.
+    worklist = build_worklist([_never_ran("statistical")], {"ml": FamilyState("ml")})
+    assert worklist.counts == {RETRY_AS_IS: 1}
+
+
+def test_the_family_axis_stays_total_across_its_own_cross_product() -> None:
+    statuses = (None, "RUNNING", AWAITING_CAPACITY, "COMPLETED", "FAILED", "PARTIAL", "CANCELLED")
+    reasons = (None, CAPACITY_EXHAUSTED, "SOMETHING_ELSE")
+    verdicts = (None, *sorted(PROBE_FINISHED_VERDICTS), VERDICT_RUNNING, "UNKNOWN")
+    seen = {
+        classify_cell(cell, FamilyState("statistical", s, r, v))
+        for cell in _every_cell_state()
+        for s, r, v in itertools.product(statuses, reasons, verdicts)
+    }
+    assert seen <= set(VERDICTS)
+
+
+# --- the vocabularies this module restates rather than imports -----------------
+
+
+def test_retry_policy_imports_neither_the_probes_package_nor_a_gcp_extra() -> None:
+    # It is imported by the CLI, the SDK and an Airflow task. Dragging `probes` (or anything that
+    # pulls a GCP extra) into those paths would reverse a decision made deliberately elsewhere --
+    # which is why the tokens below are copied rather than imported, and why this test exists to
+    # make the copies safe.
+    tree = ast.parse(Path(retry_policy.__file__).read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+        elif isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+    # `from .errors import ...` parses with an empty module head plus level=1; the names that
+    # matter here are the absolute ones.
+    banned = {"probes", "google", "pandas", "numpy", "pyarrow", "ray", "pyspark", "torch"}
+    assert not imported & banned, sorted(imported & banned)
+
+
+def test_nothing_retry_policy_imports_drags_the_probes_package_in_behind_it() -> None:
+    """The line above reads this module's own import statements; this one reads the whole
+    transitive closure, in a fresh interpreter where ``sys.modules`` starts empty. Only the second
+    can catch a `probes` import that arrives two hops away through something innocuous."""
+    # Baselined against a bare interpreter, because the `google` namespace package is already in
+    # ``sys.modules`` before line one runs (its distributions install a ``.pth``). Only what the
+    # import *adds* is this module's doing.
+    script = (
+        "import sys\n"
+        "before = set(sys.modules)\n"
+        "import scale_forecasting.retry_policy\n"
+        "added = set(sys.modules) - before\n"
+        "heavy = ('probes', 'google', 'pandas', 'numpy', 'pyarrow', 'ray', 'pyspark', 'torch')\n"
+        "pulled = sorted(m for m in added if m.split('.')[0] in heavy or 'probes' in m)\n"
+        "assert not pulled, f'retry_policy pulled: {pulled}'\n"
+        "print('ok')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ok"
+
+
+def test_the_live_job_statuses_are_words_the_registry_actually_writes() -> None:
+    assert AWAITING_CAPACITY in LIVE_JOB_STATUSES
+    assert LIVE_JOB_STATUSES.isdisjoint(_TERMINAL_STATUSES)
+
+
+def test_the_capacity_token_still_matches_the_one_capacity_publishes() -> None:
+    assert CAPACITY_EXHAUSTED == _CAPACITY_EXHAUSTED
+
+
+def test_every_probe_verdict_is_accounted_for_on_exactly_one_side() -> None:
+    # A new probe verdict must be filed as finished, as live, or as deliberately-neither. Left out
+    # of all three, it would fall through to the registry status and quietly stop overruling it.
+    # Read off the module by reflection so adding a `VERDICT_*` constant reaches this test without
+    # anyone remembering to widen a list here.
+    published = {
+        value
+        for name, value in vars(probe_vocabulary).items()
+        if name.startswith("VERDICT_") and isinstance(value, str)
+    }
+    filed = PROBE_FINISHED_VERDICTS | {PROBE_RUNNING_VERDICT, VERDICT_TRUST_REGISTRY, "UNKNOWN"}
+    assert published == filed
+    assert PROBE_RUNNING_VERDICT not in PROBE_FINISHED_VERDICTS
+
+
+def test_trust_registry_is_deliberately_on_neither_side() -> None:
+    # It is the probe declining to have an opinion -- the registry status is authoritative, which
+    # is exactly what happens when neither set matches.
+    trusted = FamilyState("ml", status="RUNNING", probe_verdict=VERDICT_TRUST_REGISTRY)
+    assert trusted.is_live is True
+    assert FamilyState("ml", status="COMPLETED", probe_verdict=VERDICT_TRUST_REGISTRY).is_live is (
+        False
+    )

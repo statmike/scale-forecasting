@@ -23,7 +23,7 @@ config, which changes the ``run_id``, which is the honest way to say the answer 
 `build_worklist` enforces this as a postcondition and raises rather than returning a worklist that
 violates it.
 
-**Verdicts.** Three ask for work, four refuse it, and the refusals are the interesting half:
+**Verdicts.** Three ask for work, five refuse it, and the refusals are the interesting half:
 
 - ``RETRY_AS_IS`` — the same submission could plausibly succeed (a transient infrastructure fault,
   or a cell that never ran at all because its job died before reaching it).
@@ -32,22 +32,26 @@ violates it.
 - ``SKIP_ALREADY_DONE`` — the invariant above.
 - ``SKIP_DETERMINISTIC`` — the same input through the same code fails the same way. A series too
   short for the fold geometry does not grow by being asked twice.
+- ``SKIP_NOT_FINISHED`` — the family that owned this cell is still running. The cell is not
+  missing, it is pending, and an impatient operator who cannot tell the two apart produces a
+  duplicate submission.
 - ``CONFIG_REPAIRABLE`` — fixable, but not by this machinery: the config named something that does
   not exist. Submits nothing, and says what to edit.
 - ``UNKNOWN`` — the default, and a real answer rather than a gap. Doing nothing on a failure nobody
   has classified is safer than guessing, and a rising ``UNKNOWN`` share is the signal that
   `worker.ERROR_CLASSES` needs a row.
 
-**What this classifier does not see yet.** Its inputs are the per-cell registry rows alone. The
-family job's own status and the runtime probe's verdict are two more inputs that can overturn a
-per-cell reading — a whole family that never started produces cells indistinguishable from cells
-whose job ran and skipped them. Those rows widen `classify_cell` in a later step; the vocabulary
-above is already the full one, so widening adds inputs rather than moving answers.
+**Two grains, because a cell cannot see its own job.** `CellState` is what the registry knows about
+one ``(ts_id, model_type)``; `FamilyState` is what it knows about the job that owned it — status,
+failure reason, and the runtime probe's verdict where one has run. The second exists because a cell
+with no metadata row looks identical whether its job never started, is running right now, died
+halfway, or ran to completion and skipped it, and only the job says which. The family reading is
+optional throughout: a report built without it is a weaker report, not a broken one.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from .errors import RegistryError
@@ -57,6 +61,7 @@ RETRY_WITH_MORE_MEMORY = "RETRY_WITH_MORE_MEMORY"
 RETRY_LATER = "RETRY_LATER"
 SKIP_ALREADY_DONE = "SKIP_ALREADY_DONE"
 SKIP_DETERMINISTIC = "SKIP_DETERMINISTIC"
+SKIP_NOT_FINISHED = "SKIP_NOT_FINISHED"
 CONFIG_REPAIRABLE = "CONFIG_REPAIRABLE"
 UNKNOWN = "UNKNOWN"
 
@@ -67,12 +72,39 @@ VERDICTS: tuple[str, ...] = (
     RETRY_LATER,
     SKIP_ALREADY_DONE,
     SKIP_DETERMINISTIC,
+    SKIP_NOT_FINISHED,
     CONFIG_REPAIRABLE,
     UNKNOWN,
 )
 
 #: The verdicts that put a cell on the worklist. Everything else submits nothing.
 RETRY_VERDICTS: frozenset[str] = frozenset({RETRY_AS_IS, RETRY_WITH_MORE_MEMORY, RETRY_LATER})
+
+# --- the family-level vocabularies, restated rather than imported --------------
+# `retry_policy` stays free of `probes` and of anything that pulls a GCP extra: it is imported by
+# the CLI, by the SDK and by an Airflow task, and dragging the probe package into those import
+# paths would reverse a decision made deliberately elsewhere. The cost is two token lists written
+# twice — paid for by `tests/unit/test_retry_policy.py`, which imports both sides and asserts they
+# still agree. Copying the words is cheap; copying them silently is not.
+
+#: Registry job statuses that mean the family has not finished. `capacity.AWAITING_CAPACITY` is one
+#: of them: a job waiting for a GPU has not failed, it has not started.
+LIVE_JOB_STATUSES: frozenset[str] = frozenset({"RUNNING", "AWAITING_CAPACITY"})
+
+#: `probes.vocabulary` verdicts that settle a family as *finished*, whatever the registry says. The
+#: probe reads the runtime directly, so when the two disagree the probe is the one that looked.
+PROBE_FINISHED_VERDICTS: frozenset[str] = frozenset(
+    {"STALE_REGISTRY", "LIKELY_COMPLETED", "LOST", "ABANDONED_WAIT"}
+)
+
+#: The probe verdict that settles a family as still live.
+PROBE_RUNNING_VERDICT = "RUNNING_CONFIRMED"
+
+#: `capacity.CAPACITY_EXHAUSTED` — the family ran out of room rather than out of correctness.
+CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
+
+#: The probe's reading of the same thing: an `AWAITING_CAPACITY` walk nobody is walking any more.
+PROBE_ABANDONED_WAIT = "ABANDONED_WAIT"
 
 #: `worker.ERROR_CLASSES` token → verdict. The mapping is deliberately explicit rather than
 #: derived: an error class is a statement about what went wrong, and a verdict is a statement about
@@ -105,6 +137,11 @@ class CellState:
     caller derives the expected cell set from the run's snapshot-pinned source rather than from a
     registry query. ``has_metadata`` false with ``has_predictions`` false means "this cell never
     happened".
+
+    ``family`` is stamped by the caller too, from `dag.group_models_by_family` — the mapping lives
+    in the config, and reading a config here would put a heavyweight import in the CLI, SDK and
+    Airflow paths for one lookup. It is what joins a cell to its `FamilyState`; ``None`` means the
+    family reading is simply unavailable and the per-cell rules stand alone.
     """
 
     ts_id: str
@@ -113,6 +150,47 @@ class CellState:
     has_predictions: bool = False
     cell_status: str | None = None
     error_class: str | None = None
+    family: str | None = None
+
+
+@dataclass(frozen=True)
+class FamilyState:
+    """What is known about the *job* that owned a cell — the context a per-cell row cannot carry.
+
+    A cell with no metadata row looks identical whether its job never started, is running right
+    now, died halfway, or ran to completion and skipped it. Only the job says which, and the
+    difference decides between "resubmit", "wait", and "something is wrong upstream of this cell".
+
+    ``status`` is the ``run_jobs`` status, ``failure_reason`` its first token (see `capacity`), and
+    ``probe_verdict`` the reconciled reading from `probes.reconcile` when a probe has run. All three
+    are optional: a repair report built without probing is a weaker report, not a broken one.
+    """
+
+    family: str
+    status: str | None = None
+    failure_reason: str | None = None
+    probe_verdict: str | None = None
+
+    @property
+    def is_live(self) -> bool:
+        """Has this family *not* finished? The probe wins over the registry when they disagree.
+
+        That precedence is the whole reason the probe exists: the registry records what a job said
+        about itself last, and a job that was killed says nothing at all, so a stale ``RUNNING``
+        row would otherwise freeze repair on a run that ended hours ago.
+        """
+        if self.probe_verdict in PROBE_FINISHED_VERDICTS:
+            return False
+        if self.probe_verdict == PROBE_RUNNING_VERDICT:
+            return True
+        return self.status in LIVE_JOB_STATUSES
+
+    @property
+    def is_capacity_bound(self) -> bool:
+        """Did this family stop because there was no room, rather than because of the work?"""
+        return (
+            self.failure_reason == CAPACITY_EXHAUSTED or self.probe_verdict == PROBE_ABANDONED_WAIT
+        )
 
 
 @dataclass(frozen=True)
@@ -148,7 +226,7 @@ class Worklist:
         return {v: len(cells) for v, cells in self.by_verdict.items() if cells}
 
 
-def classify_cell(state: CellState) -> str:
+def classify_cell(state: CellState, family: FamilyState | None = None) -> str:
     """What to do about one cell — one of `VERDICTS` (pure, total).
 
     Total by construction: every path returns, and the fallthrough is ``UNKNOWN`` rather than an
@@ -158,19 +236,42 @@ def classify_cell(state: CellState) -> str:
     The order of the checks is the argument:
 
     1. **Predictions present → ``SKIP_ALREADY_DONE``**, before anything else is consulted. This is
-       the invariant, and putting it first is what makes it one — a status column that disagrees
-       with the rows on disk does not get to overrule the rows.
-    2. **No metadata row → ``RETRY_AS_IS``.** The cell never ran. Nothing is known to be wrong with
-       it; the job that should have covered it did not get there.
-    3. **Metadata says ``ok``, but no predictions.** A contradiction: the worker recorded success
+       the invariant, and putting it first is what makes it one — neither a status column nor a
+       probe verdict gets to overrule the rows on disk.
+    2. **The family has not finished → ``SKIP_NOT_FINISHED``.** A cell missing from a job that is
+       still running is not missing, it is pending, and classifying it any other way turns an
+       impatient operator into a duplicate submission. This is also where a cancelled family is
+       caught: someone stopped that work on purpose, and quietly offering to resurrect it is not a
+       repair — ``UNKNOWN`` says so without deciding for them.
+    3. **No metadata row → ``RETRY_AS_IS``.** The cell never ran and the family is finished.
+       Nothing is known to be wrong with the cell; the job that should have covered it did not get
+       there.
+    4. **Metadata says ``ok``, but no predictions.** A contradiction: the worker recorded success
        and wrote no forecast. Something is wrong with the *run*, not with this cell, and a retry
        that re-fits into the same hole is not a diagnosis — ``UNKNOWN``, no action.
-    4. **Otherwise it is an error cell** — dispatch on `ERROR_CLASS_VERDICTS`. An error row with no
+    5. **Otherwise it is an error cell** — dispatch on `ERROR_CLASS_VERDICTS`. An error row with no
        ``error_class`` at all predates the column or came from a writer that does not fill it, and
        is ``UNKNOWN`` for the same reason as an unrecognised token.
+    6. **Finally, a capacity-bound family downgrades any retry to ``RETRY_LATER``.** The per-cell
+       row cannot see this: a cell that never ran under a family that hit a capacity wall reads as
+       ``RETRY_AS_IS``, and resubmitting it immediately walks into the same wall. The downgrade
+       only ever moves a retry to a *later* retry, so it can never turn a refusal into work.
     """
     if state.has_predictions:
         return SKIP_ALREADY_DONE
+    if family is not None:
+        if family.is_live:
+            return SKIP_NOT_FINISHED
+        if family.status == "CANCELLED":
+            return UNKNOWN
+    verdict = _verdict_from_cell(state)
+    if verdict in RETRY_VERDICTS and family is not None and family.is_capacity_bound:
+        return RETRY_LATER
+    return verdict
+
+
+def _verdict_from_cell(state: CellState) -> str:
+    """Steps 3–5 of `classify_cell` — everything the cell's own row can decide (pure)."""
     if not state.has_metadata:
         return RETRY_AS_IS
     if state.cell_status == "ok":
@@ -180,8 +281,15 @@ def classify_cell(state: CellState) -> str:
     return ERROR_CLASS_VERDICTS.get(state.error_class, UNKNOWN)
 
 
-def build_worklist(states: Iterable[CellState]) -> Worklist:
+def build_worklist(
+    states: Iterable[CellState], families: Mapping[str, FamilyState] | None = None
+) -> Worklist:
     """Classify every cell and split it into a `Worklist` (pure).
+
+    ``families`` maps a family name to what is known about its job, joined to each cell by
+    `CellState.family`. Omitting it is legitimate — a report built without the job rows is a weaker
+    report, not a broken one — and a cell whose family is absent from the mapping is classified on
+    its own row alone rather than being dropped.
 
     Raises `RegistryError` if the no-overlap postcondition is broken — a targeted cell that already
     has predictions. That can only happen if `classify_cell` is edited into disagreeing with itself,
@@ -190,7 +298,8 @@ def build_worklist(states: Iterable[CellState]) -> Worklist:
     """
     grouped: dict[str, list[CellState]] = {}
     for state in states:
-        grouped.setdefault(classify_cell(state), []).append(state)
+        family = None if families is None or state.family is None else families.get(state.family)
+        grouped.setdefault(classify_cell(state, family), []).append(state)
     worklist = Worklist(by_verdict={v: tuple(cells) for v, cells in grouped.items()})
 
     overlapping = [c for c in worklist.targets if c.has_predictions]
