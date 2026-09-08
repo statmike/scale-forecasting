@@ -18,7 +18,9 @@ from scale_forecasting.backtest import (
     Fold,
     achievable_folds,
     backtest_cell,
+    fit_rows,
     make_folds,
+    suggest_min_train,
     training_window,
 )
 from scale_forecasting.config import RunConfig
@@ -404,3 +406,61 @@ def test_the_window_excludes_the_scored_observations() -> None:
     window = training_window(ds, y, ds[11], _cfg({"scheme": "expanding"}))
     assert window[-1] == y[11]
     assert y[12] not in set(window.tolist())
+
+
+# --- fit_rows / suggest_min_train: the arithmetic behind the workload estimate --
+
+
+def test_fit_rows_is_the_final_fit_plus_every_fold_window() -> None:
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    rows = fit_rows(100, cfg)
+    assert rows[0] == 100  # the full-history fit the shipped forecast comes from
+    assert rows[1:] == [f.train_size for f in make_folds(100, cfg)]
+
+
+def test_fit_rows_shrinks_with_the_folds_a_short_series_loses() -> None:
+    cfg = _cfg({"n_folds": 4, "horizon": 5, "step": 5, "min_train": 10})
+    assert len(fit_rows(100, cfg)) == 5  # all four folds achieved
+    assert len(fit_rows(20, cfg)) == 3  # only two of the four folds achieved
+    assert fit_rows(10, cfg) == [10]  # none: the cell still fits and forecasts
+
+
+def test_fit_rows_is_one_fit_when_backtesting_is_off() -> None:
+    assert fit_rows(500, _cfg()) == [500]
+
+
+def test_n_fits_equals_the_factory_calls_the_cell_actually_makes() -> None:
+    # The definitive cross-check: `estimate_workload` counts fits from the geometry, and
+    # `backtest_cell` constructs one model per fold. Run the cell with a counting factory and the
+    # two numbers must reconcile — the folds it ran, plus the one final full-history fit that
+    # happens in `worker.run_cell` rather than here.
+    from scale_forecasting.config import estimate_workload
+
+    n = 120
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    calls = 0
+    inner = _factory()
+
+    def counting() -> BaseModel:
+        nonlocal calls
+        calls += 1
+        return inner()
+
+    backtest_cell(_series(n), counting, cfg)
+    assert estimate_workload(cfg, obs_counts=[n]).n_fits == calls + 1
+
+
+def test_suggest_min_train_reports_the_ceiling_the_marginal_series_sets() -> None:
+    # Full folds need min_train <= n - horizon - (n_folds-1)*step. At n=100, horizon 5, step 5,
+    # 3 folds that is 85; the 60-row series caps at 45. Nine of ten series clear 85.
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    counts = [100] * 9 + [60]
+    assert suggest_min_train(counts, cfg, target_share=0.9) == 85
+    assert suggest_min_train(counts, cfg, target_share=1.0) == 45
+
+
+def test_suggest_min_train_is_none_when_the_panel_cannot_reach_the_target() -> None:
+    cfg = _cfg({"n_folds": 3, "horizon": 5, "step": 5, "min_train": 10})
+    # 12 observations: horizon 5 + two steps of 5 already consumes all of it.
+    assert suggest_min_train([12, 12], cfg) is None
+    assert suggest_min_train([], cfg) is None

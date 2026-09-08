@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .config import Fanout, RunConfig, estimate_fanout, load_config
+from .config import Fanout, RunConfig, Workload, estimate_workload, load_config
 from .errors import get_logger
 from .registry.ids import make_run_id
 from .registry.views import VIEW_NAMES
@@ -72,13 +72,17 @@ class DryRunResult:
     """What a run *would* do, computed offline — no GCP calls, no compute launched.
 
     ``run_id`` is the deterministic config hash (identical to what an actual run lands under);
-    ``fanout`` is the estimated cell count; ``python_models``/``bq_models`` are the runtime split.
+    ``workload`` is the estimated work (cells always; fits and fold cohorts only once a caller has
+    supplied per-series lengths, which this offline path has not); ``python_models``/``bq_models``
+    are the runtime split. ``fanout`` is the same estimate narrowed to its four count fields, kept
+    because it is the older name and is in the public ``__init__``.
     """
 
     run_id: str
     fanout: Fanout
     python_models: list[str]
     bq_models: list[str]
+    workload: Workload | None = None
 
 
 @dataclass(frozen=True)
@@ -198,12 +202,26 @@ class Forecaster:
 
         run_id = main.run(self._config, dry_run=True)
         python_models, bq_models = split_by_runtime(self._config)
+        workload = estimate_workload(self._config)
         return DryRunResult(
             run_id=run_id,
-            fanout=estimate_fanout(self._config),
+            fanout=Fanout(workload.n_series, workload.n_models, workload.n_folds, workload.n_cells),
             python_models=python_models,
             bq_models=bq_models,
+            workload=workload,
         )
+
+    def feasibility(self) -> list[str]:
+        """Read the source panel's series lengths and report what this run's fold geometry does.
+
+        The SDK face of ``--dry-run --feasibility``. Reads one aggregation off the panel and returns
+        the report as lines; launches nothing and writes nothing. See
+        `launch_plan.feasibility_report` for why this one planning question cannot be answered
+        offline.
+        """
+        from .launch_plan import feasibility_report
+
+        return feasibility_report(self._config, settings=self._settings)
 
     def run(
         self,

@@ -61,6 +61,11 @@ class ModelCost:
 
     No margins are applied here. They ride on `FamilyCost` and `ComputeProfile`, which is
     what a consumer reads, so a margin can never be applied twice on the way through.
+
+    ``n_fits`` here counts fits that *already happened* and were measured — it is a property
+    of the profile sample, not of a run. `config.Workload.n_fits` is the forward-looking
+    quantity (how many fits a planned run will perform). Same word, opposite direction; the
+    name stays because it is a key in the persisted ``sizing`` telemetry JSON.
     """
 
     model_type: str

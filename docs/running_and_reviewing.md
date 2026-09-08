@@ -112,12 +112,55 @@ the runtime template Terraform ships, see [notebook_runtimes.md](./notebook_runt
 
 ## 1. Check the config offline first
 
-`--dry-run` resolves the config and estimates the fan-out (series × models × folds = cells) without
-touching GCP. Always cheap, always safe:
+`--dry-run` resolves the config, resolves the `run_id`, and estimates the workload without touching
+GCP. Always cheap, always safe:
 
 ```bash
 python -m scale_forecasting.main --config configs/explode_demo.json --dry-run
 ```
+
+**A cell is one series and one model — folds are not part of that multiplication.** 1,000 series and
+4 models is 4,000 cells whether you backtest twice or ten times, because the folds happen *inside* a
+cell. This matters because the cell count is what sizes the fleet: it is the unit of distribution,
+so `n_cells` here means the same thing it means in the leaderboard and in the Ray cluster planner.
+What backtesting changes is the work *per* cell, and that is a separate number.
+
+### `--feasibility`: what the fold geometry does to your actual data
+
+The count half of the estimate is a pure function of the config. The other half — how many fits each
+cell really performs, and how many series achieve all the folds you asked for — is a fact about the
+data, not the config, because a series too short for the geometry silently gets fewer folds, or
+none. So there is one planning flag that reads BigQuery:
+
+```bash
+python -m scale_forecasting.main --config configs/explode_demo.json --feasibility
+```
+
+It runs a single `SELECT ts_id, COUNT(*) … GROUP BY ts_id` against the source table and prints:
+
+```
+feasibility: 1000 series x 4 models = 4000 cells
+  fits: 15640 (19,477,760 training rows) = 3.862 whole-history fits per cell
+  3 of 3 folds: 970 series (97.0%) — all folds
+  0 of 3 folds: 30 series (3.0%) — UNSCORED
+  30 series get no folds at all: they are still fit and forecast, but they contribute nothing
+  to any leaderboard (see v_backtest_coverage)
+  min_train=180 is within budget: up to 316 still keeps 90% of series at full folds
+```
+
+Read it as three answers. **Cost:** "3.862 whole-history fits per cell" is the honest multiplier on
+your compute bill — a three-fold backtest is not 3× a plain run, it is however much the shrinking
+training windows add up to, and the number is derived from the same `make_folds` the workers use, so
+it cannot drift from what actually runs. **Coverage:** the fold histogram is the population you will
+be able to compare models on; a large `UNSCORED` cohort means a leaderboard built from a fraction of
+the fleet. **The knob:** the last line names the largest `min_train` that still brings 90% of series
+to full folds, or tells you that no value of `min_train` can and the fold count itself has to come
+down. Changing `min_train` changes the config digest and therefore the `run_id`, which the line says
+out loud.
+
+`--feasibility` implies `--dry-run` — a flag whose name promises a report can never be the thing that
+launches a run. If the panel can't be read (no credentials, table missing), it degrades to one line
+saying so and you still get your plan and your `run_id`.
 
 ## 2. Submit the run
 
@@ -434,6 +477,7 @@ Two things you won't find here:
 | Command | Purpose |
 |---------|---------|
 | `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run — a job per family in parallel (Spark/Ray ∥ BigQuery) under one `run_id`. |
+| `python -m scale_forecasting.main --config C --feasibility` | Plan without running, then read the source panel's series lengths and report what this run's fold geometry does to it: cost multiplier, fold-coverage histogram, and the `min_train` that would fix it. Implies `--dry-run`. |
 | `python -m scale_forecasting.main --config C --quota` | Read this run's capacity meters in every candidate region: what they allow, what they would clamp, and what a quota increase would buy in wall clock. Reads only. See [Quota and scale](quota_and_scale.md#4-which-quotas-and-where). |
 | `python -m scale_forecasting.submit --config C` | Submit a single Spark family job to Dataproc. |
 | `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |

@@ -13,6 +13,7 @@ from scale_forecasting.config import (
     LEARNED_STRATEGIES,
     RunConfig,
     estimate_fanout,
+    estimate_workload,
     load_config,
 )
 from scale_forecasting.errors import ConfigError
@@ -234,7 +235,10 @@ def test_hpo_rejects_unknown_granularity() -> None:
 # --- fanout --------------------------------------------------------------------
 
 
-def test_fanout_with_series_limit_and_backtest() -> None:
+def test_a_cell_is_a_series_and_a_model_not_a_fold() -> None:
+    # The number folds do NOT multiply. `n_cells` here has to mean what it means on the
+    # leaderboard, in the Ray planner and in the quota estimator, or a dry run reports three
+    # times the rows a two-fold run will ever write.
     cfg = RunConfig(
         **_minimal_dict(
             data={"source_table": "t", "series_limit": 100},
@@ -243,7 +247,7 @@ def test_fanout_with_series_limit_and_backtest() -> None:
         )
     )
     fo = estimate_fanout(cfg)
-    assert (fo.n_series, fo.n_models, fo.n_folds, fo.n_cells) == (100, 2, 3, 600)
+    assert (fo.n_series, fo.n_models, fo.n_folds, fo.n_cells) == (100, 2, 3, 200)
 
 
 def test_fanout_no_backtest_uses_one_fold() -> None:
@@ -256,6 +260,77 @@ def test_fanout_unlimited_series_is_none() -> None:
     cfg = RunConfig(**_minimal_dict())  # no series_limit
     fo = estimate_fanout(cfg)
     assert fo.n_series is None and fo.n_cells is None
+
+
+def test_fanout_is_the_workload_narrowed_to_its_counts() -> None:
+    cfg = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "t", "series_limit": 7},
+            models=["theta", "sarimax"],
+            backtest={"enabled": True, "n_folds": 4},
+        )
+    )
+    fo, w = estimate_fanout(cfg), estimate_workload(cfg)
+    assert (fo.n_series, fo.n_models, fo.n_folds, fo.n_cells) == (
+        w.n_series,
+        w.n_models,
+        w.n_folds,
+        w.n_cells,
+    )
+
+
+# --- estimate_workload ---------------------------------------------------------
+
+
+def _workload_cfg(**backtest: Any) -> RunConfig:
+    bt = {"enabled": True, "n_folds": 2, "horizon": 28, "step": 28, **backtest}
+    return RunConfig(**_minimal_dict(data={"source_table": "t", "horizon": 28}, backtest=bt))
+
+
+def test_four_years_backtested_twice_is_2_942_full_fits_not_three() -> None:
+    # 1460 daily observations, horizon 28, step 28, two folds. The final fit sees all 1460
+    # rows; the folds train on 1432 and 1404. (1460 + 1432 + 1404) / 1460 = 2.942 — the number
+    # `n_folds + 1` overstates by 2%, and overstates by much more as the horizon grows.
+    w = estimate_workload(_workload_cfg(), obs_counts=[1460])
+    assert w.n_fits == 3
+    assert w.train_rows_total == 1460 + 1432 + 1404
+    assert round(w.full_fit_equivalents, 3) == 2.942
+
+
+def test_the_geometry_half_stays_empty_without_the_series_lengths() -> None:
+    # A guess here would be wrong in the direction that flatters the plan, so there is no guess.
+    w = estimate_workload(_workload_cfg())
+    assert w.n_fits is None and w.full_fit_equivalents is None
+    assert w.train_rows_total is None and w.n_unscored is None and w.fold_histogram == {}
+
+
+def test_backtesting_off_needs_no_series_length_to_be_exact() -> None:
+    cfg = RunConfig(**_minimal_dict(data={"source_table": "t", "series_limit": 5}))
+    w = estimate_workload(cfg)
+    assert w.n_fits == w.n_cells == 5 and w.full_fit_equivalents == 1.0
+
+
+def test_a_ragged_panel_shows_up_as_a_fold_histogram_not_an_average() -> None:
+    # min_train defaults to 180: a 200-row series clears one fold and not two.
+    w = estimate_workload(_workload_cfg(), obs_counts=[1460, 1460, 220, 100])
+    assert w.fold_histogram == {0: 1, 1: 1, 2: 2}
+    assert w.n_unscored == 1
+    assert w.n_series == 4  # measured lengths win over series_limit
+
+
+def test_fits_and_rows_scale_with_models_and_the_multiplier_does_not() -> None:
+    one = estimate_workload(_workload_cfg(), obs_counts=[1460, 900])
+    cfg3 = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "t", "horizon": 28},
+            models=["theta", "sarimax", "croston"],
+            backtest={"enabled": True, "n_folds": 2, "horizon": 28, "step": 28},
+        )
+    )
+    three = estimate_workload(cfg3, obs_counts=[1460, 900])
+    assert three.n_fits == 3 * one.n_fits
+    assert three.train_rows_total == 3 * one.train_rows_total
+    assert three.full_fit_equivalents == one.full_fit_equivalents
 
 
 # --- load_config ---------------------------------------------------------------

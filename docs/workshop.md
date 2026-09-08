@@ -105,8 +105,8 @@ export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJEC
 > [`docs/running_and_reviewing.md`](./running_and_reviewing.md) — this runbook just orchestrates it for
 > the workshop. If a submit errors on a missing var, that doc's Prerequisites table is the checklist.
 
-**Sanity-check a config offline first** (resolves the config + estimates the fan-out
-`series × models × folds`, touches no GCP):
+**Sanity-check a config offline first** (resolves the config + estimates the fan-out,
+`series × models` cells — folds happen inside a cell — and touches no GCP):
 
 ```bash
 uv run python -m scale_forecasting.main --config configs/explode_100k.json --dry-run

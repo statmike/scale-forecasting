@@ -30,7 +30,14 @@ from typing import TYPE_CHECKING
 
 # Eager (light): the config contract, infra identity, and the error hierarchy. None of these pull
 # the model modules, so they keep ``import scale_forecasting`` cheap.
-from .config import Fanout, RunConfig, estimate_fanout, load_config
+from .config import (
+    Fanout,
+    RunConfig,
+    Workload,
+    estimate_fanout,
+    estimate_workload,
+    load_config,
+)
 from .errors import (
     ConfigError,
     DataError,
@@ -89,6 +96,8 @@ __all__ = [
     # Eager.
     "RunConfig",
     "load_config",
+    "estimate_workload",
+    "Workload",
     "estimate_fanout",
     "Fanout",
     "Settings",

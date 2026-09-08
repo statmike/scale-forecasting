@@ -22,12 +22,14 @@ alone — so ``coverage``, ``pinball``, ``interval_score`` and ``interval_width`
 the Python path rather than the NaNs they were for every run before this.
 
 Public surface: ``Fold``, ``OOF_COLUMNS``, ``achievable_folds``, ``holdout_fold_id``,
-``hpo_scoring_claim``, ``make_folds``, ``training_window``, ``backtest_cell``.
+``hpo_scoring_claim``, ``make_folds``, ``fit_rows``, ``suggest_min_train``, ``training_window``,
+``backtest_cell``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -198,6 +200,53 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
             )
         )
     return folds
+
+
+def fit_rows(n: int, cfg: RunConfig) -> list[int]:
+    """Training-row count of every fit one cell performs on a series of ``n`` observations (pure).
+
+    ``[n, *fold_windows]`` — the final full-history fit the shipped forecast comes from, then one
+    entry per *achieved* fold, in fold order. A cell with backtesting off does one fit, so the list
+    is ``[n]``.
+
+    This is the arithmetic behind `config.estimate_workload`, and it exists so that arithmetic
+    cannot drift from the geometry: the fold windows are read off `make_folds` rather than
+    re-derived from ``horizon``/``step``/``min_train``. A count that re-derived them would go
+    quietly wrong the first time the geometry changed — and fold geometry has changed twice
+    already (clamping, then oldest-first dropping).
+
+    Why the row counts and not just the fit count: a fold trains on *less* history than the final
+    fit, so ``n_folds + 1`` overstates the cost of backtesting. Four years of daily history
+    backtested twice at a 28-day horizon is 2.94 whole-history fits, not 3.
+    """
+    if not cfg.backtest.enabled:
+        return [n]
+    return [n] + [f.train_end - f.train_start for f in make_folds(n, cfg)]
+
+
+def suggest_min_train(
+    obs_counts: Sequence[int], cfg: RunConfig, target_share: float = 0.9
+) -> int | None:
+    """The largest ``backtest.min_train`` that still gives ``target_share`` of series all folds.
+
+    ``None`` when no positive ``min_train`` reaches the target — the panel is simply too short for
+    the requested fold geometry and the fix is fewer folds or a shorter horizon, not a smaller
+    ``min_train``.
+
+    A series gets the full ``n_folds`` exactly when
+    ``min_train <= n - horizon - (n_folds - 1) * step`` (rearranged from `achievable_folds`), so
+    each series has its own ceiling and the answer is the ``target_share`` quantile of those
+    ceilings, taken from the long end. Purely advisory: it reports what the geometry permits and
+    changes nothing, because ``min_train`` is a config field and moving it moves the run_id.
+    """
+    if not obs_counts or not 0.0 < target_share <= 1.0:
+        return None
+    bt = cfg.backtest
+    caps = sorted((n - bt.horizon - (bt.n_folds - 1) * bt.step for n in obs_counts), reverse=True)
+    # The series at this rank is the marginal one: keep it at full folds and everything longer
+    # follows, which is exactly `target_share` of the panel.
+    rank = max(1, math.ceil(target_share * len(caps))) - 1
+    return caps[rank] if caps[rank] >= 1 else None
 
 
 def training_window(ds: np.ndarray, y: np.ndarray, cutoff: object, cfg: RunConfig) -> np.ndarray:

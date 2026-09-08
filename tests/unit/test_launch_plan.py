@@ -414,3 +414,81 @@ def test_an_unreachable_registry_leaves_the_plan_unpinned_rather_than_failing(
     _fake_discover(monkeypatch, RuntimeError("no credentials"))
     cfg = _lock_cfg()
     assert launch_plan.lock_profile_source(cfg, settings=_SETTINGS).compute.profile.source == "auto"
+
+
+# --- feasibility: the one planning question the config cannot answer -----------
+
+
+def _bt_cfg(**backtest: Any) -> RunConfig:
+    bt = {"enabled": True, "n_folds": 2, "horizon": 28, "step": 28, **backtest}
+    return _cfg(
+        data={"source_table": "source_series_native", "horizon": 28},
+        models=[_SPARK],
+        backtest=bt,
+    )
+
+
+def test_feasibility_reports_fits_and_the_backtest_multiplier() -> None:
+    lines = launch_plan.feasibility_lines(_bt_cfg(), [1460, 1460])
+    joined = "\n".join(lines)
+    assert "2 series x 1 models = 2 cells" in joined
+    assert "fits: 6" in joined
+    assert "2.942 whole-history fits per cell" in joined
+
+
+def test_feasibility_names_every_fold_cohort_including_the_unscored_one() -> None:
+    lines = launch_plan.feasibility_lines(_bt_cfg(), [1460, 1460, 220, 100])
+    joined = "\n".join(lines)
+    assert "2 of 2 folds: 2 series (50.0%) — all folds" in joined
+    assert "1 of 2 folds: 1 series (25.0%) — reduced" in joined
+    assert "0 of 2 folds: 1 series (25.0%) — UNSCORED" in joined
+    assert "1 series get no folds at all" in joined
+
+
+def test_feasibility_says_min_train_is_within_budget_when_the_panel_is_long() -> None:
+    joined = "\n".join(launch_plan.feasibility_lines(_bt_cfg(), [1460] * 10))
+    assert "is within budget" in joined and "moves the run_id" not in joined
+
+
+def test_feasibility_suggests_a_lower_min_train_when_the_panel_is_short() -> None:
+    # Nine 1460-row series and one 300-row: min_train=180 leaves the short one short.
+    joined = "\n".join(launch_plan.feasibility_lines(_bt_cfg(min_train=250), [300] * 10))
+    assert "is above what this panel supports" in joined
+    assert "moves the run_id" in joined
+
+
+def test_feasibility_says_change_the_geometry_when_no_min_train_helps() -> None:
+    # 50 observations against horizon 28 + one step of 28: the geometry alone eats the series,
+    # so no min_train — not even 1 — buys a second fold. Saying "lower min_train" here would be
+    # advice that cannot work.
+    joined = "\n".join(launch_plan.feasibility_lines(_bt_cfg(), [50] * 10))
+    assert "reduce n_folds" in joined
+
+
+def test_feasibility_with_backtesting_off_reports_the_cells_and_stops() -> None:
+    joined = "\n".join(launch_plan.feasibility_lines(_cfg(models=[_SPARK]), [1460, 900]))
+    assert "1.000 whole-history fits per cell" in joined
+    assert "backtest: off" in joined
+    assert "folds" not in joined.split("backtest: off")[0].split("\n")[-1]
+
+
+def test_feasibility_report_degrades_to_a_line_when_the_panel_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A reporting verb that raises is one an operator stops running. No SF_* env is the common
+    # case (a laptop with no environment), and it must not cost the caller their plan.
+    def _boom(cfg: RunConfig, *, settings: Any = None) -> list[int]:
+        raise ConfigError("no SF_* env")
+
+    monkeypatch.setattr(launch_plan, "read_series_lengths", _boom)
+    lines = launch_plan.feasibility_report(_bt_cfg())
+    assert len(lines) == 1 and "could not read the source panel" in lines[0]
+
+
+def test_feasibility_report_says_so_when_the_panel_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(launch_plan, "read_series_lengths", lambda cfg, settings=None: [])
+    assert launch_plan.feasibility_report(_bt_cfg()) == [
+        "feasibility: the source panel returned no series"
+    ]

@@ -493,6 +493,50 @@ def test_cli_dispatches_dry_run(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) 
     assert seen == {"dry_run": True, "force": False, "run_name": "cli main test"}
 
 
+def test_cli_feasibility_implies_dry_run_and_survives_an_unreachable_panel(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Two promises in one flag. `--feasibility` on its own must never launch anything — the word
+    # names a report, so it implies `--dry-run` rather than needing it. And because the fold
+    # histogram is the one part of planning that has to read the data, an environment that cannot
+    # be reached degrades to a line: you still get your plan and your run_id with no SF_* env set.
+    import json
+    import logging
+    import os
+
+    for var in [k for k in os.environ if k.startswith("SF_")]:
+        monkeypatch.delenv(var, raising=False)
+
+    seen: dict[str, Any] = {}
+
+    def _fake_run(cfg: RunConfig, *, dry_run: bool = False, force: bool = False) -> str:
+        seen["dry_run"] = dry_run
+        return "rid-123"
+
+    def _no_panel(cfg: RunConfig, *, settings: Any = None) -> list[int]:
+        raise RuntimeError("no credentials")
+
+    monkeypatch.setattr(main, "run", _fake_run)
+    monkeypatch.setattr(launch_plan, "read_series_lengths", _no_panel)
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli feasibility test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    with caplog.at_level(logging.INFO):
+        main._main(["--config", str(path), "--feasibility"])  # note: no --dry-run
+
+    assert seen == {"dry_run": True}
+    assert "planned: rid-123" in caplog.text
+    assert "could not read the source panel" in caplog.text
+
+
 def test_cli_dispatches_probe(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 

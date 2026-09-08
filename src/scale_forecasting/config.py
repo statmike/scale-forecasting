@@ -7,7 +7,9 @@ and the frozen, normalized object is what gets logged verbatim to
 Public surface:
 - ``RunConfig`` — the frozen pydantic model.
 - ``load_config(path) -> RunConfig`` — read + validate a JSON file.
-- ``estimate_fanout(cfg) -> Fanout`` — the dry-run cell-count estimate.
+- ``estimate_workload(cfg, obs_counts=...) -> Workload`` — the dry-run work estimate: cells always,
+  fits and fold cohorts when the caller supplies per-series observation counts.
+- ``estimate_fanout(cfg) -> Fanout`` — the same estimate narrowed to its four count fields.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -1053,30 +1056,122 @@ class RunConfig(BaseModel):
         )
 
 
-# --- fanout estimate -----------------------------------------------------------
+# --- workload estimate ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Workload:
+    """Dry-run estimate of the work a run will schedule.
+
+    Two halves, and the split is the point. The **count** half (``n_series`` … ``n_cells``) is a
+    function of the config alone, so a plain ``--dry-run`` fills it with no environment and no data
+    read. The **geometry** half (``n_fits`` onward) depends on how long each series actually is,
+    which only the panel knows — so it is ``None``/empty unless the caller supplies ``obs_counts``
+    (what ``plan --feasibility`` reads). Reporting a guess there would be worse than reporting
+    nothing: on a ragged panel the guess is wrong in the direction that flatters the plan.
+
+    ``n_cells`` is ``n_series × n_models`` — one cell is one (series, model) pair, which is what
+    ``run_cell`` runs, what `engines.ray_io.plan_cluster` sizes against, and what the leaderboard's
+    ``n_cells`` counts. It deliberately does **not** multiply by folds: folds happen *inside* a
+    cell, and the old fold-multiplied number made a backtested run look like it scheduled three
+    times the work when it schedules the same work three times as deep.
+    """
+
+    n_series: int | None  # None = unlimited (unknown until the data is read)
+    n_models: int
+    n_folds: int  # requested backtest folds, or 1 when backtesting is off
+    n_cells: int | None  # n_series × n_models; None when n_series unknown
+    n_fits: int | None  # Σ over series of n_models × (achieved folds + 1)
+    full_fit_equivalents: float | None  # training rows / one whole-history fit per cell
+    train_rows_total: int | None  # observations handed to a `.fit()` across the whole run
+    fold_histogram: dict[int, int]  # achieved folds → series count; {} when unknown
+    n_unscored: int | None  # series achieving zero folds; None when unknown
+
+
+def estimate_workload(cfg: RunConfig, *, obs_counts: Sequence[int] | None = None) -> Workload:
+    """Estimate the work a run will schedule, in cells and in fits (pure).
+
+    ``obs_counts`` is the observation count of each series that will be forecast — one entry per
+    series, in any order. Supply it (from ``SELECT ts_id, COUNT(*) … GROUP BY ts_id``) and the fold
+    geometry is resolved exactly, per series, through `backtest.fit_rows`. Omit it and only the
+    cell counts come back; ``n_series`` then falls back to ``data.series_limit``, which is ``None``
+    for an unbounded run, and ``n_cells`` follows it.
+
+    **Why fits and not just cells.** A cell with two backtest folds does three fits, and the two
+    fold fits train on shorter windows than the final one — so the honest cost multiplier for
+    backtesting is ``full_fit_equivalents`` (2.94 for four years of daily history, two folds, a
+    28-day horizon), not ``n_folds + 1`` (3). ``full_fit_equivalents`` is dimensionless: it is what
+    one cell costs relative to the same cell with backtesting off, so multiply it by ``n_cells`` to
+    compare two plans. ``n_fits`` and ``train_rows_total`` are absolute and both scale with models.
+
+    With backtesting off, every cell does exactly one full-history fit, so ``n_fits == n_cells`` and
+    the multiplier is ``1.0`` without needing to know a single series length.
+    """
+    from .backtest import fit_rows
+
+    n_models = len(cfg.models)
+    n_series = len(obs_counts) if obs_counts is not None else cfg.data.series_limit
+    n_folds = cfg.backtest.n_folds if cfg.backtest.enabled else 1
+    n_cells = None if n_series is None else n_series * n_models
+
+    n_fits: int | None = None
+    equivalents: float | None = None
+    rows_total: int | None = None
+    histogram: dict[int, int] = {}
+    n_unscored: int | None = None
+
+    if obs_counts is None:
+        # The one geometry fact that needs no data: no backtest means one fit per cell.
+        if not cfg.backtest.enabled:
+            n_fits, equivalents = n_cells, 1.0
+    else:
+        per_series = [fit_rows(int(n), cfg) for n in obs_counts]
+        achieved = [len(rows) - 1 for rows in per_series]
+        rows_total = n_models * sum(sum(rows) for rows in per_series)
+        n_fits = n_models * sum(len(rows) for rows in per_series)
+        baseline = n_models * sum(int(n) for n in obs_counts)
+        equivalents = rows_total / baseline if baseline else None
+        histogram = {k: achieved.count(k) for k in sorted(set(achieved))}
+        n_unscored = histogram.get(0, 0) if cfg.backtest.enabled else None
+
+    return Workload(
+        n_series=n_series,
+        n_models=n_models,
+        n_folds=n_folds,
+        n_cells=n_cells,
+        n_fits=n_fits,
+        full_fit_equivalents=equivalents,
+        train_rows_total=rows_total,
+        fold_histogram=histogram,
+        n_unscored=n_unscored,
+    )
 
 
 @dataclass(frozen=True)
 class Fanout:
-    """Dry-run estimate of the work a run will schedule."""
+    """The count half of a `Workload`, kept for callers that predate it.
 
-    n_series: int | None  # None = unlimited (unknown until the data is read)
+    ``estimate_fanout`` is still in the public ``__init__`` and still returns this, so nothing
+    downstream had to move. One number did change meaning: ``n_cells`` is now ``n_series ×
+    n_models``, matching every other ``n_cells`` in the system (the leaderboard's, the Ray
+    planner's, the quota estimator's). It used to multiply by folds, which is why a two-fold dry
+    run reported three times the cells it would ever write a row for.
+    """
+
+    n_series: int | None
     n_models: int
-    n_folds: int  # backtest folds, or 1 when backtesting is off
-    n_cells: int | None  # n_series × n_models × n_folds; None when n_series unknown
+    n_folds: int
+    n_cells: int | None
 
 
 def estimate_fanout(cfg: RunConfig) -> Fanout:
-    """Compute the cell-count estimate (n_series × n_models × folds).
+    """The config-only cell-count estimate — `estimate_workload` narrowed to its four count fields.
 
     When ``data.series_limit`` is unset, series count isn't known offline, so
     ``n_series`` and ``n_cells`` are ``None`` (the CLI reports "all series").
     """
-    n_series = cfg.data.series_limit
-    n_models = len(cfg.models)
-    n_folds = cfg.backtest.n_folds if cfg.backtest.enabled else 1
-    n_cells = None if n_series is None else n_series * n_models * n_folds
-    return Fanout(n_series=n_series, n_models=n_models, n_folds=n_folds, n_cells=n_cells)
+    w = estimate_workload(cfg)
+    return Fanout(n_series=w.n_series, n_models=w.n_models, n_folds=w.n_folds, n_cells=w.n_cells)
 
 
 # --- loading -------------------------------------------------------------------

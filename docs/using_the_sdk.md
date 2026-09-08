@@ -33,7 +33,8 @@ forecaster = sf.Forecaster.from_file("configs/explode_demo.json")
 # See what it would do — no GCP calls, no compute launched.
 plan = forecaster.dry_run()
 print(plan.run_id)          # deterministic config hash — the id the real run lands under
-print(plan.fanout)          # estimated series × models × folds = cells
+print(plan.fanout)          # series × models = cells (folds happen inside a cell)
+print(plan.workload)        # the same counts plus the fit-cost half, when it can be known
 print(plan.python_models)   # models routed to the Spark/Ray runtime
 print(plan.bq_models)       # models routed to BigQuery-native
 
@@ -55,6 +56,16 @@ Useful methods and properties:
 
 - `.run_id` — the deterministic run_id for this config (pure hash; no GCP call).
 - `.dry_run() -> DryRunResult` — validate + report the planned fan-out and runtime split, offline.
+  Carries both `.fanout` (the four counts, kept for compatibility) and `.workload`, which adds the
+  cost half: `n_fits`, `full_fit_equivalents`, `train_rows_total`, `fold_histogram`, `n_unscored`.
+  Those five are `None`/`{}` here on purpose — how many folds a series achieves depends on how long
+  that series is, and `dry_run` does not read the data. Call `sf.estimate_workload(cfg,
+  obs_counts=[…])` with measured lengths to fill them in, or use `.feasibility()` below to have them
+  measured for you.
+- `.feasibility() -> list[str]` — the SDK face of `--dry-run --feasibility`: reads the source
+  panel's series lengths from BigQuery and returns the report lines (cost multiplier, fold-coverage
+  histogram, suggested `min_train`). The one planning call that touches GCP; if it can't reach the
+  panel it returns a single line saying so rather than raising.
 - `.dag() -> tuple[DagNode, ...]` — the planned execution DAG, offline: one node per model family
   plus the ensemble, each with its deterministic `job_key`, resolved runtime/hardware, and upstream
   deps (see [Plan the DAG and trace the jobs](#plan-the-dag-and-trace-the-jobs)).

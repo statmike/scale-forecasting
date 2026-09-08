@@ -525,6 +525,13 @@ def _main(argv: list[str] | None = None) -> None:
         help="with --cancel/--settle --force: free-text reason recorded in the audit trail",
     )
     p.add_argument(
+        "--feasibility",
+        action="store_true",
+        help="with --dry-run: read the source panel's per-series observation counts and report the "
+        "fits behind the cells, the achieved-fold cohorts, and the min_train the panel supports; "
+        "reads only, launches nothing",
+    )
+    p.add_argument(
         "--emit-out",
         help="where to write the emitted DAG (default: ./dag_<run_id>.py); implies --emit-airflow",
     )
@@ -582,8 +589,18 @@ def _main(argv: list[str] | None = None) -> None:
         )
         _print_settle_report(settle_report)
         return
-    run_id = run(cfg, dry_run=ns.dry_run, force=ns.force)
-    _log.info("%s: %s", "planned" if ns.dry_run else "submitted", run_id)
+    # `--feasibility` implies the plan verb, the way `--emit-out` implies `--emit-airflow`. It is a
+    # planning question, and a flag whose name promises a report must never be the thing that
+    # launched a run because it was passed without `--dry-run`.
+    dry_run = ns.dry_run or ns.feasibility
+    run_id = run(cfg, dry_run=dry_run, force=ns.force)
+    _log.info("%s: %s", "planned" if dry_run else "submitted", run_id)
+    # After the plan, not instead of it: the plan is the offline answer and stands on its own, and
+    # the feasibility read is the optional extra that costs a query. Kept out of `run` so
+    # `plan_run` stays GCP-free for every other caller.
+    if ns.feasibility:
+        for line in launch_plan.feasibility_report(cfg):
+            _log.info("%s", line)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint

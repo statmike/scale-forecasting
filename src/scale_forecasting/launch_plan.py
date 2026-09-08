@@ -29,8 +29,13 @@ Both take an optional `Settings`; without a reachable ``SF_*`` environment `plan
 rather than fails (a plan with an unknown verdict and no commands), because resolving a config is
 useful offline. `stage_run` requires it — staging touches GCS.
 
-Public surface: ``plan_run``, ``stage_run``, ``lock_profile_source``, and the ``LaunchPlan`` /
-``Idempotency`` result types.
+``feasibility_report`` is the deliberate exception to "the plan is offline": it reads one
+aggregation off the source panel, because how many backtest folds each series actually achieves is
+a fact about the data and no amount of config inspection will produce it. It is opt-in
+(``--feasibility``), reads only, and degrades to a line of text when there is no environment.
+
+Public surface: ``plan_run``, ``stage_run``, ``lock_profile_source``, ``feasibility_report``, and
+the ``LaunchPlan`` / ``Idempotency`` result types.
 """
 
 from __future__ import annotations
@@ -44,6 +49,8 @@ from .registry.ids import make_run_id
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
     from .dag import DagNode
@@ -413,6 +420,109 @@ def plan_run(
     )
     _emit_plan(result)
     return result
+
+
+def read_series_lengths(
+    cfg: RunConfig, *, settings: Settings | None = None
+) -> list[int]:  # pragma: no cover - GCP I/O, covered by the @gcp smokes
+    """Observation count of every series the run will forecast — one BigQuery aggregation.
+
+    ``SELECT ts_id, COUNT(*) … GROUP BY ts_id``, honouring ``data.series_limit`` the same way the
+    engines do. One scan of two columns with a single shuffle: cheap enough to run before a launch,
+    which is the whole point of `feasibility_report`.
+
+    The counts are raw rows, and raw rows are the exact input a fit sees — `features.build_features`
+    creates lag columns but does no ``dropna``, so nothing shrinks the panel between here and the
+    model. No lag-warmup correction is needed and applying one would understate every series.
+    """
+    from google.cloud import bigquery
+
+    from .engines.bigquery_names import _source_ref
+    from .settings import Settings as _Settings
+
+    settings = settings or _Settings.resolve()
+    table = _source_ref(cfg, settings.dataset_ref)
+    limit = "" if cfg.data.series_limit is None else f"\nLIMIT {int(cfg.data.series_limit)}"
+    sql = (
+        f"SELECT `{cfg.data.ts_id_col}` AS ts_id, COUNT(*) AS n_obs\n"
+        f"FROM `{table}`\n"
+        f"GROUP BY ts_id\n"
+        f"ORDER BY ts_id{limit}"
+    )
+    rows = bigquery.Client(project=settings.project_id).query(sql).result()
+    return [int(r["n_obs"]) for r in rows]
+
+
+def feasibility_lines(cfg: RunConfig, obs_counts: Sequence[int]) -> list[str]:
+    """The feasibility report for a measured panel, as lines to print (pure).
+
+    What ``plan --feasibility`` prints once it has the counts. Three things, in the order an
+    operator needs them: how much work this is (cells, fits, and the honest backtest multiplier),
+    who actually gets scored (the achieved-fold cohorts, which on a ragged panel are not one
+    number), and what to change if the answer is unwelcome (`backtest.suggest_min_train`).
+
+    Advisory only — it reads nothing but the counts and writes nothing at all. ``min_train`` is a
+    config field, so acting on the suggestion moves the run_id, which is the caller's decision to
+    make deliberately rather than something a planning verb should do for them.
+    """
+    from .backtest import suggest_min_train
+    from .config import estimate_workload
+
+    w = estimate_workload(cfg, obs_counts=obs_counts)
+    lines = [
+        f"feasibility: {w.n_series} series x {w.n_models} models = {w.n_cells} cells",
+        f"  fits: {w.n_fits} ({w.train_rows_total:,} training rows) = "
+        f"{w.full_fit_equivalents:.3f} whole-history fits per cell",
+    ]
+    if not cfg.backtest.enabled:
+        lines.append("  backtest: off — one full-history fit per cell, no folds to achieve")
+        return lines
+    for k, n in sorted(w.fold_histogram.items(), reverse=True):
+        share = n / (w.n_series or 1)
+        verdict = "all folds" if k == cfg.backtest.n_folds else "UNSCORED" if k == 0 else "reduced"
+        lines.append(f"  {k} of {cfg.backtest.n_folds} folds: {n} series ({share:.1%}) — {verdict}")
+    if w.n_unscored:
+        lines.append(
+            f"  {w.n_unscored} series get no folds at all: they are still fit and forecast, but "
+            "they contribute nothing to any leaderboard (see v_backtest_coverage)"
+        )
+    suggested = suggest_min_train(obs_counts, cfg)
+    current = cfg.backtest.min_train
+    if suggested is None:
+        lines.append(
+            f"  no min_train reaches 90% of series at all {cfg.backtest.n_folds} folds — the panel "
+            f"is short for this geometry; reduce n_folds ({cfg.backtest.n_folds}), step "
+            f"({cfg.backtest.step}) or horizon ({cfg.backtest.horizon}) instead"
+        )
+    elif suggested < current:
+        lines.append(
+            f"  min_train={current} is above what this panel supports; min_train<={suggested} "
+            "brings 90% of series to full folds (changing it moves the run_id)"
+        )
+    else:
+        lines.append(
+            f"  min_train={current} is within budget: up to {suggested} still keeps 90% of series "
+            "at full folds"
+        )
+    return lines
+
+
+def feasibility_report(cfg: RunConfig, *, settings: Settings | None = None) -> list[str]:
+    """Read the panel's series lengths and report what the run's fold geometry does to it.
+
+    The ``--feasibility`` half of the plan verb: the one part of planning that cannot be honest
+    offline, because how many folds a series achieves is a fact about the data, not the config.
+    Best-effort like every other reporting verb — an unreachable environment produces a line saying
+    so rather than an exception, so ``--dry-run --feasibility`` still returns a plan with no
+    ``SF_*`` env.
+    """
+    try:
+        obs_counts = read_series_lengths(cfg, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - a report that can fail is one nobody runs
+        return [f"feasibility: could not read the source panel ({exc}); reporting counts only"]
+    if not obs_counts:
+        return ["feasibility: the source panel returned no series"]
+    return feasibility_lines(cfg, obs_counts)
 
 
 def _manifest_dict(result: LaunchPlan, *, created_at: str) -> dict[str, object]:
