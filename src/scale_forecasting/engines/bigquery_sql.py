@@ -494,6 +494,27 @@ def build_series_ids_query(
     return f"SELECT DISTINCT {idc} AS ts_id\nFROM `{source}`{snap}{clause}\nORDER BY ts_id;"
 
 
+def build_series_count_query(
+    cfg: RunConfig, dataset: str = "{dataset}", *, snapshot_millis: int | None = None
+) -> str:
+    """``SELECT COUNT(DISTINCT ts_id)`` over the same subset `build_series_ids_query` lists.
+
+    The size of the run's series universe without materialising it. The repair path
+    (`retry_run`) needs this number and nothing else: a cell that never ran wrote no registry row,
+    so "how many cells are missing" can only be answered as *expected minus observed*, and the
+    expected side has to come from the source at the run's own snapshot — a later-arriving series
+    was never part of this run and must not be counted as a hole in it. Sharing `_series_filter`
+    and `_snapshot_clause` with the query that lists the ids is what makes the two agree; deriving
+    the count any other way would let the repair invent work.
+    """
+    source = _source_ref(cfg, dataset)
+    idc = cfg.data.ts_id_col
+    sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
+    clause = f"\nWHERE {sfilter}" if sfilter else ""
+    snap = _snapshot_clause(snapshot_millis)
+    return f"SELECT COUNT(DISTINCT {idc}) AS n_series\nFROM `{source}`{snap}{clause};"
+
+
 def build_setup_statements(
     cfg: RunConfig,
     model_name: str,

@@ -275,6 +275,31 @@ def test_series_ids_query_lists_the_subset() -> None:
     assert "ORDER BY ts_id LIMIT 100" in sql
 
 
+def test_series_count_query_counts_exactly_what_the_ids_query_lists() -> None:
+    """The repair path's denominator. Two queries that disagree would invent or hide missing work.
+
+    Pinned as a shared-fragment property rather than a string comparison: both render the same
+    ``series_limit`` subquery and the same snapshot pin, so the only difference is the projection.
+    """
+    cfg = _cfg(["arima_plus"], series_limit=100)
+    from scale_forecasting.engines.bigquery_sql import build_series_count_query
+
+    count = build_series_count_query(cfg, _DS, snapshot_millis=_SNAP_MS)
+    ids = build_series_ids_query(cfg, _DS, snapshot_millis=_SNAP_MS)
+    assert "SELECT COUNT(DISTINCT ts_id) AS n_series" in count
+    assert "ORDER BY ts_id LIMIT 100" in count
+    # Same source, same pin, same subset filter — and the count never orders or lists.
+    assert count.count(f"`{_SRC}{_SNAP}") == ids.count(f"`{_SRC}{_SNAP}") == 2
+    assert "ORDER BY ts_id;" not in count
+
+
+def test_series_count_query_drops_the_subset_when_there_is_no_limit() -> None:
+    from scale_forecasting.engines.bigquery_sql import build_series_count_query
+
+    sql = build_series_count_query(_cfg(["arima_plus"], series_limit=None), _DS)
+    assert "LIMIT" not in sql and "FOR SYSTEM_TIME AS OF" not in sql
+
+
 # --- series_limit subset -------------------------------------------------------
 
 

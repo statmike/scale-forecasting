@@ -440,6 +440,52 @@ def test_settle_passes_the_confirmation_and_the_audit_reason_through(
     assert seen["yes"] is True and seen["reason"] == "driver died mid-write"
 
 
+# --- retry: the repair, previewed by default -----------------------------------
+
+
+def test_retry_previews_by_default_and_threads_the_config_and_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``retry()`` with no arguments reaches `retry_run` with ``confirm=False``.
+
+    Retry is the one verb that *launches compute*, so a ``confirm`` that defaulted true would bill
+    a fleet on a call an operator made to look. It is also the one verb that takes the whole config
+    rather than a ``run_id``: it plans a run, and the plan comes from the config.
+    """
+    import scale_forecasting.retry_run as retry_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(retry_mod, "retry_run", lambda cfg, **kw: seen.update(cfg=cfg, **kw) or "r")
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+
+    assert f.retry() == "r"
+    assert seen["cfg"] is f._config
+    assert seen["confirm"] is False and seen["reason"] == ""
+    assert seen["settings"] is _SETTINGS
+
+
+def test_retry_passes_the_confirmation_and_the_audit_reason_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting.retry_run as retry_mod
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(retry_mod, "retry_run", lambda cfg, **kw: seen.update(cfg=cfg, **kw))
+    sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS).retry(
+        confirm=True, reason="capacity wall, region freed up"
+    )
+    assert seen["confirm"] is True and seen["reason"] == "capacity wall, region freed up"
+
+
+def test_retry_takes_no_run_id_because_a_repair_is_planned_from_the_config() -> None:
+    """A guard against someone "helpfully" adding one: a different run has a different config."""
+    import inspect
+
+    params = inspect.signature(sf.Forecaster.retry).parameters
+    assert "run_id" not in params
+    assert set(params) == {"self", "confirm", "reason"}
+
+
 # --- trace: the per-job + per-cell execution timeline --------------------------
 
 

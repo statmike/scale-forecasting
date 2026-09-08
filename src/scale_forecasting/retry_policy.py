@@ -142,6 +142,16 @@ class CellState:
     in the config, and reading a config here would put a heavyweight import in the CLI, SDK and
     Airflow paths for one lookup. It is what joins a cell to its `FamilyState`; ``None`` means the
     family reading is simply unavailable and the per-cell rules stand alone.
+
+    **``n_cells`` is how one value stands for many.** A hundred-thousand-cell run cannot be read
+    back a row at a time to be classified, and it does not need to be: every field above is an
+    input to `classify_cell`, so two cells that agree on all of them get the same verdict by
+    construction. The registry read therefore groups by exactly this tuple and returns one
+    ``CellState`` per distinct combination with ``n_cells`` set to the size of its group — lossless
+    with respect to the classifier, and a report of a few dozen rows instead of a million. ``ts_id``
+    on a grouped value is one arbitrary member of the group, kept because an operator reading
+    "3,140 cells skipped as SHORT_HISTORY" wants an example to go look at. A caller that really
+    does hold single cells just leaves ``n_cells`` at 1 and ``ts_id`` means what it says.
     """
 
     ts_id: str
@@ -151,6 +161,7 @@ class CellState:
     cell_status: str | None = None
     error_class: str | None = None
     family: str | None = None
+    n_cells: int = 1
 
 
 @dataclass(frozen=True)
@@ -222,8 +233,18 @@ class Worklist:
 
     @property
     def counts(self) -> dict[str, int]:
-        """Verdict → cell count, over every verdict that occurred. The report's headline."""
-        return {v: len(cells) for v, cells in self.by_verdict.items() if cells}
+        """Verdict → **cell** count, over every verdict that occurred. The report's headline.
+
+        Cells, not rows: each value is weighted by `CellState.n_cells`, so a grouped read and a
+        cell-at-a-time read of the same run produce the same headline. On ungrouped states every
+        weight is 1 and this is just the row count.
+        """
+        return {v: sum(c.n_cells for c in cells) for v, cells in self.by_verdict.items() if cells}
+
+    @property
+    def n_targets(self) -> int:
+        """How many cells a retry would resubmit — `targets` weighted the same way as `counts`."""
+        return sum(c.n_cells for c in self.targets)
 
 
 @dataclass(frozen=True)

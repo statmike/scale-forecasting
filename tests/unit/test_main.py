@@ -899,3 +899,114 @@ def test_settle_report_prints_the_header_hint_when_there_is_one(capsys: Any) -> 
     hint = "header left at RUNNING; every job row is terminal now — close_runs can close it"
     main._print_settle_report(_settle_report(executed=True, settled_flags=[True], hint=hint))
     assert hint in capsys.readouterr().out
+
+
+# --- --retry: the verb, and its report -----------------------------------------
+
+
+def _retry_report(*, executed: bool, blocked: tuple[str, ...] = (), errors: bool = False) -> Any:
+    from scale_forecasting.job_launch import RetryOutcome
+    from scale_forecasting.retry_policy import CellState
+    from scale_forecasting.retry_run import RetryReport, assemble_retry_plan
+
+    plan = assemble_retry_plan(
+        "rid-1",
+        header_status="FAILED",
+        states=(
+            CellState("s1", "theta", has_metadata=True, error_class="TRANSIENT_INFRA", n_cells=40),
+        ),
+        families={},
+        landed_counts={m: 99_000 for m in blocked},
+        expected_series=1000,
+        universe_source="source table at the run's pinned snapshot (17)",
+    )
+    outcome = RetryOutcome(
+        families=("statistical",),
+        errors={"native": RuntimeError("boom")} if errors else {},
+    )
+    return RetryReport(
+        run_id="rid-1",
+        plan=plan,
+        executed=executed,
+        outcome=outcome if executed else None,
+        actor="tester" if executed else None,
+        reason="driver died" if executed else "",
+    )
+
+
+def test_cli_dispatches_retry_and_force_is_its_confirmation_gate(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--retry`` previews by default; ``--force`` is what turns it into a submission.
+
+    ``--force`` now means four things on this CLI (cancel, settle, retry, and `run`'s
+    COMPLETED short-circuit). This pins the one that would be dangerous to confuse: a ``--retry``
+    that reached `retry_run` with ``confirm=True`` by default would launch compute on a preview,
+    and a ``--retry`` that fell through to `run` would re-run the *whole* config instead of the
+    repaired subset.
+    """
+    import json
+
+    import scale_forecasting.retry_run as retry_mod
+    from scale_forecasting.config import load_config_uri
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        retry_mod, "retry_run", lambda cfg, **kw: seen.update(cfg=cfg, **kw) or "REPORT"
+    )
+    monkeypatch.setattr(main, "run", lambda *a, **k: pytest.fail("--retry fell through to run()"))
+    printed: dict[str, Any] = {}
+    monkeypatch.setattr(main, "_print_retry_report", lambda r: printed.__setitem__("report", r))
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli retry test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    main._main(["--config", str(path), "--retry"])
+    assert seen["confirm"] is False and seen["reason"] == ""
+    assert make_run_id(seen["cfg"]) == make_run_id(load_config_uri(str(path)))
+    assert printed["report"] == "REPORT"
+
+    seen.clear()
+    main._main(["--config", str(path), "--retry", "--force", "--reason", "driver died"])
+    assert seen["confirm"] is True and seen["reason"] == "driver died"
+
+
+def test_retry_is_mutually_exclusive_with_the_other_verbs() -> None:
+    with pytest.raises(SystemExit):
+        main._main(["--config", "a.json", "--retry", "--settle"])
+
+
+def test_retry_report_preview_prints_the_decision_table_and_submits_nothing(capsys: Any) -> None:
+    main._print_retry_report(_retry_report(executed=False))
+    out = capsys.readouterr().out
+    assert "Retry run rid-1 (header=FAILED): 40 cell(s) on the worklist" in out
+    # The denominator's provenance is part of the report, not a footnote someone can drop.
+    assert "pinned snapshot (17)" in out
+    assert "would submit: theta" in out
+    assert "Confirm with --force" in out and "confirm=True (SDK)" in out
+
+
+def test_retry_report_names_the_models_it_refuses_and_offers_no_confirmation(capsys: Any) -> None:
+    """Nothing to submit → no "confirm with --force" line, because there is nothing to confirm."""
+    main._print_retry_report(_retry_report(executed=False, blocked=("theta",)))
+    out = capsys.readouterr().out
+    assert "NOT submittable: theta" in out
+    assert "would submit: (nothing)" in out
+    assert "Confirm with --force" not in out
+
+
+def test_retry_report_after_execution_names_the_families_and_any_launch_failure(
+    capsys: Any,
+) -> None:
+    main._print_retry_report(_retry_report(executed=True, errors=True))
+    out = capsys.readouterr().out
+    assert "Submitted repair of run rid-1: families=statistical" in out
+    assert "actor=tester" in out and "reason=driver died" in out
+    assert "native" in out and "FAILED to launch: boom" in out

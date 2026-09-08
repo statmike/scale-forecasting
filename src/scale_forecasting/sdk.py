@@ -505,6 +505,34 @@ class Forecaster:
             settings=self._settings,
         )
 
+    def retry(self, *, confirm: bool = False, reason: str = "") -> Any:
+        """Repair what this run failed to produce — a **preview by default**.
+
+        Delegates to `retry_run.retry_run`. It reads the run's per-cell outcomes, derives the cells
+        that were never attempted at all (expected series at the run's pinned snapshot, minus what
+        landed), classifies every one of them with `retry_policy`, and returns the decision table
+        inside a `retry_run.RetryReport`. Without ``confirm`` that is all it does — no launch, no
+        write. With ``confirm=True`` it re-submits **only the models that could still succeed** as a
+        fresh attempt under the same ``run_id``, and records the table it acted on under
+        ``job_telemetry.$.retry``.
+
+        Two things it will refuse, both on purpose. A cell that already has predictions is never
+        retried — a retry appends, so it can add a second forecast beside the first but never
+        replace it, and quietly swapping a reviewed forecast for a fresh fit is a different run, not
+        a repair. And because v1 submits per *model* over the whole series universe, a model with
+        *any* landed predictions is refused wholesale; the report names those under ``blocked``
+        rather than dropping them silently. Changing an answer that already landed means changing
+        the config, which changes the ``run_id`` — the honest way to say the answer changed.
+
+        There is no ``run_id`` parameter, unlike `probe` / `cancel` / `settle`. Those inspect a run;
+        this one *plans* one, and the plan comes from the config — the DAG to narrow, the family
+        each model belongs to, the source table and the series subset. A different run has a
+        different config by definition, so build a `Forecaster` on that config instead.
+        """
+        from .retry_run import retry_run
+
+        return retry_run(self._config, confirm=confirm, reason=reason, settings=self._settings)
+
     def trace(self, run_id: str | None = None, *, cell_limit: int = 5000) -> pd.DataFrame:
         """The run's execution timeline as a long-form frame — per-job spans + per-cell spans.
 

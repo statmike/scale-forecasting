@@ -128,6 +128,62 @@ def read_prediction_counts(
     return {str(r["model_type"]): int(r["n"]) for r in rows}
 
 
+def read_cell_groups(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
+    """The per-cell outcome of ``run_id``, grouped to the shape the repair classifier reads.
+
+    `retry_policy.classify_cell` looks at exactly four per-cell facts — did the cell write metadata,
+    did it write predictions, what is its ``cell_status``, what is its ``error_class`` — so cells
+    that agree on all four are guaranteed the same verdict. This groups by that tuple and returns
+    one row per distinct combination with an ``n_cells`` weight and an ``example_ts_id``: a
+    hundred-thousand-cell run comes back as a few dozen rows with nothing the classifier can use
+    thrown away.
+
+    Ensemble rows are excluded on both sides — an ensemble is calculated from cells rather than
+    being one, and it is not resubmittable at this grain. Metadata is deduped latest-write-wins per
+    cell, the same rule the serving views apply, so a re-run's second attempt is what gets
+    classified. Note the shape only covers cells that wrote *something*: a cell whose job died
+    before reaching it has no row here at all and must be derived as expected-minus-observed
+    against the run's snapshot-pinned source. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    meta_ref = resolved.registry_table_ref("forecast_metadata")
+    pred_ref = resolved.registry_table_ref("forecast_predictions")
+    sql = (
+        "WITH meta AS ("
+        "SELECT ts_id, model_type, cell_status, error_class "
+        f"FROM `{meta_ref}` "
+        "WHERE run_id=@run_id AND fold_id IS NULL AND ensemble_id IS NULL "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
+        "ORDER BY created_at DESC) = 1"
+        "), preds AS ("
+        "SELECT DISTINCT ts_id, model_type "
+        f"FROM `{pred_ref}` "
+        "WHERE run_id=@run_id AND ensemble_id IS NULL"
+        ") "
+        "SELECT m.model_type AS model_type, m.cell_status AS cell_status, "
+        "m.error_class AS error_class, p.ts_id IS NOT NULL AS has_predictions, "
+        "COUNT(*) AS n_cells, MIN(m.ts_id) AS example_ts_id "
+        "FROM meta m LEFT JOIN preds p ON p.ts_id=m.ts_id AND p.model_type=m.model_type "
+        "GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"
+    )
+    params = [_header_param("run_id", run_id)]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_cell_groups failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
 def read_cell_timing(
     run_id: str, *, limit: int = 5000, settings: Settings | None = None
 ) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test

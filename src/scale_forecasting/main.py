@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from .probes.cancel import CancelReport
     from .probes.reconcile import ProbeReport
     from .probes.settle import SettleReport
+    from .retry_run import RetryReport
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -448,6 +449,34 @@ def _print_settle_report(report: SettleReport) -> None:
         print(f"  {report.header_hint}")
 
 
+def _print_retry_report(report: RetryReport) -> None:
+    """Print a `RetryReport` — the decision table (always), then what was launched (if executed).
+
+    The plan block is `retry_run.format_retry_plan` verbatim, for the same reason settle prints
+    `format_settle_plan` verbatim: the preview an operator read before confirming and the record of
+    what they confirmed must not be two renderings that can disagree.
+
+    A confirmed call that had nothing submittable is reported as ``executed=False`` and prints the
+    plan and no launch line — that is not a failure, it is the correct answer for a run whose every
+    remaining gap is a `SKIP_*`, and dressing it up as a launch would be the misleading version.
+    """
+    from .retry_run import format_retry_plan
+
+    print(format_retry_plan(report.plan))
+    if not report.executed:
+        if report.plan.submittable:
+            print("Confirm with --force (CLI) / confirm=True (SDK) to submit this repair.")
+        return
+    outcome = report.outcome
+    launched = ", ".join(outcome.families) if outcome and outcome.families else "-"
+    print(
+        f"Submitted repair of run {report.run_id}: families={launched}  "
+        f"actor={report.actor}  reason={report.reason or '-'}"
+    )
+    for family, exc in sorted((outcome.errors if outcome else {}).items()):
+        print(f"  {family:<16} FAILED to launch: {exc}")
+
+
 def _main(argv: list[str] | None = None) -> None:
     """CLI: ``main (--config …|--config-uri …) [--dry-run|--stage-only|--probe|--settle|…]``."""
     import argparse
@@ -515,6 +544,13 @@ def _main(argv: list[str] | None = None) -> None:
         help="repair this run's stale job rows from the probe's own verdicts (a probe that "
         "writes); without --force this only PREVIEWS what would be written",
     )
+    verbs.add_argument(
+        "--retry",
+        action="store_true",
+        help="classify what this run failed to produce and re-submit only the models that could "
+        "still succeed; without --force this only PREVIEWS the decision table and launches "
+        "nothing",
+    )
     p.add_argument(
         "--job",
         help="with --probe/--cancel/--settle: narrow to one family "
@@ -522,7 +558,7 @@ def _main(argv: list[str] | None = None) -> None:
     )
     p.add_argument(
         "--reason",
-        help="with --cancel/--settle --force: free-text reason recorded in the audit trail",
+        help="with --cancel/--settle/--retry --force: free-text reason recorded in the audit trail",
     )
     p.add_argument(
         "--feasibility",
@@ -588,6 +624,17 @@ def _main(argv: list[str] | None = None) -> None:
             make_run_id(cfg), job=ns.job, yes=ns.force, reason=ns.reason or ""
         )
         _print_settle_report(settle_report)
+        return
+    if ns.retry:
+        from .retry_run import retry_run
+
+        # `--force` is the retry confirmation gate as well, which makes the flag quadruple-purposed
+        # (cancel, settle, retry, and `run`'s COMPLETED short-circuit). Deliberate: the CLI spells
+        # every confirmation the same way so an operator never has to remember which verb wants
+        # which word. It is emphatically *not* `run`'s force — that one re-runs a finished run
+        # wholesale, which is the opposite of a targeted repair — so this path never reaches `run`.
+        retry_report = retry_run(cfg, confirm=ns.force, reason=ns.reason or "")
+        _print_retry_report(retry_report)
         return
     # `--feasibility` implies the plan verb, the way `--emit-out` implies `--emit-airflow`. It is a
     # planning question, and a flag whose name promises a report must never be the thing that
