@@ -13,6 +13,9 @@ The rendered topology mirrors a live run exactly:
   (Spark serverless / Spark cluster / Ray / BigQuery-native — chosen per family, not per run); the
   **ensemble** runs ``barrier`` (downstream of every family) or ``microbatch`` (in parallel, gated
   only on ``begin_run``); ``finalize_run`` is the terminal join.
+* Optionally (``with_retry=True``) a ``retry`` node sits between the family join and the ensemble,
+  repairing what the families failed to produce so the ensemble blends the repaired cells too. It
+  is **barrier-only** — see `emit_airflow_dag` for why a microbatch run gets no retry node.
 * When a run has **several ephemeral Ray (or Dataproc-cluster) families**, a
   ``create_*_cluster`` → families → ``delete_*_cluster`` bracket is emitted (from the same
   `shared_clusters` predicates the orchestrator uses), so those
@@ -48,9 +51,13 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from .errors import get_logger
+
 if TYPE_CHECKING:
     from .config import RunConfig
     from .dag import RunDag
+
+_log = get_logger(__name__)
 
 
 def _str(value: str) -> str:
@@ -162,7 +169,9 @@ def _shared_families(cfg: RunConfig, run_dag: RunDag) -> tuple[list[str], list[s
     return ray_families, spark_families
 
 
-def emit_airflow_dag(cfg: RunConfig, config_uri: str, *, dag_id: str | None = None) -> str:
+def emit_airflow_dag(
+    cfg: RunConfig, config_uri: str, *, dag_id: str | None = None, with_retry: bool = False
+) -> str:
     """Render a run's execution DAG as an Airflow ``dag_<run_id>.py`` source string (pure, offline).
 
     Resolves the config into its DAG (`dag.plan_dag`) and emits a standalone file: ``begin_run``,
@@ -173,6 +182,20 @@ def emit_airflow_dag(cfg: RunConfig, config_uri: str, *, dag_id: str | None = No
     load the config from; it is embedded verbatim as the file's ``CONFIG_URI``. ``dag_id`` defaults
     to ``scale_forecasting_<run_id>``. Touches no GCP — the output is deterministic and
     parse/compile-checkable offline.
+
+    ``with_retry`` adds the **retry node** (`airflow_tasks.retry_families`) between the family join
+    and the ensemble, under ``trigger_rule="all_done"`` so it runs whether the families succeeded or
+    not. It is an argument here rather than a field on `config.RunConfig` for one reason: the config
+    is the run's identity — every field in it feeds the ``run_id`` digest — and whether an operator
+    wants an unattended repair inside the DAG is a property of *the deployment*, not of the run. A
+    config field would make "same question, repaired automatically" a different run_id from "same
+    question, repaired by hand", which is the opposite of what the digest means.
+
+    **A microbatch run gets no retry node, even with ``with_retry=True``.** The microbatch ensemble
+    is gated on ``begin_run`` alone and drains as soon as every base family goes terminal, so it has
+    already blended and finished by the time a post-join repair lands its cells — the repaired cells
+    would sit in the output with nothing consuming them, and the same config would mean two
+    different things in barrier and microbatch mode. The suppression is logged rather than silent.
     """
     from .dag import plan_dag
 
@@ -187,6 +210,15 @@ def emit_airflow_dag(cfg: RunConfig, config_uri: str, *, dag_id: str | None = No
 
     ensemble_enabled = run_dag.ensemble_enabled
     microbatch = cfg.compute.ensemble.mode == "microbatch"
+
+    retry_emitted = with_retry and not (ensemble_enabled and microbatch)
+    if with_retry and not retry_emitted:
+        _log.info(
+            "run %s ensembles in microbatch mode: no retry node emitted. The microbatch ensemble "
+            "drains as soon as the base families go terminal, so a repair placed after them would "
+            "land cells the ensemble has already stopped reading.",
+            run_id,
+        )
 
     out: list[str] = [
         _PREAMBLE.format(
@@ -231,6 +263,10 @@ def emit_airflow_dag(cfg: RunConfig, config_uri: str, *, dag_id: str | None = No
             )
         )
 
+    if retry_emitted:
+        out.append("\n    # --- repair what the families missed, before anything reads them -----")
+        out.append(_op("retry", "retry", "retry_families", trigger_rule="all_done"))
+
     if ensemble_enabled:
         mode = "microbatch (parallel)" if microbatch else "barrier (post-join)"
         out.append(f"\n    # --- ensemble node: {mode} ---")
@@ -257,7 +293,19 @@ def emit_airflow_dag(cfg: RunConfig, config_uri: str, *, dag_id: str | None = No
         ["delete_spark_cluster"] if spark_families else []
     )
 
-    if ensemble_enabled and not microbatch:
+    # The retry node joins the *teardown* tasks as well as the families, rather than running beside
+    # them. `job_launch.submit_retry` provisions its own shared cluster from the narrowed DAG, and
+    # `shared_clusters` derives the cluster name from the run_id — so a repair running in parallel
+    # with delete_*_cluster would be creating the very cluster that task is deleting. Ordering it
+    # after teardown costs the repair a fresh cluster create and buys an unambiguous name.
+    retry_upstream = [*families, *delete_tasks]
+
+    if ensemble_enabled and not microbatch and retry_emitted:
+        # Barrier + repair: families join into the retry node, which repairs what they missed
+        # before the ensemble blends anything, then finalize.
+        out.append(f"    {_list(retry_upstream)} >> retry >> ensemble")
+        leaves = ["ensemble"]
+    elif ensemble_enabled and not microbatch:
         # Barrier: the ensemble runs after every family, then finalize.
         out.append(f"    {_list(families)} >> ensemble")
         leaves = ["ensemble", *delete_tasks]
@@ -265,6 +313,10 @@ def emit_airflow_dag(cfg: RunConfig, config_uri: str, *, dag_id: str | None = No
         # Microbatch: the ensemble runs in parallel with the families, gated only on begin_run.
         out.append("    begin_run >> ensemble")
         leaves = ["ensemble", *direct, *delete_tasks]
+    elif retry_emitted:
+        # No ensemble, but a repair still has a consumer: the run's own predictions table.
+        out.append(f"    {_list(retry_upstream)} >> retry")
+        leaves = ["retry"]
     else:
         leaves = [*direct, *delete_tasks]
 

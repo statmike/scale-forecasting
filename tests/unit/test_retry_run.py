@@ -16,7 +16,12 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import retry_run
+# `airflow_tasks` is imported here rather than inside the one test that uses it because that test
+# reads its log output through `caplog`. `errors.get_logger` turns propagation off, and pytest's
+# logging plugin can only attach its capture handler directly to a non-propagating logger that
+# already exists when collection ends — a module first imported inside a test body logs into the
+# void. Both this import and the module-level logger in `airflow_tasks` are needed for that.
+from scale_forecasting import airflow_tasks, retry_run
 from scale_forecasting.retry_policy import (
     RETRY_AS_IS,
     SKIP_ALREADY_DONE,
@@ -352,3 +357,79 @@ def test_a_confirmed_call_with_nothing_submittable_still_launches_nothing(
     )
     report = retry_run.retry_run(object(), confirm=True)  # type: ignore[arg-type]
     assert report.executed is False and report.plan.models == ()
+
+
+# --- one decision, two call sites ----------------------------------------------
+
+
+def test_the_dag_node_and_the_cli_verb_repair_from_the_same_worklist(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``--retry --force`` and the Airflow retry node are one implementation, not two.
+
+    A repair can be launched by an operator at a terminal or, unattended, by the DAG node
+    (`airflow_tasks.retry_families`). If those two ever classified differently, the decision table
+    an operator reviewed would stop being evidence for what Composer does at 3am — and the whole
+    point of the preview is that it *is* that evidence. So both are driven here off one set of
+    fixtures, through the real `retry_run.retry_run`, and asked to submit the same thing.
+    """
+    import json
+
+    import scale_forecasting.identity as identity
+    import scale_forecasting.job_launch as job_launch
+    import scale_forecasting.registry.jobs as jobs
+    from scale_forecasting import main
+    from scale_forecasting.dag import RunDag
+    from scale_forecasting.job_launch import RetryOutcome
+    from scale_forecasting.settings import Settings
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "two call sites",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": ["theta", "xgboost"],
+            }
+        )
+    )
+
+    # theta's cells already landed, so nothing asks for them; xgboost's OOM cells are the repair.
+    plan = _plan(
+        states=(
+            CellState("s1", "theta", has_metadata=True, has_predictions=True, n_cells=1000),
+            CellState("s2", "xgboost", has_metadata=True, error_class="OOM", n_cells=40),
+        ),
+        landed_counts={"theta": 1000, "xgboost": 0},
+    )
+    assert plan.models == ("xgboost",)
+
+    submitted: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+
+    def _record(cfg: Any, retry_dag: RunDag, run_id: str, *a: Any, **k: Any) -> RetryOutcome:
+        models = tuple(m for job in retry_dag.jobs for m in job.models)
+        submitted.append((run_id, tuple(retry_dag.families), models))
+        return RetryOutcome(families=tuple(retry_dag.families))
+
+    monkeypatch.setattr(retry_run, "build_retry_plan", lambda cfg, settings=None: plan)
+    monkeypatch.setattr(job_launch, "submit_retry", _record)
+    monkeypatch.setattr(jobs, "read_run_jobs", lambda *a, **k: [])
+    monkeypatch.setattr(identity, "resolve_principal", lambda settings: "tester")
+    monkeypatch.setattr(Settings, "resolve", classmethod(lambda cls: object()))
+
+    main._main(["--config", str(path), "--retry", "--force"])
+    cli_output = capsys.readouterr().out
+    with caplog.at_level("INFO"):
+        dag_summary = airflow_tasks.retry_families(str(path))
+
+    # The same run, the same repair family, the same models — from the same plan.
+    assert len(submitted) == 2
+    assert submitted[0] == submitted[1] == (plan.run_id, ("ml_repair",), ("xgboost",))
+    # And both surface the table they acted on, so the audit trail reads the same either way.
+    table = retry_run.format_retry_plan(plan)
+    assert table in cli_output
+    assert table in caplog.text
+    assert "ml_repair" in dag_summary

@@ -118,6 +118,14 @@ def dag_nodes(run_dag: RunDag) -> tuple[DagNode, ...]:
     which jobs will run and under what ids" surface: the same ``job_key``\\ s the executor stamps
     onto each platform job and its ``run_jobs`` row, so a run's cross-system trace can be derived
     from the config alone, before anything runs.
+
+    **A retry node is never one of these, and cannot be.** An emitted Airflow DAG may carry one
+    (`airflow_emit.emit_airflow_dag` with ``with_retry``), but a repair's identity is not knowable
+    from the config: which families it touches depends on what failed, and its attempt number is
+    whatever `registry.jobs.next_job_attempt` hands out at the time — while every key here is
+    attempt 1 by construction, because this function is pure and a planned identity has no history
+    to count. The repair resolves its own ``job_key`` inside `airflow_tasks.retry_families`, at the
+    moment it has the run in front of it.
     """
     from .registry.ids import make_job_key
 

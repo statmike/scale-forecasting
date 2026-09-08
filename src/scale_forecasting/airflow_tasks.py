@@ -15,6 +15,8 @@ The node set mirrors `dag.plan_dag`:
   `job_launch.launch_native_job`, which wrap the launch in `registry.lifecycle.run_job`) — so the
   per-job trace and wall-clock are byte-identical to a live `main.run`, and a concurrent
   (microbatch) ensemble can watch the rows flip in real time.
+* ``retry_families`` — the optional repair node (barrier DAGs only), which classifies what the
+  families failed to produce and re-submits the part of it that can still succeed.
 * ``run_ensemble`` — the ensemble node, ``barrier`` (post-join) or ``microbatch`` (concurrent, its
   cross-process stop-signal polling ``run_jobs`` for base-family completion).
 * ``create_ray_cluster`` / ``delete_ray_cluster`` (and the Dataproc-cluster pair) — the shared
@@ -26,12 +28,18 @@ The node set mirrors `dag.plan_dag`:
   combined run status (the DAG's terminal join, ``trigger_rule="all_done"``).
 
 Imports stay lazy inside each function so importing this module (which the DAG file does at parse
-time, on every scheduler heartbeat) never pulls the GCP/engine extras.
+time, on every scheduler heartbeat) never pulls the GCP/engine extras. The one module-level import
+is the logger factory: `errors` is stdlib-only, and a logger created at import time is the one a log
+handler configured against this package can actually find.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from .errors import get_logger
+
+_log = get_logger(__name__)
 
 # A family/ensemble ``run_jobs`` row is "done" once it reaches one of these; a row still RUNNING (or
 # absent) when finalize reads it means the task died before finalizing, which the run counts as
@@ -82,6 +90,14 @@ def combined_run_status(job_statuses: dict[str, str | None], *, ensemble_enabled
     A missing or still-RUNNING family row counts as failed (its task died before finalizing). An
     ensemble that did not complete downgrades an otherwise-``COMPLETED`` run to ``FAILED`` (the
     requested output is incomplete); it never masks a family ``PARTIAL``/``FAILED``.
+
+    A repair's row (``statistical_repair``, from `registry.ids.REPAIR_JOB_FAMILIES`) counts as an
+    ordinary job here rather than folding onto the family it repairs, which is the same reading
+    `registry.ops.roll_up_job_statuses` gives. A repair only exists because cells were missing, so a
+    repair that failed leaves the run genuinely incomplete and the header should say ``PARTIAL``;
+    folding it in the other direction — letting a forty-cell repair report its
+    hundred-thousand-cell family ``COMPLETED`` — is exactly the lie the separate row exists to
+    prevent.
     """
     base = {family: status for family, status in job_statuses.items() if family != "ensemble"}
     n_jobs = len(base)
@@ -185,6 +201,54 @@ def run_native(config_uri: str) -> None:
     if job is None:
         raise ConfigError(f"run_native: run {run_id} has no BigQuery-native family")
     job_launch.launch_native_job(cfg, job, run_id, settings)
+
+
+def retry_families(config_uri: str) -> str:
+    """Repair what the base families failed to produce — the barrier DAG's optional retry node.
+
+    The unattended form of the ``--retry --force`` verb, and *the same call*: it hands the config to
+    `retry_run.retry_run` with ``confirm=True``, so the plan a DAG acts on is built by the one
+    classifier an operator's preview would have shown them. There is no DAG-side reimplementation of
+    the decision — a repair that ran on Composer and a repair an operator confirmed at a terminal
+    read the same registry, classify with the same `retry_policy`, and submit the same models.
+
+    The decision table (`retry_run.format_retry_plan`) goes to the task log verbatim, and a one-line
+    summary is returned so Airflow's XCom carries what happened; a run with nothing repairable
+    submits nothing and says so.
+
+    **It never raises, and that is deliberate.** The node sits between the family join and the
+    ensemble, so an exception here would skip an ensemble that would otherwise have run — a repair
+    that fails would then cost the run more than not attempting one. A repair is best-effort by
+    construction (`job_launch.RetryOutcome` already *returns* per-family failures rather than
+    raising them), and nothing is hidden by swallowing the rest: the repair's own ``run_jobs`` rows
+    carry its status and its ``job_telemetry.$.retry`` audit blob carries the table it acted on, so
+    the record of the attempt outlives the task that made it.
+    """
+    from .config import load_config_uri
+    from .retry_run import format_retry_plan, retry_run
+    from .settings import Settings
+
+    try:
+        cfg = load_config_uri(config_uri)
+        report = retry_run(
+            cfg,
+            confirm=True,
+            reason="airflow retry node",
+            settings=Settings.resolve(),
+        )
+    except Exception as exc:  # noqa: BLE001 - see the docstring: the ensemble must still run
+        _log.exception("retry node: repair could not be attempted")
+        return f"retry node: repair could not be attempted ({exc})"
+
+    _log.info("retry node for run %s:\n%s", report.run_id, format_retry_plan(report.plan))
+    if not report.executed or report.outcome is None:
+        return f"retry node: nothing to repair in run {report.run_id}"
+    repaired = ", ".join(report.outcome.families)
+    if report.outcome.errors:
+        failed = ", ".join(sorted(report.outcome.errors))
+        _log.error("retry node: repair of run %s failed for %s", report.run_id, failed)
+        return f"retry node: repaired {repaired}; still failing: {failed}"
+    return f"retry node: repaired {repaired}"
 
 
 def run_ensemble(config_uri: str) -> None:

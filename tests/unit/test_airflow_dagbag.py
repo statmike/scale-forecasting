@@ -51,14 +51,14 @@ def _cfg(**over: Any) -> RunConfig:
     return RunConfig(**base)
 
 
-def _load_dag(cfg: RunConfig, tmp_path: Path) -> Any:
+def _load_dag(cfg: RunConfig, tmp_path: Path, *, with_retry: bool = False) -> Any:
     """Emit ``cfg``'s DAG, load it through a real Airflow ``DagBag``, and return the parsed dag.
 
     Asserts the DagBag reported no import errors (the parse gate) and the run's dag_id resolved.
     """
     from airflow.models import DagBag
 
-    source = airflow_emit.emit_airflow_dag(cfg, _CONFIG_URI)
+    source = airflow_emit.emit_airflow_dag(cfg, _CONFIG_URI, with_retry=with_retry)
     (tmp_path / "dag_under_test.py").write_text(source)
     bag = DagBag(dag_folder=str(tmp_path), include_examples=False)
     assert bag.import_errors == {}, f"Airflow failed to parse the emitted DAG: {bag.import_errors}"
@@ -92,6 +92,37 @@ def test_microbatch_dag_parses_under_airflow(tmp_path: Path) -> None:
     # microbatch fires the ensemble off begin_run (concurrent with the families), not after join.
     assert "ensemble" in dag.task_ids
     assert "ensemble" in dag.get_task("begin_run").downstream_task_ids
+
+
+def test_retry_node_parses_and_wires_under_airflow(tmp_path: Path) -> None:
+    """The opt-in repair node loads under Airflow and sits where the emitter says it does.
+
+    ``trigger_rule="all_done"`` is the load-bearing kwarg here: the ast tests can only see the
+    string, while Airflow validates it against its own ``TriggerRule`` enum at parse time. A typo
+    would raise here and nowhere else.
+    """
+    from airflow.utils.trigger_rule import TriggerRule
+
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean", "median"]})
+    dag = _load_dag(cfg, tmp_path, with_retry=True)
+
+    retry = dag.get_task("retry")
+    assert retry.trigger_rule == TriggerRule.ALL_DONE
+    assert {"statistical", "ml", "deep_learning", "native"} <= retry.upstream_task_ids
+    # The repair feeds the ensemble, so the ensemble blends the cells it recovered — and the repair
+    # is never a leaf: something always reads what it wrote.
+    assert retry.downstream_task_ids == {"ensemble"}
+
+
+def test_microbatch_dag_asks_for_a_retry_node_and_gets_none(tmp_path: Path) -> None:
+    # Same suppression the emitter unit tests assert, confirmed on a DAG Airflow actually parsed:
+    # a microbatch ensemble drains as its families finish, so a post-join repair has no reader.
+    cfg = _cfg(
+        ensemble={"enabled": True, "strategies": ["mean", "median"]},
+        compute={"ensemble": {"mode": "microbatch"}},
+    )
+    dag = _load_dag(cfg, tmp_path, with_retry=True)
+    assert "retry" not in dag.task_ids
 
 
 def test_shared_ray_cluster_dag_parses_under_airflow(tmp_path: Path) -> None:

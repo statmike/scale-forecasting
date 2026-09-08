@@ -12,6 +12,8 @@ from __future__ import annotations
 import ast
 from typing import Any
 
+import pytest
+
 from scale_forecasting import airflow_emit
 from scale_forecasting.config import RunConfig
 from scale_forecasting.dag import plan_dag
@@ -55,6 +57,35 @@ def _task_ids(tree: ast.Module) -> list[str]:
             if kw.arg == "task_id" and isinstance(kw.value, ast.Constant):
                 ids.append(kw.value.value)
     return ids
+
+
+def _operator(tree: ast.Module, task_id: str) -> dict[str, Any]:
+    """The kwargs of the ``PythonOperator`` carrying this ``task_id``.
+
+    Literal kwargs come back as their values; the ones that reference emitted names (the
+    ``python_callable``, the ``op_kwargs`` dict holding ``CONFIG_URI``) come back as source text.
+    """
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "PythonOperator":
+            continue
+        kwargs: dict[str, Any] = {}
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            try:
+                kwargs[kw.arg] = ast.literal_eval(kw.value)
+            except ValueError:
+                kwargs[kw.arg] = ast.unparse(kw.value)
+        if kwargs.get("task_id") == task_id:
+            return kwargs
+    raise AssertionError(f"no PythonOperator with task_id {task_id!r} in emitted DAG")
+
+
+def _edges(source: str) -> list[str]:
+    """The emitted dependency lines (``a >> b``), stripped — the rendered topology, in order."""
+    return [line.strip() for line in source.splitlines() if ">>" in line]
 
 
 def _module_constant(tree: ast.Module, name: str) -> Any:
@@ -206,3 +237,108 @@ def test_microbatch_ensemble_runs_in_parallel() -> None:
     _compile(source)
     # microbatch fires the ensemble off begin_run (concurrent with the families), not after the join
     assert "begin_run >> ensemble" in source
+
+
+# --- the retry node (opt-in, barrier only) --------------------------------------------------------
+#
+# `with_retry` inserts a repair between the family join and the ensemble, so a run that lost cells
+# to a failed family still ensembles over the repaired ones. It is an emitter argument rather than a
+# config field because a config field would feed the run_id digest — "repair automatically" would
+# become a different run than "repair by hand", which is not what the digest means.
+
+
+def _barrier(**over: Any) -> RunConfig:
+    """A config that ensembles in barrier mode — the only mode the retry node is emitted for."""
+    return _cfg(
+        backtest={"enabled": True},
+        ensemble={"enabled": True, "strategies": ["mean"]},
+        **over,
+    )
+
+
+def test_no_retry_node_unless_it_is_asked_for() -> None:
+    source = _emit(_barrier())
+    assert "retry" not in _task_ids(_compile(source))
+
+
+def test_the_retry_node_sits_between_the_family_join_and_the_ensemble() -> None:
+    source = _emit(_barrier(), with_retry=True)
+    ids = _task_ids(_compile(source))
+    assert "retry" in ids
+    assert _edges(source) == [
+        "begin_run >> [statistical, ml, deep_learning, native]",
+        "[statistical, ml, deep_learning, native] >> retry >> ensemble",
+        "ensemble >> finalize_run",
+    ]
+
+
+def test_the_retry_node_runs_whether_the_families_succeeded_or_not() -> None:
+    """``all_done``: the case a repair exists for is precisely the one where a family failed."""
+    op = _operator(_compile(_emit(_barrier(), with_retry=True)), "retry")
+    assert op["trigger_rule"] == "all_done"
+    assert op["python_callable"] == "airflow_tasks.retry_families"
+    # The node repairs the whole run, so it takes the config and no family — unlike run_family, it
+    # cannot be told which families to touch, because only the registry knows what failed.
+    assert "CONFIG_URI" in op["op_kwargs"] and "family" not in op["op_kwargs"]
+
+
+def test_the_retry_node_waits_for_a_shared_cluster_teardown() -> None:
+    """A repair provisions its own cluster under the run-derived name, so it must not race the
+    delete."""
+    cfg = _barrier(
+        models=[_STAT, _DL],
+        compute={
+            "families": {"statistical": {"runtime": "ray"}, "deep_learning": {"runtime": "ray"}}
+        },
+    )
+    source = _emit(cfg, with_retry=True)
+    _compile(source)
+    assert _edges(source) == [
+        "begin_run >> create_ray_cluster >> [statistical, deep_learning] >> delete_ray_cluster",
+        "[statistical, deep_learning, delete_ray_cluster] >> retry >> ensemble",
+        "ensemble >> finalize_run",
+    ]
+
+
+def test_the_retry_node_is_never_a_leaf() -> None:
+    """Whatever the run's shape, something downstream consumes the repair — else it is dead work."""
+    shapes = [
+        _barrier(),
+        _barrier(
+            models=[_STAT, _DL],
+            compute={
+                "families": {"statistical": {"runtime": "ray"}, "deep_learning": {"runtime": "ray"}}
+            },
+        ),
+        _cfg(),  # no ensemble at all
+        _cfg(models=[_NATIVE]),  # BigQuery-native only
+    ]
+    for cfg in shapes:
+        source = _emit(cfg, with_retry=True)
+        _compile(source)
+        assert any(edge.startswith("retry >>") or ">> retry >>" in edge for edge in _edges(source))
+
+
+def test_a_run_without_an_ensemble_still_repairs_before_it_closes() -> None:
+    # Nothing blends the repaired cells, but the run's own predictions table is still a consumer.
+    source = _emit(_cfg(), with_retry=True)
+    _compile(source)
+    assert _edges(source) == [
+        "begin_run >> [statistical, ml, deep_learning, native]",
+        "[statistical, ml, deep_learning, native] >> retry",
+        "retry >> finalize_run",
+    ]
+
+
+def test_a_microbatch_run_gets_no_retry_node_and_says_why(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The microbatch ensemble drains as soon as the base families go terminal, so a post-join repair
+    # would land cells it has already stopped reading — barrier and microbatch would then disagree
+    # about what the same config produces. Suppressed, but never silently.
+    cfg = _barrier(compute={"ensemble": {"mode": "microbatch"}})
+    with caplog.at_level("INFO"):
+        source = _emit(cfg, with_retry=True)
+    _compile(source)
+    assert "retry" not in _task_ids(ast.parse(source))
+    assert "no retry node emitted" in caplog.text

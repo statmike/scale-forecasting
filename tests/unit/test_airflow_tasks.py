@@ -8,6 +8,8 @@ orchestrator tests and the ``@gcp`` smoke; here we only pin the logic that lives
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scale_forecasting import airflow_tasks
@@ -72,6 +74,128 @@ def test_ensemble_never_masks_a_family_failure() -> None:
     # from the base roll-up
     statuses = {"statistical": "COMPLETED", "ml": "FAILED", "ensemble": "COMPLETED"}
     assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=True) == "PARTIAL"
+
+
+def test_a_failed_repair_row_leaves_the_run_partial() -> None:
+    # A repair only exists because cells were missing, so its own row counts like any other job:
+    # `statistical` completed but its repair did not, and the run is genuinely incomplete.
+    statuses = {"statistical": "COMPLETED", "statistical_repair": "FAILED"}
+    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=False) == "PARTIAL"
+
+
+def test_a_repair_never_reports_the_family_it_repaired_as_completed() -> None:
+    # The other direction, and the reason the repair has a row of its own: a forty-cell repair that
+    # succeeded must not close a hundred-thousand-cell family that failed.
+    statuses = {"statistical": "FAILED", "statistical_repair": "COMPLETED"}
+    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=False) == "PARTIAL"
+
+
+# --- retry_families: the repair node's task callable ----------------------------------------------
+#
+# The node is the unattended form of ``--retry --force`` and delegates to the same
+# `retry_run.retry_run`, so these pin the seam rather than the decision: what it passes, what it
+# returns to XCom, and — most of the point — that it cannot take the ensemble down with it.
+
+
+def _plan(run_id: str = "run-abc") -> Any:
+    from scale_forecasting.retry_run import RetryPlan
+
+    return RetryPlan(run_id=run_id, header_status="PARTIAL", counts={"RETRY_AS_IS": 12})
+
+
+def _report(*, executed: bool, families: tuple[str, ...] = (), errors: Any = None) -> Any:
+    from scale_forecasting.job_launch import RetryOutcome
+    from scale_forecasting.retry_run import RetryReport
+
+    outcome = RetryOutcome(families=families, errors=errors or {}) if executed else None
+    return RetryReport(run_id="run-abc", plan=_plan(), executed=executed, outcome=outcome)
+
+
+def _patch_retry(monkeypatch: pytest.MonkeyPatch, result: Any) -> list[dict[str, Any]]:
+    """Stub out the repair call and the config/settings loads; return the recorded call list.
+
+    ``result`` is either the `retry_run.RetryReport` to hand back or an exception to raise.
+    """
+    from scale_forecasting import config as config_module
+    from scale_forecasting import retry_run as retry_run_module
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_retry_run(cfg: Any, **kw: Any) -> Any:
+        calls.append({"cfg": cfg, **kw})
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(config_module, "load_config_uri", lambda uri: f"cfg<{uri}>")
+    monkeypatch.setattr(Settings, "resolve", classmethod(lambda cls: _SETTINGS))
+    monkeypatch.setattr(retry_run_module, "retry_run", _fake_retry_run)
+    return calls
+
+
+def test_the_retry_node_confirms_the_repair_it_previews(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unattended by definition: there is no operator at a terminal to type "yes", so the node
+    # submits. Everything that makes that safe (a landed model is never re-asked) is in the plan.
+    calls = _patch_retry(monkeypatch, _report(executed=True, families=("statistical_repair",)))
+    summary = airflow_tasks.retry_families("gs://bkt/run.json")
+    assert calls == [
+        {
+            "cfg": "cfg<gs://bkt/run.json>",
+            "confirm": True,
+            "reason": "airflow retry node",
+            "settings": _SETTINGS,
+        }
+    ]
+    assert "statistical_repair" in summary
+
+
+def test_the_retry_node_logs_the_table_it_acted_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from scale_forecasting.retry_run import format_retry_plan
+
+    _patch_retry(monkeypatch, _report(executed=True, families=("ml_repair",)))
+    with caplog.at_level("INFO"):
+        airflow_tasks.retry_families("gs://bkt/run.json")
+    assert format_retry_plan(_plan()) in caplog.text
+
+
+def test_a_run_with_nothing_to_repair_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_retry(monkeypatch, _report(executed=False))
+    assert "nothing to repair" in airflow_tasks.retry_families("gs://bkt/run.json")
+
+
+def test_a_repair_that_failed_again_is_reported_not_hidden(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch_retry(
+        monkeypatch,
+        _report(
+            executed=True,
+            families=("statistical_repair", "ml_repair"),
+            errors={"ml_repair": RuntimeError("no capacity")},
+        ),
+    )
+    with caplog.at_level("ERROR"):
+        summary = airflow_tasks.retry_families("gs://bkt/run.json")
+    assert "still failing: ml_repair" in summary
+    assert "ml_repair" in caplog.text
+
+
+def test_a_broken_repair_never_takes_the_ensemble_down_with_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The node sits upstream of the ensemble, so raising here would *skip* a run's ensemble.
+
+    A repair is an attempt to improve a run's outcome; failing to make one must never leave the run
+    worse off than not trying. The failure still lands in the log, and any row the repair opened
+    still carries its own status.
+    """
+    _patch_retry(monkeypatch, RuntimeError("registry unreachable"))
+    with caplog.at_level("ERROR"):
+        summary = airflow_tasks.retry_families("gs://bkt/run.json")
+    assert "registry unreachable" in summary
+    assert "could not be attempted" in caplog.text
 
 
 # --- _xcom_cluster: the shared-cluster (name, region) pull ----------------------------------------
