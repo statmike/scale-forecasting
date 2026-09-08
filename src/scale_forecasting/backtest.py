@@ -22,7 +22,7 @@ alone — so ``coverage``, ``pinball``, ``interval_score`` and ``interval_width`
 the Python path rather than the NaNs they were for every run before this.
 
 Public surface: ``Fold``, ``OOF_COLUMNS``, ``achievable_folds``, ``holdout_fold_id``,
-``hpo_scoring_claim``, ``make_folds``, ``backtest_cell``.
+``hpo_scoring_claim``, ``make_folds``, ``training_window``, ``backtest_cell``.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from .features import build_features, invert_transform
@@ -197,6 +198,40 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
             )
         )
     return folds
+
+
+def training_window(ds: np.ndarray, y: np.ndarray, cutoff: object, cfg: RunConfig) -> np.ndarray:
+    """The slice of a series' own history one fold trained on, given that fold's cutoff (pure).
+
+    MASE and RMSSE divide by the mean step of the *training* data, so which history goes in is not
+    a detail — it is the number. `backtest_cell` hands each fold its own slice and always has. The
+    two paths that score from a separate history read did not: the BigQuery-native engine and the
+    ensemble scorer both passed the **whole** series, including the very window being scored. That
+    makes a native model's MASE and a Python model's MASE for the same series answers to different
+    questions, which is exactly the comparison the leaderboard exists to support. This is the one
+    rule all of them now apply.
+
+    ``ds`` must be datetime64 and sorted ascending, paired positionally with ``y`` — the callers
+    read history with ``ORDER BY ts_id, ds``, so it arrives that way. The window is every
+    observation at or before ``cutoff``, which is what `engines.bigquery_sql._fit_filter` trains on
+    and what ``fold.train_end`` slices to, narrowed to the last ``min_train`` observations under the
+    ``sliding`` scheme, whose window is fixed-width by definition.
+
+    Counting that sliding window in *observations* rather than in dates is deliberate: it is what
+    `make_folds` does, so the engines agree. On a series with gaps the native SQL's date-space bound
+    would take slightly fewer rows — a real difference, and a smaller one than scoring against a
+    denominator that has seen the future.
+
+    Returns the whole of ``y`` when the cutoff is missing. That is the behaviour every run had
+    before the cutoff was recorded, and it is the only honest answer for an OOF frame that never
+    wrote one down.
+    """
+    if cutoff is None or pd.isna(cutoff):
+        return y
+    window = y[np.asarray(ds) <= pd.Timestamp(cutoff).to_datetime64()]
+    if cfg.backtest.scheme == "sliding":
+        window = window[-cfg.backtest.min_train :]
+    return window
 
 
 def backtest_cell(

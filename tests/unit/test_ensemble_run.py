@@ -29,7 +29,7 @@ from scale_forecasting.ensemble_run import (
     run_ensemble_scoring,
     run_ensembles,
 )
-from scale_forecasting.ensembler import _fold_key, combine_oof
+from scale_forecasting.ensembler import _OOF_BLEND_COLS, _fold_key, combine_oof
 from scale_forecasting.registry.ids import make_ensemble_id
 from scale_forecasting.settings import Settings
 
@@ -262,7 +262,10 @@ def test_combine_oof_empty_input_is_empty() -> None:
     empty = pd.DataFrame(columns=_OOF_COLS)
     out = combine_oof(empty, cfg)
     assert out.empty
-    assert list(out.columns) == _OOF_COLS
+    # The empty frame has to carry the same columns as a populated one — the scorer reads
+    # `cutoff_date` off it, and a column that only exists in the non-empty case is a KeyError
+    # that appears exactly once, on the run where nothing blended.
+    assert list(out.columns) == list(_OOF_BLEND_COLS)
 
 
 def test_combine_oof_preserves_fold_ids_for_rollup() -> None:
@@ -279,6 +282,39 @@ def test_combine_oof_preserves_fold_ids_for_rollup() -> None:
     out = combine_oof(oof, cfg)
     assert set(out["fold_id"].unique()) == {0, 1}
     assert np.isnan(out["yhat"]).sum() == 0
+
+
+def test_combine_oof_carries_the_cutoff_for_the_scorers_denominator() -> None:
+    # The scorer cuts each series' history at the fold's cutoff to get the MASE/RMSSE denominator.
+    # If `combine_oof` dropped the column the scorer would fall back to the whole history — the
+    # exact defect standardizing the denominator closed, silently reintroduced for ensembles only.
+    cfg = _cfg(models=["theta", "arima_plus"], ensemble={"enabled": True, "strategies": ["mean"]})
+    oof = _oof_df(
+        [
+            ("s1", "theta", 0, "d1", 1.0, 10.0),
+            ("s1", "arima_plus", 0, "d1", 1.0, 20.0),
+            ("s1", "theta", 1, "d2", 1.0, 30.0),
+            ("s1", "arima_plus", 1, "d2", 1.0, 40.0),
+        ]
+    ).assign(cutoff_date=["c0", "c0", "c1", "c1"])
+    out = combine_oof(oof, cfg)
+    assert dict(zip(out["fold_id"], out["cutoff_date"], strict=True)) == {0: "c0", 1: "c1"}
+
+
+def test_combine_oof_carries_the_cutoff_on_the_ordinal_fallback_too() -> None:
+    # Here the cutoff is present but not fully populated, so `_fold_key` joins on the ordinal and
+    # the cutoff is an ordinary column rather than an index level. It still has to come out — read
+    # from the wrong side it would be all-NaN, and the scorer would quietly stop cutting.
+    cfg = _cfg(models=["theta", "arima_plus"], ensemble={"enabled": True, "strategies": ["mean"]})
+    oof = _oof_df(
+        [
+            ("s1", "theta", 0, "d1", 1.0, 10.0),
+            ("s1", "arima_plus", 0, "d1", 1.0, 20.0),
+        ]
+    ).assign(cutoff_date=["c0", None])
+    assert _fold_key(oof) == ["ts_id", "fold_id", "forecast_date"]
+    out = combine_oof(oof, cfg)
+    assert out["cutoff_date"].tolist() == ["c0"]
 
 
 # --- run_ensembles: disabled is a no-op that never touches GCP ------------------

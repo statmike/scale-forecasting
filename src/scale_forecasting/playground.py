@@ -190,6 +190,7 @@ def bakeoff(
     produce for the same series. ``models`` defaults to a fast, reliable subset; pass your own
     (see `available_models`) to compare any Python models. Returns a `BakeOff`.
     """
+    from .backtest import training_window
     from .ensemble_run import _apply_weights
     from .ensembler import combine_calculated, combine_oof, fit_learned
     from .metrics import METRIC_NAMES, compute_metrics
@@ -289,14 +290,25 @@ def bakeoff(
         )
 
     # --- score the ensembles on the OOF window (identical to ensemble_run) --------------------
-    y_train = series[cfg.data.target_col].to_numpy()
+    # The MASE/RMSSE denominator is the *fold's* training window, cut at its cutoff — the same rule
+    # `backtest_cell` applies to the base models above, so the two halves of this leaderboard are
+    # scaled by the same thing. Handing over the whole series would scale the ensembles by a history
+    # that includes the window they are being judged on.
+    hist = series.sort_values(cfg.data.date_col)
+    hist_ds = pd.to_datetime(hist[cfg.data.date_col]).to_numpy()
+    hist_y = hist[cfg.data.target_col].to_numpy()
     ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
     for model_type, g in ens_oof.groupby("model_type"):
         fold_panels = [
             compute_metrics(
                 fg["y_true"].to_numpy(),
                 fg["yhat"].to_numpy(),
-                y_train=y_train,
+                y_train=training_window(
+                    hist_ds,
+                    hist_y,
+                    fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None,
+                    cfg,
+                ),
                 seasonal_period=seasonal_period(cfg.data.freq),
             )
             for _fold, fg in g.sort_values("forecast_date").groupby("fold_id")

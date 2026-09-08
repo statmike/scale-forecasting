@@ -40,6 +40,16 @@ old value goes stale by definition.
 | `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
 | `ray_slot_memory` | `harvest-only` | `efecb4c` (2026-09-04) | `driver-rss-prepass` |
 | `dl_gpu_routing` | `resolved-per-family` | P1 (2026-09-05) | `flat-compute.use_gpu` |
+| `backtest_scoring` | `holdout-fold-reserved` | 3.2 (2026-09-08), after 2.3/2.4/2.6/3.1 | `unreserved-full-history` |
+
+**`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
+notice on their own — a different image, a different `run_id`, a different node count. This one
+moves what a metric column *means* while leaving the `run_id`, the row counts and the schema
+exactly as they were. A run scored before it moved and a run scored after it produce the same
+number of rows in the same tables under the same identity, and the numbers inside are not
+comparable: the newest fold is now reserved from every fit, and MASE and RMSSE are scaled by the
+fold's own training window rather than by the whole series. Declaring it on a row is the only
+mechanism that will ever say so.
 
 > ### Every row in this document is STALE, on purpose, as of 2026-09-05
 >

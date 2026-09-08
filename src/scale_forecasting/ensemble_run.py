@@ -327,6 +327,7 @@ def _ensemble_batch(
 
     from google.cloud import bigquery
 
+    from .backtest import training_window
     from .engines import bigquery_engine
     from .engines.bigquery_sql import build_history_query
     from .ensembler import combine_oof
@@ -421,22 +422,35 @@ def _ensemble_batch(
         return
 
     # y_train (for MASE/RMSSE scale) is per-series history; the base OOF has no in-sample rows, so
-    # read the full series history once, matching the natives' history read.
+    # read the full series history once, matching the natives' history read. The dates come with it
+    # because the scale denominator is the *fold's* training window, not the whole series — see
+    # `backtest.training_window`. `build_history_query` orders by ts_id, ds, so groups are sorted.
     history = _query(build_history_query(cfg, dataset)).to_dataframe()
-    hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
+    hist_by_id = {
+        tid: (pd.to_datetime(g["ds"]).to_numpy(), g["y"].to_numpy())
+        for tid, g in history.groupby("ts_id")
+    }
 
+    period = seasonal_period(cfg.data.freq)
     meta_rows: list[dict[str, Any]] = []
     for (model_type, ts_id), g in ens_oof.groupby(["model_type", "ts_id"]):
         # Score per fold, then roll up (NaN-ignoring mean) — identical to the base-model path
         # (worker._rollup_metrics), so ensemble and base metrics are computed the same way.
+        hist = hist_by_id.get(ts_id)
         fold_panels: list[dict[str, float]] = []
         for _fold, fg in g.sort_values("forecast_date").groupby("fold_id"):
+            # `combine_oof` joins base models on the cutoff, so it is constant within a fold; `min`
+            # only matters on the ordinal fallback, where taking the earliest cutoff is the choice
+            # that cannot let a later fold's data into an earlier fold's denominator.
+            cutoff = fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None
             fold_panels.append(
                 compute_metrics(
                     fg["y_true"].to_numpy(),
                     fg["yhat"].to_numpy(),
-                    y_train=hist_by_id.get(ts_id),
-                    seasonal_period=seasonal_period(cfg.data.freq),
+                    y_train=None
+                    if hist is None
+                    else training_window(hist[0], hist[1], cutoff, cfg),
+                    seasonal_period=period,
                 )
             )
         strategy = str(model_type).removeprefix("ensemble_")

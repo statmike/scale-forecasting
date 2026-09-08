@@ -105,6 +105,7 @@ def run(
     import time
     from datetime import UTC, datetime
 
+    import pandas as pd
     from google.cloud import bigquery
 
     from ..errors import RegistryError, get_logger
@@ -112,7 +113,6 @@ def run(
     from ..registry.ids import make_run_id
     from ..registry.lifecycle import run_header
     from ..registry.write_api import _META_SPEC, _OOF_SPEC
-    from ..seasonality import seasonal_period
     from ..settings import Settings
     from ..worker import _rollup_metrics
     from .bigquery_sql import (
@@ -191,7 +191,13 @@ def run(
                 history = _query(
                     build_history_query(cfg, dataset, snapshot_millis=snapshot_millis)
                 ).to_dataframe()
-                hist_by_id = {tid: g["y"].to_numpy() for tid, g in history.groupby("ts_id")}
+                # Dates ride along with the values: the scale denominator is the *fold's* training
+                # window, not the whole series, and `backtest.training_window` cuts it at the
+                # fold's cutoff. Keyed off `ORDER BY ts_id, ds`, so each group is already sorted.
+                hist_by_id = {
+                    tid: (pd.to_datetime(g["ds"]).to_numpy(), g["y"].to_numpy())
+                    for tid, g in history.groupby("ts_id")
+                }
                 plan = fold_plan(cfg)
                 for model_name in models:
                     best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
@@ -239,7 +245,7 @@ def run(
                             run_id=run_id,
                             model_name=model_name,
                             fold_id=fold_id,
-                            seasonal_period=seasonal_period(cfg.data.freq),
+                            cfg=cfg,
                         )
                         oof_rows.extend(fold_oof)
                         for ts_id, panel in fold_panels.items():
@@ -309,42 +315,55 @@ def _score_fold(
     run_id: str,
     model_name: str,
     fold_id: int,
-    seasonal_period: int,
+    cfg: RunConfig,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
     """One fold's eval frame → its ``backtest_oof`` rows and one metric panel per series (pure).
 
     This is where a native model *earns its leaderboard number*, so it is worth having out of the
-    GCP body. Three things it has to get right, none of which a live run would complain about if it
+    GCP body. Four things it has to get right, none of which a live run would complain about if it
     got them wrong — it would just report different metrics:
 
     * the rows are sorted by ``forecast_date`` before scoring, so a horizon-weighted metric sees the
       horizon in order;
-    * ``y_train`` comes from the series' own history (the scale denominator MASE and RMSSE divide
-      by), looked up per series rather than shared;
+    * ``y_train`` — the scale denominator MASE and RMSSE divide by — is *this fold's* training
+      window of the series' own history, cut at the fold's ``cutoff_date`` by
+      `backtest.training_window`. Looked up per series rather than shared, and cut rather than
+      passed whole: the full history contains the window being scored, and a denominator that has
+      seen the future is not comparable to the Python engines', which never do;
     * the interval bounds are passed through, so ``coverage``, ``pinball``, ``interval_score`` and
       ``interval_width`` are real numbers here rather than the NaNs the Python worker's OOF path
       produces;
-    * ``seasonal_period`` is the run frequency's cycle length, passed in rather than defaulted, so
-      ``mase_seasonal`` divides by the right naive.
+    * the seasonal period comes from ``cfg.data.freq`` rather than a default, so ``mase_seasonal``
+      divides by the right naive.
+
+    ``hist_by_id`` maps ``ts_id`` to a ``(ds, y)`` pair of aligned, date-sorted arrays.
 
     Panels are keyed by ``str(ts_id)`` to match `_meta_row`'s key type — the caller accumulates one
     list per series across folds and rolls them up exactly as `worker._rollup_metrics` does.
     """
+    from ..backtest import training_window
     from ..metrics import compute_metrics
+    from ..seasonality import seasonal_period
 
+    period = seasonal_period(cfg.data.freq)
     oof_rows: list[dict[str, Any]] = []
     panels: dict[str, dict[str, float]] = {}
     for ts_id, g in eval_df.groupby("ts_id"):
         g = g.sort_values("forecast_date")
         for _, row in g.iterrows():
             oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, row))
+        hist = hist_by_id.get(ts_id)
+        # One cutoff per fold — the native path trains every series to the same global origin — so
+        # any row of the group carries it. Absent on a hand-built or pre-cutoff frame, in which
+        # case `training_window` keeps the whole history, which is what this path used to do.
+        cutoff = g["cutoff_date"].iloc[0] if "cutoff_date" in g.columns else None
         panels[str(ts_id)] = compute_metrics(
             g["y_true"].to_numpy(),
             g["yhat"].to_numpy(),
-            y_train=hist_by_id.get(ts_id),
+            y_train=None if hist is None else training_window(hist[0], hist[1], cutoff, cfg),
             lower=g["yhat_lower"].to_numpy(),
             upper=g["yhat_upper"].to_numpy(),
-            seasonal_period=seasonal_period,
+            seasonal_period=period,
         )
     return oof_rows, panels
 

@@ -19,6 +19,7 @@ from scale_forecasting.backtest import (
     achievable_folds,
     backtest_cell,
     make_folds,
+    training_window,
 )
 from scale_forecasting.config import RunConfig
 from scale_forecasting.features import invert_transform
@@ -344,3 +345,62 @@ def test_fold_dataclass_helpers() -> None:
     f = Fold(fold_id=0, train_start=0, train_end=30, val_start=30, val_end=35)
     assert f.train_size == 30
     assert f.val_size == 5
+
+
+# --- the shared scale denominator (`training_window`) ---------------------------------------
+# The Python path slices `y[fold.train_start:fold.train_end]` and hands that to `compute_metrics`
+# as the MASE/RMSSE denominator. The native engine and the ensemble scorer have no folds — they
+# hold a whole history and one `cutoff_date` — so `training_window` is how they reconstruct the
+# same slice. If the two ever disagree, native MASE and Python MASE stop being comparable, and
+# nothing in a live run would say so: both columns would still hold plausible floats. That
+# equivalence is the assertion below, and it is the exit gate for standardizing the denominator.
+
+
+def test_the_cutoff_rebuilds_exactly_the_slice_the_fold_trained_on() -> None:
+    for scheme in ("expanding", "sliding"):
+        cfg = _cfg({"n_folds": 3, "horizon": 4, "step": 4, "min_train": 10, "scheme": scheme})
+        series = _series(40)
+        ds = series["ds"].to_numpy()
+        y = series["y"].to_numpy()
+        for fold in make_folds(len(y), cfg):
+            # What the Python cell fits and scales by, and the cutoff it writes onto its OOF rows.
+            expected = y[fold.train_start : fold.train_end]
+            cutoff = ds[fold.train_end - 1]
+            assert np.array_equal(training_window(ds, y, cutoff, cfg), expected), (
+                f"{scheme} fold {fold.fold_id}"
+            )
+
+
+def test_the_two_schemes_disagree_so_the_test_above_is_not_vacuous() -> None:
+    # `sliding` caps the window at `min_train`; `expanding` grows it. A `training_window` that
+    # ignored the scheme would still pass the equivalence test for expanding runs only, so the
+    # difference is asserted rather than assumed.
+    series = _series(40)
+    ds, y = series["ds"].to_numpy(), series["y"].to_numpy()
+    cutoff = ds[31]
+    grown = training_window(ds, y, cutoff, _cfg({"min_train": 10, "scheme": "expanding"}))
+    fixed = training_window(ds, y, cutoff, _cfg({"min_train": 10, "scheme": "sliding"}))
+    assert len(grown) == 32
+    assert len(fixed) == 10
+    assert np.array_equal(fixed, grown[-10:])
+
+
+def test_a_missing_cutoff_keeps_the_whole_history() -> None:
+    # An OOF frame written before the cutoff was recorded has nothing to cut at. Falling back to
+    # the full series is what those runs already did — the wrong denominator, but a stable one,
+    # and better than scoring nothing.
+    series = _series(20)
+    ds, y = series["ds"].to_numpy(), series["y"].to_numpy()
+    cfg = _cfg({"min_train": 5, "scheme": "expanding"})
+    assert np.array_equal(training_window(ds, y, None, cfg), y)
+    assert np.array_equal(training_window(ds, y, pd.NaT, cfg), y)
+
+
+def test_the_window_excludes_the_scored_observations() -> None:
+    # The defect this closes: the native engine and the ensemble scorer scaled by a history that
+    # contained the very window they were being judged on.
+    series = _series(20)
+    ds, y = series["ds"].to_numpy(), series["y"].to_numpy()
+    window = training_window(ds, y, ds[11], _cfg({"scheme": "expanding"}))
+    assert window[-1] == y[11]
+    assert y[12] not in set(window.tolist())

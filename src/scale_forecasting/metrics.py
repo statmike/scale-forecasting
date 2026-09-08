@@ -146,6 +146,12 @@ def compute_metrics(
         y_true: actuals over the evaluation window.
         yhat: point forecasts, aligned to ``y_true``.
         y_train: training-history actuals; required for scale-free MASE/RMSSE (else NaN).
+            **This fold's training window, not the whole series.** MASE and RMSSE divide by the
+            mean step of whatever is handed in, so passing history that overlaps ``y_true``
+            scales the score by data the model was judged on, and two engines that disagree
+            about it publish two incomparable numbers into the same leaderboard column. Every
+            caller derives it the same way — `backtest.training_window`, or the fold's own
+            training slice in `backtest.backtest_cell`.
         lower: lower prediction bound; with ``upper`` enables coverage/pinball (else NaN).
         upper: upper prediction bound.
         seasonal_period: steps in one seasonal cycle, from `seasonality.seasonal_period`;

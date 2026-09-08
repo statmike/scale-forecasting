@@ -249,6 +249,18 @@ The four interval metrics — `coverage`, `pinball`, `interval_score`, `interval
 something when you care about the prediction bands, and ensemble OOF has no intervals, so all four
 read NaN for ensembles.
 
+**What "needs training history" means for `mase`, `rmsse` and `mase_seasonal`.** All three divide
+the error by the average step of a naïve forecast over the training data, so which history goes in
+decides the number. Every engine uses the same rule: **the fold's own training window** — the
+observations at or before that fold's `cutoff_date`, and under `backtest.scheme: sliding` only the
+last `min_train` of them. The window the fold is *scored* on is never in its own denominator, so a
+`mase` from a Python model and a `mase` from a BigQuery-native model for the same series are
+answers to the same question and can sit in the same leaderboard column. An ensemble is scaled the
+same way, at the cutoff its blended rows carry. One consequence worth knowing: because each fold
+has a different training window, the per-fold `mase` values a run rolls up are each scaled slightly
+differently — that is what makes them honest, and it is why `mase` across runs with different fold
+geometry is not a like-for-like comparison.
+
 **On the two interval scores:** `coverage` and `interval_width` are each half of the story and
 each trivially gamed — an infinitely wide band covers everything, a zero-width one is maximally
 sharp. `interval_score` is the one number that combines them, which is why it is the sensible

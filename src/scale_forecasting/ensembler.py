@@ -92,7 +92,19 @@ def inverse_error_weights(errors: np.ndarray) -> np.ndarray:
 # --- OOF-space consensus (scoring) ---------------------------------------------
 
 # The columns of the OOF-blend frame combine_oof returns — the shape the scorer consumes.
-_OOF_BLEND_COLS = ("ts_id", "model_type", "fold_id", "forecast_date", "y_true", "yhat")
+_OOF_BLEND_COLS = (
+    "ts_id",
+    "model_type",
+    "fold_id",
+    # Carried, not just joined on: the scorer needs it to cut each series' history at the fold's
+    # last training date before handing it to `compute_metrics` as the MASE/RMSSE denominator. An
+    # ensemble scored against the full history — the window it is being judged on included — is not
+    # comparable to the base models it sits beside on the leaderboard.
+    "cutoff_date",
+    "forecast_date",
+    "y_true",
+    "yhat",
+)
 
 
 def _fold_key(oof_df: pd.DataFrame) -> list[str]:
@@ -142,20 +154,21 @@ def inner_fold_mask(oof_df: pd.DataFrame, cfg: RunConfig) -> tuple[np.ndarray, s
     return mask, "holdout"
 
 
-def _carried_fold_ids(aligned: pd.DataFrame, keys: list[str]) -> pd.Series:
-    """The `fold_id` to write on each ensemble row, wherever the join key left it.
+def _carried(aligned: pd.DataFrame, keys: list[str], name: str, dtype: str) -> pd.Series:
+    """A column to write on each ensemble row, read from wherever the join key left it.
 
-    `_fold_key` decides what the ensemble joins on; `fold_id` is written out either way, because it
-    is the ordinal a reader recognises and the ensemble rows sit in the same table as the base rows.
-    When the fallback key is in use `fold_id` *is* one of the index levels; when the join went on
-    the cutoff it is still an ordinary column. Reading it from the wrong side is how it silently
-    comes out all-NaN.
+    `_fold_key` decides what the ensemble joins on; ``fold_id`` and ``cutoff_date`` are both written
+    out either way. ``fold_id`` is the ordinal a reader recognises and the ensemble rows sit in the
+    same table as the base rows; ``cutoff_date`` is what the scorer cuts history at. Whichever one
+    the key used *is* an index level, and the other is still an ordinary column. Reading either from
+    the wrong side is how it silently comes out all-NaN — which for the cutoff means every ensemble
+    quietly reverting to a whole-history MASE denominator.
     """
-    if "fold_id" in keys:
-        return pd.Series(aligned.index.get_level_values("fold_id"), index=aligned.index)
-    if "fold_id" in aligned.columns:
-        return aligned["fold_id"]
-    return pd.Series(index=aligned.index, dtype="float64")
+    if name in keys:
+        return pd.Series(aligned.index.get_level_values(name), index=aligned.index)
+    if name in aligned.columns:
+        return aligned[name]
+    return pd.Series(index=aligned.index, dtype=dtype)
 
 
 def _weighted_blend(vals: np.ndarray, weights: np.ndarray) -> np.ndarray:
@@ -184,8 +197,9 @@ def combine_oof(
     ``forecast_predictions`` are a true beyond-data forecast (no actuals to join), each ensemble is
     scored on the **backtest OOF window** — exactly the window the base models are scored on. This
     applies the same consensus rules in OOF space (where ``y_true`` lives) and returns long-format
-    ``(ts_id, model_type='ensemble_<s>', fold_id, forecast_date, y_true, yhat)`` for the caller to
-    score with `metrics.compute_metrics`.
+    ``(ts_id, model_type='ensemble_<s>', fold_id, cutoff_date, forecast_date, y_true, yhat)`` for
+    the caller to score with `metrics.compute_metrics`. The cutoff is carried out as well as joined
+    on, because the caller cuts each series' history there to get the fold's MASE denominator.
 
     Blends over whichever base models are present per ``(ts_id, cutoff_date, forecast_date)`` key
     (see `_fold_key` for why the cutoff and not the fold ordinal):
@@ -218,7 +232,8 @@ def combine_oof(
     # have to line up with the base rows in the same table. It is carried, not joined on, so it is
     # read off whichever side of `aligned` the key put it on: the index when the fallback key is in
     # use, a column when the join went on the cutoff.
-    fold_ids = _carried_fold_ids(aligned, keys)
+    fold_ids = _carried(aligned, keys, "fold_id", "float64")
+    cutoffs = _carried(aligned, keys, "cutoff_date", "object")
     ts_ids = wide.index.get_level_values("ts_id").to_numpy()
     # `inverse_error` is the one calculated strategy that *fits* something — a per-series weight
     # off these very rows — so it is held to the same rule as the meta-learners and only sees the
@@ -238,6 +253,7 @@ def combine_oof(
                 "ts_id": wide.index.get_level_values("ts_id"),
                 "model_type": f"ensemble_{strategy}",
                 "fold_id": fold_ids.to_numpy(),
+                "cutoff_date": cutoffs.to_numpy(),
                 "forecast_date": wide.index.get_level_values(keys[-1]),
                 "y_true": truth,
                 "yhat": yhat,
