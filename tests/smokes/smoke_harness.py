@@ -11,16 +11,18 @@ reviewer would run by hand and checks the result end to end:
 3. **run** — `main.run`: submit every family on its runtime under one run_id and block to terminal.
 4. **verify** — read the registry views back (`registry.reads.read_run_summary` / ``read_run_jobs``
    / ``read_leaderboard``) and assert the run reached COMPLETED, every expected family ran and
-   succeeded with a real platform job id, and every configured model (plus the ensembles when
-   enabled) scored onto the leaderboard.
+   succeeded with a real platform job id, every configured model (plus the ensembles when
+   enabled) scored onto the leaderboard, and **no cell failed** — a run can reach COMPLETED with a
+   third of its cells dead, so `verify_cells` is what stops that reading as a pass.
 5. **rerun / collision** — re-run the same config with no ``--force``: it must resolve the *same*
    run_id and, via append-only + dedupe-on-read, leave the leaderboard counts unchanged.
 6. **reverse-trace** — print each family's stored ``system_job_id`` and the service it resolves to
    (Dataproc batch / Dataproc cluster job / Vertex Ray submission / BigQuery job), so a human can
    click straight through to the underlying job.
 
-The pure helpers (`expected_families`, `verify_run_jobs`, `verify_leaderboard`, `verify_rerun`,
-`format_trace`) take plain row dicts + a `RunConfig` and are unit-tested offline (`test_harness`).
+The pure helpers (`expected_families`, `verify_run_jobs`, `verify_leaderboard`, `verify_cells`,
+`verify_rerun`, `format_trace`) take plain row dicts + a `RunConfig` and are unit-tested offline
+(`test_harness`).
 The live orchestration (`run_smoke`) and the CLI are ``@gcp`` — they submit real jobs and cost
 money, so they never run in the offline gate; the runbook (`docs/smoke_testing.md`) drives them one
 at a time. Usage:
@@ -117,6 +119,35 @@ def verify_predictions(pred_counts: dict[str, int], cfg: RunConfig) -> list[str]
     return problems
 
 
+def verify_cells(cell_groups: list[dict[str, Any]]) -> list[str]:
+    """Check no cell failed — the check that turns a partial run from a PASS into a FAIL.
+
+    A smoke can lose a third of its cells and still satisfy every other verifier here. The run
+    reaches COMPLETED, because a failed cell is recorded rather than fatal; the model appears on the
+    leaderboard, because the leaderboard counts metadata rows and a failure writes one; and
+    `verify_predictions` is satisfied, because it asks only that the count be non-zero. That is what
+    happened to smoke 03 on 2026-09-09: thirty-seven of a hundred cells died with
+    ``CUDA error: out of memory`` and the harness printed PASS.
+
+    A smoke is a hundred well-formed series with nothing adversarial in them, so the bar is *zero*
+    failures rather than a tolerance. A tolerance would be a number to argue about, and any cell
+    that dies here is telling us something about the platform.
+
+    ``cell_groups`` is `reads.read_cell_groups` output: one row per distinct
+    (model, status, error_class, wrote-predictions) tuple, with an ``n_cells`` weight.
+    """
+    problems: list[str] = []
+    for row in cell_groups:
+        if str(row.get("cell_status")) == "ok":
+            continue
+        problems.append(
+            f"{row.get('n_cells')} cell(s) of model {row.get('model_type')!r} did not complete: "
+            f"status {row.get('cell_status')!r}, error_class {row.get('error_class')!r} "
+            f"(e.g. ts_id {row.get('example_ts_id')!r})"
+        )
+    return problems
+
+
 def verify_rerun(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[str]:
     """Check a no-``--force`` re-run left the leaderboard unchanged (append-only + dedupe-on-read).
 
@@ -188,6 +219,7 @@ def run_smoke(
     from scale_forecasting.config import load_config
     from scale_forecasting.registry.jobs import read_run_jobs
     from scale_forecasting.registry.reads import (
+        read_cell_groups,
         read_leaderboard,
         read_prediction_counts,
         read_run_summary,
@@ -217,6 +249,7 @@ def run_smoke(
         verify_run_jobs(job_rows, cfg)
         + verify_leaderboard(board, cfg)
         + verify_predictions(pred_counts, cfg)
+        + verify_cells(read_cell_groups(run_id, settings=settings))
     )
     if run_status != "COMPLETED":
         problems.append(f"run status is {run_status!r}, expected COMPLETED")

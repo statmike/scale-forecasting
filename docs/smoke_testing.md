@@ -116,13 +116,18 @@ six, because a hang only shows up once there is real work to place.
   print(f"export SF_SUBNETWORK_URI={g(\"subnetwork_uri\")}")
   print(f"export SF_RAY_NETWORK_ATTACHMENT={g(\"network_attachment_id\")}")
   print(f"export SF_VENV_ARCHIVE={g(\"venv_archive_uri\")}")
-  gpu=g("gpu_image_uri")
+  gpu=o.get("gpu_image_uri", {}).get("value")
   print(f"export SF_GPU_IMAGE={gpu}") if gpu else None')"
   export SF_REGION=us-central1   # or your deploy region
   ```
   `SF_GPU_IMAGE` is exported only when the deploy built the pre-baked GPU cluster image
   (`build_gpu_image = true`); without it, GPU cluster smokes install the driver at cluster-create
   time instead (slower). See [runtime_dependencies.md](./runtime_dependencies.md#gpu-clusters--the-pre-baked-driver-image).
+  Note the `.get` above rather than a plain lookup: Terraform does not emit the output at all when
+  the image was not built, and a hand-set `SF_GPU_IMAGE` pointing at an older baked image fails the
+  cluster at create with *"Selected software image version … can no longer be used to create new
+  clusters"* once Dataproc retires the sub-version inside it. The fallback path asks for the
+  floating `2.2-debian12` alias and so does not age out.
 - **Source tables** — both `source_series_iceberg` and `source_series_native` must exist in the
   deployment dataset (they are created by the Terraform + seed step).
 - **Deep-learning smokes (03, 06, 08, 09, 10, 14)** — the container must carry the `models` extra so
@@ -190,8 +195,8 @@ imports it into the environment, triggers it, and waits for the run to land in t
 same terminal signal the direct harness polls. Because the `run_id` is a digest of the config, a
 Composer-orchestrated run writes the registry under the **identical** id a local run would, so
 success is direct proof of *same code local↔Composer*. Verification reuses the direct harness's
-checkers (`verify_run_jobs` / `verify_leaderboard` / `verify_predictions`), holding both smokes to
-one standard.
+checkers (`verify_run_jobs` / `verify_leaderboard` / `verify_predictions` / `verify_cells`), holding
+both smokes to one standard.
 
 Two levels of proof, cheap → expensive:
 

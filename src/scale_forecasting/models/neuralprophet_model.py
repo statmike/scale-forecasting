@@ -114,19 +114,37 @@ class NeuralProphetModel(BaseModel):
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
 
     def device_used(self) -> str | None:
-        """Where the fitted weights actually live — read off a parameter tensor, not off config.
+        """Where the fit ran — read off the trainer that ran it, not off the weights afterwards.
 
-        The parameters are the receipt. Lightning's trainer can be asked what accelerator it was
-        *configured* with, but that is the request again; a tensor's ``.device`` is where the
-        arithmetic happened. NeuralProphet keeps the LightningModule on ``.model`` after ``fit``.
+        This used to read a parameter tensor from ``self._model.model``, on the reasoning that the
+        parameters are the receipt. They are, but only until the fit lets go of them: Lightning ends
+        every run by putting the module back on the CPU (``Strategy.teardown`` calls
+        ``self.lightning_module.cpu()``), so the tensor a caller sees afterwards is on the CPU no
+        matter where the arithmetic happened. On 2026-09-09 all three live services said ``"cpu"``
+        on the same day — Serverless L4, a Dataproc cluster T4 and Ray T4 — for cells that had
+        50–68 KB allocated on the card, and `device_audit` read that as MISSING_DEVICE: the verdict
+        meaning the accelerator was billed for nothing. It was the probe that was wrong.
 
-        Never raises: an unfitted model, a library version that moved the attribute, or an empty
-        parameter list all yield ``None`` (unknown), because a probe that sank a good forecast
-        would be worse than no probe at all.
+        ``trainer.strategy.root_device`` survives teardown and is not the request restated. It is
+        what Lightning's accelerator connector *resolved* the request to against the hardware it
+        found, and under an explicit ``accelerator="gpu"`` a fit cannot reach the end of training
+        without one — Lightning raises instead. The independent evidence sits beside it in the same
+        row: ``peak_gpu_bytes`` is measured by the worker from ``torch.cuda``, and `_require_device`
+        has already failed any cell that asked for a device the worker could not see.
+
+        The parameter read stays as the fallback, because it is right whenever nothing moved the
+        weights — every CPU fit, and any Lightning version that reshapes the trainer.
+
+        Never raises: an unfitted model, a moved attribute, or an empty parameter list all yield
+        ``None`` (unknown), because a probe that sank a good forecast would be worse than no probe.
         """
         try:
-            return str(next(self._model.model.parameters()).device.type)
+            return str(self._model.trainer.strategy.root_device.type)
         except Exception:  # noqa: BLE001 - the evidence is optional; the forecast is not
+            pass
+        try:
+            return str(next(self._model.model.parameters()).device.type)
+        except Exception:  # noqa: BLE001 - same
             return None
 
     def _trainer_config(self) -> dict[str, Any]:
@@ -138,10 +156,20 @@ class NeuralProphetModel(BaseModel):
         cannot push a model *off* a card — on a mixed-hardware Dataproc cluster a CPU family sees
         whatever device its executor exposes.
 
-        ``ctx.device`` says it outright. ``"gpu"`` additionally pins ``devices=1`` so a task that
-        packs several cells onto one card does not have each of them claim every visible device.
-        ``"auto"`` reproduces the old behaviour exactly, and is what a local run, an SDK call and
-        every CPU job still get.
+        ``ctx.device`` says it outright. ``"auto"`` reproduces the old behaviour exactly, and is
+        what a local run, an SDK call and every CPU job still get.
+
+        ``devices=1`` on the GPU branch is a *request only*, and this is the one place that says
+        so. NeuralProphet's own ``configure_trainer`` overwrites it with ``-1`` — all visible
+        devices — for every accelerator it resolves to ``"gpu"``. Every shape we provision puts one
+        card in front of a worker, where ``-1`` and ``1`` are the same thing, so it is stated to
+        keep the intent on the record rather than because the library honours it.
+
+        **No ``callbacks`` here, deliberately.** A Lightning callback would be the natural way to
+        read the fit's device while the weights are still on it, but handing NeuralProphet 0.9.0 a
+        ``callbacks`` key sends ``configure_trainer`` down a branch that dereferences
+        ``pl.callbacks.ProgressBarBase``, removed in the Lightning we pin, and the fit dies with an
+        ``AttributeError`` before it starts. `device_used` reads the trainer instead.
         """
         if self.ctx.device == "gpu":
             return {"accelerator": "gpu", "devices": 1}

@@ -127,6 +127,50 @@ def test_verify_predictions_flags_model_missing_entirely() -> None:
     assert any("theta" in p for p in problems)
 
 
+# --- verify_cells --------------------------------------------------------------
+
+
+def test_verify_cells_all_ok_is_clean() -> None:
+    groups = [
+        {"model_type": "theta", "cell_status": "ok", "error_class": None, "n_cells": 100},
+        {"model_type": "arima_plus", "cell_status": "ok", "error_class": None, "n_cells": 100},
+    ]
+    assert h.verify_cells(groups) == []
+
+
+def test_verify_cells_flags_the_partial_run_every_other_check_lets_through() -> None:
+    """Smoke 03 on 2026-09-09: 37 of 100 cells lost to CUDA OOM, run COMPLETED, harness said PASS.
+    The leaderboard still listed the model, and the surviving 63 wrote predictions."""
+    groups = [
+        {
+            "model_type": "neuralprophet",
+            "cell_status": "error",
+            "error_class": "OOM",
+            "n_cells": 37,
+            "example_ts_id": "s_000004",
+        },
+        {"model_type": "neuralprophet", "cell_status": "ok", "error_class": None, "n_cells": 63},
+    ]
+    problems = h.verify_cells(groups)
+    assert len(problems) == 1
+    assert "37 cell(s)" in problems[0]
+    assert "neuralprophet" in problems[0] and "OOM" in problems[0] and "s_000004" in problems[0]
+
+
+def test_verify_cells_has_no_tolerance_for_a_single_loss() -> None:
+    """A smoke is a hundred well-formed series; one dead cell is the platform saying something."""
+    groups = [
+        {"model_type": "theta", "cell_status": "ok", "error_class": None, "n_cells": 99},
+        {"model_type": "theta", "cell_status": "error", "error_class": "FitError", "n_cells": 1},
+    ]
+    assert h.verify_cells(groups) != []
+
+
+def test_verify_cells_says_nothing_about_a_run_that_wrote_no_cells() -> None:
+    """Emptiness is `verify_predictions`' question — this one only judges the cells that exist."""
+    assert h.verify_cells([]) == []
+
+
 # --- verify_rerun --------------------------------------------------------------
 
 

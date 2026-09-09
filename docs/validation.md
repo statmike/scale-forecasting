@@ -41,6 +41,8 @@ old value goes stale by definition.
 | `ray_slot_memory` | `harvest-only` | `efecb4c` (2026-09-04) | `driver-rss-prepass` |
 | `dl_gpu_routing` | `resolved-per-family` | P1 (2026-09-05) | `flat-compute.use_gpu` |
 | `backtest_scoring` | `holdout-fold-reserved` | 3.2 (2026-09-08), after 2.3/2.4/2.6/3.1 | `unreserved-full-history` |
+| `gpu_device_probe` | `trainer-root-device` | Tier 1 campaign (2026-09-09) | `parameter-tensor-after-fit` |
+| `serverless_gpu_allocator` | `rapids-pool-released` | Tier 1 campaign (2026-09-09) | `rapids-default-pool` |
 
 **`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
 notice on their own — a different image, a different `run_id`, a different node count. This one
@@ -50,6 +52,15 @@ number of rows in the same tables under the same identity, and the numbers insid
 comparable: the newest fold is now reserved from every fit, and MASE and RMSSE are scaled by the
 fold's own training window rather than by the whole series. Declaring it on a row is the only
 mechanism that will ever say so.
+
+**`gpu_device_probe` is the second of that kind, and it invalidated more than it broke.** It names
+how a fit answers the question "which device did you actually run on" — the answer that
+`device_audit` turns into a verdict. Until 2026-09-09 the answer was read off a parameter tensor
+after the fit had finished, and PyTorch Lightning moves the module back to the CPU on its way out,
+so the answer was always `cpu` and the verdict was always `MISSING_DEVICE`. Nothing about a run
+looked different; the rows, the timings and the identity were all normal. What it means is that
+**no GPU-contract result recorded before that date was earnable**, because the measurement could not
+produce a passing answer. The section on the 2026-09-09 wave below has the detail.
 
 > ### Every row in this document is STALE, on purpose, as of 2026-09-05
 >
@@ -251,14 +262,14 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
-| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | STALE | 2026-09-01 | `smoke-01-serverless-cpu-5af5de1accf2` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-09 | `smoke-01-serverless-cpu-7a3d4234e0e1` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | STALE | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
-| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | STALE | 2026-09-01 | `smoke-03-serverless-gpu-a918f22d7970` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | NEEDS_RECHECK | 2026-09-09 | `smoke-03-serverless-gpu-92763e0f2242` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-default-pool`, `gpu_device_probe=parameter-tensor-after-fit`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | STALE | 2026-09-02 | `smoke-06-cluster-gpu-2f7296ef8839` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=prebaked-driver-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | NEEDS_RECHECK | 2026-09-09 | `smoke-06-cluster-gpu-eea70f834c66` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=parameter-tensor-after-fit`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | STALE | 2026-09-03 | `smoke-08-ray-gpu-38e33f02fd6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
+| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | NEEDS_RECHECK | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=parameter-tensor-after-fit`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -282,6 +293,77 @@ reporting a contract that isn't enforced.
 
 Six cells because the expected outcome is an immediate refusal — there is no reason to buy a
 hundred series' worth of fleet to watch a job stop.
+
+### The 2026-09-09 GPU wave: three defects, and why 03, 06 and 08 are NEEDS_RECHECK
+
+The first wave of the live campaign ran the four positive rungs — smoke 01 on Serverless CPU, then
+the three GPU services: smoke 03 on a Serverless L4, smoke 06 on a Dataproc cluster T4, and smoke 08
+on Ray T4. Smoke 01 passed, and that row is `CURRENT`. The other three came back looking green and
+were not. Each of the three defects below was fixed the same day, and each fix changes something the
+runs depended on, so all three rows are marked `NEEDS_RECHECK` and have to be run again before any
+of them can claim to have proven the GPU contract.
+
+**1. The device probe was reading the weights after the library had already moved them.** All three
+services reported `device_used='cpu'` on every single GPU cell, on the same day, for cells that had
+50–68 KB genuinely allocated on the card. `device_audit` did exactly what it is supposed to do with
+that input and stamped `MISSING_DEVICE` — the verdict that means the accelerator was billed and
+never touched. The runs were fine; the probe was wrong. `NeuralProphetModel.device_used` read a
+parameter tensor from the fitted module, and PyTorch Lightning ends every run by moving the module
+back to the CPU (`Strategy.teardown` calls `self.lightning_module.cpu()`), so the tensor a caller
+sees afterwards is on the CPU no matter where the arithmetic happened. The fix reads
+`trainer.strategy.root_device` instead, which survives teardown and is what Lightning's accelerator
+connector *resolved* the request to against the hardware it actually found — not the request
+restated. The parameter read stays as a fallback for the cases where nothing moved the weights. This
+is the new `gpu_device_probe` axis, and it is the reason **no GPU-contract positive result recorded
+before 2026-09-09 was ever earnable**: the measurement could not return the answer that would have
+passed.
+
+The natural implementation — a Lightning callback that reads the device mid-fit, while the weights
+are still on it — is not available to us. Handing NeuralProphet 0.9.0 any `callbacks` key sends its
+`configure_trainer` down a branch that dereferences `pl.callbacks.ProgressBarBase`, a class removed
+from the Lightning version we pin, and the fit dies with an `AttributeError` before training starts.
+
+**2. Serverless GPU lost 37 of 100 cells to the RAPIDS memory pool, and the harness called it a
+PASS.** Every failed cell raised `CUDA error: out of memory` while asking for a model that needs
+64 KB. The cause is in the driver log rather than in our code:
+`Initializing RMM ASYNC pool size = 21632.125 MB on gpuId 0`. Serverless GPU runtimes ship the
+RAPIDS accelerator switched on, and its default allocator reserves nearly the whole L4 for Spark SQL
+before a single fit runs. The fits do not live in that JVM — they run in the PySpark Python workers,
+which are left to share a few hundred megabytes, and the ones that lose the race die. The contrast
+case is decisive: the same config on a cluster T4 and on Ray T4, neither of which loads RAPIDS, lost
+nothing at all. The fix sets `spark.rapids.memory.gpu.pool=NONE` on GPU batches, which drops the
+reservation and leaves RAPIDS allocating on demand, so SQL still runs on the card and the fits can
+reach it too. This is the new `serverless_gpu_allocator` axis.
+
+**3. The harness had no check that could see a partial run.** Losing a third of the cells satisfied
+every verifier it had. The run reached `COMPLETED`, because a failed cell is recorded rather than
+fatal. The leaderboard listed the model, because the leaderboard counts metadata rows and a failure
+writes one. `verify_predictions` was satisfied, because it asks only that the count be non-zero, and
+63 is non-zero. A new `verify_cells` closes this: a smoke is a hundred well-formed series with
+nothing adversarial in them, so the bar is *zero* failed cells rather than a tolerance. Under this
+check, smoke 03 would have printed FAIL.
+
+Two smaller facts from the same wave, both recorded here because they will otherwise be rediscovered:
+
+- **The pre-baked GPU cluster image is gone from this deploy.** Smoke 06 first failed with
+  *"Selected software image version … can no longer be used to create new clusters"* against a
+  hand-set `SF_GPU_IMAGE`. This deploy has Terraform's `build_gpu_image` switched off, so no image
+  was ever built and the environment variable was a stale value carried forward. Re-run on the
+  fallback — a stock image plus the driver init action — the smoke got its T4 and completed all 100
+  cells. That is why the row declares `gpu_cluster_image=driver-init-action` rather than the axis
+  table's current `prebaked-driver-image`, and it is an open question whether to rebuild the image
+  or make the fallback the supported path.
+- **`devices=1` is a request the library discards.** NeuralProphet's `configure_trainer`
+  unconditionally overwrites it with `-1` — all visible devices — on every accelerator it resolves
+  to `"gpu"`. Every shape we provision puts one card in front of a worker, where `-1` and `1` mean
+  the same thing, so nothing is broken; but the pin is documentation of intent, not control.
+
+**One thing the wave did prove.** Smoke 08 wrote a non-NULL `peak_gpu_bytes` on all 100 Ray cells
+(50176–62464 bytes, `Tesla T4`), where that column had previously been NULL on 100% of Ray rows.
+The GPU memory measurement works on Ray. That is independent of the device probe — it is read by the
+worker from `torch.cuda` while the fit is live — and it is the evidence that sits beside
+`device_used` in the same row and made it possible to tell that the probe, not the platform, was
+wrong.
 
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
 

@@ -30,6 +30,7 @@ Three properties are load-bearing and each has its own section below:
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -473,11 +474,62 @@ def test_the_switch_stays_out_of_the_config_and_therefore_out_of_the_run_id(
     ],
 )
 def test_the_trainer_is_told_which_device_to_use(device: str, expected: dict[str, Any]) -> None:
-    """``devices=1`` on the GPU branch so a task packing several cells onto one card does not have
-    each of them claim every visible device."""
+    """``devices=1`` is stated on the GPU branch even though NeuralProphet overwrites it with -1."""
     model_cls = get_model("neuralprophet")
     ctx = ModelContext(freq="D", horizon=HORIZON, device=device)  # type: ignore[arg-type]
     assert model_cls({}, ctx)._trainer_config() == expected  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("device", ["auto", "cpu", "gpu"])
+def test_no_callback_is_handed_to_a_library_that_cannot_take_one(device: str) -> None:
+    """A Lightning callback is the natural way to read the fit's device before teardown moves it,
+    and it is unavailable here: NeuralProphet 0.9.0's custom-callbacks branch dereferences
+    ``pl.callbacks.ProgressBarBase``, gone from the Lightning we pin, so the fit dies with an
+    ``AttributeError`` before training starts. `device_used` reads the trainer instead."""
+    model_cls = get_model("neuralprophet")
+    ctx = ModelContext(freq="D", horizon=HORIZON, device=device)  # type: ignore[arg-type]
+    assert "callbacks" not in model_cls({}, ctx)._trainer_config()  # type: ignore[attr-defined]
+
+
+def test_the_device_is_read_off_the_trainer_that_survives_teardown() -> None:
+    """Lightning ends a fit with ``lightning_module.cpu()``, so the weights say ``"cpu"`` however
+    the fit ran — which is how all three live services reported ``device_used="cpu"`` on cells with
+    50–68 KB allocated on a real card. ``strategy.root_device`` is the resolved placement and
+    outlives the move, so the parameter read is only the fallback."""
+
+    class _Strategy:
+        root_device = SimpleNamespace(type="cuda")
+
+    class _Module:
+        def parameters(self) -> Any:
+            return iter([SimpleNamespace(device=SimpleNamespace(type="cpu"))])
+
+    model_cls = get_model("neuralprophet")
+    model = model_cls({}, ModelContext(freq="D", horizon=HORIZON, device="gpu"))  # type: ignore[arg-type]
+    model._model = SimpleNamespace(  # type: ignore[attr-defined]
+        trainer=SimpleNamespace(strategy=_Strategy()), model=_Module()
+    )
+    assert model.device_used() == "cuda"
+
+
+def test_the_weights_still_answer_when_there_is_no_trainer_to_ask() -> None:
+    """Nothing moves a CPU fit's weights, so the old probe is right there — and it is what a
+    Lightning version that reshaped the trainer would fall back to."""
+
+    class _Module:
+        def parameters(self) -> Any:
+            return iter([SimpleNamespace(device=SimpleNamespace(type="cpu"))])
+
+    model_cls = get_model("neuralprophet")
+    model = model_cls({}, ModelContext(freq="D", horizon=HORIZON, device="cpu"))  # type: ignore[arg-type]
+    model._model = SimpleNamespace(model=_Module())  # type: ignore[attr-defined]
+    assert model.device_used() == "cpu"
+
+
+def test_an_unfitted_model_says_unknown_rather_than_guessing() -> None:
+    model_cls = get_model("neuralprophet")
+    model = model_cls({}, ModelContext(freq="D", horizon=HORIZON, device="gpu"))  # type: ignore[arg-type]
+    assert model.device_used() is None
 
 
 def test_auto_is_the_default_a_context_is_born_with() -> None:

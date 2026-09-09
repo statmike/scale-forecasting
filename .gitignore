@@ -52,6 +52,9 @@ spikes/
 
 # NeuralProphet / PyTorch-Lightning training artifacts (written to CWD on fit)
 lightning_logs/
+# Lightning's learning-rate finder drops a uuid-named checkpoint beside the process, not under
+# lightning_logs/, so the directory rule above never catches it.
+.lr_find_*.ckpt
 
 # Local-only working files — never tracked. CLAUDE.md stays on disk so it auto-loads for
 # AI/dev contributors; NOTES.md is a scratch build log.

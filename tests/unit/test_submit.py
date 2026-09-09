@@ -212,6 +212,34 @@ def test_build_batch_gpu_attaches_l4_executor() -> None:
     assert "spark.task.resource.gpu.amount" not in props
 
 
+def test_build_batch_gpu_releases_the_rapids_pool_to_the_fits() -> None:
+    """RAPIDS reserves ~21.6 GB of an L4 for Spark SQL before a fit starts, and the fits run in the
+    Python workers, not that JVM. Left alone it starved 37 of smoke 03's 100 cells with
+    ``CUDA error: out of memory`` for a model that needs 64 KB."""
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="gpu",
+        gpu_type="L4",
+    )
+    assert dict(batch.runtime_config.properties)["spark.rapids.memory.gpu.pool"] == "NONE"
+
+
+def test_a_cpu_batch_says_nothing_about_a_gpu_allocator_it_will_never_load() -> None:
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="cpu",
+    )
+    assert not any(k.startswith("spark.rapids") for k in batch.runtime_config.properties)
+
+
 def test_build_batch_gpu_rejects_non_l4_on_serverless() -> None:
     with pytest.raises(ConfigError, match="Serverless supports L4 only"):
         build_batch(
