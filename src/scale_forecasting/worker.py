@@ -260,10 +260,12 @@ def _model_context(
     return ModelContext(
         freq=cfg.data.freq,
         # The LARGEST horizon this cell will be asked for, not the forward one. The same context
-        # object is handed to the backtest folds, which predict `backtest.horizon`, and to the final
-        # fit, which predicts `data.horizon`. Carrying only the forward horizon made the field a
-        # trap: a model sizing anything off it — a head count, a buffer — would be right on the
-        # final fit and short on every fold, in a run where both numbers are legal and different.
+        # object is handed to the final fit, which predicts `data.horizon`, and to the backtest
+        # folds, which predict `gap + backtest.horizon` — a fold forecasts across the embargo
+        # before it reaches the window being scored. Carrying only the forward horizon made the
+        # field a trap: a model sizing anything off it — a head count, a buffer — would be right on
+        # the final fit and short on every fold, in a run where both numbers are legal and
+        # different.
         horizon=cfg.max_horizon,
         seed=0,
         holidays=holidays,

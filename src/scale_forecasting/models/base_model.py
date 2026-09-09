@@ -62,11 +62,12 @@ class ModelContext:
 
     freq: str
     # The largest horizon `predict` will be asked for in this run — `cfg.max_horizon`, which is
-    # `max(data.horizon, backtest.horizon)`. **Not the forward horizon.** One context is shared by
-    # the backtest folds and the final fit, so a field that meant only the forward horizon was
-    # wrong on every fold of any run whose backtest horizon differs. Models should predict the
-    # `horizon` argument they are *handed*; this is here for sizing decisions made at construction,
-    # before that argument exists.
+    # `max(data.horizon, backtest.gap + backtest.horizon)`. **Not the forward horizon.** One context
+    # is shared by the backtest folds and the final fit, so a field that meant only the forward
+    # horizon was wrong on every fold of any run whose backtest horizon differs. The embargo is in
+    # there because a fold forecasts *across* it before reaching the scored window. Models should
+    # predict the `horizon` argument they are *handed*; this is here for sizing decisions made at
+    # construction, before that argument exists.
     horizon: int
     seed: int = 0
     holidays: pd.DataFrame | None = None

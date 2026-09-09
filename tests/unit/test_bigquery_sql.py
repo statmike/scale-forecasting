@@ -10,8 +10,11 @@ series_limit subset, and ``@run_id`` binding for the written run_id column.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from scale_forecasting.backtest import make_folds
 from scale_forecasting.config import RunConfig
@@ -294,6 +297,102 @@ def test_fold_drop_never_targets_the_final_model() -> None:
         drop = build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=k)
         assert final_obj not in drop[0]
         assert f"_f{k}`" in drop[0]
+
+
+# --- the trained horizon: every model created for at least what its own forecast asks -----
+#
+# BQML bakes the horizon into the model at CREATE MODEL time and ML.FORECAST cannot exceed it, so a
+# CREATE and the FORECAST that reads it are a pair. They were computed by two expressions that
+# happened to agree, and an embargo pulled them apart: the fold model was trained for
+# `data.horizon` while its own fold asked for `gap + backtest.horizon`. The tests below read the
+# numbers back out of the rendered SQL rather than re-deriving them, so nothing here can agree with
+# a formula that is itself wrong.
+
+_TRAINED_FOR = re.compile(r"horizon = (\d+)")
+_ASKED_FOR = re.compile(r"STRUCT\((\d+) AS horizon")
+
+
+@pytest.mark.parametrize(
+    ("data_horizon", "backtest_horizon", "gap", "n_folds"),
+    [
+        (28, 28, 0, 3),
+        (28, 28, 3, 3),
+        (7, 28, 0, 2),
+        (28, 7, 14, 2),
+        (14, 14, 30, 1),
+        (90, 10, 5, 4),
+    ],
+)
+def test_every_native_model_is_created_for_at_least_what_its_forecast_asks(
+    data_horizon: int, backtest_horizon: int, gap: int, n_folds: int
+) -> None:
+    """The pairing, checked statement by statement over a matrix of the four horizon knobs.
+
+    Two pairs exist per run: each fold's CREATE MODEL with the ML.FORECAST inside its eval query,
+    and the final CREATE MODEL with the ML.FORECAST inside the forecast INSERT. A trained horizon
+    below what its own partner asks for is not a worse forecast — BigQuery refuses the query, after
+    the run has provisioned and started.
+    """
+    cfg = RunConfig(
+        run_name="bq test",
+        data={"source_table": "src", "series_limit": None, "horizon": data_horizon},
+        models=["arima_plus"],
+        backtest={
+            "enabled": True,
+            "n_folds": n_folds,
+            "horizon": backtest_horizon,
+            "step": 28,
+            "gap": gap,
+            "min_train": 30,
+        },
+    )
+    plan = fold_plan(cfg)
+    assert plan, "the geometry must produce folds or this proves nothing"
+
+    for fold_id, back_steps in plan:
+        create = build_fold_create_statements(
+            cfg, "arima_plus", _DS, fold_id=fold_id, back_steps=back_steps
+        )[0]
+        evaluate = build_eval_query(cfg, "arima_plus", _DS, back_steps=back_steps, fold_id=fold_id)
+        trained = int(_TRAINED_FOR.search(create).group(1))  # type: ignore[union-attr]
+        asked = int(_ASKED_FOR.search(evaluate).group(1))  # type: ignore[union-attr]
+        assert trained >= asked, f"fold {fold_id} trained for {trained}, asked for {asked}"
+
+    final_create = build_create_model_sql(cfg, "arima_plus", _DS)
+    final_insert = build_forecast_insert_sql(cfg, "arima_plus", _DS)
+    trained = int(_TRAINED_FOR.search(final_create).group(1))  # type: ignore[union-attr]
+    asked = int(_ASKED_FOR.search(final_insert).group(1))  # type: ignore[union-attr]
+    assert trained >= asked
+    # …and the final model is trained for the forecast the run ships, not for the folds' request.
+    assert trained == data_horizon
+
+
+def test_a_fold_model_is_trained_across_the_embargo_and_the_final_model_is_not() -> None:
+    """The two askers want different numbers, which is why one shared constant was not enough.
+
+    A fold reaches across the embargo because its origin is its last training date; the final model
+    forecasts from the end of history, where no embargo applies. Training everything at
+    `data.horizon` is what broke, and training everything at `gap + backtest.horizon` would waste
+    the final model's horizon on steps nobody ships.
+    """
+    cfg = _bt_cfg(gap=3)  # data.horizon 28, backtest.horizon 28
+    fold_create = build_create_model_sql(cfg, "arima_plus", _DS, back_steps=31, fold_id=0)
+    final_create = build_create_model_sql(cfg, "arima_plus", _DS)
+    assert "horizon = 31" in fold_create
+    assert "horizon = 28" in final_create
+
+
+def test_timesfm_is_asked_across_the_embargo_too_though_it_trains_nothing() -> None:
+    """AI.FORECAST has no ceiling to exceed, but it must still cover the discarded prefix."""
+    cfg = RunConfig(
+        run_name="bq test",
+        data={"source_table": "src", "series_limit": None},
+        models=["timesfm"],
+        backtest={"enabled": True, "n_folds": 3, "horizon": 28, "step": 28, "gap": 3},
+    )
+    sql = build_eval_query(cfg, "timesfm", _DS, back_steps=31, fold_id=0)
+    assert "horizon => 31" in sql
+    assert "horizon => 28" in build_forecast_insert_sql(cfg, "timesfm", _DS)
 
 
 def test_timesfm_has_no_fold_create_or_drop() -> None:

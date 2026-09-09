@@ -131,7 +131,7 @@ for HPO and learned ensembles.
 | `enabled` | `bool` | `false` | — | Turn backtesting on. |
 | `scheme` | `"expanding"` \| `"sliding"` \| `"expanding_frozen"` \| `"expanding_stale"` | `"expanding"` | — | How the model is carried between fold origins. See [Backtest schemes](#backtest-schemes) below. |
 | `n_folds` | `int` | `3` | `≥ 1` | Number of folds. |
-| `horizon` | `int` | `28` | `> 0` | Per-fold forecast horizon. |
+| `horizon` | `int` | `28` | `> 0` | Per-fold forecast horizon. Linked to `data.horizon` — see [Two horizons](#two-horizons) below. |
 | `step` | `int` | `28` | `> 0` | Step between folds. |
 | `min_train` | `int` | `180` | `> 0` | Minimum training length. |
 | `decision_metric` | see below | `"wape"` | — | Metric folds are judged on. |
@@ -155,6 +155,31 @@ in where training *starts*:
 
 `n_folds`, `horizon`, `step`, `min_train` and `gap` lay the folds out together, and a series needs at
 least `min_train + gap + horizon + (n_folds−1)·step` observations to be scored on *all* of them.
+
+<a id="two-horizons"></a>
+### Two horizons
+
+A config carries two of them and they are easy to confuse. `data.horizon` is how far the **shipped
+forecast** reaches. `backtest.horizon` is how far **each fold** predicts before it is scored. They
+are separate fields on purpose — you can score a model over seven steps while shipping twenty-eight
+— and setting them apart is legal on every engine.
+
+**A mismatch earns a warning**, in either direction, because the leaderboard then ranks models over
+a horizon the run does not deliver, and a model that wins at seven steps is not automatically the
+one to trust at twenty-eight. The warning names both fields; nothing is rewritten, because a config
+that repaired itself would move its own `run_id` and land in the registry describing a run you did
+not ask for.
+
+**How many steps a fold really asks for is `backtest.gap + backtest.horizon`,** not
+`backtest.horizon` alone. A fold's model stops training at its cutoff, and with an embargo the
+scored window starts `gap` observations later — so the model has to forecast *across* the embargo
+before it reaches anything that gets scored, and the first `gap` values are thrown away. This is
+the number that sizes everything: the Python engines are handed it as their horizon, and each
+BigQuery-native fold model is created with `OPTIONS(horizon = gap + backtest.horizon)` while the
+final model stays at `data.horizon`. BigQuery bakes that number into the trained model and rejects
+an `ML.FORECAST` asking for more, so each model is created for exactly what its own forecast asks.
+(`timesfm` is the exception that needs no accounting: `AI.FORECAST` has no training step, so there
+is no ceiling to fit under.)
 
 **A shorter series is scored on fewer folds; it never loses its forecast.** Backtesting scores a
 model — it does not produce the forecast — so a scoring shortfall costs only the score. The fold

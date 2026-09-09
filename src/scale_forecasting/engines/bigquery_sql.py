@@ -147,7 +147,28 @@ def fold_plan(cfg: RunConfig) -> list[tuple[int, int]]:
 # --- statements ----------------------------------------------------------------
 
 
-def bqml_options(cfg: RunConfig, model_name: str) -> dict[str, Any]:
+def trained_horizon(cfg: RunConfig, *, fold: bool) -> int:
+    """How many steps a native model must be *trained* to emit — the ceiling on its forecast.
+
+    BQML bakes this into the model at ``CREATE MODEL`` time and ``ML.FORECAST`` cannot exceed it,
+    so the only safe rule is that a model is created for exactly what it will be asked. There are
+    two askers and they want different numbers:
+
+    * the **final** model forecasts ``data.horizon`` steps past the end of history;
+    * a **fold** model forecasts ``gap + backtest.horizon`` — it reaches *across* the embargo,
+      because its origin is its last training date and the scored window starts ``gap`` later.
+
+    Training every model at ``data.horizon`` is what this function replaced, and it made an embargo
+    plus a trained native model a hard BigQuery error even when the two horizons matched exactly:
+    ``gap=3`` with a 28-step fold asks 31 steps of a model that holds 28. Read `_forecast_source`
+    beside this — the two must not drift, and `tests/unit/test_bigquery_sql.py` pins them together.
+    """
+    if fold:
+        return cfg.backtest.gap + cfg.backtest.horizon
+    return cfg.data.horizon
+
+
+def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict[str, Any]:
     """The resolved model parameters, as an ordered dict — one source of truth for two uses.
 
     For the ARIMA models this is the ``CREATE MODEL`` ``OPTIONS(...)`` body *and* the
@@ -155,15 +176,18 @@ def bqml_options(cfg: RunConfig, model_name: str) -> dict[str, Any]:
     TimesFM has no ``CREATE MODEL``; `_render_options` never sees its dict, but ``run`` still
     stamps ``best_params`` for every model, so we return the resolved ``AI.FORECAST`` arguments here
     — keeping the metadata row's provenance non-NULL and meaningful across both native shapes.
+
+    ``fold`` selects which horizon the model is trained for; see `trained_horizon`.
     """
     freq, _ = _freq(cfg)
+    horizon = trained_horizon(cfg, fold=fold)
     if model_name not in _MODEL_TYPE:  # timesfm — serverless AI.FORECAST, no OPTIONS clause
         return {
             "model_type": "TimesFM (AI.FORECAST)",
             "id_cols": [cfg.data.ts_id_col],
             "timestamp_col": cfg.data.date_col,
             "data_col": cfg.data.target_col,
-            "horizon": cfg.data.horizon,
+            "horizon": horizon,
             "confidence_level": _CONFIDENCE_LEVEL,
         }
     opts: dict[str, Any] = {
@@ -171,7 +195,7 @@ def bqml_options(cfg: RunConfig, model_name: str) -> dict[str, Any]:
         "time_series_id_col": cfg.data.ts_id_col,
         "time_series_timestamp_col": cfg.data.date_col,
         "time_series_data_col": cfg.data.target_col,
-        "horizon": cfg.data.horizon,
+        "horizon": horizon,
         "data_frequency": freq,
     }
     return opts
@@ -286,7 +310,9 @@ def build_create_model_sql(
     """
     ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
     source = _source_ref(cfg, dataset)
-    options = _render_options(bqml_options(cfg, model_name))
+    # A fold model is trained for the fold's request (which reaches across the embargo), the final
+    # model for the shipped forecast. `back_steps` is exactly the "is this a fold" signal.
+    options = _render_options(bqml_options(cfg, model_name, fold=back_steps is not None))
     training = _training_select(cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis)
     holiday_cte = build_custom_holiday_cte(cfg)
     if holiday_cte:
@@ -324,11 +350,9 @@ def _forecast_source(
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
-    h = (
-        horizon
-        if horizon is not None
-        else (cfg.data.horizon if back_steps is None else cfg.backtest.gap + cfg.backtest.horizon)
-    )
+    # The same function the CREATE MODEL reads, so a model is never asked for more than it was
+    # trained to emit. Two expressions that happened to agree is how they came to disagree.
+    h = horizon if horizon is not None else trained_horizon(cfg, fold=back_steps is not None)
 
     if model_name == "timesfm":
         where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)

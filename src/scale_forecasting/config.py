@@ -1061,6 +1061,45 @@ class RunConfig(BaseModel):
 
         return self
 
+    @model_validator(mode="after")
+    def _check_horizon_linkage(self) -> RunConfig:
+        """Two horizons live in one config, and nothing used to say when they may differ.
+
+        ``data.horizon`` is how far the shipped forecast reaches. ``backtest.horizon`` is how far
+        each fold predicts before it is scored. They are independent fields answering different
+        questions, so a config can set them apart on purpose — but almost every config that does
+        so did it by editing one and forgetting the other, and being ranked on a horizon you do
+        not ship is worth saying out loud.
+
+        **This warns and never raises**, which is the second answer to this question rather than
+        the first. The plan called for refusing a run whose folds out-asked a BigQuery-native
+        model's trained horizon, because ``ML.FORECAST`` cannot exceed the horizon baked in at
+        ``CREATE MODEL`` time. Refusing would have been validating around a bug: the fold model was
+        being trained at ``data.horizon`` while its own fold asked for ``gap + backtest.horizon``,
+        so an embargo broke a native run even with the two horizons matched exactly. That is fixed
+        where it belonged, in `engines.bigquery_sql.trained_horizon` — every model is now created
+        for precisely what it will be asked — and with the error impossible by construction, a
+        raise here would only forbid configs that work.
+
+        This validator never rewrites either field. The run_id is a digest taken after
+        ``_normalize``, so a config that silently repaired itself here would move its own identity
+        and land in the registry describing a run nobody asked for.
+        """
+        if not self.backtest.enabled or self.backtest.horizon == self.data.horizon:
+            return self
+
+        _log.warning(
+            "backtest.horizon=%d and data.horizon=%d differ: every fold is scored over %d steps "
+            "while the forecast this run ships reaches %d, so the leaderboard ranks models on a "
+            "horizon the run never delivers. Set the two equal unless the difference is "
+            "deliberate.",
+            self.backtest.horizon,
+            self.data.horizon,
+            self.backtest.horizon,
+            self.data.horizon,
+        )
+        return self
+
     def resolve_family_compute(self, family: str) -> ResolvedFamilyCompute:
         """Resolve one family's effective compute by layering its override on the flat defaults.
 
@@ -1129,8 +1168,20 @@ class RunConfig(BaseModel):
         refusing a model that cannot emit enough steps, a context handed to a model — has to mean
         the larger of the two, because the run will ask for both. A property rather than a field:
         it is derived, so it stays out of ``model_dump`` and no ``run_id`` moves.
+
+        **The embargo counts, and leaving it out was a bug.** A fold's model stops at ``train_end``
+        while its validation window starts ``gap`` observations later, so the model has to forecast
+        across the embargo before it reaches anything that gets scored: the Python fold asks for
+        ``gap + val_size`` steps and throws the first ``gap`` away, and the BigQuery fold asks its
+        ``ML.FORECAST`` for ``gap + backtest.horizon``. Both engines were
+        already right; this number, which is supposed to describe them, was short by exactly
+        ``gap``. What that cost: NeuralProphet emits exactly ``n_forecasts`` direct steps and does
+        not recurse, so a ``gap=3`` run passed its params validator and then came up three steps
+        short at the tail of every fold.
         """
-        return max(self.data.horizon, self.backtest.horizon if self.backtest.enabled else 0)
+        if not self.backtest.enabled:
+            return self.data.horizon
+        return max(self.data.horizon, self.backtest.gap + self.backtest.horizon)
 
     def with_series_limit(self, n_series: int | None) -> RunConfig:
         """Return a copy with ``data.series_limit`` overridden (``self`` if ``n_series`` is None).

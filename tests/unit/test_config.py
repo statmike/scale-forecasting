@@ -182,6 +182,66 @@ def test_max_horizon_takes_the_larger_of_the_two_because_the_run_asks_for_both()
     assert cfg.max_horizon == 28
 
 
+def test_the_embargo_counts_because_a_fold_forecasts_across_it() -> None:
+    """A fold's model stops at `train_end`; scoring starts `gap` later, so it forecasts over both.
+
+    This is the arithmetic `max_horizon` used to get wrong: it read `backtest.horizon` alone and
+    came up short by exactly `gap` on every embargoed run.
+    """
+    cfg = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "p.d.s", "horizon": 7},
+            backtest={"enabled": True, "horizon": 28, "gap": 3},
+        )
+    )
+    assert cfg.max_horizon == 31
+
+
+def test_the_embargo_can_push_the_ceiling_past_two_matched_horizons() -> None:
+    """The case that looks safest and is not: both horizons 28, and the folds still ask for 31."""
+    cfg = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "p.d.s", "horizon": 28},
+            backtest={"enabled": True, "horizon": 28, "gap": 3},
+        )
+    )
+    assert cfg.max_horizon == 31
+
+
+@pytest.mark.parametrize(
+    ("data_horizon", "backtest_horizon", "gap", "n_folds"),
+    [(7, 7, 0, 1), (7, 28, 0, 3), (28, 7, 5, 2), (28, 28, 3, 4), (14, 10, 9, 2), (60, 14, 1, 3)],
+)
+def test_max_horizon_covers_what_the_real_folds_ask_for(
+    data_horizon: int, backtest_horizon: int, gap: int, n_folds: int
+) -> None:
+    """Checked against the folds themselves, not against a second copy of the same formula.
+
+    `backtest._forecast_validation` calls `predict(gap + fold.val_size, ...)`, so the fold objects
+    are the authority on how many steps a model is asked for. Re-deriving the number here would
+    only prove that two lines of arithmetic match; asking `make_folds` proves the property.
+    """
+    from scale_forecasting.backtest import make_folds
+
+    cfg = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "p.d.s", "horizon": data_horizon},
+            backtest={
+                "enabled": True,
+                "horizon": backtest_horizon,
+                "gap": gap,
+                "n_folds": n_folds,
+                "min_train": 30,
+            },
+        )
+    )
+    folds = make_folds(400, cfg)
+    assert folds, "the geometry must produce folds or this proves nothing"
+    for fold in folds:
+        assert cfg.max_horizon >= cfg.backtest.gap + fold.val_size
+    assert cfg.max_horizon >= cfg.data.horizon
+
+
 def test_a_disabled_backtest_cannot_raise_the_ceiling_it_will_never_predict_at() -> None:
     cfg = RunConfig(
         **_minimal_dict(
@@ -197,6 +257,94 @@ def test_max_horizon_is_derived_so_it_cannot_move_a_run_id() -> None:
     # not. This is why it is a property.
     cfg = RunConfig(**_minimal_dict())
     assert "max_horizon" not in cfg.model_dump()
+
+
+# --- the horizon linkage: a mismatch is a methodology warning, never a refusal -----
+#
+# `data.horizon` is what the run ships; `backtest.horizon` is what each fold is scored over. They
+# are separate fields answering separate questions, so a gap between them is legal — it just means
+# the leaderboard ranks models over a horizon the run does not deliver, which is worth saying.
+#
+# It is deliberately not an error, including for a BigQuery-native model whose trained horizon is a
+# hard ceiling. That case is fixed in `bigquery_sql.trained_horizon`, which creates each model for
+# exactly what its own forecast asks, so there is nothing left here to refuse.
+
+
+def _linked(*, data_horizon: int, models: list[str], **backtest: Any) -> dict[str, Any]:
+    return _minimal_dict(
+        data={"source_table": "p.d.s", "horizon": data_horizon},
+        models=models,
+        backtest={"enabled": True, **backtest},
+    )
+
+
+def test_a_native_model_asked_for_more_steps_than_it_ships_is_allowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The config that used to be refused, and now runs: the fold model is trained to cover it."""
+    with caplog.at_level("WARNING"):
+        cfg = RunConfig(**_linked(data_horizon=7, models=["arima_plus"], horizon=28))
+    assert cfg.max_horizon == 28
+    assert "horizon the run never delivers" in caplog.text
+
+
+def test_an_embargo_on_a_native_model_is_not_an_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Matched horizons plus `gap=3` asks for 31 steps, and that is now a config that works.
+
+    Refusing it was the wrong answer to the right observation: the folds really did out-ask the
+    trained model, but the fix belongs where the model is created, not in a validator that would
+    have made users inflate `data.horizon` — the forecast they actually ship — to appease a fold.
+    """
+    with caplog.at_level("WARNING"):
+        cfg = RunConfig(**_linked(data_horizon=28, models=["arima_plus"], horizon=28, gap=3))
+    assert cfg.max_horizon == 31
+    assert caplog.text == ""
+
+
+def test_a_horizon_mismatch_with_no_native_model_warns_and_names_both_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        RunConfig(**_linked(data_horizon=28, models=["theta"], horizon=7))
+    assert "backtest.horizon=7" in caplog.text and "data.horizon=28" in caplog.text
+
+
+def test_the_warning_fires_in_both_directions_because_both_mislead(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ranked on less than you ship is as misleading as ranked on more — neither is what runs."""
+    with caplog.at_level("WARNING"):
+        RunConfig(**_linked(data_horizon=7, models=["theta"], horizon=28))
+    assert "the leaderboard ranks models on a horizon the run never delivers" in caplog.text
+
+
+def test_linked_horizons_say_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        RunConfig(**_linked(data_horizon=28, models=["arima_plus", "theta"], horizon=28))
+    assert "horizon the run never delivers" not in caplog.text
+
+
+def test_a_disabled_backtest_has_no_second_horizon_to_link() -> None:
+    """`backtest.horizon` is inert with backtesting off, so it conflicts with nothing."""
+    cfg = RunConfig(
+        **_minimal_dict(
+            data={"source_table": "p.d.s", "horizon": 7},
+            models=["arima_plus"],
+            backtest={"enabled": False, "horizon": 90},
+        )
+    )
+    assert cfg.max_horizon == 7
+
+
+def test_the_linkage_validator_never_repairs_the_config() -> None:
+    """A silent repair would move the run_id: the digest is taken after validation, not before.
+
+    The tempting behaviour — quietly raise `data.horizon` to cover the folds — would produce a
+    registry row describing a run nobody configured, under an identity nobody can reproduce from
+    the file they wrote.
+    """
+    cfg = RunConfig(**_linked(data_horizon=28, models=["theta"], horizon=7, gap=2))
+    assert (cfg.data.horizon, cfg.backtest.horizon, cfg.backtest.gap) == (28, 7, 2)
 
 
 # --- HPO config ----------------------------------------------------------------
