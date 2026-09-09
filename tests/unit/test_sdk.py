@@ -492,12 +492,51 @@ def test_retry_passes_the_confirmation_and_the_audit_reason_through(
 
 
 def test_retry_takes_no_run_id_because_a_repair_is_planned_from_the_config() -> None:
-    """A guard against someone "helpfully" adding one: a different run has a different config."""
+    """A guard against someone "helpfully" adding one: a different run has a different config.
+
+    Still true after `from_run_id` shipped, and that is the point of keeping the guard rather than
+    replacing it. An id buys you the config; it is not a second way to plan, so it belongs on the
+    constructor and nowhere else.
+    """
     import inspect
 
     params = inspect.signature(sf.Forecaster.retry).parameters
     assert "run_id" not in params
     assert set(params) == {"self", "confirm", "reason"}
+
+
+def test_from_run_id_builds_the_forecaster_the_run_launched_under(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting.retry_run as retry_mod
+
+    seen: dict[str, Any] = {}
+    cfg = sf.Forecaster.from_dict(_cfg_dict())._config
+
+    def _loader(run_id: str, *, settings: Any = None) -> Any:
+        seen.update(run_id=run_id, settings=settings)
+        return cfg
+
+    monkeypatch.setattr(retry_mod, "config_for_run", _loader)
+    f = sf.Forecaster.from_run_id("rid-inherited", settings=_SETTINGS)
+    assert seen == {"run_id": "rid-inherited", "settings": _SETTINGS}
+    # The settings reach both the lookup and the resulting object — a run recovered against one
+    # deployment must not then be repaired against the ambient one.
+    assert f._config is cfg and f._settings is _SETTINGS
+
+
+def test_from_run_id_lets_the_refusal_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The loader refuses loudly on a missing/stale/mismatched config; the constructor must not
+    # soften that into an empty Forecaster that would plan an empty repair.
+    import scale_forecasting.retry_run as retry_mod
+    from scale_forecasting.errors import ConfigError
+
+    def _refuse(run_id: str, *, settings: Any = None) -> Any:
+        raise ConfigError(f"no stored config for run {run_id}")
+
+    monkeypatch.setattr(retry_mod, "config_for_run", _refuse)
+    with pytest.raises(ConfigError, match="rid-gone"):
+        sf.Forecaster.from_run_id("rid-gone")
 
 
 # --- trace: the per-job + per-cell execution timeline --------------------------

@@ -359,6 +359,75 @@ def test_a_confirmed_call_with_nothing_submittable_still_launches_nothing(
     assert report.executed is False and report.plan.models == ()
 
 
+# --- config_for_run: reaching a repair through the run id ----------------------
+#
+# Every failure here has a plausible-looking wrong answer available — an empty config plans an
+# empty repair, a stale one plans a subset — so each refusal gets its own test. A repair that
+# quietly does less than the operator asked for is worse than one that does nothing.
+
+
+_STORED = {
+    "run_name": "inherited run",
+    "data": {"source_table": "source_series_native", "horizon": 7},
+    "models": ["theta", "xgboost"],
+}
+
+
+def _patch_stored_config(monkeypatch: pytest.MonkeyPatch, raw: Any) -> None:
+    import scale_forecasting.registry.reads as reads
+
+    monkeypatch.setattr(reads, "read_run_config", lambda run_id, settings=None: raw)
+
+
+def test_a_run_id_recovers_the_config_the_run_landed_under(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.config import RunConfig
+    from scale_forecasting.registry.ids import make_run_id
+
+    run_id = make_run_id(RunConfig.model_validate(_STORED))
+    _patch_stored_config(monkeypatch, _STORED)
+    cfg = retry_run.config_for_run(run_id)
+    # Round-trip: the recovered config is the same *plan*, not merely the same fields — the run_id
+    # is the digest of the whole thing, so equality of ids is equality of everything that plans.
+    assert make_run_id(cfg) == run_id
+    assert list(cfg.models) == ["theta", "xgboost"]
+
+
+def test_a_run_with_no_stored_config_refuses_instead_of_planning_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.errors import ConfigError
+
+    _patch_stored_config(monkeypatch, None)
+    with pytest.raises(ConfigError, match="rid-missing"):
+        retry_run.config_for_run("rid-missing")
+
+
+def test_a_stored_config_that_no_longer_validates_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A run written by older code, whose schema has since moved. What the file *meant* is no longer
+    # knowable, and guessing at it is not a repair.
+    from scale_forecasting.errors import ConfigError
+
+    _patch_stored_config(monkeypatch, {"run_name": "old", "models": ["theta"]})  # no data block
+    with pytest.raises(ConfigError, match="rid-stale"):
+        retry_run.config_for_run("rid-stale")
+
+
+def test_a_stored_config_that_digests_to_a_different_run_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # make_run_id is pure, so this can only mean the header row was edited or the digest rule
+    # changed. Either way, planning from it would repair a different run under this one's name.
+    from scale_forecasting.errors import ConfigError
+
+    _patch_stored_config(monkeypatch, _STORED)
+    with pytest.raises(ConfigError, match="rid-not-the-digest"):
+        retry_run.config_for_run("rid-not-the-digest")
+
+
 # --- one decision, two call sites ----------------------------------------------
 
 

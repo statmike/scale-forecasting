@@ -51,6 +51,15 @@ print(result.views)         # the five registry views — query any of them by r
 | `sf.Forecaster(cfg)` | an in-memory `sf.RunConfig` |
 | `sf.Forecaster.from_file(path)` | a JSON config file (raises `sf.ConfigError` on a bad file) |
 | `sf.Forecaster.from_dict(data)` | an already-parsed dict (raises `sf.ConfigError` on a bad schema) |
+| `sf.Forecaster.from_run_id(run_id)` | the config a past run landed under, read back out of its registry header |
+
+`from_run_id` is for the case where you inherited a broken run and have its id but not its config
+file — most often to repair it. It refuses rather than guessing: if the registry has no stored
+config for that id, if the stored config no longer validates against this version of the package, or
+if the stored config's own digest is not the id you asked for, you get a `sf.ConfigError` naming the
+id instead of a `Forecaster` that would plan a repair you did not mean. Note what it does *not*
+change: `retry()` still takes no `run_id`. A repair is planned from a config, and an id is a way to
+obtain that config, not a second way to plan.
 
 Useful methods and properties:
 

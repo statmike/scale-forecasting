@@ -418,6 +418,57 @@ def build_retry_plan(
     )
 
 
+def config_for_run(run_id: str, *, settings: Settings | None = None) -> RunConfig:
+    """Load back the config a run landed under, so a repair can be planned from its ``run_id``.
+
+    An operator who inherits a broken run has its id — from a pager, a dashboard, a ledger row —
+    and often not its config file. The config is still the planning input (the DAG to narrow, the
+    family each model belongs to, the source table and the series subset all come from it); this is
+    a second way to *obtain* it, not a second way to plan. The run's header carries it, because the
+    config **is** the experiment record (`registry.reads.read_run_config`).
+
+    **It refuses loudly rather than planning small,** and that asymmetry is the whole design. Every
+    failure here has a plausible-looking wrong answer available — an empty config plans an empty
+    repair, a partially-valid one plans a subset — and a repair that quietly does less than the
+    operator asked for is worse than one that does nothing, because nothing is visible. So all three
+    raise `errors.ConfigError` with the id in the message:
+
+    * **no stored config** — the run never wrote a header, or is not this deployment's run;
+    * **a config that no longer validates** — the schema moved under a run written by older code, so
+      what the file *meant* is no longer knowable and guessing at it is not a repair;
+    * **a config whose own digest is not the id asked for** — `registry.ids.make_run_id` is pure, so
+      this can only mean the row was edited or the digest rule changed. Planning from it would
+      repair a *different* run under this one's name.
+    """
+    from .config import RunConfig
+    from .errors import ConfigError
+    from .registry.ids import make_run_id
+    from .registry.reads import read_run_config
+
+    raw = read_run_config(run_id, settings=settings)
+    if raw is None:
+        raise ConfigError(
+            f"no stored config for run {run_id}: the registry has no header row carrying one. "
+            "Pass the config file instead, or check the run id and the deployment."
+        )
+    try:
+        cfg = RunConfig.model_validate(raw)
+    except Exception as exc:  # pydantic ValidationError → the package's ConfigError
+        raise ConfigError(
+            f"the stored config for run {run_id} no longer validates: {exc}. It was written by a "
+            "different version of this package; repairing from a config we cannot read would "
+            "guess at what the run asked for."
+        ) from exc
+    resolved = make_run_id(cfg)
+    if resolved != run_id:
+        raise ConfigError(
+            f"the stored config for run {run_id} digests to {resolved}. make_run_id is pure, so "
+            "either the header row was edited or the digest rule has changed; planning from it "
+            "would repair a different run under this one's name."
+        )
+    return cfg
+
+
 def retry_run(
     cfg: RunConfig,
     *,

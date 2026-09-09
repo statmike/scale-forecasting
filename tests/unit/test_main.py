@@ -710,7 +710,7 @@ def test_cli_accepts_config_uri(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_cli_requires_exactly_one_config_source() -> None:
-    """Exactly one of ``--config`` / ``--config-uri`` is required (neither, or both, exits)."""
+    """Exactly one of ``--config`` / ``--config-uri`` / ``--run-id`` (neither, or both, exits)."""
     with pytest.raises(SystemExit):
         main._main(["--dry-run"])  # neither source
     with pytest.raises(SystemExit):
@@ -1017,6 +1017,62 @@ def test_cli_dispatches_retry_and_force_is_its_confirmation_gate(
 def test_retry_is_mutually_exclusive_with_the_other_verbs() -> None:
     with pytest.raises(SystemExit):
         main._main(["--config", "a.json", "--retry", "--settle"])
+
+
+def test_cli_repairs_a_run_it_only_knows_by_id(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--retry --run-id <id>``: the config comes out of the registry instead of off disk.
+
+    The operator who inherits a broken run has its id, not its config file. What this pins is that
+    the id is only a *second way to obtain* the config — once obtained, the repair is planned from
+    that config exactly as the ``--config`` path plans from its own.
+    """
+    import json
+
+    import scale_forecasting.retry_run as retry_mod
+    from scale_forecasting.config import load_config_uri
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli run-id test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+            }
+        )
+    )
+    cfg = load_config_uri(str(path))
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        retry_mod, "config_for_run", lambda rid, **kw: seen.update(asked=rid) or cfg
+    )
+    monkeypatch.setattr(
+        retry_mod, "retry_run", lambda c, **kw: seen.update(cfg=c, **kw) or "REPORT"
+    )
+    monkeypatch.setattr(main, "run", lambda *a, **k: pytest.fail("--run-id fell through to run()"))
+    monkeypatch.setattr(main, "_print_retry_report", lambda r: None)
+
+    main._main(["--run-id", "rid-inherited", "--retry", "--force"])
+    assert seen["asked"] == "rid-inherited"
+    assert make_run_id(seen["cfg"]) == make_run_id(cfg)
+    assert seen["confirm"] is True
+
+
+def test_run_id_is_a_source_like_the_others_and_only_repairs() -> None:
+    """It joins the config-source group (so exactly-one is enforced) but serves one verb.
+
+    Every other verb reaches a run through its config's digest, so an id would only be a
+    convenience there. Accepting it silently and then ignoring the verb would be the bad outcome:
+    ``--run-id X --probe`` reads like "probe X" and would probe whatever the stored config digests
+    to. It exits instead.
+    """
+    with pytest.raises(SystemExit):
+        main._main(["--run-id", "rid-1", "--config", "a.json", "--retry"])  # two sources
+    with pytest.raises(SystemExit):
+        main._main(["--run-id", "rid-1", "--probe"])  # right source, wrong verb
 
 
 def test_retry_report_preview_prints_the_decision_table_and_submits_nothing(capsys: Any) -> None:

@@ -485,7 +485,7 @@ def _print_retry_report(report: RetryReport) -> None:
 
 
 def _main(argv: list[str] | None = None) -> None:
-    """CLI: ``main (--config …|--config-uri …) [--dry-run|--stage-only|--probe|--settle|…]``."""
+    """CLI: ``main (--config …|--config-uri …|--run-id …) [--dry-run|--stage-only|--probe|…]``."""
     import argparse
     import logging
     import os
@@ -506,12 +506,18 @@ def _main(argv: list[str] | None = None) -> None:
         )
 
     p = argparse.ArgumentParser(prog="main", description="Run a forecast (Spark + BigQuery).")
-    # Accept either a local path (--config, the interactive UX) or a gs:// URI (--config-uri, what
-    # the emitted portable "main" command references — the staged config, digest == run_id). Exactly
-    # one is required; load_config_uri resolves both forms.
+    # Where the config comes from. A local path (--config, the interactive UX), a gs:// URI
+    # (--config-uri, what the emitted portable "main" command references — the staged config, digest
+    # == run_id), or the registry itself (--run-id, for an operator who inherited a broken run and
+    # has its id but not its file). Exactly one is required. They are three ways to *obtain* the
+    # config, not three ways to run: every verb below plans from a config either way.
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--config", help="path to the run config JSON")
     src.add_argument("--config-uri", help="gs:// (or local) URI of a staged run config JSON")
+    src.add_argument(
+        "--run-id",
+        help="read the config back out of an existing run's registry header (with --retry)",
+    )
     verbs = p.add_mutually_exclusive_group()
     verbs.add_argument(
         "--dry-run", action="store_true", help="resolve + estimate fanout offline; touch no GCP"
@@ -592,7 +598,17 @@ def _main(argv: list[str] | None = None) -> None:
     )
     ns = p.parse_args(argv)
 
-    cfg = load_config_uri(ns.config or ns.config_uri)
+    if ns.run_id:
+        # Restricted to --retry on purpose. The other verbs already reach a run through its config's
+        # digest, so an id would be a convenience there; here it is the *only* way in for an
+        # operator who was handed an id and nothing else, which is the case the flag exists for.
+        if not ns.retry:
+            p.error("--run-id is only supported with --retry; other verbs take --config")
+        from .retry_run import config_for_run
+
+        cfg = config_for_run(ns.run_id)
+    else:
+        cfg = load_config_uri(ns.config or ns.config_uri)
     if ns.emit_airflow or ns.emit_out:
         out = _emit_airflow(
             cfg, ns.config or ns.config_uri, out_path=ns.emit_out, with_retry=ns.with_retry

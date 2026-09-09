@@ -149,7 +149,8 @@ class Forecaster:
 
     A run driven here is identical to the CLI/Composer run — this class only wraps
     `scale_forecasting.main.run`. Construct from an in-memory `RunConfig`, or use
-    `from_file` / `from_dict`. An optional ``settings`` injects the GCP infra identity;
+    `from_file` / `from_dict`, or `from_run_id` to recover the config a run already landed under.
+    An optional ``settings`` injects the GCP infra identity;
     ``None`` resolves it from the ``SF_*`` environment at run time (the default deployments use).
 
     The lifecycle closes the loop from one object: `dry_run` (offline plan), `dag` (the planned
@@ -181,6 +182,28 @@ class Forecaster:
 
             raise ConfigError(f"invalid config: {exc}") from exc
         return cls(cfg, settings=settings)
+
+    @classmethod
+    def from_run_id(cls, run_id: str, *, settings: Settings | None = None) -> Forecaster:
+        """Build from a run that already happened, by reading its config back out of the registry.
+
+        The third way in, for the operator who inherits a broken run: they have its id, from a
+        pager or a dashboard or a ledger row, and not its config file. The run's header carries the
+        config it landed under, so this recovers a `Forecaster` identical to the one that launched
+        it — and every method here then works as usual, `retry` included.
+
+        Delegates to `retry_run.config_for_run`, which **refuses loudly rather than returning
+        something plausible**: no stored config, a config that no longer validates, or a config
+        whose own digest is not ``run_id`` each raise `errors.ConfigError` naming the id. That
+        matters most for `retry`, where every one of those failures has a wrong answer available
+        that looks like a small repair.
+
+        This is why `retry` still takes no ``run_id`` of its own. A repair is planned from a config;
+        what an id buys you is the config, not a second way to plan.
+        """
+        from .retry_run import config_for_run
+
+        return cls(config_for_run(run_id, settings=settings), settings=settings)
 
     @property
     def config(self) -> RunConfig:
@@ -540,7 +563,9 @@ class Forecaster:
         There is no ``run_id`` parameter, unlike `probe` / `cancel` / `settle`. Those inspect a run;
         this one *plans* one, and the plan comes from the config — the DAG to narrow, the family
         each model belongs to, the source table and the series subset. A different run has a
-        different config by definition, so build a `Forecaster` on that config instead.
+        different config by definition, so build a `Forecaster` on that config instead. If all you
+        have is the id, `from_run_id` reads the config back out of the run's header and gives you
+        exactly that — which is why the id is a *constructor* argument here and not a method one.
         """
         from .retry_run import retry_run
 
