@@ -68,22 +68,25 @@ DecisionMetric = Literal[
 # score), where the median is optimal. `bias` belongs here for a different reason that lands in the
 # same place: adding the mean residual drives mean error to zero by construction.
 #
-# This is what `output.point_forecast` defaults from — the pairing is a theorem, not a preference,
-# so leaving a user to discover it by reading forecasting literature would be a poor default.
+# The pairing is a theorem, not a preference, so it is what a run falls back to whenever no
+# measurement is available to do better.
 _SQUARED_ERROR_METRICS = frozenset({"rmse", "mse", "rmsse", "bias"})
 
 
 def corrected_arm_for(decision_metric: str) -> str:
     """Which *corrected* point-forecast arm a decision metric implies — `"mean"` or `"median"`.
 
-    One rule, two callers. `RunConfig._normalize` uses it to resolve `output.point_forecast=None`
-    into a concrete arm; `calibration.select_arm` uses it under `point_forecast="auto"` to know
-    which arm it is weighing `raw` against. Splitting the rule across those two would let a
-    fleetwide default and a per-series selection disagree about what "corrected" means, which is
-    the kind of drift nobody notices until a leaderboard reads oddly.
+    One rule, two callers. `calibration.select_arm` uses it under `point_forecast="auto"` to know
+    which arm it is weighing `raw` against; `RunConfig._normalize`'s warning about an explicit
+    `median` under a squared-error metric is the same rule read the other way. Splitting it across
+    those two would let a fleetwide judgement and a per-series selection disagree about what
+    "corrected" means, which is the kind of drift nobody notices until a leaderboard reads oddly.
 
-    Says nothing about whether a backtest exists — that is the caller's guard, and the two callers
-    handle its absence differently (one raises, one falls back).
+    No longer what an unset `output.point_forecast` resolves to: with a backtest present the
+    default is `auto`, which measures the choice per series rather than deducing it fleetwide. This
+    function is what `auto` falls back to when a cell has nothing to measure.
+
+    Says nothing about whether a backtest exists — that is the caller's guard.
     """
     return "mean" if decision_metric in _SQUARED_ERROR_METRICS else "median"
 
@@ -209,9 +212,16 @@ class BacktestConfig(BaseModel):
     between origins with its parameters held fixed, which measures what refitting less often costs.
     ``expanding_stale`` fits once and never tells the model what happened next, which measures how
     fast it decays untouched — the only one of the three every model can answer identically, and so
-    the one where a cross-model leaderboard is comparing like with like. Both frozen schemes also
-    score a blind control arm alongside the primary one; see `backtest.BacktestOutcome`. Widening
-    this Literal moves no existing ``run_id`` — the digest hashes dumped values, not the schema.
+    the one where a cross-model leaderboard is comparing like with like. Widening this Literal moves
+    no existing ``run_id`` — the digest hashes dumped values, not the schema.
+
+    ``control_arm`` is what lets a refit scheme answer the frozen schemes' question without becoming
+    one. Both frozen schemes score a blind arm — one fit, walked forward untouched — beside their
+    primary arm, and ``expanding`` and ``sliding`` did not, so the run most people actually make
+    could not say what refitting was buying it. The arm costs one extra fit per *cell*, not per
+    fold, plus a forecast, which is why it is affordable on the default path. On ``expanding_stale``
+    it is refused rather than ignored: that scheme's primary arm already is the blind arm.
+    See `backtest.BacktestOutcome` for what the two arms produce.
 
     One asymmetry worth knowing: ``short_series`` is a **Python-path** policy. The BigQuery-native
     models count their folds back from one global ``MAX(ds)`` rather than from each series' own last
@@ -247,6 +257,12 @@ class BacktestConfig(BaseModel):
     # Resolved by `backtest.training_width`, which both engines call.
     window: int | None = Field(default=None, gt=0)
 
+    # Also score a blind arm — one fit, never refreshed — alongside the primary one, on the schemes
+    # that refit. The frozen schemes run it regardless; this is what lets the *default* scheme
+    # answer "what would never refitting have cost me?" without becoming a different measurement.
+    # `backtest._walk_folds`.
+    control_arm: bool = False
+
     @model_validator(mode="after")
     def _check(self) -> BacktestConfig:
         if self.min_folds > self.n_folds:
@@ -263,6 +279,18 @@ class BacktestConfig(BaseModel):
             raise ValueError(
                 f"min_train_floor is only read by short_series='shrink_train', not "
                 f"'{self.short_series}'; drop it or switch the policy"
+            )
+        if self.control_arm and self.scheme == "expanding_stale":
+            # Refused rather than ignored. Under this scheme the primary arm already *is* the blind
+            # arm, so honouring the flag would write a `yhat_stale` column comparing a thing to
+            # itself and a `staleness_gap` of zero by construction — a number that reads like a
+            # measurement and is an artefact. Silently dropping it would be worse still: the run
+            # would look like it had answered the question the flag asks.
+            raise ValueError(
+                "backtest.control_arm=true with scheme='expanding_stale' has nothing to compare: "
+                "that scheme's primary arm is already the blind, never-refreshed model, so the "
+                "control arm would be the same model twice. Drop the flag, or set it on "
+                "'expanding' or 'sliding' to measure what refitting is buying you there."
             )
         return self
 
@@ -1019,13 +1047,17 @@ class RunConfig(BaseModel):
         #     two runs that both selected per series are the same run even if the cells chose
         #     differently.
         if self.output.point_forecast is None:
-            # The mean shift only exists out-of-fold, so without a backtest the honest resolution
-            # of "you want squared-error behaviour" is the correction we can actually compute.
-            resolved = (
-                corrected_arm_for(self.backtest.decision_metric)
-                if self.backtest.enabled
-                else "median"
-            )
+            # A backtest earns `auto`: every series has held-out folds, so the arm can be chosen
+            # per series+model from what actually scored better rather than assigned fleetwide from
+            # the metric. Measured at 3 folds over ten models, fleet RMSE 28.77 against 30.54 for
+            # the fleetwide rule — and the fleetwide rule's `mean` was worse there than applying no
+            # correction at all (30.05), which is the case that decided this. MAE moved the same
+            # way, 18.75 against 19.32. `corrected_arm_for` still resolves an explicit request; it
+            # is no longer what an unset field falls back to.
+            #
+            # Without a backtest there is nothing to select from, and the mean shift does not exist
+            # off-fold, so the honest resolution stays the model's own correction.
+            resolved = "auto" if self.backtest.enabled else "median"
             object.__setattr__(
                 self, "output", self.output.model_copy(update={"point_forecast": resolved})
             )

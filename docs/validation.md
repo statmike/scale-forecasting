@@ -34,7 +34,7 @@ old value goes stale by definition.
 | `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
-| `run_id_inputs` | `authored-config-only-v2` | P3 (2026-09-05) | `authored-config-only` (`a22e94c`, after the fork below), before that `+compute.profile.source` (W11a) |
+| `run_id_inputs` | `authored-config-only-v3` | 6.5+6.6 (2026-09-09) | `authored-config-only-v2` (P3, 2026-09-05), before that `authored-config-only` (`a22e94c`, after the fork below), before that `+compute.profile.source` (W11a) |
 | `fleet_sizing` | `derived-overlay-three-way-min` | P6 (2026-09-07) | `derived-overlay` (W7b `6f4638f` + W8 `be78bec`, 2026-08-31), before that `platform-defaults` |
 | `horizon_features` | `computed-at-future-dates` | `cb7d15f` (2026-08-31) | `first-rows-of-history` |
 | `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
@@ -77,6 +77,27 @@ mechanism that will ever say so.
 > The fields were batched into one break for the same reason. Adding them one per release would
 > have moved every identity six times, and the re-validation campaign that follows is the moment
 > the whole surface is proven once, together, on identities that are final.
+>
+> ### A second break landed on 2026-09-09, and the sentence above was premature
+>
+> `run_id_inputs` is now `authored-config-only-v3`. Two changes in one commit moved every identity
+> again: `backtest.control_arm` is a new field, and an unset `output.point_forecast` now resolves to
+> `auto` under a backtest instead of to the fleetwide rule the decision metric implies. Either one
+> alone would have done it — a defaulted field appears in every config's dump, and so does a
+> resolved default, so both reach the digest for configs that never mention them.
+>
+> **What this costs and what it does not.** Nothing above becomes any less proven than it already
+> was; every row was STALE from the first break and stays STALE for the same narrow reason, that the
+> `run_id` it records is a pointer no config reproduces. The cost is to the *plan*: 2026-09-05
+> claimed the identities were final and they were not, so anyone who re-ran a config between the two
+> dates got an id that is already obsolete again. If you did, the run itself is fine — re-derive its
+> id from the config with `plan_run` rather than trusting a transcript.
+>
+> **The freeze held; the enforcement moved.** `run_ids_prebreak.json` cannot catch this, because
+> after `_BREAK_LANDED` it only asserts that ids *differ* from their pre-break values, and they
+> still do. What failed the gate was `run_ids.json`, the post-break snapshot, which pins the current
+> digest of all thirty-one shipped configs. That is the file that guards the surface from here on,
+> and it is the one a future addition has to answer to.
 
 `native_source_pin` governs **native BigQuery table** reads on the BQML `CREATE MODEL` path only;
 Iceberg sources were already un-pinned before the change, so entries that read Iceberg do not

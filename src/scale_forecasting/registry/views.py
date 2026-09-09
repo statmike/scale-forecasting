@@ -84,6 +84,9 @@ Five views, matched to the questions a run prompts:
   frozen ones. Under the two refit schemes every row reads ``per_fold`` and the column adds
   nothing, which is the correct amount for it to add. ``mean_staleness_gap`` rides along on the
   same rows: what that cohort loses, in the run's decision metric, when the model is never refit.
+  It is populated on the frozen schemes and on any refit scheme that set
+  ``backtest.control_arm``, so a ``per_fold`` row carrying a gap is not a contradiction — it is a
+  refit run that also scored the never-refreshed counterfactual.
 
 - ``v_model_leaderboard_comparable`` — *which model won, holding the question fixed?* The same
   ranking as ``v_model_leaderboard``, rebuilt so the numbers are comparable across models rather

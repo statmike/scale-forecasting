@@ -140,6 +140,7 @@ for HPO and learned ensembles.
 | `min_train_floor` | `int \| null` | `null` | `> 0` | The hard training-length minimum `shrink_train` may not cross. **Required with that policy, and rejected without it.** |
 | `gap` | `int` | `0` | `≥ 0` | The embargo: observations discarded between train and validation, for a known reporting lag. See [The embargo](#the-embargo-gap) below. |
 | `window` | `int \| null` | `null` | `> 0` | A fixed `sliding` training width, decoupled from `min_train`. Defaults to `min_train`. |
+| `control_arm` | `bool` | `false` | rejected on `expanding_stale` | Also score a blind, never-refreshed arm on a refit scheme. See [The control arm](#the-control-arm) below. |
 
 **`scheme` — how the training window moves** ([`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py)).
 Folds are anchored from the **end** of each series: the latest fold validates on the final `horizon`
@@ -317,10 +318,26 @@ when they agree, and `mixed` when they do not. A blend is only as frozen as its 
 member, and `mixed` is how you see that a consensus sitting on an `expanding_frozen` leaderboard
 is not comparable to the single-model rows around it.
 
+<a id="the-control-arm"></a>
+### The control arm — what is the refitting buying you?
+
 Both frozen schemes additionally score a **control arm**: the same fit walked forward blind, on the
 same dates. It costs a forecast, not a fit. It lands in `backtest_oof.yhat_stale` per row, and is
 summarised per cell as `forecast_metadata.staleness_gap` — the blind arm's loss minus the primary
 arm's, under this run's `decision_metric`, positive when never refreshing the model hurts.
+
+Set **`backtest.control_arm: true`** to get that same second arm on `expanding` or `sliding`. The
+question — *how much of my accuracy is the refitting rather than the model?* — is one the default
+scheme could not answer before: asking it meant switching to a frozen scheme, which changes what
+the primary arm measures, so you got the counterfactual and lost the number you came for. With the
+flag, the primary arm is untouched (`backtest_refit` still reads `per_fold`, and not one shipped
+number moves) and `yhat_stale` is simply filled in beside it.
+
+It costs **one extra fit per cell**, on the oldest fold's window, plus a forecast per fold — not a
+fit per fold — which is what makes it affordable on the path most runs take. A model with no blind
+seam keeps its scheme and leaves the column NULL. On `expanding_stale` the flag is **refused**, not
+ignored: that scheme's primary arm already *is* the blind model, so the control arm would be the
+same model twice and the gap would be zero by construction.
 
 ### The fields that arrived ahead of their code
 
@@ -408,7 +425,7 @@ What the number in `yhat` actually *is*. One field.
 
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
-| `point_forecast` | `"raw"` \| `"median"` \| `"mean"` \| `"auto"` | derived from `backtest.decision_metric` | Which arm ships in `yhat`. |
+| `point_forecast` | `"raw"` \| `"median"` \| `"mean"` \| `"auto"` | `"auto"` with a backtest, `"median"` without | Which arm ships in `yhat`. |
 
 Every model emits one number per future date, so something decides what that number is:
 
@@ -428,14 +445,22 @@ Every model emits one number per future date, so something decides what that num
 whatever you set here, so the choice is never destructive — you can re-score a finished run on the
 other arm without re-fitting anything.
 
-**The default is derived, not fixed.** Leave `point_forecast` unset and it resolves from
-`backtest.decision_metric`: `mean` for the squared-error metrics (`rmse`, `mse`, `rmsse`, `bias`)
-when a backtest is enabled, `median` otherwise. The pairing is a theorem rather than a preference —
-the median minimises absolute error and the mean minimises squared error — so shipping a median
-point forecast to a run scored on RMSE is a mismatch, and setting that combination explicitly logs a
-warning saying so. The resolution happens at parse time and the concrete arm is what lands in the
-serialized config, so the `run_id` records which arm was computed rather than an instruction to
-decide later.
+**A backtest earns `auto`.** Leave `point_forecast` unset and a run with backtesting on resolves to
+`auto` — the arm is measured per series and model rather than assigned to the whole fleet. Without a
+backtest there is nothing to measure from, so it resolves to `median`. The resolution happens at
+parse time and lands in the serialized config, so the `run_id` records what was asked for rather
+than an instruction to decide later; `auto` stays as written, because its answer is per cell and no
+single arm can stand for it.
+
+**Why not the fleetwide rule?** Because it is a theorem about the *expected* case and the fleet is
+not the expected case. The pairing is real — the median minimises absolute error, the mean minimises
+squared error — and it is still what an `auto` cell falls back to when it has too few folds to
+choose, and still what warns you if you pair an explicit `median` with a squared-error metric. But
+measured at 3 folds across ten models, per-series selection landed fleet RMSE at 28.77 against
+30.54 for the fleetwide rule, and MAE at 18.75 against 19.32. The case that settled it: under a
+squared-error metric the fleetwide rule picks `mean`, and `mean` scored **worse than applying no
+correction at all** (30.54 against 30.05). A default that is beaten by doing nothing is not a
+default.
 
 **Why this field exists at all.** For a long time the project decided this by accident: ten of the
 sixteen models built their band from residual quantiles, the frame assembler took the 0.5 quantile

@@ -659,7 +659,7 @@ def _shifted(n: int, at: int, jump: float) -> pd.DataFrame:
 
 
 @pytest.mark.parametrize("scheme", ["expanding", "sliding"])
-def test_a_refit_scheme_says_so_and_runs_no_control_arm(scheme: str) -> None:
+def test_a_refit_scheme_says_so_and_runs_no_control_arm_unless_asked(scheme: str) -> None:
     oof, _, outcome = backtest_cell(
         _random_walk(200), _real_factory("naive_mean", 5), _scheme_cfg(scheme)
     )
@@ -668,6 +668,114 @@ def test_a_refit_scheme_says_so_and_runs_no_control_arm(scheme: str) -> None:
     # Nothing to compare a fresh fit against: there is no second arm, so no gap and no column.
     assert outcome.staleness_gap is None
     assert oof["yhat_stale"].isna().all()
+
+
+# --- backtest.control_arm: the frozen schemes' question, asked on a scheme that refits --------
+
+
+def _control_cfg(scheme: str) -> RunConfig:
+    return _cfg(
+        {
+            "scheme": scheme,
+            "n_folds": 3,
+            "horizon": 5,
+            "step": 5,
+            "min_train": 20,
+            "control_arm": True,
+        }
+    )
+
+
+@pytest.mark.parametrize("scheme", ["expanding", "sliding"])
+def test_the_control_arm_fills_the_column_a_refit_scheme_leaves_empty(scheme: str) -> None:
+    """Same rows, same actuals, one extra number: what a model that was never refit predicted.
+
+    Without this the run most people actually make could not answer "is the refitting earning its
+    keep?" — the only way to ask was to switch to a frozen scheme, which changes what the primary
+    arm measures and so answers a different question.
+    """
+    oof, _, outcome = backtest_cell(
+        _random_walk(200), _real_factory("naive_mean", 5), _control_cfg(scheme)
+    )
+
+    assert oof["yhat_stale"].notna().all()
+    assert outcome.staleness_gap is not None
+    # The scheme is untouched: the primary arm is still a fresh fit per fold, and says so.
+    assert outcome.refit_mode == "per_fold"
+
+
+def test_the_control_arm_costs_one_extra_fit_for_the_cell_not_one_per_fold() -> None:
+    """The affordability claim, stated as a count — it is why this can be on the default path."""
+    inner, fits = _real_factory("naive_mean", 5), 0
+
+    def counting() -> BaseModel:
+        nonlocal fits
+        fits += 1
+        return inner()
+
+    _, fold_metrics, _ = backtest_cell(_random_walk(200), counting, _control_cfg("expanding"))
+    assert len(fold_metrics) == 3
+    assert fits == 4  # three primary fits, one blind
+
+
+def test_the_control_arm_is_anchored_on_the_oldest_fold_like_the_frozen_schemes() -> None:
+    """One anchor across all four schemes, so `yhat_stale` means the same thing in every run.
+
+    Fold 0 is the window the blind model was fit on, so the two arms have not diverged there; by
+    the last fold the primary arm has been refit twice on data the blind one never saw.
+    """
+    oof, _, _ = backtest_cell(
+        _random_walk(200), _real_factory("naive_mean", 5), _control_cfg("expanding")
+    )
+
+    fold0 = oof[oof["fold_id"] == 0]
+    assert np.allclose(fold0["yhat"].to_numpy(), fold0["yhat_stale"].to_numpy())
+    last = oof[oof["fold_id"] == oof["fold_id"].max()]
+    assert not np.allclose(last["yhat"].to_numpy(), last["yhat_stale"].to_numpy())
+
+
+def test_the_gap_is_positive_on_a_refit_scheme_when_the_series_moves() -> None:
+    """The same diagnostic the frozen schemes earn, now answerable from the default scheme."""
+    series = _shifted(200, at=188, jump=60.0)
+    _, _, outcome = backtest_cell(
+        series, _real_factory("naive_moving_average", 5), _control_cfg("expanding")
+    )
+
+    assert outcome.staleness_gap is not None
+    assert outcome.staleness_gap > 0.0
+
+
+def test_a_model_with_no_blind_seam_loses_the_diagnostic_and_keeps_its_scheme() -> None:
+    """The asymmetry with the frozen schemes, and it is the right one.
+
+    There, a missing seam means the requested scheme was not honoured, so `refit_mode` degrades to
+    `unsupported` and the leaderboard can see it. Here the scheme *is* honoured — the primary arm
+    is a fresh fit per fold either way — and only the optional second column is missing. Reporting
+    `unsupported` would tell a reader the run had fallen back to something it never left.
+    """
+    oof, fold_metrics, outcome = backtest_cell(_series(200), _factory(), _control_cfg("expanding"))
+
+    assert len(fold_metrics) == 3
+    assert outcome.refit_mode == "per_fold"
+    assert oof["yhat_stale"].isna().all()
+    assert outcome.staleness_gap is None
+
+
+def test_the_control_arm_changes_nothing_about_the_primary_arm() -> None:
+    """The flag adds a column; it must not move a single shipped number.
+
+    If it did, turning the diagnostic on would change the answer it is diagnosing — and every
+    leaderboard would depend on whether someone had asked for the counterfactual.
+    """
+    plain, _, _ = backtest_cell(
+        _random_walk(200), _real_factory("naive_mean", 5), _scheme_cfg("expanding")
+    )
+    with_arm, _, _ = backtest_cell(
+        _random_walk(200), _real_factory("naive_mean", 5), _control_cfg("expanding")
+    )
+
+    shared = [c for c in OOF_COLUMNS if c != "yhat_stale"]
+    pd.testing.assert_frame_equal(plain[shared], with_arm[shared])
 
 
 def test_a_frozen_scheme_fits_twice_for_the_whole_cell_not_once_per_fold() -> None:

@@ -27,7 +27,10 @@ different numbers rather than cheaper approximations of one number:
 
 The frozen schemes also run a **control arm**: the same fitted model walked forward blind, scored
 on the same dates, written to ``yhat_stale`` and summarised as `BacktestOutcome.staleness_gap`. It
-is a second ``predict`` rather than a second fit, so the comparison costs a forecast.
+is a second ``predict`` rather than a second fit, so the comparison costs a forecast. The refit
+schemes can ask for the same arm with ``backtest.control_arm``, which does cost them one extra fit
+per cell — that is what makes "what is refitting buying me?" answerable on the default scheme
+without switching to a scheme that answers a different question.
 
 The no-leakage invariant is ``train_end + gap == val_start`` for every fold: training data strictly
 precedes the validation window, and at the default ``gap`` of 0 they are adjacent. Raising ``gap``
@@ -92,9 +95,10 @@ OOF_COLUMNS: tuple[str, ...] = (
     "cutoff_date",
     "horizon_step",
     # The control arm: what the *blind* model predicted for this same date — one fit, never told
-    # what happened after it. NULL on the refit schemes (nothing to compare) and on
-    # ``expanding_stale`` (the primary arm already *is* the blind arm). Appended rather than slotted
-    # next to ``yhat_adjusted`` so this tuple keeps the same order as the table it writes to.
+    # what happened after it. Always present on the frozen schemes, present on a refit scheme when
+    # ``backtest.control_arm`` asks for it, and NULL on ``expanding_stale`` (the primary arm already
+    # *is* the blind arm). Appended rather than slotted next to ``yhat_adjusted`` so this tuple
+    # keeps the same order as the table it writes to.
     "yhat_stale",
 )
 
@@ -126,9 +130,10 @@ class BacktestOutcome:
     ``staleness_gap`` is ``loss(blind arm) - loss(primary arm)`` under the run's
     ``decision_metric``, both restated through `metrics.loss_of` so the sign means the same thing
     for ``coverage`` and ``bias`` as it does for ``wape``. Positive is the ordinary reading: never
-    refreshing the model costs you that much accuracy. ``None`` whenever no control arm ran —
-    which is every refit scheme, ``expanding_stale`` (whose primary arm is the control arm), and
-    any cell where the metric came back non-finite.
+    refreshing the model costs you that much accuracy. ``None`` whenever no control arm ran — a
+    refit scheme that did not ask for one (``backtest.control_arm``), a model with no blind seam,
+    ``expanding_stale`` (whose primary arm is the control arm), and any cell where the metric came
+    back non-finite.
 
     A cell that achieved zero folds still reports the nominal mode for its scheme; nothing was
     scored, and ``backtest_status`` on the same row already says so.
@@ -615,7 +620,8 @@ def _walk_folds(
     Freezing is anchored on ``folds[0]`` — the **oldest** surviving fold. Its training window is a
     prefix of every later fold's, so a model fit there has seen nothing any fold is scored on.
     Anchoring on the newest fold instead would be cheaper to write and would leak the future into
-    every earlier score.
+    every earlier score. The same anchor serves ``backtest.control_arm`` on the refit schemes, so a
+    blind arm means one thing across all four schemes.
 
     A model that declares `supports_recondition` can still refuse a particular series at runtime —
     a state-space filter can fail to converge on the extension. That drops the whole cell to
@@ -626,7 +632,24 @@ def _walk_folds(
     """
     scheme, gap = cfg.backtest.scheme, cfg.backtest.gap
     if scheme in ("expanding", "sliding"):
-        return [(_fit_predict(model_factory, y, X, f, gap), None) for f in folds], "per_fold"
+        primaries = [_fit_predict(model_factory, y, X, f, gap) for f in folds]
+        if not cfg.backtest.control_arm:
+            return [(p, None) for p in primaries], "per_fold"
+        # The control arm on a refit scheme: one extra fit for the whole cell, on the oldest fold's
+        # window, then a forecast per fold from a model nobody ever refreshed. What it buys is the
+        # counterfactual the frozen schemes get for free — how much of this cell's accuracy is the
+        # refitting rather than the model. A model with no blind seam still gets its primary arm
+        # and simply reports no gap; unlike the frozen schemes, the scheme itself is unaffected, so
+        # ``refit_mode`` stays ``"per_fold"`` and is not downgraded to ``"unsupported"``.
+        base = folds[0]
+        control = model_factory()
+        if not control.supports_extrapolate:
+            return [(p, None) for p in primaries], "per_fold"
+        control.fit(
+            y.iloc[base.train_start : base.train_end], _cut(X, base.train_start, base.train_end)
+        )
+        blind = [_predict_blind(control, X, base, f, gap) for f in folds]
+        return list(zip(primaries, blind, strict=True)), "per_fold"
 
     base = folds[0]
     blind = model_factory()

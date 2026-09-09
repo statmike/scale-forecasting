@@ -681,31 +681,71 @@ def test_profile_is_part_of_the_run_id() -> None:
     assert baseline != profiled
 
 
+# --- backtest.control_arm — the blind arm on a scheme that refits ------------------
+
+
+def test_the_control_arm_is_off_by_default() -> None:
+    """It costs a fit per cell, so it is opt-in — and every existing run must keep its shape."""
+    assert RunConfig(**_minimal_dict(backtest={"enabled": True})).backtest.control_arm is False
+
+
+@pytest.mark.parametrize("scheme", ["expanding", "sliding", "expanding_frozen"])
+def test_the_control_arm_is_accepted_on_every_scheme_that_can_use_it(scheme: str) -> None:
+    cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "scheme": scheme, "control_arm": 1}))
+    assert cfg.backtest.control_arm is True
+
+
+def test_the_control_arm_is_refused_on_the_scheme_whose_primary_arm_it_already_is() -> None:
+    """`expanding_stale` fits once and never refreshes, so the control arm is the same model twice.
+
+    Refused rather than ignored: a run that silently dropped the flag would look like it had
+    answered the question, and a run that honoured it would write a `staleness_gap` of zero by
+    construction — a number that reads like a measurement.
+    """
+    with pytest.raises(ValidationError, match="has nothing to compare"):
+        RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": True, "scheme": "expanding_stale", "control_arm": True}
+            )
+        )
+
+
+def test_the_control_arm_is_part_of_the_run_id() -> None:
+    """It changes what the run computes and what lands in `yhat_stale`, so it is a different run."""
+    from scale_forecasting.registry.ids import make_run_id
+
+    base = _minimal_dict(backtest={"enabled": True})
+    with_arm = _minimal_dict(backtest={"enabled": True, "control_arm": True})
+    assert make_run_id(RunConfig(**base)) != make_run_id(RunConfig(**with_arm))
+
+
 # --- output.point_forecast — the arm resolution ----------------------------------
 
 
-def test_point_forecast_defaults_to_median_for_absolute_error_metrics() -> None:
-    cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": "wape"}))
-    assert cfg.output.point_forecast == "median"
+def test_a_backtest_earns_auto_whatever_the_decision_metric_is() -> None:
+    """A run with held-out folds can measure the arm per series instead of deducing it fleetwide.
 
-
-def test_point_forecast_defaults_to_mean_for_squared_error_metrics() -> None:
-    """The pairing is a theorem: the mean minimises squared error, the median absolute error."""
-    for metric in ("rmse", "mse", "rmsse", "bias"):
+    The fleetwide rule is a theorem about which arm is optimal *in expectation*; `auto` asks each
+    series+model which one actually scored better on its own folds. Measured at 3 folds over ten
+    models, fleet RMSE 28.77 against 30.54 — and under the fleetwide rule the `mean` it picks for
+    a squared-error metric was worse there than applying no correction at all.
+    """
+    for metric in ("wape", "mae", "rmse", "mse", "rmsse", "bias"):
         cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": metric}))
-        assert cfg.output.point_forecast == "mean", metric
+        assert cfg.output.point_forecast == "auto", metric
 
 
-def test_squared_error_metric_without_a_backtest_resolves_to_median_not_mean() -> None:
-    """The mean shift only exists out-of-fold, so 'mean' is not an available default here."""
-    cfg = RunConfig(**_minimal_dict(backtest={"enabled": False, "decision_metric": "rmse"}))
-    assert cfg.output.point_forecast == "median"
+def test_without_a_backtest_the_default_falls_back_to_the_fleetwide_rule() -> None:
+    """Nothing to select from, and the mean shift does not exist off-fold — so: the median."""
+    for metric in ("wape", "rmse"):
+        cfg = RunConfig(**_minimal_dict(backtest={"enabled": False, "decision_metric": metric}))
+        assert cfg.output.point_forecast == "median", metric
 
 
 def test_the_resolved_arm_is_what_lands_in_the_serialized_config() -> None:
-    """`None` must not survive into the run_id: the record has to say which arm was computed."""
+    """`None` must not survive into the run_id: the record has to say which arm was asked for."""
     cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": "rmse"}))
-    assert cfg.model_dump()["output"]["point_forecast"] == "mean"
+    assert cfg.model_dump()["output"]["point_forecast"] == "auto"
 
 
 def test_the_arm_is_part_of_the_run_id() -> None:
@@ -799,17 +839,28 @@ def test_auto_does_not_warn_about_the_decision_metric(
     assert "leaderboard rewards" not in caplog.text
 
 
-def test_corrected_arm_for_is_the_single_rule_both_callers_read() -> None:
-    """Config resolution and per-cell selection must agree on what "corrected" means.
+def test_corrected_arm_for_is_the_single_rule_every_caller_reads(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The config's warning and an `auto` cell's fallback must agree on what "corrected" means.
 
-    Two copies of this rule would let a fleetwide default and an `auto` cell disagree — the run
-    would compute a median shift and grade it under a column the rest of the run reads as the mean
-    one, and nothing would say so.
+    Two copies of this rule would let them disagree — a cell would compute a median shift and grade
+    it under a column the rest of the run reads as the mean one, and nothing would say so.
     """
     from scale_forecasting.config import corrected_arm_for
 
     assert corrected_arm_for("wape") == "median"
     assert corrected_arm_for("rmse") == "mean"
-    for metric in ("wape", "rmse", "mse", "mae"):
-        cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": metric}))
-        assert cfg.output.point_forecast == corrected_arm_for(metric), metric
+    # The warning path is the config's own reading of the rule: an explicit `median` is flagged for
+    # exactly the metrics this function maps to `mean`, and for no others.
+    for metric in ("wape", "mae", "rmse", "mse", "rmsse", "bias"):
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            RunConfig(
+                **_minimal_dict(
+                    backtest={"enabled": True, "decision_metric": metric},
+                    output={"point_forecast": "median"},
+                )
+            )
+        warned = "not the one the leaderboard rewards" in caplog.text
+        assert warned == (corrected_arm_for(metric) == "mean"), metric
