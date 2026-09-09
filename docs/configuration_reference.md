@@ -135,9 +135,9 @@ for HPO and learned ensembles.
 | `step` | `int` | `28` | `> 0` | Step between folds. |
 | `min_train` | `int` | `180` | `> 0` | Minimum training length. |
 | `decision_metric` | see below | `"wape"` | — | Metric folds are judged on. |
-| `short_series` | `"adapt"` \| `"skip"` \| `"error"` | `"adapt"` | — | **Accepted, not yet honoured** — the code always adapts, whatever this says. See below. |
-| `min_folds` | `int` | `1` | `≥ 1` | **Accepted, not yet honoured.** The floor `adapt` may shrink `n_folds` to. |
-| `min_train_floor` | `int \| null` | `null` | `> 0` | **Accepted, not yet honoured.** A hard training-length minimum adaptation may not cross. |
+| `short_series` | `"adapt"` \| `"overlap"` \| `"shrink_train"` \| `"skip"` \| `"error"` | `"adapt"` | — | What a series too short for the fold grid gets. See [Short series](#short-series) below. |
+| `min_folds` | `int` | `1` | `≥ 1`, `≤ n_folds` | Fewer achievable folds than this and the series is left unscored rather than weakly scored. |
+| `min_train_floor` | `int \| null` | `null` | `> 0` | The hard training-length minimum `shrink_train` may not cross. **Required with that policy, and rejected without it.** |
 | `gap` | `int` | `0` | `≥ 0` | The embargo: observations discarded between train and validation, for a known reporting lag. See [The embargo](#the-embargo-gap) below. |
 | `window` | `int \| null` | `null` | `> 0` | A fixed `sliding` training width, decoupled from `min_train`. Defaults to `min_train`. |
 
@@ -222,12 +222,49 @@ and then discards the first `gap` of them before joining to actuals, so `horizon
 same thing on both engines: position 1 is the first *scored* point, not the first point the model
 emitted.
 
-**`short_series` — what it will eventually select.** The code now always adapts, so the `adapt`
-default finally describes what happens; the field is still inert because the other two branches are
-unreachable and adaptation ignores `min_folds` and `min_train_floor`. Once implemented: `adapt`
-shrinks the grid down to `min_folds` and never trains on less than `min_train_floor`; `skip` leaves
-the series out of the backtest entirely; `error` restores the old fail-the-cell behaviour for anyone
-who wants a hard stop.
+<a id="short-series"></a>
+### Short series
+
+A panel of real series is ragged, so some of them will not hold the fold grid you asked for. There
+is no universally right answer to that, because every answer gives something up. `short_series`
+is where you say which thing you would rather lose, and the five policies are listed here in the
+order of how much they cost you:
+
+| `short_series` | What it does for a series too short for the grid | What you give up |
+|----------------|--------------------------------------------------|------------------|
+| `adapt` (default) | Scores it on the folds it *can* support, dropping the oldest ones. | **Folds.** A short series is ranked on thinner evidence than a long one. |
+| `overlap` | Narrows `step` until all `n_folds` fit — the widest step that works, so the least overlap that works. | **Fold independence.** The validation windows share observations, so the fold scores are no longer independent evidence. |
+| `shrink_train` | Lowers `min_train` — as little as the shortfall demands — until all `n_folds` fit, never below `min_train_floor`. | **Training history.** Early folds are fit on less data than you said a model needs. |
+| `skip` | Leaves the series out of the backtest entirely. | **The series.** It is still fit and forecast; it just never appears on a leaderboard. |
+| `error` | Refuses the whole run before it starts. | **The run.** Nothing is produced until you change the geometry or the policy. |
+
+Three things are worth knowing about how these behave together.
+
+- **`min_folds` is the give-up floor, and it judges the result, not the starting point.** A rescue
+  policy gets to try first; if what it achieved is still below `min_folds`, the series is left
+  unscored rather than ranked on evidence too thin to rank it. The default of `1` is exactly
+  today's behaviour — score anything that supports at least one fold.
+- **A rescue is a rescue, not a rewrite.** `overlap` and `shrink_train` change nothing at all for a
+  series that was long enough already, so a panel of mixed lengths still lays its long series out
+  the way `adapt` would.
+- **Nothing here can cost you a forecast.** Backtesting scores a model; it does not produce the
+  forecast. Every policy except `error` still fits and forecasts the series, and `error` refuses
+  at plan time — before any cell exists — rather than failing cells one at a time. A series that
+  ends up unscored gets `backtest_status = 'unscored'` and a `backtest_note` naming the policy that
+  left it that way; its forecast is written either way.
+
+When a policy adjusts the geometry, the cell's `backtest_status` is `reduced` and its
+`backtest_note` names the policy and the trade. `reduced` means "not the geometry the config asked
+for", so `overlap` and `shrink_train` produce the otherwise-impossible pair of `reduced` with
+`n_folds_achieved` equal to the requested `n_folds` — the signal that the full fold count was
+bought with something other than folds.
+
+**`short_series` is a Python-path policy.** The BigQuery-native models count their folds back from
+a single global `MAX(ds)` in SQL, so there is no per-series grid for a policy to adapt. `error` is
+the exception, because it is checked against the panel at submit time rather than per cell — one
+aggregation before anything is provisioned — so it stops a native run too. Each Python engine
+re-checks it on the panel it read, which is what covers the launch paths that do not go through
+the submit verb: a staged config run from an emitted command, or a Composer task.
 
 ### Backtest schemes
 
@@ -260,19 +297,18 @@ same dates. It costs a forecast, not a fit. It lands in `backtest_oof.yhat_stale
 summarised per cell as `forecast_metadata.staleness_gap` — the blind arm's loss minus the primary
 arm's, under this run's `decision_metric`, positive when never refreshing the model hurts.
 
-### Fields that are accepted but not yet honoured
+### The fields that arrived ahead of their code
 
-`short_series`, `min_folds` and `min_train_floor` all validate today and change nothing today. They
-were added to the schema ahead of the code that reads them, in one commit, because a new config
-field moves every `run_id` that has ever been recorded — landing them together costs one identity
-break instead of seven. (`gap`, `window` and `model_params` landed in that same commit and *are* now
-honoured; they are documented above and below. So is the `expanding_frozen` scheme.)
+`short_series`, `min_folds`, `min_train_floor`, `gap` and `window` — along with the frozen schemes
+and `model_params` — were all added to the schema in a single commit, before anything read them.
+That was deliberate. A new config field moves every `run_id` that has ever been recorded, so
+landing them together cost one identity break instead of seven.
 
-Setting one is therefore not harmless even though it is inert: it changes your run's `run_id`, so a
-config that sets `min_folds: 2` is a different run from the same config without it, producing
-identical numbers. `tests/unit/test_inert_config_fields.py` holds both halves of that claim, and
-will fail on the day one of these fields is wired up — at which point this section is what needs
-correcting.
+**All of them are honoured now**, and they are documented above alongside every other field; there
+is no longer an inert corner of this schema. What survives from that decision is the property that
+made it worth making: setting any one of them changes your `run_id`.
+`tests/unit/test_declared_ahead_fields.py` keeps watching for that, because a field that quietly
+left the digest would have to be paid for a second time to put it back.
 
 **`decision_metric` — what folds are judged on** (definitions in
 [`metrics.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics.py); `err = yhat − y_true`). This single choice drives

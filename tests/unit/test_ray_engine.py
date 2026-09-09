@@ -401,6 +401,66 @@ def test_limit_series_matches_spark_ordered_subset() -> None:
     assert sorted(out["ts_id"].unique()) == ["s1", "s2"]  # s1,s2 ordered-first, s3 dropped
 
 
+# --- offline: the short_series="error" backstop --------------------------------
+
+
+def _bt(policy: str) -> RunConfig:
+    """A config whose fold grid needs 20 observations: min_train 12 + horizon 4 + one step of 4."""
+    return _cfg(
+        backtest={
+            "enabled": True,
+            "short_series": policy,
+            "n_folds": 2,
+            "horizon": 4,
+            "step": 4,
+            "min_train": 12,
+        }
+    )
+
+
+def test_the_backstop_refuses_the_job_when_a_series_cannot_hold_the_grid() -> None:
+    """Second line of defence: the submit-time pre-flight is not on every path into this engine."""
+    from scale_forecasting.errors import ConfigError
+
+    # Two long series and one short one — `_panel` numbers its ids from zero, so the short frame is
+    # relabelled rather than concatenated straight in, which would merge it into s0.
+    short = _panel(1, rows_each=8).assign(ts_id="s_short")
+    panel = pd.concat([_panel(2, rows_each=30), short], ignore_index=True)
+    with pytest.raises(ConfigError, match="1 of 3 series"):
+        ray_engine._assert_source_supports_folds(panel, _bt("error"))
+
+
+def test_the_backstop_passes_a_panel_that_holds_the_grid() -> None:
+    assert ray_engine._assert_source_supports_folds(_panel(3, rows_each=30), _bt("error")) is None
+
+
+@pytest.mark.parametrize("policy", ["adapt", "overlap", "skip"])
+def test_the_backstop_stands_aside_for_every_policy_that_already_decided(policy: str) -> None:
+    """The other four policies handle a short series per-cell; there is nothing here to refuse."""
+    short = _panel(1, rows_each=8)
+    assert ray_engine._assert_source_supports_folds(short, _bt(policy)) is None
+
+
+def test_the_backstop_counts_the_configured_id_column_not_a_hardcoded_one() -> None:
+    """It reads the panel the run will fan out, so it has to read it the way the config names it."""
+    from scale_forecasting.errors import ConfigError
+
+    panel = _panel(1, rows_each=8).rename(columns={"ts_id": "series_key"})
+    cfg = _cfg(
+        data={"source_table": "source_series_native", "horizon": 4, "ts_id_col": "series_key"},
+        backtest={
+            "enabled": True,
+            "short_series": "error",
+            "n_folds": 2,
+            "horizon": 4,
+            "step": 4,
+            "min_train": 12,
+        },
+    )
+    with pytest.raises(ConfigError, match="1 of 1 series"):
+        ray_engine._assert_source_supports_folds(panel, cfg)
+
+
 # --- offline: series_limit as a read-side row_restriction ----------------------
 
 

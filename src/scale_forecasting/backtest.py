@@ -41,10 +41,15 @@ Each fold is scored on the *intervals the model already returned*, not on the po
 alone — so ``coverage``, ``pinball``, ``interval_score`` and ``interval_width`` are real numbers on
 the Python path rather than the NaNs they were for every run before this.
 
-Public surface: ``Fold``, ``BacktestOutcome``, ``OOF_COLUMNS``, ``achievable_folds``,
-``holdout_fold_id``,
-``hpo_scoring_claim``, ``make_folds``, ``fit_rows``, ``suggest_min_train``, ``training_width``,
-``training_window``, ``backtest_cell``.
+``backtest.short_series`` decides what a series too short for the requested grid gets, and each
+branch gives up something different — folds (``adapt``), fold independence (``overlap``), training
+history (``shrink_train``), the series (``skip``) or the run (``error``). `resolve_geometry` is the
+one place that reasoning lives; `make_folds` reads its answer and never re-derives it.
+
+Public surface: ``Fold``, ``FoldGeometry``, ``BacktestOutcome``, ``OOF_COLUMNS``,
+``achievable_folds``, ``assert_panel_supports_folds``, ``holdout_fold_id``,
+``hpo_scoring_claim``, ``make_folds``, ``fit_rows``, ``resolve_geometry``, ``suggest_min_train``,
+``training_width``, ``training_window``, ``backtest_cell``.
 """
 
 from __future__ import annotations
@@ -213,32 +218,142 @@ def training_width(cfg: RunConfig) -> int:
     return bt.window if bt.window is not None else bt.min_train
 
 
+@dataclass(frozen=True)
+class FoldGeometry:
+    """The grid one series actually gets, after ``backtest.short_series`` has had its say.
+
+    ``step`` and ``min_train`` are the *effective* values, which differ from the authored ones only
+    under the two policies that buy folds by spending something: ``overlap`` spends the step,
+    ``shrink_train`` spends the training requirement. ``note`` says what was spent, in the words the
+    cell writes to ``forecast_metadata.backtest_note``; ``None`` means the geometry is exactly what
+    the config asked for.
+    """
+
+    n_achieved: int
+    step: int
+    min_train: int
+    note: str | None
+
+
+def _folds_at(n: int, cfg: RunConfig, *, step: int, min_train: int) -> int:
+    """How many folds ``n`` observations hold at this step and floor — the arithmetic only.
+
+    Fold ``k`` validates on ``[n - horizon - (n_folds-1-k)*step, ...)``, so the binding constraint
+    is the *oldest* surviving fold's training end landing at or after ``min_train``. The embargo
+    eats into the same slack the folds do, because it consumes history no fold may train on.
+    """
+    bt = cfg.backtest
+    slack = n - bt.horizon - bt.gap - min_train
+    if slack < 0:
+        return 0
+    return min(bt.n_folds, slack // step + 1)
+
+
+def resolve_geometry(n: int, cfg: RunConfig) -> FoldGeometry:
+    """Apply ``backtest.short_series`` to a series of ``n`` observations (pure).
+
+    A series long enough for the full grid never reaches a policy branch — the policies exist only
+    for the shortfall, and each one answers it by giving up something different:
+
+    * ``adapt`` (the default) gives up **folds**. The geometry is held exactly and the *oldest*
+      folds are dropped, so the series is still scored on the most recent window it can reach, on
+      the same dates as its longer neighbours.
+    * ``overlap`` gives up **fold independence**. The fold count is held and the step shrinks to buy
+      it, so validation windows share observations. That is a real technique and a real cost: the
+      per-fold scores are correlated, so their mean is more confident than the evidence warrants.
+      The step is reduced only as far as it has to be, so the overlap is the least that works.
+    * ``shrink_train`` gives up **training history**. The count and the step are held and the
+      training requirement drops instead, never past ``min_train_floor`` (which is why that field is
+      required with this mode). Also reduced only as far as needed.
+    * ``skip`` gives up **the series**. Anything short of the full grid is left unscored, so every
+      series on the leaderboard was measured on identical geometry — the comparable slice, enforced
+      when the run happens rather than reconstructed when it is read.
+    * ``error`` gives up **the run**, and does it somewhere else: `assert_panel_supports_folds`
+      checks the panel before any cell starts. Here it behaves as ``adapt``, deliberately, so that
+      a cell reached by any other path still forecasts — a shortfall must never cost a forecast.
+
+    ``min_folds`` is the give-up floor the first three respect. Below it the series is left unscored
+    rather than ranked on evidence too thin to rank it — one fold of five is not a fifth of an
+    answer. At its default of 1 it is exactly today's behaviour.
+    """
+    bt = cfg.backtest
+    step, min_train = bt.step, bt.min_train
+    achieved = _folds_at(n, cfg, step=step, min_train=min_train)
+    if achieved >= bt.n_folds:
+        return FoldGeometry(achieved, step, min_train, None)
+
+    note: str | None = None
+    if bt.short_series == "skip":
+        return FoldGeometry(
+            0,
+            step,
+            min_train,
+            f"short_series=skip: {n} observations support {achieved} of {bt.n_folds} folds, and "
+            "this policy scores only series that reach all of them",
+        )
+    if bt.short_series == "overlap" and bt.n_folds > 1:
+        slack = n - bt.horizon - bt.gap - min_train
+        # The largest step that still fits every requested fold — least overlap that works.
+        widest = max(1, slack // (bt.n_folds - 1)) if slack >= 0 else 1
+        candidate = min(bt.step, widest)
+        reached = _folds_at(n, cfg, step=candidate, min_train=min_train)
+        if reached > achieved:
+            note = (
+                f"short_series=overlap: step {bt.step} -> {candidate} to reach {reached} of "
+                f"{bt.n_folds} folds; validation windows overlap, so the fold scores are not "
+                "independent evidence"
+            )
+            step, achieved = candidate, reached
+    elif bt.short_series == "shrink_train" and bt.min_train_floor is not None:
+        room = n - bt.horizon - bt.gap - (bt.n_folds - 1) * bt.step
+        # Shrink only as far as needed, and never past the floor.
+        candidate = max(bt.min_train_floor, min(min_train, room))
+        reached = _folds_at(n, cfg, step=step, min_train=candidate)
+        if reached > achieved:
+            note = (
+                f"short_series=shrink_train: min_train {bt.min_train} -> {candidate} "
+                f"(floor {bt.min_train_floor}) to reach {reached} of {bt.n_folds} folds"
+            )
+            min_train, achieved = candidate, reached
+
+    if 0 < achieved < bt.min_folds:
+        return FoldGeometry(
+            0,
+            bt.step,
+            bt.min_train,
+            f"short_series={bt.short_series}: {achieved} achievable folds is below "
+            f"min_folds={bt.min_folds}, so the series is left unscored rather than weakly scored",
+        )
+    return FoldGeometry(achieved, step, min_train, note)
+
+
 def achievable_folds(n: int, cfg: RunConfig) -> int:
     """How many of the requested folds ``n`` observations can actually support (pure).
 
-    ``0`` when the series cannot even hold one fold, ``cfg.backtest.n_folds`` when it holds them
-    all. Split out from `make_folds` because two callers need the count without the folds:
-    the cell records ``n_folds_achieved``, and a reader deciding whether a run's leaderboard is
-    comparable needs to know a series was scored on fewer folds than its neighbours.
+    ``0`` when the series gets no folds — either because it cannot hold one or because
+    ``short_series`` declined to score it — and ``cfg.backtest.n_folds`` when it holds them all.
+    Split out from `make_folds` because two callers need the count without the folds: the cell
+    records ``n_folds_achieved``, and a reader deciding whether a run's leaderboard is comparable
+    needs to know a series was scored on fewer folds than its neighbours.
 
-    Fold ``k`` validates on ``[n - horizon - (n_folds-1-k)*step, ...)``, so the binding constraint
-    is the *oldest* surviving fold's training end landing at or after ``min_train``. With an embargo
-    the training end is ``gap`` observations earlier than the validation start, so the embargo eats
-    into the same slack the folds do — a series long enough for three folds at ``gap=0`` may support
-    only two at ``gap=14``, which is the honest answer rather than a shortfall to hide.
+    The count is policy-aware, so it is the number the series really gets rather than the number the
+    arithmetic would allow. `resolve_geometry` is where the policy lives; call that instead when you
+    also need to know what the policy *did*.
     """
-    bt = cfg.backtest
-    slack = n - bt.horizon - bt.gap - bt.min_train
-    if slack < 0:
-        return 0
-    return min(bt.n_folds, slack // bt.step + 1)
+    return resolve_geometry(n, cfg).n_achieved
 
 
 def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
     """Build the CV folds for ``n`` observations — as many as the series supports.
 
     Uses ``cfg.backtest``: ``n_folds``, ``horizon``, ``step``, ``min_train``, ``scheme``, ``gap``,
-    ``window``.
+    ``window``, ``short_series``, ``min_folds`` and ``min_train_floor``.
+
+    **The shortfall is `resolve_geometry`'s to answer, not this function's.** ``step`` and the
+    training floor used below are the *effective* ones it returns, which under ``overlap`` or
+    ``shrink_train`` are not the authored ones. Everything else here — the anchoring, the numbering,
+    the holdout — is unchanged by the policy, and that is deliberate: a policy decides how much
+    evidence a short series contributes, never where a fold sits relative to its neighbours.
 
     **``gap`` is an embargo, and it moves the training end, not the validation window.** The folds
     stay anchored where they were — fold ``k`` still validates on the same dates — and the fit
@@ -255,11 +370,13 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
     were one field, and a forecaster who wanted a 90-day sliding window was also telling the fold
     planner that 90 days was enough history to score on.
 
-    **Clamps rather than raises.** A series too short for the requested folds used to raise
-    ``ConfigError``, which `run_cell` caught as a cell error — so the forecast was thrown away
-    over a *scoring* shortfall, and short history became the single largest error class in the
-    registry. The fit itself was never in question. Now the shortest series in a panel returns the
-    folds it can support, possibly none, and the caller still fits and forecasts it.
+    **Clamps rather than raises — under every policy, including ``error``.** A series too short for
+    the requested folds used to raise ``ConfigError``, which `run_cell` caught as a cell error — so
+    the forecast was thrown away over a *scoring* shortfall, and short history became the single
+    largest error class in the registry. The fit itself was never in question. Now the shortest
+    series in a panel returns the folds it can support, possibly none, and the caller still fits
+    and forecasts it. ``short_series="error"`` refuses the run from `assert_panel_supports_folds`,
+    before any cell exists; it never turns this function into the raising version again.
 
     **Survivors keep their fold_id from the full plan; the OLDEST folds are the ones dropped.**
     Both halves matter. Dropping the oldest keeps every series scored on the most recent window it
@@ -274,10 +391,11 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
     instead of a per-series lookup. Each fold carries that verdict as ``role``.
     """
     bt = cfg.backtest
-    horizon, step, n_folds = bt.horizon, bt.step, bt.n_folds
+    horizon, n_folds = bt.horizon, bt.n_folds
     width = training_width(cfg)
 
-    achieved = achievable_folds(n, cfg)
+    geom = resolve_geometry(n, cfg)
+    achieved, step = geom.n_achieved, geom.step
     if achieved == 0:
         return []
 
@@ -325,6 +443,45 @@ def fit_rows(n: int, cfg: RunConfig) -> list[int]:
     if not cfg.backtest.enabled:
         return [n]
     return [n] + [f.train_end - f.train_start for f in make_folds(n, cfg)]
+
+
+def assert_panel_supports_folds(obs_counts: Sequence[int], cfg: RunConfig) -> None:
+    """Enforce ``short_series="error"`` against a measured panel — raise, or return quietly (pure).
+
+    A no-op under every other policy, and under ``error`` too when every series clears the full fold
+    grid. The point of the mode is a hard stop for anyone who would rather not discover afterwards
+    that a third of their leaderboard was scored on two folds instead of five, and a hard stop is
+    only useful if it lands *before* the work. So this is called from two places, neither of which
+    is a cell: the submit path's pre-flight (`launch_plan.preflight_short_series`, which reads the
+    panel's series lengths straight out of the warehouse and refuses before anything is
+    provisioned), and each Python engine's driver once it has the panel in hand (the backstop that
+    still holds when submit could not reach the warehouse — a staged config, an offline plan, a
+    launch that skipped the CLI).
+
+    Both callers pass the same thing: one observation count per series. The refusal names how many
+    series fall short and by how much, because "some series are too short" is not actionable and
+    "412 of 5,000 series need 89 more observations" is.
+    """
+    from .errors import ConfigError
+
+    bt = cfg.backtest
+    if not (bt.enabled and bt.short_series == "error"):
+        return
+    short = [
+        n
+        for n in obs_counts
+        if _folds_at(n, cfg, step=bt.step, min_train=bt.min_train) < bt.n_folds
+    ]
+    if not short:
+        return
+    need = bt.min_train + bt.gap + bt.horizon + (bt.n_folds - 1) * bt.step
+    raise ConfigError(
+        f"short_series='error': {len(short)} of {len(obs_counts)} series cannot support all "
+        f"{bt.n_folds} folds. The shortest has {min(short)} observations and {need} are needed "
+        f"(min_train={bt.min_train} + gap={bt.gap} + horizon={bt.horizon} + "
+        f"(n_folds-1)*step={bt.step}). Lower the fold geometry, or choose another short_series "
+        "policy — 'adapt' scores each series on the folds it does support."
+    )
 
 
 def suggest_min_train(

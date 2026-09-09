@@ -1,8 +1,9 @@
 """Tests for backtest folds + out-of-fold predictions.
 
-Covers fold geometry, the no-leakage invariant (train_end == val_start), expanding vs
-sliding schemes, the short-series clamp (fewer folds, never an exception), and OOF frame
-shape/units.
+Covers fold geometry, the no-leakage invariant (``train_end + gap == val_start``), expanding vs
+sliding schemes, the five `backtest.short_series` policies for a series too short to hold the
+requested grid (each buying folds with a different currency, and none of them raising from the
+fold planner), and OOF frame shape/units.
 """
 
 from __future__ import annotations
@@ -17,14 +18,17 @@ from scale_forecasting.backtest import (
     OOF_COLUMNS,
     Fold,
     achievable_folds,
+    assert_panel_supports_folds,
     backtest_cell,
     fit_rows,
     make_folds,
+    resolve_geometry,
     suggest_min_train,
     training_width,
     training_window,
 )
 from scale_forecasting.config import RunConfig
+from scale_forecasting.errors import ConfigError
 from scale_forecasting.features import invert_transform
 from scale_forecasting.models.base_model import DEFAULT_QUANTILES, BaseModel, ModelContext
 
@@ -285,6 +289,199 @@ def test_the_embargo_scores_the_validation_window_and_not_the_dates_it_skipped()
     assert len(fold_metrics) == 2
 
 
+# --- the short-series policy (`short_series`, `min_folds`, `min_train_floor`) -----------------
+#
+# Every policy answers the same question — this series cannot hold the requested grid, now what —
+# and each one buys folds with a different currency. The tests below are written to name the
+# currency, because a test that only counted folds would pass on a policy that had quietly started
+# spending the wrong one.
+
+# 3 folds needs min_train 20 + horizon 5 + 2*step 5 = 35 observations. 30 supports two.
+_SHORT = {"n_folds": 3, "horizon": 5, "step": 5, "min_train": 20}
+
+
+def test_adapt_is_the_default_and_is_what_the_code_did_before_the_policy_existed() -> None:
+    """The whole point of the default: this item added four branches and moved nobody's numbers."""
+    cfg = _cfg(_SHORT)
+    assert cfg.backtest.short_series == "adapt" and cfg.backtest.min_folds == 1
+    geom = resolve_geometry(30, cfg)
+    assert (geom.n_achieved, geom.step, geom.min_train, geom.note) == (2, 5, 20, None)
+    assert [f.fold_id for f in make_folds(30, cfg)] == [1, 2]  # oldest dropped, ids preserved
+
+
+def test_overlap_buys_the_missing_folds_with_the_step_and_says_so() -> None:
+    """The fold count comes back to what was asked for; the independence of the folds does not.
+
+    30 observations leave slack 5 after ``min_train`` and ``horizon``, which is one step at the
+    authored 5 and therefore two folds. Three folds need two gaps inside that same slack, so the
+    step drops to 2 — the *largest* step that fits, because the least overlap that works is the
+    least evidence spent.
+    """
+    cfg = _cfg({**_SHORT, "short_series": "overlap"})
+    geom = resolve_geometry(30, cfg)
+    assert (geom.n_achieved, geom.step, geom.min_train) == (3, 2, 20)
+    assert "step 5 -> 2" in geom.note and "not independent evidence" in geom.note
+    folds = make_folds(30, cfg)
+    assert [f.fold_id for f in folds] == [0, 1, 2]
+    # The currency: consecutive validation windows now share observations, which at the authored
+    # step of 5 (== horizon) they never did.
+    starts = [f.val_start for f in folds]
+    assert starts == [21, 23, 25] and folds[0].val_end > folds[1].val_start
+    # Bought without touching anything else: no leakage, and min_train is still respected.
+    for f in folds:
+        assert f.train_end == f.val_start and f.train_size >= 20 and f.val_end <= 30
+
+
+def test_overlap_never_widens_the_step_on_a_series_that_did_not_need_help() -> None:
+    """It is a rescue, not a rewrite: a long series is laid out exactly as `adapt` lays it out."""
+    cfg = _cfg({**_SHORT, "short_series": "overlap"})
+    assert make_folds(100, cfg) == make_folds(100, _cfg(_SHORT))
+    assert resolve_geometry(100, cfg).note is None
+
+
+def test_shrink_train_buys_the_missing_folds_with_training_history_down_to_the_floor() -> None:
+    """Same three folds, different currency — and the floor is what stops it going too far.
+
+    Three folds at step 5 need ``min_train <= 30 - 5 - 2*5 == 15``, so the requirement drops from
+    20 to exactly 15: as little as the shortfall demands, not as far as the floor allows.
+    """
+    cfg = _cfg({**_SHORT, "short_series": "shrink_train", "min_train_floor": 10})
+    geom = resolve_geometry(30, cfg)
+    assert (geom.n_achieved, geom.step, geom.min_train) == (3, 5, 15)
+    assert "min_train 20 -> 15" in geom.note
+    folds = make_folds(30, cfg)
+    assert [f.fold_id for f in folds] == [0, 1, 2]
+    assert [f.val_start for f in folds] == [15, 20, 25]
+    assert min(f.train_size for f in folds) == 15  # the shrunk floor, honoured exactly
+
+
+def test_shrink_train_stops_at_the_floor_and_takes_whatever_folds_that_reaches() -> None:
+    """The floor is a floor, not a target. Below it the series gets fewer folds, not less history.
+
+    28 observations would need ``min_train <= 13`` for three folds and the floor forbids it, so the
+    policy shrinks to 18 and takes the two folds that buys instead of the three it was asked for.
+    """
+    cfg = _cfg({**_SHORT, "short_series": "shrink_train", "min_train_floor": 18})
+    geom = resolve_geometry(28, cfg)
+    assert (geom.n_achieved, geom.min_train) == (2, 18)
+    assert min(f.train_size for f in make_folds(28, cfg)) == 18
+
+
+def test_shrink_train_requires_its_floor_and_the_floor_requires_shrink_train() -> None:
+    """A knob that is read by exactly one mode is rejected outside it rather than silently ignored.
+
+    Both directions, because both are the same mistake seen from opposite ends: a shrink with no
+    stopping rule would fit on almost nothing, and a floor set under `adapt` would look like a
+    safety limit while doing nothing at all.
+    """
+    with pytest.raises(ValueError, match="min_train_floor"):
+        _cfg({**_SHORT, "short_series": "shrink_train"})
+    with pytest.raises(ValueError, match="only read by"):
+        _cfg({**_SHORT, "min_train_floor": 10})
+
+
+def test_skip_leaves_anything_short_of_the_full_grid_unscored() -> None:
+    """The comparable slice, enforced when the run happens instead of reconstructed when it is read.
+
+    A series that would have contributed two folds contributes none, so every series on the
+    leaderboard was measured on the same geometry. It is still fit and forecast — `make_folds`
+    returning nothing is a scoring verdict, never a cell failure.
+    """
+    cfg = _cfg({**_SHORT, "short_series": "skip"})
+    assert make_folds(30, cfg) == [] and achievable_folds(30, cfg) == 0
+    assert "scores only series that reach all of them" in resolve_geometry(30, cfg).note
+    assert len(make_folds(35, cfg)) == 3  # exactly long enough, so nothing is skipped
+
+
+def test_min_folds_leaves_a_thinly_scored_series_unscored_rather_than_ranked() -> None:
+    """One fold of three is not a third of an answer, and the floor is how an operator says so."""
+    cfg = _cfg({**_SHORT, "min_folds": 3})
+    assert achievable_folds(30, cfg) == 0  # would have been 2
+    assert "below min_folds=3" in resolve_geometry(30, cfg).note
+    assert achievable_folds(35, cfg) == 3  # clears the floor, scored normally
+
+
+def test_min_folds_applies_after_a_rescue_not_instead_of_it() -> None:
+    """`overlap` gets to try first; the floor judges what it achieved, not what it started with."""
+    cfg = _cfg({**_SHORT, "short_series": "overlap", "min_folds": 3})
+    assert achievable_folds(30, cfg) == 3  # adapt would have been 2, and 2 < 3 would be unscored
+
+
+def test_min_folds_above_n_folds_is_rejected_because_nothing_could_ever_clear_it() -> None:
+    with pytest.raises(ValueError, match="exceeds n_folds"):
+        _cfg({**_SHORT, "min_folds": 4})
+
+
+def test_error_still_never_raises_from_the_fold_planner() -> None:
+    """The one rule the policy surface must not break: a scoring shortfall cannot cost a forecast.
+
+    ``error`` refuses the *run*, from `assert_panel_supports_folds`, before any cell exists. Reached
+    any other way — a unit call, a staged config, an engine that skipped the pre-flight — it lays
+    folds out exactly as `adapt` does, because the alternative is the error class this whole design
+    removed.
+    """
+    cfg = _cfg({**_SHORT, "short_series": "error"})
+    assert make_folds(30, cfg) == make_folds(30, _cfg(_SHORT))
+    assert make_folds(10, cfg) == []
+
+
+def test_the_panel_gate_refuses_only_under_error_and_only_when_a_series_is_short() -> None:
+    """Every other policy has already decided what to do about a short series; this one has not."""
+    short_panel, full_panel = [100, 30, 100], [100, 35, 100]
+    for policy in ("adapt", "overlap", "skip"):
+        assert (
+            assert_panel_supports_folds(short_panel, _cfg({**_SHORT, "short_series": policy}))
+            is None
+        )
+    err = _cfg({**_SHORT, "short_series": "error"})
+    assert assert_panel_supports_folds(full_panel, err) is None
+    with pytest.raises(ConfigError, match="1 of 3 series"):
+        assert_panel_supports_folds(short_panel, err)
+
+
+def test_the_panel_gate_names_the_arithmetic_including_the_embargo() -> None:
+    """ "Some series are too short" is not actionable; a count and a shortfall are."""
+    cfg = _cfg({**_SHORT, "short_series": "error", "gap": 4})
+    with pytest.raises(ConfigError) as exc:
+        assert_panel_supports_folds([30, 100], cfg)
+    msg = str(exc.value)
+    assert "The shortest has 30 observations and 39 are needed" in msg
+    assert "gap=4" in msg
+
+
+def test_the_panel_gate_is_silent_when_backtesting_is_off() -> None:
+    """There are no folds to fall short of, so a short series is not a shortfall."""
+    off = _cfg({**_SHORT, "short_series": "error", "enabled": False})
+    assert not off.backtest.enabled
+    assert assert_panel_supports_folds([10], off) is None
+
+
+def test_every_policy_keeps_the_invariants_the_geometry_exists_to_protect() -> None:
+    """The sweep that stops a policy buying folds by quietly breaking something else.
+
+    Whatever a policy spends, four things hold for every fold it produces: no leakage across the
+    embargo, a full-width validation window, nothing read past the end of the series, and a
+    training window at or above whatever floor that policy is entitled to use.
+    """
+    policies: list[tuple[dict[str, Any], int]] = [
+        ({"short_series": "adapt"}, 20),
+        ({"short_series": "overlap"}, 20),
+        ({"short_series": "shrink_train", "min_train_floor": 10}, 10),
+        ({"short_series": "skip"}, 20),
+        ({"short_series": "error"}, 20),
+    ]
+    for extra, floor in policies:
+        for gap in (0, 3):
+            cfg = _cfg({**_SHORT, **extra, "gap": gap})
+            for n in range(0, 60):
+                folds = make_folds(n, cfg)
+                assert len(folds) == achievable_folds(n, cfg), f"{extra} n={n}"
+                for f in folds:
+                    assert f.train_end + gap == f.val_start, f"{extra} n={n}"
+                    assert f.val_size == 5 and f.val_end <= n, f"{extra} n={n}"
+                    assert f.train_size >= floor, f"{extra} n={n}"
+
+
 # --- backtest_cell -------------------------------------------------------------
 
 
@@ -445,8 +642,8 @@ def test_fold_metrics_have_full_panel() -> None:
 # --- the four schemes, and what each one is a measurement of ---------------------------------
 #
 # The geometry is identical across all four bar `sliding` (asserted in
-# `test_inert_config_fields.py`), so everything below is about how the *model* is carried between
-# origins — which is the only thing that changes, and the whole reason the schemes exist.
+# `test_declared_ahead_fields.py`), so everything below is about how the *model* is carried
+# between origins — the only thing that changes, and the whole reason the schemes exist.
 
 
 def _scheme_cfg(scheme: str) -> RunConfig:

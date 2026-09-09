@@ -525,6 +525,44 @@ def feasibility_report(cfg: RunConfig, *, settings: Settings | None = None) -> l
     return feasibility_lines(cfg, obs_counts)
 
 
+def preflight_short_series(cfg: RunConfig, *, settings: Settings | None = None) -> None:
+    """Enforce ``backtest.short_series="error"`` at submit time, where the operator is watching.
+
+    `main.run` calls this once, before it launches anything. It is the *useful* place to refuse a
+    run under that policy: the message reaches the terminal the operator typed into, no cluster has
+    been provisioned, and no registry rows exist to clean up. Each Python engine's driver holds a
+    second check (`spark_io.assert_source_supports_folds` and the Ray twin) for the paths that do
+    not come through here — a staged config launched from an emitted command, a Composer task, or
+    an engine driven directly.
+
+    Costs one aggregation, and only when the policy is armed; every other value of
+    ``short_series`` returns before touching BigQuery, because those policies have already decided
+    what a short series gets.
+
+    **A failed read warns rather than refuses.** ``short_series="error"`` means "stop if the panel
+    is too short", not "stop if I could not tell" — turning a transient BigQuery hiccup into a
+    refused run would be a worse failure than the one this guards against. The driver backstop
+    still runs, on a panel the engine has by then definitely read, so nothing is skipped by
+    letting this one go.
+    """
+    bt = cfg.backtest
+    if not (bt.enabled and bt.short_series == "error"):
+        return
+    from .backtest import assert_panel_supports_folds
+
+    try:
+        obs_counts = read_series_lengths(cfg, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - see the docstring: unreadable is not too short
+        _log.warning(
+            "short_series='error': could not read the source panel (%s); deferring the check to "
+            "the engine driver",
+            exc,
+        )
+        return
+    if obs_counts:
+        assert_panel_supports_folds(obs_counts, cfg)
+
+
 def _manifest_dict(result: LaunchPlan, *, created_at: str) -> dict[str, object]:
     """The reproducibility-manifest payload for a staged run (pure — ``created_at`` is caller-set).
 

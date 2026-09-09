@@ -358,6 +358,23 @@ def _sample_series(source: pd.DataFrame, cfg: RunConfig) -> list[pd.DataFrame]:
     return [source[source[id_col] == tid] for tid in ids]
 
 
+def _assert_source_supports_folds(source: pd.DataFrame, cfg: RunConfig) -> None:
+    """Backstop for ``backtest.short_series="error"`` — the Ray twin of the Spark one.
+
+    Same contract as `spark_io.assert_source_supports_folds` and the same reason for existing: the
+    submit-time check in `launch_plan.preflight_short_series` is not on every path into this
+    engine. Cheaper here than there — the panel is already a driver-side pandas frame, so this is a
+    ``groupby.size()`` rather than a distributed aggregation — but still skipped outright under
+    every other policy, which have already decided what a short series gets.
+    """
+    from ..backtest import assert_panel_supports_folds
+
+    bt = cfg.backtest
+    if not (bt.enabled and bt.short_series == "error"):
+        return
+    assert_panel_supports_folds([int(n) for n in source.groupby(cfg.data.ts_id_col).size()], cfg)
+
+
 def _resolve_fleetwide_hpo(
     source: pd.DataFrame, cfg: RunConfig, executed: list[str]
 ) -> dict[str, dict[str, object]] | None:
@@ -470,6 +487,9 @@ def run(
         started = time.perf_counter()
         try:
             source = _read_source_series(cfg, settings)
+
+            # The `short_series="error"` backstop, before the job costs anything. No-op otherwise.
+            _assert_source_supports_folds(source, cfg)
 
             # Fleetwide HPO resolves once on the driver over a small sample, before fan-out — the
             # Ray twin of spark_io.resolve_fleetwide_hpo, over the already-collected pandas panel.

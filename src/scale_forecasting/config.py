@@ -122,6 +122,9 @@ def _is_non_finite(value: Any) -> bool:
 
 
 GpuType = Literal["T4", "L4"]
+# What a series too short for the requested fold grid gets. Ordered by what each one gives up:
+# folds, fold independence, training history, the series, the run.
+ShortSeriesPolicy = Literal["adapt", "overlap", "shrink_train", "skip", "error"]
 EnsembleMode = Literal["barrier", "microbatch"]
 ProfileMode = Literal["off", "auto", "always"]
 ProfileMeasure = Literal["off", "harvest", "controlled"]
@@ -171,13 +174,27 @@ class FeaturesConfig(BaseModel):
 class BacktestConfig(BaseModel):
     """Time-series cross-validation. Off by default (cheapest first run).
 
-    **Three of these fields are accepted but not yet honoured.** They were declared here ahead of
-    the methodology work that implements them, because ``run_id`` is a digest of the whole config:
-    adding a field moves every identity ever recorded, so the fields landed together, once, rather
-    than one per release. ``test_inert_config_fields.py`` asserts that what remains unread changes
-    nothing. See ``docs/configuration_reference.md`` for which is which.
+    Every field here is now honoured. The five that arrived ahead of the code that reads them —
+    ``short_series``, ``min_folds``, ``min_train_floor``, ``gap`` and ``window`` — were declared in
+    one commit because ``run_id`` is a digest of the whole config: adding a field moves every
+    identity ever recorded, so landing them together cost one identity break instead of five.
+    ``test_declared_ahead_fields.py`` holds the other half of that bargain: each field reaches
+    the digest.
 
-    ``gap`` and ``window`` are now honoured. ``gap`` is an **embargo**: training stops ``gap``
+    ``short_series`` decides what happens to a series too short for the requested fold grid, and
+    every branch of it is a different trade rather than a different amount of the same thing.
+    ``adapt`` (the default) holds the geometry exactly and drops the **oldest** folds, so a short
+    series is scored on the most recent window it can reach. ``overlap`` holds the fold *count* and
+    shrinks the step to buy it, which means validation windows share observations and the per-fold
+    scores stop being independent evidence. ``shrink_train`` holds the count and the step and lowers
+    the training requirement instead, never past ``min_train_floor`` — which is why that field is
+    required with this mode rather than optional. ``skip`` leaves any series short of the full grid
+    unscored, so every series on the leaderboard was measured identically. ``error`` refuses the
+    run outright; it is checked before any cell runs and never raises inside one, because a scoring
+    shortfall must never cost a forecast. ``min_folds`` is the give-up floor the first three
+    respect: a series that cannot reach it is left unscored rather than weakly scored.
+
+    ``gap`` and ``window`` are also honoured. ``gap`` is an **embargo**: training stops ``gap``
     observations before the validation window starts, so ``train_end + gap == val_start`` and the
     fold measures a forecast issued with a reporting lag. It moves the training end, never the
     validation window — the folds of a ``gap=14`` run cover the same dates as the folds of a
@@ -196,12 +213,11 @@ class BacktestConfig(BaseModel):
     score a blind control arm alongside the primary one; see `backtest.BacktestOutcome`. Widening
     this Literal moves no existing ``run_id`` — the digest hashes dumped values, not the schema.
 
-    ``short_series`` is the one that has moved. The code now always adapts — `make_folds` shrinks
-    the grid to whatever the series supports, possibly to nothing, and the cell forecasts either
-    way — so the ``"adapt"`` default finally describes what happens. The field is still inert in
-    that the other two branches are unreachable: nothing yet honours ``"skip"`` or ``"error"``, and
-    adaptation ignores ``min_folds`` and ``min_train_floor``. Setting it changes the ``run_id`` and
-    nothing else.
+    One asymmetry worth knowing: ``short_series`` is a **Python-path** policy. The BigQuery-native
+    models count their folds back from one global ``MAX(ds)`` rather than from each series' own last
+    observation, so they have no per-series grid to adapt; a short series there simply contributes
+    fewer scored rows. ``error`` is the exception, because it is checked against the panel before
+    either engine starts.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -214,19 +230,15 @@ class BacktestConfig(BaseModel):
     min_train: int = Field(default=180, gt=0)
     decision_metric: DecisionMetric = "wape"
 
-    # --- accepted, not yet honoured (see the class docstring) ---------------------------
-
-    # What to do with a series too short for the requested fold grid: shrink the grid to fit,
-    # leave the series out of the backtest, or fail the cell. Today: always shrinks, whatever
-    # this says — the other two branches are not wired.
-    short_series: Literal["adapt", "skip", "error"] = "adapt"
-    # The floor `short_series="adapt"` may shrink `n_folds` to before it gives up. Today the floor
-    # is effectively 0: a series that supports no folds is left unscored, not failed.
+    # What a series too short for the full fold grid gets. Resolved by `backtest.resolve_geometry`;
+    # see the class docstring for what each branch trades away.
+    short_series: ShortSeriesPolicy = "adapt"
+    # The give-up floor: fewer achievable folds than this and the series is left unscored rather
+    # than scored on evidence too thin to rank it. The default of 1 is today's behaviour exactly.
     min_folds: int = Field(default=1, ge=1)
-    # A hard minimum training length, independent of `min_train`, that adaptation may not go below.
+    # The hard training-length minimum `short_series="shrink_train"` may not cross. Required with
+    # that mode (and only meaningful there) — without it, shrinking has no stopping rule.
     min_train_floor: int | None = Field(default=None, gt=0)
-
-    # --- honoured (see the class docstring) ----------------------------------------------
 
     # The embargo: observations discarded between train_end and val_start, for a forecast issued
     # with a known reporting lag. `backtest.make_folds` and `engines.bigquery_sql.fold_plan`.
@@ -234,6 +246,25 @@ class BacktestConfig(BaseModel):
     # A fixed training width for `sliding`, decoupled from `min_train`'s role as a data floor.
     # Resolved by `backtest.training_width`, which both engines call.
     window: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _check(self) -> BacktestConfig:
+        if self.min_folds > self.n_folds:
+            raise ValueError(
+                f"min_folds={self.min_folds} exceeds n_folds={self.n_folds}, so no series could "
+                "ever clear the floor and nothing would be scored"
+            )
+        if self.short_series == "shrink_train" and self.min_train_floor is None:
+            raise ValueError(
+                "short_series='shrink_train' needs min_train_floor: shrinking the training "
+                "requirement without a floor has no stopping rule and would fit on almost nothing"
+            )
+        if self.short_series != "shrink_train" and self.min_train_floor is not None:
+            raise ValueError(
+                f"min_train_floor is only read by short_series='shrink_train', not "
+                f"'{self.short_series}'; drop it or switch the policy"
+            )
+        return self
 
 
 class OutputConfig(BaseModel):

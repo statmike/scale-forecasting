@@ -492,3 +492,70 @@ def test_feasibility_report_says_so_when_the_panel_is_empty(
     assert launch_plan.feasibility_report(_bt_cfg()) == [
         "feasibility: the source panel returned no series"
     ]
+
+
+# --- preflight_short_series: the one policy that refuses a run -----------------
+
+
+def _counted(monkeypatch: pytest.MonkeyPatch, counts: list[int]) -> list[int]:
+    """Patch the panel read to return ``counts``, and record that it was called."""
+    calls: list[int] = []
+
+    def _read(cfg: RunConfig, *, settings: Any = None) -> list[int]:
+        calls.append(1)
+        return counts
+
+    monkeypatch.setattr(launch_plan, "read_series_lengths", _read)
+    return calls
+
+
+def test_the_preflight_refuses_the_run_when_a_series_cannot_hold_the_grid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The point of ``error``: an operator who asked for a comparable panel finds out at submit."""
+    _counted(monkeypatch, [1460, 100])
+    with pytest.raises(ConfigError, match="short_series='error'"):
+        launch_plan.preflight_short_series(_bt_cfg(short_series="error"))
+
+
+def test_the_preflight_passes_a_panel_that_holds_the_grid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _counted(monkeypatch, [1460, 1460])
+    assert launch_plan.preflight_short_series(_bt_cfg(short_series="error")) is None
+
+
+@pytest.mark.parametrize("policy", ["adapt", "overlap", "skip"])
+def test_the_preflight_costs_nothing_under_every_other_policy(
+    monkeypatch: pytest.MonkeyPatch, policy: str
+) -> None:
+    """A guard that queried BigQuery on every run would be a tax on the policies that never fire."""
+    calls = _counted(monkeypatch, [100])
+    assert launch_plan.preflight_short_series(_bt_cfg(short_series=policy)) is None
+    assert calls == []
+
+
+def test_the_preflight_costs_nothing_when_backtesting_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _counted(monkeypatch, [100])
+    cfg = _cfg(data={"source_table": "source_series_native", "horizon": 28}, models=[_SPARK])
+    assert launch_plan.preflight_short_series(cfg) is None
+    assert calls == []
+
+
+def test_an_unreadable_panel_warns_and_defers_rather_than_refusing_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``error`` means "stop if the panel is too short", not "stop if I could not tell".
+
+    Refusing on a transient BigQuery failure would be a worse outcome than the one this guards
+    against, and it would be unfixable from the config. The engine drivers hold the backstop, on a
+    panel they have by then definitely read.
+    """
+
+    def _boom(cfg: RunConfig, *, settings: Any = None) -> list[int]:
+        raise ConfigError("no SF_* env")
+
+    monkeypatch.setattr(launch_plan, "read_series_lengths", _boom)
+    assert launch_plan.preflight_short_series(_bt_cfg(short_series="error")) is None

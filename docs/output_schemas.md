@@ -123,9 +123,9 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `point_forecast_decision` | `STRING` | *How* that arm was picked, which the column above cannot say on its own: `configured` (the config named it), `auto-corrected` / `auto-raw` (`output.point_forecast: "auto"`, and the cell's held-out folds went that way), `auto-few-folds` / `auto-no-backtest` (selection was asked for but there was not enough held out to decide, so the fleetwide arm applied), or `engine-native` (BigQuery-native rows, where only one arm exists). |
 | `interval_calibration` | `STRING` | What happened to the band *after* the model produced it: `oof-per-step` (re-estimated per horizon step from out-of-fold residuals), `oof-flat` (one pooled out-of-fold band, too few residuals to resolve per step), `in-sample` (no backtest ran; the model's own band shipped unchanged), or `native` (BigQuery-native rows). |
 | `point_forecast_margin` | `FLOAT64` | How much the corrected arm beat the raw one by on this cell, as a fraction of the raw arm's loss in the run's `decision_metric`. Positive means the correction helped. NULL when there was no backtest to grade it on. |
-| `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. NULL means backtesting was never asked for. |
+| `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. `reduced` covers any geometry other than the one the config asked for, not just a shorter fold list. NULL means backtesting was never asked for. |
 | `n_folds_achieved` | `INT64` | Folds actually scored (`0` on `unscored`/`failed`). |
-| `backtest_note` | `STRING` | Why the backtest was not `full` — the shortfall arithmetic, or the exception. NULL when it was. |
+| `backtest_note` | `STRING` | Why the backtest was not `full` — the shortfall arithmetic, or the `short_series` policy and what it traded away, or the exception. NULL when it was. |
 
 ### Why a cell failed, in a word you can group by
 
@@ -243,17 +243,24 @@ the cell caught it as an error, and a forecast that had not even been attempted 
 Short history was the single largest error class in the registry, and none of it was a modelling
 failure.
 
-Now the fold grid shrinks to what the series supports — oldest folds dropped first, survivors keeping
-their original `fold_id` — and the cell fits and forecasts either way. The outcome is recorded rather
+Now the fold grid adapts to what the series supports — by default the oldest folds are dropped,
+survivors keeping their original `fold_id` — and the cell fits and forecasts either way. What the
+grid does instead of raising is `backtest.short_series`'s to decide; the outcome is recorded rather
 than inferred, because through the metric columns alone these are indistinguishable:
 
 | Situation | Metrics | `backtest_status` |
 |-----------|---------|-------------------|
 | Backtesting switched off | all NULL | NULL |
-| Scored on every requested fold | populated | `full` |
-| Scored on fewer folds than requested | populated | `reduced` |
-| Too short to score at all | all NULL | `unscored` |
+| Scored on exactly the grid the config asked for | populated | `full` |
+| Scored on an adjusted grid — fewer folds, a narrowed `step`, or a shrunken `min_train` | populated | `reduced` |
+| Too short to score at all, or the policy declined to score it | all NULL | `unscored` |
 | Scoring raised | all NULL | `failed` |
+
+`reduced` is the broad one: it means "not the geometry the config asked for", whichever way the
+geometry moved. Under `short_series: "overlap"` or `"shrink_train"` that produces a pair which is
+otherwise impossible — `reduced` with `n_folds_achieved` equal to the requested `n_folds` — and
+that pair is precisely the signal that the full fold count was bought with fold independence or
+with training history rather than with folds. `backtest_note` says which.
 
 `n_folds_achieved` is what makes a leaderboard readable across a ragged panel: two series with the
 same WAPE are not comparable if one was scored on five folds and the other on one.

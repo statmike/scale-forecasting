@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from .backtest import achievable_folds, backtest_cell
+from .backtest import achievable_folds, backtest_cell, resolve_geometry
 from .calibration import apply_calibration, calibrate_from_oof, compare_arms, select_arm
 from .config import corrected_arm_for
 from .errors import ConfigError, get_logger
@@ -750,15 +750,26 @@ def _backtest_outcome(
     support very different conclusions about a leaderboard. The note names the arithmetic rather
     than restating the status, because the actionable part is *how much* history the series would
     have needed.
+
+    **``reduced`` means "not the geometry the config asked for", which is wider than "fewer
+    folds".** Under ``short_series="overlap"`` or ``"shrink_train"`` a series can reach the full
+    fold count by spending something else — overlapping validation windows, or a shorter training
+    requirement — and that row is ``reduced`` with ``n_folds_achieved`` equal to ``n_folds``. The
+    pair reads correctly and cannot occur any other way, so ``v_backtest_coverage`` shows it as its
+    own cohort; `backtest.resolve_geometry` supplies the note saying which trade was made.
     """
     bt = cfg.backtest
-    if achieved >= bt.n_folds:
+    geom = resolve_geometry(len(series), cfg)
+    if achieved >= bt.n_folds and geom.note is None:
         return "full", None
-    need = bt.min_train + bt.horizon + (bt.n_folds - 1) * bt.step
+    if geom.note is not None:
+        return ("reduced" if achieved > 0 else "unscored"), geom.note
+    need = bt.min_train + bt.gap + bt.horizon + (bt.n_folds - 1) * bt.step
     shortfall = (
         f"{len(series)} observations support {achieved} of {bt.n_folds} folds; "
         f"{need} needed for all of them "
-        f"(min_train={bt.min_train} + horizon={bt.horizon} + (n_folds-1)*step={bt.step})"
+        f"(min_train={bt.min_train} + gap={bt.gap} + horizon={bt.horizon} + "
+        f"(n_folds-1)*step={bt.step})"
     )
     return ("reduced" if achieved > 0 else "unscored"), shortfall
 

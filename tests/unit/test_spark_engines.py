@@ -771,8 +771,9 @@ class _RecordingSource:
     the last read. A fake is the only way to see a sequence.
     """
 
-    def __init__(self, log: list[str]) -> None:
+    def __init__(self, log: list[str], obs_counts: list[int] | None = None) -> None:
         self.log = log
+        self.obs_counts = obs_counts or []
 
     def persist(self, level: Any) -> _RecordingSource:
         self.log.append(f"persist:{level}")
@@ -782,12 +783,35 @@ class _RecordingSource:
         self.log.append("unpersist")
         return self
 
+    # The `short_series="error"` gate's chain: groupBy(id).count().select("count").toPandas().
+    # Only ever called when that policy is armed, which is the point of logging it separately.
+    def groupBy(self, col: str) -> _RecordingSource:  # noqa: N802 - the pyspark spelling
+        self.log.append(f"groupBy:{col}")
+        return self
 
-def _explode_with_fakes(monkeypatch: Any, log: list[str], *, boom: bool = False) -> Any:
+    def count(self) -> _RecordingSource:
+        return self
+
+    def select(self, col: str) -> _RecordingSource:
+        return self
+
+    def toPandas(self) -> pd.DataFrame:  # noqa: N802 - the pyspark spelling
+        self.log.append("count_collect")
+        return pd.DataFrame({"count": self.obs_counts})
+
+
+def _explode_with_fakes(
+    monkeypatch: Any,
+    log: list[str],
+    *,
+    boom: bool = False,
+    backtest: dict[str, Any] | None = None,
+    obs_counts: list[int] | None = None,
+) -> Any:
     """Run the explode driver with every collaborator faked; return the recording source."""
     from pyspark import StorageLevel
 
-    source = _RecordingSource(log)
+    source = _RecordingSource(log, obs_counts)
     cells = object()
 
     def _read(spark: Any, cfg: Any, settings: Any) -> Any:
@@ -831,7 +855,8 @@ def _explode_with_fakes(monkeypatch: Any, log: list[str], *, boom: bool = False)
     monkeypatch.setattr(spark_explode, "_widen_fanout", lambda cfg, spark, n: {"buckets": 4})
     monkeypatch.setattr(spark_explode, "_stamp_executed_fanout", lambda *a, **k: None)
 
-    cfg = _cfg(data={"source_table": "t", "freq": "D", "horizon": HORIZON, "series_limit": 5})
+    data = {"source_table": "t", "freq": "D", "horizon": HORIZON, "series_limit": 5}
+    cfg = _cfg(data=data, **({"backtest": backtest} if backtest else {}))
     spark_explode.run(
         cfg,
         manage_header=False,  # contributor mode: no header writes, so no GCP
@@ -866,3 +891,53 @@ def test_the_cache_is_released_even_when_the_fan_out_raises(monkeypatch: Any) ->
         _explode_with_fakes(monkeypatch, log, boom=True)
     assert log[-1] == "unpersist"
     assert "collect" not in log
+
+
+# --- the short_series="error" backstop, on the way in --------------------------
+
+_ERROR_BT = {
+    "enabled": True,
+    "short_series": "error",
+    "n_folds": 2,
+    "horizon": 4,
+    "step": 4,
+    "min_train": 12,
+}
+
+
+def test_the_backstop_refuses_before_the_driver_spends_anything(monkeypatch: Any) -> None:
+    """A policy whose answer is "do not run this" has to be asked before the run costs money.
+
+    The order in the log is the assertion: the panel count happens against the cached relation and
+    ahead of the HPO pre-pass and the cross-join, so a refused run has provisioned a cluster and
+    read one aggregation, not fanned a million cells across it.
+    """
+    import pytest
+
+    from scale_forecasting.errors import ConfigError
+
+    log: list[str] = []
+    with pytest.raises(ConfigError, match="short_series='error'"):
+        _explode_with_fakes(monkeypatch, log, backtest=_ERROR_BT, obs_counts=[30, 8])
+    assert log == ["read", log[1], "groupBy:ts_id", "count_collect", "unpersist"]
+    assert "hpo" not in log and "cross_join" not in log
+
+
+def test_a_panel_that_holds_the_grid_runs_straight_through(monkeypatch: Any) -> None:
+    log: list[str] = []
+    _explode_with_fakes(monkeypatch, log, backtest=_ERROR_BT, obs_counts=[30, 30])
+    assert log[2:] == [
+        "groupBy:ts_id",
+        "count_collect",
+        "hpo",
+        "cross_join",
+        "collect",
+        "unpersist",
+    ]
+
+
+def test_the_backstop_asks_the_cluster_nothing_under_every_other_policy(monkeypatch: Any) -> None:
+    """One aggregation is cheap, but it is not free, and four of the five policies never need it."""
+    log: list[str] = []
+    _explode_with_fakes(monkeypatch, log, backtest={**_ERROR_BT, "short_series": "adapt"})
+    assert "groupBy:ts_id" not in log and "count_collect" not in log

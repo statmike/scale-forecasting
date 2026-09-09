@@ -288,10 +288,16 @@ def run(
             # Spark is lazy, so `source` is a recipe, not data: every action below re-executes the
             # BigQuery read from scratch. There are four of them — the series count, the HPO
             # sample, the cross-join, and the semi-join `series_limit` performs against its own
-            # distinct ids *inside* this relation. Persisting is unconditional because even the
-            # do-nothing path reads twice. MEMORY_AND_DISK rather than MEMORY_ONLY: the panel is
-            # sized to be bigger than the executors, and spilling beats re-reading.
+            # distinct ids *inside* this relation — plus a fifth under `short_series="error"`.
+            # Persisting is unconditional because even the do-nothing path reads twice.
+            # MEMORY_AND_DISK rather than MEMORY_ONLY: the panel is sized to be bigger than the
+            # executors, and spilling beats re-reading.
             source.persist(StorageLevel.MEMORY_AND_DISK)
+
+            # The backstop for `short_series="error"`, and the reason it is here rather than after
+            # the fan-out sizing: a policy that refuses the run should refuse it before the run
+            # costs anything. Returns without an action under every other policy.
+            spark_io.assert_source_supports_folds(source, cfg)
 
             # Fan-out width needs both a session and the source: the fleet's ceiling is set on the
             # batch and read back from the live conf, and an unbounded run's series count can only

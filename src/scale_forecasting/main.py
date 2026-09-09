@@ -150,6 +150,12 @@ def run(
     # own ``auto`` choice into something that looks pinned. ``force`` overrides, as it does the
     # idempotency guard.
     check_pinned_source(cfg, settings=settings, force=force)
+    # `backtest.short_series: "error"` is the one policy that refuses a run rather than deciding
+    # what a short series gets, and this is where it is worth refusing: the message lands in the
+    # operator's terminal, nothing has been provisioned, and no registry rows exist yet. A no-op
+    # under every other policy, and under this one on a panel that fits. Each Python engine keeps
+    # its own backstop for the launch paths that never come through here.
+    launch_plan.preflight_short_series(cfg, settings=settings)
     # Lock `source: "auto"` before the digest — the same step `launch_plan.plan_run` / ``stage_run``
     # take, and it has to happen here too or the three verbs would disagree about this run's
     # identity: ``--dry-run`` would report an id the real run then never uses.

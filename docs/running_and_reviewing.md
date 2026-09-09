@@ -303,7 +303,9 @@ ORDER BY pooled_wape;
 
 `v_backtest_coverage` is the panel behind each score: one row per cohort of series that shared a
 `backtest_status` (`full` / `reduced` / `unscored` / `failed`, or NULL where no backtest was asked
-for) and an achieved fold count. `v_model_leaderboard_comparable` is the ranking rebuilt on one
+for) and an achieved fold count. `reduced` means the series was scored on some other geometry than
+the config asked for — usually fewer folds, but under a rescuing `backtest.short_series` policy it
+can be the full fold count bought with a narrowed `step` or a shrunken `min_train` instead. `v_model_leaderboard_comparable` is the ranking rebuilt on one
 fold — the newest, which every series that achieved any fold achieved — with the error pooled across
 the panel rather than averaged over series. Ensembles are ranked there beside the base models. Full
 definitions in [output_schemas.md](./output_schemas.md).

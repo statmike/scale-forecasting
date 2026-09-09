@@ -9,7 +9,8 @@ Split along the pure/I-O seam so the interesting logic is offline-testable:
   `fanout_properties`, `bucket_key_cols`.
 * **I/O / Spark shell** (pyspark imported lazily, parity with the seed job):
   `read_source_series` (connector read + deterministic ``series_limit`` subset),
-  `add_bucket`, `cross_join_models`, `status_schema`, `make_group_runner`.
+  `assert_source_supports_folds` (the ``short_series="error"`` backstop), `add_bucket`,
+  `cross_join_models`, `status_schema`, `make_group_runner`.
 
 **Fan-out mechanics.** The engine shuffles cells into *buckets* and runs one Spark task per bucket
 (``groupBy(bucket).applyInPandas``, with the shuffle width set from the bucket count by
@@ -512,6 +513,30 @@ def _limit_series(df: DataFrame, cfg: RunConfig) -> DataFrame:
     id_col = cfg.data.ts_id_col
     keep = df.select(id_col).distinct().orderBy(id_col).limit(limit)
     return df.join(keep, on=id_col, how="leftsemi")
+
+
+def assert_source_supports_folds(source: DataFrame, cfg: RunConfig) -> None:
+    """Backstop for ``backtest.short_series="error"``: refuse the job before any cell is fit.
+
+    The policy is normally caught at submit time by `launch_plan.preflight_short_series`, which is
+    where an operator can actually see the message. This is the second place it is checked, and it
+    exists because the submit-time check is not on every path into this engine: a staged config
+    launched from an emitted command, a Composer task, a notebook driving the engine directly, and
+    a pre-flight whose BigQuery read failed all arrive here without it having run.
+
+    Costs one aggregation, and only when the policy is armed — every other value of
+    ``short_series`` returns before touching Spark, because those policies have already decided
+    what a short series gets and there is nothing here to refuse. The count is over the same
+    ``source`` relation the run will fan out (already ``series_limit``-subset and persisted), so it
+    measures exactly the panel that would have been scored rather than the table behind it.
+    """
+    from ..backtest import assert_panel_supports_folds
+
+    bt = cfg.backtest
+    if not (bt.enabled and bt.short_series == "error"):
+        return
+    counts = source.groupBy(cfg.data.ts_id_col).count().select("count").toPandas()["count"]
+    assert_panel_supports_folds([int(n) for n in counts], cfg)
 
 
 def sample_series_to_driver(df: DataFrame, cfg: RunConfig, k: int) -> list[pd.DataFrame]:
