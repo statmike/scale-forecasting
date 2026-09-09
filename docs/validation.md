@@ -270,6 +270,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
 | 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
 | 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
+| 20 | `20_gpu_intent_cpu_family.json` | **Disagreement arm:** `use_gpu: true` with the deep-learning family overridden to `cpu` must complete on CPU, buying no accelerator | NEVER_RUN | — | — | — |
 
 ### Why three configs exist that are designed to fail
 
@@ -979,6 +980,21 @@ cannot be fed; the fix is a GPU worker with more vCPUs. Written up in
 The run also crossed the bearer-token TTL **four times** (06:12, 07:42, 08:28, 09:13) and the Ray
 jobs client refreshed itself each time without a 401 — a five-hour unattended run is the strongest
 evidence yet for that mechanism.
+
+**The config was edited on 2026-09-09, so this row is now stale for a second, separate reason.**
+Everything above describes `gpu_fraction: "auto"`, and the config now pins `0.125` and
+`profile.source: "baseline"`. The reason is the GPU-utilisation finding: `auto` sizes the fraction
+from NeuralProphet's measured peak device memory, that peak is about 75 KB, and `_clamp_fraction`
+therefore lands on `_MIN_FRACTION` — ten cells packed onto a card, which is a packing decision
+derived from a model that is not really using the accelerator at all. This config is the GPU arm of
+the CPU-vs-GPU A/B, and its CPU twin gets eight cells per eight-core node, so an unpinned GPU arm
+would start with a 25 % concurrency advantage that has nothing to do with the accelerator. Pinning
+`0.125` makes both arms report `slots_per_unit == 8`. `profile.source` is excluded from the digest,
+so it does not appear in any `run_id` and has to be recorded here instead; `baseline` is pinned
+because the shipped baseline carries no deep-learning family, which means it cannot resolve a
+`slot_cores` that would halve one arm's concurrency and not the other's. The `gpu_fraction` change
+does move the id. Nothing above is retracted — it describes a run that happened — but the config
+that produced it is no longer the config in the tree.
 
 **On 2026-09-02 the whole Ray track stopped provisioning, and the elimination is the useful part.**
 `ray_100k` was attempted and never reached a job: Vertex returned the contentless

@@ -29,8 +29,11 @@
     "persist_models": true,
     "use_gpu": true,
     "gpu_type": "T4",
-    "gpu_fraction": "auto",
+    "gpu_fraction": 0.125,
     "accelerator_count": 1,
+    "profile": {
+      "source": "baseline"
+    },
     "ray_head_machine_type": "n1-highmem-32",
     "ray_gpu_machine_type": "n1-standard-8",
     "ray_autoscale": true,

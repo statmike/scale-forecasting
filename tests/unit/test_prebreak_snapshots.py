@@ -105,6 +105,7 @@ _POST_BREAK = {
     "configs/smokes/17_gpu_absent_serverless.json",
     "configs/smokes/18_gpu_absent_cluster.json",
     "configs/smokes/19_gpu_absent_ray.json",
+    "configs/smokes/20_gpu_intent_cpu_family.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

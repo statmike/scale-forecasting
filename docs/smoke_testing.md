@@ -37,6 +37,7 @@ Run them cheap → expensive; each is numbered in that order.
 | 17 | `17_gpu_absent_serverless.json` | Serverless GPU with the card hidden — the run must **refuse**, not finish on CPU |
 | 18 | `18_gpu_absent_cluster.json` | The same refusal on a Dataproc cluster GPU worker |
 | 19 | `19_gpu_absent_ray.json` | The same refusal on a Ray GPU worker |
+| 20 | `20_gpu_intent_cpu_family.json` | The **opposite** mistake: `use_gpu: true` with the deep-learning family overridden to `cpu`. The run must finish on CPU, having bought no accelerator |
 
 Every other smoke reads the managed-Iceberg source table, so 13 gives the native-format read its own
 proof; together they validate both source formats.
@@ -76,6 +77,19 @@ The switch is infrastructure, not config: it never enters `ComputeConfig`, so ar
 move a `run_id`, and a config runs under one identity whether the card is hidden or not. Six cells
 each, because there is no reason to buy a hundred series' worth of fleet to watch a job refuse to
 start.
+
+**Why 20 exists, and why it is the mirror image of 17–19.** Those three ask what happens when a job
+is told to use a device it cannot see. 20 asks the opposite question: what happens when the two
+places that decide about accelerators disagree in the other direction. Its config sets the flat
+`compute.use_gpu: true` **and** overrides the deep-learning family to `hardware: "cpu"`, which is a
+perfectly reasonable thing for someone to write while moving a workload off GPUs — they flip the
+family and forget the legacy flat flag underneath it. There is only one correct outcome: the
+per-family override wins, `resolve_family_compute` returns `cpu` with no `gpu_type`, the submitter
+provisions a CPU pool because it reads that same resolver, and the run completes having bought no
+accelerator. The failure this guards against is the one where routing and provisioning read
+different variables — the fleet is GPU, the tasks request CPU, nothing is ever schedulable, and the
+run hangs until something times out rather than failing with a message. A hundred cells rather than
+six, because a hang only shows up once there is real work to place.
 
 ## Prerequisites
 
