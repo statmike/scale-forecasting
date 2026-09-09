@@ -375,7 +375,13 @@ class Forecaster:
             _log.warning("%s", line)
         return dag_nodes(run_dag)
 
-    def emit_airflow(self, config_uri: str | None = None, *, dag_id: str | None = None) -> str:
+    def emit_airflow(
+        self,
+        config_uri: str | None = None,
+        *,
+        dag_id: str | None = None,
+        with_retry: bool = False,
+    ) -> str:
         """Render this config's Airflow DAG as a ``dag_<run_id>.py`` source string — pure, offline.
 
         The Composer counterpart to `dag`: instead of the node list, it returns a standalone Airflow
@@ -388,11 +394,18 @@ class Forecaster:
         convention (``runs/<run_id>.json``). ``dag_id`` overrides the default
         ``scale_forecasting_<run_id>``. Touches no GCP — write the returned string to the Airflow
         DAGs folder (or stage it with `staging.stage_dag`).
+
+        ``with_retry`` adds the repair node between the family join and the ensemble — the
+        unattended form of `retry`, so a scheduled run recovers what it can before anything reads
+        it. Off by default, and an argument rather than a config field: config fields feed the
+        ``run_id`` digest, and repairing on a schedule must not be a different run from repairing by
+        hand. A microbatch ensemble gets no node even when asked (it has already drained by then);
+        `airflow_emit.emit_airflow_dag` logs when it declines.
         """
         from .airflow_emit import emit_airflow_dag
 
         uri = config_uri if config_uri is not None else f"runs/{self.run_id}.json"
-        return emit_airflow_dag(self._config, uri, dag_id=dag_id)
+        return emit_airflow_dag(self._config, uri, dag_id=dag_id, with_retry=with_retry)
 
     def jobs(self, run_id: str | None = None) -> list[JobTrace]:
         """The per-job cross-system trace for a run — one `JobTrace` per family, plus the ensemble.

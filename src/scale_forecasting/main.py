@@ -327,7 +327,9 @@ def _combined_status(
     return engine_status
 
 
-def _emit_airflow(cfg: RunConfig, config_uri: str, *, out_path: str | None = None) -> str:
+def _emit_airflow(
+    cfg: RunConfig, config_uri: str, *, out_path: str | None = None, with_retry: bool = False
+) -> str:
     """Render this run's Airflow DAG to a local file and return the path (offline — touches no GCP).
 
     The "emit" verb: resolves the run's DAG and renders it to a standalone ``dag_<run_id>.py``
@@ -337,13 +339,18 @@ def _emit_airflow(cfg: RunConfig, config_uri: str, *, out_path: str | None = Non
     run directly; a local ``--config`` path emits a DAG suitable for local parse/compile checks and
     inspection. ``out_path`` overrides the default ``./dag_<run_id>.py`` destination. Writing is the
     only side effect.
+
+    ``with_retry`` adds the repair node (``--with-retry``), off by default so the same emit command
+    keeps producing the same DAG it always has. It stays an argument here rather than a config field
+    because every config field feeds the ``run_id`` digest: "repair automatically" and "repair by
+    hand" must be the same run, not two.
     """
     from pathlib import Path
 
     from .airflow_emit import emit_airflow_dag
 
     run_id = make_run_id(cfg)
-    source = emit_airflow_dag(cfg, config_uri)
+    source = emit_airflow_dag(cfg, config_uri, with_retry=with_retry)
     out = Path(out_path) if out_path else Path(f"dag_{run_id}.py")
     out.write_text(source, encoding="utf-8")
     return str(out)
@@ -572,6 +579,13 @@ def _main(argv: list[str] | None = None) -> None:
         help="where to write the emitted DAG (default: ./dag_<run_id>.py); implies --emit-airflow",
     )
     p.add_argument(
+        "--with-retry",
+        action="store_true",
+        help="include the repair node in the emitted DAG: after the families finish it re-submits "
+        "the cells they failed to produce, so the ensemble blends those too. Barrier ensembles "
+        "only (a microbatch ensemble has already drained by then); with --emit-airflow",
+    )
+    p.add_argument(
         "--force",
         action="store_true",
         help="acknowledge re-running an already-run config (shapes the exists-vs-new guidance)",
@@ -580,7 +594,9 @@ def _main(argv: list[str] | None = None) -> None:
 
     cfg = load_config_uri(ns.config or ns.config_uri)
     if ns.emit_airflow or ns.emit_out:
-        out = _emit_airflow(cfg, ns.config or ns.config_uri, out_path=ns.emit_out)
+        out = _emit_airflow(
+            cfg, ns.config or ns.config_uri, out_path=ns.emit_out, with_retry=ns.with_retry
+        )
         _log.info("wrote Airflow DAG: %s", out)
         return
     if ns.stage_only:

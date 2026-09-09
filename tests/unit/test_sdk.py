@@ -305,6 +305,20 @@ def test_dag_returns_planned_nodes_offline() -> None:
     assert all(isinstance(n, sf.DagNode) for n in nodes)
 
 
+def test_emit_airflow_carries_the_repair_node_only_when_asked() -> None:
+    # `dag()` above can never show a repair node — a repair's families and attempt number are not
+    # knowable from the config. The emitted DAG is the only surface where one appears, and it takes
+    # an explicit argument to get there.
+    f = sf.Forecaster.from_dict(
+        _cfg_dict(models=["theta", "lightgbm"], ensemble={"enabled": True, "strategies": ["mean"]}),
+        settings=_SETTINGS,
+    )
+    assert "retry" not in f.emit_airflow("gs://bkt/run.json")
+    with_retry = f.emit_airflow("gs://bkt/run.json", with_retry=True)
+    assert "airflow_tasks.retry_families" in with_retry
+    assert ">> retry >> ensemble" in with_retry
+
+
 # --- jobs: the per-job cross-system trace --------------------------------------
 
 

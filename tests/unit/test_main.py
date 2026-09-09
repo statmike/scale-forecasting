@@ -117,6 +117,42 @@ def test_cli_dispatches_stage_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatc
     assert seen == {"run_name": "cli stage test", "force": False}
 
 
+def _emit_config(tmp_path: Any) -> Any:
+    """A barrier-ensemble config on disk — the shape that can carry a repair node."""
+    import json
+
+    path = tmp_path / "run.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_name": "cli emit test",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": [_SPARK],
+                "ensemble": {"enabled": True, "strategies": ["mean", "median"]},
+            }
+        )
+    )
+    return path
+
+
+def test_cli_emits_a_dag_without_a_repair_node_by_default(tmp_path: Any) -> None:
+    # The flag is opt-in, so every emit command that worked before this existed still emits the
+    # same DAG. A repair spends money; it does not get switched on by an upgrade.
+    path = _emit_config(tmp_path)
+    out = tmp_path / "dag.py"
+    main._main(["--config", str(path), "--emit-airflow", "--emit-out", str(out)])
+    assert "retry" not in out.read_text()
+
+
+def test_cli_with_retry_emits_the_repair_node(tmp_path: Any) -> None:
+    path = _emit_config(tmp_path)
+    out = tmp_path / "dag.py"
+    main._main(["--config", str(path), "--emit-airflow", "--with-retry", "--emit-out", str(out)])
+    source = out.read_text()
+    assert "airflow_tasks.retry_families" in source
+    assert ">> retry >> ensemble" in source
+
+
 def test_dry_run_allows_ray() -> None:
     # Ray is a supported runtime now; a ray config plans + dry-runs like any other.
     run_id = main.run(_cfg(models=[_SPARK, *_NATIVE], python_runtime="ray"), dry_run=True)
