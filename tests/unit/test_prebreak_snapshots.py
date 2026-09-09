@@ -87,9 +87,10 @@ _SCORED_AT_2_3 = frozenset({"coverage", "pinball", "interval_score", "interval_w
 # names below. That is the half that still catches a plumbing regression, and it is the half 2.5
 # did not touch.
 #
-# The numeric pin is not lost, it moved: `golden_panel.json` carries it, exactly, with no
-# exemptions, and `test_current_cell_output_matches_the_pinned_panel` is now the only test in this
-# module that reads a forecast value. That test is the one to keep sharp.
+# The numeric pin is not lost, it moved: `golden_panel.json` carries it, with no exemptions and at
+# an exact tolerance for every model that can hold one (see `_UNSTABLE_FIT` for the five that
+# cannot). `test_current_cell_output_matches_the_pinned_panel` is now the only test in this module
+# that reads a forecast value. That test is the one to keep sharp.
 _MOVED_AT_2_5 = True
 _COLUMNS_ADDED_AT_2_5 = frozenset({"yhat_raw", "yhat_adjusted"})
 
@@ -116,11 +117,34 @@ _HORIZON = 28
 # snapshot describes folds the shipped data can actually produce.
 _FOLD_OBS = 1460
 
-# Absolute vs relative tolerance for the numbers. Loose enough to survive a BLAS or libm
-# difference between machines, tight enough that any change with a *cause* moves further than
-# this. A behavioural regression does not land at 1e-9.
+# Absolute vs relative tolerance for the numbers: an exact pin in everything but name, and what
+# most of the panel is held to. Ten of the fifteen models reproduce bit-for-bit on any machine.
 _RTOL = 1e-9
 _ATOL = 1e-9
+
+# The other five, and the one place this module admits a number it cannot pin exactly.
+#
+# These five fit by iterative numerical optimisation inside `statsmodels`, and an optimiser does
+# not stop at the same point on two different CPUs: the BLAS kernels chosen depend on the
+# instruction set found at load time, the reduction order changes with them, and the search halts
+# a few ULPs away. The evidence that it is the machine and not the code: on the CI runner exactly
+# these five moved and the other ten moved nothing at all, while locally the whole panel is
+# reproducible to the bit under any thread count. Note that `stl_bagging` also fits an ARIMA and
+# did *not* move — so this set is what was observed, not a category anyone reasoned their way to.
+# A sixth name belongs here only with the same kind of evidence behind it.
+#
+# The two bands are sized from the runner's actual movements rather than guessed. Forecast values
+# moved at most 2.1e-6 relative; metrics moved at most 4.1e-3, and that outlier is `bias` — a
+# near-zero average of errors on a series whose level is ~270, so an absolute shift of 0.008 reads
+# as a large fraction of itself. Error metrics amplify by construction; the forecast is the
+# scale-free signal, so it keeps the tighter band.
+#
+# What the loose band still catches: item 2.5, the last deliberate movement in this panel, moved
+# WAPE by 5.7e-2 — fourteen times the metric band and four orders above the forecast one. A change
+# with a cause is not subtle.
+_UNSTABLE_FIT = frozenset({"autoets", "holtwinters", "sarimax", "theta", "ucm"})
+_UNSTABLE_FIT_RTOL_FORECAST = 1e-5
+_UNSTABLE_FIT_RTOL_METRIC = 1e-2
 
 # `neuralprophet` is excluded from the numeric panel for two independent reasons, and both would
 # have to stop being true to include it: it costs ~51 s for this one series (85% of the panel's
@@ -205,10 +229,17 @@ def _jsonable(v: Any) -> Any:
     return None if math.isnan(f) or math.isinf(f) else f
 
 
-def _close(a: Any, b: Any) -> bool:
+def _relative(want: Any, got: Any) -> float:
+    """How far `got` moved from `want`, as a fraction of `want`. A value gained or lost is inf."""
+    if want is None or got is None:
+        return math.inf
+    return abs(float(got) - float(want)) / max(abs(float(want)), 1e-12)
+
+
+def _close(a: Any, b: Any, rtol: float = _RTOL) -> bool:
     if a is None or b is None:
         return a is None and b is None
-    return math.isclose(float(a), float(b), rel_tol=_RTOL, abs_tol=_ATOL)
+    return math.isclose(float(a), float(b), rel_tol=rtol, abs_tol=_ATOL)
 
 
 @pytest.fixture(scope="module")
@@ -314,8 +345,9 @@ def _cell_complaints(
     """Every way the cells in `current` differ from `expected`, as sentences. Empty means same.
 
     Shared by both panel tests so that "unchanged" means one thing rather than two. Numbers are
-    compared with `_close` on both sides: a BLAS or libm difference between two machines moves the
-    last bit or two of a float, and a pin that fails on that is a pin someone switches off.
+    compared with `_close`, at the exact tolerance for most models and at the wider cross-machine
+    band for the five named in `_UNSTABLE_FIT` — see the comment there for why those five and why
+    that width. A pin that fails on a difference between two CPUs is a pin someone switches off.
 
     `newly_scored` names metrics allowed to have gone from "not computed" to a number since the
     snapshot was taken. It is one-directional on purpose — the reverse move, a metric that used to
@@ -339,6 +371,9 @@ def _cell_complaints(
     out: list[str] = []
     for model in sorted(current):
         got, want = current[model], expected[model]
+        unstable = model in _UNSTABLE_FIT
+        metric_rtol = _UNSTABLE_FIT_RTOL_METRIC if unstable else _RTOL
+        forecast_rtol = _UNSTABLE_FIT_RTOL_FORECAST if unstable else _RTOL
         if got["status"] != want["status"]:
             out.append(f"{model}: cell status {want['status']!r} -> {got['status']!r}")
         if set(got["columns"]) != set(want["columns"]) | columns_added:
@@ -352,7 +387,7 @@ def _cell_complaints(
             w, g = want["metrics"][key], got["metrics"][key]
             if key in newly_scored and w is None and g is not None:
                 continue  # the movement 2.3 declared, in the only direction it declared it
-            if compare_values and not _close(g, w):
+            if compare_values and not _close(g, w, metric_rtol):
                 out.append(f"{model}: metric {key} moved {w!r} -> {g!r}")
         if len(got["yhat"]) != len(want["yhat"]):
             out.append(f"{model}: forecast length {len(want['yhat'])} -> {len(got['yhat'])}")
@@ -362,12 +397,15 @@ def _cell_complaints(
         drifted = [
             (i, w, g)
             for i, (w, g) in enumerate(zip(want["yhat"], got["yhat"], strict=True))
-            if not _close(g, w)
+            if not _close(g, w, forecast_rtol)
         ]
         if drifted:
+            # The worst movement, not just the first: it is the number anyone re-sizing a
+            # tolerance needs, and reading it off one failure beats another round trip to find it.
+            i, w, g = max(drifted, key=lambda d: _relative(d[1], d[2]))
             out.append(
-                f"{model}: {len(drifted)} of {len(want['yhat'])} forecast values moved, first at "
-                f"step {drifted[0][0]}: {drifted[0][1]!r} -> {drifted[0][2]!r}"
+                f"{model}: {len(drifted)} of {len(want['yhat'])} forecast values moved, worst at "
+                f"step {i}: {w!r} -> {g!r} ({_relative(w, g):.2e} relative)"
             )
     return out
 
@@ -409,9 +447,15 @@ def test_current_cell_output_matches_the_pinned_panel(
 
     The pre-break comparison above answers a question that is settled — it carries an exemption now
     and will carry more as more deliberate changes land, and each one narrows what it can still
-    catch. This one has no exemptions and never will: it pins today's numbers exactly, so the next
-    unintended movement fails in the commit that causes it rather than being discovered later by
-    someone regenerating a snapshot for an unrelated reason.
+    catch. This one pins today's numbers, so the next unintended movement fails in the commit that
+    causes it rather than being discovered later by someone regenerating a snapshot for an
+    unrelated reason.
+
+    It carries no *exemption* — nothing here is allowed to change direction or appear from nowhere
+    — but it does carry a tolerance, and for the five models in `_UNSTABLE_FIT` that tolerance is
+    wide enough to absorb the difference between two CPUs. That is a limit of what a numeric pin
+    can promise across machines, written down where it applies rather than left for whoever next
+    sees the gate go red on a runner and green at their desk.
 
     When a change here *is* intended, `--write` and say so in the commit body. That is the whole
     ceremony, and it is worth having: it makes moving a number a thing somebody decided.
@@ -422,6 +466,40 @@ def test_current_cell_output_matches_the_pinned_panel(
     )
     complaints = _cell_complaints(current_panel["cells"], snapshot_panel_now["cells"])
     assert not complaints, "output moved from the pinned panel:\n" + "\n".join(complaints)
+
+
+def test_the_cross_machine_band_names_only_models_the_panel_still_runs() -> None:
+    """A widened tolerance for a model that no longer exists is a dead line nobody can see is dead.
+
+    The band in `_UNSTABLE_FIT` is the one place this module gives up exactness, so it is the one
+    place worth checking stays honest: a renamed or retired model must take its exemption with it
+    rather than leave a name behind that reads like a live claim about today's suite.
+    """
+    stale = sorted(_UNSTABLE_FIT - set(_panel_models()))
+    assert not stale, (
+        f"{stale} carry the cross-machine tolerance band but are not in the numeric panel any "
+        "more. Remove them from `_UNSTABLE_FIT` — every model left in it must be one whose "
+        "movement across machines was actually observed."
+    )
+
+
+def test_the_cross_machine_band_is_wide_for_five_models_and_for_no_others() -> None:
+    """The band is the module's one loose thread, so it is worth testing and not just writing.
+
+    Two claims in one: the same 1e-6 movement that a named model is allowed to make is a failure
+    for a model that is not named, and the width really is per-model rather than global.
+    """
+    base = {
+        "status": "ok",
+        "metrics": {"wape": 0.1},
+        "columns": ["yhat"],
+        "yhat": [100.0],
+        "n_oof_rows": 3,
+    }
+    nudged = {**base, "metrics": {"wape": 0.1 * (1 + 1e-6)}, "yhat": [100.0 * (1 + 1e-6)]}
+
+    assert not _cell_complaints({"autoets": nudged}, {"autoets": base})
+    assert _cell_complaints({"croston": nudged}, {"croston": base})
 
 
 def _write() -> None:
