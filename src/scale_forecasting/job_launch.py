@@ -500,19 +500,30 @@ def submit_retry(
     Shared clusters are provisioned from the *narrowed* DAG, so a repair of two Ray families still
     gets one cluster between them and a repair of one gets none — the same rule as a first attempt,
     applied to the smaller job list.
+
+    ``max_executors`` falls back to ``compute.capacity.retry.max_executors`` when the caller passes
+    none, so an unattended repair (the Airflow node, ``--retry`` without a flag) can be sized from
+    the config it launches from — the only input those paths have. An explicit argument wins,
+    because it comes from an operator who is looking at the run. Neither shifts the ``run_id``:
+    everything under ``compute.capacity`` is digest-excluded, which is why the knob lives there
+    rather than beside ``compute.max_executors``. See `config.RetryResources` for what a repair can
+    and cannot vary.
     """
     from concurrent.futures import ThreadPoolExecutor
 
     from . import shared_clusters
 
+    if max_executors is None:
+        max_executors = cfg.compute.capacity.retry.max_executors
     python_jobs = retry_dag.python_jobs
     native = retry_dag.native_job
     errors: dict[str, BaseException] = {}
     _log.info(
-        "retry %s: families=%s models=%s",
+        "retry %s: families=%s models=%s max_executors=%s",
         run_id,
         retry_dag.families,
         {job.family: list(job.models) for job in retry_dag.jobs},
+        max_executors if max_executors is not None else "from the fan-out",
     )
     with (
         shared_clusters.shared_ray_cluster(cfg, retry_dag, run_id, settings) as ray_cluster,

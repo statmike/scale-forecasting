@@ -68,6 +68,20 @@ def test_disabling_capacity_retry_does_not_move_the_run_id() -> None:
     assert make_run_id(_cfg(compute={"capacity": {"enabled": False}})) == make_run_id(_cfg())
 
 
+def test_sizing_a_repair_does_not_move_the_run_id() -> None:
+    """A repair that runs narrower than the attempt it repairs is still the same run.
+
+    This is the whole reason `config.RetryResources` sits under ``compute.capacity`` rather than
+    beside ``compute.max_executors``. If it forked the id, a repair would write its ``run_jobs``
+    rows and its cells under a run nobody is looking at — the failed run would still read as failed
+    and the recovered cells would be invisible to it.
+    """
+    narrow = _cfg(compute={"capacity": {"retry": {"max_executors": 4}}})
+    assert make_run_id(narrow) == make_run_id(_cfg())
+    # The sibling it is deliberately *not*: a run-wide ceiling describes what was asked for.
+    assert make_run_id(_cfg(compute={"max_executors": 4})) != make_run_id(_cfg())
+
+
 def test_the_resolved_profile_source_does_not_move_the_run_id() -> None:
     """Observed live (smoke 01): a pinned harvest in the digest never converges on a re-run."""
     pinned = _cfg(compute={"profile": {"source": "prior-run-0123456789ab"}})

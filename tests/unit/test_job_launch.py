@@ -572,6 +572,41 @@ def test_one_family_failing_does_not_hide_the_others(monkeypatch: pytest.MonkeyP
     assert "fell over again" in str(outcome.errors["statistical_repair"])
 
 
+def test_a_repair_sizes_itself_from_the_config_when_nobody_passes_a_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The unattended paths (the Airflow node, `--retry` with no flag) launch from a config and
+    # nothing else. Without this fallback a forty-cell repair asks for the fleet the whole run was
+    # sized for, because the fan-out arithmetic reads the original config's series count.
+    seen = _record_launchers(monkeypatch)
+    cfg = _cfg(models=[_SPARK], compute={"capacity": {"retry": {"max_executors": 4}}})
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK])
+    job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
+    assert [kw["max_executors"] for _, kw in seen] == [4]
+
+
+def test_an_operator_at_the_terminal_outranks_the_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same precedence the batch path already uses: an explicit argument beats the authored value.
+    # The operator passing it is looking at the run; the config was written before it failed.
+    seen = _record_launchers(monkeypatch)
+    cfg = _cfg(models=[_SPARK], compute={"capacity": {"retry": {"max_executors": 4}}})
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK])
+    job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS, max_executors=32)
+    assert [kw["max_executors"] for _, kw in seen] == [32]
+
+
+def test_a_repair_with_no_ceiling_anywhere_still_sizes_from_the_fan_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The default must stay "no operator ceiling" — the block is opt-in, and an unset field is not
+    # a request to run on one executor.
+    seen = _record_launchers(monkeypatch)
+    cfg = _cfg(models=[_SPARK])
+    narrowed = dag.narrow_to_models(dag.plan_dag(cfg), [_SPARK])
+    job_launch.submit_retry(cfg, narrowed, "run-abc", _SETTINGS)
+    assert [kw["max_executors"] for _, kw in seen] == [None]
+
+
 def test_a_repair_never_reopens_the_run_header(monkeypatch: pytest.MonkeyPatch) -> None:
     # One header owner per run. A repair joining an existing run_id that wrote RUNNING over the
     # driver's finalized row would rewrite the run's outcome from a job that is not the run.

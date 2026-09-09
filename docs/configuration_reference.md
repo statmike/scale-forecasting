@@ -612,6 +612,7 @@ number you have an opinion about and inherit the rest.
 | `enabled` | `bool` | `true` | — | `false` = one pass over the candidates, no back-off, all services. Beats an authored `max_passes`. |
 | `preflight` | `bool` | `true` | — | Read each candidate region's quota **before** the first create, and skip or clamp accordingly. See below. |
 | `ray` \| `dataproc_cluster` \| `dataproc_serverless` | `object` | `{}` | — | Per-service partial override; unset fields inherit the shipped default below. |
+| `retry` | `object` | `{}` | — | How wide a **repair** runs — not a capacity policy, but the same digest-excluded surface. See below. |
 
 `preflight` is the cheap half of the same problem: retrying is for a region that is *temporarily*
 full, and a preflight is for one that was never going to work. It reads the region's allowance,
@@ -652,6 +653,40 @@ would fork your run identity and break dedupe-on-read.
   "capacity": {
     "ray": {"max_wall_seconds": 7200},
     "dataproc_serverless": {"max_attempts": 20}
+  }
+}
+```
+
+#### `compute.capacity.retry` — how wide a repair runs
+
+A repair (`--retry`, `Forecaster.retry`, or the emitted DAG's retry node) re-submits a handful of
+cells out of a run that was sized for all of them. The fleet arithmetic does not know that: it sizes
+from the config's fan-out, so a forty-cell repair of a hundred-thousand-cell family asks for the
+hundred-thousand-cell fleet and pays for it.
+
+| Field | Type | Default | Constraint | Purpose |
+|-------|------|---------|-----------|---------|
+| `max_executors` | `int` \| `null` | `null` | `> 0` | Ceiling on the repair's Spark batch (`spark.dynamicAllocation.maxExecutors`). `null` = size from the fan-out, as a first attempt does. |
+
+It is here rather than beside `compute.max_executors` because a repair that resized itself must stay
+the **same run**: everything under `compute.capacity` is excluded from the `run_id` digest, and a
+forked id would mean the repair wrote its rows under a run nobody is looking at.
+
+It is in the config rather than only on `--max-executors` because the unattended repair paths launch
+from a config and nothing else — a ceiling reachable only through a flag is one an orchestrated
+repair can never set. An explicit `--max-executors` still wins; the operator passing it is looking at
+the run, and the config was written before the run failed.
+
+Two limits worth knowing. It caps a Spark **batch** and is ignored by the Ray and in-process paths,
+so a Ray family's repair still provisions from the fan-out. And it is the only resource a repair can
+vary: a repair reuses the config its run staged, so anything the *worker* reads out of that config
+(`bucket_target_cells`, `max_parallelism`, the model list, the data block) is the same bytes for the
+repair as for the attempt, by construction.
+
+```json
+"compute": {
+  "capacity": {
+    "retry": {"max_executors": 8}
   }
 }
 ```

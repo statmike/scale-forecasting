@@ -551,6 +551,40 @@ class CapacityServicePolicy(BaseModel):
     backoff_max_seconds: float | None = Field(default=None, ge=0)
 
 
+class RetryResources(BaseModel):
+    """What a **repair** may claim differently from the attempt it repairs.
+
+    A repair re-submits a handful of cells out of a run that was sized for all of them. The fleet
+    arithmetic does not know that: it sizes from the config's fan-out, so a forty-cell repair of a
+    hundred-thousand-cell family asks for the hundred-thousand-cell fleet and pays for it. This is
+    where a run says how wide its repairs should be instead.
+
+    It lives here, under ``compute.capacity``, for the reason the parent's docstring already gives:
+    everything under ``capacity`` is excluded from the ``run_id`` digest, and a repair that resized
+    itself must stay the *same run*. A sibling of ``compute.max_executors`` would fork the id, which
+    would mean the repair wrote its rows under a run nobody was looking at.
+
+    It is a config block rather than only a CLI flag for the same reason ``compute.max_executors``
+    is: the unattended repair paths (`airflow_tasks.retry_families`, `main`'s ``--retry``) launch
+    from a config and nothing else, so a ceiling reachable only through an argument is a ceiling an
+    orchestrated repair can never set. An explicit ``max_executors=`` argument still wins over it
+    (`job_launch.submit_retry`) — the operator at the terminal overrides the file.
+
+    **Why only this one knob, and what may join it.** A repair reuses the config its run staged, so
+    the only settings it can vary are the ones the *driver* reads at launch: anything the worker
+    reads out of the staged config (``bucket_target_cells``, ``max_parallelism``, the model list,
+    the data block) is the same bytes for the repair as for the attempt, by construction. Of the
+    driver-side knobs, ``max_executors`` is the one the launchers already take as an argument
+    (`job_launch.launch_family_job`). Note its reach: it caps a Spark **batch's**
+    ``spark.dynamicAllocation.maxExecutors`` and is ignored by the Ray and in-process paths, so a
+    Ray family's repair still provisions from the fan-out.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_executors: int | None = Field(default=None, gt=0)
+
+
 class CapacityConfig(BaseModel):
     """How hard to look for room when a service says it has none — per service (G2).
 
@@ -591,6 +625,10 @@ class CapacityConfig(BaseModel):
     dataproc_cluster: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Dataproc Serverless batch submission — region only, and rejections come back in seconds.
     dataproc_serverless: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+    # How wide a *repair* runs (see `RetryResources`). Not a capacity *policy* — it does not tune
+    # the candidate walk — but it belongs to the same digest-excluded operational surface, and
+    # giving it its own top-level block would mean a second exclusion entry saying the same thing.
+    retry: RetryResources = Field(default_factory=RetryResources)
 
     def policy_for(self, service: str) -> CapacityPolicy:
         """Resolve this config into the runtime policy for ``service`` (pure).
