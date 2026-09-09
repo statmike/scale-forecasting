@@ -171,12 +171,20 @@ class FeaturesConfig(BaseModel):
 class BacktestConfig(BaseModel):
     """Time-series cross-validation. Off by default (cheapest first run).
 
-    **Five of these fields are accepted but not yet honoured.** They are declared here ahead of the
-    methodology work that implements them, because ``run_id`` is a digest of the whole config:
-    adding a field moves every identity ever recorded, so the fields land together, once, rather
-    than one per release. Until then ``make_folds`` reads exactly what it read before — ``n_folds``,
-    ``horizon``, ``step``, ``min_train``, ``scheme`` — and ``test_inert_config_fields.py`` asserts
-    that the others change nothing. See ``docs/configuration_reference.md`` for which is which.
+    **Three of these fields are accepted but not yet honoured.** They were declared here ahead of
+    the methodology work that implements them, because ``run_id`` is a digest of the whole config:
+    adding a field moves every identity ever recorded, so the fields landed together, once, rather
+    than one per release. ``test_inert_config_fields.py`` asserts that what remains unread changes
+    nothing. See ``docs/configuration_reference.md`` for which is which.
+
+    ``gap`` and ``window`` are now honoured. ``gap`` is an **embargo**: training stops ``gap``
+    observations before the validation window starts, so ``train_end + gap == val_start`` and the
+    fold measures a forecast issued with a reporting lag. It moves the training end, never the
+    validation window — the folds of a ``gap=14`` run cover the same dates as the folds of a
+    ``gap=0`` run, so the two are comparable — and it costs history, so a series may achieve fewer
+    folds under it. ``window`` is the ``sliding`` scheme's training width, defaulting to
+    ``min_train``, which frees ``min_train`` to mean only the feasibility floor. Both are mirrored
+    into the BigQuery-native fold SQL, so the two engines score the same windows.
 
     ``scheme`` is the one that is fully honoured, and it decides *what a fold's score is a score
     of*. ``expanding`` and ``sliding`` refit at every origin, so a score is about a freshly-trained
@@ -217,10 +225,14 @@ class BacktestConfig(BaseModel):
     min_folds: int = Field(default=1, ge=1)
     # A hard minimum training length, independent of `min_train`, that adaptation may not go below.
     min_train_floor: int | None = Field(default=None, gt=0)
-    # Observations discarded between train_end and val_start, breaking the `train_end == val_start`
-    # adjacency for forecasts issued with a known reporting lag.
+
+    # --- honoured (see the class docstring) ----------------------------------------------
+
+    # The embargo: observations discarded between train_end and val_start, for a forecast issued
+    # with a known reporting lag. `backtest.make_folds` and `engines.bigquery_sql.fold_plan`.
     gap: int = Field(default=0, ge=0)
     # A fixed training width for `sliding`, decoupled from `min_train`'s role as a data floor.
+    # Resolved by `backtest.training_width`, which both engines call.
     window: int | None = Field(default=None, gt=0)
 
 

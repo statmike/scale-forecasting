@@ -138,8 +138,8 @@ for HPO and learned ensembles.
 | `short_series` | `"adapt"` \| `"skip"` \| `"error"` | `"adapt"` | — | **Accepted, not yet honoured** — the code always adapts, whatever this says. See below. |
 | `min_folds` | `int` | `1` | `≥ 1` | **Accepted, not yet honoured.** The floor `adapt` may shrink `n_folds` to. |
 | `min_train_floor` | `int \| null` | `null` | `> 0` | **Accepted, not yet honoured.** A hard training-length minimum adaptation may not cross. |
-| `gap` | `int` | `0` | `≥ 0` | **Accepted, not yet honoured.** Observations to discard between train and validation, for a known reporting lag. |
-| `window` | `int \| null` | `null` | `> 0` | **Accepted, not yet honoured.** A fixed `sliding` width, decoupled from `min_train`. |
+| `gap` | `int` | `0` | `≥ 0` | The embargo: observations discarded between train and validation, for a known reporting lag. See [The embargo](#the-embargo-gap) below. |
+| `window` | `int \| null` | `null` | `> 0` | A fixed `sliding` training width, decoupled from `min_train`. Defaults to `min_train`. |
 
 **`scheme` — how the training window moves** ([`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py)).
 Folds are anchored from the **end** of each series: the latest fold validates on the final `horizon`
@@ -149,12 +149,12 @@ in where training *starts*:
 - **`expanding`** (default) — training uses **all history** from the series start up to each fold's
   validation point. The train window grows fold to fold. Best default: every fold sees maximum
   history.
-- **`sliding`** — training uses a **fixed-width** window of the last `min_train` observations
-  immediately before each fold. Older history is dropped. Use when the series' behavior drifts and
-  recent history is more representative than old history.
+- **`sliding`** — training uses a **fixed-width** window of the last `window` observations
+  immediately before each fold, and `window` defaults to `min_train`. Older history is dropped. Use
+  when the series' behavior drifts and recent history is more representative than old history.
 
-`n_folds`, `horizon`, `step`, and `min_train` lay the folds out together, and a series needs at least
-`min_train + horizon + (n_folds−1)·step` observations to be scored on *all* of them.
+`n_folds`, `horizon`, `step`, `min_train` and `gap` lay the folds out together, and a series needs at
+least `min_train + gap + horizon + (n_folds−1)·step` observations to be scored on *all* of them.
 
 **A shorter series is scored on fewer folds; it never loses its forecast.** Backtesting scores a
 model — it does not produce the forecast — so a scoring shortfall costs only the score. The fold
@@ -198,7 +198,29 @@ was "skipped for backtesting", which was never true; the correction said it "fai
 was true at the time and is the behaviour this change removed.)
 
 Features are built once and a **fresh** model is fit per fold, so no state leaks across folds and
-`train_end == val_start` always (no leakage).
+`train_end + gap == val_start` always (no leakage; at the default `gap` of 0 the two are adjacent).
+
+<a id="the-embargo-gap"></a>
+**`gap` — the embargo.** Raising `gap` opens a band of observations between the end of training and
+the start of validation that are neither trained on nor scored. That is how you measure a forecast
+issued with a reporting lag: if the last fortnight of actuals is never in the warehouse when the
+model runs, then scoring a model that trained right up to the cutoff flatters it. Set `gap: 14` and
+each fold's model stops learning fourteen days earlier.
+
+Two things about how it is applied are worth knowing, because they are what make the numbers usable:
+
+- **The embargo moves the training end, not the validation window.** A `gap: 14` run scores exactly
+  the same dates as the same config at `gap: 0`, so the two runs are directly comparable and the
+  difference between them is the cost of the lag. The alternative — pushing validation later —
+  would have changed both the model and the test set at once.
+- **It costs history.** Each fold gives up `gap` observations it would otherwise have trained on,
+  which is why `gap` is in the feasibility formula above: a short series achieves fewer folds at a
+  larger embargo.
+
+The BigQuery-native path mirrors this exactly. It forecasts `gap + horizon` points from its cutoff
+and then discards the first `gap` of them before joining to actuals, so `horizon_step` means the
+same thing on both engines: position 1 is the first *scored* point, not the first point the model
+emitted.
 
 **`short_series` — what it will eventually select.** The code now always adapts, so the `adapt`
 default finally describes what happens; the field is still inert because the other two branches are
@@ -215,7 +237,7 @@ cheaper approximations of one number, so pick the one that matches the question 
 | `scheme` | What happens at each origin | The question it answers |
 |----------|-----------------------------|-------------------------|
 | `expanding` (default) | A fresh model is fit on all history up to the cutoff. | How good is this model when freshly trained? |
-| `sliding` | A fresh model is fit on a fixed-width `min_train` window. | Same, but with a bounded memory. |
+| `sliding` | A fresh model is fit on a fixed-width `window` (default `min_train`). | Same, but with a bounded memory. |
 | `expanding_frozen` | One fit on the oldest fold's window, then handed the observations that arrived since, parameters held fixed. | What does refitting less often cost me? |
 | `expanding_stale` | One fit, and the model is never told what happened next. | How fast does this decay if nobody touches it? |
 
@@ -240,16 +262,17 @@ arm's, under this run's `decision_metric`, positive when never refreshing the mo
 
 ### Fields that are accepted but not yet honoured
 
-`short_series`, `min_folds`, `min_train_floor`, `gap` and `window` all validate today and change
-nothing today. They were added to the schema ahead of the code that reads them, in one commit,
-because a new config field moves every `run_id` that has ever been recorded — landing them together
-costs one identity break instead of seven. (`model_params` landed in that same commit and *is* now
-honoured; it is documented below. So is the `expanding_frozen` scheme, above.)
+`short_series`, `min_folds` and `min_train_floor` all validate today and change nothing today. They
+were added to the schema ahead of the code that reads them, in one commit, because a new config
+field moves every `run_id` that has ever been recorded — landing them together costs one identity
+break instead of seven. (`gap`, `window` and `model_params` landed in that same commit and *are* now
+honoured; they are documented above and below. So is the `expanding_frozen` scheme.)
 
 Setting one is therefore not harmless even though it is inert: it changes your run's `run_id`, so a
-config that sets `gap: 7` is a different run from the same config without it, producing identical
-numbers. `tests/unit/test_inert_config_fields.py` holds both halves of that claim, and will fail on
-the day one of these fields is wired up — at which point this section is what needs correcting.
+config that sets `min_folds: 2` is a different run from the same config without it, producing
+identical numbers. `tests/unit/test_inert_config_fields.py` holds both halves of that claim, and
+will fail on the day one of these fields is wired up — at which point this section is what needs
+correcting.
 
 **`decision_metric` — what folds are judged on** (definitions in
 [`metrics.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics.py); `err = yhat − y_true`). This single choice drives
@@ -284,7 +307,7 @@ read NaN for ensembles.
 the error by the average step of a naïve forecast over the training data, so which history goes in
 decides the number. Every engine uses the same rule: **the fold's own training window** — the
 observations at or before that fold's `cutoff_date`, and under `backtest.scheme: sliding` only the
-last `min_train` of them. The window the fold is *scored* on is never in its own denominator, so a
+last `window` (default `min_train`) of them. The window the fold is *scored* on is never in its own denominator, so a
 `mase` from a Python model and a `mase` from a BigQuery-native model for the same series are
 answers to the same question and can sit in the same leaderboard column. An ensemble is scaled the
 same way, at the cutoff its blended rows carry. One consequence worth knowing: because each fold

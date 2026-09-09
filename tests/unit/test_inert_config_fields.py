@@ -11,8 +11,9 @@ against the registry at plan time (`dag.check_model_params`), and consumed by
 `NeuralProphetModel`. **`expanding_frozen` is now honoured too** — `backtest._walk_folds` carries
 one fit across origins for it, and `expanding_stale` joined the Literal alongside it. What remains
 of that scheme here is the geometry invariant, which is not a "not yet" but a standing fact: the
-frozen schemes change how a model is *carried*, never where a fold starts. Five backtest fields
-remain inert.
+frozen schemes change how a model is *carried*, never where a fold starts. **`gap` and `window`
+left the inert list next**, wired through `backtest.make_folds`, `backtest.training_width` and the
+native fold SQL. Three backtest fields remain inert.
 
 It also creates a gap between what the schema says and what the code does, and a gap nobody is
 watching becomes a lie. So this module pins both halves:
@@ -22,7 +23,9 @@ watching becomes a lie. So this module pins both halves:
   somebody wires a field up, which is exactly when the "not yet honoured" wording in the config
   reference and the `BacktestConfig` docstring stops being true and has to be deleted.
 * **In the digest** — setting any of them moves the `run_id`. If one did not, it would be missing
-  from the dumped payload, and the break would have to be paid for a second time to add it.
+  from the dumped payload, and the break would have to be paid for a second time to add it. This
+  half covers the honoured fields too: leaving the digest is not something implementing a field is
+  allowed to do quietly.
 
 When you implement one of these: delete its entry from `_INERT_BACKTEST_FIELDS` (or
 `_UNREAD_IN_SOURCE`) in the same commit, and update `docs/configuration_reference.md`. The digest
@@ -49,9 +52,12 @@ _INERT_BACKTEST_FIELDS: dict[str, Any] = {
     "short_series": "error",
     "min_folds": 3,
     "min_train_floor": 90,
-    "gap": 14,
-    "window": 200,
 }
+
+# Left the inert list when they were wired up, and stay here for the digest half below — that claim
+# is true for the life of a field, not just while it is unread. `gap` is the embargo and `window`
+# the sliding training width; `tests/unit/test_backtest.py` holds what they now do.
+_HONOURED_BACKTEST_FIELDS: dict[str, Any] = {"gap": 14, "window": 200}
 
 # Names no module outside `config.py` may mention while the field is unread. `scheme` is absent
 # because it is read, and every one of its values is now honoured. `model_params` left this tuple
@@ -85,7 +91,10 @@ def _folds(cfg: RunConfig) -> list[tuple[int, int, int, int, int]]:
 # --- accepted -----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("field", "value"), sorted(_INERT_BACKTEST_FIELDS.items()))
+@pytest.mark.parametrize(
+    ("field", "value"),
+    sorted({**_INERT_BACKTEST_FIELDS, **_HONOURED_BACKTEST_FIELDS}.items()),
+)
 def test_the_new_backtest_fields_are_accepted(field: str, value: Any) -> None:
     assert getattr(_cfg(backtest={field: value}).backtest, field) == value
 
@@ -175,7 +184,10 @@ def test_no_module_outside_config_reads_the_unhonoured_fields() -> None:
 # --- in the digest ------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("field", "value"), sorted(_INERT_BACKTEST_FIELDS.items()))
+@pytest.mark.parametrize(
+    ("field", "value"),
+    sorted({**_INERT_BACKTEST_FIELDS, **_HONOURED_BACKTEST_FIELDS}.items()),
+)
 def test_every_new_backtest_field_reaches_the_run_id(field: str, value: Any) -> None:
     """Inert in behaviour, not in identity — that is what makes landing them early worth it."""
     assert make_run_id(_cfg(backtest={field: value})) != make_run_id(_cfg())

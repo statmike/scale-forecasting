@@ -21,6 +21,7 @@ from scale_forecasting.backtest import (
     fit_rows,
     make_folds,
     suggest_min_train,
+    training_width,
     training_window,
 )
 from scale_forecasting.config import RunConfig
@@ -184,6 +185,104 @@ def test_every_clamped_fold_still_honours_the_no_leakage_and_min_train_invariant
             assert f.train_size >= 12  # min_train respected
             assert f.val_size == 7  # full-width validation window
             assert f.val_end <= n  # never reads past the series
+
+
+# --- the embargo (`gap`) and the sliding width (`window`) ------------------------------------
+
+
+_GEOM = {"n_folds": 3, "horizon": 5, "step": 5, "min_train": 20}
+
+
+def test_the_embargo_moves_the_training_end_and_leaves_the_validation_window_alone() -> None:
+    """The direction is the whole design, so it is asserted rather than described.
+
+    A ``gap`` run and a ``gap=0`` run score the *same dates*; only how much history the model was
+    allowed to see changes. Anchoring the other way round — validation pushed out past the
+    embargo — would have been easier to write and would make the two runs incomparable, because
+    fold 2 of one would cover a different fortnight than fold 2 of the other.
+    """
+    plain = make_folds(100, _cfg(_GEOM))
+    embargoed = make_folds(100, _cfg({**_GEOM, "gap": 7}))
+    assert [(f.val_start, f.val_end) for f in embargoed] == [
+        (f.val_start, f.val_end) for f in plain
+    ]
+    assert [f.train_end for f in embargoed] == [f.train_end - 7 for f in plain]
+    for f in embargoed:
+        assert f.train_end + 7 == f.val_start
+
+
+def test_the_embargo_costs_history_so_a_short_series_achieves_fewer_folds() -> None:
+    """Not a bug to route around: the observations in the embargo are genuinely unusable.
+
+    `achievable_folds` subtracts the gap for the same reason it subtracts the horizon — a series
+    that cannot seat the oldest fold's training window *and* the embargo in front of it cannot run
+    that fold. Reporting three folds and delivering two would be the alternative.
+    """
+    n = 20 + 5 + 2 * 5  # exactly three folds' worth at gap=0
+    assert achievable_folds(n, _cfg(_GEOM)) == 3
+    assert achievable_folds(n, _cfg({**_GEOM, "gap": 5})) == 2
+    assert len(make_folds(n, _cfg({**_GEOM, "gap": 5}))) == 2
+
+
+def test_a_sliding_window_is_its_own_width_and_min_train_stays_the_floor() -> None:
+    """The split is the point of the field: how much the model sees, versus how much is enough.
+
+    Before ``window`` existed, asking for a 60-observation sliding window also told the fold planner
+    that 60 observations were enough to score on — one number doing two jobs, and the only way to
+    say "train on the last 60 but do not bother scoring a series with less than a year" was to pick
+    whichever mattered more.
+    """
+    cfg = _cfg({**_GEOM, "scheme": "sliding", "window": 60})
+    folds = make_folds(100, cfg)
+    assert [f.train_size for f in folds] == [60, 60, 60]
+    # Feasibility still reads `min_train`, not `window`: the wider window did not cost a fold.
+    assert len(folds) == achievable_folds(100, cfg) == 3
+
+
+def test_an_unset_window_reproduces_the_min_train_geometry_exactly() -> None:
+    """Why the default is ``None`` and not a copy of ``min_train``: the two stay distinguishable in
+    the serialized config, and every pre-``window`` run's geometry is unchanged."""
+    sliding = {**_GEOM, "scheme": "sliding"}
+    assert training_width(_cfg(sliding)) == 20
+    assert make_folds(100, _cfg(sliding)) == make_folds(100, _cfg({**sliding, "window": 20}))
+
+
+def test_the_scale_denominator_follows_the_training_width() -> None:
+    """MASE divides by the mean step of the training data, so `training_window` has to slice the
+    same span `make_folds` did — one function, `training_width`, answers for both."""
+    cfg = _cfg({**_GEOM, "scheme": "sliding", "window": 60})
+    n = 100
+    ds = pd.date_range("2026-01-01", periods=n, freq="D").to_numpy()
+    y = np.arange(float(n))
+    fold = make_folds(n, cfg)[-1]
+    got = training_window(ds, y, pd.Timestamp(ds[fold.train_end - 1]), cfg)
+    assert len(got) == 60
+    assert got[0] == y[fold.train_start] and got[-1] == y[fold.train_end - 1]
+
+
+def test_the_embargo_scores_the_validation_window_and_not_the_dates_it_skipped() -> None:
+    """End to end through `backtest_cell`: the OOF rows land on the validation dates.
+
+    The trap this exists for is off-by-a-gap. A model's forecast origin is its last training date,
+    so with an embargo the first ``gap`` steps it produces cover dates nobody is scoring. If those
+    were kept, every OOF row would be shifted ``gap`` days early and scored against the wrong
+    actual — a silent, plausible-looking accuracy number.
+    """
+    cfg = _cfg({"n_folds": 2, "horizon": 4, "step": 4, "min_train": 10, "gap": 3})
+    series = _series(40)
+    oof, fold_metrics, _ = backtest_cell(series, _factory(), cfg)
+
+    assert len(oof) == 2 * 4
+    for fold in make_folds(len(series), cfg):
+        rows = oof[oof["fold_id"] == fold.fold_id].reset_index(drop=True)
+        assert list(rows["ds"]) == list(series["ds"].iloc[fold.val_start : fold.val_end])
+        assert list(rows["y_true"]) == list(series["y"].iloc[fold.val_start : fold.val_end])
+        # Numbered from the window, not from the origin — see `bigquery_sql.build_eval_query`.
+        assert list(rows["horizon_step"]) == [1, 2, 3, 4]
+        # `_LastValue` is flat at the last *training* value, which the embargo moved back.
+        assert rows["cutoff_date"].iloc[0] == series["ds"].iloc[fold.train_end - 1]
+        assert set(rows["yhat_raw"]) == {series["y"].iloc[fold.train_end - 1]}
+    assert len(fold_metrics) == 2
 
 
 # --- backtest_cell -------------------------------------------------------------

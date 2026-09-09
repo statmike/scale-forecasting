@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ..backtest import training_width
 from ..features import holiday_frame
 from .bigquery_names import _model_ref, _registry_of, _sanitize_identifier, _source_ref
 
@@ -123,10 +124,13 @@ def fold_plan(cfg: RunConfig) -> list[tuple[int, int]]:
     """The backtest folds as ``[(fold_id, back_steps)]`` — pure, mirrors ``backtest.make_folds``.
 
     ``make_folds`` anchors folds from the end: fold ``k``'s validation window starts at position
-    ``n - horizon - (n_folds - 1 - k) * step``. In date space anchored on ``MAX(ds)`` that makes
-    the last *training* date ``MAX(ds) - back_steps`` where
-    ``back_steps = horizon + (n_folds-1-k)*step`` — independent of each series' length, so this is a
-    pure function of ``cfg.backtest``. ``fold_id`` ordering matches ``make_folds`` (fold 0 is the
+    ``n - horizon - (n_folds - 1 - k) * step``, and training stops ``gap`` observations before that.
+    In date space anchored on ``MAX(ds)`` that makes the last *training* date
+    ``MAX(ds) - back_steps`` where ``back_steps = horizon + gap + (n_folds-1-k)*step`` — independent
+    of each series' length, so this is a pure function of ``cfg.backtest``. The embargo enters here
+    and nowhere else in the fold arithmetic, which is what keeps the two engines from disagreeing
+    about it: everything downstream reads ``back_steps``.
+    ``fold_id`` ordering matches ``make_folds`` (fold 0 is the
     earliest / largest step-back), so native and Python OOF fold ids line up. The per-series
     min-train feasibility guard ``make_folds`` enforces is *not* replicated in SQL (BQML trains on
     whatever history precedes the cutoff); series too short for a fold simply train on less.
@@ -137,7 +141,7 @@ def fold_plan(cfg: RunConfig) -> list[tuple[int, int]]:
     engines two places to disagree. ``test_bigquery_sql`` asserts the identity instead.
     """
     bt = cfg.backtest
-    return [(k, bt.horizon + (bt.n_folds - 1 - k) * bt.step) for k in range(bt.n_folds)]
+    return [(k, bt.horizon + bt.gap + (bt.n_folds - 1 - k) * bt.step) for k in range(bt.n_folds)]
 
 
 # --- statements ----------------------------------------------------------------
@@ -218,8 +222,10 @@ def _train_window_where(
 
     ``back_steps=None`` is the **final, true-future** fit: no date bound, train on everything.
     Otherwise the fit is a backtest fold: ``ds <= cutoff`` (expanding), plus a lower
-    ``ds > cutoff - min_train`` bound for the sliding scheme so the window is fixed-width —
-    mirroring ``backtest.make_folds``'s ``expanding`` vs ``sliding`` ``train_start``.
+    ``ds > cutoff - window`` bound for the sliding scheme so the window is fixed-width — mirroring
+    ``backtest.make_folds``'s ``expanding`` vs ``sliding`` ``train_start``. The width comes from
+    `backtest.training_width`, the same call the Python path makes, so "how wide is a sliding
+    window" has one answer across the two engines rather than two that happen to agree.
     """
     if back_steps is None:
         return []
@@ -227,7 +233,7 @@ def _train_window_where(
     conds = [f"{datec} <= {_cutoff_expr(cfg, source, back_steps, snapshot_millis=snapshot_millis)}"]
     if cfg.backtest.scheme == "sliding":
         lower = _cutoff_expr(
-            cfg, source, back_steps + cfg.backtest.min_train, snapshot_millis=snapshot_millis
+            cfg, source, back_steps + training_width(cfg), snapshot_millis=snapshot_millis
         )
         conds.append(f"{datec} > {lower}")
     return conds
@@ -307,15 +313,21 @@ def _forecast_source(
     ``back_steps=None`` is the **final true-future** forecast (from the all-history model /
     all-history TimesFM history); an int is a **backtest fold** forecast (from the fold model /
     ``ds <= cutoff`` TimesFM history). ``horizon`` defaults to ``data.horizon`` for the final
-    forecast and ``backtest.horizon`` for a fold. Both yield ``forecast_timestamp`` /
+    forecast and ``backtest.gap + backtest.horizon`` for a fold. Both yield ``forecast_timestamp`` /
     ``forecast_value`` / ``prediction_interval_{lower,upper}_bound`` plus the id column.
+
+    A fold forecast reaches **across** the embargo rather than starting after it, because a model's
+    forecast origin is its last training date and BQML gives no way to move it. The extra ``gap``
+    dates come back with the rest and `build_eval_query` drops them, which is the same thing
+    `backtest._forecast_validation` does on the Python side. At the default ``gap`` of 0 the two
+    expressions are identical to what they were.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     h = (
         horizon
         if horizon is not None
-        else (cfg.data.horizon if back_steps is None else cfg.backtest.horizon)
+        else (cfg.data.horizon if back_steps is None else cfg.backtest.gap + cfg.backtest.horizon)
     )
 
     if model_name == "timesfm":
@@ -419,9 +431,17 @@ def build_eval_query(
     reconstruct: it is what identifies a fold across engines. ``fold_id`` cannot, because this
     path derives its folds from one global ``MAX(ds)`` while the Python path anchors each series
     on its own last observation, so on a ragged panel the same ordinal is a different window.
-    ``horizon_step`` is how many cadence units past that cutoff each forecast date is, which is
-    the same 1-based position `backtest.py` records — computed by date difference rather than by
-    row position so a missing actual shifts nothing.
+    ``horizon_step`` is the 1-based position **within the validation window** — the same thing
+    `backtest.py` records — computed by date difference rather than by row position so a missing
+    actual shifts nothing.
+
+    **The embargo is subtracted, not carried.** With ``gap > 0`` the forecast reaches ``gap`` dates
+    further than the window being scored, so those rows are filtered out and the remaining ones are
+    numbered from the window's own first date rather than from the cutoff. Numbering from the cutoff
+    would have been the other defensible reading — distance from the origin is what decay is a
+    function of — and it loses on comparability: a ``gap=14`` run and a ``gap=0`` run at the same
+    horizon would then never share a ``horizon_step`` value, so no degradation curve could be laid
+    over the other. The absolute distance is not lost either way; ``cutoff_date`` is on every row.
     """
     source = _source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
@@ -439,6 +459,10 @@ def build_eval_query(
     # Cross-joined once rather than inlined twice: the same scalar feeds both new columns, and a
     # single named source is what makes the two agree by construction instead of by review.
     cutoff = _cutoff_expr(cfg, source, back_steps, snapshot_millis=snapshot_millis)
+    gap = cfg.backtest.gap
+    step_expr = f"DATE_DIFF(DATE(f.forecast_timestamp), c.cutoff_date, {unit})"
+    embargo = f"\nWHERE {step_expr} > {gap}" if gap else ""
+    offset = f" - {gap}" if gap else ""
     return (
         f"SELECT\n"
         f"  f.{idc} AS ts_id, DATE(f.forecast_timestamp) AS forecast_date,\n"
@@ -446,11 +470,11 @@ def build_eval_query(
         f"  f.prediction_interval_lower_bound AS yhat_lower,\n"
         f"  f.prediction_interval_upper_bound AS yhat_upper,\n"
         f"  c.cutoff_date AS cutoff_date,\n"
-        f"  DATE_DIFF(DATE(f.forecast_timestamp), c.cutoff_date, {unit}) AS horizon_step\n"
+        f"  {step_expr}{offset} AS horizon_step\n"
         f"FROM {forecast} f\n"
         f"JOIN `{source}`{snap} s\n"
         f"  ON s.{idc} = f.{idc} AND s.{datec} = DATE(f.forecast_timestamp)\n"
-        f"CROSS JOIN (SELECT {cutoff} AS cutoff_date) c\n"
+        f"CROSS JOIN (SELECT {cutoff} AS cutoff_date) c{embargo}\n"
         f"ORDER BY ts_id, forecast_date;"
     )
 

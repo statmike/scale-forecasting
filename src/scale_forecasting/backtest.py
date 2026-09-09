@@ -7,9 +7,9 @@ entry points:
 - ``make_folds(n, cfg) -> list[Fold]`` — integer-indexed CV splits over ``n`` sorted
   observations. Folds are anchored from the end: the latest fold validates on the final
   ``horizon`` points, earlier folds step back by ``step``. ``expanding`` grows the train
-  window from 0; ``sliding`` keeps a fixed ``min_train`` window. A series too short for the
-  requested folds gets as many as it supports (``achievable_folds``), possibly none — never an
-  exception, because a scoring shortfall must not cost the forecast.
+  window from 0; ``sliding`` keeps a fixed ``window`` (defaulting to ``min_train``). A series too
+  short for the requested folds gets as many as it supports (``achievable_folds``), possibly none —
+  never an exception, because a scoring shortfall must not cost the forecast.
 - ``backtest_cell(series, model, cfg) -> (oof, fold_metrics, outcome)`` — features are built once
   (leakage-free: lags only look backward), then each fold is scored on its validation window.
 
@@ -29,8 +29,11 @@ The frozen schemes also run a **control arm**: the same fitted model walked forw
 on the same dates, written to ``yhat_stale`` and summarised as `BacktestOutcome.staleness_gap`. It
 is a second ``predict`` rather than a second fit, so the comparison costs a forecast.
 
-The no-leakage invariant is ``train_end == val_start`` for every fold: training data
-strictly precedes the validation window. Freezing is anchored on the **oldest** surviving fold,
+The no-leakage invariant is ``train_end + gap == val_start`` for every fold: training data strictly
+precedes the validation window, and at the default ``gap`` of 0 they are adjacent. Raising ``gap``
+opens an embargo — observations that are neither trained on nor scored — which is how you measure a
+forecast issued with a reporting lag, where the data for the last fortnight is not in yet.
+Freezing is anchored on the **oldest** surviving fold,
 whose training window is a subset of every later fold's, so a frozen model's parameters have never
 seen anything a later fold is scored on.
 
@@ -40,8 +43,8 @@ the Python path rather than the NaNs they were for every run before this.
 
 Public surface: ``Fold``, ``BacktestOutcome``, ``OOF_COLUMNS``, ``achievable_folds``,
 ``holdout_fold_id``,
-``hpo_scoring_claim``, ``make_folds``, ``fit_rows``, ``suggest_min_train``, ``training_window``,
-``backtest_cell``.
+``hpo_scoring_claim``, ``make_folds``, ``fit_rows``, ``suggest_min_train``, ``training_width``,
+``training_window``, ``backtest_cell``.
 """
 
 from __future__ import annotations
@@ -136,7 +139,7 @@ class Fold:
 
     fold_id: int
     train_start: int
-    train_end: int  # == val_start (no leakage)
+    train_end: int  # + backtest.gap == val_start (no leakage; adjacent at the default gap of 0)
     val_start: int
     val_end: int
     # "holdout" for the newest fold, "fit" for every older one. See `holdout_fold_id`.
@@ -192,6 +195,24 @@ def hpo_scoring_claim(cfg: RunConfig) -> str:
     return "holdout" if cfg.backtest.n_folds >= 2 else "in_sample"
 
 
+def training_width(cfg: RunConfig) -> int:
+    """How many observations a ``sliding`` fold trains on — ``window``, or ``min_train`` (pure).
+
+    One function because three places need the same answer and they are in three different
+    languages: `make_folds` slices integer positions, `training_window` slices the history a
+    scale-free metric divides by, and `engines.bigquery_sql._train_window_where` renders a SQL date
+    bound. They disagreed once before over what a sliding window meant, and a MASE whose denominator
+    came from a different window than the fit is a number nobody can act on.
+
+    ``window`` defaults to ``None`` rather than to ``min_train``'s value so that an unset window
+    keeps meaning "whatever the floor is" even if the floor is later changed — and so the two ideas
+    stay separable in the serialized config, where a reader can see which one the author actually
+    chose.
+    """
+    bt = cfg.backtest
+    return bt.window if bt.window is not None else bt.min_train
+
+
 def achievable_folds(n: int, cfg: RunConfig) -> int:
     """How many of the requested folds ``n`` observations can actually support (pure).
 
@@ -201,10 +222,13 @@ def achievable_folds(n: int, cfg: RunConfig) -> int:
     comparable needs to know a series was scored on fewer folds than its neighbours.
 
     Fold ``k`` validates on ``[n - horizon - (n_folds-1-k)*step, ...)``, so the binding constraint
-    is the *oldest* surviving fold's validation start landing at or after ``min_train``.
+    is the *oldest* surviving fold's training end landing at or after ``min_train``. With an embargo
+    the training end is ``gap`` observations earlier than the validation start, so the embargo eats
+    into the same slack the folds do — a series long enough for three folds at ``gap=0`` may support
+    only two at ``gap=14``, which is the honest answer rather than a shortfall to hide.
     """
     bt = cfg.backtest
-    slack = n - bt.horizon - bt.min_train
+    slack = n - bt.horizon - bt.gap - bt.min_train
     if slack < 0:
         return 0
     return min(bt.n_folds, slack // bt.step + 1)
@@ -213,7 +237,23 @@ def achievable_folds(n: int, cfg: RunConfig) -> int:
 def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
     """Build the CV folds for ``n`` observations — as many as the series supports.
 
-    Uses ``cfg.backtest``: ``n_folds``, ``horizon``, ``step``, ``min_train``, ``scheme``.
+    Uses ``cfg.backtest``: ``n_folds``, ``horizon``, ``step``, ``min_train``, ``scheme``, ``gap``,
+    ``window``.
+
+    **``gap`` is an embargo, and it moves the training end, not the validation window.** The folds
+    stay anchored where they were — fold ``k`` still validates on the same dates — and the fit
+    simply stops ``gap`` observations earlier, so ``train_end + gap == val_start``. That is the
+    right way round for the thing an embargo models: a forecast issued with a reporting lag knows
+    the world up to ``gap`` periods before the window it is judged on. Anchoring the *validation*
+    off the training end instead would make every fold of a ``gap=14`` run score a different
+    fortnight than the same fold of a ``gap=0`` run, and the two runs would stop being comparable.
+
+    **``window`` is the sliding scheme's training width**, defaulting to ``min_train`` so an
+    unset ``window`` reproduces the previous geometry exactly. Splitting them frees ``min_train`` to
+    mean only what its name says — the feasibility floor, how much history a fold needs before it
+    is worth scoring — while ``window`` says how much of that history the model may look at. They
+    were one field, and a forecaster who wanted a 90-day sliding window was also telling the fold
+    planner that 90 days was enough history to score on.
 
     **Clamps rather than raises.** A series too short for the requested folds used to raise
     ``ConfigError``, which `run_cell` caught as a cell error — so the forecast was thrown away
@@ -234,7 +274,8 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
     instead of a per-series lookup. Each fold carries that verdict as ``role``.
     """
     bt = cfg.backtest
-    horizon, step, n_folds, min_train = bt.horizon, bt.step, bt.n_folds, bt.min_train
+    horizon, step, n_folds = bt.horizon, bt.step, bt.n_folds
+    width = training_width(cfg)
 
     achieved = achievable_folds(n, cfg)
     if achieved == 0:
@@ -244,13 +285,13 @@ def make_folds(n: int, cfg: RunConfig) -> list[Fold]:
     for k in range(n_folds - achieved, n_folds):
         val_start = n - horizon - (n_folds - 1 - k) * step
         val_end = val_start + horizon
-        train_end = val_start
+        train_end = val_start - bt.gap
         # Membership, not equality: `sliding` is the one scheme with a fixed-width window, and
         # `expanding_frozen` differs from `expanding` in how the model is *refit*, not in where
         # training starts. Written as `== "expanding"`, adding that scheme silently gave it sliding
         # geometry — the kind of thing widening a Literal does for free in the digest and not at
         # all in the code.
-        train_start = max(0, train_end - min_train) if bt.scheme == "sliding" else 0
+        train_start = max(0, train_end - width) if bt.scheme == "sliding" else 0
         folds.append(
             Fold(
                 fold_id=k,
@@ -296,15 +337,19 @@ def suggest_min_train(
     ``min_train``.
 
     A series gets the full ``n_folds`` exactly when
-    ``min_train <= n - horizon - (n_folds - 1) * step`` (rearranged from `achievable_folds`), so
-    each series has its own ceiling and the answer is the ``target_share`` quantile of those
-    ceilings, taken from the long end. Purely advisory: it reports what the geometry permits and
-    changes nothing, because ``min_train`` is a config field and moving it moves the run_id.
+    ``min_train <= n - horizon - gap - (n_folds - 1) * step`` (rearranged from `achievable_folds`),
+    so each series has its own ceiling and the answer is the ``target_share`` quantile of those
+    ceilings, taken from the long end. The embargo is subtracted here for the same reason
+    `achievable_folds` subtracts it: it consumes history no fold can use, so advice that ignored it
+    would suggest a ``min_train`` that then achieves fewer folds than promised. Purely advisory: it
+    reports what the geometry permits and changes nothing, because ``min_train`` is a config field
+    and moving it moves the run_id.
     """
     if not obs_counts or not 0.0 < target_share <= 1.0:
         return None
     bt = cfg.backtest
-    caps = sorted((n - bt.horizon - (bt.n_folds - 1) * bt.step for n in obs_counts), reverse=True)
+    lost = bt.horizon + bt.gap + (bt.n_folds - 1) * bt.step
+    caps = sorted((n - lost for n in obs_counts), reverse=True)
     # The series at this rank is the marginal one: keep it at full folds and everything longer
     # follows, which is exactly `target_share` of the panel.
     rank = max(1, math.ceil(target_share * len(caps))) - 1
@@ -325,8 +370,8 @@ def training_window(ds: np.ndarray, y: np.ndarray, cutoff: object, cfg: RunConfi
     ``ds`` must be datetime64 and sorted ascending, paired positionally with ``y`` — the callers
     read history with ``ORDER BY ts_id, ds``, so it arrives that way. The window is every
     observation at or before ``cutoff``, which is what `engines.bigquery_sql._fit_filter` trains on
-    and what ``fold.train_end`` slices to, narrowed to the last ``min_train`` observations under the
-    ``sliding`` scheme, whose window is fixed-width by definition.
+    and what ``fold.train_end`` slices to, narrowed to the last `training_width` observations under
+    the ``sliding`` scheme, whose window is fixed-width by definition.
 
     Counting that sliding window in *observations* rather than in dates is deliberate: it is what
     `make_folds` does, so the engines agree. On a series with gaps the native SQL's date-space bound
@@ -341,7 +386,7 @@ def training_window(ds: np.ndarray, y: np.ndarray, cutoff: object, cfg: RunConfi
         return y
     window = y[np.asarray(ds) <= pd.Timestamp(cutoff).to_datetime64()]
     if cfg.backtest.scheme == "sliding":
-        window = window[-cfg.backtest.min_train :]
+        window = window[-training_width(cfg) :]
     return window
 
 
@@ -350,20 +395,40 @@ def _cut(X: pd.DataFrame | None, start: int, end: int) -> pd.DataFrame | None:
     return None if X is None else X.iloc[start:end]
 
 
+def _forecast_validation(
+    est: BaseModel, X: pd.DataFrame | None, fold: Fold, gap: int
+) -> pd.DataFrame:
+    """One model, already fitted to ``fold.train_end``, forecasting this fold's validation window.
+
+    Every caller wants the same thing and the embargo is the only reason it takes a function. A
+    model's forecast origin is wherever its history stopped, so with ``gap > 0`` the first ``gap``
+    steps it produces cover the embargo — dates that are neither trained on nor scored. Asking for
+    ``gap + val_size`` steps and discarding that prefix is what makes the returned frame line up
+    with the validation window positionally, which is the alignment every consumer here assumes.
+
+    Discarding rather than never asking: a forecast is a recursion for most of these models, so the
+    embargo steps have to be produced to get past them. The cost is ``gap`` extra steps of a
+    forecast, and at the default ``gap`` of 0 there is no slice at all.
+    """
+    frame = est.predict(gap + fold.val_size, _cut(X, fold.train_end, fold.val_end))
+    return frame.iloc[gap:] if gap else frame
+
+
 def _fit_predict(
     model_factory: Callable[[], BaseModel],
     y: pd.Series,
     X: pd.DataFrame | None,
     fold: Fold,
+    gap: int,
 ) -> pd.DataFrame:
     """A fresh model fit on this fold's training window and asked for its validation window."""
     est = model_factory()
     est.fit(y.iloc[fold.train_start : fold.train_end], _cut(X, fold.train_start, fold.train_end))
-    return est.predict(fold.val_size, _cut(X, fold.val_start, fold.val_end))
+    return _forecast_validation(est, X, fold, gap)
 
 
 def _predict_blind(
-    model: BaseModel, X: pd.DataFrame | None, base: Fold, fold: Fold
+    model: BaseModel, X: pd.DataFrame | None, base: Fold, fold: Fold, gap: int
 ) -> pd.DataFrame:
     """Push one already-fitted model's forecast origin out to ``fold`` and forecast from there.
 
@@ -375,7 +440,7 @@ def _predict_blind(
     model.advance_origin(
         fold.train_end - base.train_end, X_gap=_cut(X, base.train_end, fold.train_end)
     )
-    return model.predict(fold.val_size, _cut(X, fold.val_start, fold.val_end))
+    return _forecast_validation(model, X, fold, gap)
 
 
 def _walk_folds(
@@ -402,9 +467,9 @@ def _walk_folds(
     is not a claim a leaderboard column can carry, and the honest summary of a cell that fell back
     partway is that it is not cleanly frozen.
     """
-    scheme = cfg.backtest.scheme
+    scheme, gap = cfg.backtest.scheme, cfg.backtest.gap
     if scheme in ("expanding", "sliding"):
-        return [(_fit_predict(model_factory, y, X, f), None) for f in folds], "per_fold"
+        return [(_fit_predict(model_factory, y, X, f, gap), None) for f in folds], "per_fold"
 
     base = folds[0]
     blind = model_factory()
@@ -412,21 +477,22 @@ def _walk_folds(
         # No blind seam at all, so neither frozen scheme can be honoured. Checked before the fit is
         # paid for. No model in this tree lands here — all sixteen opt in — but an out-of-tree model
         # inherits the ``False`` default, and it has to degrade to a refit rather than raise.
-        return [(_fit_predict(model_factory, y, X, f), None) for f in folds], "unsupported"
+        return [(_fit_predict(model_factory, y, X, f, gap), None) for f in folds], "unsupported"
     blind.fit(y.iloc[base.train_start : base.train_end], _cut(X, base.train_start, base.train_end))
 
     if scheme == "expanding_stale":
         # The primary arm *is* the blind arm here, so there is no second arm and ``yhat_stale``
         # stays NULL. That is the whole point of the scheme: one identical question, asked of all
         # sixteen models, with nothing varying between them but the model.
-        return [(_predict_blind(blind, X, base, f), None) for f in folds], "extrapolate"
+        return [(_predict_blind(blind, X, base, f, gap), None) for f in folds], "extrapolate"
 
     if not blind.supports_recondition:
         # `expanding_frozen` on a model that cannot absorb an observation. It refits per fold and
         # says so — but the blind arm is already fitted and costs only a forecast, so the control
         # arm still runs and the staleness diagnostic is still available for this model.
         arms = [
-            (_fit_predict(model_factory, y, X, f), _predict_blind(blind, X, base, f)) for f in folds
+            (_fit_predict(model_factory, y, X, f, gap), _predict_blind(blind, X, base, f, gap))
+            for f in folds
         ]
         return arms, "unsupported"
 
@@ -445,11 +511,11 @@ def _walk_folds(
             except Exception:  # noqa: BLE001 - see the docstring: fall back, never fail the cell
                 mode = "unsupported"
         primary = (
-            frozen.predict(fold.val_size, _cut(X, fold.val_start, fold.val_end))
+            _forecast_validation(frozen, X, fold, gap)
             if mode == "recondition"
-            else _fit_predict(model_factory, y, X, fold)
+            else _fit_predict(model_factory, y, X, fold, gap)
         )
-        arms.append((primary, _predict_blind(blind, X, base, fold)))
+        arms.append((primary, _predict_blind(blind, X, base, fold, gap)))
     return arms, mode
 
 

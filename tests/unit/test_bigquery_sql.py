@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from scale_forecasting.backtest import make_folds
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines.bigquery_names import _model_ref
 from scale_forecasting.engines.bigquery_sql import (
@@ -214,6 +215,62 @@ def test_the_native_plans_holdout_is_the_fold_the_python_engines_reserve() -> No
         assert plan[-1][0] == holdout_fold_id(cfg)
         # …and it is the newest window, not merely the last row of the list.
         assert plan[-1][1] == min(steps for _k, steps in plan)
+
+
+def _bt_cfg(**backtest: Any) -> RunConfig:
+    return RunConfig(
+        run_name="bq test",
+        data={"source_table": "src", "series_limit": None},
+        models=["arima_plus"],
+        backtest={"enabled": True, "n_folds": 3, "horizon": 28, "step": 28, **backtest},
+    )
+
+
+def test_the_native_cutoff_lands_exactly_where_the_python_fold_stops_training() -> None:
+    """The parity that makes the embargo one feature rather than two implementations of it.
+
+    Both engines are told "stop training ``gap`` observations before the validation window". The
+    Python path says so in positions and the native path in a date offset from ``MAX(ds)``, and the
+    two are the same statement exactly when ``back_steps == n - fold.train_end``. Asserting the
+    identity over several gaps is cheaper than reasoning about it twice, and it is the assertion
+    that fails if either side later grows an off-by-one.
+    """
+    n = 400
+    for gap in (0, 1, 7, 30):
+        cfg = _bt_cfg(gap=gap)
+        folds = make_folds(n, cfg)
+        assert len(folds) == 3  # long enough that none is clamped away
+        assert fold_plan(cfg) == [(f.fold_id, n - f.train_end) for f in folds]
+
+
+def test_a_native_fold_forecasts_across_the_embargo_and_scores_only_what_is_past_it() -> None:
+    """BQML's forecast origin is the model's last training date and cannot be moved.
+
+    So a fold under an embargo asks for ``gap + horizon`` steps and throws the first ``gap`` away —
+    the same thing `backtest._forecast_validation` does in Python. Dropping them matters here in a
+    way it does not there: the eval query *inner joins* the forecast to actuals on the date, so the
+    embargo rows would find their actuals and be scored, quietly, as if they were the window.
+    """
+    sql = build_eval_query(_bt_cfg(gap=3), "arima_plus", _DS, back_steps=31, fold_id=0)
+    assert "STRUCT(31 AS horizon" in sql  # gap + backtest.horizon
+    assert "WHERE DATE_DIFF(DATE(f.forecast_timestamp), c.cutoff_date, DAY) > 3" in sql
+    # …and what survives is numbered from the validation window, matching the Python OOF rows.
+    assert "DATE_DIFF(DATE(f.forecast_timestamp), c.cutoff_date, DAY) - 3 AS horizon_step" in sql
+
+
+def test_without_an_embargo_the_eval_query_is_byte_for_byte_what_it_always_was() -> None:
+    """`gap=0` is the default, so the whole shipped corpus runs down this branch."""
+    sql = build_eval_query(_bt_cfg(), "arima_plus", _DS, back_steps=28, fold_id=0)
+    assert "STRUCT(28 AS horizon" in sql
+    assert "WHERE DATE_DIFF" not in sql
+    assert "DATE_DIFF(DATE(f.forecast_timestamp), c.cutoff_date, DAY) AS horizon_step" in sql
+
+
+def test_a_native_sliding_window_is_window_wide_not_min_train_wide() -> None:
+    cfg = _bt_cfg(scheme="sliding", min_train=180, window=60)
+    sql = build_create_model_sql(cfg, "arima_plus", _DS, back_steps=28, fold_id=0)
+    # lower bound = cutoff - window = MAX(ds) - (28 + 60), not - (28 + 180)
+    assert "ds > (SELECT DATE_SUB(MAX(ds), INTERVAL 88 DAY)" in sql
 
 
 def test_fold_create_and_drop_target_the_same_object() -> None:
