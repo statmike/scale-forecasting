@@ -8,6 +8,7 @@ fold planner), and OOF frame shape/units.
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -480,6 +481,127 @@ def test_every_policy_keeps_the_invariants_the_geometry_exists_to_protect() -> N
                     assert f.train_end + gap == f.val_start, f"{extra} n={n}"
                     assert f.val_size == 5 and f.val_end <= n, f"{extra} n={n}"
                     assert f.train_size >= floor, f"{extra} n={n}"
+
+
+# --- the geometry surface, swept together ----------------------------------------------------
+#
+# Every field Phase 6 added or changed feeds one calculation — where a fold sits — and each test
+# above holds all the others still at one fixture geometry. This sweep is the one that varies them
+# together, because what is left to catch here is interaction: an embargo eating the slack a policy
+# was counting on, or an invariant that only holds because `step` happens to equal `horizon` in
+# every fixture in this file.
+#
+# **`gap=0` reproducing the pre-embargo geometry is deliberately not re-tested here.**
+# `tests/unit/snapshots/golden_panel_prebreak.json` pins `[fold_id, train_start, train_end,
+# val_start, val_end]` for all nine shipped backtesting configs, generated from pre-break code, and
+# `test_prebreak_snapshots.py` compares it on every gate. That is a stronger claim than anything
+# expressible here, because it is a literal record rather than a re-derivation. What this sweep
+# adds is the geometries no shipped config uses.
+
+_SURFACE: list[dict[str, Any]] = [
+    {"n_folds": 1, "horizon": 7, "step": 7, "min_train": 14, "gap": 0},
+    {"n_folds": 2, "horizon": 4, "step": 9, "min_train": 12, "gap": 0},  # step > horizon: spaced
+    {"n_folds": 3, "horizon": 6, "step": 2, "min_train": 15, "gap": 0},  # step < horizon: overlaps
+    {"n_folds": 4, "horizon": 5, "step": 5, "min_train": 20, "gap": 3},
+    {"n_folds": 5, "horizon": 3, "step": 4, "min_train": 10, "gap": 1},
+    {"n_folds": 2, "horizon": 10, "step": 10, "min_train": 8, "gap": 12},  # embargo > min_train
+    {"n_folds": 3, "horizon": 7, "step": 7, "min_train": 30, "gap": 0},
+]
+
+_ALL_POLICIES: list[dict[str, Any]] = [
+    {"short_series": "adapt"},
+    {"short_series": "overlap"},
+    {"short_series": "shrink_train", "min_train_floor": 5},
+    {"short_series": "skip"},
+    {"short_series": "error"},
+]
+
+
+def _geom_id(geom: dict[str, Any]) -> str:
+    """Readable parametrize ids, so a failure names the geometry rather than an index."""
+    return "f{n_folds}h{horizon}s{step}m{min_train}g{gap}".format(**geom)
+
+
+@pytest.mark.parametrize("geom", _SURFACE, ids=_geom_id)
+@pytest.mark.parametrize("policy", _ALL_POLICIES, ids=lambda p: str(p["short_series"]))
+@pytest.mark.parametrize("scheme", ["expanding", "sliding"])
+def test_the_fold_grid_holds_its_shape_across_the_whole_geometry_surface(
+    geom: dict[str, Any], policy: dict[str, Any], scheme: str
+) -> None:
+    """Seven geometries x five policies x two schemes x every series length, one set of invariants.
+
+    The invariants are the ones a reader of the registry is entitled to assume without looking at
+    the config that produced it: folds are numbered from the full plan and the survivors are its
+    most recent tail, the newest fold always reaches the end of the series and is always the
+    holdout, consecutive folds are exactly one effective step apart, no fit sees an observation
+    inside its own embargo, and nothing reads past the end of history.
+    """
+    cfg = _cfg({**geom, **policy, "scheme": scheme})
+    n_folds, horizon, gap = geom["n_folds"], geom["horizon"], geom["gap"]
+    width = training_width(cfg)
+
+    for n in range(0, 150):
+        folds = make_folds(n, cfg)
+        effective = resolve_geometry(n, cfg)
+        assert len(folds) == effective.n_achieved == achievable_folds(n, cfg), f"n={n}"
+        if not folds:
+            continue
+
+        # Identity: the survivors are the latest-origin suffix of the full plan, keeping the ids
+        # they had in it. Renumbering them 0..k would align a short series' fold 0 against a long
+        # one's fold 0 over completely different dates.
+        assert [f.fold_id for f in folds] == list(range(n_folds - len(folds), n_folds)), f"n={n}"
+        assert folds[-1].fold_id == n_folds - 1, f"n={n}"
+        assert [f.role for f in folds] == ["fit"] * (len(folds) - 1) + ["holdout"], f"n={n}"
+
+        # Placement: the newest fold ends the series, and every earlier one is one effective step
+        # behind it. Under `overlap` the effective step is not the authored one, which is the whole
+        # point of asking `resolve_geometry` for it rather than reading `cfg`.
+        assert folds[-1].val_end == n, f"n={n}"
+        for older, newer in pairwise(folds):
+            assert newer.val_start - older.val_start == effective.step, f"n={n}"
+
+        for f in folds:
+            assert f.train_end + gap == f.val_start, f"n={n} fold={f.fold_id}"
+            assert f.val_size == horizon, f"n={n} fold={f.fold_id}"
+            assert 0 <= f.train_start < f.train_end and f.val_end <= n, f"n={n} fold={f.fold_id}"
+            assert f.train_size >= effective.min_train, f"n={n} fold={f.fold_id}"
+            # The two schemes differ in exactly one thing: whether history is capped.
+            if scheme == "sliding":
+                assert f.train_size == min(width, f.train_end), f"n={n} fold={f.fold_id}"
+            else:
+                assert f.train_start == 0, f"n={n} fold={f.fold_id}"
+
+
+@pytest.mark.parametrize("geom", _SURFACE, ids=_geom_id)
+def test_error_lays_out_folds_exactly_like_adapt_at_every_geometry(geom: dict[str, Any]) -> None:
+    """``error`` refuses the run somewhere else, so at the planner it must be indistinguishable.
+
+    Tested at one geometry above; the reason to sweep it is that this equality is what guarantees a
+    cell reached without the pre-flight still forecasts. A geometry where the two diverged would
+    turn a scoring shortfall back into a lost forecast, which is the error class the policy surface
+    exists to remove.
+    """
+    strict = _cfg({**geom, "short_series": "error"})
+    lenient = _cfg({**geom, "short_series": "adapt"})
+    for n in range(0, 150):
+        assert make_folds(n, strict) == make_folds(n, lenient), f"n={n}"
+
+
+@pytest.mark.parametrize("geom", _SURFACE, ids=_geom_id)
+def test_the_panel_gate_is_the_only_place_a_shortfall_can_stop_a_run(geom: dict[str, Any]) -> None:
+    """Plan time raises; nothing downstream of it does.
+
+    The panel gate is handed the shortest length that still holds the full grid and the one below
+    it, so the boundary is exercised at every geometry rather than assumed to be where the
+    arithmetic in the message says it is.
+    """
+    cfg = _cfg({**geom, "short_series": "error"})
+    enough = next(n for n in range(0, 300) if achievable_folds(n, cfg) == geom["n_folds"])
+
+    assert assert_panel_supports_folds([enough, enough + 40], cfg) is None
+    with pytest.raises(ConfigError, match="1 of 2 series"):
+        assert_panel_supports_folds([enough - 1, enough + 40], cfg)
 
 
 # --- backtest_cell -------------------------------------------------------------

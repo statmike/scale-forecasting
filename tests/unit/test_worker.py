@@ -293,6 +293,45 @@ def test_the_note_names_the_arithmetic_so_a_reader_knows_how_much_history_was_ne
     assert "min_train=30" in note and f"horizon={HORIZON}" in note and f"step={HORIZON}" in note
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"short_series": "adapt"},
+        {"short_series": "overlap"},
+        {"short_series": "shrink_train", "min_train_floor": 10},
+        {"short_series": "skip"},
+        {"short_series": "error"},
+    ],
+    ids=lambda p: str(p["short_series"]),
+)
+def test_no_short_series_policy_can_cost_a_cell_its_forecast(policy: dict[str, Any]) -> None:
+    """`error` refuses the run at plan time and nowhere else — this is the "nowhere else" half.
+
+    `launch_plan.preflight_short_series` and `assert_panel_supports_folds` are where a shortfall
+    stops a run, and they run before any cell exists. A cell that reaches `run_cell` anyway — a
+    staged config, a unit call, an engine that skipped the pre-flight — must still fit and forecast,
+    because the fit was never what fell short. Every policy is swept rather than just `error`, since
+    the guarantee is about `run_cell`, not about which policy is selected.
+
+    **The forecast is only required to be *identical* where the cell went unscored.**
+    ``shrink_train`` rescues this series — it spends training history to reach a fold — and a cell
+    that gets folds picks its point-forecast arm from them, so its shipped numbers move. That is
+    the policy working, not a leak: the guarantee is that a scoring shortfall never costs a
+    forecast, not that scoring never changes one.
+    """
+    short = _series(30 + HORIZON - 1)  # one observation short of a single fold
+    res = run_cell(short, "theta", _bt_cfg(**policy))
+    assert res.status == "ok" and res.error is None
+    assert len(res.predictions) == HORIZON
+
+    unscored = run_cell(short, "theta", _cfg()).predictions
+    if res.n_folds_achieved:
+        assert policy["short_series"] == "shrink_train", "only that policy can rescue this series"
+        assert not res.predictions["yhat"].equals(unscored["yhat"])
+    else:
+        pd.testing.assert_frame_equal(res.predictions, unscored)
+
+
 def test_a_backtest_that_raises_loses_the_score_and_nothing_else(monkeypatch: Any) -> None:
     """The catch-all arm: whatever scoring does, the final fit below it still runs."""
 
