@@ -33,7 +33,8 @@ exactly the run nobody noticed for twenty-one jobs.
 
 Public surface: ``PROVISIONED_HARDWARE_ENV``, ``HIDE_DEVICES_ENV``, ``add_hardware_arg``,
 ``export_hardware_env``, ``hardware_args``, ``provisioned_hardware``, ``spark_executor_env``,
-``ray_env_vars``, ``driver_fit_scope``, ``visible_device``.
+``ray_env_vars``, ``driver_fit_scope``, ``visible_device``, ``hide_devices_mode``,
+``device_probe_faulted``.
 """
 
 from __future__ import annotations
@@ -57,28 +58,74 @@ _GPU = "gpu"
 
 # Fault injection, and the only reason it exists: to prove the GPU contract can fail.
 #
-# Three live rungs will show a Serverless L4, a cluster T4 and a Ray T4 each reporting a device.
-# Three green lights prove nothing on their own — a check that cannot fail is indistinguishable
-# from `assert True` — so each service also needs an arm where the accelerator is provisioned and
-# then taken away, and the run must stop instead of quietly finishing on CPU. Setting this makes a
-# GPU job export ``CUDA_VISIBLE_DEVICES=""`` to its workers, which is how you take a card away from
-# torch without touching the provisioning.
+# Three live rungs show a Serverless L4, a cluster T4 and a Ray T4 each reporting a device. Three
+# green lights prove nothing on their own — a check that cannot fail is indistinguishable from
+# `assert True` — so each service also needs an arm where the accelerator is provisioned and then
+# taken away, and the run must stop instead of quietly finishing on CPU.
+#
+# **Two mechanisms, because one of them is too blunt to reach our own check.** ``cuda`` mode exports
+# ``CUDA_VISIBLE_DEVICES=""`` to the workers, which takes the card away from torch without touching
+# the provisioning. It is the more faithful simulation of a genuinely lost device, and on 2026-09-10
+# it showed exactly why that is not always what you want to test: on Serverless the RAPIDS plugin
+# hit ``cudaErrorNoDevice`` and Spark churned executors for 49 minutes, and on Ray the worker
+# holding a GPU slot with no device crashed rather than raising. Both withheld the forecast, which
+# is the property that matters, but neither ever reached `worker._require_device`, so neither
+# recorded *why*. Only the Dataproc cluster did.
+#
+# ``probe`` mode leaves CUDA entirely alone — the plugin initialises, the Ray slot is satisfied —
+# and instead makes *our own* device probes answer "no device" inside the worker. That is a weaker
+# simulation of hardware loss and a stronger test of the contract: all three services then reach the
+# check and write the message that names the family, the engine and what the worker saw.
+#
+# ``SF_HIDE_DEVICES=1`` keeps meaning ``cuda``, so every command already written down still tests
+# what it was recorded as testing.
 #
 # Deliberately narrow rather than a general "export this environment to workers" passthrough: the
 # general form is invisible rope — it would let an operator move the thread pin, the CUDA allocator
 # or any library's behaviour from outside the config, with nothing in the run's record saying so.
-# This switch does one nameable thing.
+# This switch does two nameable things and nothing else.
 #
 # Infra-level, like ``SF_SERVERLESS_DEPS``, and for the same reason: it is not a property of the
 # science, so it must not enter ``ComputeConfig`` and therefore the ``run_id``. It also does nothing
 # on a CPU job — hiding a device from a job that was never given one is not a test of anything.
 HIDE_DEVICES_ENV = "SF_HIDE_DEVICES"
 _CUDA_VISIBLE = "CUDA_VISIBLE_DEVICES"
+_HIDE_PROBE = "probe"
+
+
+def hide_devices_mode() -> str | None:
+    """Which fault is armed: ``"probe"``, ``"cuda"``, or ``None`` when the switch is unset.
+
+    Anything truthy that is not ``"probe"`` reads as ``"cuda"`` — that is what ``=1`` meant before
+    the modes existed, and a typo'd value failing *open* (no fault at all) would silently turn a
+    negative arm into a positive one and report a pass.
+    """
+    raw = (os.environ.get(HIDE_DEVICES_ENV) or "").strip().lower()
+    if not raw:
+        return None
+    return _HIDE_PROBE if raw == _HIDE_PROBE else "cuda"
+
+
+def device_probe_faulted() -> bool:
+    """True when this process must report no device however much hardware it can see.
+
+    Read by the two device probes — `visible_device` here and `profiling.measure._peak_gpu_bytes`
+    — which are the two answers `worker._require_device` consults. Nothing else consults it: the
+    fault belongs at the probe, not scattered through the callers of the probe.
+    """
+    return hide_devices_mode() == _HIDE_PROBE
 
 
 def _fault_env() -> dict[str, str]:
-    """``{CUDA_VISIBLE_DEVICES: ""}`` when the negative arm is armed, else ``{}`` (see above)."""
-    return {_CUDA_VISIBLE: ""} if os.environ.get(HIDE_DEVICES_ENV) else {}
+    """The worker environment the armed fault needs — ``{}`` when nothing is armed (see above).
+
+    ``cuda`` mode hides the card from torch. ``probe`` mode carries the switch itself through to
+    the worker, because the fault is read there rather than imposed from outside.
+    """
+    mode = hide_devices_mode()
+    if mode is None:
+        return {}
+    return {HIDE_DEVICES_ENV: _HIDE_PROBE} if mode == _HIDE_PROBE else {_CUDA_VISIBLE: ""}
 
 
 def add_hardware_arg(parser: argparse.ArgumentParser) -> None:
@@ -183,6 +230,10 @@ def _probe_visible_device() -> tuple[str, str | None]:
     ``hardware`` is on the lean launch path — `commands` and `_entry` import it — so a top-level
     tensor-library import here would put torch in front of every submit.
     """
+    if device_probe_faulted():
+        # The armed fault, reported as the positive finding it is meant to imitate: torch is here
+        # and says there is no device. Not ``"unknown"`` — that would claim nobody looked.
+        return ("cpu", None)
     try:
         import torch
     except Exception:  # noqa: BLE001 - no tensor library is not an error, it is an answer

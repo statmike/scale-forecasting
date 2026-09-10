@@ -61,17 +61,31 @@ and a check that cannot fail is worth nothing. 17–19 are the same three servic
 taken away after it was bought:
 
 ```bash
-SF_HIDE_DEVICES=1 .venv/bin/python tests/smokes/smoke_harness.py \
+SF_HIDE_DEVICES=probe .venv/bin/python tests/smokes/smoke_harness.py \
   configs/smokes/17_gpu_absent_serverless.json --no-rerun
 ```
 
-`SF_HIDE_DEVICES` makes a **GPU** job additionally export `CUDA_VISIBLE_DEVICES=""` to its workers,
-on the same executor-env seam that already carries the provisioned-hardware fact — Spark through
-`spark.executorEnv.*`, Ray through `runtime_env.env_vars`. Torch then sees no device even though
-the hardware is attached and billing, which is exactly the state a real provisioning failure leaves
-a worker in. The expected outcome is a **failed** job whose message names the family, the service
-and the config field that turns the device off; a run that reaches `COMPLETED` is the finding. The
-harness reports a failed run as a failed smoke, so read the report rather than the exit code here.
+`SF_HIDE_DEVICES` arms a fault on a **GPU** job and carries it to the workers on the same
+executor-env seam that already carries the provisioned-hardware fact — Spark through
+`spark.executorEnv.*`, Ray through `runtime_env.env_vars`. There are two modes, and they hide the
+device at different depths:
+
+| Value | What the worker sees | Use it for |
+|-------|----------------------|------------|
+| `probe` | The device probe reports `cpu` while CUDA itself is untouched | The default. Reaches `_require_device`, so the contract gets to speak. |
+| `cuda` (or any other value, including the older `1`) | `CUDA_VISIBLE_DEVICES=""` — the card is gone as far as every CUDA library on the box is concerned | Reproducing what a real provisioning failure does to the whole stack. |
+
+`cuda` mode is the more faithful imitation of a lost card and the less useful test, because on two
+of the three services something below us dies before our check runs: a Ray worker holding a GPU
+slot crashes rather than raising, and the Serverless RAPIDS plugin aborts the executor, which Spark
+then replaces over and over. `probe` mode hides the device only from *our* probe, so the job gets as
+far as the contract check on every service. Anything other than `probe` reads as `cuda` on purpose —
+a typo'd value failing open would turn a negative arm into a positive one and report a pass.
+
+The expected outcome either way is a **failed** job; under `probe` its message names the family,
+the service and the config field that turns the device off. A run that reaches `COMPLETED` is the
+finding. The harness reports a failed run as a failed smoke, so read the report rather than the exit
+code here.
 
 The switch is infrastructure, not config: it never enters `ComputeConfig`, so arming it does not
 move a `run_id`, and a config runs under one identity whether the card is hidden or not. Six cells

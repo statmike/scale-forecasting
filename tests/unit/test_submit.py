@@ -228,6 +228,91 @@ def test_build_batch_gpu_releases_the_rapids_pool_to_the_fits() -> None:
     assert dict(batch.runtime_config.properties)["spark.rapids.memory.gpu.pool"] == "NONE"
 
 
+def test_a_gpu_batch_gives_up_instead_of_replacing_executors_forever() -> None:
+    """The 2026-09-10 churn: an executor whose card is missing dies inside the RAPIDS plugin before
+    it runs a task, so no task-failure counter advances and Spark just asks for another one. That
+    batch was still replacing executors 49 minutes in, against 28 for the same run with its card,
+    and only a hand-typed cancel stopped it. This is the executor-level counter, windowed."""
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        max_executors=10,
+        hardware="gpu",
+        gpu_type="L4",
+    )
+    props = dict(batch.runtime_config.properties)
+    assert props["spark.executor.maxNumFailures"] == "20"  # two per executor the batch may run
+    assert props["spark.executor.failuresValidityInterval"] == "30m"
+
+
+def test_a_cpu_batch_says_nothing_about_executor_failures() -> None:
+    """The churn is a GPU-plugin failure mode; a CPU batch's spec stays byte-identical."""
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        max_executors=10,
+    )
+    props = dict(batch.runtime_config.properties)
+    assert "spark.executor.maxNumFailures" not in props
+    assert "spark.executor.failuresValidityInterval" not in props
+
+
+@pytest.mark.parametrize(
+    ("max_executors", "expected"),
+    [(None, 8), (1, 8), (3, 8), (4, 8), (5, 10), (50, 100)],
+)
+def test_the_failure_budget_scales_with_the_fleet_but_never_below_a_floor(
+    max_executors: int | None, expected: int
+) -> None:
+    """Two per executor, because on a big batch losing a node now and then is ordinary attrition
+    and must not kill the run — floored so a small batch still gets a few retries, and floored
+    again when no cap is named at all and the service decides the fleet size."""
+    from scale_forecasting.submit import _gpu_executor_failures
+
+    assert _gpu_executor_failures(max_executors) == expected
+
+
+@pytest.mark.parametrize(
+    ("elapsed_s", "grace_s", "cells", "stalled"),
+    [
+        (100.0, 2700, 0, False),  # inside the grace period: not started is not failed
+        (3000.0, 2700, 0, True),  # past it with nothing written: stuck
+        (3000.0, 2700, 1, False),  # one cell is proof of life
+        (3000.0, 2700, None, False),  # unreadable count is no evidence, not evidence of death
+        (99999.0, 0, 0, False),  # switched off
+    ],
+)
+def test_the_watchdog_only_fires_on_a_run_that_produced_nothing(
+    elapsed_s: float, grace_s: int, cells: int | None, stalled: bool
+) -> None:
+    """Three ways to answer no, and each is a false alarm it refuses to raise. The ``None`` row is
+    the one that matters most: a watchdog that read a BigQuery outage as death would cancel healthy
+    runs at exactly the moment nobody could check on them."""
+    from scale_forecasting.submit import is_stalled
+
+    assert is_stalled(elapsed_s=elapsed_s, grace_s=grace_s, cells=cells) is stalled
+
+
+def test_the_stall_grace_is_infra_not_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same reasoning as ``SF_SERVERLESS_DEPS``: a deployment-level bound must not enter the
+    config and rename the run it bounds."""
+    monkeypatch.setenv("SF_CODE_BUCKET", "b")
+    monkeypatch.setenv("SF_CONTAINER_IMAGE", "img:tag")
+    monkeypatch.setenv("SF_COMPUTE_SA", "sa@p.iam.gserviceaccount.com")
+    monkeypatch.setenv("SF_SUBNETWORK_URI", "projects/p/regions/r/subnetworks/s")
+    assert BatchInfra.resolve().stall_grace_seconds == 2700
+    monkeypatch.setenv("SF_STALL_GRACE_S", "600")
+    assert BatchInfra.resolve().stall_grace_seconds == 600
+    monkeypatch.setenv("SF_STALL_GRACE_S", "0")
+    assert BatchInfra.resolve().stall_grace_seconds == 0  # the off switch
+
+
 def test_releasing_the_pool_puts_back_the_memory_default_it_switches_off() -> None:
     """Naming a ``spark.rapids.*`` property makes Serverless stop deriving executor memory.
 
@@ -596,9 +681,67 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     assert staged["parent"] == "projects/proj-x/locations/us-central1"
     assert batch_id.startswith("sf-")
     assert staged["batch_id"] == batch_id
-    # The blocking wait must use the long timeout (a 100k batch exceeds api-core's 900s default),
-    # not the bare no-arg result() that regressed to it.
-    assert staged["wait_timeout"] == submit._WAIT_TIMEOUT_SECONDS
+    # The wait polls on the watchdog's interval, not on api-core's 900s default and not on a bare
+    # no-arg result(). What bounds the *whole* wait is the loop's deadline, which is still the long
+    # one — a 100k batch exceeds any of these individually and must not be abandoned mid-run.
+    assert staged["wait_timeout"] == submit._WATCHDOG_INTERVAL_SECONDS
+
+
+class _NeverFinishes:
+    """An operation that is still running every time it is asked, and remembers being cancelled."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def result(self, timeout: float | None = None) -> Any:
+        import time
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        time.sleep(0.02)
+        raise FuturesTimeoutError
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+def test_a_batch_that_never_writes_a_cell_is_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The churn, ended. Nothing else was going to end it: the batch's own ttl is 24 h on purpose
+    so a healthy 100k run survives, and the client-side wait is 2 h — both of which the GPU batch
+    of 2026-09-10 would have sat inside, billing, having produced nothing."""
+    from scale_forecasting import job_outcome, submit
+    from scale_forecasting.errors import EngineError
+
+    monkeypatch.setattr(submit, "_WATCHDOG_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(job_outcome, "cells_written", lambda run_id, **k: 0)
+    op = _NeverFinishes()
+    with pytest.raises(EngineError, match="wrote no forecast rows"):
+        submit._wait_for_batch(
+            op, run_id="r", batch_id="sf-r", wait_timeout=60.0, grace_s=1, since=None
+        )
+    assert op.cancelled
+
+
+def test_a_batch_that_has_written_something_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One cell is proof of life, and the watch is dropped for good once it appears — a run that
+    wedges later is the ttl's problem. Here the wait ends at its own deadline, as it always did,
+    and the original client-side ``TimeoutError`` is what comes out."""
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    from scale_forecasting import job_outcome, submit
+
+    calls: list[str] = []
+    monkeypatch.setattr(submit, "_WATCHDOG_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(
+        job_outcome, "cells_written", lambda run_id, **k: (calls.append(run_id), 3)[1]
+    )
+    op = _NeverFinishes()
+    with pytest.raises(FuturesTimeoutError):
+        submit._wait_for_batch(
+            op, run_id="r", batch_id="sf-r", wait_timeout=1.3, grace_s=1, since=None
+        )
+    assert not op.cancelled
+    # Asked once, then stood down — not once per poll for the rest of the run.
+    assert len(calls) == 1
 
 
 def test_submit_batch_raises_on_failed_terminal_state(monkeypatch: pytest.MonkeyPatch) -> None:

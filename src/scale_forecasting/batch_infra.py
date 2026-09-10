@@ -103,6 +103,25 @@ _ENV_CLUSTER_MAX_AGE = "SF_CLUSTER_MAX_AGE"
 _DEFAULT_CLUSTER_IDLE_TTL_SECONDS = 1800
 _DEFAULT_CLUSTER_MAX_AGE_SECONDS = 86400
 
+# How long a submitted job may write nothing at all before the submitter stops waiting and cancels
+# it. The third bound in this file and the only one that watches *progress* rather than the clock:
+# the two above ask "has this lived too long", and a run that is genuinely stuck has not.
+#
+# It exists because the ceilings above are useless against the failure they would otherwise have to
+# catch. A batch that churns executors it cannot start burns fleet at full rate while producing
+# nothing, and the only thing that would eventually stop it is a 24 h ttl set deliberately high so a
+# healthy 100k run survives. Waiting a day to find out is not a bound. Zero rows written is the
+# signal that separates the two cases, because a healthy run of any size writes its first metadata
+# row as soon as its first cell finishes.
+#
+# 45 minutes is chosen against what has to happen before that first row: create or provision, unpack
+# the environment, read the source, fit one cell. The slowest of those observed — a GPU cluster
+# create with a driver init action — is around 20 minutes, and the longest whole *successful* GPU
+# smoke was 28. Doubling the create leaves generous room for a cold day without letting a genuinely
+# dead run bill for an hour. Override with ``SF_STALL_GRACE_S``; 0 disables the watchdog.
+_ENV_STALL_GRACE = "SF_STALL_GRACE_S"
+_DEFAULT_STALL_GRACE_SECONDS = 2700
+
 
 def _env_seconds(name: str, default: int) -> int:
     """Read a non-negative integer seconds value from ``name``, else ``default``.
@@ -149,6 +168,8 @@ class BatchInfra:
     # (which has `ttl_seconds`) and Ray ignore them. 0 disables a bound.
     cluster_idle_ttl_seconds: int = _DEFAULT_CLUSTER_IDLE_TTL_SECONDS
     cluster_max_age_seconds: int = _DEFAULT_CLUSTER_MAX_AGE_SECONDS
+    # How long a batch may write no cells before the submitter cancels it — see the block above.
+    stall_grace_seconds: int = _DEFAULT_STALL_GRACE_SECONDS
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -190,6 +211,7 @@ class BatchInfra:
             cluster_max_age_seconds=_env_seconds(
                 _ENV_CLUSTER_MAX_AGE, _DEFAULT_CLUSTER_MAX_AGE_SECONDS
             ),
+            stall_grace_seconds=_env_seconds(_ENV_STALL_GRACE, _DEFAULT_STALL_GRACE_SECONDS),
         )
 
     @classmethod

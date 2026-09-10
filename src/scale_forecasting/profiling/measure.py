@@ -44,7 +44,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..hardware import driver_fit_scope
+from ..hardware import device_probe_faulted, driver_fit_scope
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -295,7 +295,13 @@ def _peak_gpu_bytes(*, reset: bool = False) -> int | None:  # pragma: no cover -
     returns. Keeping both halves in one function keeps the "torch might not be here" handling
     in one place: an absent torch, an absent CUDA build and an absent device all land on
     ``None`` rather than on a ``0`` that a consumer would size against.
+
+    The armed ``probe`` fault lands here too, and this is the second of the two probes it has to
+    reach: `worker._require_device` asks this one first and only consults `hardware.visible_device`
+    for the wording of the message.
     """
+    if device_probe_faulted():
+        return None
     try:
         import torch
 

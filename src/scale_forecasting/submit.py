@@ -25,12 +25,14 @@ which of the two dependency envelopes delivers the locked environment), and `bat
 answers *what the batch did* once it is terminal. Both have consumers that never submit anything,
 which is why they are not folded in here.
 
-Public surface: ``submit_batch``, ``build_batch``, ``sizing_properties``, ``plan_sizing``, ``main``.
+Public surface: ``submit_batch``, ``build_batch``, ``sizing_properties``, ``plan_sizing``,
+``is_stalled``, ``main``.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
@@ -63,6 +65,30 @@ _SERVERLESS_DEFAULT_GPU_CORES = 4
 # is actually waited out (and its DCU/wall-clock telemetry stamped). Not a cost knob — the batch's
 # own runtime is what it is; this only bounds how long the submitter blocks.
 _WAIT_TIMEOUT_SECONDS = 7200.0
+
+# How many executors a GPU batch may lose before Spark gives up on the application, and the window
+# those losses have to fall inside.
+#
+# The failure this bounds is not a slow run, it is a run that cannot start and will not stop. An
+# executor whose card is missing dies inside the RAPIDS plugin at init, *before* it runs a task, so
+# no task-failure counter ever advances — Spark simply asks the service for a replacement, and the
+# replacement does the same thing. On 2026-09-10 that batch was still churning executors 49 minutes
+# in, against 28 minutes for the same run when the card was there, with no forecast and nothing to
+# stop it short of the TTL — and our TTL is deliberately hours long so that a healthy 100k run is
+# not cancelled mid-flight. Unattended, that is fleet burned for nothing.
+#
+# Scaled to the fleet rather than fixed, because on a large batch losing a node now and then is
+# ordinary attrition and must not kill the run; windowed for the same reason, so failures spread
+# thinly across a long run never accumulate into a verdict. A batch that cannot keep a single
+# executor alive blows through both in minutes.
+_GPU_EXECUTOR_FAILURE_FACTOR = 2
+_GPU_MIN_EXECUTOR_FAILURES = 8
+_GPU_EXECUTOR_FAILURE_WINDOW = "30m"
+
+# How often the submitter looks up from its wait to ask whether the batch has written anything. Only
+# consulted after the grace period has passed and only until the first row appears, so a healthy run
+# costs at most one small BigQuery count and usually none at all.
+_WATCHDOG_INTERVAL_SECONDS = 300.0
 
 
 # --- pure: batch spec assembly (no network) ------------------------------------
@@ -122,6 +148,90 @@ def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
         "spark.dataproc.executor.resource.accelerator.type": gpu_type.lower(),
         "spark.rapids.memory.gpu.pool": "NONE",
     }
+
+
+def _gpu_executor_failures(max_executors: int | None) -> int:
+    """How many executor losses this GPU batch tolerates before Spark fails it (pure).
+
+    Two per executor the batch may run, floored so a small batch still gets a few retries. ``None``
+    — no cap named, so the service decides the fleet size — takes the floor.
+    """
+    if max_executors is None:
+        return _GPU_MIN_EXECUTOR_FAILURES
+    return max(_GPU_MIN_EXECUTOR_FAILURES, _GPU_EXECUTOR_FAILURE_FACTOR * max_executors)
+
+
+def is_stalled(*, elapsed_s: float, grace_s: int, cells: int | None) -> bool:
+    """Has this batch produced nothing for long enough to call it stuck rather than slow? (pure)
+
+    Three ways to answer no, and each of them is a false alarm this deliberately refuses to raise.
+    ``grace_s <= 0`` is the operator switching the watchdog off. Inside the grace period nothing is
+    concluded, because a run that has not started is not a run that has failed. And ``cells is
+    None`` — the count could not be read — is *no evidence*, not evidence of death; a watchdog that
+    cancelled healthy runs during a BigQuery outage would be worse than the failure it guards.
+
+    So the only yes is: past the grace period, the count was read, and it is zero.
+    """
+    if grace_s <= 0 or elapsed_s < grace_s:
+        return False
+    return cells == 0
+
+
+def _wait_for_batch(
+    operation: Any,
+    *,
+    run_id: str,
+    batch_id: str,
+    wait_timeout: float,
+    grace_s: int,
+    since: Any,
+) -> Any:  # pragma: no cover - GCP I/O, exercised by the @gcp smokes
+    """Block until the batch is terminal, cancelling it if it stops producing anything.
+
+    Behaviourally identical to the bare ``operation.result(timeout=wait_timeout)`` it replaces for
+    every run that writes even one cell: the same terminal object comes back, and the same
+    client-side ``TimeoutError`` is raised — the original one, re-raised at the same deadline —
+    for a run that outlives the wait. The loop only exists so there is somewhere to look up from.
+
+    What it adds is the case the timeouts above cannot see. `is_stalled` has the rule; once the
+    first row appears the watch is switched off for good, because a run that has produced output is
+    alive and anything that wedges it later is the ttl's problem, not this function's.
+    """
+    import time
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    from .job_outcome import cells_written
+
+    started = time.monotonic()
+    deadline = started + wait_timeout
+    watching = grace_s > 0
+    while True:
+        try:
+            return operation.result(timeout=_WATCHDOG_INTERVAL_SECONDS)
+        except FuturesTimeoutError:
+            if time.monotonic() >= deadline:
+                raise
+        if not watching:
+            continue
+        elapsed = time.monotonic() - started
+        if elapsed < grace_s:
+            continue
+        cells = cells_written(run_id, since=since)
+        if cells:
+            _log.info("batch %s has written %d cell(s); watchdog stands down", batch_id, cells)
+            watching = False
+            continue
+        if is_stalled(elapsed_s=elapsed, grace_s=grace_s, cells=cells):
+            _log.error(
+                "batch %s has written no cells in %.0f min; cancelling", batch_id, elapsed / 60
+            )
+            with contextlib.suppress(Exception):  # a cancel that fails must not mask the diagnosis
+                operation.cancel()
+            raise EngineError(
+                f"batch {batch_id} wrote no forecast rows in {elapsed / 60:.0f} minutes and was "
+                f"cancelled (stall watchdog; raise SF_STALL_GRACE_S, or set it to 0, if this run "
+                f"legitimately takes that long to produce its first cell)"
+            )
 
 
 def _estimated_series(
@@ -356,6 +466,12 @@ def build_batch(
         # because a measured sizing overlay has a better number and must keep it.
         cores = int(props.get("spark.executor.cores", _SERVERLESS_DEFAULT_GPU_CORES))
         props.setdefault("spark.executor.memory", f"{serverless_gpu_executor_memory_mb(cores)}m")
+        # And a bound on executor churn (see the constants). `setdefault` so a config-supplied
+        # override still wins — this is a floor under the failure mode, not a policy.
+        props.setdefault(
+            "spark.executor.maxNumFailures", str(_gpu_executor_failures(max_executors))
+        )
+        props.setdefault("spark.executor.failuresValidityInterval", _GPU_EXECUTOR_FAILURE_WINDOW)
     props.update(spark_executor_env(hardware))
 
     return dataproc.Batch(
@@ -432,6 +548,7 @@ def submit_batch(
     # substitutes to run this function without a network, and a module-level import would freeze
     # the originals here where `monkeypatch.setattr(batch_telemetry, ...)` can no longer reach them.
     from .batch_telemetry import _batch_client, _stamp_job_telemetry
+    from .job_outcome import launch_window_start
     from .profiling.source import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -475,11 +592,22 @@ def submit_batch(
     client = _batch_client(settings.region)
     parent = f"projects/{settings.project_id}/locations/{settings.region}"
     _log.info("submitting batch %s to %s", batch_id, parent)
+    since = launch_window_start()  # before submit: nothing this batch writes can predate it
     operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
     if wait:
         # Block until terminal, but with a timeout long enough for a full-scale (100k) batch — the
         # api-core polling default is only 900s, which a 100k run exceeds (_WAIT_TIMEOUT_SECONDS).
-        result = operation.result(timeout=wait_timeout)  # blocks until terminal
+        # The watchdog inside cancels a batch that never writes a cell (see `_wait_for_batch`); the
+        # `since` bound is what stops a re-run reading the previous attempt's rows as its own life
+        # signs, the same trap `job_outcome` closed for the status audit.
+        result = _wait_for_batch(
+            operation,
+            run_id=run_id,
+            batch_id=batch_id,
+            wait_timeout=wait_timeout,
+            grace_s=infra.stall_grace_seconds,
+            since=since,
+        )
         state = getattr(result, "state", None)
         state_name = getattr(state, "name", str(state))
         _log.info("batch %s finished: state=%s", batch_id, state_name)

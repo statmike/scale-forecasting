@@ -117,6 +117,48 @@ def read_cell_counts(
     return dict(rows[0]) if rows else {}
 
 
+def cells_written(
+    run_id: str,
+    *,
+    since: datetime | None = None,
+    settings: Settings | None = None,
+) -> int | None:  # pragma: no cover - GCP I/O, exercised by the @gcp smokes
+    """How many ``forecast_metadata`` rows this run has written so far — the liveness signal.
+
+    Deliberately unlike `read_cell_counts`, which is a verdict on a finished family. This is asked
+    *while a job is still running* and only has to answer "is anything at all happening", so it
+    counts every row the run has: any family, any model, folds and ensemble rows included. Filtering
+    to full fits the way the audit does would report zero for a run that is hours into backtesting
+    and perfectly healthy, which is precisely the false alarm a watchdog must not raise.
+
+    ``None`` when the read fails — no evidence, therefore no verdict. A watchdog that treated an
+    unreachable BigQuery as "the run is dead" would cancel healthy runs during an outage.
+    """
+    from google.cloud import bigquery
+
+    from .registry.tables import _resolve_settings
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        "SELECT COUNT(*) AS cells "
+        f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
+        "WHERE run_id=@run_id AND (@since IS NULL OR created_at >= @since)"
+    )
+    params = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("since", "TIMESTAMP", since),
+    ]
+    try:
+        client = bigquery.Client(project=resolved.project_id)
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - a liveness probe must never sink the job it watches
+        _log.warning("liveness cell count failed for run %s: %r", run_id, exc)
+        return None
+    return int(rows[0]["cells"]) if rows else 0
+
+
 def audit_cells(
     run_id: str,
     family: str,

@@ -30,8 +30,10 @@ Three properties are load-bearing and each has its own section below:
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -44,6 +46,7 @@ from scale_forecasting.config import RunConfig
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.models import get_model
 from scale_forecasting.models.base_model import BaseModel, ModelContext
+from scale_forecasting.profiling import measure
 from scale_forecasting.ray_submit import build_entrypoint
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
@@ -437,6 +440,89 @@ def test_arming_it_hides_the_card_on_both_worker_seams(monkeypatch: pytest.Monke
         hardware.PROVISIONED_HARDWARE_ENV: "gpu",
         "CUDA_VISIBLE_DEVICES": "",
     }
+
+
+@pytest.mark.parametrize(
+    ("raw", "mode"),
+    [
+        ("1", "cuda"),  # what it meant before the modes existed, and still does
+        ("cuda", "cuda"),
+        ("probe", "probe"),
+        ("PROBE", "probe"),  # a mode name is not a password
+        ("yes", "cuda"),  # anything unrecognised falls back to a fault, never to none
+    ],
+)
+def test_an_unrecognised_value_still_arms_something(raw: str, mode: str) -> None:
+    """Failing *open* here would be the worst outcome available: a typo'd mode that quietly armed
+    nothing would turn a negative arm into a positive one and report a pass for a check that never
+    ran. The two real modes are named; everything else is the blunt one."""
+    with mock.patch.dict(os.environ, {hardware.HIDE_DEVICES_ENV: raw}):
+        assert hardware.hide_devices_mode() == mode
+
+
+def test_the_switch_unset_is_the_only_way_to_arm_nothing() -> None:
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop(hardware.HIDE_DEVICES_ENV, None)
+        assert hardware.hide_devices_mode() is None
+        assert hardware.device_probe_faulted() is False
+
+
+def test_probe_mode_leaves_cuda_alone_and_carries_the_switch_instead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of the second mode. Emptying ``CUDA_VISIBLE_DEVICES`` killed the RAPIDS
+    plugin on Serverless and crashed the Ray worker holding a GPU slot, so on two of three services
+    the contract check was never reached and the registry never learned *why* the run stopped. This
+    mode lets CUDA initialise normally and faults our own probe inside the worker instead, so all
+    three services get as far as `_require_device` and record its message."""
+    monkeypatch.setenv(hardware.HIDE_DEVICES_ENV, "probe")
+    assert hardware.spark_executor_env("gpu") == {
+        f"spark.executorEnv.{hardware.PROVISIONED_HARDWARE_ENV}": "gpu",
+        f"spark.executorEnv.{hardware.HIDE_DEVICES_ENV}": "probe",
+    }
+    assert hardware.ray_env_vars("gpu") == {
+        hardware.PROVISIONED_HARDWARE_ENV: "gpu",
+        hardware.HIDE_DEVICES_ENV: "probe",
+    }
+
+
+def test_probe_mode_makes_both_device_probes_report_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both, because `_require_device` consults both: the memory probe decides whether there is a
+    device and `visible_device` supplies the wording. ``("cpu", None)`` and not ``("unknown", …)``
+    — the fault imitates a card that did not attach, not a worker where nobody looked."""
+    monkeypatch.setenv(hardware.HIDE_DEVICES_ENV, "probe")
+    monkeypatch.setattr(hardware, "_visible", None)  # the memo, which a real worker fills once
+    assert hardware.device_probe_faulted() is True
+    assert hardware.visible_device() == ("cpu", None)
+    assert measure._peak_gpu_bytes() is None
+
+
+def test_probe_mode_reaches_the_contract_check_and_it_speaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The property the whole mode exists for, end to end through the real probes rather than
+    through stubs: a cell told to use a device, on a worker whose probe says there is none, stops
+    with the message that names the family, the engine and what the worker saw."""
+    monkeypatch.setenv(hardware.HIDE_DEVICES_ENV, "probe")
+    monkeypatch.setattr(hardware, "_visible", None)
+    monkeypatch.setattr("scale_forecasting.worker._gpu_probe_useful", None)
+    with pytest.raises(ConfigError) as excinfo:
+        _require_device("gpu", "deep_learning", "spark")
+    assert "torch is installed here and reports no CUDA device" in str(excinfo.value)
+    assert "deep_learning" in str(excinfo.value)
+
+
+def test_a_cpu_cell_is_untouched_by_the_probe_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_require_device` checks ``gpu`` only, and the fault must not invent a failure for a cell
+    that never asked for a device — otherwise arming the arm would fail the statistical families
+    of a mixed run for no reason."""
+    monkeypatch.setenv(hardware.HIDE_DEVICES_ENV, "probe")
+    monkeypatch.setattr(hardware, "_visible", None)
+    monkeypatch.setattr("scale_forecasting.worker._gpu_probe_useful", None)
+    _require_device("cpu", "statistical", "spark")
+    _require_device("auto", "statistical", "spark")
 
 
 @pytest.mark.parametrize("value", [None, "cpu"])
