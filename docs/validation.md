@@ -278,9 +278,9 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
-| 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
-| 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden must FAIL, not finish on CPU | NEVER_RUN | — | — | — |
+| 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden produces no forecast — but it does *not* fail fast, see below | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service | CURRENT | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden produces no forecast — but the worker dies before the contract can speak, see below | CURRENT | 2026-09-10 | `smoke-19-gpu-absent-ray-1c033f10707b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 20 | `20_gpu_intent_cpu_family.json` | **Disagreement arm:** `use_gpu: true` with the deep-learning family overridden to `cpu` must complete on CPU, buying no accelerator | NEVER_RUN | — | — | — |
 
 ### Why three configs exist that are designed to fail
@@ -292,7 +292,9 @@ is provisioned and then taken away from the workers, so a run that still reaches
 reporting a contract that isn't enforced.
 
 Six cells because the expected outcome is an immediate refusal — there is no reason to buy a
-hundred series' worth of fleet to watch a job stop.
+hundred series' worth of fleet to watch a job stop. **All three were run on 2026-09-10 and all three
+did withhold the forecast, but only one of them refused immediately or said why**; the section below
+on that wave has what each service actually did.
 
 ### The 2026-09-09 GPU wave: four defects found, fixed, and re-proven the same day
 
@@ -396,6 +398,61 @@ The GPU memory measurement works on Ray. That is independent of the device probe
 worker from `torch.cuda` while the fit is live — and it is the evidence that sits beside
 `device_used` in the same row and made it possible to tell that the probe, not the platform, was
 wrong.
+
+### The 2026-09-10 negative arms: the contract holds, the reporting around it does not
+
+Smokes 17, 18 and 19 are the other half of the GPU wave — the same three services with
+`SF_HIDE_DEVICES=1`, which provisions the accelerator and then hides it from the workers. Without
+them the three green rungs above are indistinguishable from a check that always says yes.
+
+**The property they were run to establish does hold.** None of the three produced a forecast. Every
+one of them wrote zero rows to `forecast_predictions`, and the smoke harness printed `RESULT: FAIL`
+on all three. A GPU job that loses its device does not quietly finish on the CPU and hand back
+numbers, which is the thing that would have been genuinely dangerous.
+
+**Two things around that property do not hold**, and both are worth more than the arms cost.
+
+**1. A run that produced nothing closes `COMPLETED`.** Smoke 18 wrote six `forecast_metadata` rows,
+all of them `cell_status='error'`, and no predictions at all; smoke 19 wrote nothing whatsoever and
+recorded four crashed chunks in its telemetry. Both of them closed with `run_jobs.status =
+COMPLETED` and `run_registry.status = COMPLETED`. The rule that should have applied is in
+`aggregate_status`, which has always said that no successful cells means `FAILED` and a mix means
+`PARTIAL` — and the Ray driver's own log even says `run will close PARTIAL`. The reason the rule
+never fires is structural rather than a slipped condition: under the per-family DAG,
+`launch_family_job` wraps the submitter in `run_job` and the submitter returns a *probe handle*, not
+an outcome. Nothing carries the remote engine's cell tallies back to the driver that owns the row,
+so the row goes terminal on the only fact the driver has — the launch call returned without raising
+— and the header rolls up job rows that all say the same thing. **The practical consequence is that
+the registry will report a green run that forecast nothing**, which is exactly the reading an
+unattended pipeline acts on. The three positive rungs are unaffected: they wrote 100 good cells
+each, so `COMPLETED` was the right answer there for the wrong reason.
+
+**2. Only one of the three services let the contract speak.** `_require_device` raises a
+`ConfigError` naming the family, the engine and what the worker saw, and on the Dataproc cluster that
+is precisely what landed — six rows of `error_class='CONFIG_REPAIRABLE'` carrying *"family
+'deep_learning' is set to hardware='gpu' and this spark job was provisioned onto GPU hardware, but
+torch is installed here and reports no CUDA device"*. That is the negative arm working as designed.
+The other two services never reached the check, for two different reasons:
+
+- **On Ray, the worker process dies first.** The task holds `GPU: 0.5`, and a Ray worker that holds a
+  GPU slot with no visible device does not raise — it crashes. The driver saw four
+  `WorkerCrashedError()` chunks and nothing else, so the only diagnosis in the registry is the crash
+  class. Ray retried each one, because `WorkerCrashedError` is on the deliberate retry list as an
+  infrastructure fault, which is the right default and the wrong outcome here.
+- **On Serverless, the RAPIDS plugin dies first, and it does not fail fast at all.** The executor
+  plugin hit `cudaErrorNoDevice` and shut down (`ai.rapids.cudf.CudaFatalException … 100
+  cudaErrorNoDevice`), Spark replaced the executor, and the replacement did the same thing. The batch
+  was still churning executors 49 minutes in — against 28 minutes for the equivalent *successful*
+  run — with no forecast and no end in sight, and it was cancelled rather than left to the four-hour
+  TTL. The `FAILED` on its ledger row is that cancellation. Operationally this is worse than a fast
+  refusal: an unattended GPU batch that loses its device burns fleet until something stops it.
+
+Both of those are properties of the fault injection meeting the platform, not of the contract itself
+— `SF_HIDE_DEVICES` empties `CUDA_VISIBLE_DEVICES` on the executor environment, which is a blunter
+instrument on a runtime that loads a CUDA library of its own than it is on one that does not. What
+the arms establish, precisely, is: **the contract is enforced and named on Dataproc clusters, and on
+the other two services the forecast is withheld but the reason is not recorded.** That is a smaller
+claim than the campaign plan predicted, and it is the one the evidence supports.
 
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
 
@@ -1980,15 +2037,25 @@ which is why it transfers to a user's data in a way a memory bound does not.
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
 
-- **Nothing yet fails a run that paid for a GPU and never touched one.** The `dl_gpu_routing` fix
-  makes the engine route where the submitter provisions, and the `peak_gpu_bytes` probe now records
-  on every cell rather than only under profiling — but recording is not checking. A run in that
-  state still reports `COMPLETED`, and the only reason we know five earlier ones were in it is that
-  somebody queried the registry by hand. The missing piece is a verdict at the end of a
-  GPU-provisioned job: if no deep-learning cell reports device bytes, say so where the operator will
-  see it. Until that exists, "the GPU was used" is a manual check on every GPU run, per runtime —
-  Ray on Vertex, Serverless Spark and cluster Spark each provision accelerators by a different
-  mechanism, so a passing check on one says nothing about the other two.
+- **A run that paid for a GPU and never touched one is now *named*, but still not failed.** The
+  verdict this bullet used to ask for exists: `device_audit` runs at the end of every
+  GPU-provisioned job and stamps `job_telemetry.device_use.verdict`, and all three services were
+  seen producing `ENGAGED_IDLE` on 2026-09-09 and `MISSING_DEVICE` on 2026-09-10. What it does not
+  do is change the run's outcome, deliberately — a device that sat idle produced a *correct* run and
+  an expensive one, which is a cost finding rather than a fault. The open part is that nobody is
+  told. The verdict sits in a JSON column that an operator has to know to query, so "the GPU earned
+  its cost" is still a manual check on every GPU run; it wants a place in the review surface, not a
+  new failure mode.
+
+- **A job whose every cell errored still closes `COMPLETED`, on every runtime.** Found by the
+  negative arms on 2026-09-10 and detailed in that section above: `launch_family_job` has no channel
+  for the remote engine's cell tallies, so a `run_jobs` row goes terminal on "the launch call
+  returned without raising" and the header rolls those up. `aggregate_status` — which has the
+  correct rule, and which the Ray driver even evaluates and logs — is not consulted. The three
+  positive rungs are unaffected because they really did complete, but the registry cannot presently
+  be trusted to distinguish a run that forecast everything from one that forecast nothing. Until it
+  can, the smoke harness's `verify_cells` and `verify_predictions` are the only things that catch
+  it, and neither of them runs in production.
 
 - **A per-task memory clamp with no headroom is unschedulable, and no offline test could have
   caught it. Fixed 2026-09-03 at `17e1221` and proven live the same day.** `ray_100k` held at zero cells for
