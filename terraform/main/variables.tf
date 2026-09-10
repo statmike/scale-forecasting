@@ -216,11 +216,18 @@ variable "build_gpu_image" {
   description = <<-EOT
     Build a custom Dataproc VM image with the NVIDIA driver pre-baked, for GPU *clusters* (opt-in;
     default FALSE). GPU clusters are the one surface that both needs the host driver and can't use
-    the custom container; baking the driver into a VM image here removes the slow per-cluster-create
-    driver compile. Off by default because it needs extra IAM (Compute image/instance admin on the
-    Cloud Build SA) and builder-VM egress to the NVIDIA mirrors; when false, GPU clusters install the
-    driver at create time (slower, and can race the cluster-create window). Independent of
-    build_image — content-addressed on docker/gpu_image_customize.sh + the base Dataproc version.
+    the custom container; baking the driver into a VM image here removes the few minutes of
+    per-cluster-create driver install.
+
+    FALSE is the supported path, not merely the safe one: GPU clusters install the driver at create
+    time from the floating 2.2-debian12 alias, which is what the smoke suite validates. A custom
+    image ages out when Google retires the base version it was built from, and after that it cannot
+    create clusters at all ("Selected software image version ... can no longer be used"), so turning
+    this on takes on an artifact you have to rebuild. It also needs extra IAM (Compute
+    image/instance admin on the Cloud Build SA) and builder-VM egress to the NVIDIA mirrors.
+
+    Independent of build_image — content-addressed on docker/gpu_image_customize.sh + the base
+    Dataproc version, not on the lock, because it carries a kernel driver rather than our packages.
   EOT
   type        = bool
   default     = false

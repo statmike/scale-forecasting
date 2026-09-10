@@ -31,7 +31,7 @@ old value goes stale by definition.
 | `ray_deps` | `stock-image+uv-runtime-env` | `822ae25` (2026-08-28) | `custom-container-image` |
 | `cluster_deps` | `packed-venv-init-action` | `eae3874` | job-attached archive (driver never saw it) |
 | `serverless_deps` | `container-image` | long-standing | — |
-| `gpu_cluster_image` | `prebaked-driver-image` | `254fe4f` | driver install via init action |
+| `gpu_cluster_image` | `driver-init-action` | owner decision (2026-09-09), reverting `254fe4f` | `prebaked-driver-image` |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
 | `run_id_inputs` | `authored-config-only-v3` | 6.5+6.6 (2026-09-09) | `authored-config-only-v2` (P3, 2026-09-05), before that `authored-config-only` (`a22e94c`, after the fork below), before that `+compute.profile.source` (W11a) |
@@ -264,12 +264,12 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 |---|--------|--------|--------|------|--------|---------------|
 | 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-09 | `smoke-01-serverless-cpu-7a3d4234e0e1` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | STALE | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
-| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | NEEDS_RECHECK | 2026-09-09 | `smoke-03-serverless-gpu-92763e0f2242` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-default-pool`, `gpu_device_probe=parameter-tensor-after-fit`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-09 | `smoke-03-serverless-gpu-92763e0f2242` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | NEEDS_RECHECK | 2026-09-09 | `smoke-06-cluster-gpu-eea70f834c66` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=parameter-tensor-after-fit`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-09 | `smoke-06-cluster-gpu-eea70f834c66` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | NEEDS_RECHECK | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=parameter-tensor-after-fit`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -294,14 +294,21 @@ reporting a contract that isn't enforced.
 Six cells because the expected outcome is an immediate refusal — there is no reason to buy a
 hundred series' worth of fleet to watch a job stop.
 
-### The 2026-09-09 GPU wave: three defects, and why 03, 06 and 08 are NEEDS_RECHECK
+### The 2026-09-09 GPU wave: four defects found, fixed, and re-proven the same day
 
 The first wave of the live campaign ran the four positive rungs — smoke 01 on Serverless CPU, then
 the three GPU services: smoke 03 on a Serverless L4, smoke 06 on a Dataproc cluster T4, and smoke 08
-on Ray T4. Smoke 01 passed, and that row is `CURRENT`. The other three came back looking green and
-were not. Each of the three defects below was fixed the same day, and each fix changes something the
-runs depended on, so all three rows are marked `NEEDS_RECHECK` and have to be run again before any
-of them can claim to have proven the GPU contract.
+on Ray T4. Smoke 01 passed. The other three came back looking green and were not, for three
+independent reasons — and fixing the second of those exposed a fourth defect, which blocked submit
+outright until it was fixed too.
+
+**All four were fixed and all three rungs were then re-run, and that second pass is what the rows
+above record.** Each of 03, 06 and 08 completed 100 of 100 cells with `device_used='cuda'` on every
+one, and each stamped `device_use.verdict = ENGAGED_IDLE` with `cells_on_device = 100` — which is
+what the campaign plan predicted for a positive arm. Nothing here should be read as "the platform
+was broken": every one of these runs really did have its accelerator. What was broken was our
+ability to say so, and in one case our ability to keep the fits alive alongside a library that
+wanted the same card.
 
 **1. The device probe was reading the weights after the library had already moved them.** All three
 services reported `device_used='cpu'` on every single GPU cell, on the same day, for cells that had
@@ -333,7 +340,24 @@ which are left to share a few hundred megabytes, and the ones that lose the race
 case is decisive: the same config on a cluster T4 and on Ray T4, neither of which loads RAPIDS, lost
 nothing at all. The fix sets `spark.rapids.memory.gpu.pool=NONE` on GPU batches, which drops the
 reservation and leaves RAPIDS allocating on demand, so SQL still runs on the card and the fits can
-reach it too. This is the new `serverless_gpu_allocator` axis.
+reach it too. This is the new `serverless_gpu_allocator` axis. On the re-run, smoke 03 completed all
+100 cells with no OOM at all.
+
+That fix had a sequel worth knowing about, because it is not discoverable by reading anything Google
+publishes. **Naming any `spark.rapids.*` property makes Serverless stop deriving GPU executor
+memory.** Left alone the service resolves a 4-core L4 executor to `spark.executor.memory=9560m` and
+derives the overhead from it; supply one RAPIDS property and it falls back to
+`spark.executor.memory=3346m` with `spark.executor.memoryOverhead=0m`, then rejects its own default
+at submit, because 0 is below the 256m-per-core floor it validates against. So a batch that releases
+the pool has to restate the memory the platform would have chosen. That number is derivable rather
+than copied: the per-config maximum of 3346m per core bounds memory *and* overhead summed, and
+overhead is service-owned at 40% of memory, so the memory we may name is `cores × 3346 / 1.4` —
+9560m at four cores, exactly what the service picked for itself. The same arithmetic was already
+wrong one layer up, in the sizing overlay, which clamped the GPU inversion to the maximum itself and
+so guaranteed an illegal batch once the service added its 40%. It had never fired because it needs a
+measured deep-learning memory footprint and the profile source had none. Both are fixed, and the
+sweep invariant now reads "memory plus the overhead derived from it fits" rather than "memory alone
+fits".
 
 **3. The harness had no check that could see a partial run.** Losing a third of the cells satisfied
 every verifier it had. The run reached `COMPLETED`, because a failed cell is recorded rather than
@@ -341,7 +365,8 @@ fatal. The leaderboard listed the model, because the leaderboard counts metadata
 writes one. `verify_predictions` was satisfied, because it asks only that the count be non-zero, and
 63 is non-zero. A new `verify_cells` closes this: a smoke is a hundred well-formed series with
 nothing adversarial in them, so the bar is *zero* failed cells rather than a tolerance. Under this
-check, smoke 03 would have printed FAIL.
+check, smoke 03 would have printed FAIL. On the re-run it printed PASS with `n_cells=100`, and that
+is the first time the harness has been able to tell those two outcomes apart.
 
 Two smaller facts from the same wave, both recorded here because they will otherwise be rediscovered:
 
@@ -350,16 +375,23 @@ Two smaller facts from the same wave, both recorded here because they will other
   hand-set `SF_GPU_IMAGE`. This deploy has Terraform's `build_gpu_image` switched off, so no image
   was ever built and the environment variable was a stale value carried forward. Re-run on the
   fallback — a stock image plus the driver init action — the smoke got its T4 and completed all 100
-  cells. That is why the row declares `gpu_cluster_image=driver-init-action` rather than the axis
-  table's current `prebaked-driver-image`, and it is an open question whether to rebuild the image
-  or make the fallback the supported path.
+  cells. **The owner's call, taken the same day, is that the fallback is now the supported path**,
+  so `gpu_cluster_image` moved back to `driver-init-action` and `254fe4f` is reverted as a default.
+  The reasoning is that the pre-baked image is what broke: a custom image ages out, and when it does
+  the failure lands on whoever next asks for a GPU cluster, in a message about image versions rather
+  than about anything they did. Every fresh deploy already gets the fallback, because
+  `build_gpu_image` defaults off, so this makes the supported path and the default path the same
+  one. Terraform can still build the image for an operator who creates GPU clusters often enough to
+  care about the few minutes the boot-time driver install costs; it is an opt-in optimisation with
+  no ledger row behind it, not the shape we test. Ray reached the same conclusion earlier and for
+  the same reason — see the smoke-07 head-crash note.
 - **`devices=1` is a request the library discards.** NeuralProphet's `configure_trainer`
   unconditionally overwrites it with `-1` — all visible devices — on every accelerator it resolves
   to `"gpu"`. Every shape we provision puts one card in front of a worker, where `-1` and `1` mean
   the same thing, so nothing is broken; but the pin is documentation of intent, not control.
 
 **One thing the wave did prove.** Smoke 08 wrote a non-NULL `peak_gpu_bytes` on all 100 Ray cells
-(50176–62464 bytes, `Tesla T4`), where that column had previously been NULL on 100% of Ray rows.
+(50176–77824 bytes, `Tesla T4`), where that column had previously been NULL on 100% of Ray rows.
 The GPU memory measurement works on Ray. That is independent of the device probe — it is read by the
 worker from `torch.cuda` while the fit is live — and it is the evidence that sits beside
 `device_used` in the same row and made it possible to tell that the probe, not the platform, was

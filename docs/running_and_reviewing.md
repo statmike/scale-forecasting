@@ -56,10 +56,16 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
     export SF_CONTAINER_IMAGE="$(terraform output -raw runtime_image_repo):latest"
     export SF_COMPUTE_SA="$(terraform output -raw compute_sa)"
     export SF_SUBNETWORK_URI="$(terraform output -raw subnetwork_uri)"
-    # optional — only the Dataproc-*cluster* path (packed-venv deps / pre-baked GPU image) reads these:
+    # optional — only the Dataproc-*cluster* path reads this:
     export SF_VENV_ARCHIVE="$(terraform output -raw venv_archive_uri)"
-    export SF_GPU_IMAGE="$(terraform output -raw gpu_image_uri)"
     ```
+
+    `SF_GPU_IMAGE` is deliberately not in that list. GPU clusters boot the stock image and install
+    the driver at create time, which is the supported path; the pre-baked image is opt-in
+    (`build_gpu_image = true`) and its `gpu_image_uri` output does not exist unless you built one.
+    Export it only if you did — and only from the live `terraform output`, never a value carried
+    over from a previous deploy, because a stale image URI fails cluster create with
+    `Selected software image version … can no longer be used to create new clusters`.
 
   - **Ray on Vertex** (notebook `04`) reads `compute_sa`, `code_bucket`, and (for the private path)
     `network_attachment_id` — notebook `04` calls `RayInfra.from_terraform_outputs()` itself, so on a

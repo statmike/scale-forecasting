@@ -114,7 +114,7 @@ service and how they stay aligned*:
 | **Dataproc Serverless** | Google-managed | shared container image (from `uv.lock`) | **Google-managed** |
 | **Ray on Vertex** | Google-managed | Vertex prebuilt image + `uv` runtime_env (same lock) | **Google-managed** |
 | **Dataproc cluster — CPU** | stock `2.2-debian12` VM image | packed-venv archive (same lock) | — (no GPU) |
-| **Dataproc cluster — GPU** | **custom `2.2-debian12` VM image** (driver pre-baked) | packed-venv archive (same lock) | **provided by us**, baked into the VM image at build time |
+| **Dataproc cluster — GPU** | stock `2.2-debian12` VM image | packed-venv archive (same lock) | **provided by us**, installed by an init action at cluster create |
 
 Two invariants keep the whole picture aligned:
 
@@ -227,23 +227,31 @@ Config + identity:
 > from the cluster. The archive is a single content-addressed artifact that is provably the same
 > environment as the container — one build, reused everywhere.
 
-### GPU clusters — the pre-baked driver image
+### GPU clusters — the driver init action
 
 The venv archive delivers the Python stack (including the CUDA `torch` wheel), but the deep-learning
 family on GPU hardware also needs the **host NVIDIA kernel driver**, which a wheel can't provide. On the
-managed services Google supplies it; on a cluster it is ours to bake in.
+managed services Google supplies it; on a cluster it is ours to install.
 
-Rather than install the driver on every cluster create — a source build that is slow and races the
-cluster-create window — the driver is baked **once** into a **custom `2.2-debian12` VM image** at
-image-build time. GPU clusters then boot from that image and simply load the already-present module; the
-create is fast and repeatable, and CPU clusters keep using the stock `2.2-debian12` image unchanged.
+**A GPU cluster boots the stock `2.2-debian12` image and installs the driver at create time.** That
+is the supported path, it is what a fresh deploy gets with no extra steps, and it is what smoke 06 is
+validated on. It costs a few minutes of driver install on every cluster create.
 
-The custom image is produced by a **separate** Cloud Build (`docker/cloudbuild-gpu-image.yaml`) with
-its own content-addressing — the customization script + the base Dataproc version, *not* the lock.
-That is deliberate: it carries a kernel driver, not our packages, so it must **not** rebuild when a
-dependency changes. `dataproc_cluster.py` selects it for GPU clusters via the image URI (a Terraform
-output);
-when no custom GPU image is configured, the cluster falls back to installing the driver at create time.
+There is also a **pre-baked image**, and it is an opt-in optimisation rather than the default. Set
+Terraform's `build_gpu_image = true` and a separate Cloud Build (`docker/cloudbuild-gpu-image.yaml`)
+produces a custom `2.2-debian12` VM image with the driver already in it, content-addressed on the
+customization script + the base Dataproc version rather than on the lock — deliberately, because it
+carries a kernel driver and must not rebuild when a dependency changes. `dataproc_cluster.py` picks
+it up through the `gpu_image_uri` Terraform output when one exists.
+
+**Why the fast path is not the default.** A custom Dataproc image ages out. Google retires the base
+version it was built from, and after that the image cannot create clusters at all — the failure is
+`Selected software image version … can no longer be used to create new clusters`, and it lands on
+whoever next asks for a GPU cluster, in a message about image versions rather than about anything
+they did. That is exactly how it failed on 2026-09-09. The init action asks for the floating
+`2.2-debian12` alias instead, so it does not have an expiry date. Take the optimisation if you create
+GPU clusters often enough for the boot-time install to matter, and expect to rebuild the image when
+the base version moves.
 
 ## Colab Enterprise — `uv`-from-lock install
 
