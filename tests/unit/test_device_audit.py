@@ -122,11 +122,30 @@ def test_gpu_requested_cpu_used_is_missing_even_with_bytes_on_the_clock() -> Non
 def _reader(row: dict[str, Any]) -> Any:
     """Stand in for the BigQuery aggregate, the way `profiling.source` injects a measurement."""
 
-    def read(run_id: str, models: list[str], *, settings: Any = None) -> dict[str, Any]:
+    def read(run_id: str, models: list[str], **kwargs: Any) -> dict[str, Any]:
         read.seen = (run_id, models)  # type: ignore[attr-defined]
+        read.kwargs = kwargs  # type: ignore[attr-defined]
         return row
 
     return read
+
+
+def test_the_audit_is_scoped_to_the_attempt_being_audited() -> None:
+    """``forecast_metadata`` is append-only and has no attempt column, so the read is bounded by
+    time or it counts the previous attempt as well.
+
+    Found live on 2026-09-09, re-running the three GPU smokes: each reported ``cells: 200`` against
+    ``cells_on_device: 100`` and so looked like half the fleet had lost its device, when in truth
+    the first attempt's hundred CPU cells were still sitting under the same ``run_id``.
+    """
+    from datetime import UTC, datetime
+
+    since = datetime(2026, 9, 10, tzinfo=UTC)
+    read = _reader({"cells": 100, "cells_on_device": 100, "max_peak_gpu_bytes": 78_000})
+    audit_device_use(
+        "r", "dl", ["neuralprophet"], hardware="gpu", gpu_type="T4", since=since, read=read
+    )
+    assert read.kwargs["since"] == since  # type: ignore[attr-defined]
 
 
 def test_a_cpu_family_never_runs_the_query() -> None:

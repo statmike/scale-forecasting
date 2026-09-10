@@ -26,9 +26,13 @@ overlaps the Spark provisioning floor. `run` joins both, rolls the two outcomes 
 combined status (COMPLETED iff both green, else FAILED — finalized *before* re-raising so the run
 stays queryable and the CLI exits non-zero), and returns the shared ``run_id``.
 
-**Coarsening (documented).** A remote contributor batch can't return its run-level PARTIAL (some
-cells errored) to the orchestrator, so a SUCCEEDED batch is reported COMPLETED; per-model failure
-stays visible on ``v_model_leaderboard`` (a failed model → NULL metric AVGs).
+**How a job's status is known.** A remote contributor batch cannot *return* its run-level outcome to
+the orchestrator — the submitter hands back a probe handle, not a result — so for a long time a
+SUCCEEDED batch was reported COMPLETED whatever its cells did, and a family whose every cell errored
+closed green. It is no longer inferred from the submission: after a family job finishes,
+`job_outcome.audit_cells` reads that attempt's cell tallies straight out of ``forecast_metadata``
+and the row takes its status from those. One aggregate, identical for Serverless, a Dataproc
+cluster and Ray, because all three write the same rows.
 
 Both Python runtimes are supported and dispatched by ``cfg.python_runtime``: ``"spark"`` launches a
 Dataproc Serverless batch (`submit_batch`), ``"ray"`` an autoscaling
@@ -51,7 +55,6 @@ from .registry.ids import make_run_id
 
 if TYPE_CHECKING:
     from .config import RunConfig
-    from .dag import RunDag
     from .probes.cancel import CancelReport
     from .probes.reconcile import ProbeReport
     from .probes.settle import SettleReport
@@ -122,6 +125,8 @@ def run(
 
     from .backtest import hpo_scoring_claim
     from .dag import plan_dag, preflight
+    from .errors import EngineError
+    from .job_outcome import combined_run_status
     from .profiling.source import check_pinned_source
     from .registry.header import header_status, merge_header_telemetry
     from .registry.lifecycle import run_header
@@ -185,6 +190,11 @@ def run(
     # One error slot per family job (keyed by family name), plus the ensemble node's.
     job_errors: dict[str, BaseException] = {}
     ensemble_error: BaseException | None = None
+    # And one terminal status per job, keyed the same way — what its ``run_jobs`` row now says. The
+    # two are not the same fact and neither implies the other: a job can fail without raising (its
+    # cells all errored on a remote driver that reported the *submission* as fine), and the run
+    # header has to hear about it. See `job_outcome`.
+    job_statuses: dict[str, str | None] = {}
     native = run_dag.native_job
     python_jobs = run_dag.python_jobs
 
@@ -253,36 +263,54 @@ def run(
                     bq_outcome = job_launch.launch_native_job(
                         cfg, native, run_id, settings, force=force
                     )
+                    job_statuses["native"] = "COMPLETED"
                 except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
                     job_errors["native"] = exc
+                    job_statuses["native"] = "FAILED"
             for future, job in futures.items():
                 try:
-                    future.result()
+                    # `launch_family_job` returns the status it wrote on the row, or ``None`` when
+                    # the cell audit could not be read — in which case the row kept the finalizer's
+                    # COMPLETED, so that is what the header must roll up. Reading it back out of
+                    # BigQuery instead would be a second chance to be wrong about a row we wrote.
+                    job_statuses[job.family] = future.result() or "COMPLETED"
                 except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
                     job_errors[job.family] = exc
+                    job_statuses[job.family] = "FAILED"
             # Every base family has joined: no more base predictions will land, so the concurrent
             # drain loop can stop after its final ready-series pass. Set before the ensemble join.
             base_done.set()
             if ensemble_future is not None:
                 try:
                     ensemble_future.result()
+                    job_statuses["ensemble"] = "COMPLETED"
                 except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
                     ensemble_error = exc
+                    job_statuses["ensemble"] = "FAILED"
 
         # Barrier ensemble: it reads every family's base predictions / backtest_oof, so it runs
         # strictly after the join and only when every family succeeded. (Microbatch already ran
         # concurrently above.) A failure here is captured like a family error — the ensembles are
         # part of the run's success contract.
-        if not ensemble_concurrent and not job_errors and run_dag.ensemble_enabled:
+        #
+        # "Succeeded" is the row's status, not merely "did not raise". A family whose every cell
+        # errored raises nothing and leaves no base predictions to blend, so an ensemble launched
+        # over it can only fail or produce a consensus of nothing — and until the cell audit existed
+        # there was no way to tell that family apart from a healthy one.
+        families_green = all(status == "COMPLETED" for status in job_statuses.values())
+        if not ensemble_concurrent and families_green and run_dag.ensemble_enabled:
             try:
                 job_launch.launch_ensemble_job(cfg, run_id, settings, force=force)
+                job_statuses["ensemble"] = "COMPLETED"
             except Exception as exc:  # noqa: BLE001 - captured, finalized below, re-raised
                 ensemble_error = exc
+                job_statuses["ensemble"] = "FAILED"
 
         # Combined status across the family jobs that ran: all green → COMPLETED, all failed →
         # FAILED, some but not all → PARTIAL (surviving families' forecasts stay usable). An
         # ensemble failure on top of all-green families fails the run: full output undelivered.
-        status = _combined_status(run_dag, job_errors, ensemble_error)
+        # The same roll-up the Airflow `finalize_run` task applies, over the same statuses.
+        status = combined_run_status(job_statuses, ensemble_enabled=run_dag.ensemble_enabled)
         fields: dict[str, object] = {"bq_models": list(native.models) if native else []}
         if bq_outcome is not None:
             fields["n_series"] = bq_outcome.n_series
@@ -303,34 +331,19 @@ def run(
         # Re-raise the first failure so the CLI exits non-zero; the header already records the
         # combined status (FAILED or PARTIAL).
         raise first_error
+    if status != "COMPLETED":
+        # A run can now finish badly without anything having raised: every job's launch call
+        # returned, and the cell audit is what found that a family produced nothing. There is no
+        # exception to re-raise, so one is made here — otherwise the header would say FAILED while
+        # the CLI exited zero, and every unattended caller (Composer, a shell script, the SDK)
+        # would read the run as fine. The registry rows carry the detail; this only sets the exit.
+        failed = sorted(f for f, s in job_statuses.items() if s != "COMPLETED")
+        raise EngineError(
+            f"run {run_id} finished {status}: {', '.join(failed)} produced no usable forecasts "
+            f"(see run_jobs.job_telemetry.$.cells)"
+        )
     _log.info("run %s done: status=%s", run_id, status)
     return run_id
-
-
-def _combined_status(
-    run_dag: RunDag,
-    job_errors: dict[str, BaseException],
-    ensemble_error: BaseException | None,
-) -> str:
-    """Roll the per-family job outcomes into one run status (pure).
-
-    Over the family jobs that ran (one per family in the DAG): every job green → ``COMPLETED``;
-    every job failed → ``FAILED``; a mix → ``PARTIAL``. An ensemble failure downgrades an
-    otherwise-``COMPLETED`` run to ``FAILED`` (the requested output is incomplete); it never masks a
-    family ``PARTIAL``/``FAILED``.
-    """
-    n_jobs = len(run_dag.jobs)
-    n_failed = len(job_errors)
-    if n_failed == 0:
-        engine_status = "COMPLETED"
-    elif n_failed == n_jobs:
-        engine_status = "FAILED"
-    else:
-        engine_status = "PARTIAL"
-
-    if engine_status == "COMPLETED" and ensemble_error is not None:
-        return "FAILED"
-    return engine_status
 
 
 def _emit_airflow(

@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, Any
 from .errors import get_logger
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -119,6 +121,7 @@ def read_device_use(
     run_id: str,
     models: list[str],
     *,
+    since: datetime | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:  # pragma: no cover - GCP I/O, exercised by the @gcp smokes
     """The one aggregate a verdict is decided from: ``{cells, cells_on_device, …}``.
@@ -127,6 +130,12 @@ def read_device_use(
     under the same ``run_id``, and a statistical family's CPU cells would drown the deep-learning
     family's evidence. Full-fit rows only — fold rows are bracketed by the full-fit row that
     already covers them, and ensemble rows are arithmetic rather than fits.
+
+    ``since`` bounds the read to the attempt being audited (`job_outcome.launch_window_start`).
+    ``forecast_metadata`` is append-only and carries no attempt column, so without it a re-run
+    counts the previous attempt's cells as well as its own: the 2026-09-09 re-runs of smokes 03, 06
+    and 08 each reported ``cells: 200`` against ``cells_on_device: 100`` and so read as half the
+    fleet missing its device, when in truth the first attempt's hundred CPU cells were still there.
 
     Never raises. This is an audit of a job that has already succeeded; failing the job because the
     audit query failed would trade a correct run for a missing note.
@@ -144,11 +153,13 @@ def read_device_use(
         "ANY_VALUE(device_name) AS device_name "
         f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
         "WHERE run_id=@run_id AND model_type IN UNNEST(@models) "
-        "AND fold_id IS NULL AND ensemble_id IS NULL"
+        "AND fold_id IS NULL AND ensemble_id IS NULL "
+        "AND (@since IS NULL OR created_at >= @since)"
     )
     params = [
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
         bigquery.ArrayQueryParameter("models", "STRING", models),
+        bigquery.ScalarQueryParameter("since", "TIMESTAMP", since),
     ]
     try:
         client = bigquery.Client(project=resolved.project_id)
@@ -168,6 +179,7 @@ def audit_device_use(
     *,
     hardware: str | None,
     gpu_type: str | None,
+    since: datetime | None = None,
     settings: Settings | None = None,
     read: Any = None,
 ) -> dict[str, Any] | None:  # pragma: no cover - the read half is GCP I/O
@@ -184,7 +196,7 @@ def audit_device_use(
     """
     if hardware != "gpu":
         return None
-    agg = (read or read_device_use)(run_id, models, settings=settings)
+    agg = (read or read_device_use)(run_id, models, since=since, settings=settings)
     if not agg:
         return None
     blob = {

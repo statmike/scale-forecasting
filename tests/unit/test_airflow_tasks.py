@@ -1,9 +1,13 @@
 """Offline tests for the Airflow task-callable seam (``scale_forecasting.airflow_tasks``).
 
-Covers the module's pure, GCP-free surface — the header-status roll-up and the XCom cluster pull —
-without importing Airflow or touching a registry. The task callables themselves (``begin_run``,
+Covers the module's pure, GCP-free surface — the repair node and the XCom cluster pull — without
+importing Airflow or touching a registry. The task callables themselves (``begin_run``,
 ``run_family``, …) are thin wrappers over `main`'s launch building blocks, exercised live by the
 orchestrator tests and the ``@gcp`` smoke; here we only pin the logic that lives in this module.
+
+The header-status roll-up `finalize_run` applies is **not** here: it is one shared function,
+`job_outcome.combined_run_status`, and `test_job_outcome` pins it once for both this task and
+`main.run`.
 """
 
 from __future__ import annotations
@@ -21,74 +25,6 @@ _SETTINGS = Settings(
     connection="proj-x.us-central1.conn",
     warehouse_uri="gs://bkt/warehouse",
 )
-
-# --- combined_run_status: the header roll-up (mirror of main._combined_status) --------------------
-
-
-def test_all_families_completed_is_completed() -> None:
-    statuses = {"statistical": "COMPLETED", "ml": "COMPLETED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=False) == "COMPLETED"
-
-
-def test_all_families_failed_is_failed() -> None:
-    statuses = {"statistical": "FAILED", "ml": "FAILED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=False) == "FAILED"
-
-
-def test_mixed_families_is_partial() -> None:
-    statuses = {"statistical": "COMPLETED", "ml": "FAILED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=False) == "PARTIAL"
-
-
-def test_missing_or_running_family_counts_as_failed() -> None:
-    # a family row still RUNNING (its task died before finalizing) or absent is not COMPLETED
-    assert (
-        airflow_tasks.combined_run_status(
-            {"statistical": "COMPLETED", "ml": "RUNNING"}, ensemble_enabled=False
-        )
-        == "PARTIAL"
-    )
-    assert (
-        airflow_tasks.combined_run_status({"statistical": "RUNNING"}, ensemble_enabled=False)
-        == "FAILED"
-    )
-
-
-def test_no_base_families_is_completed() -> None:
-    # degenerate: nothing to fail → COMPLETED (matches main._combined_status n_failed==0 branch)
-    assert airflow_tasks.combined_run_status({}, ensemble_enabled=False) == "COMPLETED"
-
-
-def test_ensemble_incomplete_downgrades_completed_run() -> None:
-    statuses = {"statistical": "COMPLETED", "ml": "COMPLETED", "ensemble": "FAILED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=True) == "FAILED"
-
-
-def test_completed_ensemble_keeps_completed() -> None:
-    statuses = {"statistical": "COMPLETED", "ensemble": "COMPLETED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=True) == "COMPLETED"
-
-
-def test_ensemble_never_masks_a_family_failure() -> None:
-    # a base-family PARTIAL is not upgraded by a completed ensemble; the ensemble key is excluded
-    # from the base roll-up
-    statuses = {"statistical": "COMPLETED", "ml": "FAILED", "ensemble": "COMPLETED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=True) == "PARTIAL"
-
-
-def test_a_failed_repair_row_leaves_the_run_partial() -> None:
-    # A repair only exists because cells were missing, so its own row counts like any other job:
-    # `statistical` completed but its repair did not, and the run is genuinely incomplete.
-    statuses = {"statistical": "COMPLETED", "statistical_repair": "FAILED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=False) == "PARTIAL"
-
-
-def test_a_repair_never_reports_the_family_it_repaired_as_completed() -> None:
-    # The other direction, and the reason the repair has a row of its own: a forty-cell repair that
-    # succeeded must not close a hundred-thousand-cell family that failed.
-    statuses = {"statistical": "FAILED", "statistical_repair": "COMPLETED"}
-    assert airflow_tasks.combined_run_status(statuses, ensemble_enabled=False) == "PARTIAL"
-
 
 # --- retry_families: the repair node's task callable ----------------------------------------------
 #

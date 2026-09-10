@@ -16,7 +16,7 @@ import pytest
 
 from scale_forecasting import dag, job_launch, launch_plan, main
 from scale_forecasting.config import RunConfig
-from scale_forecasting.errors import ConfigError
+from scale_forecasting.errors import ConfigError, EngineError
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
 
@@ -174,7 +174,10 @@ def test_run_n_series_override_changes_run_id() -> None:
 
 
 def _patch_run_seams(
-    monkeypatch: pytest.MonkeyPatch, *, bq_error: Exception | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bq_error: Exception | None = None,
+    family_status: str | None = None,
 ) -> dict[str, Any]:
     """Fake every GCP seam main.run touches so the ensemble gating is exercised offline.
 
@@ -184,6 +187,12 @@ def _patch_run_seams(
     per-job run_jobs lifecycle and submitters are never reached offline). ``bq_error`` makes the
     native job
     raise, to prove ensembles are skipped when a family fails.
+
+    ``family_status`` is the *other* way a family fails — the one that raises nothing. It is what
+    `job_launch.launch_family_job` returns after auditing the cells the job actually wrote
+    (`job_outcome.audit_cells`), so a ``"FAILED"`` here is a job whose launch went perfectly and
+    whose every cell errored. The default ``None`` is the real no-opinion return (the audit could
+    not be read), which the orchestrator reads as the COMPLETED the row already carries.
     """
     import scale_forecasting.ensemble_run as ensemble_mod
     from scale_forecasting.engines import bigquery_engine
@@ -210,9 +219,12 @@ def _patch_run_seams(
         return bigquery_engine.BqOutcome(status="COMPLETED", n_series=3, models=list(job.models))
 
     monkeypatch.setattr(job_launch, "launch_native_job", _fake_native)
-    monkeypatch.setattr(
-        job_launch, "launch_family_job", lambda *a, **k: seen.__setitem__("spark_ran", True)
-    )
+
+    def _fake_family(*a: Any, **k: Any) -> str | None:
+        seen["spark_ran"] = True
+        return family_status
+
+    monkeypatch.setattr(job_launch, "launch_family_job", _fake_family)
 
     # The ensemble DAG node opens its own run_jobs row before running the consensus; fake that
     # per-job lifecycle so launch_ensemble_job runs for real down to the run_ensembles call.
@@ -420,42 +432,55 @@ def test_run_ensemble_failure_finalizes_header_failed(monkeypatch: pytest.Monkey
     assert seen["status"] == "FAILED"
 
 
-# --- _combined_status: the per-family roll-up (pure) ---------------------------
+# --- run(): a family that fails without raising ---------------------------------
+#
+# The 2026-09-10 negative arms: a Dataproc cluster job whose six cells all refused for want of a
+# GPU, and a Ray job that wrote no cells at all. Neither raised — the *submission* went fine — and
+# both closed the run COMPLETED on both registry tiers. What the launch call now returns is the
+# status the cell audit read off the rows, and these pin what the orchestrator does with it.
 
 
-def _boom() -> RuntimeError:
-    return RuntimeError("x")
+def test_a_family_that_produced_nothing_fails_the_run_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One Python family reporting FAILED, one native family green → a mixed run → PARTIAL. Nothing
+    # raised inside the run, so the non-zero exit has to be manufactured; the header is finalized
+    # first, so the run stays queryable.
+    seen = _patch_run_seams(monkeypatch, family_status="FAILED")
+    with pytest.raises(EngineError, match="statistical"):
+        main.run(_cfg())
+    assert seen["status"] == "PARTIAL"
 
 
-def test_combined_status_all_jobs_green_is_completed() -> None:
-    d = dag.plan_dag(_cfg())  # statistical + native jobs
-    assert main._combined_status(d, {}, None) == "COMPLETED"
+def test_a_family_that_produced_nothing_skips_the_ensemble(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # There are no base predictions to blend, so the barrier ensemble must not run — the same
+    # skip an exception would have caused. Until the audit existed this family was indistinguishable
+    # from a healthy one and the ensemble ran over nothing.
+    seen = _patch_run_seams(monkeypatch, family_status="FAILED")
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean"]})
+    with pytest.raises(EngineError):
+        main.run(cfg)
+    assert seen["ensemble_called"] is False
+    assert seen["status"] == "PARTIAL"
 
 
-def test_combined_status_mixed_is_partial() -> None:
-    d = dag.plan_dag(_cfg())
-    # one family failed, the other green → some but not all → PARTIAL (and the mirror case).
-    assert main._combined_status(d, {"native": _boom()}, None) == "PARTIAL"
-    assert main._combined_status(d, {"statistical": _boom()}, None) == "PARTIAL"
+def test_a_partial_family_also_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Some cells landed and are usable, so the header says PARTIAL rather than FAILED — but the run
+    # did not deliver what was asked for, and an unattended caller must not read it as success.
+    seen = _patch_run_seams(monkeypatch, family_status="PARTIAL")
+    with pytest.raises(EngineError, match="PARTIAL"):
+        main.run(_cfg())
+    assert seen["status"] == "PARTIAL"
 
 
-def test_combined_status_all_jobs_failed_is_failed() -> None:
-    d = dag.plan_dag(_cfg())
-    assert main._combined_status(d, {"statistical": _boom(), "native": _boom()}, None) == "FAILED"
-
-
-def test_combined_status_single_job_has_no_partial() -> None:
-    bq_only = dag.plan_dag(_cfg(models=_NATIVE))  # native family only
-    assert main._combined_status(bq_only, {}, None) == "COMPLETED"
-    assert main._combined_status(bq_only, {"native": _boom()}, None) == "FAILED"
-
-
-def test_combined_status_ensemble_failure_fails_a_green_run() -> None:
-    d = dag.plan_dag(_cfg())
-    # families green but the ensemble step failed → the run didn't deliver full output → FAILED.
-    assert main._combined_status(d, {}, _boom()) == "FAILED"
-    # an ensemble error never masks a family PARTIAL/FAILED (status already non-COMPLETED).
-    assert main._combined_status(d, {"native": _boom()}, _boom()) == "PARTIAL"
+def test_an_unreadable_audit_leaves_the_run_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The pessimistic direction is the dangerous one: BigQuery briefly unreachable must not turn a
+    # good run red. `None` means no opinion, and the row's own COMPLETED stands.
+    seen = _patch_run_seams(monkeypatch, family_status=None)
+    main.run(_cfg())
+    assert seen["status"] == "COMPLETED"
 
 
 # --- CLI: says something at all -------------------------------------------------

@@ -120,7 +120,7 @@ def launch_family_job(
     max_executors: int | None = None,
     ray_cluster: tuple[str, str] | None = None,
     spark_cluster: dict[str, tuple[str, str]] | None = None,
-) -> None:
+) -> str | None:
     """Run one Python family's job on its resolved runtime, wrapped in its ``run_jobs`` row.
 
     Called on a worker thread — one per Python family (statistical / ml / deep_learning), so the
@@ -156,8 +156,14 @@ def launch_family_job(
     per-family create/delete). Keyed rather than a single pair because a Dataproc cluster has one
     worker machine type, so a mixed run gets one cluster per hardware kind. A family naming its own
     standing cluster keeps that, and every other runtime/mode ignores the dict.
+
+    Returns the family's terminal status — ``COMPLETED`` / ``PARTIAL`` / ``FAILED``, read from the
+    cells it wrote (`job_outcome.audit_cells`), or ``None`` when that read was unavailable. The
+    caller rolls these into the run header's status, which is why they come back rather than only
+    landing on the row: a family that produced nothing has to be able to fail a run it is part of.
     """
     from .device_audit import audit_device_use
+    from .job_outcome import audit_cells, launch_window_start
     from .probes.vocabulary import ProbeHandle
     from .registry.ids import make_job_key
     from .registry.jobs import next_job_attempt
@@ -235,6 +241,9 @@ def launch_family_job(
         )
     entry_blob = entry_handle.to_blob()
     job_id = make_job_key(run_id, job.family, attempt)
+    # Taken before the row is even written, so the two audits below count this attempt's cells and
+    # not an earlier attempt's. `forecast_metadata` is append-only and carries no attempt column.
+    since = launch_window_start()
     # The publisher is installed *around* the dispatch, not passed into it: the capacity walk runs
     # several frames down inside the submitter, and this is the only frame that knows which row it
     # belongs to. See `capacity.publishing_to` for why it is ambient rather than a parameter.
@@ -308,10 +317,22 @@ def launch_family_job(
             list(job.models),
             hardware=compute.hardware,
             gpu_type=compute.gpu_type,
+            since=since,
             settings=settings,
         )
         if device_use:
             fin.finalize(telemetry={"device_use": device_use})
+        # And did it forecast anything? Until this existed the row went terminal on "the launch
+        # call returned without raising", which is a fact about the submission rather than the
+        # run: a job whose every cell errored closed COMPLETED on both registry tiers. Same shape
+        # as the device audit above — one aggregate off the driver, identical for every runtime —
+        # and `None` when unreadable, which leaves the row's default status alone.
+        status, cells = audit_cells(
+            run_id, job.family, list(job.models), since=since, settings=settings
+        )
+        if status is not None:
+            fin.finalize(status=status, telemetry={"cells": cells})
+        return status
 
 
 def launch_native_job(

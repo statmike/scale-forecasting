@@ -81,40 +81,6 @@ def _xcom_spark_clusters(ti: Any) -> dict[str, tuple[str, str]] | None:
     return {hardware: (pair[0], pair[1]) for hardware, pair in value.items()}
 
 
-def combined_run_status(job_statuses: dict[str, str | None], *, ensemble_enabled: bool) -> str:
-    """Roll the per-family ``run_jobs`` statuses into one header status (pure — mirrors
-    `main._combined_status`).
-
-    Over the base families (every key but ``"ensemble"``): all ``COMPLETED`` → ``COMPLETED``; all
-    non-``COMPLETED`` → ``FAILED``; a mix → ``PARTIAL`` (surviving families' forecasts stay usable).
-    A missing or still-RUNNING family row counts as failed (its task died before finalizing). An
-    ensemble that did not complete downgrades an otherwise-``COMPLETED`` run to ``FAILED`` (the
-    requested output is incomplete); it never masks a family ``PARTIAL``/``FAILED``.
-
-    A repair's row (``statistical_repair``, from `registry.ids.REPAIR_JOB_FAMILIES`) counts as an
-    ordinary job here rather than folding onto the family it repairs, which is the same reading
-    `registry.ops.roll_up_job_statuses` gives. A repair only exists because cells were missing, so a
-    repair that failed leaves the run genuinely incomplete and the header should say ``PARTIAL``;
-    folding it in the other direction — letting a forty-cell repair report its
-    hundred-thousand-cell family ``COMPLETED`` — is exactly the lie the separate row exists to
-    prevent.
-    """
-    base = {family: status for family, status in job_statuses.items() if family != "ensemble"}
-    n_jobs = len(base)
-    n_failed = sum(1 for status in base.values() if status != "COMPLETED")
-    if n_jobs == 0 or n_failed == 0:
-        engine_status = "COMPLETED"
-    elif n_failed == n_jobs:
-        engine_status = "FAILED"
-    else:
-        engine_status = "PARTIAL"
-
-    if ensemble_enabled and engine_status == "COMPLETED":
-        if job_statuses.get("ensemble") != "COMPLETED":
-            return "FAILED"
-    return engine_status
-
-
 def begin_run(config_uri: str) -> str:
     """Open the run: ensure the registry tables exist, then write the header RUNNING; return run_id.
 
@@ -293,13 +259,15 @@ def finalize_run(config_uri: str) -> None:
     The DAG's terminal join (``trigger_rule="all_done"``, so it runs even when a family failed). The
     owner-mode exit half of `registry.lifecycle.run_header`, split out to a separate task: reads the
     per-job rows (`registry.jobs.read_run_jobs`), rolls them into the combined status
-    (`combined_run_status`), and stamps ``status`` + a whole-run ``runtime_seconds`` (the slowest
+    (`job_outcome.combined_run_status` — the same roll-up `main.run` applies to the statuses it
+    holds in hand), and stamps ``status`` + a whole-run ``runtime_seconds`` (the slowest
     parallel job's wall-clock) + the ``bq_models`` list onto the header
     (`registry.header.update_header`). Each family's own row was
     already finalized by its task, so this only reconciles the header the base jobs run *under*.
     """
     from .config import load_config_uri
     from .dag import plan_dag
+    from .job_outcome import combined_run_status
     from .registry.header import update_header
     from .registry.ids import make_run_id
     from .registry.jobs import read_run_jobs

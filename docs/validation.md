@@ -427,6 +427,19 @@ the registry will report a green run that forecast nothing**, which is exactly t
 unattended pipeline acts on. The three positive rungs are unaffected: they wrote 100 good cells
 each, so `COMPLETED` was the right answer there for the wrong reason.
 
+**This one is fixed, and the fix does not fight the structure.** Nothing tries to carry an outcome
+back through a submitter that has none to give. Instead the driver asks the same way the device
+audit already asks its own question: once the job finishes, `job_outcome.audit_cells` reads that
+attempt's tallies out of `forecast_metadata` — one aggregate, the same for all three services,
+because all three write the same rows — and the row's status comes from those. Zero cells is
+`FAILED`, not a quiet `COMPLETED`. The header then rolls those statuses up through the *same*
+function the Airflow `finalize_run` task calls; there had been two copies of that roll-up and the
+local one folded exceptions rather than statuses, which is why neither tier caught the other's
+blind spot. Since a run can now finish badly without anything raising, `main.run` also raises at the
+end so the process still exits non-zero. **Offline only so far** — the live re-run of smoke 18 that
+has to show the row flipping to `FAILED` is pending, and until it lands the row above still says
+what the run actually did on the day.
+
 **2. Only one of the three services let the contract speak.** `_require_device` raises a
 `ConfigError` naming the family, the engine and what the worker saw, and on the Dataproc cluster that
 is precisely what landed — six rows of `error_class='CONFIG_REPAIRABLE'` carrying *"family
@@ -2047,15 +2060,29 @@ Things that are true today and that no entry above covers. Keep this list short 
   its cost" is still a manual check on every GPU run; it wants a place in the review surface, not a
   new failure mode.
 
-- **A job whose every cell errored still closes `COMPLETED`, on every runtime.** Found by the
-  negative arms on 2026-09-10 and detailed in that section above: `launch_family_job` has no channel
-  for the remote engine's cell tallies, so a `run_jobs` row goes terminal on "the launch call
-  returned without raising" and the header rolls those up. `aggregate_status` — which has the
-  correct rule, and which the Ray driver even evaluates and logs — is not consulted. The three
-  positive rungs are unaffected because they really did complete, but the registry cannot presently
-  be trusted to distinguish a run that forecast everything from one that forecast nothing. Until it
-  can, the smoke harness's `verify_cells` and `verify_predictions` are the only things that catch
-  it, and neither of them runs in production.
+- **A job whose every cell errored used to close `COMPLETED` on every runtime. Fixed in code and
+  covered offline; not yet re-proven live.** Found by the negative arms on 2026-09-10 and detailed in
+  that section above. The fix does not try to carry an outcome back from the remote driver — a
+  submitter hands back a probe handle, and that is the shape of the problem rather than an oversight.
+  It asks the question the way the device audit already asks its own: after the job finishes,
+  `job_outcome.audit_cells` reads that attempt's cell tallies out of `forecast_metadata` and the row
+  takes its status from them, so **zero cells is `FAILED`, all-errored is `FAILED`, a mix is
+  `PARTIAL`**. One aggregate, identical for Serverless, a Dataproc cluster and Ray, because all three
+  write the same rows. The status then reaches the header through the *same* roll-up the Airflow
+  `finalize_run` task uses — there used to be two implementations of that roll-up, and the local one
+  rolled up exceptions rather than statuses, which is the other half of why nothing noticed.
+
+  Two consequences worth naming. A run can now finish badly with nothing having raised, so `main.run`
+  manufactures the non-zero exit an unattended caller needs. And the audit is bounded by launch time,
+  which closes a second defect in passing: `forecast_metadata` is append-only with no attempt column,
+  so the 2026-09-09 re-runs each counted the *previous* attempt's cells too and reported `cells: 200`
+  against `cells_on_device: 100`.
+
+  **What is not yet true is the part this document exists for.** The rule is exercised only by
+  offline tests. The live proof is a re-run of smoke 18 — six cells, all of which must error — whose
+  `run_jobs` row and header both have to come back `FAILED`. Until that row is in the table above,
+  the registry's ability to tell a run that forecast everything from one that forecast nothing is
+  claimed, not shown.
 
 - **A per-task memory clamp with no headroom is unschedulable, and no offline test could have
   caught it. Fixed 2026-09-03 at `17e1221` and proven live the same day.** `ray_100k` held at zero cells for
