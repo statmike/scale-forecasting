@@ -45,6 +45,7 @@ old value goes stale by definition.
 | `serverless_gpu_allocator` | `rapids-pool-released` | Tier 1 campaign (2026-09-09) | `rapids-default-pool` |
 | `job_status` | `derived-from-cell-tallies` | `bf12e96` (2026-09-10) | `launch-call-returned` |
 | `gpu_batch_churn` | `executor-failure-budget+stall-watchdog` | 2026-09-10 | `unbounded-executor-replacement` |
+| `gpu_fault_injection` | `probe-mode-default` | 2026-09-10 | `cuda-visible-devices-emptied` |
 
 **`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
 notice on their own — a different image, a different `run_id`, a different node count. This one
@@ -66,11 +67,20 @@ produce a passing answer. The section on the 2026-09-09 wave below has the detai
 
 **`job_status` is declared by one row, on purpose.** It names where a `run_jobs` row's terminal
 status comes from: until 2026-09-10 it came from the launch call returning without raising, and now
-it comes from that attempt's cell tallies in `forecast_metadata`. Only the smoke 18 row declares it,
-because only that row's *claim* depends on it — it is the entry asserting that a run which forecast
-nothing closes `FAILED`. Every other row was recorded from a run whose cells did all succeed, so the
-old derivation and the new one agree on it: `COMPLETED` was the right answer under both, and the old
-one merely reached it without checking. Rows will pick the axis up as they are re-run.
+it comes from that attempt's cell tallies in `forecast_metadata`. Only the three negative arms
+declare it, because only their *claims* depend on it — they are the entries asserting that a run
+which forecast nothing closes `FAILED`. Every other row was recorded from a run whose cells did all
+succeed, so the old derivation and the new one agree on it: `COMPLETED` was the right answer under
+both, and the old one merely reached it without checking. Rows will pick the axis up as they are
+re-run.
+
+**`gpu_fault_injection` names how the negative arms take the card away, and it decides what they can
+prove.** `cuda-visible-devices-emptied` is the faithful imitation of a lost accelerator and the
+useless test: on Ray and on Serverless something below our code — the worker holding the GPU slot,
+the RAPIDS executor plugin — reacts to the missing device first, so the fault never arrives at the
+check it was aimed at. `probe-mode-default` (`SF_HIDE_DEVICES=probe`) makes our own device probe
+report `cpu` and leaves CUDA alone, which delivers the fault to `_require_device` on all three
+services. Only the three negative arms declare the axis; no other row arms the switch at all.
 
 **`gpu_batch_churn` is declared by one row for the same reason.** It names what stops a Dataproc
 Serverless GPU batch that cannot make progress. Until 2026-09-10 nothing did: Spark replaced a dying
@@ -300,9 +310,9 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden produces no forecast — but it did *not* fail fast, see below; recheck under the churn fix and `probe` mode | NEEDS_RECHECK | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `gpu_batch_churn=executor-failure-budget+stall-watchdog`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service — and the run closes `FAILED` on both registry tiers, counting only its own attempt's cells | CURRENT | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `job_status=derived-from-cell-tallies`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden produces no forecast — but the worker dies before the contract can speak, see below | CURRENT | 2026-09-10 | `smoke-19-gpu-absent-ray-1c033f10707b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden fails every cell with the contract message naming the service, and the batch stops instead of churning executors | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `gpu_fault_injection=probe-mode-default`, `gpu_batch_churn=executor-failure-budget+stall-watchdog`, `job_status=derived-from-cell-tallies`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service — and the run closes `FAILED` on both registry tiers, counting only its own attempt's cells | CURRENT | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden fails every cell with the contract message naming the service, instead of crashing the worker that holds the GPU slot | CURRENT | 2026-09-10 | `smoke-19-gpu-absent-ray-1c033f10707b` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 20 | `20_gpu_intent_cpu_family.json` | **Disagreement arm:** `use_gpu: true` with the deep-learning family overridden to `cpu` must complete on CPU, buying no accelerator | NEVER_RUN | — | — | — |
 
 ### Why three configs exist that are designed to fail
@@ -425,13 +435,17 @@ worker from `torch.cuda` while the fit is live — and it is the evidence that s
 `device_used` in the same row and made it possible to tell that the probe, not the platform, was
 wrong.
 
-### The 2026-09-10 negative arms: the contract holds, the reporting around it does not
+### The 2026-09-10 negative arms: two passes, and the second one is what the rows record
 
-Smokes 17, 18 and 19 are the other half of the GPU wave — the same three services with
-`SF_HIDE_DEVICES=1`, which provisions the accelerator and then empties `CUDA_VISIBLE_DEVICES` on the
-workers. (That value now spells itself `cuda`, and it is no longer the recommended one; the `probe`
-mode that replaced it as the default did not exist when this wave ran.) Without these arms the three
-green rungs above are indistinguishable from a check that always says yes.
+Smokes 17, 18 and 19 are the other half of the GPU wave — the same three services with the
+accelerator provisioned and then taken away from the workers. Without these arms the three green
+rungs above are indistinguishable from a check that always says yes.
+
+**They were run twice on the same day, and the two passes are not interchangeable.** The first used
+`SF_HIDE_DEVICES=1`, which empties `CUDA_VISIBLE_DEVICES`; it established the property below and
+found two defects, one of them a genuine production risk. Both were fixed, the second pass used
+`SF_HIDE_DEVICES=probe`, and it is the second pass the ledger rows above record. The first pass is
+written out here because what it found is the reason the second one could say anything.
 
 **The property they were run to establish does hold.** None of the three produced a forecast. Every
 one of them wrote zero rows to `forecast_predictions`, and the smoke harness printed `RESULT: FAIL`
@@ -505,20 +519,45 @@ Both of those are properties of the fault injection meeting the platform, not of
 Emptying `CUDA_VISIBLE_DEVICES` is a blunter instrument on a runtime that loads a CUDA library of its
 own than it is on one that does not: Ray's worker and the RAPIDS plugin both react to the missing
 card before any of our code runs, so on those two services the injection never delivered its fault
-to the check it was aimed at. What the arms establish, precisely, is: **the contract is enforced and
-named on Dataproc clusters, and on the other two services the forecast is withheld but the reason is
-not recorded.** That is a smaller claim than the campaign plan predicted, and it is the one the
-evidence supports.
+to the check it was aimed at. What the *first pass* established, precisely, is: **the contract is
+enforced and named on Dataproc clusters, and on the other two services the forecast is withheld but
+the reason is not recorded.** That was a smaller claim than the campaign plan predicted, and it was
+the one that afternoon's evidence supported. The next section is the pass that closed the gap.
 
-**Both findings have a fix in the repo, and neither has been re-run yet.** The injection now has a
-second, shallower mode — `SF_HIDE_DEVICES=probe` makes our device probe report `cpu` while leaving
-CUDA untouched — so the fault arrives at `_require_device` rather than at the library underneath it,
-which is the only way the other two services can be asked the question this wave meant to ask.
-Separately, and independently of testing, a GPU batch no longer replaces executors without limit:
-`spark.executor.maxNumFailures` is bounded and a driver-side watchdog cancels a batch that has
-written nothing (see `gpu_batch_churn` in the axes table). Row 17 is `NEEDS_RECHECK` on the strength
-of that second change. Until all three arms are re-run under `probe`, the paragraph above is what the
-evidence says.
+#### The second pass, the same afternoon: all three services now say why
+
+Both findings were fixed and all three arms re-run under `SF_HIDE_DEVICES=probe`. The injection's
+new mode makes our own device probe report `cpu` while leaving CUDA untouched, so the fault arrives
+at `_require_device` instead of at the library underneath it. Separately, and independently of
+testing, a GPU batch no longer replaces executors without limit: `spark.executor.maxNumFailures` is
+bounded and a driver-side watchdog cancels a batch that has written nothing (see `gpu_batch_churn`).
+
+```
+17  Serverless L4   FAILED  1068 s   6 cells   CONFIG_REPAIRABLE ×6   "this spark job"
+18  Cluster T4      FAILED  1070 s   6 cells   CONFIG_REPAIRABLE ×6   "this spark job"
+19  Ray T4          FAILED  1067 s   6 cells   CONFIG_REPAIRABLE ×6   "this ray job"
+```
+
+**All three now reach the contract and record what it said**, in the same words the cluster had been
+producing alone: *"family 'deep_learning' is set to hardware='gpu' and this &lt;service&gt; job was
+provisioned onto GPU hardware, but torch is installed here and reports no CUDA device, so the
+accelerator did not attach to this worker."* Each stamped `MISSING_DEVICE` with
+`cells = cells_no_device = 6` and `cells_on_device = 0`, and each closed `FAILED` on both registry
+tiers. The Ray worker no longer crashes — holding a GPU slot is fine when the device is really
+there; it was the empty `CUDA_VISIBLE_DEVICES` that killed it.
+
+**The churn is gone and the Serverless properties are accepted.** `gcloud dataproc batches describe`
+read back `spark.executor.maxNumFailures: 8` and `spark.executor.failuresValidityInterval: 30m` on
+the live batch, so Dataproc Serverless takes both — a rejected property would have failed the batch
+at submit. Smoke 17 ended in **17.8 minutes against 49 minutes of executor-churning on the first
+pass**, and against 28 minutes for the equivalent *successful* GPU run. The stall watchdog was not
+what stopped it and did not need to be; it stands as the backstop for the case where a batch neither
+progresses nor dies.
+
+The three durations landing within three seconds of each other is coincidence, not an artifact —
+they ran on independent clocks (17 from 14:30:18, 18 and 19 from 14:40) and each is roughly fifteen
+minutes of provisioning followed by an immediate refusal. Provisioning dominates because that is the
+point: the accelerator is bought before it is taken away.
 
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
 
@@ -2113,17 +2152,20 @@ Things that are true today and that no entry above covers. Keep this list short 
   its cost" is still a manual check on every GPU run; it wants a place in the review surface, not a
   new failure mode.
 
-- **Two of the three services still cannot say *why* a GPU job lost its device.** The forecast is
-  withheld on all three — that part is proven — but only the Dataproc cluster reaches
-  `_require_device` and records the contract message. On Ray the worker holding a GPU slot crashes
-  before the check runs, so the registry's only diagnosis is `WorkerCrashedError`; on Serverless the
-  RAPIDS plugin dies first and Spark replaces the executor indefinitely, which is the worse of the
-  two because an unattended batch then burns fleet until something stops it. The negative-arm
-  section above has the detail. **Both fixes are written and neither is proven live:**
+- **Two of the three services could not say *why* a GPU job lost its device. Fixed 2026-09-10 and
+  proven live the same day.** The forecast was withheld on all three, but only the Dataproc cluster
+  reached `_require_device` and recorded the contract message: on Ray the worker holding a GPU slot
+  crashed before the check ran, and on Serverless the RAPIDS plugin died first and Spark replaced
+  the executor indefinitely — the worse of the two, because an unattended batch then burns fleet
+  until something stops it. Two fixes, and the second is a production change rather than a test one:
   `SF_HIDE_DEVICES=probe` injects the fault at our own probe so it reaches the check instead of the
   CUDA library underneath it, and a bounded executor-failure budget plus a driver-side stall
-  watchdog make the Serverless batch give up. Re-running 17, 18 and 19 under `probe` is what would
-  close this, and it is the next thing owed to this section.
+  watchdog make the batch give up. All three arms were re-run under `probe` and all three recorded
+  `CONFIG_REPAIRABLE` on six cells, naming their own service; smoke 17 ended in 17.8 minutes against
+  49 of churning. **What this gap leaves behind** is that the deeper `cuda` mode still cannot be
+  used to test the check on Ray or Serverless — the crash and the plugin abort are real platform
+  behaviour and are unchanged. A genuine card failure in production would still present as those,
+  not as a named contract error.
 
 - **A per-task memory clamp with no headroom is unschedulable, and no offline test could have
   caught it. Fixed 2026-09-03 at `17e1221` and proven live the same day.** `ray_100k` held at zero cells for
