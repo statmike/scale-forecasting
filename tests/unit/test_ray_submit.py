@@ -23,6 +23,7 @@ importing their symbols. The two exceptions are ``ray_submit``'s own names, ``_s
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -731,6 +732,176 @@ def test_submit_and_poll_refreshes_client_on_401(monkeypatch: pytest.MonkeyPatch
     assert (job_id, status) == ("job-1", "SUCCEEDED")
     assert detail == ""  # no failure detail on a SUCCEEDED run
     assert len(connects) == 2  # connected once to submit/poll, reconnected once after the 401
+
+
+# --- poll-loop transport blips: a dropped request is not a failed job -------------------------
+
+# The verbatim error that ended `ray-100k-3fbc82fe3b6d` on 2026-09-10 at minute 79 of a 100,000-
+# series run. Kept whole rather than paraphrased: the classifier reads the *string*, so a
+# paraphrase would test a message the proxy never actually sends.
+_LIVE_SSL_BLIP = (
+    "HTTPSConnectionPool(host='a0312de907097985-dot-us-central1.aiplatform-training."
+    "googleusercontent.com', port=443): Max retries exceeded with url: "
+    "/api/jobs/sf-ray-100k-3fbc82fe3b6d-statistical-a1 (Caused by SSLError(SSLError(5, "
+    "'[SSL: UNEXPECTED_EOF_WHILE_READING] unexpected eof while reading (_ssl.c:2590)')))"
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _LIVE_SSL_BLIP,
+        "401 Client Error: Unauthorized",
+        "504 Gateway Timeout for url: https://.../api/jobs/x",
+        "Connection aborted",
+        "Read timed out",
+    ],
+)
+def test_is_recoverable_poll_error_true_for_channel_faults(message: str) -> None:
+    # Every one of these describes the link to the dashboard, not the job running on the cluster.
+    assert ray_jobs._is_recoverable_poll_error(Exception(message)) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "403 Client Error: Forbidden",
+        "Ray cluster version 2.9 is incompatible with client 2.47",
+        "Job entrypoint command failed with exit code 1",
+    ],
+)
+def test_is_recoverable_poll_error_false_for_real_faults(message: str) -> None:
+    # A poll loop that forgives everything never terminates — these must still propagate.
+    assert ray_jobs._is_recoverable_poll_error(Exception(message)) is False
+
+
+def test_status_with_recovery_returns_without_reconnecting_when_the_poll_works() -> None:
+    reconnects: list[int] = []
+    status = ray_jobs._status_with_recovery(lambda: "RUNNING", lambda: reconnects.append(1))
+    assert status == "RUNNING"
+    # The happy path is every poll but a handful in a run's life; it must stay free.
+    assert reconnects == []
+
+
+def test_status_with_recovery_survives_a_blip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One dropped request, then the channel is back — the run keeps going.
+
+    This is the whole point of the fix. Before it, the exception below reached `_submit_and_poll`'s
+    caller, which marked the run FAILED and tore down the fleet.
+    """
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
+    reconnects: list[int] = []
+    calls: list[int] = []
+
+    def _poll() -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError(_LIVE_SSL_BLIP)
+        return "SUCCEEDED"
+
+    assert ray_jobs._status_with_recovery(_poll, lambda: reconnects.append(1)) == "SUCCEEDED"
+    assert len(reconnects) == 1
+
+
+def test_status_with_recovery_gives_up_after_consecutive_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patience is bounded: a channel that never comes back still ends the run, and says why."""
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
+    reconnects: list[int] = []
+
+    def _poll() -> str:
+        raise RuntimeError(_LIVE_SSL_BLIP)
+
+    with pytest.raises(RuntimeError, match="UNEXPECTED_EOF_WHILE_READING"):
+        ray_jobs._status_with_recovery(_poll, lambda: reconnects.append(1), attempts=3)
+    # Three attempts means two recoveries between them — the last failure raises rather than
+    # spending a reconnect nobody will use.
+    assert len(reconnects) == 2
+
+
+def test_status_with_recovery_reraises_a_real_fault_immediately() -> None:
+    reconnects: list[int] = []
+
+    def _poll() -> str:
+        raise RuntimeError("Ray cluster version 2.9 is incompatible with client 2.47")
+
+    with pytest.raises(RuntimeError, match="incompatible"):
+        ray_jobs._status_with_recovery(_poll, lambda: reconnects.append(1))
+    assert reconnects == []
+
+
+def test_status_with_recovery_budget_is_per_call_not_cumulative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that hiccups once an hour must never accumulate toward the give-up threshold.
+
+    The budget counts *consecutive* failures, which falls out of it being scoped to one call. Here
+    two separate polls each fail once and each recover; had the budget been shared across the run,
+    a long enough run would eventually exhaust it on blips that were minutes apart.
+    """
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
+    reconnects: list[int] = []
+
+    def _flaky_once() -> Callable[[], str]:
+        calls: list[int] = []
+
+        def _poll() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError(_LIVE_SSL_BLIP)
+            return "RUNNING"
+
+        return _poll
+
+    for _ in range(2):
+        assert (
+            ray_jobs._status_with_recovery(_flaky_once(), lambda: reconnects.append(1), attempts=2)
+            == "RUNNING"
+        )
+    assert len(reconnects) == 2
+
+
+def test_submit_and_poll_survives_a_transport_blip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end through `_submit_and_poll`: the live 2026-09-10 failure now polls to SUCCEEDED.
+
+    Mirrors `test_submit_and_poll_refreshes_client_on_401` in shape, because the remedy is the
+    same — rebuild the client and carry on — and only the triggering error differs.
+    """
+    resource_name = "projects/proj-x/locations/us-central1/persistentResources/sf-ray-abc"
+    connects: list[int] = []
+
+    class _FakeClient:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+            self.calls = 0
+
+        def submit_job(self, *, entrypoint: str, runtime_env: dict) -> str:
+            return "job-1"
+
+        def get_job_status(self, job_id: str) -> str:
+            self.calls += 1
+            # First client: one good poll, then the TLS session dies mid-read.
+            if self.idx == 0:
+                if self.calls == 1:
+                    return "RUNNING"
+                raise RuntimeError(_LIVE_SSL_BLIP)
+            return "SUCCEEDED"
+
+    def _fake_connect(_name: str) -> _FakeClient:
+        idx = len(connects)
+        connects.append(idx)
+        return _FakeClient(idx)
+
+    monkeypatch.setattr(ray_jobs, "_connect_job_client", _fake_connect)
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
+
+    job_id, status, detail = ray_jobs._submit_and_poll(
+        resource_name, "python -m x", {"working_dir": "/src"}, wait=True
+    )
+    assert (job_id, status) == ("job-1", "SUCCEEDED")
+    assert detail == ""
+    assert len(connects) == 2  # connected once to submit/poll, reconnected once after the blip
 
 
 def test_submit_and_poll_captures_driver_detail_on_failure(

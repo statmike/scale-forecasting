@@ -7,7 +7,7 @@ through Vertex's managed Ray dashboard proxy and fail on warm-up races and OAuth
 reader debugging "the job never started" and a reader debugging "the cluster never provisioned" are
 looking for two different files.
 
-Two long-run hazards live here and nowhere else, which is most of why the module exists:
+Three long-run hazards live here and nowhere else, which is most of why the module exists:
 
 * **The dashboard warm-up race** — a cluster reaches RUNNING before its dashboard is reachable
   through the proxy, so the first handshake can time out (`_is_dashboard_warmup_error`,
@@ -15,6 +15,9 @@ Two long-run hazards live here and nowhere else, which is most of why the module
 * **The 60-minute bearer token** — the ``vertex_ray://`` client mints an OAuth token at construction
   and never refreshes it, so a long GPU run outlives it. Handled proactively
   (`_client_needs_refresh`) with a reactive 401 backstop (`_is_auth_expiry_error`).
+* **A blip on the monitoring channel** — the poll runs for hours over a public HTTPS proxy, so
+  sooner or later one request dies in transit. That says nothing about the job
+  (`_is_recoverable_poll_error`, `_status_with_recovery`).
 
 `probes.runtimes` reuses `_connect_job_client` to read a live job's status on demand.
 """
@@ -22,6 +25,7 @@ Two long-run hazards live here and nowhere else, which is most of why the module
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from .errors import get_logger
@@ -47,6 +51,15 @@ _DASHBOARD_CONNECT_BACKOFF_SECONDS = 15
 # proactively rebuild the client — minting a fresh token — once it reaches this age, comfortably
 # under the TTL, rather than waiting to absorb the 401 the reactive poll path handles as a backstop.
 _CLIENT_MAX_AGE_SECONDS = 2700  # 45 min
+
+# How hard one `get_job_status` call tries before we accept that contact is lost. The budget is
+# per-poll, so a run that hiccups once an hour never accumulates toward it; only *consecutive*
+# failures spend it. Deliberately generous, because the two outcomes are not symmetric: waiting a
+# few extra minutes costs a fleet we have already paid for, while giving up early destroys a
+# multi-hour run and tears the fleet down with it. `_connect_job_client` carries its own retry
+# budget on top of this, so the real tolerance per attempt is larger than the backoff suggests.
+_POLL_RETRY_ATTEMPTS = 4
+_POLL_RETRY_BACKOFF_SECONDS = 15
 
 
 def _is_dashboard_warmup_error(exc: Exception) -> bool:
@@ -85,6 +98,65 @@ def _is_auth_expiry_error(exc: Exception) -> bool:
     """
     low = str(exc).lower()
     return " 401" in low or "unauthorized" in low
+
+
+def _is_recoverable_poll_error(exc: Exception) -> bool:
+    """True if a failed ``get_job_status`` says something about the *channel*, not about the job.
+
+    A poll is a small HTTPS request to Vertex's managed dashboard proxy, repeated every
+    `_POLL_SECONDS` for as long as the run lasts. Over a two-hour run that is several hundred
+    requests across the public internet, and the interesting property is that *none of them are the
+    job*: the job is a Ray driver on a cluster that neither knows nor cares whether we are watching.
+    So a transport failure here — a proxy 5xx, a dropped connection, a TLS session that ends
+    mid-read — is a statement about our view of the run, and treating it as a verdict on the run is
+    a category error. `ray-100k-3fbc82fe3b6d` (2026-09-10) is what that error costs: an
+    ``SSLError: UNEXPECTED_EOF_WHILE_READING`` at minute 79 propagated out of the poll, marked both
+    jobs FAILED, and tore down a twenty-node fleet that was still writing cells — 224,967 of 400,000
+    of them already durable in BigQuery.
+
+    Two shapes are recoverable and they arrive for different reasons. An expired token
+    (`_is_auth_expiry_error`) is ours to fix by re-minting. A transient transport fault
+    (`_is_dashboard_warmup_error`, which is the same wire-level vocabulary whether it shows up
+    during warm-up or mid-poll) is nobody's to fix and clears by itself. Everything else — a version
+    mismatch, a 403, an unrecognised error — is a genuine fault and must still propagate, because a
+    poll loop that retries *every* exception is a poll loop that never ends.
+    """
+    return _is_auth_expiry_error(exc) or _is_dashboard_warmup_error(exc)
+
+
+def _status_with_recovery(
+    poll: Callable[[], str],
+    reconnect: Callable[[], None],
+    *,
+    attempts: int = _POLL_RETRY_ATTEMPTS,
+    backoff_s: float = _POLL_RETRY_BACKOFF_SECONDS,
+) -> str:
+    """Call ``poll`` for a job status, rebuilding the client and retrying past recoverable failures.
+
+    Split out of `_submit_and_poll` for one reason: the live poll is `pragma: no cover`, and the
+    behaviour that matters here — *which* failures are forgiven and how many times — is exactly the
+    behaviour that was wrong before. It has to be provable offline.
+
+    On a recoverable failure we wait before reconnecting rather than after, so a blip has a moment
+    to clear before we spend a handshake on it. ``reconnect`` failures are *not* caught: if we
+    cannot re-establish contact at all then contact really is lost, and `_connect_job_client` has
+    already spent its own retry budget deciding that.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return poll()
+        except Exception as exc:  # noqa: BLE001 - classify, recover the channel, re-raise faults
+            if not _is_recoverable_poll_error(exc) or attempt == attempts:
+                raise
+            _log.info(
+                "Ray job poll failed on attempt %d/%d (%r); reconnecting and retrying",
+                attempt,
+                attempts,
+                exc,
+            )
+            time.sleep(backoff_s)
+            reconnect()
+    raise AssertionError("unreachable: the loop returns or raises on every attempt")
 
 
 def _client_needs_refresh(
@@ -187,20 +259,18 @@ def _submit_and_poll(
             client_born = time.monotonic()
         return client
 
-    def _status() -> str:
-        # Backstop: if the proactive refresh ever misses (clock skew / a rebuild that lands late), a
-        # 401 is still recoverable — rebuild the client (fresh token) and retry once, so a long run
-        # polls to completion instead of aborting.
+    def _reconnect() -> None:
+        # Backstop for both recoverable shapes. A 401 means the proactive refresh missed (clock
+        # skew, or a rebuild that landed late) and a fresh token fixes it; a transport fault means
+        # the channel dropped and a fresh client re-establishes it. Same remedy, so one path.
         nonlocal client, client_born
-        try:
-            return str(_fresh_client().get_job_status(job_id))
-        except Exception as exc:  # noqa: BLE001 - only a 401 is recoverable here; re-raise the rest
-            if not _is_auth_expiry_error(exc):
-                raise
-            _log.info("Ray job poll hit auth expiry (%r); refreshing client and retrying", exc)
-            client = _connect_job_client(cluster_resource_name)
-            client_born = time.monotonic()
-            return str(client.get_job_status(job_id))
+        client = _connect_job_client(cluster_resource_name)
+        client_born = time.monotonic()
+
+    def _status() -> str:
+        return _status_with_recovery(
+            lambda: str(_fresh_client().get_job_status(job_id)), _reconnect
+        )
 
     if not wait:
         return job_id, _status(), ""

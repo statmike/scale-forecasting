@@ -46,6 +46,7 @@ old value goes stale by definition.
 | `job_status` | `derived-from-cell-tallies` | `bf12e96` (2026-09-10) | `launch-call-returned` |
 | `gpu_batch_churn` | `executor-failure-budget+stall-watchdog` | 2026-09-10 | `unbounded-executor-replacement` |
 | `gpu_fault_injection` | `probe-mode-default` | 2026-09-10 | `cuda-visible-devices-emptied` |
+| `ray_poll_recovery` | `transient-transport+auth` | 2026-09-10 | `auth-expiry-only` |
 
 **`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
 notice on their own — a different image, a different `run_id`, a different node count. This one
@@ -103,6 +104,19 @@ axis, because only that row's claim is about a batch that never progresses — f
 budget is never spent and the watchdog stands down the moment the first cell lands, so both values
 of the axis produce the identical run. The bound lives on `BatchInfra`, not on `ComputeConfig`, so
 arming or changing it cannot move a `run_id`.
+
+**`ray_poll_recovery` names which failures of the monitoring channel a Ray run can survive**, and
+long runs are the only ones that can tell the two values apart. A Ray run is watched by a driver
+that asks the Vertex dashboard proxy for the job's status every fifteen seconds; over a two-hour run
+that is several hundred small HTTPS requests, and none of them are the job. Until 2026-09-10 the
+poll recovered from exactly one failure — an expired OAuth token — and re-raised everything else,
+which meant a single dropped request was treated as a verdict on a run it could not actually see.
+`transient-transport+auth` widens that to the transport faults the connect path had already
+classified as transient. The reason this is an axis rather than a bug note is that it changes what a
+completed long Ray run *proves*: under `auth-expiry-only`, finishing meant the work succeeded **and**
+several hundred consecutive network requests happened to survive, so a failure was ambiguous between
+the two. Only the rows whose runs are long enough to be exposed declare it; a six-series Ray smoke
+polls a handful of times and would finish under either value.
 
 > ### Every row in this document is STALE, on purpose, as of 2026-09-05
 >
@@ -1187,17 +1201,125 @@ the honest starting position and the reason for adding the table at all: it is t
 | Config | Proves | Status | Date | run_id | Axes at proof |
 |--------|--------|--------|------|--------|---------------|
 | `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | STALE | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
-| `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | STALE | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-10 | `explode-demo-088f172ad2f5` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested and ranked on one leaderboard (10) | CURRENT | 2026-09-10 | `mixed-demo-db2dfb2f675d` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on, ranked inside the same board (10) | CURRENT | 2026-09-10 | `ensemble-demo-b2ff15a4d418` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, statistical and ml to Serverless Spark, native to BigQuery, all four under one `run_id` (50) | CURRENT | 2026-09-10 | `per-family-runtimes-demo-8fe8f224a7e1` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
-| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | STALE | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `explode_100k.json` | The headline: Spark `explode` over 100,000 series | STALE | 2026-09-01 | `explode-100k-1c59265062aa` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
+| `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-10 | `ray-autoscale-demo-9728c900963a` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-10 | `explode-100k-ef602ea229b4` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+
+#### 2026-09-10, `ray_autoscale_demo`: the first side-by-side of what was planned and what ran
+
+The re-run is `ray-autoscale-demo-9728c900963a`, `COMPLETED` in 2,160 s against the prior pass's
+2,513 s, with 30,000 cells and no errors. Two things in it are worth more than the pass.
+
+**The node curve still reaches eight.** The run-level telemetry records `derived_units: 8`,
+`cpu_node_count: 8` and `total_worker_nodes: 8`, against an authored ceiling of `ray_cpu_max_nodes:
+8`. That is the check this rung exists for: the derived fleet size holds back one unit as a reserve,
+and if that reserve had been scoped to the wrong number the pool would come up at seven and nothing
+would fail — the run would simply be quietly smaller than the config asked for. It comes up at eight.
+
+**`sizing` and `sizing_executed` were compared here for the first time, and they differ in exactly
+one place.** The planned slot measured both axes and carried a memory reservation:
+
+```
+sizing:           slot.measured = ["cores", "memory_bytes"]   memory_bytes = 2153924199
+                  task_options  = {"num_cpus": 1, "memory": 2153924199}
+sizing_executed:  slot.measured = ["cores"]   slot.assumed = ["memory_bytes"]   memory_bytes = null
+                  task_options  = {"num_cpus": 1}
+```
+
+The executed plan drops the memory request before it reaches the scheduler. That is the
+`ray_slot_memory=harvest-only` axis doing precisely what its name says, and it is deliberate: Ray
+enforces a memory request as hard as a core request, so pinning the measured figure per task packs
+one cell onto a node and costs a factor of 3.8 in throughput. Harvesting the number without imposing
+it keeps the measurement — which is what feeds later sizing decisions — while letting cores set
+concurrency. The proof that nothing was lost is that both structures land on `slots_per_unit: 7` and
+`total_slots: 56`. Same concurrency, reached by cores alone. Until this run the two structures had
+only ever been read one at a time, so "the executed plan matches the planned one except where the
+axis says otherwise" was a reasonable belief rather than a recorded observation. It is now recorded.
+
+The GPU half of the plan is present and empty, which is also correct: this config authors no
+deep-learning model, so the deep-learning pool plans `n_cells: 0` and `derived_units: 0`, and the
+cluster came up with `gpu_node_count: 0`. No accelerator was bought for a family with nothing to run.
+
+#### 2026-09-10, `explode_demo`: the artifact claim checked rather than inherited
+
+`explode-demo-088f172ad2f5`, `COMPLETED`, both the statistical and ml jobs green, 40 of 40 cells
+`ok`. This row's claim ends in "artifacts persisted", and `explode_demo` is the only config in the
+tree that sets `persist_models: true`, so that clause was verified on its own rather than allowed to
+ride along on the harness `PASS`. All 40 `forecast_metadata` rows carry a non-null `model_artifact`
+reference, and the bucket prefix for the run holds exactly 40 objects totalling 645.66 MiB. Both
+halves matter: rows with references and no objects, or objects with no rows, would each still let
+the harness report a pass. The leaderboard shows `wape=None` for all four models, which is correct —
+this config authors no `backtest` block, so there is nothing to score.
+
+#### 2026-09-10, `explode_100k`: the hundred-thousand rung, re-proven under the current architecture
+
+`explode-100k-ef602ea229b4`, `COMPLETED`, both jobs green, 400,000 distinct
+(`ts_id`, `model_type`, `forecast_date`) prediction cells — exactly 100,000 series × 4 models × a
+28-day horizon, with nothing dropped. This config is not workshop material. The configs a reader is
+walked through top out at 10,000 series, because 10,000 is the largest scale a stock project can
+reproduce without asking for quota. `explode_100k` and `ray_100k` are kept for one purpose: to show
+that the same code, unchanged, runs an order of magnitude larger.
+
+Against the 2026-09-01 run of the identical config, both families finished faster:
+
+| Family | 2026-09-01 | 2026-09-10 | |
+|--------|-----------|-----------|---|
+| `statistical` | 7,053.7 s (117.6 m) | 5,847.7 s (97.5 m) | 1.21x |
+| `ml` | 3,329.3 s (55.5 m) | 2,599.7 s (43.3 m) | 1.28x |
+
+Read that as a sanity check, not as a measurement. The config pins `max_executors: 20` in both runs,
+so the ceiling on parallelism was the same, but three architecture axes moved between the two dates
+(`fleet_sizing`, `run_id_inputs`, and the horizon-feature fix), and Serverless does not promise the
+same machines twice. What the pair establishes is that nothing regressed at scale while those axes
+were changing — the kind of claim a headline A/B is built to make properly, and this is not one.
+
+#### 2026-09-10, `ray_100k`: a dropped HTTPS request killed a healthy twenty-node run
+
+The first attempt at `ray-100k-3fbc82fe3b6d` died 79.5 minutes in, with 224,967 of its 400,000 cells
+already written to BigQuery and climbing steadily. Both jobs were marked `FAILED` and the fleet was
+torn down. Nothing had gone wrong with the run.
+
+What happened is that the driver polls Ray for job status every fifteen seconds, over a public HTTPS
+proxy, for as long as the run lasts — several thousand requests on a run this size. One of them died
+in transit:
+
+```
+SSLError(5, '[SSL: UNEXPECTED_EOF_WHILE_READING] unexpected eof while reading')
+```
+
+That is the connection ending mid-response. It says nothing whatsoever about the job on the other
+end. But `_submit_and_poll` forgave exactly one kind of poll failure — an expired bearer token,
+because a long run outliving its token had already cost us a run once — and
+re-raised everything else as a job failure. So a transport blip was reported as two failed jobs, and
+the ordinary teardown path then removed twenty nodes of healthy, paid-for work.
+
+The evidence that the jobs were fine is circumstantial but consistent: `failure_reason` is null on
+both rows, Ray never reported a `FAILED` state, and cells were landing in `forecast_predictions`
+right up to the cut. It cannot be more than circumstantial, because our own teardown destroyed the
+cluster we would need to ask. That asymmetry is the whole argument for the fix — being wrong in the
+forgiving direction costs a few minutes of a fleet already paid for, and being wrong in the strict
+direction destroys a multi-hour run.
+
+The odd part is that the code already knew this error was transient. `_is_dashboard_warmup_error`
+classifies exactly this string, and had done since the dashboard-handshake work; the poll loop
+simply never consulted it. The fix (`_is_recoverable_poll_error`, `_status_with_recovery`) makes the
+poll loop forgive both shapes — expired auth and dropped transport — reconnecting and retrying up to
+four consecutive times with a fifteen-second wait, and re-raising anything else untouched. The
+budget is per-poll, so a run that hiccups once an hour never accumulates toward it. Eight offline
+tests cover the classifier and the retry loop, including the verbatim live error string above, since
+the classifier reads the message text and a paraphrase would test something the proxy never sends.
+
+This is what the `ray_poll_recovery` axis names, and why finishing a long Ray run under the old
+value proved something weaker than it looked: it proved no request happened to drop, not that a
+dropped request was survivable.
 
 **`all_families_10k` ran twice on 2026-09-04, and the pair is the `ray_slot_memory` A/B.** The first
 pass is the run that found the defect; the second is the identical config under the fix, submitted
