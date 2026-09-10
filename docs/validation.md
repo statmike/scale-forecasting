@@ -40,7 +40,7 @@ old value goes stale by definition.
 | `ray_pool_shape` | `autoscaling` | F5 (2026-09-03) | `fixed-size` (pinned by `4c988bc`) |
 | `ray_slot_memory` | `harvest-only` | `efecb4c` (2026-09-04) | `driver-rss-prepass` |
 | `dl_gpu_routing` | `resolved-per-family` | P1 (2026-09-05) | `flat-compute.use_gpu` |
-| `backtest_scoring` | `holdout-fold-reserved` | 3.2 (2026-09-08), after 2.3/2.4/2.6/3.1 | `unreserved-full-history` |
+| `backtest_scoring` | `holdout-reserved+embargo-aware+auto-refit` | Phase 6 (`11401bf`, `fae9cee`, `834ad6a`, 2026-09-09/10) | `holdout-fold-reserved` (3.2, 2026-09-08, after 2.3/2.4/2.6/3.1), before that `unreserved-full-history` |
 | `gpu_device_probe` | `trainer-root-device` | Tier 1 campaign (2026-09-09) | `parameter-tensor-after-fit` |
 | `serverless_gpu_allocator` | `rapids-pool-released` | Tier 1 campaign (2026-09-09) | `rapids-default-pool` |
 | `job_status` | `derived-from-cell-tallies` | `bf12e96` (2026-09-10) | `launch-call-returned` |
@@ -55,6 +55,16 @@ number of rows in the same tables under the same identity, and the numbers insid
 comparable: the newest fold is now reserved from every fit, and MASE and RMSSE are scaled by the
 fold's own training window rather than by the whole series. Declaring it on a row is the only
 mechanism that will ever say so.
+
+**It carries three changes, and the reason they share one axis is that a reader has one question.**
+Phase 6 moved it again on 2026-09-09/10: folds now forecast *across* the embargo instead of stopping
+at it (three places in the code disagreed about that, `11401bf`), `auto` became the refit scheme a
+backtest earns by default, and refitting schemes gained an optional never-refreshed control arm
+(`fae9cee`). Bundling them costs precision — a future reader cannot tell from the axis alone which
+of the three moved a particular number — and buys the thing that matters more: there is exactly one
+value to check before trusting any accuracy figure in this document, rather than three that must all
+be read together to mean anything. The commits are named in the table for anyone who needs to go
+further.
 
 **`gpu_device_probe` is the second of that kind, and it invalidated more than it broke.** It names
 how a fit answers the question "which device did you actually run on" — the answer that
@@ -1178,8 +1188,8 @@ the honest starting position and the reason for adding the table at all: it is t
 |--------|--------|--------|------|--------|---------------|
 | `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | STALE | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | STALE | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
-| `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | STALE | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | STALE | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested and ranked on one leaderboard (10) | CURRENT | 2026-09-10 | `mixed-demo-db2dfb2f675d` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| `ensemble_demo.json` | The same mix with three ensemble strategies on, ranked inside the same board (10) | CURRENT | 2026-09-10 | `ensemble-demo-b2ff15a4d418` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, statistical and ml to Serverless Spark, native to BigQuery, all four under one `run_id` (50) | CURRENT | 2026-09-10 | `per-family-runtimes-demo-8fe8f224a7e1` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
@@ -1489,6 +1499,25 @@ The three Spark demo rows landed together on 2026-09-01, and two of them are wor
   rank *inside* the same board: `inverse_error` 0.408, `mean` 0.411, `median` 0.413 — all three
   beating both `arima_plus` and `theta`, none beating `timesfm` at 0.391. Recorded as-is. The claim
   the product makes is that ensembles are produced, ranked and comparable, not that they win.
+
+**Both were re-run on 2026-09-10 and every number came back bit-identical.** `mixed-demo-db2dfb2f675d`
+and `ensemble-demo-b2ff15a4d418` reproduced the figures above to full float precision — `timesfm`
+0.39154588800396195, `arima_plus` 0.4183748578576073, `theta` 0.4510803985450681, and the three
+ensembles at 0.4084785200757231 / 0.41166952120260025 / 0.4133315235193376. That deserves a second
+look rather than a victory lap, because `backtest_scoring` moved *twice* in between: 3.2 reserved
+the newest fold on 2026-09-08, and Phase 6 changed fold geometry and refit on 2026-09-09/10. An axis
+that moves without moving a number is either a strong result or a change that never reached the
+config, and the two are worth telling apart.
+
+**It is the first.** These configs author no `gap`, and a `gap` of zero reproduces the pre-embargo
+fold layout exactly — that is not an inference, it is pinned literally by
+`golden_panel_prebreak.json`, which records `[fold_id, train_start, train_end, val_start, val_end]`
+for all nine shipped backtesting configs from pre-break code and is compared on every offline gate.
+The refit half checks out too: `backtest_refit` reads `per_fold` on all thirty cells, so `auto`
+resolved to what these three models were already doing. Same folds and same refit give the same
+arithmetic, and the run reproduced it to the last digit across nine days and two architecture moves.
+The `run_id` did change — Phase 6 broke the config digest — which is exactly the distinction the
+axes are for: the identity moved, the measurement did not.
 
 **`explode_100k` is the headline claim, and it is now a citation.** 100,000 series × 4 models =
 **400,000 cells**, `COMPLETED`, all four models on the board at `n_cells=100000` each, and the
