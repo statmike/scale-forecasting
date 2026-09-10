@@ -313,7 +313,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden fails every cell with the contract message naming the service, and the batch stops instead of churning executors | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `gpu_fault_injection=probe-mode-default`, `gpu_batch_churn=executor-failure-budget+stall-watchdog`, `job_status=derived-from-cell-tallies`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service — and the run closes `FAILED` on both registry tiers, counting only its own attempt's cells | CURRENT | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden fails every cell with the contract message naming the service, instead of crashing the worker that holds the GPU slot | CURRENT | 2026-09-10 | `smoke-19-gpu-absent-ray-1c033f10707b` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| 20 | `20_gpu_intent_cpu_family.json` | **Disagreement arm:** `use_gpu: true` with the deep-learning family overridden to `cpu` must complete on CPU, buying no accelerator | NEVER_RUN | — | — | — |
+| 20 | `20_gpu_intent_cpu_family.json` | **Disagreement arm:** `use_gpu: true` with the deep-learning family overridden to `cpu` completes on CPU and buys no accelerator — the Ray pool comes up with no `acceleratorType` at all | CURRENT | 2026-09-10 | `smoke-20-gpu-intent-cpu-family-239ba1e33242` | `dl_gpu_routing=resolved-per-family`, `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `gpu_device_probe=trainer-root-device`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 
 ### Why three configs exist that are designed to fail
 
@@ -558,6 +558,23 @@ The three durations landing within three seconds of each other is coincidence, n
 they ran on independent clocks (17 from 14:30:18, 18 and 19 from 14:40) and each is roughly fifteen
 minutes of provisioning followed by an immediate refusal. Provisioning dominates because that is the
 point: the accelerator is bought before it is taken away.
+
+#### Smoke 20, the mirror image: an accelerator that is asked for and correctly not bought
+
+`smoke-20-gpu-intent-cpu-family-239ba1e33242`, 2026-09-10. Where 17–19 ask what a job does when it
+loses a device it was promised, 20 asks the opposite: the config says `use_gpu: true` and
+`gpu_type: "T4"` at the top level, and then overrides `compute.families.deep_learning.hardware` to
+`"cpu"`. The family override must win, and the run must cost nothing in accelerators.
+
+**The strongest evidence is not that the run completed — it is the shape of the pool it ran on.**
+The Vertex persistent resource came up as `n1-standard-16` and `n1-standard-8` with **no
+`acceleratorType` field on either pool**, read straight off the live v1beta1 resource while the run
+was in flight. A `use_gpu: true` that leaked past the family override would have shown a T4 there,
+and no amount of reading the registry afterwards would distinguish "ran on CPU" from "bought a card
+and ignored it". The run then completed all 100 cells `cell_status='ok'` with `device_used='cpu'` on
+every one, `hardware='cpu'` and a NULL `gpu_type` on the `run_jobs` row, and a NULL `device_verdict`
+because there is no GPU contract to audit when none was requested for that family. 1688 s, pool torn
+down and the resource list read back empty.
 
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
 
@@ -1163,7 +1180,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | STALE | 2026-09-01 | `explode-demo-d1b57690dc96` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested (10) | STALE | 2026-09-01 | `mixed-demo-405983dddf0a` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ensemble_demo.json` | The same mix with three ensemble strategies on (10) | STALE | 2026-09-01 | `ensemble-demo-9849a2f73669` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, the rest on Spark (50) | STALE | 2026-09-02 | `per-family-runtimes-demo-f1746911caf5` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
+| `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, statistical and ml to Serverless Spark, native to BigQuery, all four under one `run_id` (50) | CURRENT | 2026-09-10 | `per-family-runtimes-demo-8fe8f224a7e1` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | STALE | 2026-09-05 | `ray-autoscale-demo-886a053c374c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
@@ -1450,6 +1467,17 @@ trace naming all four system job ids. The config asks for `hardware: "gpu"` with
 the T4 in the trace is the default resolving correctly rather than a value copied from the config.
 This is the row the restraint above was protecting: the split is the claim, and it is now the thing
 that was proven.
+
+**Re-run 2026-09-10 as `per-family-runtimes-demo-8fe8f224a7e1`, and it held under a much-changed
+architecture** — per-family GPU routing, three-way fleet sizing, the trainer-root-device probe and
+the new `run_id` inputs have all landed since the first pass. Same four jobs, same three runtimes,
+same 250 cells: `native` home in 35 s, `ml` in 1509 s, `statistical` in 1558 s, `deep_learning` in
+1636 s. The Ray pool was torn down and the persistent-resource list read back empty. **Read the
+leaderboard's empty WAPE column correctly:** this config authors no `backtest` block, so its 250
+cells are forecasts into the future with nothing to score against. The row proves routing and
+identity, not accuracy — `mixed_demo` and `ensemble_demo` are the rows that carry scored numbers.
+The `deep_learning` job again stamped `ENGAGED_IDLE` at 62,464 peak bytes on a T4, which is the
+known "the GPU is attached and has nothing to do at these hyperparameters" finding, not a new one.
 
 The three Spark demo rows landed together on 2026-09-01, and two of them are worth reading past the
 `CURRENT`:
