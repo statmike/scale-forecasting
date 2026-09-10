@@ -1,0 +1,44 @@
+{
+  "run_name": "neuralprophet_ab_cpu",
+  "python_runtime": "ray",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 10000
+  },
+  "models": ["neuralprophet"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  },
+  "compute": {
+    "persist_models": false,
+    "use_gpu": true,
+    "gpu_type": "T4",
+    "gpu_fraction": 0.125,
+    "accelerator_count": 1,
+    "families": {
+      "deep_learning": {
+        "hardware": "cpu"
+      }
+    },
+    "profile": {
+      "source": "baseline"
+    },
+    "ray_head_machine_type": "n1-standard-16",
+    "ray_cpu_machine_type": "n1-standard-8",
+    "ray_gpu_machine_type": "n1-standard-8",
+    "ray_autoscale": true,
+    "ray_cpu_min_nodes": 1,
+    "ray_cpu_max_nodes": 12,
+    "ray_gpu_min_nodes": 1,
+    "ray_gpu_max_nodes": 12,
+    "ray_regions": ["us-central1"]
+  }
+}

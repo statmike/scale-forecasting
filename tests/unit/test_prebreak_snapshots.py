@@ -106,6 +106,13 @@ _POST_BREAK = {
     "configs/smokes/18_gpu_absent_cluster.json",
     "configs/smokes/19_gpu_absent_ray.json",
     "configs/smokes/20_gpu_intent_cpu_family.json",
+    # The GPU-vs-CPU A/B arms, written 2026-09-10. Nothing to hash before the break either. Their
+    # own invariants — that the two arms stay identical apart from the accelerator — live in
+    # `test_ab_preregistration.py`, and that is the stronger pin: it constrains the two configs
+    # against *each other*, which is what the experiment depends on, rather than against a
+    # recorded digest.
+    "configs/neuralprophet_ab_gpu.json",
+    "configs/neuralprophet_ab_cpu.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only
@@ -329,8 +336,18 @@ def test_current_digests_match_the_pinned_snapshot(snapshot_run_ids_now: dict[st
 
 
 def test_fold_geometry_is_unchanged(snapshot_panel: dict[str, Any]) -> None:
-    """Pure arithmetic, and the surface the break's five new backtest fields touch directly."""
-    assert build_folds() == snapshot_panel["folds"], (
+    """Pure arithmetic, and the surface the break's five new backtest fields touch directly.
+
+    Post-break configs are dropped before the comparison for the same reason they are dropped from
+    the pre-break id list: there is no pre-break geometry for them to have kept. This did not come
+    up until 2026-09-10 because every post-break config until then had backtesting off, and
+    `build_folds` only visits configs that backtest — so the exclusion was latent rather than
+    absent. The filter is here and not in `build_folds`, which stays complete: the *current*
+    snapshot should record the new configs' folds, and only the historical comparison should skip
+    them.
+    """
+    current = {k: v for k, v in build_folds().items() if k not in _POST_BREAK}
+    assert current == snapshot_panel["folds"], (
         "fold geometry moved. The new backtest fields are supposed to be inert at their "
         "defaults; if this is intentional it is a behaviour change and needs its own decision."
     )

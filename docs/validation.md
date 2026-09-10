@@ -1209,9 +1209,11 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-10 | `ray-autoscale-demo-9728c900963a` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-10 | `explode-100k-ef602ea229b4` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | STALE | 2026-09-05 | `ray-100k-dcc77a9d1e9b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-10 | `ray-100k-3fbc82fe3b6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | NEVER_RUN | | | |
+| `neuralprophet_ab_cpu.json` | The CPU arm of the same A/B — the identical config with the deep-learning family on CPU | NEVER_RUN | | | |
 
 #### 2026-09-10, `ray_autoscale_demo`: the first side-by-side of what was planned and what ran
 
@@ -1320,6 +1322,21 @@ the classifier reads the message text and a paraphrase would test something the 
 This is what the `ray_poll_recovery` axis names, and why finishing a long Ray run under the old
 value proved something weaker than it looked: it proved no request happened to drop, not that a
 dropped request was survivable.
+
+**The re-run passed, and it is worth being exact about what that does and does not show.** Submitted
+with `--force`, so it kept the same `run_id` and topped up rather than starting over: 400,000 new
+`forecast_metadata` rows on top of the 224,967 the first attempt left, `COMPLETED` on both jobs at
+attempt 2, all four models at 100,000 cells each. Statistical took 6,620.0 s (110.3 minutes) and ml
+4,559.1 s (76.0 minutes) — the whole run ran half an hour past the point where the first attempt
+died. Teardown was confirmed by the v1beta1 REST endpoint returning `{}`, not by the SDK's success
+line.
+
+But the recovery path logged **zero** retries. No request dropped this time, so the fix was never
+exercised on live infrastructure. What this run proves is that a 110-minute Ray run at 100,000
+series completes and lands every cell; what proves the recovery path is the eight offline tests,
+which drive it with the verbatim error string the proxy actually sent. Those are two different
+claims and the ledger should not blur them — which is the same distinction that made the old axis
+value misleading in the first place.
 
 **`all_families_10k` ran twice on 2026-09-04, and the pair is the `ray_slot_memory` A/B.** The first
 pass is the run that found the defect; the second is the identical config under the fix, submitted
