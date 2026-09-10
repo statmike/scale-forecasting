@@ -236,8 +236,21 @@ def run_smoke(
     # 2. stage — upload artifacts + manifest, capture runnable commands.
     staged = launch_plan.stage_run(cfg, settings=settings, force=force)
 
-    # 3. run — submit every family + block to terminal.
-    run_id = main_mod.run(cfg, settings=settings, force=force)
+    # 3. run — submit every family + block to terminal. A run that finishes badly now raises rather
+    #    than returning: `main.run` has to exit non-zero so an unattended caller notices. A smoke's
+    #    job is the opposite — to *report* — and the negative arms (17/18/19) are worth their cost
+    #    precisely for what the registry says after a run that must not produce forecasts. So the
+    #    failure becomes a problem line, the verifiers still read back whatever landed, and the
+    #    traceback goes to stderr so nothing is lost.
+    run_error: str | None = None
+    try:
+        run_id = main_mod.run(cfg, settings=settings, force=force)
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        run_id = dry.run_id
+        run_error = f"run raised {type(exc).__name__}: {exc}"
 
     # 4. verify — read the views back.
     summary = read_run_summary(run_id, settings=settings)
@@ -251,12 +264,16 @@ def run_smoke(
         + verify_predictions(pred_counts, cfg)
         + verify_cells(read_cell_groups(run_id, settings=settings))
     )
+    if run_error:
+        problems.insert(0, run_error)
     if run_status != "COMPLETED":
         problems.append(f"run status is {run_status!r}, expected COMPLETED")
 
     # 5. rerun / collision — same config, no force → same id, dedupe keeps the board constant.
+    #    Skipped after a failed run: the check is that a *second* run of a good config changes
+    #    nothing, and re-running a config that just failed only pays for the same failure twice.
     reran = False
-    if do_rerun:
+    if do_rerun and not run_error:
         run_id2 = main_mod.run(cfg, settings=settings)
         reran = True
         if run_id2 != run_id:

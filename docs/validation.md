@@ -43,6 +43,7 @@ old value goes stale by definition.
 | `backtest_scoring` | `holdout-fold-reserved` | 3.2 (2026-09-08), after 2.3/2.4/2.6/3.1 | `unreserved-full-history` |
 | `gpu_device_probe` | `trainer-root-device` | Tier 1 campaign (2026-09-09) | `parameter-tensor-after-fit` |
 | `serverless_gpu_allocator` | `rapids-pool-released` | Tier 1 campaign (2026-09-09) | `rapids-default-pool` |
+| `job_status` | `derived-from-cell-tallies` | `bf12e96` (2026-09-10) | `launch-call-returned` |
 
 **`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
 notice on their own — a different image, a different `run_id`, a different node count. This one
@@ -61,6 +62,14 @@ so the answer was always `cpu` and the verdict was always `MISSING_DEVICE`. Noth
 looked different; the rows, the timings and the identity were all normal. What it means is that
 **no GPU-contract result recorded before that date was earnable**, because the measurement could not
 produce a passing answer. The section on the 2026-09-09 wave below has the detail.
+
+**`job_status` is declared by one row, on purpose.** It names where a `run_jobs` row's terminal
+status comes from: until 2026-09-10 it came from the launch call returning without raising, and now
+it comes from that attempt's cell tallies in `forecast_metadata`. Only the smoke 18 row declares it,
+because only that row's *claim* depends on it — it is the entry asserting that a run which forecast
+nothing closes `FAILED`. Every other row was recorded from a run whose cells did all succeed, so the
+old derivation and the new one agree on it: `COMPLETED` was the right answer under both, and the old
+one merely reached it without checking. Rows will pick the axis up as they are re-run.
 
 > ### Every row in this document is STALE, on purpose, as of 2026-09-05
 >
@@ -279,7 +288,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden produces no forecast — but it does *not* fail fast, see below | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service | CURRENT | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service — and the run closes `FAILED` on both registry tiers, counting only its own attempt's cells | CURRENT | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `job_status=derived-from-cell-tallies`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden produces no forecast — but the worker dies before the contract can speak, see below | CURRENT | 2026-09-10 | `smoke-19-gpu-absent-ray-1c033f10707b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 20 | `20_gpu_intent_cpu_family.json` | **Disagreement arm:** `use_gpu: true` with the deep-learning family overridden to `cpu` must complete on CPU, buying no accelerator | NEVER_RUN | — | — | — |
 
@@ -436,9 +445,22 @@ because all three write the same rows — and the row's status comes from those.
 function the Airflow `finalize_run` task calls; there had been two copies of that roll-up and the
 local one folded exceptions rather than statuses, which is why neither tier caught the other's
 blind spot. Since a run can now finish badly without anything raising, `main.run` also raises at the
-end so the process still exits non-zero. **Offline only so far** — the live re-run of smoke 18 that
-has to show the row flipping to `FAILED` is pending, and until it lands the row above still says
-what the run actually did on the day.
+end so the process still exits non-zero.
+
+**And it is proven live.** Attempt 2 of `smoke-18-gpu-absent-cluster-ef1858b8b83d`, 2026-09-10,
+1196 s on the same cluster T4 with the device hidden again — long enough that it is a real
+provision-and-run, not a short-circuit. The same six cells errored the same way, and this time the
+`run_jobs` row reads `status=FAILED` with `job_telemetry.cells = {"cells": 6, "errors": 6, "status":
+"FAILED"}`, the header reads `FAILED`, and the process exited non-zero on the manufactured
+`EngineError`. The paragraph above describes what attempt 1 did; the table row now records attempt
+2, which is the behaviour the code ships.
+
+**Six, not twelve** — which is the second thing this re-run had to show. `forecast_metadata` is
+append-only and carries no attempt column, so an unbounded read would have counted attempt 1's six
+error rows as well and reported `cells: 12`. Both audits now take a launch-time bound, and both
+reported six. That closes the cross-attempt counting defect the 2026-09-09 re-runs exposed, where
+smokes 03, 06 and 08 each reported `cells: 200` against `cells_on_device: 100` and so read as half
+the fleet missing its device when in truth the first attempt's hundred CPU cells were still there.
 
 **2. Only one of the three services let the contract speak.** `_require_device` raises a
 `ConfigError` naming the family, the engine and what the worker saw, and on the Dataproc cluster that
@@ -2060,29 +2082,14 @@ Things that are true today and that no entry above covers. Keep this list short 
   its cost" is still a manual check on every GPU run; it wants a place in the review surface, not a
   new failure mode.
 
-- **A job whose every cell errored used to close `COMPLETED` on every runtime. Fixed in code and
-  covered offline; not yet re-proven live.** Found by the negative arms on 2026-09-10 and detailed in
-  that section above. The fix does not try to carry an outcome back from the remote driver — a
-  submitter hands back a probe handle, and that is the shape of the problem rather than an oversight.
-  It asks the question the way the device audit already asks its own: after the job finishes,
-  `job_outcome.audit_cells` reads that attempt's cell tallies out of `forecast_metadata` and the row
-  takes its status from them, so **zero cells is `FAILED`, all-errored is `FAILED`, a mix is
-  `PARTIAL`**. One aggregate, identical for Serverless, a Dataproc cluster and Ray, because all three
-  write the same rows. The status then reaches the header through the *same* roll-up the Airflow
-  `finalize_run` task uses — there used to be two implementations of that roll-up, and the local one
-  rolled up exceptions rather than statuses, which is the other half of why nothing noticed.
-
-  Two consequences worth naming. A run can now finish badly with nothing having raised, so `main.run`
-  manufactures the non-zero exit an unattended caller needs. And the audit is bounded by launch time,
-  which closes a second defect in passing: `forecast_metadata` is append-only with no attempt column,
-  so the 2026-09-09 re-runs each counted the *previous* attempt's cells too and reported `cells: 200`
-  against `cells_on_device: 100`.
-
-  **What is not yet true is the part this document exists for.** The rule is exercised only by
-  offline tests. The live proof is a re-run of smoke 18 — six cells, all of which must error — whose
-  `run_jobs` row and header both have to come back `FAILED`. Until that row is in the table above,
-  the registry's ability to tell a run that forecast everything from one that forecast nothing is
-  claimed, not shown.
+- **Two of the three services still cannot say *why* a GPU job lost its device.** The forecast is
+  withheld on all three — that part is proven — but only the Dataproc cluster reaches
+  `_require_device` and records the contract message. On Ray the worker holding a GPU slot crashes
+  before the check runs, so the registry's only diagnosis is `WorkerCrashedError`; on Serverless the
+  RAPIDS plugin dies first and Spark replaces the executor indefinitely, which is the worse of the
+  two because an unattended batch then burns fleet until something stops it. The negative-arm
+  section above has the detail. Both need a fault-injection seam that reaches the check rather than
+  the CUDA library underneath it, and the Serverless one additionally needs the batch to give up.
 
 - **A per-task memory clamp with no headroom is unschedulable, and no offline test could have
   caught it. Fixed 2026-09-03 at `17e1221` and proven live the same day.** `ray_100k` held at zero cells for
