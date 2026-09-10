@@ -52,6 +52,10 @@ _log = get_logger(__name__)
 # worker — we don't enable the RAPIDS SQL plugin (our SQL isn't the GPU workload).
 _SERVERLESS_GPU_TYPE = "L4"
 
+# Serverless' own executor shape for an L4 batch, used only when no sizing overlay named one —
+# `compute.profile.mode == "off"`, or a profile with no memory measurement for this family.
+_SERVERLESS_DEFAULT_GPU_CORES = 4
+
 # How long ``wait=True`` blocks on the batch LRO before giving up. The google-api-core polling
 # default is 900s (15 min) — shorter than a 100k forecast batch, so the bare ``operation.result()``
 # would raise a client-side TimeoutError on a batch that is still running perfectly server-side
@@ -98,6 +102,14 @@ def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
     smoke 03 thirty-seven of a hundred cells; the same run on a Dataproc cluster T4 and on Ray T4,
     neither of which loads RAPIDS, lost none. ``pool=NONE`` drops the reservation and leaves RAPIDS
     allocating on demand, so SQL still runs on the GPU and the fits can reach it too.
+
+    **Naming any ``spark.rapids.*`` property costs us the service's memory defaults**, which is why
+    `build_batch` states ``spark.executor.memory`` right after calling this. Left alone, Serverless
+    sizes a GPU executor at 9560m over 4 cores and derives the overhead from that. Supply one
+    RAPIDS property and it stops: the batch resolves to ``spark.executor.memory=3346m`` with
+    ``spark.executor.memoryOverhead=0m``, and the service then rejects its own default, because 0
+    is below the 256m-per-core floor it validates against. There is no way to keep the defaulting
+    and release the pool, so we restate the number the platform would have chosen.
     """
     if gpu_type != _SERVERLESS_GPU_TYPE:
         raise ConfigError(
@@ -336,7 +348,14 @@ def build_batch(
     if max_executors is not None:
         props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
     if hardware == "gpu":
+        from .resources.serverless import serverless_gpu_executor_memory_mb
+
         props.update(_serverless_gpu_properties(gpu_type or _SERVERLESS_GPU_TYPE))
+        # Restoring, not overriding: the RAPIDS property above switches off the service's own
+        # GPU memory defaulting, so this puts back the value it would have derived. `setdefault`
+        # because a measured sizing overlay has a better number and must keep it.
+        cores = int(props.get("spark.executor.cores", _SERVERLESS_DEFAULT_GPU_CORES))
+        props.setdefault("spark.executor.memory", f"{serverless_gpu_executor_memory_mb(cores)}m")
     props.update(spark_executor_env(hardware))
 
     return dataproc.Batch(

@@ -1009,8 +1009,23 @@ def test_a_gpu_batch_sizes_memory_through_the_service_owned_overhead_ratio() -> 
 def test_the_gpu_inversion_is_clamped_to_the_per_config_maximum() -> None:
     """Dividing by 0.4 puts an ordinary DL footprint past the cap — raw, the batch is rejected."""
     out = _serverless(cores=1, memory_bytes=2 * _GIB, gpu_fraction=0.25)
-    assert out.properties["spark.executor.memory"] == f"{4 * 3346}m"  # not the raw 20480m
+    assert out.properties["spark.executor.memory"] == "9560m"  # not the raw 20480m
     assert any("L4 maximum" in note for note in out.notes)
+
+
+def test_the_gpu_clamp_leaves_room_for_the_overhead_the_service_will_add() -> None:
+    """The per-core maximum bounds ``memory + memoryOverhead``, and overhead is derived from memory.
+
+    Clamping ``spark.executor.memory`` to the maximum itself therefore *guarantees* an illegal
+    batch: the service adds its 40% on top and the pair lands 40% over the cap. It rejects that at
+    submit with ``INVALID_ARGUMENT``, minutes into an unattended run — the exact failure the whole
+    snap-to-legal exercise exists to prevent.
+    """
+    out = _serverless(cores=1, memory_bytes=2 * _GIB, gpu_fraction=0.25)
+    cores = int(out.properties["spark.executor.cores"])
+    memory_mb = int(out.properties["spark.executor.memory"].rstrip("m"))
+    derived_overhead = memory_mb * serverless._SERVERLESS_PYSPARK_OVERHEAD_RATIO
+    assert memory_mb + derived_overhead <= cores * serverless._SERVERLESS_L4_MB_PER_CORE
 
 
 def test_a_tiny_gpu_slot_is_raised_to_the_memory_floor_too() -> None:
@@ -1622,7 +1637,9 @@ def test_every_gpu_shape_the_probe_can_measure_translates_to_a_legal_batch(
     assert "spark.executor.memoryOverhead" not in props
     memory_mb = int(props["spark.executor.memory"].rstrip("m"))
     assert granted * serverless._SERVERLESS_MIN_MB_PER_CORE <= memory_mb
-    assert memory_mb <= granted * serverless._SERVERLESS_L4_MB_PER_CORE
+    # The bound is on memory *plus the overhead the service derives from it*, not on memory alone
+    # — `serverless_gpu_executor_memory_mb` is the per-core maximum with that 40% taken out.
+    assert memory_mb <= serverless.serverless_gpu_executor_memory_mb(granted)
 
 
 @pytest.mark.parametrize("max_units", [1, 2, 3, 50, 10_000])

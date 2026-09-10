@@ -228,6 +228,67 @@ def test_build_batch_gpu_releases_the_rapids_pool_to_the_fits() -> None:
     assert dict(batch.runtime_config.properties)["spark.rapids.memory.gpu.pool"] == "NONE"
 
 
+def test_releasing_the_pool_puts_back_the_memory_default_it_switches_off() -> None:
+    """Naming a ``spark.rapids.*`` property makes Serverless stop deriving executor memory.
+
+    Its fallback is ``spark.executor.memory=3346m`` with ``memoryOverhead=0m``, which the service
+    then rejects at submit — 0 is under the 256m-per-core floor it validates. So a batch that
+    releases the pool must also name the memory the platform would have chosen: 9560m at 4 cores.
+    """
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="gpu",
+        gpu_type="L4",
+    )
+    assert dict(batch.runtime_config.properties)["spark.executor.memory"] == "9560m"
+
+
+def test_a_measured_sizing_overlay_keeps_its_own_memory_number() -> None:
+    """The restore is a floor under the unsized case, not an override of a measurement."""
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="gpu",
+        gpu_type="L4",
+        properties={"spark.executor.cores": "8", "spark.executor.memory": "12000m"},
+    )
+    assert dict(batch.runtime_config.properties)["spark.executor.memory"] == "12000m"
+
+
+def test_the_restored_memory_follows_the_cores_the_overlay_chose() -> None:
+    """A wider executor gets a proportionally wider allowance — the max is stated per core."""
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="gpu",
+        gpu_type="L4",
+        properties={"spark.executor.cores": "8"},
+    )
+    assert dict(batch.runtime_config.properties)["spark.executor.memory"] == "19120m"
+
+
+def test_a_cpu_batch_names_no_gpu_memory_it_will_never_need() -> None:
+    batch = build_batch(
+        infra=_infra(),
+        settings=_settings(),
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        hardware="cpu",
+    )
+    assert "spark.executor.memory" not in batch.runtime_config.properties
+
+
 def test_a_cpu_batch_says_nothing_about_a_gpu_allocator_it_will_never_load() -> None:
     batch = build_batch(
         infra=_infra(),

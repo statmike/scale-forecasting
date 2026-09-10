@@ -167,6 +167,24 @@ def spark_tasks_per_executor(slot: ResourceSlot, cores: int) -> int:
     return max(1, cores // max(1, min(slot.cores, cores)))
 
 
+def serverless_gpu_executor_memory_mb(cores: int) -> int:
+    """The ``spark.executor.memory`` a Serverless L4 executor may ask for at ``cores`` (pure).
+
+    The per-config maximum is stated per core and applies to ``spark.executor.memory`` *and*
+    ``spark.executor.memoryOverhead`` **summed**, not to memory alone. Overhead is service-owned
+    on the GPU path at 40% of memory, so the memory we are allowed to name is the max divided by
+    1.4 rather than the max itself — ask for the max and the derived overhead pushes the pair over
+    it, which the service rejects at submit with ``INVALID_ARGUMENT``.
+
+    At the 4-core shape this returns 9560 MB, which is exactly what Serverless resolves a GPU batch
+    to when left to itself (observed on `sf-smoke-03-serverless-gpu-92763e0f2242-deep-learning-a1`,
+    2026-09-09). That agreement is the evidence that both constants above are right, and it is why
+    naming this value explicitly is a restatement of the platform's own default rather than a
+    second opinion about it.
+    """
+    return int(cores * _SERVERLESS_L4_MB_PER_CORE / (1 + _SERVERLESS_PYSPARK_OVERHEAD_RATIO))
+
+
 def _executor_counts(plan: RuntimeResourcePlan) -> tuple[int, int, int]:
     """``(min, initial, max)`` executors, clamped into the platform's ``[2, 2000]`` (pure).
 
@@ -278,7 +296,7 @@ def translate_serverless(
             # result is still bounded — the inversion divides by 0.4, so an ordinary
             # deep-learning footprint lands well past the per-config maximum if left raw.
             memory_mb = math.ceil(python_mb / _SERVERLESS_PYSPARK_OVERHEAD_RATIO)
-            ceiling = cores * _SERVERLESS_L4_MB_PER_CORE
+            ceiling = serverless_gpu_executor_memory_mb(cores)
             if memory_mb > ceiling:
                 notes.append(
                     f"{memory_mb}m exceeds the extrapolated L4 maximum of {ceiling}m at "
