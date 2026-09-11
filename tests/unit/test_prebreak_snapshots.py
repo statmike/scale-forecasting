@@ -113,6 +113,15 @@ _POST_BREAK = {
     # recorded digest.
     "configs/neuralprophet_ab_gpu.json",
     "configs/neuralprophet_ab_cpu.json",
+    # The two repair-ladder rungs, written 2026-09-11 — also nothing to hash before the break. Both
+    # are deliberately ordinary two-family Spark runs, because everything they prove happens *after*
+    # submission and a pinned digest would say nothing about it. They differ only in how much of a
+    # family had landed when it died, which is the whole distinction the ladder turns on:
+    # `repair_demo` loses a family mid-write and `--retry` refuses it (a partly-landed model cannot
+    # be re-asked at v1's model grain without duplicating what survived), while `repair_retry_demo`
+    # loses one during provisioning, lands nothing, and is repaired end to end.
+    "configs/repair_demo.json",
+    "configs/repair_retry_demo.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

@@ -1,0 +1,17 @@
+{
+  "run_name": "repair_demo",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 3000
+  },
+  "models": ["theta", "holtwinters", "xgboost"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "compute": {
+    "use_gpu": false
+  }
+}

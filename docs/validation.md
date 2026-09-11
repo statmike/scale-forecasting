@@ -47,6 +47,7 @@ old value goes stale by definition.
 | `gpu_batch_churn` | `executor-failure-budget+stall-watchdog` | 2026-09-10 | `unbounded-executor-replacement` |
 | `gpu_fault_injection` | `probe-mode-default` | 2026-09-10 | `cuda-visible-devices-emptied` |
 | `ray_poll_recovery` | `transient-transport+auth` | 2026-09-10 | `auth-expiry-only` |
+| `serverless_cancel` | `operation-cancel` | Tier 5 campaign (2026-09-11) | `batch-delete` (could not stop a live batch at all) |
 
 **`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
 notice on their own — a different image, a different `run_id`, a different node count. This one
@@ -1212,6 +1213,8 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-10 | `ray-100k-3fbc82fe3b6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `repair_demo.json` | The repair ladder's refusal — a family lost *mid-write*, leaving two models partly landed, which `--retry` classifies correctly and then declines to submit (3,000 series, two families) | CURRENT | 2026-09-11 | `repair-demo-55119d4c6f7c` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| `repair_retry_demo.json` | The repair ladder end to end — a family lost *during provisioning* lands nothing, and `--retry` re-submits exactly it under a `statistical_repair` token while a second, deliberately cancelled family is left alone (300 series, two families) | CURRENT | 2026-09-11 | `repair-retry-demo-59310436a6fd` | `serverless_deps=container-image`, `serverless_cancel=operation-cancel`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | CURRENT | 2026-09-10 | `neuralprophet-ab-gpu-e530eea3a755` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
 | `neuralprophet_ab_cpu.json` | The CPU arm of the same A/B — the identical config with the deep-learning family on CPU | CURRENT | 2026-09-11 | `neuralprophet-ab-cpu-f4bfff3b39e9` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
 
@@ -1456,6 +1459,104 @@ and `device_share` of 1.0 says every second of GPU-arm fit time had a device hol
 Utilisation is 87 KB against 16 GB, roughly 0.0005 % of the card. The contract this project added
 was that a GPU run must actually reach a device; it was never that reaching one is worth paying for.
 This A/B is the measurement that separates the two, and it says `use_gpu: False` stays the default.
+
+#### 2026-09-11, the repair ladder: `--cancel` had never once stopped a Serverless batch
+
+Tier 5 exists to run the repair ladder against live infrastructure rather than against its own unit
+tests, all eight of whose verdicts were already covered offline. It found two defects on its first
+two attempts, and neither was in the classifier.
+
+**The first was `--cancel` itself.** `repair_demo` was submitted to create a partial run by stopping
+one of its two families mid-flight. The verb refused:
+
+```
+Cancelled run repair-demo-55119d4c6f7c: 0 of 1 in-flight job(s) stopped
+  statistical  NOT cancelled  FailedPrecondition: 400 Cannot delete non-terminal batch
+```
+
+The implementation called `delete_batch`, under a comment asserting that "Dataproc Serverless has no
+separate cancel — deleting a running batch stops it". The comment was half true and the code was
+wrong in the half that mattered. There is no `cancel_batch` RPC — `BatchControllerClient` exposes
+only create/get/list/delete, and REST `.../batches/{id}:cancel` is a 404 — but what `gcloud dataproc
+batches cancel` actually does, visible under `--log-http`, is `POST .../operations/{id}:cancel`
+against the long-running operation the batch names in its own `operation` field. So the verb whose
+entire purpose is stopping in-flight work had never been able to stop any of it on this runtime, and
+deleting would have destroyed the telemetry the registry reads even where it did apply.
+
+No offline test caught it because the fake batch client's `delete_batch` always succeeded — the test
+pinned that a delete was *issued*, which was exactly the wrong assertion. The replacement asserts the
+operation is cancelled *and* that the batch is not deleted, plus the terminal-batch and
+not-yet-assigned-operation edges. Live, on the next run: `1 of 1 in-flight job(s) stopped`, both
+batches confirmed `CANCELLED` by `describe`.
+
+**The second was that `--retry` could not launch at all.** `retry_run` takes `settings` optionally
+and the CLI never passes it. Every read on the way to the plan tolerates `None`, because the registry
+helpers resolve settings themselves — so the preview was flawless and the submit handed `None` all
+the way down to `job_launch.launch_family_job`, which died on `settings.region`:
+
+```
+  statistical_repair FAILED to launch: 'NoneType' object has no attribute 'region'
+```
+
+The three sibling verbs — `cancel_run`, `settle_run`, `reconcile` — all resolve settings on their
+first line. `retry_run` was the one that did not. The bug lived entirely in the gap between a preview
+that resolves lazily and a submit that does not, which is why no preview test could see it; the
+regression test now asserts the launcher receives a resolved `Settings`, and fails with
+`the launcher was handed None` against the old code.
+
+**What the two rungs prove, and why it took two.** The obvious induction — cancel a family mid-flight
+— produces the one shape v1 deliberately cannot repair. `repair_demo` lost `statistical` after it had
+written 1,968 theta and 1,998 holtwinters cells of 3,000 each, and `--retry` classified that exactly
+right and then declined:
+
+```
+  verdicts: RETRY_AS_IS=2034, SKIP_ALREADY_DONE=6966
+  NOT submittable: holtwinters, theta — these models already have landed predictions, and v1
+  re-submits a whole model over the whole series universe, so a repair would append a duplicate
+  beside every finished cell.
+```
+
+That is the no-overlap invariant enforced *above* its own grain: the invariant is per cell, the
+submission unit is per model, so any landed prediction blocks the whole model. Correct, and the
+refusal is the product working. But it means the submittable case is a model that landed **nothing**,
+and stopping a family mid-write never produces one.
+
+`repair_retry_demo` produces one deliberately, by cancelling during provisioning — before any Python
+runs — and it carries two different inductions on purpose:
+
+| family | how it was stopped | `run_jobs.status` | retry verdict |
+|--------|--------------------|-------------------|---------------|
+| `ml` | the product's `--cancel --job ml` | `CANCELLED` | `UNKNOWN` × 300 — left alone |
+| `statistical` | out-of-band, so no cancellation was ever recorded | `FAILED` | `RETRY_AS_IS` × 600 — repaired |
+
+The split is the design, not an accident of timing. A deliberately cancelled family is not something
+a repair may quietly resurrect (`retry_policy.classify_cell`: "someone stopped that work on purpose"),
+while a family that simply died is. It also re-proves the sticky-cancellation rule from
+[the 2026-09-02 cancel run](#the-cancel-reached-its-job-and-then-the-launcher-overwrote-the-cancellation-with-failed)
+under a second runtime: the driver's own unwind wrote `FAILED` for both families, and `ml` stayed
+`CANCELLED` anyway because the guard held.
+
+The repair then ran end to end. `statistical_repair` filed **its own** attempt-1 row beside the
+original `statistical` attempt-1 `FAILED` row rather than over it, so the record of what went wrong
+survives the fix:
+
+| family | attempt | status | batch | runtime |
+|--------|---------|--------|-------|---------|
+| `ml` | 1 | `CANCELLED` | `…-ml-a1` | 143.8 s |
+| `statistical` | 1 | `FAILED` | `…-statistical-a1` | 320.5 s |
+| `statistical_repair` | 1 | `COMPLETED` | `…-statistical-repair-a1` | 1,965.7 s |
+
+600 cells landed — 300 theta, 300 holtwinters — against a worklist of exactly 600, with **zero**
+duplicate `(ts_id, model_type)` pairs and 8,400 prediction rows per model (300 × 28). The leaderboard
+resolves both models at 300 cells. The audit blob landed on the repair's own row carrying the counts
+it decided from (`RETRY_AS_IS: 600`, `UNKNOWN: 300`), the models, the empty `blocked` list, the
+launching user's identity, and the pinned snapshot the universe was counted at.
+
+**What Tier 5 says about the ladder.** The classifier was never the risk — it was fully covered
+offline and it was right both times, including the counts, at the first attempt. Both defects were in
+the machinery around it, and both had the same shape: a path that only executes when someone actually
+stops or repairs something live. `--cancel` shipped a wrong implementation behind a test that
+asserted the wrong verb, and `--retry` shipped a launch path that no preview could reach.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 

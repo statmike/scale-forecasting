@@ -64,6 +64,10 @@ _SPARK_BATCH_STATES = {
     "CANCELLED": NATIVE_FAILED,
 }
 
+# The batch states past which there is nothing left to stop. Read by `_cancel_serverless` so a
+# batch that finished between the plan read and the cancel is reported as gone, not as a failure.
+_BATCH_TERMINAL = frozenset({NATIVE_SUCCEEDED, NATIVE_FAILED})
+
 # Dataproc **cluster** ``JobStatus.State``. DONE is the only success; ERROR / CANCELLED /
 # ATTEMPT_FAILURE are non-success terminals; everything pre-terminal is RUNNING.
 _SPARK_CLUSTER_STATES = {
@@ -187,7 +191,14 @@ class SparkProbe:
         return self._cancel_serverless(handle, settings=settings)
 
     def _cancel_serverless(self, handle: ProbeHandle, *, settings: Settings) -> CancelResult:
-        # Dataproc Serverless has no separate "cancel" — deleting a running batch stops it.
+        # Stopping a Serverless batch means cancelling the *long-running operation* that created it,
+        # not touching the batch resource. There is no `cancel_batch` RPC — `BatchControllerClient`
+        # offers only create/get/list/delete, and REST `.../batches/{id}:cancel` is a 404 — so what
+        # `gcloud dataproc batches cancel` really does is POST `operations/{id}:cancel` against the
+        # operation the batch names in its own `operation` field. Deleting instead, as this did
+        # until 2026-09-11, is wrong in both directions: a live batch refuses it outright ("Cannot
+        # delete non-terminal batch", so cancel could never stop anything) and a finished one would
+        # be destroyed along with the telemetry the registry still reads from it.
         try:
             from google.api_core.exceptions import NotFound
 
@@ -196,12 +207,35 @@ class SparkProbe:
             client = _batch_client(handle.region)
             parent = f"projects/{settings.project_id}/locations/{handle.region}"
             try:
-                client.delete_batch(
+                batch = client.get_batch(
                     name=f"{parent}/batches/{handle.native_id}", timeout=_PROBE_TIMEOUT_S
                 )
             except NotFound:
                 return CancelResult(stopped=False, already_gone=True, detail="batch already gone")
-            return CancelResult(stopped=True, already_gone=False, detail="batch delete issued")
+
+            # The plan layer filters terminal families out before we get here, but a batch can
+            # finish in the gap between that read and this one. Nothing to stop → already_gone,
+            # which the caller reads as an effective cancel.
+            state_name = getattr(getattr(batch, "state", None), "name", "")
+            if _SPARK_BATCH_STATES.get(state_name, NATIVE_UNKNOWN) in _BATCH_TERMINAL:
+                return CancelResult(
+                    stopped=False, already_gone=True, detail=f"batch already {state_name.lower()}"
+                )
+
+            operation = getattr(batch, "operation", "") or ""
+            if not operation:
+                # The service stamps `operation` when it accepts the batch; it is empty only in the
+                # sliver before that lands, where there is no running work to stop yet.
+                return CancelResult(
+                    stopped=False, already_gone=False, detail="batch operation not yet assigned"
+                )
+            try:
+                client.transport.operations_client.cancel_operation(name=operation)
+            except NotFound:
+                return CancelResult(
+                    stopped=False, already_gone=True, detail="batch operation already gone"
+                )
+            return CancelResult(stopped=True, already_gone=False, detail="batch cancel issued")
         except Exception as exc:  # noqa: BLE001 - cancel is advisory: report failure, never raise
             return _cancel_failure(exc)
 

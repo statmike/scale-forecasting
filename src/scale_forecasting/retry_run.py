@@ -491,7 +491,18 @@ def retry_run(
     "why does this job exist", and the attempt it was launched to fix keeps its own row and its own
     failure reason, which is what ``run_jobs`` being append-only is for.
     """
-    plan = build_retry_plan(cfg, settings=settings)
+    # Resolve once, up front, exactly as the sibling verbs do (`probes.cancel.cancel_run`,
+    # `probes.settle.settle_run`, `probes.reconcile`). Deferring it is what broke the launch on
+    # 2026-09-11: every *read* below tolerates ``None`` because the registry helpers resolve it
+    # themselves, so the preview looked perfect while the submit path handed ``None`` down to
+    # `job_launch.launch_family_job` and died on ``settings.region``. Resolving here means the
+    # preview and the launch are planned against the same settings object rather than two
+    # independently resolved ones, which is the property that actually matters.
+    from .settings import Settings  # module-level import is TYPE_CHECKING-only
+
+    s = settings if settings is not None else Settings.resolve()
+
+    plan = build_retry_plan(cfg, settings=s)
     if not confirm:
         return RetryReport(run_id=plan.run_id, plan=plan, executed=False, reason=reason)
     if not plan.submittable:
@@ -506,14 +517,14 @@ def retry_run(
     from .registry.jobs import read_run_jobs, update_job
 
     retry_dag = narrow_to_models(plan_dag(cfg), plan.models)
-    outcome = submit_retry(cfg, retry_dag, plan.run_id, settings, max_executors=max_executors)
+    outcome = submit_retry(cfg, retry_dag, plan.run_id, s, max_executors=max_executors)
 
-    resolved_actor = actor if actor is not None else resolve_principal(settings)
+    resolved_actor = actor if actor is not None else resolve_principal(s)
     audit = _retry_audit(plan, actor=resolved_actor, at=datetime.now(UTC), reason=reason)
     repaired = set(retry_dag.families)
-    for row in read_run_jobs(plan.run_id, settings=settings):
+    for row in read_run_jobs(plan.run_id, settings=s):
         if row.get("family") in repaired and row.get("job_id"):
-            update_job(row["job_id"], settings=settings, merge_telemetry={"retry": audit})
+            update_job(row["job_id"], settings=s, merge_telemetry={"retry": audit})
     return RetryReport(
         run_id=plan.run_id,
         plan=plan,

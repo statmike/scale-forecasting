@@ -324,11 +324,19 @@ def test_the_audit_blob_records_the_decision_and_the_evidence_it_rests_on() -> N
 # --- preview submits nothing ---------------------------------------------------
 
 
+def _resolvable_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The three vars `Settings.resolve` requires. Pure env reading — no network, no ADC."""
+    monkeypatch.setenv("SF_PROJECT_ID", "test-project")
+    monkeypatch.setenv("SF_CONNECTION", "test-project.us-central1.conn")
+    monkeypatch.setenv("SF_WAREHOUSE_URI", "gs://test-warehouse/warehouse")
+
+
 def test_a_preview_reads_the_plan_and_launches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """The default is the whole safety story: no launcher, no registry write, on any path."""
     import scale_forecasting.job_launch as job_launch
     import scale_forecasting.registry.jobs as jobs
 
+    _resolvable_env(monkeypatch)
     plan = _plan(
         states=(CellState("s1", "theta", has_metadata=True, error_class="OOM", n_cells=5),)
     )
@@ -348,6 +356,7 @@ def test_a_confirmed_call_with_nothing_submittable_still_launches_nothing(
     """Not a failure — the correct answer for a run whose every gap is a SKIP_*."""
     import scale_forecasting.job_launch as job_launch
 
+    _resolvable_env(monkeypatch)
     plan = _plan(
         states=(CellState("s1", "theta", has_metadata=True, has_predictions=True, n_cells=5),)
     )
@@ -357,6 +366,66 @@ def test_a_confirmed_call_with_nothing_submittable_still_launches_nothing(
     )
     report = retry_run.retry_run(object(), confirm=True)  # type: ignore[arg-type]
     assert report.executed is False and report.plan.models == ()
+
+
+def test_a_confirmed_repair_hands_the_launcher_real_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-09-11 live defect, pinned.
+
+    ``retry_run`` takes ``settings`` optionally and the CLI never passes it. Every *read* on the way
+    to the plan tolerates ``None`` — the registry helpers resolve it themselves — so the preview was
+    flawless while the launch handed ``None`` straight through to `job_launch.launch_family_job`,
+    which died on ``settings.region``: "'NoneType' object has no attribute 'region'". The bug lived
+    entirely in the gap between a preview that resolves lazily and a submit that does not, which is
+    why no preview test could see it. Assert the launcher receives a resolved object, not ``None``.
+    """
+    import scale_forecasting.job_launch as job_launch
+    import scale_forecasting.registry.jobs as jobs
+    from scale_forecasting.settings import Settings
+
+    _resolvable_env(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    plan = _plan(states=(CellState("s1", "theta", n_cells=5),))
+    assert plan.submittable, "fixture must reach the launch path for this test to mean anything"
+
+    monkeypatch.setattr(retry_run, "build_retry_plan", lambda cfg, settings=None: plan)
+    monkeypatch.setattr(job_launch, "submit_retry", _recording_submit(seen))
+    monkeypatch.setattr(jobs, "read_run_jobs", lambda run_id, settings=None: [])
+    monkeypatch.setattr(retry_run, "narrow_to_models", lambda dag, models: dag, raising=False)
+
+    import scale_forecasting.dag as dag_mod
+    import scale_forecasting.identity as identity
+
+    monkeypatch.setattr(dag_mod, "plan_dag", lambda cfg: _StubDag())
+    monkeypatch.setattr(dag_mod, "narrow_to_models", lambda dag, models: _StubDag())
+    monkeypatch.setattr(identity, "resolve_principal", lambda settings: "someone@example.test")
+
+    report = retry_run.retry_run(object(), confirm=True)  # type: ignore[arg-type]
+
+    assert report.executed is True
+    assert seen["settings"] is not None, "the launcher was handed None — the live defect"
+    assert isinstance(seen["settings"], Settings)
+    assert seen["settings"].project_id == "test-project"
+
+
+class _StubDag:
+    families = ("statistical_repair",)
+
+
+def _recording_submit(seen: dict[str, Any]) -> Any:
+    def _submit(cfg: Any, retry_dag: Any, run_id: str, settings: Any, **kwargs: Any) -> Any:
+        seen["settings"] = settings
+        return job_launch_outcome()
+
+    return _submit
+
+
+def job_launch_outcome() -> Any:
+    from scale_forecasting.job_launch import RetryOutcome
+
+    return RetryOutcome(families=("statistical_repair",))
 
 
 # --- config_for_run: reaching a repair through the run id ----------------------

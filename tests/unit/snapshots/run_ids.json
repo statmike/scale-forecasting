@@ -13,6 +13,8 @@
   "configs/ray_autoscale_demo.json": "ray-autoscale-demo-9728c900963a",
   "configs/ray_cpu_demo.json": "ray-cpu-demo-1650659c3c20",
   "configs/ray_gpu_demo.json": "ray-gpu-demo-fa53d37c8122",
+  "configs/repair_demo.json": "repair-demo-55119d4c6f7c",
+  "configs/repair_retry_demo.json": "repair-retry-demo-59310436a6fd",
   "configs/smokes/01_serverless_cpu.json": "smoke-01-serverless-cpu-7a3d4234e0e1",
   "configs/smokes/02_bq_native.json": "smoke-02-bq-native-e354a8652712",
   "configs/smokes/03_serverless_gpu.json": "smoke-03-serverless-gpu-92763e0f2242",

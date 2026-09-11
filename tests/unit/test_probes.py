@@ -162,19 +162,47 @@ def test_get_probe_unknown_runtime_raises() -> None:
 
 
 class _FakeBatch:
-    """A minimal Dataproc ``Batch`` stand-in: only the fields the probe + telemetry reader touch."""
+    """A minimal Dataproc ``Batch`` stand-in: only the fields the probe + telemetry reader touch.
 
-    def __init__(self, state_name: str, message: str = "") -> None:
+    ``operation`` is the long-running operation the service stamps on the batch when it accepts it.
+    Cancel reads it and stops *that*, so it has to be here for the cancel path to be exercised.
+    """
+
+    def __init__(
+        self,
+        state_name: str,
+        message: str = "",
+        operation: str = "projects/p/regions/us-central1/operations/op-1",
+    ) -> None:
         self.state = types.SimpleNamespace(name=state_name)
         self.state_message = message
+        self.operation = operation
+
+
+class _FakeOperationsClient:
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc
+        self.cancelled: list[str] = []
+
+    def cancel_operation(self, *, name: str) -> None:
+        if self._exc is not None:
+            raise self._exc
+        self.cancelled.append(name)
 
 
 class _FakeBatchClient:
-    def __init__(self, batch: _FakeBatch | None = None, exc: Exception | None = None) -> None:
+    def __init__(
+        self,
+        batch: _FakeBatch | None = None,
+        exc: Exception | None = None,
+        cancel_exc: Exception | None = None,
+    ) -> None:
         self._batch = batch
         self._exc = exc
         self.seen: dict[str, Any] = {}
         self.deleted = False
+        self.operations_client = _FakeOperationsClient(cancel_exc)
+        self.transport = types.SimpleNamespace(operations_client=self.operations_client)
 
     def get_batch(self, *, name: str, timeout: float) -> _FakeBatch:
         self.seen["name"] = name
@@ -1066,15 +1094,65 @@ def test_cancelling_a_family_does_not_erase_what_it_took_to_get_here(
 # --- P5: per-engine cancel() (stubbed clients, never touch GCP) ----------------
 
 
-def test_spark_serverless_cancel_issues_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spark_serverless_cancel_stops_the_batchs_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The one that matters. Until 2026-09-11 this path called `delete_batch`, which the service
+    # refuses on a live batch ("Cannot delete non-terminal batch") — so `--cancel` could not stop a
+    # running Serverless job at all, and no offline test caught it because the fake client's delete
+    # always succeeded. Cancel goes through the long-running operation the batch names, and the
+    # batch resource itself is left alone so its telemetry survives for the registry to read.
     client = _FakeBatchClient(batch=_FakeBatch("RUNNING"))
     _patch_batch_client(monkeypatch, client)
 
     result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
 
     assert result.stopped is True and result.already_gone is False
-    assert client.deleted is True
-    assert client.seen["delete_name"].endswith("/batches/sf-run-abc-statistical-a1")
+    assert client.operations_client.cancelled == ["projects/p/regions/us-central1/operations/op-1"]
+    assert client.deleted is False, "cancel must not destroy the batch or its telemetry"
+    assert client.seen["name"].endswith("/batches/sf-run-abc-statistical-a1")
+
+
+@pytest.mark.parametrize("state_name", ["SUCCEEDED", "FAILED", "CANCELLED"])
+def test_spark_serverless_cancel_terminal_batch_is_already_gone(
+    monkeypatch: pytest.MonkeyPatch, state_name: str
+) -> None:
+    # A batch that finished between the plan read and this call: nothing left to stop, and no
+    # pointless operation cancel issued against a settled operation.
+    client = _FakeBatchClient(batch=_FakeBatch(state_name))
+    _patch_batch_client(monkeypatch, client)
+
+    result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
+
+    assert result.already_gone is True and result.stopped is False
+    assert client.operations_client.cancelled == []
+
+
+def test_spark_serverless_cancel_without_an_operation_yet_reports_honestly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `operation` is empty only in the sliver before the service stamps it. Nothing is addressable,
+    # so neither flag is set — the caller leaves the registry alone rather than claiming a stop.
+    client = _FakeBatchClient(batch=_FakeBatch("PENDING", operation=""))
+    _patch_batch_client(monkeypatch, client)
+
+    result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
+
+    assert result.stopped is False and result.already_gone is False
+    assert "not yet assigned" in result.detail
+
+
+def test_spark_serverless_cancel_vanished_operation_is_already_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from google.api_core.exceptions import NotFound
+
+    client = _FakeBatchClient(batch=_FakeBatch("RUNNING"), cancel_exc=NotFound("op gone"))
+    _patch_batch_client(monkeypatch, client)
+
+    result = SparkProbe().cancel(_serverless_handle(), settings=_SETTINGS)
+
+    assert result.already_gone is True and result.stopped is False
 
 
 def test_spark_serverless_cancel_not_found_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
