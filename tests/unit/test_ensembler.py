@@ -274,6 +274,11 @@ def _metric_df(rows: list[tuple[str, float]], *, metric: str = "wape") -> pd.Dat
     return pd.DataFrame([{"model_type": m, metric: v} for (m, v) in rows])
 
 
+def _series_metric_df(rows: list[tuple[str, str, float]], *, metric: str = "wape") -> pd.DataFrame:
+    """Per-series metric rows (ts_id, model_type, <metric>) — the shape production reads."""
+    return pd.DataFrame([{"ts_id": t, "model_type": m, metric: v} for (t, m, v) in rows])
+
+
 def test_no_calculated_strategy_yields_no_rows() -> None:
     # a learned-only config produces nothing from the calculated blender.
     assert combine_calculated(_base_df([("s1", "theta", "d1", 10.0)]), _cfg(["nnls"])) == []
@@ -315,6 +320,81 @@ def test_inverse_error_weights_by_run_metric() -> None:
     rows = combine_calculated(base, _cfg(["inverse_error"]), metric)
     # weights ∝ 1/0.1 : 1/0.9 = 9 : 1 → (9*10 + 1*30)/10 = 12.0
     assert rows[0]["yhat"] == pytest.approx(12.0)
+
+
+def test_inverse_error_weights_are_estimated_per_series() -> None:
+    # Two series that disagree about which model is better. Pooled weights would hand both the same
+    # blend; per-series weights pull each toward its own winner.
+    base = _base_df(
+        [
+            ("s1", "theta", "d1", 10.0),
+            ("s1", "sarimax", "d1", 30.0),
+            ("s2", "theta", "d1", 10.0),
+            ("s2", "sarimax", "d1", 30.0),
+        ]
+    )
+    metric = _series_metric_df(
+        [("s1", "theta", 0.1), ("s1", "sarimax", 0.9), ("s2", "theta", 0.9), ("s2", "sarimax", 0.1)]
+    )
+    by_series = {
+        r["ts_id"]: r["yhat"] for r in combine_calculated(base, _cfg(["inverse_error"]), metric)
+    }
+    # s1 trusts theta 9:1 → (9*10 + 1*30)/10 = 12.0; s2 trusts sarimax 9:1 → the mirror image.
+    assert by_series["s1"] == pytest.approx(12.0)
+    assert by_series["s2"] == pytest.approx(28.0)
+
+
+def test_inverse_error_is_unchanged_by_how_the_series_are_batched() -> None:
+    """The 2026-09-11 live defect, pinned.
+
+    Microbatch hands `combine_calculated` one ready-batch of series at a time; barrier hands it all
+    of them at once. Those have to agree, and for ``inverse_error`` they did not: weights came from
+    a run-wide ``groupby("model_type").mean()`` over whatever metric rows the call was given, so
+    filtering to a batch's series changed them. Smokes 11 and 12 differed on every one of 2,800
+    prediction rows while their leaderboards matched, because the OOF-scored counterpart really was
+    per-series and hid it. Split the input two ways and demand the same numbers.
+    """
+    base = _base_df(
+        [
+            ("s1", "theta", "d1", 10.0),
+            ("s1", "sarimax", "d1", 30.0),
+            ("s2", "theta", "d1", 50.0),
+            ("s2", "sarimax", "d1", 70.0),
+        ]
+    )
+    metric = _series_metric_df(
+        [("s1", "theta", 0.1), ("s1", "sarimax", 0.9), ("s2", "theta", 0.9), ("s2", "sarimax", 0.2)]
+    )
+    cfg = _cfg(["inverse_error"])
+
+    whole = {r["ts_id"]: r["yhat"] for r in combine_calculated(base, cfg, metric)}
+    batched: dict[str, float] = {}
+    for ts_id in ("s1", "s2"):
+        rows = combine_calculated(
+            base[base["ts_id"] == ts_id], cfg, metric[metric["ts_id"] == ts_id]
+        )
+        batched.update({r["ts_id"]: r["yhat"] for r in rows})
+
+    assert whole == pytest.approx(batched), "batching the series changed the forecast"
+
+
+def test_inverse_error_series_without_metadata_falls_back_to_mean() -> None:
+    # s2 has no metric rows of its own. Falling back to the *pooled* weights would reintroduce the
+    # batch dependence the per-series estimate exists to remove, so it degrades to uniform instead.
+    base = _base_df(
+        [
+            ("s1", "theta", "d1", 10.0),
+            ("s1", "sarimax", "d1", 30.0),
+            ("s2", "theta", "d1", 10.0),
+            ("s2", "sarimax", "d1", 30.0),
+        ]
+    )
+    metric = _series_metric_df([("s1", "theta", 0.1), ("s1", "sarimax", 0.9)])
+    by_series = {
+        r["ts_id"]: r["yhat"] for r in combine_calculated(base, _cfg(["inverse_error"]), metric)
+    }
+    assert by_series["s1"] == pytest.approx(12.0)
+    assert by_series["s2"] == pytest.approx(20.0)  # (10 + 30) / 2
 
 
 def test_inverse_error_without_metric_frame_degrades_to_mean() -> None:

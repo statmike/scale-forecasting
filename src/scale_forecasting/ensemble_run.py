@@ -379,6 +379,15 @@ def _ensemble_batch(
     back to back on the same data: the three calculated strategies agreed to float noise and
     ``ensemble_nnls`` differed in the fourth decimal (see `docs/validation.md`).
 
+    That first sentence was only two-thirds true until 2026-09-11, and re-running the same pair
+    caught it. ``mean`` and ``median`` were per-series and came back bit-identical, but
+    ``inverse_error``'s *future* blend took its weights from a run-wide
+    ``groupby("model_type").mean()`` over this call's metric rows — which microbatch filters to the
+    batch's series — so it moved on every one of 2,800 rows while its OOF-scored counterpart, which
+    really is per-series, matched exactly. The leaderboard therefore looked clean while the shipped
+    forecasts disagreed. `ensembler._inverse_error_weight_matrix` now estimates those weights per
+    series, and the claim above holds for all three.
+
     Neither answer is wrong, but the microbatch one depends on how series happened to batch, which
     depends on job timing — so it is not reproducible the way the rest of a run is. Deciding whether
     learned strategies should defer to a final global fit is a design question, deliberately left

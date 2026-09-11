@@ -517,7 +517,9 @@ def combine_calculated(
     yhat_upper``) and returns prediction-row dicts the caller stamps with ``run_id``/``ensemble_id``
     and appends via the Storage Write API — the same path `ensemble_run._apply_weights` uses
     for the learned strategies. ``inverse_error`` weights each model by ``1/mean(decision_metric)``
-    from ``metric_df`` (``forecast_metadata`` for this run); ``mean``/``median`` need no metrics.
+    from ``metric_df`` (``forecast_metadata`` for this run), estimated **per series** so the answer
+    does not depend on which series arrive together (`_inverse_error_weight_matrix`);
+    ``mean``/``median`` need no metrics.
     Optional pruning drops weak base models first (`_pruned_models`). Blends over whichever
     (pruned) base models are present per ``(ts_id, forecast_date)``, renormalizing weights over that
     present subset. Returns an empty list when no calculated strategy is requested or the base is
@@ -532,11 +534,6 @@ def combine_calculated(
     if not present:
         return []
 
-    # inverse_error weights: 1/mean(metric) per model, renormalized; uniform when no metric frame.
-    ie_weights: np.ndarray | None = None
-    if "inverse_error" in calculated:
-        ie_weights = _inverse_error_run_weights(present, cfg, metric_df)
-
     # One wide frame per value column, aligned to the present base models, reused across strategies.
     keys = ["ts_id", "forecast_date"]
     wide = {
@@ -546,6 +543,14 @@ def combine_calculated(
         for col in ("yhat", "yhat_lower", "yhat_upper")
     }
     index = wide["yhat"].index
+
+    # inverse_error weights: 1/mean(metric) per model, estimated per *series* and renormalized;
+    # uniform when no metric frame. Per-row, so the matrix is built against `index`.
+    ie_weights: np.ndarray | None = None
+    if "inverse_error" in calculated:
+        ie_weights = _inverse_error_weight_matrix(
+            present, cfg, metric_df, np.asarray(index.get_level_values("ts_id"))
+        )
 
     rows: list[dict[str, Any]] = []
     for strategy in calculated:
@@ -573,10 +578,63 @@ def combine_calculated(
     return rows
 
 
+def _inverse_error_weight_matrix(
+    models: list[str], cfg: RunConfig, metric_df: pd.DataFrame | None, ts_ids: np.ndarray
+) -> np.ndarray:
+    """Inverse-error weights per prediction row, estimated **per series** — ``(n_rows, n_models)``.
+
+    Weight ∝ ``1/mean(decision_metric)`` over that series' own ``forecast_metadata`` rows, through
+    `inverse_error_weights` exactly as the pooled version did.
+
+    Per-series is what makes the strategy reproducible. The microbatch ensemble trigger hands
+    `combine_calculated` one ready-batch of series at a time while the barrier trigger hands it all
+    of them, so **any** weight pooled across series depends on how the run happened to batch, and
+    the same config on the same data then lands different forecasts. A run-wide
+    ``groupby("model_type").mean()`` did exactly that here until 2026-09-11: smokes 11 and 12, run
+    back to back on identical data, produced a different ``ensemble_inverse_error`` on every one of
+    2,800 rows. It also puts the future blend in step with `_inverse_error_blend`, the OOF-scored
+    counterpart, which has always been per-series — the two are meant to be the same weighting seen
+    from two sides. See `docs/validation.md`.
+
+    A series with no metadata of its own falls back to **uniform**, degrading to ``mean``: the same
+    NULL-tolerant behaviour as a missing metric frame, and partition-invariant for the same reason.
+    A frame with no ``ts_id`` column carries no series grain to use, so it keeps the pooled weights
+    (`_inverse_error_run_weights`); the production read always selects ``ts_id``.
+    """
+    n = len(models)
+    metric = cfg.backtest.decision_metric
+    uniform = np.full(n, 1.0 / n)
+    if metric_df is None or metric_df.empty or metric not in metric_df.columns:
+        return np.tile(uniform, (len(ts_ids), 1))
+    if "ts_id" not in metric_df.columns:
+        return np.tile(_inverse_error_run_weights(models, cfg, metric_df), (len(ts_ids), 1))
+
+    mean_by_series = (
+        metric_df.groupby(["ts_id", "model_type"])[metric]
+        .mean()
+        .unstack("model_type")
+        .reindex(columns=models)
+    )
+    # One call to the shared 1-D helper per series rather than a vectorized re-implementation: the
+    # zero-error and all-non-finite branches have to stay identical to the OOF path's, and the only
+    # way to guarantee that is to call the same function.
+    per_series = {
+        str(ts_id): inverse_error_weights(
+            np.array([loss_of(metric, float(v)) for v in row], dtype=float)
+        )
+        for ts_id, row in zip(mean_by_series.index, mean_by_series.to_numpy(), strict=True)
+    }
+    return np.array([per_series.get(str(t), uniform) for t in ts_ids], dtype=float)
+
+
 def _inverse_error_run_weights(
     models: list[str], cfg: RunConfig, metric_df: pd.DataFrame | None
 ) -> np.ndarray:
-    """Per-model inverse-error weights from the run's ``forecast_metadata`` (pure).
+    """Per-model inverse-error weights pooled over the whole metric frame (pure).
+
+    The fallback arm of `_inverse_error_weight_matrix`, for a frame with no ``ts_id`` column to
+    group by. Not the production path — pooling across series is what made ``inverse_error``
+    depend on microbatch batching; read that function's docstring before reaching for this one.
 
     Weight ∝ ``1/mean(decision_metric)`` over the model's metadata rows, via
     `inverse_error_weights` (zeros dominate, non-finite → uniform). Falls back to uniform when
