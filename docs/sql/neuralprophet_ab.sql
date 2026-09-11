@@ -244,20 +244,26 @@ JOIN w USING (arm);
 -- What was written: `SUM(n_fits)`, with the note "every fit counts here, backtest folds included, so
 -- this reads the fold rows too". Two things about that were wrong, and neither is about this run:
 --
---   1. `n_fits` is NULL on every row. The column is declared on `forecast_metadata` and never
---      populated by any writer, so `SUM(n_fits)` was NULL, the denominator collapsed, and the CASE
---      fell through to its ELSE. The pre-registered query could not have produced a number on any
---      data, so this is a repair to a query that never worked, not a repair fitted to a result.
---   2. There are no fold rows. Both arms backtested (`backtest_status='full'`, `n_folds_achieved=2`)
---      and wrote exactly 10,000 rows each, all with `fold_id IS NULL` — the frozen-backtest scheme
---      scores folds without emitting a row per fold. So "reads the fold rows too" describes a shape
---      the table does not have, and here one row is one recorded fit.
+--   1. `n_fits` is NULL on every row. The column is declared in the `forecast_metadata` row spec
+--      (`registry/write_api.py`) and no writer populates it — nor `train_rows_total` beside it. So
+--      `SUM(n_fits)` was NULL, the denominator collapsed, and the CASE fell through to its ELSE.
+--      The pre-registered query could not have produced a number on any data ever written, which is
+--      what makes this a repair to a query that never worked rather than one fitted to a result.
+--   2. "reads the fold rows too" named the wrong table. `forecast_metadata` is one row per cell by
+--      design; the per-fold rows live in `backtest_oof` (560,000 per arm here — 2 folds x 10,000
+--      series x 28 horizon steps). Nothing is missing. The fit count therefore has to be derived
+--      from the backtest columns on the cell row, not found as extra rows.
 --
--- The repair is `COUNT(*)` over the same rows the pre-registered query already selected. It cannot
--- favour an arm: both arms landed exactly 10,000 cells (CONTROL 1), so any per-cell constant — 1, or
--- 3 if one counted the two folds as separate fits — cancels in `s`, which is a ratio between the two
--- arms. The choice rescales `cost_per_1k_fits`, and rescales both arms by the same factor. So the
--- decision below is invariant to it; only the units of the two cost columns depend on it.
+-- The repair derives it: with `backtest_refit='per_fold'` a cell fits once per fold plus once on
+-- full history, so `n_folds_achieved + 1`; with a frozen scheme the fold scores reuse one fit, so 1.
+-- Both arms here are `per_fold` with `n_folds_achieved=2`, giving 3 fits per cell and 30,000 per arm.
+--
+-- Why this cannot have favoured an arm, as arithmetic rather than assurance: both arms landed
+-- exactly 10,000 cells under the identical backtest block (CONTROL 1), so whatever per-cell fit
+-- constant one chooses is the *same* constant on both sides and cancels in `s`, which is a ratio
+-- between the arms. The choice rescales both `cost_per_1k_fits` columns by that one factor. So the
+-- decision below is invariant to it, and only the units of the two cost columns depend on getting
+-- it right — which is reason enough to get it right, but not a route to a different verdict.
 --
 -- Let s = throughput ratio (GPU fits per node-second / CPU fits per node-second)
 --     r = accel_surcharge (declared above)
@@ -274,7 +280,9 @@ WITH all_fits AS (
     IF(run_id = gpu_run_id, 'gpu', 'cpu')        AS arm,
     fit_seconds,
     cpu_seconds,
-    n_fits,
+    -- Fits this cell actually ran: one per fold plus the full-history fit when each fold refits,
+    -- one when a frozen scheme reuses a single fit across the folds. See the repair note above.
+    IF(backtest_refit = 'per_fold', COALESCE(n_folds_achieved, 0) + 1, 1) AS fits_in_cell,
     worker_id,
     cell_started_at,
     cell_ended_at
@@ -287,7 +295,7 @@ WITH all_fits AS (
 per_arm AS (
   SELECT
     arm,
-    COUNT(*)                                                             AS total_fits,  -- see repair note
+    SUM(fits_in_cell)                                                    AS total_fits,  -- see repair note
     SUM(fit_seconds)                                                     AS total_fit_seconds,
     COUNT(DISTINCT worker_id)                                            AS nodes,
     TIMESTAMP_DIFF(MAX(cell_ended_at), MIN(cell_started_at), SECOND)     AS wall_seconds

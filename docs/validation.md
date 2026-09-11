@@ -1395,10 +1395,11 @@ cannot check it any other way.
 |---|---|---|
 | Wall clock | 19,054.3 s (5.29 h) | 14,828.0 s (4.12 h) |
 | Cells landed / ok | 10,000 / 10,000 | 10,000 / 10,000 |
-| Mean seconds per fit | 126.5 | 97.5 |
+| Fits (3 per cell — two folds refit plus full history) | 30,000 | 30,000 |
+| Mean seconds per cell / per fit | 126.5 / 42.2 | 97.5 / 32.5 |
 | WAPE | 0.35006025869087765 | 0.35006025868556495 |
 | `device_share` of fit time | 1.0 | 0.0 |
-| Cost per 1,000 fits (CPU node-seconds, r = 1.92) | 332,810 | 142,063 |
+| Cost per 1,000 fits (CPU node-seconds, r = 1.92) | 110,937 | 47,354 |
 
 All four pre-registered controls passed before the decision was read: identical landed cell counts
 and distinct series, device telemetry present on the GPU arm and absent on the CPU arm,
@@ -1422,22 +1423,31 @@ gives s = 0.774 and a cost ratio of 2.48. Either denominator lands in the same b
 rule, so the verdict is not an artifact of that choice.
 
 **The pre-registered query needed a repair, and it must be read with that in mind.** Its denominator
-was `SUM(n_fits)`, and `n_fits` is a column `forecast_metadata` declares and no writer has ever
-populated — so the sum was NULL, the throughput ratio was NULL, and the `CASE` fell through to
-`INCONCLUSIVE`. That verdict agreed with the shipped default and with every prior expectation, which
-is precisely why it would have been comfortable to accept. It was a defect, not a result. The repair
-substitutes `COUNT(*)` over the same rows and is written into
+was `SUM(n_fits)`, and `n_fits` is a column the `forecast_metadata` row spec declares and no writer
+has ever populated — nor `train_rows_total` beside it. So the sum was NULL, the throughput ratio was
+NULL, and the `CASE` fell through to `INCONCLUSIVE`. That verdict agreed with the shipped default and
+with every prior expectation, which is precisely why it would have been comfortable to accept. It was
+a defect, not a result.
+
+The repair derives the fit count from the backtest columns on each cell row — with
+`backtest_refit='per_fold'` a cell fits once per fold plus once on full history, so
+`n_folds_achieved + 1`, which is 3 here and 30,000 fits per arm. It is written into
 [`docs/sql/neuralprophet_ab.sql`](sql/neuralprophet_ab.sql) as a dated note rather than applied
 silently. The argument that it cannot have favoured an arm is arithmetic, not assurance: both arms
-landed exactly 10,000 cells, so any per-cell fit constant cancels in s, which is a ratio between the
-arms; the choice rescales both cost columns by the same factor and leaves the decision untouched.
+landed exactly 10,000 cells under the identical backtest block, so whatever per-cell constant one
+chooses is the same on both sides and cancels in s, which is a ratio between the arms. Getting it
+wrong rescales both cost columns by one shared factor and leaves the decision alone — which is what
+happened on the first pass at the repair, where a flat `COUNT(*)` put both costs 3x high and s at
+exactly the 0.8196 reported above.
 
-Two facts fell out of diagnosing that, neither of which changes the verdict and both of which are
-open. `n_fits` is declared and never written, on every row this table has. And both arms report
-`backtest_status='full'` with `n_folds_achieved=2.0` while writing **zero rows with a non-null
-`fold_id`** — the frozen-backtest scheme scores folds without emitting a row per fold, so the SQL's
-original premise that section 5 "reads the fold rows too" describes a table shape that does not
-exist. Here one row is one recorded fit and the fit count equals the cell count on both arms.
+**One thing the diagnosis got wrong on the way, and correcting it is the point.** The original SQL
+said section 5 "reads the fold rows too", and no row in `forecast_metadata` carries a non-null
+`fold_id` — which read at first like a backtest writing no folds despite reporting
+`backtest_status='full'`. It is not. `forecast_metadata` is one row per cell by design and the
+per-fold rows live in `backtest_oof`, 560,000 of them per arm: two folds by ten thousand series by a
+twenty-eight-step horizon. Nothing was missing; the comment named the wrong table. What remains
+genuinely open is smaller and duller — `n_fits` and `train_rows_total` are declared in the row spec
+and written by nobody, and should either be wired up or removed.
 
 **On placement versus utilisation.** The GPU arm's `device_audit` recorded that the deep-learning
 family "used its device but barely touched it (peak 87,040 bytes on a T4)". Both halves of that are
