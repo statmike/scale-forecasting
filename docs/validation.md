@@ -48,6 +48,7 @@ old value goes stale by definition.
 | `gpu_fault_injection` | `probe-mode-default` | 2026-09-10 | `cuda-visible-devices-emptied` |
 | `ray_poll_recovery` | `transient-transport+auth` | 2026-09-10 | `auth-expiry-only` |
 | `serverless_cancel` | `operation-cancel` | Tier 5 campaign (2026-09-11) | `batch-delete` (could not stop a live batch at all) |
+| `ensemble_weighting` | `per-series-calculated+batch-fit-learned` | Tier 6 wave A (2026-09-11) | `gather-order-dependent` (registered at its broken value the same day, then flipped by the fix; see the note below) |
 
 **`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
 notice on their own — a different image, a different `run_id`, a different node count. This one
@@ -320,7 +321,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
 | 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-09 | `smoke-01-serverless-cpu-7a3d4234e0e1` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | STALE | 2026-09-01 | `smoke-02-bq-native-0ffcc1f22d54` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
+| 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-11 | `smoke-02-bq-native-e354a8652712` | `native_source_pin=unpinned-all-sources`, `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-09 | `smoke-03-serverless-gpu-92763e0f2242` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
@@ -329,9 +330,9 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode | STALE | 2026-09-02 | `smoke-11-ensemble-barrier-19926ef4b90f` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode | STALE | 2026-09-02 | `smoke-12-ensemble-microbatch-f165a65d0b65` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 13 | `13_native_format.json` | Reading the native BigQuery source table | STALE | 2026-09-02 | `smoke-13-native-format-8e67fd137515` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode — the ensemble node waits for every member family, then runs once (20 s against a 22-minute run) | STALE | 2026-09-11 | `smoke-11-ensemble-barrier-834f770ba38b` | `ensemble_weighting=gather-order-dependent`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode — the ensemble node runs alongside the members for the whole 23 minutes, gathering as they land | STALE | 2026-09-11 | `smoke-12-ensemble-microbatch-9bcd1d294437` | `ensemble_weighting=gather-order-dependent`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-11 | `smoke-13-native-format-0995c922faab` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
@@ -1204,7 +1205,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | STALE | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-10 | `explode-demo-088f172ad2f5` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested and ranked on one leaderboard (10) | CURRENT | 2026-09-10 | `mixed-demo-db2dfb2f675d` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| `ensemble_demo.json` | The same mix with three ensemble strategies on, ranked inside the same board (10) | CURRENT | 2026-09-10 | `ensemble-demo-b2ff15a4d418` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| `ensemble_demo.json` | The same mix with three ensemble strategies on, ranked inside the same board (10) | STALE | 2026-09-10 | `ensemble-demo-b2ff15a4d418` | `ensemble_weighting=gather-order-dependent`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, statistical and ml to Serverless Spark, native to BigQuery, all four under one `run_id` (50) | CURRENT | 2026-09-10 | `per-family-runtimes-demo-8fe8f224a7e1` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
@@ -1557,6 +1558,64 @@ offline and it was right both times, including the counts, at the first attempt.
 the machinery around it, and both had the same shape: a path that only executes when someone actually
 stops or repairs something live. `--cancel` shipped a wrong implementation behind a test that
 asserted the wrong verb, and `--retry` shipped a launch path that no preview could reach.
+
+#### 2026-09-11, Tier 6 wave A: `inverse_error` was weighted per batch, not per series
+
+Smokes 11 and 12 are the same configuration run two ways. Barrier mode holds the ensemble until every
+member family has finished and then computes once; microbatch mode runs the ensemble node alongside
+the members for the whole run, gathering each one as it lands. Both are meant to be a **scheduling**
+choice — when the arithmetic happens, not what it computes. Running them back to back caught a place
+where that was not true.
+
+The unweighted ensembles agree perfectly. `ensemble_mean` and `ensemble_median` are bit-identical
+across the two runs on all 2,800 forecast rows. Both **weighted** ensembles differ on every row.
+
+| ensemble | rows differing | series affected | median relative difference | p95 |
+|---|---|---|---|---|
+| `ensemble_mean` | 0 / 2,800 | 0 | 0 | 0 |
+| `ensemble_median` | 0 / 2,800 | 0 | 0 | 0 |
+| `ensemble_inverse_error` | 2,800 / 2,800 | 100 | 0.07% | 3.0% |
+| `ensemble_nnls` | 2,800 / 2,800 | 100 | 0.58% | 35.2% |
+
+The inputs really are identical, which is what makes the difference meaningful. All 22,400 member
+out-of-fold rows — every `(ts_id, model_type, fold_id, forecast_date)` — join across the two runs
+with a maximum absolute difference of exactly zero, and both runs combined the same four members
+(`mean` and `median` matching bit-for-bit proves it, and the stored NNLS weights name all four in
+both).
+
+**The NNLS half is old news, and known.** `ensemble_run._ensemble_batch` has documented it since
+2026-09-02, from this same pair of smokes: a non-negative least squares fit over collinear members
+has a solution *face* rather than a unique point, an active-set solver walks to whichever vertex it
+reaches first, and microbatch feeds the members in arrival order where barrier feeds them in one
+canonical pass. Two vertices of the same optimal face score the same on the holdout, so this is a
+deliberately open design question rather than an error, and it stays open.
+
+**The `inverse_error` half was new.** Its weights are a closed-form function of per-model error, so
+they have no solver to wander — they should have matched, and they did not. The cause was that the
+*future* blend pooled its metrics across series: `1/mean(decision_metric)` computed with a run-wide
+`groupby("model_type").mean()` over whatever metric rows the call happened to be given. Microbatch
+filters those rows to the batch's series, so the pool differed, so every weight differed, so every
+one of the 2,800 shipped forecast rows differed. Its out-of-fold counterpart
+(`ensembler._inverse_error_blend`) has always looped per series, so the leaderboard the two runs
+produced looked clean while the numbers underneath it disagreed — which is precisely why this
+survived to be caught by a re-run rather than by a metric.
+
+The fix (`ensembler._inverse_error_weight_matrix`) estimates those weights per series, from that
+series' own metadata, through the same `inverse_error_weights` helper the out-of-fold path uses so
+the zero-error and non-finite branches cannot drift apart. A series with no metadata of its own falls
+back to uniform, degrading to `mean` — pooled fallback would have quietly reintroduced the batch
+dependence. Three unit tests pin it, the load-bearing one being that splitting the series across two
+`combine_calculated` calls must return byte-identical rows to one call over all of them; all three
+fail against the pooled code.
+
+The axis `ensemble_weighting` was registered the same day at its **broken** value,
+`gather-order-dependent`, and then moved to `per-series-calculated+batch-fit-learned` by the fix. The
+two-step is deliberate and follows the mechanism this page has used since P0: an axis added at its
+old value flips the declaring rows to STALE automatically the moment the value changes, where an axis
+added afterwards silently leaves behind every row somebody forgot to hand-mark. It worked as
+intended — smokes 11 and 12 and `ensemble_demo` are STALE above, awaiting a re-run under the fix. The
+new value names both halves honestly: the calculated strategies are now partition-invariant, the
+learned ones are still fit per batch.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
