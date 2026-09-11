@@ -330,8 +330,8 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) | STALE | 2026-09-03 | `smoke-09-shared-ray-f42e5785f6b9` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `dl_gpu_routing=flat-compute.use_gpu` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode — the ensemble node waits for every member family, then runs once (20 s against a 22-minute run) | STALE | 2026-09-11 | `smoke-11-ensemble-barrier-834f770ba38b` | `ensemble_weighting=gather-order-dependent`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
-| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode — the ensemble node runs alongside the members for the whole 23 minutes, gathering as they land | STALE | 2026-09-11 | `smoke-12-ensemble-microbatch-9bcd1d294437` | `ensemble_weighting=gather-order-dependent`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode — the ensemble node waits for every member family, then runs once (23 s against a 23-minute run); re-run under the weighting fix as attempt 2, and its four ensembles now match microbatch's on all 2,800 cells | CURRENT | 2026-09-11 | `smoke-11-ensemble-barrier-834f770ba38b` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode — the ensemble node runs alongside the members for the whole 24 minutes, gathering as they land; re-run under the weighting fix as attempt 2, and the barrier pair of this row is the proof that gather mode is now a scheduling choice only | CURRENT | 2026-09-11 | `smoke-12-ensemble-microbatch-9bcd1d294437` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-11 | `smoke-13-native-format-0995c922faab` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 14 | `14_full_dag.json` | Flagship: all families + native + ensemble, one run_id (DL on Spark L4) | STALE | 2026-09-02 | `smoke-14-full-dag-c8664f7a2d23` | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
@@ -1613,9 +1613,51 @@ The axis `ensemble_weighting` was registered the same day at its **broken** valu
 two-step is deliberate and follows the mechanism this page has used since P0: an axis added at its
 old value flips the declaring rows to STALE automatically the moment the value changes, where an axis
 added afterwards silently leaves behind every row somebody forgot to hand-mark. It worked as
-intended — smokes 11 and 12 and `ensemble_demo` are STALE above, awaiting a re-run under the fix. The
-new value names both halves honestly: the calculated strategies are now partition-invariant, the
-learned ones are still fit per batch.
+intended — it re-STALEd smokes 11, 12 and `ensemble_demo` without anyone marking them. The new value
+names both halves honestly: the calculated strategies are now partition-invariant, the learned ones
+are still fit per batch.
+
+**Proven live the same day.** Both smokes were re-run with `--force` under the fix, as attempt 2 of
+the same two `run_id`s, and the table settles it without needing to trust either run's own report.
+Every cell now holds two values per run — the pre-fix one and the post-fix one — so the question is
+which values the two *modes* share:
+
+| ensemble | distinct values per cell, run 11 | per cell, run 12 | cells where barrier and microbatch share a value |
+|---|---|---|---|
+| `ensemble_mean` | 1 | 1 | 2,800 / 2,800 |
+| `ensemble_median` | 1 | 1 | 2,800 / 2,800 |
+| `ensemble_inverse_error` | **2** | **2** | 2,800 / 2,800 |
+| `ensemble_nnls` | 1 | 2 | 2,800 / 2,800 |
+
+Two values inside each run is the fix moving the numbers; one value shared across the runs is the
+two gather modes agreeing on every cell. `ensemble_nnls` landing on the barrier answer this time is
+the arrival order happening to match, not a guarantee — that half is still open, and run 12 having
+two values while run 11 has one is exactly what a solver that follows arrival order looks like.
+
+#### 2026-09-11: the ensemble forecast rows had no write timestamp at all
+
+Running that comparison is what turned this up, because the obvious way to separate two attempts of
+one `run_id` is `created_at` — and on `forecast_predictions` every ensemble row has a NULL one. Not
+some of them: all 5,600 across the two smokes, against zero NULLs on the 22,400 member prediction
+rows, the 44,800 ensemble out-of-fold rows and the 1,600 metadata rows in the same runs.
+
+That is a contract this page and the code both state. `forecast_predictions` is read
+newest-write-wins (`QUALIFY ROW_NUMBER() … ORDER BY created_at DESC NULLS LAST`), and
+`ensemble_run`'s own module docstring said "every ensemble row carries a `created_at`" as the
+resolution to the append-only design. The engines stamp their prediction rows; `assemble_ensemble_oof_rows`
+stamps the blended OOF; `assemble_metadata_row` stamps the metadata. The one writer that did not was
+the inline loop in `_ensemble_batch` that stamps `run_id` and `ensemble_id` onto the blended rows —
+`@gcp`-only code no unit test reaches, which is the whole reason it went unnoticed. So a second pass
+over any run — a `--force` re-ensemble, a repair, a re-score — left two well-formed rows per cell
+with nothing to order them by, and the reader got whichever one the scan returned first.
+
+The fix moves the stamping into `registry.rows.stamp_ensemble_prediction_rows`, one function both
+blender paths go through, next to the OOF assembler that always did this correctly. Two tests pin
+every column it owns, on both blender shapes. Deliberately **not** a new architecture axis: no
+forecast number changes, and no result on this page makes a claim that depends on ensemble re-run
+idempotency, so nothing already proven has moved under it. It is proven live with wave B, which
+carries an ensemble anyway. Rows written before today keep their NULL and lose to any later row —
+which is what the `NULLS LAST` in every one of those reads is for.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
