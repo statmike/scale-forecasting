@@ -171,6 +171,35 @@ def assemble_ensemble_oof_rows(
     return rows
 
 
+def stamp_ensemble_prediction_rows(
+    rows: list[dict[str, Any]], *, run_id: str, ensemble_id: str, created_at: datetime | None
+) -> list[dict[str, Any]]:
+    """Fill the four run-scoped columns on blended prediction rows, in place → the same list.
+
+    The blenders that produce these rows (`ensembler.combine_calculated`,
+    `ensemble_run._apply_weights`) are pure and config-only: they know a series, a date and a
+    number, and nothing about which run asked for them. Everything the run contributes is stamped
+    here, in one place both paths go through, rather than in each caller's loop.
+
+    That one place is the point. The two paths used to stamp their own columns inline in
+    `_ensemble_batch`, which is `@gcp`-only code no unit test reaches, and they disagreed: neither
+    set ``created_at``, so until 2026-09-11 every ensemble prediction row in the registry had a NULL
+    one. `forecast_predictions` is deduped newest-write-wins, so a second pass over a run — a
+    ``--force`` re-ensemble, a repair — left two rows per cell with nothing to order them by. The
+    companion `assemble_ensemble_oof_rows` had always stamped it, which is why only the forecast
+    table was affected. `test_rows.py` now pins that every column this function owns comes back set.
+
+    ``compute_engine`` is ``"ensemble"`` for both strategy families: a blend runs wherever the
+    ensemble node runs, not on the engine that fitted its members.
+    """
+    for row in rows:
+        row["run_id"] = run_id
+        row["ensemble_id"] = ensemble_id
+        row["compute_engine"] = "ensemble"
+        row["created_at"] = created_at
+    return rows
+
+
 def assemble_metadata_row(
     result: CellResult, created_at: datetime, model_artifact: str | None = None
 ) -> dict[str, Any]:

@@ -39,6 +39,7 @@ from scale_forecasting.registry.rows import (
     assemble_oof_rows,
     assemble_prediction_rows,
     cell_dedup_key,
+    stamp_ensemble_prediction_rows,
 )
 from scale_forecasting.registry.write_api import (
     _META_SPEC,
@@ -243,6 +244,55 @@ def test_ensemble_oof_rows_survive_a_frame_with_no_horizon_step() -> None:
 
 def test_ensemble_oof_rows_empty_frame_is_no_rows() -> None:
     assert assemble_ensemble_oof_rows(_ens_oof().iloc[0:0], "r", "e") == []
+
+
+def _blended_rows() -> list[dict[str, Any]]:
+    """What the two pure blenders hand back: a series, a date, a number, and nothing run-scoped."""
+    return [
+        # `combine_calculated`'s shape — no run_id, no compute_engine.
+        {"ts_id": "s1", "model_type": "ensemble_mean", "forecast_date": "2026-01-01", "yhat": 1.0},
+        # `_apply_weights`' shape — sets some of them itself, which is exactly why the stamp has to
+        # be authoritative rather than a `setdefault`.
+        {
+            "run_id": "stale",
+            "ts_id": "s1",
+            "model_type": "ensemble_nnls",
+            "compute_engine": "ensemble",
+            "forecast_date": "2026-01-01",
+            "yhat": 2.0,
+            "quantiles": None,
+        },
+    ]
+
+
+def test_ensemble_prediction_rows_carry_the_created_at_the_dedupe_sorts_on() -> None:
+    """The 2026-09-11 defect: this was the one cell-table writer that stamped no timestamp.
+
+    `forecast_predictions` is read newest-write-wins, so a NULL here means a second pass over a run
+    (a ``--force`` re-ensemble, a repair) leaves two rows per cell with nothing to order them by —
+    silently, because both rows are well-formed. Assert every column the stamp owns, on both
+    blender shapes, so no future caller can go back to filling them in its own loop.
+    """
+    rows = stamp_ensemble_prediction_rows(
+        _blended_rows(), run_id="my-run-abc123def456", ensemble_id="ens-9f2", created_at=_CREATED
+    )
+    for row in rows:
+        assert row["created_at"] == _CREATED
+        assert row["run_id"] == "my-run-abc123def456"  # overwritten, not preserved
+        assert row["ensemble_id"] == "ens-9f2"
+        assert row["compute_engine"] == "ensemble"
+        assert set(row) <= _spec_columns(_PRED_SPEC), set(row) - _spec_columns(_PRED_SPEC)
+
+
+def test_ensemble_prediction_rows_are_stamped_in_place() -> None:
+    # `_ensemble_batch` appends both blenders into one list and stamps it once at the end, so the
+    # rows it hands to the Write API are these objects, not a copy the return value happens to hold.
+    rows = _blended_rows()
+    assert (
+        stamp_ensemble_prediction_rows(rows, run_id="r", ensemble_id="e", created_at=_CREATED)
+        is rows
+    )
+    assert rows[0]["created_at"] == _CREATED
 
 
 # --- the created_at stamp ------------------------------------------------------

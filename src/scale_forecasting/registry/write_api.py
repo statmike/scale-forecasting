@@ -46,7 +46,10 @@ _PRED_SPEC: tuple[tuple[str, str], ...] = (
     ("yhat_lower", "D"),
     ("yhat_upper", "D"),
     ("quantiles", "S"),
-    # Reserved — declared so the deployment migration happens once; no assembler emits it yet.
+    # The write timestamp the newest-wins dedupe sorts on. Only `ensemble_run` writes predictions
+    # through this spec (the engines load their own), and it stamped nothing here until 2026-09-11,
+    # so every ensemble prediction row before that date carries NULL — which is why every read of
+    # this table orders `created_at DESC NULLS LAST` rather than plain DESC.
     ("created_at", "S"),
 )
 

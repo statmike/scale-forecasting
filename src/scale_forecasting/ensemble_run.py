@@ -56,7 +56,11 @@ ensemble config re-appends the same cells — correct-but-wasteful when the numb
 genuine conflict when they don't (``xgb`` is a stochastic meta-learner, and a repair re-fits). Both
 cases resolve the same way: every ensemble row carries a ``created_at``, and each read dedupes to
 one row per cell by ``ORDER BY created_at DESC NULLS LAST`` — see `base_read_sql`, and
-`registry.rows.cell_dedup_key` for the same rule on the base tables. No pre-delete — a ``DELETE``
+`registry.rows.cell_dedup_key` for the same rule on the base tables. That sentence was aspirational
+until 2026-09-11: the OOF and metadata rows carried the stamp, the *prediction* rows did not, so the
+one table a reader takes the forecast from was the one table with no tiebreak. Every ensemble
+prediction row written before that date is NULL and loses to any later one, which is what
+``NULLS LAST`` is for. No pre-delete — a ``DELETE``
 matching rows still in the ~90-min Write API streaming buffer is rejected for the whole window
 (the constraint every cell writer already lives under).
 A *different* ensemble config keys distinctly (different ``ensemble_id``), so it never overwrites
@@ -404,7 +408,7 @@ def _ensemble_batch(
     from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
     from .registry.header import merge_header_telemetry
-    from .registry.rows import assemble_ensemble_oof_rows
+    from .registry.rows import assemble_ensemble_oof_rows, stamp_ensemble_prediction_rows
     from .registry.write_api import _META_SPEC, _OOF_SPEC, _PRED_SPEC
     from .seasonality import seasonal_period
     from .worker import _rollup_metrics
@@ -463,24 +467,21 @@ def _ensemble_batch(
     oof_df = _query(oof_sql).to_dataframe()
     metric_df = _query(metric_sql).to_dataframe()
 
-    # A single Write-API append of every ensemble prediction row (calculated + learned). Each row is
-    # stamped with run_id + ensemble_id here so the pure blenders stay config-only.
+    # A single Write-API append of every ensemble prediction row (calculated + learned). Both
+    # blenders are pure and config-only, so every run-scoped column is stamped afterwards, in the
+    # one call below — see `stamp_ensemble_prediction_rows` for why that is not two inline loops.
     pred_rows: list[dict[str, Any]] = []
 
     # 1. Calculated ensembles — blend the base predictions in pandas (Write API, not DML).
-    for row in combine_calculated(base_df, cfg, metric_df):
-        row.update(
-            run_id=run_id, ensemble_id=ensemble_id, compute_engine="ensemble", quantiles=None
-        )
-        pred_rows.append(row)
+    pred_rows.extend(
+        {**row, "quantiles": None} for row in combine_calculated(base_df, cfg, metric_df)
+    )
 
     # 2. Learned ensembles — fit on the OOF, apply the weights in pandas, append prediction rows.
     artifact_uris: dict[str, str] = {}
     learned_weights, artifacts, learned_basis = fit_learned(oof_df, cfg)
     for strategy, wmap in learned_weights.items():
-        for row in _apply_weights(base_df, wmap, run_id, strategy):
-            row["ensemble_id"] = ensemble_id
-            pred_rows.append(row)
+        pred_rows.extend(_apply_weights(base_df, wmap, run_id, strategy))
         artifact_uris[strategy] = upload_artifact_bytes(
             artifacts[strategy],
             f"ensemble_{ensemble_id}_{strategy}.pkl",
@@ -488,6 +489,9 @@ def _ensemble_batch(
             settings.artifact_root,
         )
 
+    stamp_ensemble_prediction_rows(
+        pred_rows, run_id=run_id, ensemble_id=ensemble_id, created_at=created_at
+    )
     if pred_rows:
         bigquery_engine._append_rows(settings, "forecast_predictions", _PRED_SPEC, pred_rows)
     log.info(
