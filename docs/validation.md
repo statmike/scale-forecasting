@@ -1212,8 +1212,8 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-10 | `ray-100k-3fbc82fe3b6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
-| `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | NEVER_RUN | | | |
-| `neuralprophet_ab_cpu.json` | The CPU arm of the same A/B — the identical config with the deep-learning family on CPU | NEVER_RUN | | | |
+| `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | CURRENT | 2026-09-10 | `neuralprophet-ab-gpu-e530eea3a755` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
+| `neuralprophet_ab_cpu.json` | The CPU arm of the same A/B — the identical config with the deep-learning family on CPU | CURRENT | 2026-09-11 | `neuralprophet-ab-cpu-f4bfff3b39e9` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
 
 #### 2026-09-10, `ray_autoscale_demo`: the first side-by-side of what was planned and what ran
 
@@ -1380,6 +1380,72 @@ Two operational notes from the second pass. The Ray jobs client crossed the bear
 21:40 and refreshed itself rather than 401-ing, so the long-run failure mode from earlier campaigns
 did not recur. Teardown was REST-verified: 404 on the resource and `{}` on the collection, not the
 SDK's "Successfully deleted the cluster" line.
+
+#### 2026-09-10/11, the NeuralProphet accelerator A/B: the T4 is 18 % *slower*, not merely not-faster
+
+Two runs, identical but for one line. `neuralprophet-ab-gpu-e530eea3a755` and
+`neuralprophet-ab-cpu-f4bfff3b39e9`, 10,000 NeuralProphet cells each on a twelve-node Ray fleet,
+backtested at two folds, both `COMPLETED` at attempt 1, teardown REST-verified `{}` on both. The
+configs differ only in `compute.families.deep_learning.hardware`. Both pin `gpu_fraction: 0.125` and
+`compute.profile.source: "baseline"` — that second pin is worth recording here because it is excluded
+from the `run_id` digest, so it is not recoverable from the identifiers above and a future reader
+cannot check it any other way.
+
+| | GPU arm | CPU arm |
+|---|---|---|
+| Wall clock | 19,054.3 s (5.29 h) | 14,828.0 s (4.12 h) |
+| Cells landed / ok | 10,000 / 10,000 | 10,000 / 10,000 |
+| Mean seconds per fit | 126.5 | 97.5 |
+| WAPE | 0.35006025869087765 | 0.35006025868556495 |
+| `device_share` of fit time | 1.0 | 0.0 |
+| Cost per 1,000 fits (CPU node-seconds, r = 1.92) | 332,810 | 142,063 |
+
+All four pre-registered controls passed before the decision was read: identical landed cell counts
+and distinct series, device telemetry present on the GPU arm and absent on the CPU arm,
+`cpu_seconds/fit_seconds` at most 1.005 on every cell with a single `intraop_threads` value per arm,
+and measured wave density within 1.0E-4 across 119 waves. The decision rule then fired cleanly:
+**s = 0.8196, r = 1.92, `device_share` = 1.0 → CPU, the accelerator does not pay for itself.**
+
+**The prediction was wrong, and in the interesting direction.** Phase 0 pre-registered s in
+[0.95, 1.07] — the expectation was rough parity, an accelerator that neither helps nor hurts on a
+model that allocates 87 KB of device memory. The measurement is 0.82. Attaching a T4 did not fail to
+help; it made every fit about 30 seconds slower. The most likely reading is that host-to-device
+transfer and kernel-launch overhead on a network this small exceed the arithmetic they replace, so
+the device is pure overhead on the critical path. That is a stronger result than parity would have
+been, and it is stronger against us: it says the GPU path costs 2.34x per fit rather than the ~1.9x
+the surcharge alone implies.
+
+**The conclusion does not depend on how the fleet is counted.** The query divides by
+`COUNT(DISTINCT worker_id)`, which came out 102 on the GPU arm and 108 on the CPU arm — a scheduling
+outcome, not what was purchased. Dividing instead by the twelve nodes actually paid for on both arms
+gives s = 0.774 and a cost ratio of 2.48. Either denominator lands in the same branch of the same
+rule, so the verdict is not an artifact of that choice.
+
+**The pre-registered query needed a repair, and it must be read with that in mind.** Its denominator
+was `SUM(n_fits)`, and `n_fits` is a column `forecast_metadata` declares and no writer has ever
+populated — so the sum was NULL, the throughput ratio was NULL, and the `CASE` fell through to
+`INCONCLUSIVE`. That verdict agreed with the shipped default and with every prior expectation, which
+is precisely why it would have been comfortable to accept. It was a defect, not a result. The repair
+substitutes `COUNT(*)` over the same rows and is written into
+[`docs/sql/neuralprophet_ab.sql`](sql/neuralprophet_ab.sql) as a dated note rather than applied
+silently. The argument that it cannot have favoured an arm is arithmetic, not assurance: both arms
+landed exactly 10,000 cells, so any per-cell fit constant cancels in s, which is a ratio between the
+arms; the choice rescales both cost columns by the same factor and leaves the decision untouched.
+
+Two facts fell out of diagnosing that, neither of which changes the verdict and both of which are
+open. `n_fits` is declared and never written, on every row this table has. And both arms report
+`backtest_status='full'` with `n_folds_achieved=2.0` while writing **zero rows with a non-null
+`fold_id`** — the frozen-backtest scheme scores folds without emitting a row per fold, so the SQL's
+original premise that section 5 "reads the fold rows too" describes a table shape that does not
+exist. Here one row is one recorded fit and the fit count equals the cell count on both arms.
+
+**On placement versus utilisation.** The GPU arm's `device_audit` recorded that the deep-learning
+family "used its device but barely touched it (peak 87,040 bytes on a T4)". Both halves of that are
+the point. Placement works — the routing, the fraction, the probe and the audit all did their jobs,
+and `device_share` of 1.0 says every second of GPU-arm fit time had a device holding memory.
+Utilisation is 87 KB against 16 GB, roughly 0.0005 % of the card. The contract this project added
+was that a GPU run must actually reach a device; it was never that reaching one is worth paying for.
+This A/B is the measurement that separates the two, and it says `use_gpu: False` stays the default.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 

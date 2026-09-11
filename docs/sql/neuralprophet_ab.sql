@@ -18,14 +18,20 @@
 -- Set the four DECLAREs below first.
 -- ============================================================================================
 
-DECLARE gpu_run_id STRING DEFAULT '<gpu-arm-run-id>';
-DECLARE cpu_run_id STRING DEFAULT '<cpu-arm-run-id>';
+DECLARE gpu_run_id STRING DEFAULT 'neuralprophet-ab-gpu-e530eea3a755';
+DECLARE cpu_run_id STRING DEFAULT 'neuralprophet-ab-cpu-f4bfff3b39e9';
 
 -- The accelerator surcharge `r`: the price of one GPU node divided by the price of one CPU node,
 -- same machine type, same region, at the rate actually billed. Set this from current list or
 -- committed-use pricing before running; it is a business input, not a measurement, and the decision
 -- rule below is stated in terms of it rather than around it.
-DECLARE accel_surcharge FLOAT64 DEFAULT 1.0;
+--
+-- 1.92 is us-central1 on-demand list at the time of the run: an n1-standard-8 is ~$0.380/hour
+-- (8 vCPU + 30 GB) and one T4 adds ~$0.350/hour, so (0.380 + 0.350) / 0.380 = 1.92. Committed-use
+-- or a Spot GPU moves this, and it is the one number here a reader is expected to substitute for
+-- their own contract. The decision rule below reads `r` rather than hard-coding a threshold, so
+-- substituting it re-runs the decision honestly instead of requiring a re-argued one.
+DECLARE accel_surcharge FLOAT64 DEFAULT 1.92;
 
 -- Bucket width for the steady-state windows. Thirty minutes is wide enough to average over a slow
 -- cell and narrow enough that the autoscaler's ramp lands in its own bucket instead of contaminating
@@ -230,8 +236,28 @@ JOIN w USING (arm);
 -- The decision variable is COST PER THOUSAND FITS, not per-fit latency. A GPU that is 8% faster and
 -- 40% more expensive is a worse machine for this workload however good the latency looks.
 --
--- Every fit counts here, backtest folds included, so this reads the fold rows too — `n_fits` on each
--- row is what the model actually trained, and summing it is the denominator.
+-- POST-HOC REPAIR, 2026-09-11, made after the data landed. Recorded here rather than quietly fixed,
+-- because editing a pre-registered query once the results are visible is exactly what
+-- pre-registration exists to prevent. The only thing that makes such an edit legitimate is that a
+-- reader can check for themselves that it could not have moved the answer.
+--
+-- What was written: `SUM(n_fits)`, with the note "every fit counts here, backtest folds included, so
+-- this reads the fold rows too". Two things about that were wrong, and neither is about this run:
+--
+--   1. `n_fits` is NULL on every row. The column is declared on `forecast_metadata` and never
+--      populated by any writer, so `SUM(n_fits)` was NULL, the denominator collapsed, and the CASE
+--      fell through to its ELSE. The pre-registered query could not have produced a number on any
+--      data, so this is a repair to a query that never worked, not a repair fitted to a result.
+--   2. There are no fold rows. Both arms backtested (`backtest_status='full'`, `n_folds_achieved=2`)
+--      and wrote exactly 10,000 rows each, all with `fold_id IS NULL` — the frozen-backtest scheme
+--      scores folds without emitting a row per fold. So "reads the fold rows too" describes a shape
+--      the table does not have, and here one row is one recorded fit.
+--
+-- The repair is `COUNT(*)` over the same rows the pre-registered query already selected. It cannot
+-- favour an arm: both arms landed exactly 10,000 cells (CONTROL 1), so any per-cell constant — 1, or
+-- 3 if one counted the two folds as separate fits — cancels in `s`, which is a ratio between the two
+-- arms. The choice rescales `cost_per_1k_fits`, and rescales both arms by the same factor. So the
+-- decision below is invariant to it; only the units of the two cost columns depend on it.
 --
 -- Let s = throughput ratio (GPU fits per node-second / CPU fits per node-second)
 --     r = accel_surcharge (declared above)
@@ -261,7 +287,7 @@ WITH all_fits AS (
 per_arm AS (
   SELECT
     arm,
-    SUM(n_fits)                                                          AS total_fits,
+    COUNT(*)                                                             AS total_fits,  -- see repair note
     SUM(fit_seconds)                                                     AS total_fit_seconds,
     COUNT(DISTINCT worker_id)                                            AS nodes,
     TIMESTAMP_DIFF(MAX(cell_ended_at), MIN(cell_started_at), SECOND)     AS wall_seconds
