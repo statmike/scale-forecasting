@@ -159,6 +159,35 @@ def test_asking_for_a_device_and_selecting_nothing_that_could_use_one_warns() ->
     cfg = _cfg(models=["theta"], **_GPU)
     report = dag.gpu_usefulness_report(cfg, dag.plan_dag(cfg).jobs)
     assert any("has no effect" in line for line in report)
+    assert any("no GPU-capable model is selected" in line for line in report)
+
+
+def test_a_capable_model_routed_off_the_device_is_not_reported_as_an_absent_model() -> None:
+    """The A/B's CPU arm: `use_gpu` set, neuralprophet selected, family override sends it to CPU.
+
+    Both causes end with no GPU job, so a single message for both was almost right and read as
+    plainly wrong on this arm — it said no deep-learning model was selected while one was. The
+    conclusion (the flag buys nothing) was correct; only the reason was invented, which is the kind
+    of diagnostic that costs someone an hour looking for a bug in the wrong file.
+    """
+    cfg = _cfg(
+        models=["neuralprophet"],
+        python_runtime="ray",
+        compute={
+            "use_gpu": True,
+            "gpu_type": "T4",
+            "families": {"deep_learning": {"hardware": "cpu"}},
+        },
+    )
+    jobs = dag.plan_dag(cfg).jobs
+    assert all(j.compute is None or j.compute.hardware == "cpu" for j in jobs)
+
+    report = " ".join(dag.gpu_usefulness_report(cfg, jobs))
+    assert "neuralprophet" in report, "the warning must name the model it is talking about"
+    assert "no GPU-capable model is selected" not in report, (
+        "a GPU-capable model IS selected here; it is routed off the device, which is a different "
+        "thing and points at a different line of the config"
+    )
 
 
 def test_a_plain_cpu_run_has_nothing_to_say() -> None:

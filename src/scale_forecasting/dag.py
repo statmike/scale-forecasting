@@ -297,13 +297,34 @@ def gpu_usefulness_report(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> list[s
                 f"cost but has NO green run behind it yet — no accuracy A/B and no live smoke."
             )
 
-    # The inverse: a run that asked for a device and then selected nothing that could ever use one.
+    # The inverse: `use_gpu` is set and nothing lands on a device. Two different causes, and naming
+    # the wrong one sends a reader hunting for a config bug that is not there. The A/B's CPU arm is
+    # the second case exactly — it selects neuralprophet and routes it off the accelerator — and it
+    # was told the first, that no deep-learning model was selected.
     if not gpu_jobs and cfg.compute.use_gpu:
-        lines.append(
-            "compute.use_gpu is true but no deep-learning model is selected, so no job resolves "
-            "to GPU hardware and the flag has no effect. Select a GPU-capable model or drop the "
-            "flag; leaving it set makes the config read as a GPU run when it is not one."
+        routed_off = sorted(
+            {
+                m
+                for job in jobs
+                if job.compute is not None and job.compute.hardware != "gpu"
+                for m in job.models
+                if get_model(m).gpu_capable
+            }
         )
+        if routed_off:
+            lines.append(
+                f"compute.use_gpu is true but {routed_off} resolves to CPU hardware, so no job "
+                f"resolves to GPU and the flag buys nothing. A families.<family>.hardware override "
+                f"wins over the flat flag by design, so this is not an error — it is worth saying "
+                f"only because a config that reads as a GPU run and is not one is easy to mistake "
+                f"for one that is."
+            )
+        else:
+            lines.append(
+                "compute.use_gpu is true but no GPU-capable model is selected, so no job resolves "
+                "to GPU hardware and the flag has no effect. Select a GPU-capable model or drop "
+                "the flag; leaving it set makes the config read as a GPU run when it is not one."
+            )
     return lines
 
 
