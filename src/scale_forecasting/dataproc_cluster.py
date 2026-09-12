@@ -94,6 +94,23 @@ _GPU_INIT_ACTION = "gs://goog-dataproc-initialization-actions-us-central1/gpu/in
 # well under the client-side create wait below).
 _GPU_INIT_TIMEOUT = timedelta(minutes=30)
 
+# GPU clusters pin the image sub-version; CPU clusters stay on the floating 2.2 line above.
+#
+# The reason is an incompatibility we do not control. `install_gpu_driver.sh` builds NVIDIA's kernel
+# modules from source unless a prebuilt tarball is already cached, and that source calls
+# ``pci_resize_resource`` with three arguments. Debian's 6.1.0-52 headers — which
+# ``2.2.87-debian12`` boots — declare a fourth (``int exclude_bars``), so the compile stops at
+# ``nv-pci.o``. It is not a timeout and not a transient: every released driver fails identically
+# (550.142, 550.163.01, 570.172.08, 580.82.07), and so does Debian's own packaged
+# ``nvidia-open-kernel-dkms`` — so neither the ``gpu-driver-version`` nor the
+# ``gpu-driver-provider`` metadata knob reaches around it.
+#
+# ``2.2.85-debian12`` is the previous sub-minor and boots ``6.1.0-49``, where the build succeeds —
+# and, for a deployment that has already built once, where the cached tarball skips the build
+# entirely. Pinned on the GPU path only, so CPU clusters keep tracking the line. Revisit when NVIDIA
+# adds a conftest for the new signature, or Debian updates its driver package.
+_GPU_IMAGE_VERSION = "2.2.85-debian12"
+
 # How long ``wait=True`` blocks on the job before giving up (parity with the batch wait ceiling).
 _WAIT_TIMEOUT_SECONDS = 7200.0
 
@@ -260,8 +277,11 @@ def build_cluster(
     }
     if not use_gpu_image:
         # A *cluster* image version (2.2-debian12), distinct from the Serverless *runtime* version.
-        # Omitted on the custom-image path (the image pins its own version).
-        software_kwargs["image_version"] = _DEFAULT_IMAGE_VERSION
+        # Omitted on the custom-image path (the image pins its own version). A GPU cluster takes the
+        # pinned sub-minor instead — see `_GPU_IMAGE_VERSION` for the driver build that forces it.
+        software_kwargs["image_version"] = (
+            _GPU_IMAGE_VERSION if hardware == "gpu" else _DEFAULT_IMAGE_VERSION
+        )
     software = dataproc.SoftwareConfig(**software_kwargs)
 
     # The server-side backstop behind our own teardown — see `build_lifecycle_config`. Attached to
@@ -476,30 +496,49 @@ def _create_cluster(
     op.result(timeout=_WAIT_TIMEOUT_SECONDS)
 
 
-def _explain_create_failure(exc: Exception, gpu_image_uri: str | None) -> Exception:
+def _explain_create_failure(
+    exc: Exception, gpu_image_uri: str | None, hardware: str | None = None
+) -> Exception:
     """Return the exception to raise for a non-capacity create failure (pure).
 
-    Passes almost everything straight through. The one case it rewrites is a *retired image
-    version* on a create that used a pre-baked custom GPU image, because there the raw message
-    names a version string the operator never chose and cannot find in any config: the version is
-    baked into the image, and the image was built by the deployment weeks earlier. Left alone, the
-    error sends someone hunting for a pin that does not exist. So it names the image, says the
-    version inside it has aged out, and points at the fallback that needs no image at all.
+    Passes almost everything straight through. What it rewrites is a *retired image version*, and
+    only on the two GPU paths that carry a version the operator never chose and cannot find in any
+    config. A CPU create runs on the floating alias, which resolves forward and never retires, so
+    a retirement error there is about something the operator did pin and is left alone.
 
-    Note what is *not* claimed: nothing here re-bakes or reroutes. A custom image has an expiry the
-    product cannot see, and the honest response to hitting it is to say so.
+    The two rewritten cases differ in what has to change. A pre-baked custom image has the
+    sub-minor it was built from baked in and cannot move, so the way out is to stop using it or to
+    rebuild it. A stock GPU create is pinned in *our* code (`_GPU_IMAGE_VERSION`), so the way out
+    is to move or drop that pin — and the error should say so rather than send someone hunting
+    through their config for a version string that is not there.
+
+    Note what is *not* claimed: nothing here re-bakes or reroutes. Both pins have an expiry the
+    product cannot see, and the honest response to hitting one is to say so.
     """
     from .compute_fallback import is_retired_image_error
     from .errors import EngineError
 
-    if not (gpu_image_uri and is_retired_image_error(exc)):
+    if not is_retired_image_error(exc):
         return exc
-    return EngineError(
-        f"Dataproc refused the custom GPU image {gpu_image_uri}: the Dataproc version baked into "
-        f"it has been retired, and a baked image cannot move to a newer one. Unset SF_GPU_IMAGE to "
-        f"use the fallback (stock image + the GPU-driver init action, which compiles the driver at "
-        f"create), or rebuild the image from a current version. Underlying error: {exc}"
-    )
+    if gpu_image_uri:
+        return EngineError(
+            f"Dataproc refused the custom GPU image {gpu_image_uri}: the Dataproc version baked "
+            f"into it has been retired, and a baked image cannot move to a newer one. Unset "
+            f"SF_GPU_IMAGE to use the fallback (stock image + the GPU-driver init action, which "
+            f"compiles the driver at create), or rebuild the image from a current version. "
+            f"Underlying error: {exc}"
+        )
+    if hardware == "gpu":
+        return EngineError(
+            f"Dataproc retired image version {_GPU_IMAGE_VERSION}, which GPU clusters are pinned "
+            f"to because the GPU-driver init action cannot compile NVIDIA's kernel modules on the "
+            f"kernel newer images boot (see _GPU_IMAGE_VERSION in dataproc_cluster.py). This pin "
+            f"is in the code, not in your config. Check whether the driver builds on the current "
+            f"{_DEFAULT_IMAGE_VERSION} line again — if it does, the pin can be dropped; if not, "
+            f"move it to the newest sub-minor that still builds, or supply a pre-baked driver "
+            f"image via SF_GPU_IMAGE. Underlying error: {exc}"
+        )
+    return exc
 
 
 def _attempt_cluster_at(
@@ -675,8 +714,11 @@ def _create_cluster_across_candidates(
         raise
     except Exception as exc:
         # The walk re-raises a CONFIG_FAULT verbatim, which is right for every case but one: a
-        # retired custom GPU image names a version the operator never chose. Rewrite only that.
-        explained = _explain_create_failure(exc, build_kwargs.get("gpu_image_uri"))
+        # retired image on a GPU create names a version the operator never chose — it came from a
+        # baked image or from our own pin. Rewrite only that.
+        explained = _explain_create_failure(
+            exc, build_kwargs.get("gpu_image_uri"), build_kwargs.get("hardware")
+        )
         if explained is exc:
             raise
         raise explained from exc

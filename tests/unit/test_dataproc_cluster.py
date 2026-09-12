@@ -196,6 +196,28 @@ def test_build_cluster_gpu_t4_attaches_n1_accelerator_and_init_action() -> None:
     assert dict(cfg.gce_cluster_config.metadata)["cudnn-version"] == ""
 
 
+def test_a_gpu_cluster_pins_the_image_and_a_cpu_cluster_does_not() -> None:
+    # The driver install compiles NVIDIA's kernel modules, and that source does not build against
+    # the kernel the floating 2.2 line now boots. The GPU path takes the pinned sub-minor; the CPU
+    # path, which runs no driver install, keeps tracking the line. See `_GPU_IMAGE_VERSION`.
+    def image_of(hardware: str, gpu_type: str | None) -> str:
+        cluster = dataproc_cluster.build_cluster(
+            infra=_infra(),
+            settings=_settings(),
+            project_id="proj-x",
+            name="sf-cluster-run-abc",
+            hardware=hardware,
+            gpu_type=gpu_type,
+        )
+        return cluster.config.software_config.image_version
+
+    assert image_of("gpu", "T4") == dataproc_cluster._GPU_IMAGE_VERSION
+    assert image_of("cpu", None) == dataproc_cluster._DEFAULT_IMAGE_VERSION
+    # A pin only means something if it is narrower than what it replaces.
+    assert dataproc_cluster._GPU_IMAGE_VERSION != dataproc_cluster._DEFAULT_IMAGE_VERSION
+    assert dataproc_cluster._GPU_IMAGE_VERSION.startswith("2.2.")
+
+
 def test_build_cluster_gpu_disables_secure_boot_only_on_gpu() -> None:
     # The GPU-driver install action loads unsigned NVIDIA kernel modules, which Secure Boot blocks;
     # a GPU cluster turns Secure Boot off (vTPM + integrity monitoring stay on).
@@ -807,11 +829,27 @@ def test_a_retired_custom_gpu_image_is_explained_and_names_the_fallback() -> Non
     assert "2.2.86-debian12" in text  # the original message, retained
 
 
-def test_the_same_failure_without_a_custom_image_is_left_alone() -> None:
-    # On the stock path the version comes from the moving alias, so the raw message is already
-    # about something the operator can find. Rewriting it would only add noise.
+def test_the_same_failure_on_a_cpu_cluster_is_left_alone() -> None:
+    # A CPU cluster creates from the moving alias, which resolves forward and never retires, so a
+    # retirement message there is about a version the operator did choose. Rewriting it adds noise.
     raw = RuntimeError("400 Selected software image version can no longer be used")
-    assert dataproc_cluster._explain_create_failure(raw, None) is raw
+    assert dataproc_cluster._explain_create_failure(raw, None, "cpu") is raw
+
+
+def test_a_retired_pinned_gpu_image_points_at_the_pin_rather_than_the_config() -> None:
+    # The stock GPU path is pinned to a sub-minor in our own code, so when that sub-minor retires
+    # the raw message names a version the operator will never find by grepping their config.
+    raw = RuntimeError(
+        f"400 Selected software image version '{dataproc_cluster._GPU_IMAGE_VERSION}' can no "
+        "longer be used to create new clusters."
+    )
+    explained = dataproc_cluster._explain_create_failure(raw, None, "gpu")
+    assert explained is not raw
+    text = str(explained)
+    assert dataproc_cluster._GPU_IMAGE_VERSION in text  # the pin that expired
+    assert "_GPU_IMAGE_VERSION" in text  # where to go change it
+    assert "SF_GPU_IMAGE" in text  # the other way out
+    assert "can no longer be used" in text  # the original message, retained
 
 
 def test_an_ordinary_failure_is_passed_through_even_with_a_custom_image() -> None:

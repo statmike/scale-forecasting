@@ -136,12 +136,14 @@ six, because a hang only shows up once there is real work to place.
   ```
   `SF_GPU_IMAGE` is exported only when the deploy built the pre-baked GPU cluster image
   (`build_gpu_image = true`); without it, GPU cluster smokes install the driver at cluster-create
-  time instead (slower). See [runtime_dependencies.md](./runtime_dependencies.md#gpu-clusters--the-pre-baked-driver-image).
+  time instead (slower). See [runtime_dependencies.md](./runtime_dependencies.md#gpu-clusters--the-driver-init-action).
   Note the `.get` above rather than a plain lookup: Terraform does not emit the output at all when
   the image was not built, and a hand-set `SF_GPU_IMAGE` pointing at an older baked image fails the
   cluster at create with *"Selected software image version … can no longer be used to create new
-  clusters"* once Dataproc retires the sub-version inside it. The fallback path asks for the
-  floating `2.2-debian12` alias and so does not age out.
+  clusters"* once Dataproc retires the sub-version inside it. The fallback path pins a sub-minor of
+  its own (`2.2.85-debian12`, because the driver build needs that kernel), so it can hit the same
+  message eventually — but recovering is a one-line change rather than an image rebuild, and the
+  error says so.
 - **Source tables** — both `source_series_iceberg` and `source_series_native` must exist in the
   deployment dataset (they are created by the Terraform + seed step).
 - **Deep-learning smokes (03, 06, 08, 09, 10, 14)** — the container must carry the `models` extra so

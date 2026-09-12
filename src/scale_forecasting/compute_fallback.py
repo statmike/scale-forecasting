@@ -63,8 +63,9 @@ US_ZONES: dict[str, list[str]] = {
 
 # Dataproc retires individual sub-minor image versions on its own schedule, and refuses creates from
 # them. The moving `2.2-debian12` alias resolves forward, so this only bites a create pinned to one
-# fixed version — in practice a *custom* image, which bakes the sub-minor it was built from into a
-# label and cannot move. Not a capacity error: no zone has the retired image either.
+# fixed version: a *custom* image, which bakes the sub-minor it was built from into a label and
+# cannot move, or a GPU cluster, which pins a sub-minor the driver build needs. Not a capacity
+# error: no zone has the retired image either.
 _RETIRED_IMAGE_MARKERS: tuple[str, ...] = (
     "can no longer be used to create new clusters",
     "no longer supported",

@@ -220,11 +220,11 @@ variable "build_gpu_image" {
     per-cluster-create driver install.
 
     FALSE is the supported path, not merely the safe one: GPU clusters install the driver at create
-    time from the floating 2.2-debian12 alias, which is what the smoke suite validates. A custom
-    image ages out when Google retires the base version it was built from, and after that it cannot
-    create clusters at all ("Selected software image version ... can no longer be used"), so turning
-    this on takes on an artifact you have to rebuild. It also needs extra IAM (Compute
-    image/instance admin on the Cloud Build SA) and builder-VM egress to the NVIDIA mirrors.
+    time on a stock image, which is what the smoke suite validates. A custom image ages out when
+    Google retires the base version it was built from, and after that it cannot create clusters at
+    all ("Selected software image version ... can no longer be used"), so turning this on takes on
+    an artifact you have to rebuild. It also needs extra IAM (Compute image/instance admin on the
+    Cloud Build SA) and builder-VM egress to the NVIDIA mirrors.
 
     Independent of build_image — content-addressed on docker/gpu_image_customize.sh + the base
     Dataproc version, not on the lock, because it carries a kernel driver rather than our packages.
