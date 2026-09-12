@@ -323,8 +323,8 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-09 | `smoke-01-serverless-cpu-7a3d4234e0e1` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-11 | `smoke-02-bq-native-e354a8652712` | `native_source_pin=unpinned-all-sources`, `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-09 | `smoke-03-serverless-gpu-92763e0f2242` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU | STALE | 2026-09-01 | `smoke-04-cluster-cpu-c5b992778fd1` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name | STALE | 2026-09-01 | `smoke-05-cluster-reuse-596268ab32a7` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
+| 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU — and the create-then-delete half of the lifecycle: its cluster was `NOT_FOUND` the moment the run ended | CURRENT | 2026-09-12 | `smoke-04-cluster-cpu-9196365250ac` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name — both family jobs ran on `sf-smoke-cluster` and it was still `RUNNING` afterwards | CURRENT | 2026-09-12 | `smoke-05-cluster-reuse-adbe6bd63644` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover | CURRENT | 2026-09-09 | `smoke-06-cluster-gpu-eea70f834c66` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU | STALE | 2026-09-03 | `smoke-07-ray-cpu-2cb4115312b1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
@@ -335,7 +335,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-11 | `smoke-13-native-format-0995c922faab` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 14 | `14_full_dag.json` | Flagship: all four families + native + ensemble under one run_id (DL on a Serverless L4). Also the row that proves the ensemble write timestamp: 11,200 blended prediction rows, none NULL | CURRENT | 2026-09-11 | `smoke-14-full-dag-2cef0feb95da` | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one. **A 2026-09-12 re-run attempt never reached submit** (`smoke-16-cluster-split-hardware-8a15339afe9b`, header closed `FAILED`); see the narrative below | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` || 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden fails every cell with the contract message naming the service, and the batch stops instead of churning executors | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `gpu_fault_injection=probe-mode-default`, `gpu_batch_churn=executor-failure-budget+stall-watchdog`, `job_status=derived-from-cell-tallies`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden fails every cell with the contract message naming the service, and the batch stops instead of churning executors | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `gpu_fault_injection=probe-mode-default`, `gpu_batch_churn=executor-failure-budget+stall-watchdog`, `job_status=derived-from-cell-tallies`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service — and the run closes `FAILED` on both registry tiers, counting only its own attempt's cells | CURRENT | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden fails every cell with the contract message naming the service, instead of crashing the worker that holds the GPU slot | CURRENT | 2026-09-10 | `smoke-19-gpu-absent-ray-1c033f10707b` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
@@ -1205,7 +1205,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `bq_native_demo.json` | The BigQuery-native family alone — no cluster of any kind (100 series) | STALE | 2026-09-01 | `bq-native-demo-b374041fdd1e` | `python=3.11`, `run_id_inputs=+compute.profile.source` |
 | `explode_demo.json` | The Spark `explode` fan-out, statistical + ML, artifacts persisted (10) | CURRENT | 2026-09-10 | `explode-demo-088f172ad2f5` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | One Spark model and the natives under one `run_id`, backtested and ranked on one leaderboard (10) | CURRENT | 2026-09-10 | `mixed-demo-db2dfb2f675d` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| `ensemble_demo.json` | The same mix with three ensemble strategies on, ranked inside the same board (10) | STALE | 2026-09-10 | `ensemble-demo-b2ff15a4d418` | `ensemble_weighting=gather-order-dependent`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| `ensemble_demo.json` | The same mix with three ensemble strategies on, ranked inside the same board (10) — re-run under the weighting fix as attempt 2, which also made it the clearest demonstration of the write-timestamp tiebreak (see below) | CURRENT | 2026-09-12 | `ensemble-demo-b2ff15a4d418` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `per_family_runtimes_demo.json` | Per-family runtime split — deep learning to Ray GPU, statistical and ml to Serverless Spark, native to BigQuery, all four under one `run_id` (50) | CURRENT | 2026-09-10 | `per-family-runtimes-demo-8fe8f224a7e1` | `serverless_deps=container-image`, `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_cpu_demo.json` | Ray on Vertex, CPU, alongside the natives, backtested (6) | STALE | 2026-09-01 | `ray-cpu-demo-f6b6fbdb83a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
 | `ray_gpu_demo.json` | Ray on Vertex, GPU T4 (`neuralprophet`), alongside the natives (6) | STALE | 2026-09-02 | `ray-gpu-demo-e2dcbef4a373` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only` |
@@ -1665,6 +1665,61 @@ ensemble row shares one timestamp, `20:33:01`, which is the intended behaviour a
 artifact: `_ensemble_batch` captures `datetime.now(UTC)` once when the job starts and reuses it for
 every drain, so one ensemble job is one write generation no matter how many microbatches it gathers
 in.
+
+`ensemble_demo`, re-run the next day under the weighting fix, then showed the tiebreak doing its
+actual job. That config had already run once before the fix, so its `run_id` now holds two attempts:
+**560 raw prediction rows per ensemble strategy over 280 cells — 280 with a NULL `created_at` and
+280 stamped.** Every cell therefore resolves to the post-fix row, because `NULLS LAST` sorts the old
+attempt underneath the new one. Before the fix both attempts would have been NULL and the reader
+would have got whichever the scan happened to return first, with no way to tell which.
+
+#### 2026-09-12, Tier 6 wave C: the cluster lifecycle re-proved itself, and the GPU cluster did not
+
+Smokes 04 and 05 both passed, both matching their pre-registered `run_id`s. What they are worth
+running for is the **lifecycle asymmetry** — an ephemeral cluster must be deleted when its run ends,
+a named one must not — and both halves held again. Right after 04 finished,
+`sf-cluster-smoke-04-cluster-cpu-9196365250ac` was already `NOT_FOUND`; right after 05 finished, both
+of its family jobs reported `sf-smoke-cluster` as their placement with state `DONE`, and that cluster
+was still `RUNNING`. As before, the survival check is made against `clusters list`, outside the
+harness, because a reuse path that tore down a cluster it did not create would pass every assertion
+the harness makes.
+
+**One correction to how that check has to be read.** `sf-smoke-cluster` disappeared about half an
+hour later, which looks alarming and is not: every cluster the product builds carries a
+`LifecycleConfig` whose `idle_delete_ttl` defaults to 1800 s, and the deletion landed at 02:27:43
+against a last job finishing 01:57:43 — 1800 s to the second. The reuse path did not delete it;
+Dataproc reclaimed it. The practical consequence is that **the survival assertion has a
+thirty-minute window**, so it has to be made promptly after the run rather than whenever the
+campaign next looks.
+
+**Smoke 16 never reached submit, and the reason is worth recording in two parts.**
+
+The proximate cause is external. The GPU cluster's second init action is Google's published
+`gpu/install_gpu_driver.sh`, and on both workers it looked for a prebuilt kernel-module tarball for
+this image's kernel (`kmod_debian12_550.142.tar.gz` for `6.1.0-52-cloud-amd64`), got a 404, fell
+back to compiling the NVIDIA open kernel modules from source, and was killed partway through
+`make -j8 modules`. Both workers reported `Initialization action failed` about six and a half
+minutes in. Dataproc then held the create operation in `RUNNING` /
+`CREATE_VMS_AND_MANAGED_GROUP_DONE` for another forty minutes collecting diagnostics, so the
+product's blocking create call had no failure to react to and simply waited. Nothing here is a
+product defect, but it does mean **the cluster-GPU path is currently blocked by an upstream cache
+miss** — which is precisely the failure the pre-baked driver image was built to avoid, and that
+image was reverted by owner decision on 2026-09-09 as a cost call. Smoke 06 is the other config on
+this path; its CURRENT row predates the miss.
+
+The second part *is* ours, and only a two-cluster run could have exposed it.
+`shared_clusters.shared_spark_cluster` provisions one cluster **per hardware kind, sequentially**,
+and submits nothing until every one of them is up. So the CPU cluster came up at 02:01, then sat
+completely idle while the GPU cluster tried and failed to provision — and at 02:39, exactly 1800 s
+after it was created, Dataproc's own idle TTL reclaimed it. **A cluster that has never run a job is
+idle from the moment it exists**, so on any run where a second cluster takes more than the idle TTL
+to provision, the first one is destroyed before it is ever used. Under normal conditions the GPU
+create finishes in a few minutes and this is invisible; it took a create that hung to make it
+reachable. Nothing was lost — no family had been submitted, so there were no job rows, and
+`registry.ops.close_runs` closed the orphaned header `RUNNING → FAILED` with the reason "no job rows
+— the run never recorded a family". Both clusters and all three VMs were confirmed gone afterwards.
+
+Neither problem has been fixed yet, so smoke 16's row stays STALE against its 2026-09-02 `run_id`.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
