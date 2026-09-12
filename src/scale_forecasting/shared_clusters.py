@@ -48,12 +48,15 @@ the run genuinely is running, it is provisioning. A merge and not a whole-column
 run's header telemetry is written by several jobs and the last writer must not erase the rest.
 
 Public surface: ``shared_ray_inputs``, ``shared_ray_cluster``, ``shared_spark_inputs``,
-``shared_spark_cluster``, ``shared_capacity_path``.
+``shared_spark_cluster``, ``provision_spark_clusters``, ``teardown_spark_clusters``,
+``shared_capacity_path``.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from threading import Lock
 from typing import TYPE_CHECKING
 
 from .capacity import publishing_to
@@ -230,36 +233,112 @@ def shared_spark_cluster(
     off the deployment region while the other landed at home; each family's job must submit to where
     its own cluster actually is.
 
-    Teardown is an ``ExitStack``, which matters for the partial-create case: if the GPU cluster
-    fails to provision after the CPU cluster came up, the stack unwinds the CPU one on the way out
-    rather than leaking it. Every created cluster is torn down on any exit path — that is the whole
-    guarantee this module exists to make, and splitting into several clusters multiplies what there
-    is to leak. The Dataproc analog of `shared_ray_cluster`.
+    **The clusters are created at the same time, not one after the other, and that is a
+    correctness fix rather than a speed one.** A Dataproc cluster's idle timer starts when the
+    cluster exists, not when it first gets work: a cluster that has never run a job is idle from
+    the moment it comes up. Provisioning in a loop therefore left the first cluster idling for the
+    whole of the second create, and a GPU create that takes longer than the idle TTL — a driver
+    build on a cache miss can take the better part of an hour — got the CPU cluster reclaimed
+    underneath the run before the fan-out ever started. Creating them together bounds the first
+    cluster's idle window to the *difference* between the two creates instead of the whole of the
+    second one. It also shortens the run, but that is the smaller half of the reason.
+
+    Every created cluster is torn down on any exit path — that is the whole guarantee this module
+    exists to make, and splitting into several clusters multiplies what there is to leak. The
+    create itself cleans up after a failed fan-out (`provision_spark_clusters`), so this bracket
+    only has to cover the *body*. The Dataproc analog of `shared_ray_cluster`.
     """
     inputs = shared_spark_inputs(run_dag.python_jobs)
     if inputs is None:
         yield None
         return
-    from .dataproc_cluster import provision_shared_cluster, teardown_shared_cluster
+    clusters = provision_spark_clusters(cfg, inputs, run_id=run_id, settings=settings)
+    try:
+        yield clusters
+    finally:
+        teardown_spark_clusters(clusters, settings)
+
+
+def provision_spark_clusters(
+    cfg: RunConfig,
+    inputs: dict[str, tuple[list[str], str | None]],
+    *,
+    run_id: str,
+    settings: Settings,
+) -> dict[str, tuple[str, str]]:
+    """Create one ephemeral Dataproc cluster per hardware kind, **all at the same time**, and
+    return ``{hardware: (name, region)}``.
+
+    The create half of `shared_spark_cluster`, factored out because the Airflow surface needs the
+    same thing without the bracket: `airflow_tasks.create_spark_cluster` hands its result to a
+    downstream delete task instead of a ``finally``. One function so the two surfaces cannot drift.
+
+    **Creating them together is a correctness fix, not a speed one.** A Dataproc cluster's idle
+    timer starts when the cluster exists, not when it first gets work — a cluster that has never
+    run a job is idle from the moment it comes up. Creating them in a loop therefore left the first
+    cluster idling for the whole of the second create, and live, a GPU create that ran long (a
+    driver build on a cache miss can take the better part of an hour) got the CPU cluster reclaimed
+    at its idle TTL before the fan-out had started. Side by side, the first cluster's idle window
+    shrinks to the *difference* between the two creates rather than the whole of the second one.
+    The run also finishes sooner, but that is the smaller half of the reason.
+
+    **A failed fan-out leaves nothing behind.** If one create raises, this waits for its siblings
+    to finish first and then tears down every cluster that did come up, including one that landed
+    *after* the failure — the case a sequential version could not have, and the one that leaks
+    quietly. The original failure is what propagates.
+    """
+    from .dataproc_cluster import provision_shared_cluster
 
     # Only distinguish names when there is something to distinguish. A one-group run keeps the name
     # every existing log line, doc, and live-proven run already shows.
     suffixed = len(inputs) > 1
-    with ExitStack() as stack:
-        clusters: dict[str, tuple[str, str]] = {}
-        for hardware, (models, gpu_type) in inputs.items():
-            path = shared_capacity_path("dataproc_cluster", hardware if suffixed else None)
-            with publishing_to(_header_capacity_publisher(run_id, path, settings)):
-                name, region = provision_shared_cluster(
-                    cfg,
-                    run_id=run_id,
-                    use_gpu=hardware == "gpu",
-                    gpu_type=gpu_type,
-                    settings=settings,
-                    models=models,
-                    name_suffix=hardware if suffixed else None,
-                )
-            # Registered the instant it exists, so a failure in the *next* create still unwinds it.
-            stack.callback(teardown_shared_cluster, name, region, settings)
-            clusters[hardware] = (name, region)
-        yield clusters
+    landed: dict[str, tuple[str, str]] = {}
+    landed_lock = Lock()
+
+    def provision(hardware: str) -> None:
+        models, gpu_type = inputs[hardware]
+        path = shared_capacity_path("dataproc_cluster", hardware if suffixed else None)
+        # The capacity publisher is a context variable, so the thread doing the work installs its
+        # own: a value set on the calling thread does not follow a worker into the pool.
+        with publishing_to(_header_capacity_publisher(run_id, path, settings)):
+            name, region = provision_shared_cluster(
+                cfg,
+                run_id=run_id,
+                use_gpu=hardware == "gpu",
+                gpu_type=gpu_type,
+                settings=settings,
+                models=models,
+                name_suffix=hardware if suffixed else None,
+            )
+        with landed_lock:
+            landed[hardware] = (name, region)
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(inputs), thread_name_prefix="sf-cluster") as pool:
+            futures = [pool.submit(provision, hardware) for hardware in inputs]
+            # Leaving the pool's block joins every worker, so a thread still creating when its
+            # sibling raised has recorded its cluster before the cleanup below reads the dict.
+            for future in futures:
+                future.result()
+    except BaseException:
+        teardown_spark_clusters(landed, settings)
+        raise
+    # Rebuilt in `inputs` order — CPU then GPU — so what a family looks itself up in does not
+    # depend on which create happened to finish first.
+    return {hardware: landed[hardware] for hardware in inputs}
+
+
+def teardown_spark_clusters(clusters: dict[str, tuple[str, str]], settings: Settings) -> None:
+    """Delete every cluster in ``{hardware: (name, region)}``, attempting all of them.
+
+    Every entry is tried even if one delete raises, and an error surfaces only once the rest have
+    been attempted: bailing on the first failure would leak the cluster behind it, which is exactly
+    the outcome this module exists to prevent. A no-op on an empty mapping.
+    """
+    from .dataproc_cluster import teardown_shared_cluster
+
+    # An ExitStack rather than a loop-with-try: it already attempts every callback and chains the
+    # errors, so the "first failure must not strand the rest" rule is structural here.
+    with ExitStack() as unwind:
+        for name, region in clusters.values():
+            unwind.callback(teardown_shared_cluster, name, region, settings)

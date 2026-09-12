@@ -13,9 +13,13 @@ All offline: provision and teardown are faked, so nothing touches Vertex or Data
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from scale_forecasting import dag, job_launch, shared_clusters
 from scale_forecasting.config import RunConfig
@@ -319,12 +323,21 @@ def test_shared_spark_inputs_ignores_family_with_standing_cluster() -> None:
 
 
 def _patch_shared_spark(
-    monkeypatch: pytest.MonkeyPatch, calls: dict[str, Any], *, fail_on: str | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    calls: dict[str, Any],
+    *,
+    fail_on: str | None = None,
+    during: Callable[[str], None] | None = None,
 ) -> None:
-    """Fake provision/teardown, recording every call in order.
+    """Fake provision/teardown, recording every call.
 
     ``fail_on`` makes the create for that hardware kind raise, which is how the partial-create
-    unwind is exercised: the group that already came up must still be torn down.
+    unwind is exercised: the group that already came up must still be torn down. ``during`` is
+    called with the hardware kind inside the create, before it succeeds or fails — the hook the
+    concurrency tests hang a barrier or a sleep off.
+
+    Recording order is *arrival* order and the creates run at the same time, so assert on the set
+    of calls rather than the sequence unless the test is specifically about ordering.
     """
     from scale_forecasting import dataproc_cluster
 
@@ -333,7 +346,10 @@ def _patch_shared_spark(
 
     def _provision(cfg: RunConfig, **kw: Any) -> tuple[str, str]:
         calls["provision"].append(kw)
-        if fail_on is not None and kw["use_gpu"] == (fail_on == "gpu"):
+        hardware = "gpu" if kw["use_gpu"] else "cpu"
+        if during is not None:
+            during(hardware)
+        if fail_on is not None and hardware == fail_on:
             raise RuntimeError(f"capacity: {fail_on}")
         suffix = kw.get("name_suffix")
         return f"sf-cluster-shared{'-' + suffix if suffix else ''}", "us-central1"
@@ -381,17 +397,20 @@ def test_shared_spark_cluster_provisions_one_cluster_per_hardware_kind(
             "gpu": ("sf-cluster-shared-gpu", "us-central1"),
         }
         # Each cluster is sized for its own group's models and its own hardware — the CPU cluster
-        # never sees the GPU family's fan-out, and buys no accelerators for it.
-        assert [(c["use_gpu"], c["models"], c["name_suffix"]) for c in calls["provision"]] == [
-            (False, ["theta"], "cpu"),
-            (True, ["neuralprophet"], "gpu"),
-        ]
-    # Both torn down, in reverse creation order — the ExitStack unwinds LIFO. Order is incidental
-    # here (the clusters are independent); what matters is that neither is left behind.
-    assert calls["teardown"] == [
+        # never sees the GPU family's fan-out, and buys no accelerators for it. A set, because the
+        # two creates run at the same time and neither is guaranteed to record itself first.
+        assert {
+            (c["use_gpu"], tuple(c["models"]), c["name_suffix"]) for c in calls["provision"]
+        } == {
+            (False, ("theta",), "cpu"),
+            (True, ("neuralprophet",), "gpu"),
+        }
+    # Both torn down. Which one goes first is incidental (the clusters are independent); what
+    # matters is that neither is left behind.
+    assert set(calls["teardown"]) == {
         ("sf-cluster-shared-gpu", "us-central1"),
         ("sf-cluster-shared-cpu", "us-central1"),
-    ]
+    }
 
 
 def test_shared_spark_cluster_tears_down_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,11 +425,11 @@ def test_shared_spark_cluster_tears_down_on_exception(monkeypatch: pytest.Monkey
 
 
 def test_shared_spark_cluster_unwinds_a_partial_create(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A GPU create that fails after the CPU cluster came up must not leak the CPU cluster.
+    """A GPU create that fails while the CPU cluster is up must not leak the CPU cluster.
 
-    The reason the bracket is an ``ExitStack`` and not a single ``finally``: with two clusters there
-    is a window where one exists and the other is still being created, and the failure that closes
-    that window is exactly the one nobody is watching for.
+    The reason the bracket is a stack and not a single ``finally``: with two clusters there is a
+    window where one exists and the other is still being created, and the failure that closes that
+    window is exactly the one nobody is watching for.
     """
     calls: dict[str, Any] = {}
     _patch_shared_spark(monkeypatch, calls, fail_on="gpu")
@@ -418,8 +437,85 @@ def test_shared_spark_cluster_unwinds_a_partial_create(monkeypatch: pytest.Monke
     run_dag = dag.plan_dag(cfg)
     with pytest.raises(RuntimeError, match="capacity: gpu"):
         with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
-            pytest.fail("body must not run — the second create failed")
+            pytest.fail("body must not run — one of the creates failed")
     assert calls["teardown"] == [("sf-cluster-shared-cpu", "us-central1")]
+
+
+def test_shared_spark_cluster_creates_the_hardware_kinds_at_the_same_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two creates overlap, which is what keeps the first cluster off the idle clock.
+
+    A Dataproc cluster is idle from the moment it exists, so a cluster created in a loop sits on
+    its idle timer for the whole of the next create — live, a slow GPU create had the CPU cluster
+    reclaimed before the fan-out started. The barrier is the assertion: both creates have to be
+    inside the fake at once for it to clear, so a sequential implementation times out here rather
+    than passing quietly.
+    """
+    barrier = threading.Barrier(2, timeout=10)
+    calls: dict[str, Any] = {}
+    _patch_shared_spark(monkeypatch, calls, during=lambda _hardware: barrier.wait())
+    cfg = _mixed_hardware_cfg()
+    run_dag = dag.plan_dag(cfg)
+    with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS) as spark_cluster:
+        assert spark_cluster is not None
+        # Yielded CPU-then-GPU regardless of which thread finished first.
+        assert list(spark_cluster) == ["cpu", "gpu"]
+
+
+def test_shared_spark_cluster_tears_down_a_sibling_that_lands_after_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure the sequential version could not cover: a cluster that comes up *after* a
+    sibling create has already raised.
+
+    With the creates side by side, "unwind what exists" is not enough — the unwind has to wait for
+    the still-running thread first, or it tears down a cluster set that is missing the one about
+    to appear. Here the CPU create fails immediately while the GPU create is still working; the
+    GPU cluster must still be torn down.
+    """
+    cpu_failed = threading.Event()
+
+    def _during(hardware: str) -> None:
+        if hardware == "cpu":
+            cpu_failed.set()  # the `fail_on` raise is the next statement
+        else:
+            assert cpu_failed.wait(timeout=10)  # so the GPU cluster lands strictly afterwards
+
+    calls: dict[str, Any] = {}
+    _patch_shared_spark(monkeypatch, calls, fail_on="cpu", during=_during)
+    cfg = _mixed_hardware_cfg()
+    run_dag = dag.plan_dag(cfg)
+    with pytest.raises(RuntimeError, match="capacity: cpu"):
+        with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
+            pytest.fail("body must not run — one of the creates failed")
+    assert calls["teardown"] == [("sf-cluster-shared-gpu", "us-central1")]
+
+
+def test_shared_spark_cluster_tears_down_the_rest_when_one_teardown_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One cluster refusing to delete must not strand the other one running up a bill."""
+    from scale_forecasting import dataproc_cluster
+
+    calls: dict[str, Any] = {}
+    _patch_shared_spark(monkeypatch, calls)
+
+    def _teardown(name: str, region: str, settings: Settings) -> None:
+        calls["teardown"].append((name, region))
+        if name.endswith("-gpu"):
+            raise RuntimeError("delete: gpu")
+
+    monkeypatch.setattr(dataproc_cluster, "teardown_shared_cluster", _teardown)
+    cfg = _mixed_hardware_cfg()
+    run_dag = dag.plan_dag(cfg)
+    with pytest.raises(RuntimeError, match="delete: gpu"):
+        with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
+            pass
+    assert set(calls["teardown"]) == {
+        ("sf-cluster-shared-cpu", "us-central1"),
+        ("sf-cluster-shared-gpu", "us-central1"),
+    }
 
 
 def test_shared_spark_cluster_skips_single_family(monkeypatch: pytest.MonkeyPatch) -> None:

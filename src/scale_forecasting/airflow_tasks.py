@@ -352,15 +352,20 @@ def create_spark_cluster(config_uri: str) -> dict[str, list[str]]:
     accelerators under the CPU families' work. Each value carries its own region, because a capacity
     failover may have moved one cluster and not the other.
 
-    **A partial create tears itself down before raising.** Unlike the local path's ``ExitStack``,
-    this task has no ``finally`` reaching into `delete_spark_cluster` — a raising task pushes no
+    The creates run side by side and a failed fan-out cleans up after itself, because both come
+    from the same function the local path uses (`shared_clusters.provision_spark_clusters`) — the
+    idle-TTL reason for creating them together is written up there, and one implementation is the
+    only way this surface and the local one stay honest about G1. What this task adds is the XCom
+    shape: a tuple is not JSON, so each value is serialized as a ``[name, region]`` list for
+    `delete_spark_cluster` to read back.
+
+    Cleaning up a partial create *here* matters more than it does locally: a raising task pushes no
     XCom, so the downstream teardown would find nothing and the already-created cluster would bill
-    on unnoticed. Cleaning up here is the only place that can see it.
+    on unnoticed. This task is the only place that can see it.
     """
     from . import shared_clusters
     from .config import load_config_uri
     from .dag import plan_dag
-    from .dataproc_cluster import provision_shared_cluster, teardown_shared_cluster
     from .errors import ConfigError
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -373,25 +378,10 @@ def create_spark_cluster(config_uri: str) -> dict[str, list[str]]:
         raise ConfigError(
             f"create_spark_cluster: run {run_id} has no shared Dataproc-cluster families"
         )
-    suffixed = len(inputs) > 1
-    clusters: dict[str, list[str]] = {}
-    try:
-        for hardware, (models, gpu_type) in inputs.items():
-            name, region = provision_shared_cluster(
-                cfg,
-                run_id=run_id,
-                use_gpu=hardware == "gpu",
-                gpu_type=gpu_type,
-                settings=settings,
-                models=models,
-                name_suffix=hardware if suffixed else None,
-            )
-            clusters[hardware] = [name, region]
-    except Exception:
-        for name, region in clusters.values():
-            teardown_shared_cluster(name, region, settings)
-        raise
-    return clusters
+    clusters = shared_clusters.provision_spark_clusters(
+        cfg, inputs, run_id=run_id, settings=settings
+    )
+    return {hardware: [name, region] for hardware, (name, region) in clusters.items()}
 
 
 def delete_spark_cluster(config_uri: str, ti: Any = None) -> None:
