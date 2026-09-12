@@ -256,3 +256,46 @@ def test_a_cluster_from_before_the_registry_label_is_still_judged_on_its_run():
     legacy = _cluster("sf-ray-demo-abc123", labels={APP_LABEL[0]: APP_LABEL[1]})
     (verdict,) = _classify([legacy], {"demo-abc123": "COMPLETED"})
     assert verdict.reap
+
+
+# --- the launch-time sweep: the half that runs without being asked -------------------------
+
+
+def _explode(**_kw):
+    raise AssertionError("the sweep should not have looked at Vertex here")
+
+
+def test_the_launch_sweep_can_be_turned_off_by_environment(monkeypatch):
+    """`SF_REAP_ON_LAUNCH=0` has to short-circuit *before* any read, not merely skip the delete."""
+    monkeypatch.setenv(ray_reaper.SWEEP_ON_LAUNCH_ENV, "0")
+    monkeypatch.setattr(ray_reaper, "plan_reap_clusters", _explode)
+    assert ray_reaper.sweep_on_launch(_settings(REGISTRY), ["us-central1"]) == ()
+
+
+def test_the_launch_sweep_is_on_unless_told_otherwise(monkeypatch):
+    """A cleanup nobody remembers to enable is a cleanup that never runs, so the default is on."""
+    monkeypatch.delenv(ray_reaper.SWEEP_ON_LAUNCH_ENV, raising=False)
+    looked: list[str] = []
+    monkeypatch.setattr(
+        ray_reaper,
+        "plan_reap_clusters",
+        lambda **kw: looked.append("yes") or _plan(()),
+    )
+    assert ray_reaper.sweep_on_launch(_settings(REGISTRY), ["us-central1"]) == ()
+    assert looked == ["yes"]
+
+
+def test_a_sweep_that_fails_lets_the_run_start_anyway(monkeypatch):
+    """The whole point of the sweep is to save money, and no saving is worth failing a launch.
+
+    A Vertex outage, a missing permission or a registry that cannot be read all reach here. Each of
+    them leaves the deployment exactly where it was before this sweep existed — which is survivable
+    — whereas raising would mean a cleanup routine had become a reason runs cannot start.
+    """
+    monkeypatch.delenv(ray_reaper.SWEEP_ON_LAUNCH_ENV, raising=False)
+
+    def _boom(**_kw):
+        raise RuntimeError("403 listing persistent resources")
+
+    monkeypatch.setattr(ray_reaper, "plan_reap_clusters", _boom)
+    assert ray_reaper.sweep_on_launch(_settings(REGISTRY), ["us-central1"]) == ()

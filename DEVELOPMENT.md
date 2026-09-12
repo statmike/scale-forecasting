@@ -96,8 +96,15 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   garbage immediately, because waiting half an hour there just bills for a GPU. Preview by default,
   and the preview prints the kept clusters as prominently as the doomed ones — a list showing only
   deletions reads as "nothing is running" when the opposite is true. Policy is pure and offline-tested
-  (`test_ray_reaper.py`, 26 tests, mostly pinning the *refusals*); the Vertex list and delete are thin
-  wrappers.
+  (`test_ray_reaper.py`, mostly pinning the *refusals*); the Vertex list and delete are thin wrappers.
+  **A verb is not a ceiling, though**, and Vertex offers nothing to hang one on, so the same decision
+  also runs automatically immediately before any Ray cluster is created (`sweep_on_launch`, called
+  from the one function every ephemeral create passes through) — the one moment the deployment is
+  guaranteed awake, and the moment the leaked cluster is holding the quota the new one needs. It
+  swallows its own failures, because no cleanup is worth a launch that will not start, and it is
+  switched by `SF_REAP_ON_LAUNCH` rather than by config: a `RunConfig` field would change every
+  `run_id` (the id is a digest of the config), and a deployment's cleanup policy has no business
+  changing the identity of a run's results.
 - **Two reserved-but-inert config fields wired, and a correctness bug they surfaced.**
   `features.level_shift` and `compute.machine_family` had both been declared, documented as
   "reserved", and consumed nowhere. `level_shift` now detects a single abrupt regime change

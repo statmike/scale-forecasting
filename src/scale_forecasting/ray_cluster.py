@@ -504,6 +504,14 @@ def _create_cluster_across_regions(
     ``on_state`` publishes ``AWAITING_CAPACITY`` while the walk is still running, defaulting to
     whatever `capacity.publishing_to` installed for this family (`job_launch` does).
     """
+    from .ray_reaper import sweep_on_launch
+
+    # Before adding a cluster, take back the ones a killed launcher left behind. This is as close to
+    # an always-on ceiling as Vertex allows (`ray_reaper.sweep_on_launch` explains why there is no
+    # TTL to set instead), and the moment it matters most: a leaked cluster is holding the regional
+    # quota the create below is about to ask for. Best effort by construction — it swallows its own
+    # failures — and it cannot see a reuse target, because reuse never reaches this function.
+    sweep_on_launch(settings, regions)
     ledger = ledger if ledger is not None else CapacityLedger(service="ray")
     plans = _apply_quota_preflight(plan, infra, settings, regions, ledger) if preflight else {}
     live = [region for region in regions if region not in ledger.dead_candidates]

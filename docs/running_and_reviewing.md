@@ -484,6 +484,14 @@ provisioned yourself and point runs at with `compute.ray_cluster_name` is never 
 path neither creates nor labels a cluster, so this verb cannot see it. Pass `--region` more than once
 to sweep several regions in one go; the default is the region your environment already points at.
 
+**The same sweep also runs by itself, just before any Ray cluster is created.** A verb only runs when
+someone runs it, and a leak happens when nobody is watching — so every Ray launch reclaims finished
+clusters first, which is also when it matters most (the leaked cluster is holding the regional quota
+the new one is about to ask for). It never blocks a launch: if the listing or the registry read
+fails, it logs and provisions anyway. Set `SF_REAP_ON_LAUNCH=0` to turn it off. It is an environment
+variable rather than a config field on purpose — a run's `run_id` is a digest of its config, and a
+deployment's cleanup policy has no business changing the identity of a run's results.
+
 **Order matters, and the verbs enforce it.** A registry row is the only index of which GCS objects
 belong to which run, so every delete goes *artifacts first, rows last*. Dropping the rows first
 would strand the artifacts permanently — which is what makes `sweep-orphans` necessary at all, for

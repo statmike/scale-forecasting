@@ -44,13 +44,21 @@ Preview is the default and ``yes=True`` executes, the same shape every destructi
 `registry.ops` uses — and the plan prints the kept clusters as prominently as the doomed ones,
 because "why is this one still here?" is the question an operator actually arrives with.
 
-Split along the usual pure/I-O seam: `classify_clusters` and `format_reap_plan` are pure and decide
-everything, while `plan_reap_clusters` and `reap_clusters` only fetch and act.
+**Two ways in, because a verb alone is not a ceiling.** `reap_clusters` is the operator's command
+and previews by default. `sweep_on_launch` is the same decision run automatically, immediately
+before this deployment creates a Ray cluster — the one moment it is guaranteed to be awake, and the
+moment a leaked cluster is holding the quota the new one needs. It swallows its own failures,
+because no cleanup is worth a launch that will not start, and it can be switched off with
+``SF_REAP_ON_LAUNCH=0``.
 
-Public surface: ``reap_clusters``, ``plan_reap_clusters``, ``classify_clusters``,
-``format_reap_plan``, ``ReapPlan``, ``ReapCandidate``, ``DEFAULT_MIN_AGE_SECONDS``. Reachable as
-``registry-ops reap-clusters`` and as `sdk.Registry.reap_clusters`; the Vertex listing and the
-delete it drives are `ray_cluster.list_clusters` / `ray_cluster.teardown_shared_cluster`.
+Split along the usual pure/I-O seam: `classify_clusters` and `format_reap_plan` are pure and decide
+everything, while `plan_reap_clusters`, `reap_clusters` and `sweep_on_launch` only fetch and act.
+
+Public surface: ``reap_clusters``, ``sweep_on_launch``, ``plan_reap_clusters``,
+``classify_clusters``, ``format_reap_plan``, ``ReapPlan``, ``ReapCandidate``,
+``DEFAULT_MIN_AGE_SECONDS``, ``SWEEP_ON_LAUNCH_ENV``. Reachable as ``registry-ops reap-clusters``
+and as `sdk.Registry.reap_clusters`; the Vertex listing and the delete it drives are
+`ray_cluster.list_clusters` / `ray_cluster.teardown_shared_cluster`.
 """
 
 from __future__ import annotations
@@ -76,6 +84,10 @@ _log = get_logger(__name__)
 #: abandon a cluster on the same clock — and comfortably longer than the gap between a run creating
 #: its cluster and its header landing in BigQuery.
 DEFAULT_MIN_AGE_SECONDS = 1800.0
+
+#: Set to ``0``/``false``/``no``/``off`` to stop `sweep_on_launch` running before a cluster create.
+SWEEP_ON_LAUNCH_ENV = "SF_REAP_ON_LAUNCH"
+_OFF = frozenset({"0", "false", "no", "off"})
 
 #: Vertex is already taking this one down; deleting it again achieves nothing and logs a scary
 #: error.
@@ -293,8 +305,6 @@ def reap_clusters(
     `shared_clusters.teardown_spark_clusters` gives: stopping at the first failure strands all of
     the ones behind it, which is precisely the outcome this module exists to prevent.
     """
-    from .ray_cluster import teardown_shared_cluster
-
     resolved = _settings(settings)
     plan = plan_reap_clusters(settings=resolved, regions=regions, min_age_seconds=min_age_seconds)
     _log.warning("%s", format_reap_plan(plan))
@@ -305,10 +315,21 @@ def reap_clusters(
         _log.warning("DRY RUN — no cluster deleted. Re-run with yes=True to execute.")
         return plan
 
+    _delete_all(plan, resolved)
+    return plan
+
+
+def _delete_all(
+    plan: ReapPlan, settings: Settings
+) -> tuple[str, ...]:  # pragma: no cover - GCP I/O, @gcp smoke
+    """Delete every reapable cluster in ``plan``; return the names that actually went away."""
+    from .ray_cluster import teardown_shared_cluster
+
+    gone: list[str] = []
     for candidate in plan.reapable:
         cluster = candidate.cluster
         try:
-            teardown_shared_cluster(cluster.name, cluster.region, resolved)
+            teardown_shared_cluster(cluster.name, cluster.region, settings)
         except Exception as exc:  # noqa: BLE001 - one stuck delete must not strand the rest
             _log.warning(
                 "could not delete Ray cluster %s in %s — it may still be billing: %r",
@@ -316,5 +337,43 @@ def reap_clusters(
                 cluster.region,
                 exc,
             )
-    _log.warning("reaped %d Ray cluster(s) in %s", len(plan.reapable), plan.registry)
-    return plan
+        else:
+            gone.append(cluster.name)
+    _log.warning("reaped %d Ray cluster(s) in %s", len(gone), plan.registry)
+    return tuple(gone)
+
+
+def sweep_on_launch(settings: Settings, regions: Sequence[str]) -> tuple[str, ...]:
+    """Reclaim finished-run clusters just before creating another one. Best effort; never raises.
+
+    The verb above only runs when a person runs it, and a leak is by definition something that
+    happened while nobody was watching. Vertex has no cluster-side ceiling to lean on instead (no
+    TTL, no idle timeout), so the closest thing to "always" available here is *every time this
+    deployment provisions a Ray cluster* — which is also when it matters most, since the leaked
+    cluster is holding the regional quota the create is about to ask for.
+
+    Two deliberate choices:
+
+    * **Failure is swallowed.** A launch must not die because a cleanup read failed; the worst case
+      of skipping the sweep is the status quo before it existed, while the worst case of raising is
+      a run that never starts. Anything that goes wrong is logged and the create proceeds.
+    * **It is an environment switch, not a config field.** ``SF_REAP_ON_LAUNCH=0`` turns it off. A
+      `RunConfig` field would change every run's ``run_id`` — the id is a digest of the config — and
+      a deployment-level cleanup policy has no business changing the identity of a run's results.
+      Same reasoning as ``SF_SERVERLESS_DEPS`` living on the infra object.
+
+    Returns the names it reclaimed, for the caller that wants to say so.
+    """
+    import os
+
+    if os.environ.get(SWEEP_ON_LAUNCH_ENV, "1").strip().lower() in _OFF:
+        return ()
+    try:
+        plan = plan_reap_clusters(settings=settings, regions=regions)
+        if plan.is_empty:
+            return ()
+        _log.warning("%s", format_reap_plan(plan))
+        return _delete_all(plan, settings)
+    except Exception as exc:  # noqa: BLE001 - a cleanup must never be the reason a run fails
+        _log.warning("launch-time Ray cluster sweep skipped (%r); provisioning anyway", exc)
+        return ()

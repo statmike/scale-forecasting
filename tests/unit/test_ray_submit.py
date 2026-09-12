@@ -28,13 +28,32 @@ from typing import Any
 
 import pytest
 
-from scale_forecasting import capacity, ray_cluster, ray_infra, ray_jobs, ray_submit, ray_telemetry
+from scale_forecasting import (
+    capacity,
+    ray_cluster,
+    ray_infra,
+    ray_jobs,
+    ray_reaper,
+    ray_submit,
+    ray_telemetry,
+)
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines import ray_io
 from scale_forecasting.errors import ConfigError, EngineError
 from scale_forecasting.profiling import source as profiling_source
 from scale_forecasting.registry.ids import make_run_id
 from scale_forecasting.settings import Settings
+
+
+@pytest.fixture(autouse=True)
+def _no_launch_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Creating a cluster now reclaims leaked ones first; offline, that would be live Vertex I/O.
+
+    The switch is the product's own (`ray_reaper.SWEEP_ON_LAUNCH_ENV`), so this both keeps the
+    tests offline and exercises the documented way to turn the sweep off.
+    """
+    monkeypatch.setenv(ray_reaper.SWEEP_ON_LAUNCH_ENV, "0")
+
 
 _CPU = "theta"
 _GPU = "neuralprophet"
@@ -440,6 +459,27 @@ def test_submit_ray_ephemeral_creates_submits_and_deletes(
     assert calls["init_project"] == "proj-x"
     # The caller-supplied id is threaded to the Ray job so its own submission id is deterministic.
     assert calls["submission_id"] == "sf-rid-ml-a1"
+
+
+def test_creating_a_cluster_first_reclaims_what_a_killed_run_left_behind(
+    _stubbed_lifecycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The only always-on half of the leak fix, so the wiring is worth pinning.
+
+    Vertex has no TTL to hang a ceiling on, so `ray_reaper.sweep_on_launch` runs at the one moment
+    this deployment is guaranteed to be awake and paying attention: just before it asks the same
+    region for more capacity. If this call goes missing, nothing reclaims a leaked cluster until a
+    human thinks to run the verb.
+    """
+    swept: list[tuple[str, ...]] = []
+
+    def _fake_sweep(settings: Any, regions: Any) -> tuple[str, ...]:
+        swept.append(tuple(regions))
+        return ()
+
+    monkeypatch.setattr(ray_reaper, "sweep_on_launch", _fake_sweep)
+    ray_submit.submit_ray(_cfg(), settings=_settings(), infra=_infra(), wait=True)
+    assert swept == [("us-central1",)]
 
 
 def test_submit_ray_records_both_pool_plans_under_its_own_family(
