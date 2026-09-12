@@ -703,6 +703,31 @@ class Registry:
 
         return ops.sweep_orphans(settings=self._settings, yes=yes)
 
+    def reap_clusters(
+        self,
+        *,
+        regions: list[str] | None = None,
+        min_age_seconds: float | None = None,
+        yes: bool = False,
+    ) -> Any:
+        """Delete Ray clusters belonging to this registry whose run has already finished.
+
+        The compute counterpart of `sweep_orphans`, and the only protection against a launcher that
+        was killed before its teardown could run — a Vertex Ray cluster has no idle TTL to fall back
+        on the way a Dataproc one does. Preview unless ``yes``. See `ray_reaper.reap_clusters` for
+        the rules that decide a cluster is abandoned, and why an ambiguous one is left running.
+        """
+        from .ray_reaper import DEFAULT_MIN_AGE_SECONDS, reap_clusters
+
+        return reap_clusters(
+            settings=self._settings,
+            regions=regions,
+            min_age_seconds=(
+                DEFAULT_MIN_AGE_SECONDS if min_age_seconds is None else min_age_seconds
+            ),
+            yes=yes,
+        )
+
     def snapshot(
         self, suffix: str, *, into: str | None = None, expiration_days: int | None = None
     ) -> dict[str, str]:

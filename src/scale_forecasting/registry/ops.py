@@ -2,7 +2,7 @@
 
 A deployment's registry is not write-once. Runs accumulate, experiments end, a bad run wants
 deleting, and the operator wants to know what is actually in there before touching any of it. This
-module is that surface: **seven bounded verbs** over exactly one registry — the one
+module is that surface: **eight bounded verbs** over exactly one registry — the one
 `Settings.registry_dataset_ref` resolves to.
 
 **Manage only, by design.** There is no wipe here. A full teardown is `bq rm -r -f <dataset>` or the
@@ -16,8 +16,17 @@ below touches only what the caller named:
 | `close_runs` | finalize abandoned ``RUNNING`` headers to what their job rows already imply |
 | `drop_run` | delete named run(s) from every tier: rows, GCS artifacts, and BQML model objects |
 | `sweep_orphans` | delete artifact prefixes under *this* registry with no ``run_registry`` row |
+| `reap_clusters` | delete Ray clusters belonging to *this* registry whose run has finished |
 | `snapshot` | BigQuery table snapshots of the five registry tables (cheap, expirable) |
 | `export` | dump the registry to GCS (Parquet or newline-delimited JSON) for offline analysis |
+
+`reap_clusters` is the odd one out — it deletes *compute*, not registry contents — and it is here
+because the registry is what decides. A Vertex Ray cluster has no idle TTL to set (the Dataproc
+clusters do, which is why only the Ray side leaks), so the only way to know a cluster is abandoned
+is to ask whether its run is over, and that answer lives in ``run_registry``. Scoped exactly like
+`sweep_orphans`: clusters are labelled with the registry that owns them, so another deployment in
+the same project is outside its world. The policy and the Vertex calls are `ray_reaper`'s; this
+module contributes the verb and `all_header_statuses`.
 
 **The ordering rule.** A registry row is the *only* index of which GCS objects exist. Delete the
 rows first and the artifacts become unidentifiable garbage forever — which is exactly how the old
@@ -497,6 +506,35 @@ def _statuses(
             f"could not read run statuses from {settings.registry_dataset_ref}: {exc}"
         ) from exc
     return {r: found.get(r) for r in run_ids}
+
+
+def all_header_statuses(
+    settings: Settings,
+) -> dict[str, str | None]:  # pragma: no cover - GCP I/O, @gcp smoke
+    """``{run_id: latest header status}`` for **every** run in this registry (one query).
+
+    The whole-registry form of `_statuses`, for a caller that has to answer "is this run finished?"
+    without knowing the run ids up front. `ray_reaper` is that caller: it reads run ids off cluster
+    *names*, which are clamped to 63 characters and so may hold only a prefix of the real id — there
+    is nothing to bind into a ``WHERE run_id IN UNNEST(...)``, and prefix matching happens in pure
+    code against this map instead. One header row per run makes it a small read even on a busy
+    registry.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    sql = (
+        "SELECT run_id, ARRAY_AGG(status ORDER BY created_at DESC LIMIT 1)[OFFSET(0)] AS status\n"
+        f"FROM `{settings.registry_table_ref('run_registry')}`\nGROUP BY run_id"
+    )
+    client = bigquery.Client(project=settings.project_id)
+    try:
+        return {str(r["run_id"]): r["status"] for r in client.query(sql).result()}
+    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+        raise RegistryError(
+            f"could not read run statuses from {settings.registry_dataset_ref}: {exc}"
+        ) from exc
 
 
 def _run_models(
@@ -992,7 +1030,7 @@ def export(
 def main(argv: list[str] | None = None) -> None:
     """CLI: ``python -m scale_forecasting.registry.ops <verb> [...]``.
 
-    One subcommand per verb, the same seven the SDK exposes (G1 — one implementation, three
+    One subcommand per verb, the same eight the SDK exposes (G1 — one implementation, three
     entry points). Mutating verbs preview by default and need ``--yes``.
     """
     import argparse
@@ -1028,6 +1066,22 @@ def main(argv: list[str] | None = None) -> None:
     p_sweep = sub.add_parser("sweep-orphans", help="delete artifacts with no run_registry row")
     p_sweep.add_argument("--yes", action="store_true", help="execute (default is a preview)")
 
+    p_reap = sub.add_parser("reap-clusters", help="delete Ray clusters whose run has finished")
+    p_reap.add_argument(
+        "--region",
+        action="append",
+        dest="regions",
+        default=None,
+        help="a region to sweep; repeatable (default: the data-plane region alone)",
+    )
+    p_reap.add_argument(
+        "--min-age-seconds",
+        type=float,
+        default=None,
+        help="how old a cluster with no run header must be before it counts as garbage",
+    )
+    p_reap.add_argument("--yes", action="store_true", help="execute (default is a preview)")
+
     p_snap = sub.add_parser("snapshot", help="BigQuery table snapshots of the registry")
     p_snap.add_argument("suffix", help="names the snapshot set, e.g. 20260831")
     p_snap.add_argument("--into", default=None, help="target dataset (default: the registry's own)")
@@ -1048,6 +1102,16 @@ def main(argv: list[str] | None = None) -> None:
         drop_run(ns.run_ids, yes=ns.yes, force=ns.force)
     elif ns.verb == "sweep-orphans":
         sweep_orphans(yes=ns.yes)
+    elif ns.verb == "reap-clusters":
+        from ..ray_reaper import DEFAULT_MIN_AGE_SECONDS, reap_clusters
+
+        reap_clusters(
+            regions=ns.regions,
+            min_age_seconds=(
+                DEFAULT_MIN_AGE_SECONDS if ns.min_age_seconds is None else ns.min_age_seconds
+            ),
+            yes=ns.yes,
+        )
     elif ns.verb == "snapshot":
         snapshot(ns.suffix, into=ns.into, expiration_days=ns.expiration_days)
     elif ns.verb == "export":

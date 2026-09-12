@@ -78,6 +78,26 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- **A Ray cluster that outlives the process that made it (`ray_reaper.py`, `reap-clusters`).** Ray
+  teardown is a `finally` block, which is a promise only as strong as the launching process: kill it
+  and the Vertex cluster stays up. The Dataproc path has no equivalent exposure — every cluster it
+  creates carries an idle TTL and a max age and Dataproc reclaims it unasked — but Vertex's
+  `PersistentResource` has no TTL, idle, or auto-delete field at all (checked against the proto, not
+  assumed), so a reaper is the only mechanism available. What made it buildable safely was making
+  "garbage" decidable rather than heuristic: every cluster we create now carries an `app` label and a
+  `registry: <dataset>` label, so a second deployment sharing the project is invisible to us the same
+  way `sweep-orphans` is scoped; the cluster name embeds the `run_id`; and deletion requires that run
+  to be terminal. Two subtleties are the real content. The name is clamped to Vertex's 63 characters,
+  so a long `run_id` survives only as a *prefix* — matching by equality would read every long-named
+  run as unknown and delete a live cluster, so matching is by prefix and an ambiguous prefix with any
+  live match keeps the machine. And the minimum-age floor (30 min, mirroring the Dataproc idle TTL)
+  applies *only* when there is no header at all, covering the seconds between cluster create and
+  header write; a run that is already finished plus a standing cluster is a failed teardown and is
+  garbage immediately, because waiting half an hour there just bills for a GPU. Preview by default,
+  and the preview prints the kept clusters as prominently as the doomed ones — a list showing only
+  deletions reads as "nothing is running" when the opposite is true. Policy is pure and offline-tested
+  (`test_ray_reaper.py`, 26 tests, mostly pinning the *refusals*); the Vertex list and delete are thin
+  wrappers.
 - **Two reserved-but-inert config fields wired, and a correctness bug they surfaced.**
   `features.level_shift` and `compute.machine_family` had both been declared, documented as
   "reserved", and consumed nowhere. `level_shift` now detects a single abrupt regime change
@@ -98,9 +118,10 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   features while the shipped forecast did not. `features.build_future_features` now builds the
   horizon frame properly, with column-order parity by construction because
   `_lag_forecaster.recursive_predict` reads exog positionally.
-- Registry operations (`registry/ops.py`) — the manage-only operator surface, seven verbs over the
+- Registry operations (`registry/ops.py`) — the manage-only operator surface, eight verbs over the
   one registry `SF_*` resolves to: `init`, `doctor` (read-only: row counts, runs stuck `RUNNING`,
-  orphaned artifacts), `close-runs`, `drop-run`, `sweep-orphans`, `snapshot`, `export`. One
+  orphaned artifacts), `close-runs`, `drop-run`, `sweep-orphans`, `reap-clusters`, `snapshot`,
+  `export`. One
   implementation, three
   entry points (`python -m scale_forecasting.registry.ops <verb>`, the `Registry` SDK class,
   a notebook) — G1 applies to operations too. Deliberately **not** shipped: a wipe verb (a full
@@ -123,7 +144,7 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   an operator tidying the registry closes a run that is still going. Preview-by-default with exact
   blast radius (runs, objects, bytes), the same shape the probe's cancel path uses. Pure/I-O seam
   throughout: planners, SQL renderers, the status roll-up, and formatters are offline-tested
-  (`test_registry_ops.py`); the seven verbs are `@gcp`.
+  (`test_registry_ops.py`); the verbs themselves are `@gcp`.
   With this landed, **`reset.py` and a whole-registry `drop_all` are gone** — the destructive tier leaves
   the product entirely. What replaces them is a `bq rm` one-liner
   ([operations.md §2c](docs/operations.md)), because the only thing `reset` did that a `bq rm`

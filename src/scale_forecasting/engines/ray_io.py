@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from ..settings import Settings
 
 __all__ = [
+    "EPHEMERAL_PREFIX",
     "RayClusterPlan",
     "aggregate_status",
     "calibrate_gpu_fraction",
@@ -75,6 +76,7 @@ __all__ = [
     "plan_cluster",
     "plan_pool",
     "pool_families",
+    "run_id_prefix_from_cluster_name",
     "split_gpu_cpu_models",
 ]
 
@@ -377,6 +379,12 @@ def _check_gpu_machine(gpu_type: str, gpu_machine_type: str) -> None:
         )
 
 
+#: What every *ephemeral* Ray cluster's name starts with, and the only place a ``run_id`` is written
+#: down on the compute side: `ray_reaper.classify_clusters` reads it back out to find the run that
+#: owns a standing cluster, and will not consider deleting a cluster whose name lacks it.
+EPHEMERAL_PREFIX = "sf-ray-"
+
+
 def cluster_name(cfg: RunConfig, run_id: str) -> str:
     """The cluster name: the reuse target if set, else ``sf-ray-<run_id>`` (Vertex-legal, ≤ 63).
 
@@ -391,7 +399,21 @@ def cluster_name(cfg: RunConfig, run_id: str) -> str:
     """
     if cfg.compute.ray_cluster_name:
         return cfg.compute.ray_cluster_name
-    return f"sf-ray-{run_id}"[:63].rstrip("-")
+    return f"{EPHEMERAL_PREFIX}{run_id}"[:63].rstrip("-")
+
+
+def run_id_prefix_from_cluster_name(name: str) -> str | None:
+    """Read the ``run_id`` back out of an ephemeral cluster name, or ``None`` if it isn't one.
+
+    The inverse of `cluster_name`, and deliberately named a *prefix* rather than a run id: the clamp
+    to 63 characters means a run whose ``run_name`` is long enough loses the tail of its id here, so
+    what comes back is only guaranteed to be the start of the real one. Callers must match it
+    against known run ids by prefix, never assume equality — `ray_reaper.classify_clusters` does
+    exactly that, and treats an ambiguous prefix as a reason to leave the cluster alone.
+    """
+    if not name.startswith(EPHEMERAL_PREFIX):
+        return None
+    return name[len(EPHEMERAL_PREFIX) :] or None
 
 
 def _sizing_fraction(cfg: RunConfig) -> float:

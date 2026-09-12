@@ -136,8 +136,17 @@ uv run python -m scale_forecasting.registry.ops close-runs          # preview ev
 uv run python -m scale_forecasting.registry.ops close-runs --yes
 ```
 
-The full verb set (`init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` / `snapshot` /
-`export`) and the
+A killed Ray launcher leaves something more expensive behind than a stuck row: the Vertex cluster it
+created, which Vertex will never reclaim on its own (a persistent resource has no idle timeout and no
+max age). `reap-clusters` deletes the ones whose run has already finished, and previews first:
+
+```bash
+uv run python -m scale_forecasting.registry.ops reap-clusters       # preview: what, and why
+uv run python -m scale_forecasting.registry.ops reap-clusters --yes
+```
+
+The full verb set (`init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` /
+`reap-clusters` / `snapshot` / `export`) and the
 matching `Registry` SDK class are documented in
 [running_and_reviewing.md §6](./running_and_reviewing.md#6-managing-the-registry).
 

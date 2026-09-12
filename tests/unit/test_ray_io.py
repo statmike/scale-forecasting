@@ -343,6 +343,33 @@ def test_plan_reuse_targets_named_cluster_and_skips_lifecycle() -> None:
     assert plan.reuse is True
 
 
+def test_a_cluster_name_round_trips_back_to_its_run_id() -> None:
+    # `ray_reaper` reads the run id back out of a cluster name to decide whether the run that owns
+    # the machine has finished. If these two ever stop being inverses the reaper stops recognising
+    # its own clusters, so the pairing is pinned here, next to the naming it depends on.
+    name = ray_io.cluster_name(_cfg(compute=_compute()), "run-abc-123")
+    assert ray_io.run_id_prefix_from_cluster_name(name) == "run-abc-123"
+
+
+def test_a_long_run_id_comes_back_only_as_a_prefix() -> None:
+    # The 63-char clamp means the name cannot hold a long id in full. What comes back is the start
+    # of the real one, which is why the reaper matches by prefix and treats an ambiguous match as a
+    # reason to leave the cluster running rather than assume equality.
+    run_id = "x" * 80
+    name = ray_io.cluster_name(_cfg(compute=_compute()), run_id)
+    recovered = ray_io.run_id_prefix_from_cluster_name(name)
+    assert recovered is not None
+    assert run_id.startswith(recovered)
+    assert len(recovered) < len(run_id)
+
+
+def test_an_operator_named_cluster_yields_no_run_id() -> None:
+    # A reuse target is not run-derived, so there is no id to recover and nothing for the reaper to
+    # judge it against.
+    assert ray_io.run_id_prefix_from_cluster_name("my-standing-cluster") is None
+    assert ray_io.run_id_prefix_from_cluster_name(ray_io.EPHEMERAL_PREFIX) is None
+
+
 def test_plan_gpu_off_sizes_no_gpu_pool() -> None:
     # use_gpu=False → NeuralProphet still routes to the GPU list, but no GPU nodes are provisioned
     # (the model would fall back to CPU inside the task). The CPU pool still runs the stat model.

@@ -409,7 +409,7 @@ to the run's base models, so re-ensembling never folds a previous consensus into
 ## 6. Managing the registry
 
 Runs accumulate. `registry.ops` is the operator surface over the one registry your `SF_*`
-environment points at — seven verbs, reachable identically from the CLI, the SDK (`Registry`), and a
+environment points at — eight verbs, reachable identically from the CLI, the SDK (`Registry`), and a
 notebook:
 
 ```bash
@@ -433,6 +433,7 @@ reg.drop_run("abc123", yes=True)
 | `close-runs` | Finalize abandoned `RUNNING` headers to the status their own job rows already imply. Deletes nothing. Names no runs = every stuck header. |
 | `drop-run` | Delete named run(s) from every tier — GCS artifacts, BQML `sf_model_*` objects, then registry rows. Takes as many ids as you like. |
 | `sweep-orphans` | Delete artifact prefixes under *this* registry's root that have no `run_registry` row. |
+| `reap-clusters` | Delete Vertex Ray clusters belonging to *this* registry whose run has already finished. |
 | `snapshot` | BigQuery table snapshots of the five registry tables — `--into` another dataset, `--expiration-days` for a TTL. |
 | `export` | Dump the registry to GCS as Parquet (default) or newline-delimited JSON. |
 
@@ -460,6 +461,28 @@ then `close-runs` for the header. Settle is the same preview-by-default shape as
 table — it writes only on confirmation, refuses anything ambiguous, and never deletes; the full
 decision table is in
 [troubleshooting.md § Settle a stale row](./troubleshooting.md#settle-a-stale-row).
+
+**`reap-clusters` is the one that costs money while you think about it.** A Ray run creates a Vertex
+cluster and tears it down in a `finally` block, so anything that kills the launching process — a
+closed laptop, a lost SSH session, a machine restart — leaves the cluster running. Vertex has no
+idle timeout and no max-age setting for a persistent resource, so nothing reclaims it; a head node
+plus a T4 simply keeps billing. (The Dataproc side of the product does not have this problem: every
+cluster it creates carries an idle TTL and a max age, and Dataproc deletes it without being asked.)
+
+```bash
+python -m scale_forecasting.registry.ops reap-clusters        # preview: what it would delete, and why
+python -m scale_forecasting.registry.ops reap-clusters --yes
+```
+
+It deletes a cluster only when three separate facts agree: the cluster carries this product's label
+*and* a label naming **this** registry, its name is one we generated from a `run_id`, and that run's
+header is terminal — or there is no header for it at all and the cluster is older than 30 minutes
+(`--min-age-seconds`), which is the window that keeps it from deleting a cluster whose run is still
+starting up. Anything else is left alone and printed with the reason, so the preview answers "why is
+that GPU still up?" as directly as it answers "what will you delete?". A standing cluster you
+provisioned yourself and point runs at with `compute.ray_cluster_name` is never touched: the reuse
+path neither creates nor labels a cluster, so this verb cannot see it. Pass `--region` more than once
+to sweep several regions in one go; the default is the region your environment already points at.
 
 **Order matters, and the verbs enforce it.** A registry row is the only index of which GCS objects
 belong to which run, so every delete goes *artifacts first, rows last*. Dropping the rows first
@@ -491,4 +514,4 @@ Two things you won't find here:
 | `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
-| `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` / `snapshot` / `export`. |
+| `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` / `reap-clusters` / `snapshot` / `export`. |

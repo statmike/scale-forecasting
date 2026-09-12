@@ -346,10 +346,11 @@ def _stubbed_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     def _fake_stage(cfg: RunConfig, run_id: str, infra: ray_infra.RayInfra) -> str:
         return f"gs://code-bkt/runs/{run_id}.json"
 
-    def _fake_create(plan: Any, infra: Any, name: str) -> str:
+    def _fake_create(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         calls["order"].append("create")
         calls["create_name"] = name
+        calls["create_labels"] = labels
         return f"projects/proj-x/locations/us-central1/persistentResources/{name}"
 
     def _fake_get(resource_name: str) -> Any:
@@ -432,6 +433,9 @@ def test_submit_ray_ephemeral_creates_submits_and_deletes(
     assert calls["deleted"] == 1  # ephemeral tears down
     assert calls["order"] == ["create", "get", "submit", "delete"]
     assert calls["telemetry"]["cluster_name"].startswith("sf-ray-")
+    # Every cluster we create is labelled on the way up: `ray_reaper` has nothing to scope itself
+    # with otherwise, and an unlabelled cluster is one it can never reclaim.
+    assert calls["create_labels"] == {"app": "scale-forecasting", "registry": "ds_x"}
     # Vertex SDK is pinned to the configured project (never the ambient GOOGLE_CLOUD_PROJECT).
     assert calls["init_project"] == "proj-x"
     # The caller-supplied id is threaded to the Ray job so its own submission id is deterministic.
@@ -1066,7 +1070,7 @@ def test_submit_ray_falls_back_to_next_region_on_capacity_stockout(
     # tried, which succeeds. The winning region's cluster is torn down after the job.
     calls = _stubbed_lifecycle
 
-    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+    def _stockout_then_ok(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         calls["order"].append("create")
         if calls["created"] == 1:
@@ -1103,7 +1107,7 @@ def test_an_ambient_publisher_reaches_the_walk_several_frames_below_it(
     """
     calls = _stubbed_lifecycle
 
-    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+    def _stockout_then_ok(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         calls["order"].append("create")
         if calls["created"] == 1:
@@ -1167,7 +1171,7 @@ def test_submit_ray_falls_back_when_capacity_reason_only_on_resource_error(
         "Resources are insufficient in region: us-east1. Try a different region."
     )
 
-    def _generic_then_ok(plan: Any, infra: Any, name: str) -> str:
+    def _generic_then_ok(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         calls["order"].append("create")
         if calls["created"] == 1:
@@ -1194,7 +1198,7 @@ def test_submit_ray_fails_fast_on_a_region_invariant_error_without_trying_more_r
     # asks for the same machine type and gets the same answer. Fail on the first attempt.
     calls = _stubbed_lifecycle
 
-    def _bad_config(plan: Any, infra: Any, name: str) -> str:
+    def _bad_config(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         raise RuntimeError("machine type's memory is too small")
 
@@ -1211,7 +1215,7 @@ def test_a_stockout_that_mentions_the_machine_type_still_hops(
     """Capacity wins the tie: this names a machine type but is plainly about the *place*."""
     calls = _stubbed_lifecycle
 
-    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+    def _stockout_then_ok(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         if calls["created"] == 1:
             raise RuntimeError(
@@ -1240,7 +1244,7 @@ def test_submit_ray_raises_when_all_regions_stock_out(
     """
     calls = _stubbed_lifecycle
 
-    def _always_stockout(plan: Any, infra: Any, name: str) -> str:
+    def _always_stockout(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         raise RuntimeError("Resources are insufficient in region: x. try a different region")
 
@@ -1341,7 +1345,7 @@ def test_the_create_walk_clears_the_name_in_every_region_it_tries(
     """Each region holds its own copy of the run-derived name, so each is checked before create."""
     calls = _stubbed_lifecycle
 
-    def _stockout_then_ok(plan: Any, infra: Any, name: str) -> str:
+    def _stockout_then_ok(plan: Any, infra: Any, name: str, labels: dict[str, str]) -> str:
         calls["created"] += 1
         if calls["created"] == 1:
             raise RuntimeError("Resources are insufficient in region: us-east1")

@@ -32,16 +32,24 @@ log line; `_delete_cluster` polls the resource until it reads ``NOT_FOUND`` and 
 it does not. `_clear_stale_resource` is the other half — a run-derived name means a previous
 attempt's ``ERROR``-state wreckage sits on the exact path the next create wants.
 
-Public surface: ``cluster_resource_path``, ``provision_shared_cluster``,
-``teardown_shared_cluster``. The lifecycle verbs `_create_cluster_across_regions` / `_get_cluster` /
-`_delete_cluster` are driven by `ray_submit.submit_ray`, which owns the create→run→teardown
-ordering for a single-family run.
+And teardown verifying is still not teardown *guaranteeing*. Everything above runs inside the
+launching process, so a ``kill -9``, a preempted VM or a laptop that sleeps leaves the cluster
+standing — Dataproc self-heals from that through `dataproc_cluster.build_lifecycle_config`'s idle
+TTL, and Vertex offers no equivalent field to set. `cluster_labels` and `list_clusters` are this
+module's half of the answer: they make our clusters findable from outside the process that made
+them, so `ray_reaper` can come back later and reclaim the ones whose run is over.
+
+Public surface: ``cluster_resource_path``, ``cluster_labels``, ``list_clusters``, ``RayCluster``,
+``provision_shared_cluster``, ``teardown_shared_cluster``. The lifecycle verbs
+`_create_cluster_across_regions` / `_get_cluster` / `_delete_cluster` are driven by
+`ray_submit.submit_ray`, which owns the create→run→teardown ordering for a single-family run.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .capacity import (
@@ -58,6 +66,8 @@ from .errors import get_logger
 from .ray_infra import RayInfra
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from .config import RunConfig
     from .settings import Settings
 
@@ -145,15 +155,15 @@ def _resolve_regions(cfg: RunConfig, settings: Settings) -> list[str]:
 
 
 def _create_cluster(
-    plan: ray_io.RayClusterPlan, infra: RayInfra, name: str
+    plan: ray_io.RayClusterPlan, infra: RayInfra, name: str, labels: dict[str, str]
 ) -> str:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
     """Create the Vertex Ray cluster (autoscaling per pool by default) and return its
     ``cluster_resource_name``.
 
     Head node is a single small CPU box (no accelerator, never autoscaled); workers are the planned
     GPU/CPU pools (`_worker_resources`), each with a Vertex ``AutoscalingSpec`` by default
-    or a fixed ``node_count`` when ``ray_autoscale=False``. Labels tag the
-    run.
+    or a fixed ``node_count`` when ``ray_autoscale=False``. ``labels`` comes from
+    `cluster_labels` and is what makes the cluster findable later — see there for why.
 
     Connectivity follows `RayInfra`'s three modes (first set wins): a PSC-I network
     attachment (``psc_interface_config`` — the supported private path, the only mode whose managed
@@ -206,7 +216,7 @@ def _create_cluster(
         service_account=infra.compute_sa,
         ray_version=infra.ray_version,
         python_version=infra.python_version,
-        labels={"app": "scale-forecasting"},
+        labels=labels,
         # NOTE: no explicit location — the region is bound via _init_vertex before this call, which
         # is what the region-fallback loop re-pins per attempt.
     )
@@ -231,6 +241,94 @@ def cluster_resource_path(settings: Settings, name: str, region: str | None = No
     """
     loc = region or settings.region
     return f"projects/{settings.project_id}/locations/{loc}/persistentResources/{name}"
+
+
+#: Label key/value that marks a cluster as this product's work, whoever deployed it.
+APP_LABEL = ("app", "scale-forecasting")
+#: Label key holding the registry a cluster's run belongs to. See `cluster_labels`.
+REGISTRY_LABEL_KEY = "registry"
+
+
+def cluster_labels(settings: Settings) -> dict[str, str]:
+    """The labels every cluster we create carries: what made it, and which registry it answers to.
+
+    The ``app`` label alone answers "did we build this?", which is enough to *find* our clusters but
+    not enough to safely delete one: two deployments sharing a project would each see the other's
+    clusters as unexplained. The ``registry`` label closes that — it names the dataset holding the
+    run rows that decide whether a cluster is still needed, so `ray_reaper` can leave anything
+    keyed to a different registry strictly alone. It is the same scoping argument that makes
+    `registry.ops.sweep_orphans` safe, applied to compute instead of storage.
+
+    Vertex label values are lowercase letters, digits, ``-`` and ``_`` only, so a dataset id is
+    lowercased and anything else folded to ``-`` (BigQuery permits uppercase; Vertex does not).
+    """
+    dataset = re.sub(r"[^a-z0-9_-]", "-", settings.registry_dataset_id.lower())[:63]
+    return {APP_LABEL[0]: APP_LABEL[1], REGISTRY_LABEL_KEY: dataset}
+
+
+@dataclass(frozen=True)
+class RayCluster:
+    """One of our Vertex Ray clusters as a plain value — enough to judge it without re-reading it.
+
+    ``name`` is the resource id (the last path segment), which is the *cluster name* the product
+    chose, not Vertex's optional ``display_name``. ``create_time`` is timezone-aware, or ``None``
+    if Vertex returned a resource without one; `ray_reaper` treats a missing time as "cannot age
+    this, leave it alone" rather than as age zero.
+    """
+
+    name: str
+    region: str
+    resource_name: str
+    state: str
+    labels: dict[str, str]
+    create_time: datetime | None
+
+
+def list_clusters(
+    settings: Settings, regions: Sequence[str]
+) -> tuple[RayCluster, ...]:  # pragma: no cover - live Vertex I/O, exercised by the @gcp smoke
+    """Every cluster carrying the `APP_LABEL` in each named region, oldest first.
+
+    **Raises rather than skipping a region it cannot read.** A sweep that quietly drops a region
+    reports "nothing to reclaim" while an accelerator bills in the region it could not see, which is
+    the exact failure this whole path exists to prevent. Duplicate regions are collapsed, so passing
+    the data-plane region twice costs one call.
+
+    Listing is regional — the client must target ``<region>-aiplatform.googleapis.com``, the same
+    constraint `_resource_state` documents — and unlabelled resources are dropped here: anything in
+    the project that we did not create is not ours to enumerate, let alone delete.
+    """
+    from google.cloud import aiplatform_v1
+
+    from .errors import EngineError
+
+    found: list[RayCluster] = []
+    for region in dict.fromkeys(regions):
+        client = aiplatform_v1.PersistentResourceServiceClient(
+            client_options={"api_endpoint": f"{region}-aiplatform.googleapis.com"}
+        )
+        parent = f"projects/{settings.project_id}/locations/{region}"
+        try:
+            resources = list(client.list_persistent_resources(parent=parent))
+        except Exception as exc:  # noqa: BLE001 - re-raised with the region that could not be read
+            raise EngineError(
+                f"could not list Vertex persistent resources in {region}: {exc}"
+            ) from exc
+        for resource in resources:
+            labels = dict(resource.labels)
+            if labels.get(APP_LABEL[0]) != APP_LABEL[1]:
+                continue
+            found.append(
+                RayCluster(
+                    name=resource.name.rsplit("/", 1)[-1],
+                    region=region,
+                    resource_name=resource.name,
+                    state=str(aiplatform_v1.PersistentResource.State(resource.state).name),
+                    labels=labels,
+                    create_time=resource.create_time,
+                )
+            )
+    return tuple(sorted(found, key=lambda c: (c.create_time is None, c.create_time, c.name)))
 
 
 def _cluster_error_message(
@@ -276,7 +374,7 @@ def _attempt_cluster_in_region(
     # what makes a *second pass* over the same region possible at all.
     _clear_stale_resource(cluster_resource_path(settings, name, region))
     _log.info("attempting Ray cluster %s in region %s", name, region)
-    resource_name = _create_cluster(plan, infra, name)
+    resource_name = _create_cluster(plan, infra, name, cluster_labels(settings))
     _log.info("Ray cluster %s created in region %s", name, region)
     return resource_name, region
 
