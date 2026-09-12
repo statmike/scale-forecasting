@@ -329,7 +329,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 07 | `07_ray_cpu.json` | Ray on Vertex, CPU — two families sharing one cluster, and the row that replaces the un-rederivable `run_id` the note below records | CURRENT | 2026-09-12 | `smoke-07-ray-cpu-ed27e03a2083` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) — all three landed on one cluster, the two CPU families in ~6 min each and the GPU one in ~17, and the device audit called the T4 `ENGAGED_IDLE` unprompted | CURRENT | 2026-09-12 | `smoke-09-shared-ray-859750fc97a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id | STALE | 2026-09-04 | `smoke-10-mixed-runtimes-a39f0fb4f3fa` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
+| 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id — genuinely concurrent, not merely all-present: BigQuery finished in 41 s while the two Serverless batches were still fitting and the Ray T4 family ran on past both | CURRENT | 2026-09-12 | `smoke-10-mixed-runtimes-7aef85d2117b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 11 | `11_ensemble_barrier.json` | Ensembling in barrier mode — the ensemble node waits for every member family, then runs once (23 s against a 23-minute run); re-run under the weighting fix as attempt 2, and its four ensembles now match microbatch's on all 2,800 cells | CURRENT | 2026-09-11 | `smoke-11-ensemble-barrier-834f770ba38b` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode — the ensemble node runs alongside the members for the whole 24 minutes, gathering as they land; re-run under the weighting fix as attempt 2, and the barrier pair of this row is the proof that gather mode is now a scheduling choice only | CURRENT | 2026-09-11 | `smoke-12-ensemble-microbatch-9bcd1d294437` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-11 | `smoke-13-native-format-0995c922faab` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
@@ -1720,6 +1720,58 @@ reachable. Nothing was lost — no family had been submitted, so there were no j
 — the run never recorded a family". Both clusters and all three VMs were confirmed gone afterwards.
 
 Neither problem has been fixed yet, so smoke 16's row stays STALE against its 2026-09-02 `run_id`.
+
+#### 2026-09-12, Tier 6 wave D: three green runs on Ray, and a teardown guarantee that turned out to be a hope
+
+Wave D is the Ray-on-Vertex set — smoke 07 (CPU), 09 (one shared cluster serving both CPU and GPU
+pools) and 10 (Spark, Ray and BigQuery under a single `run_id`). All three passed, and all three
+resolved to the `run_id` predicted for them before they were launched, so the ids in the table above
+are checked rather than transcribed.
+
+**Smoke 10 is concurrent in the way the row claims, and the timings are what show it.** "All three
+runtimes under one `run_id`" would be satisfied by running them one after another, so the interesting
+number is the overlap: the BigQuery-native family finished in **41 s** while both Serverless batches
+were still fitting (they took 1,318 s and 1,421 s), and the Ray T4 family ran on for **1,786 s**,
+past the end of both. Three engines, three very different clocks, one run, five models on the board.
+
+**Smoke 07 also retires a loose end this page recorded rather than hid.** The arithmetic note further
+down flagged that 07's old `run_id` could not be re-derived from its config under any commit, and
+said the re-run would replace the pointer either way. It has: `smoke-07-ray-cpu-ed27e03a2083` is
+what the committed config produces, and the row now names it.
+
+**The GPU contract worked without being asked.** Both 09 and 10 attach a T4 to the deep-learning
+family, and in both runs the device audit filed `ENGAGED_IDLE` on its own — peak device memory of
+71,680 and 62,464 bytes against a 17 GB card. That is the known NeuralProphet result, but the point
+here is not the finding, it is that a run which would once have quietly billed a GPU it never used
+now says so in the job row and in the logs, unprompted, on two different runs. The contract holds in
+anger, not only in its own tests.
+
+**What wave D found that was not on anyone's list: a killed run leaks a Vertex Ray cluster, and
+nothing ever reclaims it.** The dev machine restarted while smoke 09 was provisioning. The launching
+process died with it, so the `finally` that tears the cluster down never ran — and twenty-five
+minutes later `sf-ray-smoke-09-shared-ray-859750fc97a5` was still `RUNNING` with a head node, a CPU
+worker and a **T4** worker, billing against a run that no longer existed. It was deleted by hand and
+the persistent-resources list confirmed empty; the abandoned header was closed `RUNNING → FAILED`
+("no job rows — the run never recorded a family"), and 09 was re-run clean.
+
+The incident is not the finding. **The asymmetry is.** Every Dataproc cluster this product builds
+carries a `LifecycleConfig` with a 1800 s idle TTL and a 24 h max age, so the identical kill leaves a
+cluster that Dataproc reclaims by itself — which is exactly why wave C's far messier GPU failure
+leaked nothing. The Ray path has no counterpart at all. Teardown there is *entirely* a `finally` in a
+process whose lifetime nobody controls, which makes it a hope rather than a guarantee: a `kill -9`,
+a preempted VM, an out-of-memory launcher or an evicted Composer worker each defeat it, and each
+leaves an accelerator running. Vertex `PersistentResource` has no idle-TTL field to set, so the fix
+cannot be the Dataproc one; it has to be a reaper that lists the `app: scale-forecasting` clusters
+and deletes any whose embedded `run_id` has a terminal header or none. That is now a tracked item.
+Until it exists, this page should not be read as saying Ray teardown is guaranteed — it is reliable
+whenever the launcher survives, and undefined when it does not.
+
+**One thing wave D could not prove, stated plainly.** The concurrent per-hardware cluster
+provisioner written to fix wave C's idle-TTL race is offline-proven only. Proving it live needs a
+run with two Dataproc clusters at once, and a Dataproc cluster is CPU *or* GPU, so the only
+configuration that produces two is smoke 16 — still blocked on the upstream GPU driver 404. The fix
+ships with unit tests (including a barrier that a sequential implementation cannot pass) and no live
+run behind it, and smoke 16's row stays STALE until both clear.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
