@@ -29,11 +29,18 @@ at a time. Usage:
 
     .venv/bin/python tests/smokes/smoke_harness.py configs/smokes/01_serverless_cpu.json
     .venv/bin/python tests/smokes/smoke_harness.py configs/smokes/01_serverless_cpu.json --force
+
+The negative arms (``*_gpu_absent_*``) need their fault armed by the caller and the harness refuses
+to start one without it — see `verify_fault_armed`::
+
+    SF_HIDE_DEVICES=probe .venv/bin/python tests/smokes/smoke_harness.py \\
+        configs/smokes/18_gpu_absent_cluster.json --force
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -41,6 +48,30 @@ if TYPE_CHECKING:
 
 
 # --- pure helpers (offline-testable) -------------------------------------------
+
+
+# The negative arms (17/18/19) are named for what they do, and the name is the only place the
+# harness can tell them apart. Their fault is armed by an operator env var rather than by the
+# config, because a new config field would move the `run_id` of every row that declares one.
+_NEGATIVE_ARM_MARKER = "gpu_absent"
+
+
+def verify_fault_armed(config_path: str, hide_devices: str | None) -> list[str]:
+    """Check that a negative-arm config is being run with its fault armed. Problems (empty = OK).
+
+    A negative arm asserts that a GPU job *refuses* when the device is missing. Run it without
+    `SF_HIDE_DEVICES` and nothing is missing, so the job simply succeeds — and because this harness
+    verifies a run rather than a claim, it reports `PASS`. That reading is worse than a failure: it
+    banks a green result for a check that never happened. So an unarmed negative arm is a problem
+    in its own right, stated before any registry row is read.
+    """
+    if _NEGATIVE_ARM_MARKER not in Path(config_path).name or hide_devices:
+        return []
+    return [
+        f"{Path(config_path).name} is a negative arm and SF_HIDE_DEVICES is unset, so the device "
+        "was never hidden — this run cannot prove the contract is enforced. Re-run with "
+        "SF_HIDE_DEVICES=probe, or pass --allow-unarmed to run it as an ordinary positive run."
+    ]
 
 
 def expected_families(cfg: RunConfig) -> list[str]:
@@ -211,9 +242,11 @@ class SmokeResult:
 
 
 def run_smoke(
-    config_path: str, *, force: bool = False, do_rerun: bool = True
+    config_path: str, *, force: bool = False, do_rerun: bool = True, allow_unarmed: bool = False
 ) -> SmokeResult:  # pragma: no cover - @gcp: submits real jobs
     """Drive one smoke config through dry → stage → run → verify → rerun → trace. Live (@gcp)."""
+    import os
+
     from scale_forecasting import launch_plan
     from scale_forecasting import main as main_mod
     from scale_forecasting.config import load_config
@@ -266,6 +299,12 @@ def run_smoke(
     )
     if run_error:
         problems.insert(0, run_error)
+    # Last-ditch: the CLI refuses an unarmed negative arm before anything is spent, but a
+    # programmatic caller bypasses the CLI, and the one outcome never worth producing is a green
+    # verdict for a check that did not run. `allow_unarmed` is the operator saying they meant to
+    # run this config as an ordinary positive run, which is a legitimate thing to want.
+    if not allow_unarmed:
+        problems = verify_fault_armed(config_path, os.environ.get("SF_HIDE_DEVICES")) + problems
     if run_status != "COMPLETED":
         problems.append(f"run status is {run_status!r}, expected COMPLETED")
 
@@ -324,6 +363,7 @@ def _report(result: SmokeResult) -> str:  # pragma: no cover - formatting for th
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - @gcp CLI wrapper
     """``python tests/smokes/smoke_harness.py <config.json> [--force] [--no-rerun]`` → exit code."""
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(description="Run one smoke config end to end (live @gcp).")
     parser.add_argument("config", help="path to a configs/smokes/*.json config")
@@ -333,8 +373,24 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - @gcp CLI w
     parser.add_argument(
         "--no-rerun", action="store_true", help="skip the rerun/collision check (one run only)"
     )
+    parser.add_argument(
+        "--allow-unarmed",
+        action="store_true",
+        help="run a negative-arm config without SF_HIDE_DEVICES (an ordinary positive run)",
+    )
     ns = parser.parse_args(argv)
-    result = run_smoke(ns.config, force=ns.force, do_rerun=not ns.no_rerun)
+
+    # Refuse before anything is submitted. An unarmed negative arm bills a full run — a GPU cluster
+    # in the case of 18 — to answer a question it cannot ask, so the cheap moment to catch it is
+    # now, not in the report afterwards.
+    unarmed = verify_fault_armed(ns.config, os.environ.get("SF_HIDE_DEVICES"))
+    if unarmed and not ns.allow_unarmed:
+        print("\n".join(f"refusing to run: {p}" for p in unarmed))
+        return 2
+
+    result = run_smoke(
+        ns.config, force=ns.force, do_rerun=not ns.no_rerun, allow_unarmed=ns.allow_unarmed
+    )
     print(_report(result))
     return 0 if result.ok else 1
 

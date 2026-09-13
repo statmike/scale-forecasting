@@ -75,6 +75,17 @@ device at different depths:
 | `probe` | The device probe reports `cpu` while CUDA itself is untouched | The default. Reaches `_require_device`, so the contract gets to speak. |
 | `cuda` (or any other value, including the older `1`) | `CUDA_VISIBLE_DEVICES=""` — the card is gone as far as every CUDA library on the box is concerned | Reproducing what a real provisioning failure does to the whole stack. |
 
+**Forgetting the variable used to be silent, and is not any more.** Run one of these three configs
+without `SF_HIDE_DEVICES` and nothing is hidden, so the job succeeds normally and every verifier is
+satisfied — the report reads `PASS` for a check that never happened, which is worse than a failure
+because it looks like evidence. The harness now refuses to start an unarmed `*_gpu_absent_*` config
+and exits `2` without submitting anything, so the mistake costs nothing instead of a GPU cluster.
+If you genuinely want one of them as an ordinary positive run, say so with `--allow-unarmed`.
+
+Read their results the other way round from every other smoke: **`RESULT: FAIL`, with every cell
+refused and the run closing `FAILED`, is the passing outcome.** A negative arm that reports `PASS`
+means the fault never reached the code under test.
+
 `cuda` mode is the more faithful imitation of a lost card and the less useful test, because on two
 of the three services something below us dies before our check runs: a Ray worker holding a GPU
 slot crashes rather than raising, and the Serverless RAPIDS plugin aborts the executor, which Spark

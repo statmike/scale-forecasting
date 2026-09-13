@@ -216,3 +216,32 @@ def test_format_trace_shows_system_job_id() -> None:
     rows = [_job("statistical", system_job_id="sf-run-abc-statistical-a1")]
     (line,) = h.format_trace(rows)
     assert "sf-run-abc-statistical-a1" in line
+
+
+# --- the negative arms only mean something with their fault armed -----------------
+
+
+def test_an_unarmed_negative_arm_is_a_problem_not_a_pass() -> None:
+    # The trap this closes: without SF_HIDE_DEVICES the device is never hidden, the job succeeds
+    # normally, every verifier is happy, and the report reads PASS for a check that never ran.
+    (problem,) = h.verify_fault_armed("configs/smokes/18_gpu_absent_cluster.json", None)
+    assert "SF_HIDE_DEVICES" in problem  # what to set
+    assert "18_gpu_absent_cluster.json" in problem  # which config
+    assert "--allow-unarmed" in problem  # the way through if it was deliberate
+
+
+def test_an_armed_negative_arm_is_clean() -> None:
+    assert h.verify_fault_armed("configs/smokes/19_gpu_absent_ray.json", "probe") == []
+    # Any depth counts as armed; which depth reaches which check is the runbook's business.
+    assert h.verify_fault_armed("configs/smokes/17_gpu_absent_serverless.json", "cuda") == []
+
+
+def test_an_ordinary_config_needs_no_fault() -> None:
+    # Most smokes are positive arms and must not be gated on an env var they never read.
+    assert h.verify_fault_armed("configs/smokes/06_cluster_gpu.json", None) == []
+    assert h.verify_fault_armed("configs/smokes/01_serverless_cpu.json", None) == []
+
+
+def test_the_check_reads_the_file_name_not_the_directory() -> None:
+    # A path that happens to contain the marker upstream of the file name is not a negative arm.
+    assert h.verify_fault_armed("/tmp/gpu_absent/06_cluster_gpu.json", None) == []
