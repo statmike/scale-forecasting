@@ -122,6 +122,13 @@ _POST_BREAK = {
     # loses one during provisioning, lands nothing, and is repaired end to end.
     "configs/repair_demo.json",
     "configs/repair_retry_demo.json",
+    # The Dataproc-cluster half of the same A/B, written 2026-09-13 — nothing to hash before the
+    # break, and the argument given for the Ray arms above applies here with more force. What these
+    # two files have to guarantee is that they describe one fleet and differ only in the card, and a
+    # digest cannot say that about a *pair*; `test_ab_preregistration.py` compares them to each
+    # other instead, down to the Spark properties each arm would submit.
+    "configs/neuralprophet_ab_cluster_gpu.json",
+    "configs/neuralprophet_ab_cluster_cpu.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

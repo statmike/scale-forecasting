@@ -1,0 +1,36 @@
+{
+  "run_name": "neuralprophet_ab_cluster_cpu",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 3000
+  },
+  "models": ["neuralprophet"],
+  "features": {
+    "holidays": ["US"],
+    "transform": "log1p"
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  },
+  "compute": {
+    "persist_models": false,
+    "use_gpu": true,
+    "gpu_type": "T4",
+    "gpu_fraction": 0.125,
+    "max_executors": 4,
+    "profile": {
+      "source": "baseline"
+    },
+    "families": {
+      "deep_learning": {
+        "spark_mode": "cluster",
+        "hardware": "cpu"
+      }
+    }
+  }
+}

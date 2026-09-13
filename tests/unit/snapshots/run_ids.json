@@ -6,6 +6,8 @@
   "configs/explode_100k.json": "explode-100k-ef602ea229b4",
   "configs/explode_demo.json": "explode-demo-088f172ad2f5",
   "configs/mixed_demo.json": "mixed-demo-db2dfb2f675d",
+  "configs/neuralprophet_ab_cluster_cpu.json": "neuralprophet-ab-cluster-cpu-a402414abf5e",
+  "configs/neuralprophet_ab_cluster_gpu.json": "neuralprophet-ab-cluster-gpu-273d32b553c8",
   "configs/neuralprophet_ab_cpu.json": "neuralprophet-ab-cpu-f4bfff3b39e9",
   "configs/neuralprophet_ab_gpu.json": "neuralprophet-ab-gpu-e530eea3a755",
   "configs/per_family_runtimes_demo.json": "per-family-runtimes-demo-8fe8f224a7e1",
