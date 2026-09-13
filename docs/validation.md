@@ -32,6 +32,7 @@ old value goes stale by definition.
 | `cluster_deps` | `packed-venv-init-action` | `eae3874` | job-attached archive (driver never saw it) |
 | `serverless_deps` | `container-image` | long-standing | — |
 | `gpu_cluster_image` | `driver-init-action+image-pinned-2.2.85` | 2026-09-12, see the note below | `driver-init-action` on the floating `2.2-debian12` line (owner decision 2026-09-09, reverting `254fe4f`), before that `prebaked-driver-image` |
+| `cluster_provisioning` | `concurrent-per-hardware` | `e1010be` (2026-09-12) | `sequential-per-hardware` |
 | `native_source_pin` | `unpinned-all-sources` | `9af322a` (2026-08-25) | `unpinned-iceberg-only` |
 | `python` | `3.11` | `515ecb0` | mixed per surface |
 | `run_id_inputs` | `authored-config-only-v3` | 6.5+6.6 (2026-09-09) | `authored-config-only-v2` (P3, 2026-09-05), before that `authored-config-only` (`a22e94c`, after the fork below), before that `+compute.profile.source` (W11a) |
@@ -352,7 +353,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-11 | `smoke-13-native-format-0995c922faab` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 14 | `14_full_dag.json` | Flagship: all four families + native + ensemble under one run_id (DL on a Serverless L4). Also the row that proves the ensemble write timestamp: 11,200 blended prediction rows, none NULL | CURRENT | 2026-09-11 | `smoke-14-full-dag-2cef0feb95da` | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
-| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one. **A 2026-09-12 re-run attempt never reached submit** (`smoke-16-cluster-split-hardware-8a15339afe9b`, header closed `FAILED`); see the narrative below | STALE | 2026-09-02 | `smoke-16-cluster-split-hardware-5e05307425e4` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
+| 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one. Both were observed `CREATING` in the same `clusters list`, which is the live proof that the per-hardware creates now run side by side; and the two images in that same listing were `2.2.87-debian12` for CPU (the floating alias) against `2.2.85-debian12` for GPU (the pin), so the split is visible in one frame. 300 cells over three models on two clusters, COMPLETED | CURRENT | 2026-09-13 | `smoke-16-cluster-split-hardware-8a15339afe9b` | `cluster_provisioning=concurrent-per-hardware`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden fails every cell with the contract message naming the service, and the batch stops instead of churning executors | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `gpu_fault_injection=probe-mode-default`, `gpu_batch_churn=executor-failure-budget+stall-watchdog`, `job_status=derived-from-cell-tallies`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service — and the run closes `FAILED` on both registry tiers, counting only its own attempt's cells. **STALE 2026-09-12:** the GPU path now pins the cluster image — see the `gpu_cluster_image` note above | STALE | 2026-09-10 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 19 | `19_gpu_absent_ray.json` | **Negative arm:** a Ray T4 job with the device hidden fails every cell with the contract message naming the service, instead of crashing the worker that holds the GPU slot | CURRENT | 2026-09-10 | `smoke-19-gpu-absent-ray-1c033f10707b` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
@@ -1719,10 +1720,19 @@ back to compiling the NVIDIA open kernel modules from source, and was killed par
 minutes in. Dataproc then held the create operation in `RUNNING` /
 `CREATE_VMS_AND_MANAGED_GROUP_DONE` for another forty minutes collecting diagnostics, so the
 product's blocking create call had no failure to react to and simply waited. Nothing here is a
-product defect, but it does mean **the cluster-GPU path is currently blocked by an upstream cache
-miss** — which is precisely the failure the pre-baked driver image was built to avoid, and that
-image was reverted by owner decision on 2026-09-09 as a cost call. Smoke 06 is the other config on
-this path; its CURRENT row predates the miss.
+product defect, but it does mean **the cluster-GPU path is currently blocked** — which is precisely
+the failure the pre-baked driver image was built to avoid, and that image was reverted by owner
+decision on 2026-09-09 as a cost call. Smoke 06 is the other config on this path; its CURRENT row
+predates the miss.
+
+> **Corrected 2026-09-12.** Two details above are wrong and the correction matters, because the
+> original reading ("wait for Google's 404 to clear") would have waited forever. The 404 is not
+> Google's: `install_gpu_driver.sh` caches that tarball in *the deployment's own* Dataproc temp
+> bucket, so every deployment fills it for itself, and ours held one keyed to the older kernel. And
+> the build was not "killed partway" by the 30-minute init timeout — the component stats record both
+> workers `FAILED` at 199 s and 212 s. It was a compile error: NVIDIA's source calls
+> `pci_resize_resource` with three arguments and Debian's 6.1.0-52 headers declare a fourth. See the
+> `gpu_cluster_image` note near the top for the full finding and the pin that resolves it.
 
 The second part *is* ours, and only a two-cluster run could have exposed it.
 `shared_clusters.shared_spark_cluster` provisions one cluster **per hardware kind, sequentially**,
@@ -1736,7 +1746,14 @@ reachable. Nothing was lost — no family had been submitted, so there were no j
 `registry.ops.close_runs` closed the orphaned header `RUNNING → FAILED` with the reason "no job rows
 — the run never recorded a family". Both clusters and all three VMs were confirmed gone afterwards.
 
-Neither problem has been fixed yet, so smoke 16's row stays STALE against its 2026-09-02 `run_id`.
+**Both problems are fixed, and smoke 16 is green again as of 2026-09-13.** The idle-window half
+landed first (`e1010be`, 2026-09-12): `shared_clusters.provision_spark_clusters` runs the
+per-hardware creates side by side, which bounds the first cluster's idle window to the *difference*
+between the two creates rather than the whole of the second one. The Airflow create task shares that
+function instead of keeping its own copy of the loop. The driver half landed the next day as the
+`2.2.85-debian12` pin. The re-run is the live proof of both: both clusters appeared `CREATING` in the
+same listing — which no sequential provisioner can produce — and the run completed 300 cells across
+three models on two clusters.
 
 #### 2026-09-12, Tier 6 wave D: three green runs on Ray, and a teardown guarantee that turned out to be a hope
 
@@ -1786,9 +1803,12 @@ whenever the launcher survives, and undefined when it does not.
 **One thing wave D could not prove, stated plainly.** The concurrent per-hardware cluster
 provisioner written to fix wave C's idle-TTL race is offline-proven only. Proving it live needs a
 run with two Dataproc clusters at once, and a Dataproc cluster is CPU *or* GPU, so the only
-configuration that produces two is smoke 16 — still blocked on the upstream GPU driver 404. The fix
-ships with unit tests (including a barrier that a sequential implementation cannot pass) and no live
-run behind it, and smoke 16's row stays STALE until both clear.
+configuration that produces two is smoke 16 — blocked at the time on the GPU driver build. The fix
+ships with unit tests (including a barrier that a sequential implementation cannot pass) and, as of
+that day, no live run behind it. **Cleared 2026-09-13:** with the driver build unblocked by the image
+pin, smoke 16 ran and both clusters were observed `CREATING` at the same time, which is the
+observation a sequential provisioner cannot produce. The row is CURRENT and declares
+`cluster_provisioning=concurrent-per-hardware`.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
