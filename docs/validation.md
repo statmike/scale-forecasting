@@ -50,6 +50,7 @@ old value goes stale by definition.
 | `ray_poll_recovery` | `transient-transport+auth` | 2026-09-10 | `auth-expiry-only` |
 | `serverless_cancel` | `operation-cancel` | Tier 5 campaign (2026-09-11) | `batch-delete` (could not stop a live batch at all) |
 | `ensemble_weighting` | `per-series-calculated+batch-fit-learned` | Tier 6 wave A (2026-09-11) | `gather-order-dependent` (registered at its broken value the same day, then flipped by the fix; see the note below) |
+| `job_wait` | `operator-dialed-24h+leave-cluster-up` | `2ca68f1` + `5f3c48e` (2026-09-14) | `fixed-2h-client-ceiling`, which on the cluster path tore the cluster down under a healthy job; see the note below |
 
 **`backtest_scoring` is the axis nothing else can see.** The others move something a reader could
 notice on their own — a different image, a different `run_id`, a different node count. This one
@@ -1245,7 +1246,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `repair_retry_demo.json` | The repair ladder end to end — a family lost *during provisioning* lands nothing, and `--retry` re-submits exactly it under a `statistical_repair` token while a second, deliberately cancelled family is left alone (300 series, two families) | CURRENT | 2026-09-11 | `repair-retry-demo-59310436a6fd` | `serverless_deps=container-image`, `serverless_cancel=operation-cancel`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | CURRENT | 2026-09-10 | `neuralprophet-ab-gpu-e530eea3a755` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
 | `neuralprophet_ab_cpu.json` | The CPU arm of the same A/B — the identical config with the deep-learning family on CPU | CURRENT | 2026-09-11 | `neuralprophet-ab-cpu-f4bfff3b39e9` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
-| `neuralprophet_ab_cluster_gpu.json` | The GPU arm of the same question asked of the *other* scheduler — 3,000 NeuralProphet cells on a four-worker Dataproc cluster with one T4 each. The pair exists because a throughput result on Ray is a result about Ray; the shipped default deserves both. Sized by quota, not preference: four T4s is what the region allows | NEVER_RUN | — | — | — |
+| `neuralprophet_ab_cluster_gpu.json` | The GPU arm of the same question asked of the *other* scheduler — 3,000 NeuralProphet cells on a four-worker Dataproc cluster with one T4 each. The pair exists because a throughput result on Ray is a result about Ray; the shipped default deserves both. Sized by quota, not preference: four T4s is what the region allows. Attempt 1 was killed at 1,941 of 3,000 cells by the client wait ceiling; this is attempt 2, on the fix | CURRENT | 2026-09-14 | `neuralprophet-ab-cluster-gpu-273d32b553c8` (attempt 2) | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `cluster_provisioning=concurrent-per-hardware`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `job_status=derived-from-cell-tallies`, `job_wait=operator-dialed-24h+leave-cluster-up`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `neuralprophet_ab_cluster_cpu.json` | The CPU arm of the cluster pair — the same config with the deep-learning family on CPU, held to the same four workers so the fleets match. Both arms pin `gpu_fraction: 0.125`, which is the only thing stopping the GPU arm from packing two cells per worker against this one's seven | NEVER_RUN | — | — | — |
 
 #### 2026-09-10, `ray_autoscale_demo`: the first side-by-side of what was planned and what ran
@@ -1820,6 +1821,50 @@ that day, no live run behind it. **Cleared 2026-09-13:** with the driver build u
 pin, smoke 16 ran and both clusters were observed `CREATING` at the same time, which is the
 observation a sequential provisioner cannot produce. The row is CURRENT and declares
 `cluster_provisioning=concurrent-per-hardware`.
+
+#### 2026-09-14, the cluster A/B, GPU arm: the first run that could not have finished yesterday
+
+`neuralprophet-ab-cluster-gpu-273d32b553c8`, `COMPLETED`, 3,000 NeuralProphet cells on a four-worker
+Dataproc cluster with one T4 each, backtested at two folds. Zero failed cells — `cell_status` has a
+single bucket, `ok`, with a WAPE on every row. Total wall clock **3 h 23 m** (12:36:03 to 15:59:34),
+of which 11 m 34 s was the cluster coming up and **188 minutes** was the fitting window itself, from
+the first cell at 12:49:36 to the last at 15:57:37. That works out to 9,000 fits (two fold refits
+plus the full-history fit, per cell) in 79.4 fit-hours: **95.2 seconds per cell, 31.7 per fit**, and
+just under 16 cells landed per minute. Mean WAPE across the arm was 0.3485. Teardown was verified
+the way this page requires — `clusters list` returned no items and the `NVIDIA_T4_GPUS` meter went
+back to 0.0 of 4.0 — not by trusting the SDK's success line.
+
+**The run is also the live proof of the wait fix, because it is longer than the ceiling that fix
+removed.** Attempt 1 of this same arm died at 1,941 of 3,000 cells on 2026-09-13, and not because
+anything was wrong with it: the launcher's client-side wait hit a hard-coded two-hour limit, the
+exception unwound through a `finally` that deletes the ephemeral cluster, and a perfectly healthy
+job was destroyed by the machine that was only supposed to be watching it. At 3 h 23 m, attempt 2
+spent over an hour past that ceiling. Under the previous code it would have been killed at
+14:36 with roughly 1,900 cells written, exactly as before. Under the new axis value the wait is a
+24-hour deployment setting (`SF_CLUSTER_JOB_WAIT_S`), and giving up on it now raises a distinct
+condition that leaves the cluster running and tells the operator where it is, because "I stopped
+watching" is not the same statement as "the run is over."
+
+Two smaller things the arm confirmed. The stall watchdog, which had only ever run on the Serverless
+path, was ported to the shared wait as part of the same fix and appeared on a cluster job for the
+first time here: at 13:36:59 it read 709 written cells and stood down permanently. And the fleet
+came out at exactly the planned shape — **28 distinct `worker_id` values**, which is four workers ×
+seven executor slots each. That number is the one the pre-registered analysis assumes, and it is
+only 28 because both arms pin `gpu_fraction: 0.125`. Left unpinned, a GPU cluster widens
+`spark.task.cpus` to 3 and lands 2 cells per worker against the CPU arm's 7 — a 3.5× handicap that
+is invisible in the config and would have been read as a GPU result.
+
+The device telemetry says what it has said every previous time this model has met an accelerator:
+all 3,000 cells genuinely ran on the card, and peak device memory was **87,040 bytes**. The
+`device_audit` verdict is that the family used its device and barely touched it — correct behaviour,
+paying for hardware it does not need at these hyperparameters.
+
+**No verdict yet.** This is one arm. The CPU arm has not run, the four pre-registered controls in
+`docs/sql/neuralprophet_ab_cluster.sql` have not been evaluated, and section 5 of that file — the
+decision rule — is not to be run unless all four controls pass. One housekeeping note for anyone
+re-reading the numbers later: attempt 1's partial rows (1,941 cells, 54,600 predictions, 108,696
+out-of-fold rows) were deleted before attempt 2, because that SQL deliberately reads the cell table
+raw, with no time filter and no dedupe, and would otherwise have averaged two runs together.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
