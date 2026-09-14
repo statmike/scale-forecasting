@@ -1246,8 +1246,8 @@ the honest starting position and the reason for adding the table at all: it is t
 | `repair_retry_demo.json` | The repair ladder end to end — a family lost *during provisioning* lands nothing, and `--retry` re-submits exactly it under a `statistical_repair` token while a second, deliberately cancelled family is left alone (300 series, two families) | CURRENT | 2026-09-11 | `repair-retry-demo-59310436a6fd` | `serverless_deps=container-image`, `serverless_cancel=operation-cancel`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | CURRENT | 2026-09-10 | `neuralprophet-ab-gpu-e530eea3a755` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
 | `neuralprophet_ab_cpu.json` | The CPU arm of the same A/B — the identical config with the deep-learning family on CPU | CURRENT | 2026-09-11 | `neuralprophet-ab-cpu-f4bfff3b39e9` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
-| `neuralprophet_ab_cluster_gpu.json` | The GPU arm of the same question asked of the *other* scheduler — 3,000 NeuralProphet cells on a four-worker Dataproc cluster with one T4 each. The pair exists because a throughput result on Ray is a result about Ray; the shipped default deserves both. Sized by quota, not preference: four T4s is what the region allows. Attempt 1 was killed at 1,941 of 3,000 cells by the client wait ceiling; this is attempt 2, on the fix | CURRENT | 2026-09-14 | `neuralprophet-ab-cluster-gpu-273d32b553c8` (attempt 2) | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `cluster_provisioning=concurrent-per-hardware`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `job_status=derived-from-cell-tallies`, `job_wait=operator-dialed-24h+leave-cluster-up`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| `neuralprophet_ab_cluster_cpu.json` | The CPU arm of the cluster pair — the same config with the deep-learning family on CPU, held to the same four workers so the fleets match. Both arms pin `gpu_fraction: 0.125`, which is the only thing stopping the GPU arm from packing two cells per worker against this one's seven | NEVER_RUN | — | — | — |
+| `neuralprophet_ab_cluster_gpu.json` | The GPU arm of the same question asked of the *other* scheduler — 3,000 NeuralProphet cells on a four-worker Dataproc cluster with one T4 each. The pair exists because a throughput result on Ray is a result about Ray; the shipped default deserves both. Sized by quota, not preference: four T4s is what the region allows. Attempt 1 was killed at 1,941 of 3,000 cells by the client wait ceiling; this is attempt 2, on the fix | CURRENT | 2026-09-14 | `neuralprophet-ab-cluster-gpu-273d32b553c8` (attempt 2) | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `job_status=derived-from-cell-tallies`, `job_wait=operator-dialed-24h+leave-cluster-up`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| `neuralprophet_ab_cluster_cpu.json` | The CPU arm of the cluster pair — the same config with the deep-learning family on CPU, held to the same four workers so the fleets match. Both arms pin `gpu_fraction: 0.125`, which is the only thing stopping the GPU arm from packing two cells per worker against this one's seven | CURRENT | 2026-09-14 | `neuralprophet-ab-cluster-cpu-a402414abf5e` | `cluster_deps=packed-venv-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `job_status=derived-from-cell-tallies`, `job_wait=operator-dialed-24h+leave-cluster-up`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 
 #### 2026-09-10, `ray_autoscale_demo`: the first side-by-side of what was planned and what ran
 
@@ -1859,12 +1859,54 @@ all 3,000 cells genuinely ran on the card, and peak device memory was **87,040 b
 `device_audit` verdict is that the family used its device and barely touched it — correct behaviour,
 paying for hardware it does not need at these hyperparameters.
 
-**No verdict yet.** This is one arm. The CPU arm has not run, the four pre-registered controls in
-`docs/sql/neuralprophet_ab_cluster.sql` have not been evaluated, and section 5 of that file — the
-decision rule — is not to be run unless all four controls pass. One housekeeping note for anyone
-re-reading the numbers later: attempt 1's partial rows (1,941 cells, 54,600 predictions, 108,696
-out-of-fold rows) were deleted before attempt 2, because that SQL deliberately reads the cell table
-raw, with no time filter and no dedupe, and would otherwise have averaged two runs together.
+One housekeeping note for anyone re-reading the numbers later: attempt 1's partial rows (1,941
+cells, 54,600 predictions, 108,696 out-of-fold rows) were deleted before attempt 2, because that SQL
+deliberately reads the cell table raw, with no time filter and no dedupe, and would otherwise have
+averaged two runs together.
+
+#### 2026-09-14, the cluster A/B, CPU arm: green, and then a control failed on two straggler cells
+
+`neuralprophet-ab-cluster-cpu-a402414abf5e`, `COMPLETED`, the same 3,000 cells on the same
+four-worker cluster with the deep-learning family routed to CPU. Zero failed cells. Submitted
+16:11:46, cluster up at 16:19:07 — 6 m 50 s against the GPU arm's 11 m 34 s, the difference being
+the GPU driver init action this arm does not run — first cell 16:26:26, last 19:01:13, done
+19:03:07. **Total wall clock 2 h 51 m, fitting window 154.8 minutes**, 9,000 fits in 67.1 fit-hours:
+80.5 seconds per cell, 26.8 per fit. 28 distinct workers again, so the two fleets match. Mean WAPE
+**0.3485**, which is the GPU arm's figure to four decimal places. Teardown verified: no clusters
+listed, T4 usage back to 0.0 of 4.0, CPU usage back to 0.0 of 200.
+
+**Controls 1, 2 and 3 pass. Control 4 returns INCONCLUSIVE, so section 5 has not been run.** The
+three that pass are worth stating because they are what makes a comparison legitimate at all: both
+arms landed 3,000 `ok` cells over 3,000 distinct series; the device contract holds in both
+directions, `cuda` on every GPU cell with 87,040 peak bytes and `cpu` on every CPU cell with no
+device bytes at all; and the thread pin held, one `intraop_threads` value per arm with
+`cpu_seconds/fit_seconds` never above 1.001.
+
+Control 4 asks whether the two fleets were *equally busy*, comparing mean density across 30-minute
+buckets after dropping each arm's first and last bucket as cold start and drain. It came back at a
+**10.6 % gap against a 10 % threshold** — GPU 0.9967, CPU 0.9012. The per-bucket breakdown says why,
+and it is not a difference in how the fleets behaved:
+
+| Arm | Steady-state buckets, density each | Mean |
+|---|---|---|
+| GPU | 0.9764, 1.0098, 0.9994, 0.9942, 1.0038 | 0.9967 |
+| CPU | 1.0011, 0.9967, 0.9989, 0.9905, **0.5189** | 0.9012 |
+
+The CPU arm's four saturated buckets average 0.9968 — the GPU arm's number to three decimal places.
+The fifth is its *drain*, and the drain is in the steady-state set only because the run spilled
+**two cells** past the top of the hour, at 19:01:13. Those two cells created a seventh bucket, the
+seventh bucket absorbed the "drop the last one" rule, and the real drain was promoted into the
+comparison. Had those two fits finished 74 seconds sooner, the drain would have been last, would
+have been dropped, and the control would have passed with a gap near 0.0001. The GPU arm was not
+better behaved; its drain simply landed inside its final bucket and was trimmed as designed.
+
+So the defect is in the trimming rule, which assumes the drain occupies exactly one bucket and
+aligns the buckets to the wall clock rather than to the run. **That is not grounds for changing the
+rule here.** The gap between "this control is brittle" and "this control is brittle in the direction
+that would let me read the answer" is the entire reason the file was pre-registered before either
+arm was submitted, and it was discovered by looking at the result. The verdict on this page is
+INCONCLUSIVE, section 5 is unrun, and what to do about it is recorded below rather than decided by
+whoever was holding the terminal.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
