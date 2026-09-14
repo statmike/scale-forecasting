@@ -2620,6 +2620,13 @@ The 2 h figure itself is right (`_WAIT_TIMEOUT_SECONDS = 7200.0`), and `main.run
 timeout through, so **there is no knob at all from the documented path** — the doc now says so and
 points at the persistent-VM route instead of implying a longer wait is available.
 
+> *Superseded 2026-09-14.* The audit found the doc wrong about the flag; it did not question whether
+> 2 h was the right number, and it was not. The same constant killed a live GPU cluster job two
+> hours into a three-hour fit (see the cluster A/B rows below). Both client waits now default to 24
+> h and are moved with `SF_BATCH_JOB_WAIT_S` / `SF_CLUSTER_JOB_WAIT_S`, so the documented path does
+> have a knob. The paragraph above is left as written because it is the record of what was true
+> that day.
+
 **Act 2's tier table was two notebooks out of date, and Act 3's tour never mentioned them.** The doc
 described `smoke` = 3, `batch` = 5, `full` = "all 6". The harness registry has **8**: `smoke` = 4
 (`09_review_run` joined it, being registry-read-only), `batch` = 7 (`08_run_and_monitor`), `full` = 8.

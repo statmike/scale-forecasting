@@ -326,6 +326,12 @@ def test_how_long_the_launcher_waits_on_a_cluster_job_is_an_operator_dial(
     assert BatchInfra.resolve().cluster_job_wait_seconds == 86400
     monkeypatch.setenv("SF_CLUSTER_JOB_WAIT_S", "172800")
     assert BatchInfra.resolve().cluster_job_wait_seconds == 172800
+    # Serverless has the same dial for the same reason. Nothing is destroyed when it fires there —
+    # the batch outlives the launcher under its own ttl — but a healthy 100k run still reported as a
+    # failure and skipped its telemetry stamp, which is a bad enough default on its own.
+    assert BatchInfra.resolve().batch_job_wait_seconds == 86400
+    monkeypatch.setenv("SF_BATCH_JOB_WAIT_S", "3600")
+    assert BatchInfra.resolve().batch_job_wait_seconds == 3600
 
 
 def test_releasing_the_pool_puts_back_the_memory_default_it_switches_off() -> None:
@@ -700,6 +706,46 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     # no-arg result(). What bounds the *whole* wait is the loop's deadline, which is still the long
     # one — a 100k batch exceeds any of these individually and must not be abandoned mid-run.
     assert staged["wait_timeout"] == job_wait._WATCHDOG_INTERVAL_SECONDS
+
+
+def test_the_batch_wait_deadline_comes_from_infra_unless_a_caller_names_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline that bounds the whole wait used to be a module constant — 2 h, unreachable from
+    `main.run`, and short of a full-scale batch. It is now a deployment dial that a single submit
+    can still override."""
+    from dataclasses import replace
+
+    from scale_forecasting import batch_telemetry, submit
+
+    seen: list[float] = []
+
+    def _fake_wait(operation, **kwargs):
+        seen.append(kwargs["wait_timeout"])
+        return type("R", (), {"state": type("S", (), {"name": "SUCCEEDED"})()})()
+
+    monkeypatch.setattr(submit, "stage_code", lambda bucket: ("gs://p.zip", "gs://m.py"))
+    monkeypatch.setattr(submit, "_stage_config", lambda *a, **k: "gs://cfg.json")
+    monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _StubBatchClient())
+    monkeypatch.setattr(batch_telemetry, "_stamp_job_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(submit, "wait_for_job", _fake_wait)
+
+    infra = replace(_infra(), batch_job_wait_seconds=54321)
+    submit.submit_batch(_cfg(models=["theta"]), settings=_settings(), infra=infra, wait=True)
+    submit.submit_batch(
+        _cfg(models=["theta"]), settings=_settings(), infra=infra, wait=True, wait_timeout=60.0
+    )
+    assert seen == [54321.0, 60.0]
+
+
+class _StubBatchClient:
+    """Enough of the Dataproc batches client for a submit that never reaches the network."""
+
+    def create_batch(self, *, parent: str, batch: Any, batch_id: str) -> Any:
+        return object()
+
+    def get_batch(self, *, name: str) -> Any:
+        return type("B", (), {})()
 
 
 class _NeverFinishes:

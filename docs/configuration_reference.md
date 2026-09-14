@@ -1032,6 +1032,11 @@ the clock: a job that has written no forecast rows after `SF_STALL_GRACE_S` (45 
 for the rest of the run. Serverless batches have been under that watchdog since it was written; the
 cluster path joined them.
 
+Serverless has the same patience setting for the same reason, as `SF_BATCH_JOB_WAIT_S` (also 24
+hours, also overridable per submit with `--wait-timeout`). It was never as dangerous there — a wait
+expiring destroys nothing, because the batch runs on under its own ttl — but a healthy long batch
+would still lose its Dataproc telemetry stamp and report a failure to whatever launched it.
+
 ```json
 "compute": {
   "families": {

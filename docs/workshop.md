@@ -142,11 +142,14 @@ uv run python -m scale_forecasting.main --config configs/ray_100k.json          
 uv run python -m scale_forecasting.main --config configs/all_families_10k.json   # every family
 ```
 
-> **On the wait timeout.** A 100k run runs longer than the client's old 15-minute default wait, so
-> the submitter blocks up to **2 h**. That bound is **fixed on this entrypoint** — `--wait-timeout`
-> is a flag on the lower-level `python -m scale_forecasting.submit` module, and passing it to
-> `main` fails with `unrecognized arguments`. If your run will outlast two hours, drive it from a
-> persistent VM (see the note at the end of this Act) rather than reaching for a longer wait.
+> **On the wait timeout.** A 100k run runs far longer than the client library's own 15-minute
+> default, so the submitter blocks for up to **24 h** — long enough that no healthy run should reach
+> it. How long to wait is a patience setting rather than a cost control (your terminal going away
+> stops no meter), so it sits deliberately above the ceilings that *do* end a job. Move it with the
+> `SF_BATCH_JOB_WAIT_S` environment variable, or per submit with `--wait-timeout` on the lower-level
+> `python -m scale_forecasting.submit` module; `main` still has no such flag. Drive a long run from
+> a persistent VM anyway (see the note at the end of this Act) — a laptop that sleeps is the likelier
+> problem.
 > If you ever *do*
 > see a client-side `TimeoutError`, the **jobs are unaffected** — they keep running server-side; only
 > the local wait gave up. Check true state with

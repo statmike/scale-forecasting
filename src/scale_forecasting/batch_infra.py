@@ -75,8 +75,9 @@ _VENV_ARCHIVE_PYTHON = f"./{_VENV_UNPACK_DIR}/bin/python"
 # run can exceed 4h, and the cancel kills it before it writes its run_registry summary row, so the
 # efficiency views render blank). We set an explicit, generous 24h so a full-scale run finishes on
 # its own. Override per-submit with ``--ttl``. This bounds the batch's lifetime, NOT the client wait
-# (that's _WAIT_TIMEOUT_SECONDS): a serverless batch bills only for what it uses, so a high ceiling
-# costs nothing extra — it just stops the platform from guillotining a healthy long run.
+# (that's ``batch_job_wait_seconds`` below): a serverless batch bills only for what it uses, so a
+# high ceiling costs nothing extra — it just stops the platform from guillotining a healthy long
+# run.
 _DEFAULT_TTL_SECONDS = 86400
 
 # Cluster lifetime bounds (``LifecycleConfig``), the *cluster* analog of the batch ttl above — and
@@ -122,9 +123,10 @@ _DEFAULT_CLUSTER_MAX_AGE_SECONDS = 86400
 _ENV_STALL_GRACE = "SF_STALL_GRACE_S"
 _DEFAULT_STALL_GRACE_SECONDS = 2700
 
-# How long the submitter blocks on a *cluster* job before it stops waiting. The fourth bound here,
-# and the one that is not a safety bound at all — it is a patience setting, and it is written down
-# because getting that distinction wrong has already cost a run.
+# How long the submitter blocks on a job before it stops waiting — one per runtime. The fourth and
+# fifth entries here, and the only ones that are not safety bounds at all: they are patience
+# settings, and they are written down at length because getting that distinction wrong has already
+# cost a run.
 #
 # On 2026-09-13 a GPU cluster job was killed two hours in, with 1,941 of 3,000 cells landed and the
 # fit proceeding normally. Nothing was wrong with it. The submitter's wait simply expired against a
@@ -132,17 +134,24 @@ _DEFAULT_STALL_GRACE_SECONDS = 2700
 # deleted the cluster underneath it. The run was lost to its own launcher.
 #
 # The mistake worth naming is the reasoning that put 2 h there: it read as a cost bound, and it is
-# not one. Nothing about how long the client blocks changes what the cluster bills — the three
-# bounds above are what do that, and between them they cover every way a cluster can outlive its
-# usefulness. A cluster with nothing running is reclaimed by the idle ttl. A cluster running
-# something wedged writes no cells and is cancelled by the stall watchdog. A cluster that survives
-# both is killed by max age. A short client wait adds nothing to that; it only converts long runs
-# into lost ones.
+# not one. Nothing about how long the client blocks changes what the job bills — the three bounds
+# above are what do that, and between them they cover every way a job can outlive its usefulness. A
+# cluster with nothing running is reclaimed by the idle ttl. Anything wedged writes no cells and is
+# cancelled by the stall watchdog. Whatever survives both is killed by max age, or by the batch
+# ttl. A short client wait adds nothing to that; it only converts long runs into lost ones.
 #
-# So the default matches the max-age wall: wait as long as the cluster is allowed to exist, and let
-# the bounds that actually know something end the run. Override with ``SF_CLUSTER_JOB_WAIT_S``.
+# So both defaults match the wall that actually ends the job — the cluster's max age, the batch's
+# ttl — on the principle of waiting exactly as long as the thing is allowed to exist, and letting
+# the bounds that know something be the ones that end it.
+#
+# Serverless was never as exposed as the cluster path, because a client wait expiring there
+# destroys nothing: the batch runs on under its own ttl. What it loses is the telemetry stamp and
+# an honest exit code, so a healthy 100k run reports as a failure to whatever launched it. Same
+# reasoning, milder symptom, same fix. ``--wait-timeout`` still overrides per submit.
 _ENV_CLUSTER_JOB_WAIT = "SF_CLUSTER_JOB_WAIT_S"
 _DEFAULT_CLUSTER_JOB_WAIT_SECONDS = 86400
+_ENV_BATCH_JOB_WAIT = "SF_BATCH_JOB_WAIT_S"
+_DEFAULT_BATCH_JOB_WAIT_SECONDS = 86400
 
 
 def _env_seconds(name: str, default: int) -> int:
@@ -192,8 +201,9 @@ class BatchInfra:
     cluster_max_age_seconds: int = _DEFAULT_CLUSTER_MAX_AGE_SECONDS
     # How long a job may write no cells before the submitter cancels it — see the block above.
     stall_grace_seconds: int = _DEFAULT_STALL_GRACE_SECONDS
-    # How long the submitter blocks on a cluster job — patience, not a cost bound. See above.
+    # How long the submitter blocks on a job — patience, not a cost bound. See above.
     cluster_job_wait_seconds: int = _DEFAULT_CLUSTER_JOB_WAIT_SECONDS
+    batch_job_wait_seconds: int = _DEFAULT_BATCH_JOB_WAIT_SECONDS
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -238,6 +248,9 @@ class BatchInfra:
             stall_grace_seconds=_env_seconds(_ENV_STALL_GRACE, _DEFAULT_STALL_GRACE_SECONDS),
             cluster_job_wait_seconds=_env_seconds(
                 _ENV_CLUSTER_JOB_WAIT, _DEFAULT_CLUSTER_JOB_WAIT_SECONDS
+            ),
+            batch_job_wait_seconds=_env_seconds(
+                _ENV_BATCH_JOB_WAIT, _DEFAULT_BATCH_JOB_WAIT_SECONDS
             ),
         )
 

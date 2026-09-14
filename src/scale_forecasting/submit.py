@@ -59,14 +59,6 @@ _SERVERLESS_GPU_TYPE = "L4"
 # `compute.profile.mode == "off"`, or a profile with no memory measurement for this family.
 _SERVERLESS_DEFAULT_GPU_CORES = 4
 
-# How long ``wait=True`` blocks on the batch LRO before giving up. The google-api-core polling
-# default is 900s (15 min) — shorter than a 100k forecast batch, so the bare ``operation.result()``
-# would raise a client-side TimeoutError on a batch that is still running perfectly server-side
-# (the batch is unaffected — only the local wait aborts). We poll for up to 2h so a full-scale run
-# is actually waited out (and its DCU/wall-clock telemetry stamped). Not a cost knob — the batch's
-# own runtime is what it is; this only bounds how long the submitter blocks.
-_WAIT_TIMEOUT_SECONDS = 7200.0
-
 # How many executors a GPU batch may lose before Spark gives up on the application, and the window
 # those losses have to fall inside.
 #
@@ -441,7 +433,7 @@ def submit_batch(
     hardware: str = "cpu",
     gpu_type: str | None = None,
     wait: bool = True,
-    wait_timeout: float = _WAIT_TIMEOUT_SECONDS,
+    wait_timeout: float | None = None,
 ) -> str:
     """Stage code + config and submit one Dataproc Serverless forecast batch; return its batch id.
 
@@ -466,6 +458,10 @@ def submit_batch(
     ``hardware="gpu"`` attaches an L4 per executor (the deep-learning family's serverless job);
     ``gpu_type`` names the accelerator (serverless is L4-only). Both default to the CPU batch, so an
     existing caller submits exactly as before.
+
+    ``wait_timeout`` left ``None`` takes ``infra.batch_job_wait_seconds`` — how long to block is a
+    deployment-level patience setting, not something a caller should have to know. Pass a number
+    only to override one submit.
     """
     # `batch_telemetry`'s two names are bound per call, not at module load. They are what a test
     # substitutes to run this function without a network, and a module-level import would freeze
@@ -518,17 +514,20 @@ def submit_batch(
     since = launch_window_start()  # before submit: nothing this batch writes can predate it
     operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
     if wait:
-        # Block until terminal, but with a timeout long enough for a full-scale (100k) batch — the
-        # api-core polling default is only 900s, which a 100k run exceeds (_WAIT_TIMEOUT_SECONDS).
-        # The watchdog inside cancels a batch that never writes a cell (see `job_wait.wait_for_job`,
-        # shared with the cluster submitter); the `since` bound is what stops a re-run reading the
-        # previous attempt's rows as its own life signs, the same trap `job_outcome` closed for the
-        # status audit.
+        # Block until terminal, with a patience that outlasts the batch's own ttl — the api-core
+        # polling default is 900s and even the old 2h ceiling was short of a 100k run, and a wait
+        # expiring on a healthy batch costs the telemetry stamp and an honest exit code for nothing
+        # (see `batch_infra._ENV_BATCH_JOB_WAIT`). The watchdog inside cancels a batch that never
+        # writes a cell (`job_wait.wait_for_job`, shared with the cluster submitter); the `since`
+        # bound is what stops a re-run reading the previous attempt's rows as its own life signs,
+        # the same trap `job_outcome` closed for the status audit.
         result = wait_for_job(
             operation,
             run_id=run_id,
             label=f"batch {batch_id}",
-            wait_timeout=wait_timeout,
+            wait_timeout=(
+                float(infra.batch_job_wait_seconds) if wait_timeout is None else wait_timeout
+            ),
             grace_s=infra.stall_grace_seconds,
             since=since,
         )
@@ -565,9 +564,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--wait-timeout",
         type=float,
-        default=_WAIT_TIMEOUT_SECONDS,
-        help=f"seconds to block on the batch when waiting (default {_WAIT_TIMEOUT_SECONDS:.0f}; a "
-        "100k batch exceeds the 900s api-core default)",
+        default=None,
+        help="seconds to block on the batch when waiting (default SF_BATCH_JOB_WAIT_S, 24h; "
+        "giving up early costs the telemetry stamp and exits non-zero on a healthy batch)",
     )
     p.add_argument(
         "--ttl",
