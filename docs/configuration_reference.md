@@ -1014,6 +1014,24 @@ They are environment, not config, so changing them does **not** change your `run
 A cluster named by `spark_cluster_name` gets neither — the run does not create it and does not own
 when it ends, so reclaiming it is yours to do.
 
+**How long the launcher waits, and what happens when it stops.** Separately from those server-side
+bounds, the process that submitted the job blocks until the job is terminal. That wait is patience,
+not a cost control — the launcher going away stops no meter — so it is set high, at **24 hours**,
+and is moved with `SF_CLUSTER_JOB_WAIT_S` (seconds). Environment, not config: it does not change
+your `run_id`.
+
+If the wait does run out, the launcher **leaves the cluster running** and tells you where it is.
+That is deliberate. A wait expiring says only that the launcher stopped looking, and the job it
+stopped looking at is very likely still fitting; deleting its cluster at that moment would be the
+launcher destroying its own healthy run. Follow the job with `--probe`, and the idle and max-age
+bounds above reclaim the cluster once it finishes or goes quiet.
+
+A job that genuinely wedges is caught by a different mechanism, one that watches output instead of
+the clock: a job that has written no forecast rows after `SF_STALL_GRACE_S` (45 minutes by default,
+`0` to switch it off) is cancelled. A single written row is proof of life and stands the watch down
+for the rest of the run. Serverless batches have been under that watchdog since it was written; the
+cluster path joined them.
+
 ```json
 "compute": {
   "families": {

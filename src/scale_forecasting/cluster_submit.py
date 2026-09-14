@@ -28,7 +28,6 @@ from .commands import build_driver_args
 from .compute_fallback import resolve_candidates
 from .dataproc_cluster import (
     _DEFAULT_WORKER_COUNT,
-    _WAIT_TIMEOUT_SECONDS,
     _cluster_client,
     _create_cluster_across_candidates,
     _delete_cluster,
@@ -37,6 +36,7 @@ from .dataproc_cluster import (
 )
 from .errors import EngineError, get_logger
 from .hardware import spark_executor_env
+from .job_wait import wait_for_job
 from .staging import stage_code, stage_config
 
 if TYPE_CHECKING:
@@ -108,21 +108,67 @@ def build_job(
     )
 
 
+class WaitExpired(EngineError):
+    """The submitter stopped waiting on a cluster job that had not finished.
+
+    Distinct from every other failure on this path because it says nothing about the job. A FAILED
+    job is finished and its cluster is finished with it; a wait that expires leaves a job that was
+    running a moment ago and probably still is. The caller needs to tell those apart, because the
+    ordinary response to an exception here — tear the cluster down — is the one response that turns
+    "we stopped watching" into "the run is gone".
+    """
+
+    def __init__(self, job_id: str, waited_s: float) -> None:
+        self.job_id = job_id
+        self.waited_s = waited_s
+        super().__init__(
+            f"stopped waiting on cluster job {job_id or '(id unknown)'} after "
+            f"{waited_s / 3600:.1f}h; it may still be running"
+        )
+
+
 def _submit_job_and_wait(
-    client: Any, project_id: str, region: str, job: object, *, wait: bool
+    client: Any,
+    project_id: str,
+    region: str,
+    job: object,
+    *,
+    wait: bool,
+    run_id: str,
+    wait_timeout: float,
+    grace_s: int,
+    since: Any,
 ) -> tuple[str, str, str]:  # pragma: no cover - live Dataproc I/O, exercised by the @gcp smoke
     """Submit the PySpark job; return ``(job_id, state_name, detail)``.
 
     With ``wait`` block to terminal and return the terminal state; without it return the immediate
     post-submit state. ``detail`` carries the driver status message on a non-DONE terminal state.
+
+    The wait is `job_wait.wait_for_job`, the same loop the Serverless submitter uses, so a cluster
+    job that never writes a cell is now cancelled on the same rule rather than left to bill until
+    the cluster's max age. A wait that runs out of patience instead of evidence raises `WaitExpired`
+    carrying the server-assigned job id, which is the one thing the caller needs to follow the run
+    after it has stopped watching.
     """
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
     op = client.submit_job_as_operation(
         request={"project_id": project_id, "region": region, "job": job}
     )
-    submitted = op.metadata.job_id if not wait else None
+    submitted = op.metadata.job_id
     if not wait:
         return (submitted or "", "SUBMITTED", "")
-    result = op.result(timeout=_WAIT_TIMEOUT_SECONDS)
+    try:
+        result = wait_for_job(
+            op,
+            run_id=run_id,
+            label=f"cluster job {submitted}",
+            wait_timeout=wait_timeout,
+            grace_s=grace_s,
+            since=since,
+        )
+    except FuturesTimeoutError as exc:
+        raise WaitExpired(submitted or "", wait_timeout) from exc
     job_id = result.reference.job_id
     state = result.status.state
     state_name = getattr(state, "name", str(state))
@@ -177,6 +223,7 @@ def submit_cluster_job(
     reuse path the count is moot (the cluster exists) but the overlay still applies, which is what
     keeps a family's own shape correct on a cluster sized for the union of several.
     """
+    from .job_outcome import launch_window_start
     from .profiling.source import profile_for_run
     from .registry.ids import make_run_id
     from .settings import Settings
@@ -246,6 +293,9 @@ def submit_cluster_job(
     cluster_client = _cluster_client(region)
     job_client = _job_client(region)
 
+    # Before submit, so nothing this job writes can predate the liveness window the watchdog reads.
+    since = launch_window_start()
+    leave_cluster_up = False
     try:
         job = build_job(
             cluster=name,
@@ -260,7 +310,15 @@ def submit_cluster_job(
             provisioned_hardware=hardware,
         )
         submitted_id, state_name, detail = _submit_job_and_wait(
-            job_client, project_id, region, job, wait=wait
+            job_client,
+            project_id,
+            region,
+            job,
+            wait=wait,
+            run_id=run_id,
+            wait_timeout=float(infra.cluster_job_wait_seconds),
+            grace_s=infra.stall_grace_seconds,
+            since=since,
         )
         # A cluster job id is server-assigned (not client-set), so return the *real* id Dataproc
         # assigned (``reference.job_id``) — that's what resolves in the console for reverse-trace.
@@ -271,10 +329,24 @@ def submit_cluster_job(
                 f"cluster job {final_id} terminal state {state_name}: {detail or '(no detail)'}"
             )
         return final_id, region
+    except WaitExpired as expired:
+        # The one exception that must not reach the teardown below. Every other way out of this
+        # block leaves a job that is over; this one leaves a job that is very likely still fitting,
+        # and deleting its cluster would be the launcher destroying its own healthy run — which is
+        # precisely what happened on 2026-09-13, 1,941 cells in. Leaving the cluster up is safe
+        # because it is not this process that bounds the spend: the idle ttl reclaims it once the
+        # job ends, and max age is the wall behind that.
+        leave_cluster_up = not reuse
+        raise EngineError(
+            f"{expired}. The cluster was LEFT RUNNING at {name} ({region}) so that giving up on "
+            f"the wait does not kill the run. Follow it with `--probe`; it is reclaimed by the "
+            f"cluster's own idle/max-age bounds once it finishes or goes quiet. Raise "
+            f"SF_CLUSTER_JOB_WAIT_S to wait longer."
+        ) from expired
     finally:
         # Stamp the sizing decision even on the failure path: a cluster job that OOM'd is exactly
         # the one whose executor split someone needs to read, and the header is the only place it
         # would survive the teardown below. Best-effort, like every other telemetry write.
         _stamp_cluster_telemetry(run_id, sizing, settings)
-        if not reuse:
+        if not reuse and not leave_cluster_up:
             _delete_cluster(cluster_client, project_id, region, name)

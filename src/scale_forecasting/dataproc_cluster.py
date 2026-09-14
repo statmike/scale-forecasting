@@ -111,7 +111,17 @@ _GPU_INIT_TIMEOUT = timedelta(minutes=30)
 # adds a conftest for the new signature, or Debian updates its driver package.
 _GPU_IMAGE_VERSION = "2.2.85-debian12"
 
-# How long ``wait=True`` blocks on the job before giving up (parity with the batch wait ceiling).
+# How long to block on a control-plane operation — creating the cluster, deleting it — before
+# giving up. These are the operations whose duration is genuinely bounded and has nothing to do with
+# the size of the run: the slowest create observed is a GPU cluster building its driver at init,
+# around twenty minutes, so two hours is generous by an order of magnitude and a wait that reaches
+# it means Dataproc is stuck, not busy.
+#
+# It used to bound the *job* wait as well, and that was the bug of 2026-09-13 — a number chosen
+# against how long a cluster takes to appear, silently governing how long a three-hour fit was
+# allowed to run. The job wait is a different question with a different answer and now lives in its
+# own setting (``BatchInfra.cluster_job_wait_seconds``), which is where the reasoning is written
+# down.
 _WAIT_TIMEOUT_SECONDS = 7200.0
 
 # Dataproc's own bounds on ``LifecycleConfig``. The defaults live on `BatchInfra` (this module

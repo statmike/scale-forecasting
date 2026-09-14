@@ -984,3 +984,143 @@ def test_an_unreadable_meter_leaves_every_candidate_standing(monkeypatch):
     assert len(live) == 3
     assert granted == {}
     assert not ledger.attempts
+
+
+# --- the wait on a cluster job: patience vs. teardown --------------------------
+#
+# The 2026-09-13 loss in one section. A GPU cluster job was two hours into a three-hour fit when
+# the launcher's own hard-coded two-hour ceiling expired; teardown lives in a ``finally``, so the
+# launcher deleted the cluster out from under a healthy job and took 1,941 landed cells with it.
+# Two things were wrong and both are tested here: the ceiling was not the operator's to move, and
+# "I stopped watching" was treated as "the job is over".
+
+
+class _ClusterLifecycle:
+    """Every seam `submit_cluster_job` touches, replaced — so the lifecycle runs entirely offline.
+
+    Records the one thing these tests are about: whether the cluster got deleted.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> None:
+        import types
+
+        from scale_forecasting import job_outcome
+        from scale_forecasting.profiling import source as profile_source
+
+        self.deleted: list[str] = []
+        self.stamped: list[str] = []
+        self.wait_kwargs: dict[str, Any] = {}
+
+        def _wait(client, project_id, region, job, **kwargs):
+            self.wait_kwargs.update(kwargs)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(profile_source, "profile_for_run", lambda cfg, **k: None)
+        monkeypatch.setattr(job_outcome, "launch_window_start", lambda: None)
+        monkeypatch.setattr(
+            cluster_submit, "stage_code", lambda bucket: ("gs://p.zip", "gs://m.py")
+        )
+        monkeypatch.setattr(cluster_submit, "stage_config", lambda *a, **k: "gs://cfg.json")
+        monkeypatch.setattr(cluster_submit, "_stage_cluster_init", lambda infra: "gs://init.sh")
+        monkeypatch.setattr(cluster_submit, "resolve_candidates", lambda **k: ["candidate"])
+        monkeypatch.setattr(
+            cluster_submit,
+            "_create_cluster_across_candidates",
+            lambda *a, **k: types.SimpleNamespace(region="us-central1"),
+        )
+        monkeypatch.setattr(cluster_submit, "_cluster_client", lambda region: object())
+        monkeypatch.setattr(cluster_submit, "_job_client", lambda region: object())
+        monkeypatch.setattr(cluster_submit, "build_job", lambda **k: object())
+        monkeypatch.setattr(
+            cluster_submit, "_stamp_cluster_telemetry", lambda rid, s, st: self.stamped.append(rid)
+        )
+        monkeypatch.setattr(
+            cluster_submit,
+            "_delete_cluster",
+            lambda client, project, region, name: self.deleted.append(name),
+        )
+        monkeypatch.setattr(cluster_submit, "_submit_job_and_wait", _wait)
+
+
+def _done_job() -> Any:
+    return ("real-job-id", "DONE", "")
+
+
+def _venv_cfg() -> RunConfig:
+    return _cfg(compute={"spark_deps": "packed_venv"})
+
+
+def test_a_job_that_finishes_still_tears_its_ephemeral_cluster_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The baseline the next two tests are measured against: nothing here weakens teardown."""
+    lifecycle = _ClusterLifecycle(monkeypatch, _done_job())
+    job_id, region = cluster_submit.submit_cluster_job(
+        _venv_cfg(), settings=_settings(), infra=_infra_with_venv()
+    )
+    assert (job_id, region) == ("real-job-id", "us-central1")
+    assert len(lifecycle.deleted) == 1
+
+
+def test_a_job_that_fails_still_tears_its_ephemeral_cluster_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal FAILED job is *finished*, so its cluster has no further work to do."""
+    from scale_forecasting.errors import EngineError
+
+    lifecycle = _ClusterLifecycle(monkeypatch, ("real-job-id", "FAILED", "OOM in the executor"))
+    with pytest.raises(EngineError, match="terminal state FAILED"):
+        cluster_submit.submit_cluster_job(
+            _venv_cfg(), settings=_settings(), infra=_infra_with_venv()
+        )
+    assert len(lifecycle.deleted) == 1
+
+
+def test_a_wait_that_merely_expires_leaves_the_cluster_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-09-13 regression test. A `WaitExpired` says nothing about the job — it says the
+    launcher stopped looking. Tearing down on it is the launcher killing its own healthy run."""
+    from scale_forecasting.errors import EngineError
+
+    lifecycle = _ClusterLifecycle(monkeypatch, cluster_submit.WaitExpired("job-9", 86400.0))
+    with pytest.raises(EngineError) as caught:
+        cluster_submit.submit_cluster_job(
+            _venv_cfg(), settings=_settings(), infra=_infra_with_venv()
+        )
+    assert lifecycle.deleted == []
+    message = str(caught.value)
+    # The operator is left with three things: the job to follow, where its cluster is, and the dial.
+    assert "job-9" in message
+    assert "LEFT RUNNING" in message
+    assert "us-central1" in message
+    assert "SF_CLUSTER_JOB_WAIT_S" in message
+    # Telemetry is stamped on this path too — the sizing is exactly what a stuck job needs read.
+    assert len(lifecycle.stamped) == 1
+
+
+def test_the_cluster_job_wait_comes_from_infra_not_from_a_module_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the 2026-09-13 defect: the ceiling was hard-coded, so no operator could
+    move it. It is now `BatchInfra.cluster_job_wait_seconds`, and it must be what gets threaded."""
+    lifecycle = _ClusterLifecycle(monkeypatch, _done_job())
+    infra = _infra_with_venv()
+    cluster_submit.submit_cluster_job(_venv_cfg(), settings=_settings(), infra=infra)
+    assert lifecycle.wait_kwargs["wait_timeout"] == float(infra.cluster_job_wait_seconds)
+    assert lifecycle.wait_kwargs["grace_s"] == infra.stall_grace_seconds
+
+
+def test_the_default_client_wait_outlasts_every_bound_that_actually_stops_the_spend() -> None:
+    """A client wait shorter than the cluster's own bounds converts long runs into lost ones for no
+    saving: the launcher going away stops no meter. So it sits above the server-side ttl that does.
+
+    It also sits well above the control-plane ceiling, which is a different number for a different
+    job — `dataproc_cluster._WAIT_TIMEOUT_SECONDS` bounds create and delete, operations that take
+    minutes; conflating the two is what broke.
+    """
+    infra = _infra_with_venv()
+    assert infra.cluster_job_wait_seconds >= infra.cluster_max_age_seconds
+    assert infra.cluster_job_wait_seconds > dataproc_cluster._WAIT_TIMEOUT_SECONDS

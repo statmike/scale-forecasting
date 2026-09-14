@@ -294,7 +294,7 @@ def test_the_watchdog_only_fires_on_a_run_that_produced_nothing(
     """Three ways to answer no, and each is a false alarm it refuses to raise. The ``None`` row is
     the one that matters most: a watchdog that read a BigQuery outage as death would cancel healthy
     runs at exactly the moment nobody could check on them."""
-    from scale_forecasting.submit import is_stalled
+    from scale_forecasting.job_wait import is_stalled
 
     assert is_stalled(elapsed_s=elapsed_s, grace_s=grace_s, cells=cells) is stalled
 
@@ -311,6 +311,21 @@ def test_the_stall_grace_is_infra_not_config(monkeypatch: pytest.MonkeyPatch) ->
     assert BatchInfra.resolve().stall_grace_seconds == 600
     monkeypatch.setenv("SF_STALL_GRACE_S", "0")
     assert BatchInfra.resolve().stall_grace_seconds == 0  # the off switch
+
+
+def test_how_long_the_launcher_waits_on_a_cluster_job_is_an_operator_dial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It used to be a module constant nobody could reach, which is half of why 2026-09-13 cost a
+    run. Like every other deployment-level bound it is infra, not config: moving it must not rename
+    the run it bounds."""
+    monkeypatch.setenv("SF_CODE_BUCKET", "b")
+    monkeypatch.setenv("SF_CONTAINER_IMAGE", "img:tag")
+    monkeypatch.setenv("SF_COMPUTE_SA", "sa@p.iam.gserviceaccount.com")
+    monkeypatch.setenv("SF_SUBNETWORK_URI", "projects/p/regions/r/subnetworks/s")
+    assert BatchInfra.resolve().cluster_job_wait_seconds == 86400
+    monkeypatch.setenv("SF_CLUSTER_JOB_WAIT_S", "172800")
+    assert BatchInfra.resolve().cluster_job_wait_seconds == 172800
 
 
 def test_releasing_the_pool_puts_back_the_memory_default_it_switches_off() -> None:
@@ -635,7 +650,7 @@ def test_resolve_defaults_to_the_container_envelope(monkeypatch: pytest.MonkeyPa
 
 def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """submit_batch overrides series_limit, stages code+config, and calls create_batch once."""
-    from scale_forecasting import batch_telemetry, submit
+    from scale_forecasting import batch_telemetry, job_wait, submit
 
     staged: dict[str, Any] = {}
 
@@ -684,7 +699,7 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     # The wait polls on the watchdog's interval, not on api-core's 900s default and not on a bare
     # no-arg result(). What bounds the *whole* wait is the loop's deadline, which is still the long
     # one — a 100k batch exceeds any of these individually and must not be abandoned mid-run.
-    assert staged["wait_timeout"] == submit._WATCHDOG_INTERVAL_SECONDS
+    assert staged["wait_timeout"] == job_wait._WATCHDOG_INTERVAL_SECONDS
 
 
 class _NeverFinishes:
@@ -708,15 +723,15 @@ def test_a_batch_that_never_writes_a_cell_is_cancelled(monkeypatch: pytest.Monke
     """The churn, ended. Nothing else was going to end it: the batch's own ttl is 24 h on purpose
     so a healthy 100k run survives, and the client-side wait is 2 h — both of which the GPU batch
     of 2026-09-10 would have sat inside, billing, having produced nothing."""
-    from scale_forecasting import job_outcome, submit
+    from scale_forecasting import job_outcome, job_wait
     from scale_forecasting.errors import EngineError
 
-    monkeypatch.setattr(submit, "_WATCHDOG_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(job_wait, "_WATCHDOG_INTERVAL_SECONDS", 0.001)
     monkeypatch.setattr(job_outcome, "cells_written", lambda run_id, **k: 0)
     op = _NeverFinishes()
     with pytest.raises(EngineError, match="wrote no forecast rows"):
-        submit._wait_for_batch(
-            op, run_id="r", batch_id="sf-r", wait_timeout=60.0, grace_s=1, since=None
+        job_wait.wait_for_job(
+            op, run_id="r", label="batch sf-r", wait_timeout=60.0, grace_s=1, since=None
         )
     assert op.cancelled
 
@@ -727,17 +742,17 @@ def test_a_batch_that_has_written_something_is_left_alone(monkeypatch: pytest.Mo
     and the original client-side ``TimeoutError`` is what comes out."""
     from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-    from scale_forecasting import job_outcome, submit
+    from scale_forecasting import job_outcome, job_wait
 
     calls: list[str] = []
-    monkeypatch.setattr(submit, "_WATCHDOG_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(job_wait, "_WATCHDOG_INTERVAL_SECONDS", 0.001)
     monkeypatch.setattr(
         job_outcome, "cells_written", lambda run_id, **k: (calls.append(run_id), 3)[1]
     )
     op = _NeverFinishes()
     with pytest.raises(FuturesTimeoutError):
-        submit._wait_for_batch(
-            op, run_id="r", batch_id="sf-r", wait_timeout=1.3, grace_s=1, since=None
+        job_wait.wait_for_job(
+            op, run_id="r", label="batch sf-r", wait_timeout=1.3, grace_s=1, since=None
         )
     assert not op.cancelled
     # Asked once, then stood down — not once per poll for the rest of the run.

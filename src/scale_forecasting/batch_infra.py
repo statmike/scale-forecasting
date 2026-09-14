@@ -122,6 +122,28 @@ _DEFAULT_CLUSTER_MAX_AGE_SECONDS = 86400
 _ENV_STALL_GRACE = "SF_STALL_GRACE_S"
 _DEFAULT_STALL_GRACE_SECONDS = 2700
 
+# How long the submitter blocks on a *cluster* job before it stops waiting. The fourth bound here,
+# and the one that is not a safety bound at all — it is a patience setting, and it is written down
+# because getting that distinction wrong has already cost a run.
+#
+# On 2026-09-13 a GPU cluster job was killed two hours in, with 1,941 of 3,000 cells landed and the
+# fit proceeding normally. Nothing was wrong with it. The submitter's wait simply expired against a
+# hard-coded 2 h, and because teardown lives in a ``finally``, giving up on watching the job also
+# deleted the cluster underneath it. The run was lost to its own launcher.
+#
+# The mistake worth naming is the reasoning that put 2 h there: it read as a cost bound, and it is
+# not one. Nothing about how long the client blocks changes what the cluster bills — the three
+# bounds above are what do that, and between them they cover every way a cluster can outlive its
+# usefulness. A cluster with nothing running is reclaimed by the idle ttl. A cluster running
+# something wedged writes no cells and is cancelled by the stall watchdog. A cluster that survives
+# both is killed by max age. A short client wait adds nothing to that; it only converts long runs
+# into lost ones.
+#
+# So the default matches the max-age wall: wait as long as the cluster is allowed to exist, and let
+# the bounds that actually know something end the run. Override with ``SF_CLUSTER_JOB_WAIT_S``.
+_ENV_CLUSTER_JOB_WAIT = "SF_CLUSTER_JOB_WAIT_S"
+_DEFAULT_CLUSTER_JOB_WAIT_SECONDS = 86400
+
 
 def _env_seconds(name: str, default: int) -> int:
     """Read a non-negative integer seconds value from ``name``, else ``default``.
@@ -168,8 +190,10 @@ class BatchInfra:
     # (which has `ttl_seconds`) and Ray ignore them. 0 disables a bound.
     cluster_idle_ttl_seconds: int = _DEFAULT_CLUSTER_IDLE_TTL_SECONDS
     cluster_max_age_seconds: int = _DEFAULT_CLUSTER_MAX_AGE_SECONDS
-    # How long a batch may write no cells before the submitter cancels it — see the block above.
+    # How long a job may write no cells before the submitter cancels it — see the block above.
     stall_grace_seconds: int = _DEFAULT_STALL_GRACE_SECONDS
+    # How long the submitter blocks on a cluster job — patience, not a cost bound. See above.
+    cluster_job_wait_seconds: int = _DEFAULT_CLUSTER_JOB_WAIT_SECONDS
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -212,6 +236,9 @@ class BatchInfra:
                 _ENV_CLUSTER_MAX_AGE, _DEFAULT_CLUSTER_MAX_AGE_SECONDS
             ),
             stall_grace_seconds=_env_seconds(_ENV_STALL_GRACE, _DEFAULT_STALL_GRACE_SECONDS),
+            cluster_job_wait_seconds=_env_seconds(
+                _ENV_CLUSTER_JOB_WAIT, _DEFAULT_CLUSTER_JOB_WAIT_SECONDS
+            ),
         )
 
     @classmethod
