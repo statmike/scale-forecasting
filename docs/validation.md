@@ -2448,7 +2448,8 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Registry ops — job-level settle (`--settle`) | CURRENT | Run live 2026-09-04 against the one fixture reserved for it: the `statistical` family of `nb03-combo-ensemble-1788329058-c4a5e6db54a1`, `RUNNING` in the registry since 2026-09-02 while its Dataproc batch had `SUCCEEDED` with all 10 of 10 cells landed. The row now reads `COMPLETED` and carries the whole audit blob it was written on under `job_telemetry.$.settle`. **This row is being recorded 2026-09-15, eleven days after the command ran** — the proof happened and nobody wrote it down, which is the exact failure this file exists to prevent. `settled_by` is null for the P6 reason directly below, whose fix landed seven hours later the same day. The fixture class is now empty — every job row in the registry is terminal — so this cannot be re-proven without manufacturing a stale row. See below. |
 | Run audit principal (P6) | CURRENT | The `actor=None` on 2026-09-02's live cancel was a **defect**, resolved 2026-09-04: the userinfo lookup was sending the ADC quota project as `x-goog-user-project` and getting a 403 for `serviceusage.services.use` on a project unrelated to the run. Fixed by stripping the quota project (`identity._without_quota_project`) and verified live under the same ADC credential — `resolve_principal()` returns the user's email. Proven end-to-end on a real run 2026-09-05: `ray-100k-dcc77a9d1e9b`'s header row carries `user_id = <the launching user email>`, where its three pre-fix attempts are blank. That is the *launch* path; cancel-with-attribution has not been re-exercised live since the fix, though the audit *write* was already proven on 2026-09-02. See below. |
 | Registry ops — Ray cluster reaper (`reap-clusters`) | CURRENT | Proven live 2026-09-15 in four arms, against launchers killed on purpose to reproduce the 2026-09-12 incident. The verb **kept** a cluster whose run was still live, **named** a finished run's orphan in the preview, **reclaimed** it under `--yes` with the v1beta1 `persistentResources` read afterwards returning `{}`, and then `sweep_on_launch` reclaimed a *second* orphan with nobody asking — at 15:33:04 UTC, two seconds before the launch that triggered it began its own create. Both decision branches ran live (finished-run and unknown-run), and the 1800 s floor was watched both holding a 1476-second-old headerless cluster and releasing the same cluster at 41 minutes. **The first reclaim attempt failed and exposed two defects** — the delete was going to the wrong regional endpoint, and a failed delete was being counted as reaped — fixed in `ec73f45` and re-proven the same day. See below. |
-| Repair ladder end to end — a launcher killed mid-provision (`--probe` → `--settle` → `close-runs` → `reap-clusters`) | CURRENT | Proven live 2026-09-15 against `deadlock-11h-d09a1bf19be9`, a Ray CPU run whose launcher was `kill -9`'d six minutes into its twelve-minute cluster create. The Vertex create finished server-side with nobody owning it, leaving exactly the state that had no exit before: an orphaned cluster, a `RUNNING` header, and a `RUNNING` job row whose runtime job was never submitted. The four verbs then walked it to a clean registry and an empty region **with no manual step** — no `drop-run --force`, no hand-deleted cluster, no edited row. `--probe` read the family as native `NOT_FOUND` / verdict `LOST` (`cluster alive; ray job not on it`) where before the fix it read a permanent `UNKNOWN`; `--settle --force` wrote `FAILED` / `RUNTIME_LOST`; `close-runs --yes` took the header `RUNNING → FAILED`; `reap-clusters --yes` named the orphan by its now-terminal run and reclaimed it. Every state change was verified by reading it back — `v_run_jobs`, `run_registry`, and the v1beta1 `persistentResources` endpoint returning `{}` with a direct GET returning 404 — never by a verb's own success line. **Scope is signature 1 only:** killed *before* the submit. Signature 2 (killed after submit, row stuck at `AWAITING_CAPACITY`) and signature 4 (the Dataproc-cluster shape) are not proven by this run. See below. |
+| Repair ladder end to end — a launcher killed mid-provision (`--probe` → `--settle` → `close-runs` → `reap-clusters`) | CURRENT | Proven live 2026-09-15 against `deadlock-11h-d09a1bf19be9`, a Ray CPU run whose launcher was `kill -9`'d six minutes into its twelve-minute cluster create. The Vertex create finished server-side with nobody owning it, leaving exactly the state that had no exit before: an orphaned cluster, a `RUNNING` header, and a `RUNNING` job row whose runtime job was never submitted. The four verbs then walked it to a clean registry and an empty region **with no manual step** — no `drop-run --force`, no hand-deleted cluster, no edited row. `--probe` read the family as native `NOT_FOUND` / verdict `LOST` (`cluster alive; ray job not on it`) where before the fix it read a permanent `UNKNOWN`; `--settle --force` wrote `FAILED` / `RUNTIME_LOST`; `close-runs --yes` took the header `RUNNING → FAILED`; `reap-clusters --yes` named the orphan by its now-terminal run and reclaimed it. Every state change was verified by reading it back — `v_run_jobs`, `run_registry`, and the v1beta1 `persistentResources` endpoint returning `{}` with a direct GET returning 404 — never by a verb's own success line. **Scope is signature 1 only:** killed *before* the submit. Signature 2 (killed after submit, row stuck at `AWAITING_CAPACITY`) was proven separately the same day — its own row is below. Signature 4 (the Dataproc-cluster shape) is not proven by either run. See below. |
+| Repair ladder end to end — a launcher killed *after* the submit, row stuck at `AWAITING_CAPACITY` | CURRENT | Proven live 2026-09-15 against `orphan-11h-28d65b370b23`, the other half of the same incident. A Ray CPU run was `kill -9`'d 23 seconds after its job reached the cluster, so the job ran to completion on a cluster whose launcher no longer existed — 100/100 cells landed — while the registry still described a family waiting for capacity. The row read `AWAITING_CAPACITY`, not `RUNNING`, because the capacity walk had recorded a failed `us-east1` attempt and nothing rewrites the status after a later region succeeds. The ladder walked it to a clean registry with **no manual step**: `--probe` escalated the row instead of skipping it (`escalated=True`, `statistical ray AWAITING_CAPACITY SUCCEEDED STALE_REGISTRY 100/100`), `--settle --force` wrote `COMPLETED` with no failure reason, `close-runs --yes` took the header `RUNNING → COMPLETED`, and `reap-clusters --yes` reclaimed the orphan. Every state change verified by reading it back — `v_run_jobs`, `run_registry`, all three regions' v1beta1 `persistentResources` returning `{}` and a direct GET returning 404. The run has predictions and no leaderboard, which is expected: the launcher died before ensemble and finalize. **The failed region's verdict came back `TRANSIENT_CAPACITY` where the classifier's own comment predicts `HARD_CEILING`** — a real, low-severity finding recorded below. Signature 4 remains unproven. See below. |
 
 ### A launcher killed mid-provision now finds its own way out
 
@@ -2491,12 +2492,75 @@ evidence that does not count here.
 That is deliberate — `settle` never invents time, because a row settled three days after the fact
 would otherwise report three days of runtime for a ten-minute job.
 
-**What this does not prove.** Two shapes of the same incident are still unproven live. Killing the
-launcher *after* it submits leaves the row at `AWAITING_CAPACITY` with a runtime handle, and the job
-then runs to completion on the orphan; the escalation fix for that shipped the same day and is
-pinned offline, but no live run has exercised it. The Dataproc-cluster version cannot be fixed the
-same way at all — an empty job id there is genuinely ambiguous between "never submitted" and
-"submitted and we died before the id came back" — and remains open.
+**What this does not prove.** Killing the launcher *after* it submits produces a different state
+entirely, and this run says nothing about it; that shape was proven separately the same day and has
+its own section immediately below. The Dataproc-cluster version cannot be fixed the same way at all
+— an empty job id there is genuinely ambiguous between "never submitted" and "submitted and we died
+before the id came back" — and remains open.
+
+### The other half: a job that finished while the registry said it was waiting for room
+
+Kill the launcher twenty seconds later and you get a state that looks nothing like the one above and
+is arguably worse. The Ray job is already on the cluster's job server, which does not care that the
+client that submitted it has gone. It runs, it finishes, it lands all 100 cells. What is left behind
+is a registry describing a run that never started.
+
+And it does not say `RUNNING`. It says `AWAITING_CAPACITY`, for a reason worth spelling out: the job
+row is written `RUNNING` at launch, but a capacity walk that records a *failed* region attempt
+publishes `AWAITING_CAPACITY` over it, and **nothing writes it back** when a later region succeeds.
+The successful attempt returns straight out of the walk; the only code that would finalize the
+status is the launcher's own exit path, and the launcher is dead. So a run that hopped regions and
+then worked perfectly is, to the registry, indistinguishable from one still queueing.
+
+The probe used to make this worse. It skipped every `AWAITING_CAPACITY` row on the sensible theory
+that a family between capacity attempts has no runtime job to ask about — except here it has one,
+and the job's id is sitting in the row's own handle. The fix narrowed the skip to rows that still
+*look* pre-launch, meaning the handle's `native_id` is still empty.
+
+**The fixture was killed on purpose**, exactly as for signature 1, and one further thing was
+arranged: `compute.capacity.preflight` was set to `false`. That needs saying plainly. With the
+preflight on — the shipped default — a region with no PSC-I network attachment is dropped before any
+create is attempted, so no attempt is recorded, nothing publishes, and the row stays `RUNNING`: you
+get signature 1 again. Turning the preflight off does not invent a failure, it declines to predict
+one, and what follows is a real 404 from the real API. Every registry state below was written by
+shipped code on a shipped config flag.
+
+Six arms, fixed before the launch:
+
+| Arm | What had to happen | What happened |
+|---|---|---|
+| A — the right incident is reproduced | row `AWAITING_CAPACITY` with a non-empty `native_id`, header `RUNNING`, capacity telemetry naming the failed region | all of it, with one deviation on the recorded *verdict* — see below |
+| B — the job finishes without its launcher | 100/100 cells, launcher confirmed dead | killed at 21:11:51, 23 s after `submitted Ray job`; the last cell landed by 21:20:29 with no process alive |
+| C — the probe escalates rather than skipping | the family appears, native `SUCCEEDED`, verdict `STALE_REGISTRY` | `escalated=True`; `statistical ray AWAITING_CAPACITY SUCCEEDED STALE_REGISTRY 100/100 Job finished successfully.` A family missing from this output would have been the pre-fix behaviour and a fail |
+| D — settle writes `COMPLETED`, not a failure | job row `COMPLETED`, no failure reason, read back | preview `AWAITING_CAPACITY -> COMPLETED (runtime succeeded; 100/100 series landed)`; `v_run_jobs` confirms |
+| E — `close-runs` closes the header | header terminal, and terminal means `COMPLETED` | `RUNNING → COMPLETED (every job COMPLETED)`, confirmed from `run_registry` |
+| F — the reaper reclaims | preview names the run, `--yes` reclaims, **verified by REST** | `run finished but the cluster is still up: orphan-11h-28d65b370b23 is COMPLETED`; afterwards all three regions list `{}` and a direct GET returns 404 |
+
+Arm D is the one where the stakes are asymmetric. Every other failure mode here ends in some flavour
+of "the registry is confused"; writing `FAILED` on this row would have recorded a run that finished
+and produced every one of its forecasts as lost work.
+
+**A finding, small but real.** The failed `us-east1` attempt was classified `TRANSIENT_CAPACITY`,
+where the classifier's own comment says this exact case is a `HARD_CEILING` — hop, and never come
+back, because no amount of patience builds a network attachment. The comment records a live finding
+that the exception type is `NotFound`; on this path the Vertex SDK raises a generic *"Cluster …
+returned an error. | Unexpected response."* instead, and although the entire 404 body is then
+appended to the message — `HTTP/1.1 404 Not Found`, `"reason": "notFound"`, *"The resource …
+networkAttachments/… was not found"* — no marker list matches any of it. The region is therefore not
+dropped, and a walk that failed everywhere would come back and spend another 160 seconds on it.
+Severity is low precisely because the preflight catches this case, which is why the fixture had to
+disable the preflight to reach it at all; the exposed population is deployments that have turned the
+preflight off. Filed as a backlog item, not fixed here.
+
+**One thing observed working that nobody was watching.** The failed `us-east1` create left a Vertex
+resource behind, and the product deleted it mid-walk and logged "verified gone" — the same
+read-it-back discipline the reaper had to learn the hard way, already in place on this path.
+`us-east1` lists `{}` at the end, independently confirmed.
+
+**And one result that must not be over-read.** The probe handle's predicted `resource_name` was
+correct despite a capacity hop. That is luck of geography, not a property: the hop happened to land
+on the run's default region. A hop to a third region would still miss and degrade the probe to a
+registry-only read, exactly as documented. Nothing here tests that.
 
 ### The reaper works, and the first time it said so it was lying
 
