@@ -270,7 +270,18 @@ class RayProbe:
     NOT_FOUND (``exists=False``, "cluster torn down") — and short-circuits before the dashboard
     connect, which would otherwise retry through its warm-up budget against a dead endpoint. When
     the cluster is alive it reuses `ray_jobs._connect_job_client` + ``get_job_status`` (and
-    ``get_job_info`` for the failure message). Any error degrades to UNKNOWN.
+    ``get_job_info`` for the failure message). Errors degrade to UNKNOWN, with one exception below.
+
+    **A living cluster that has no such job is NOT_FOUND, not UNKNOWN,** and the distinction is the
+    difference between a hole that heals and one that never does. A launcher killed while its
+    cluster provisions leaves the cluster up — so the "torn down" arm cannot fire — and a job id
+    that was never submitted, so the dashboard 404s. Read as UNKNOWN that is a permanent refusal:
+    the run header stays RUNNING because no verb may close it, and the reaper keeps sparing the
+    cluster *because* the header says RUNNING. Read as NOT_FOUND (`ray_jobs._is_job_absent_error`,
+    which demands two independent markers before it will say so) the existing ladder runs on its
+    own: LOST past the startup grace → ``settle`` writes FAILED → ``close-runs`` closes the header
+    → the reaper collects the cluster. Nothing about the verdict set changes; the adapter simply
+    stops calling a fact an uncertainty.
 
     **`_init_vertex` first, always.** ``vertex_ray.get_ray_cluster`` takes no project or location —
     it reads the SDK's global config, which a probe process has never set. The launching process
@@ -288,7 +299,7 @@ class RayProbe:
             from google.api_core.exceptions import NotFound
 
             from ..ray_cluster import _get_cluster, _init_vertex
-            from ..ray_jobs import _connect_job_client
+            from ..ray_jobs import _connect_job_client, _is_job_absent_error
 
             resource_name = handle.resource_name
             if not resource_name:
@@ -302,7 +313,14 @@ class RayProbe:
             except NotFound:
                 return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="ray cluster torn down")
             client = _connect_job_client(resource_name)
-            status = str(client.get_job_status(handle.native_id))
+            try:
+                status = str(client.get_job_status(handle.native_id))
+            except Exception as exc:  # noqa: BLE001 - one shape is a verdict, the rest degrade
+                if not _is_job_absent_error(exc):
+                    return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
+                return ProbeResult(
+                    NATIVE_NOT_FOUND, exists=False, detail="cluster alive; ray job not on it"
+                )
             native = _RAY_JOB_STATES.get(status, NATIVE_UNKNOWN)
             detail = ""
             try:

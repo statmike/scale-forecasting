@@ -735,6 +735,50 @@ def test_is_auth_expiry_error_false_for_non_401(message: str) -> None:
     assert ray_jobs._is_auth_expiry_error(Exception(message)) is False
 
 
+# --- job-absence classifier: the one dashboard error that is a fact, not a fault ---------------
+
+
+def test_is_job_absent_error_true_for_the_sdk_404_the_dashboard_actually_raises() -> None:
+    # The verbatim shape: `_raise_error` renders the server's 404 body into the RuntimeError text.
+    exc = RuntimeError(
+        "Request failed with status code 404: Job raysubmit_4LamXRuQpYdSMg7J does not exist."
+    )
+    assert ray_jobs._is_job_absent_error(exc) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # A bare 404 is a statement about the *route*, not about the job — a misrouted proxy, a
+        # dashboard endpoint that moved. Absence needs the server to say the job is absent.
+        "Request failed with status code 404: <html>404 Not Found</html>.",
+        "404 Client Error: Not Found for url: https://.../api/jobs/raysubmit_x",
+        # The same API says "does not exist" about a runtime-env package at *submit* time, which is
+        # a broken submission, not a missing job.
+        "Request failed with status code 404: Package gcs://x.zip does not exist.",
+        # And the transport faults `_is_recoverable_poll_error` forgives must stay forgiven.
+        "504 Gateway Timeout for url: https://.../api/jobs/raysubmit_x",
+        "401 Client Error: Unauthorized",
+        "Ray job failed",
+    ],
+)
+def test_is_job_absent_error_false_for_everything_it_must_not_claim(message: str) -> None:
+    """The asymmetry this classifier is built around, pinned as tests.
+
+    A false negative costs nothing — the caller degrades to the UNKNOWN it would have returned
+    anyway. A false positive lets a repair verb write FAILED over a job that is alive. So every
+    shape that merely *resembles* absence has to be refused, and both markers are required.
+    """
+    assert ray_jobs._is_job_absent_error(Exception(message)) is False
+
+
+def test_a_job_absence_404_is_not_also_a_recoverable_poll_error() -> None:
+    # The two classifications must not overlap: the poll loop retries what it can recover from, and
+    # retrying a job that is genuinely gone would spend the whole budget to learn nothing.
+    exc = RuntimeError("Request failed with status code 404: Job raysubmit_x does not exist.")
+    assert ray_jobs._is_recoverable_poll_error(exc) is False
+
+
 def test_submit_and_poll_refreshes_client_on_401(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 401 mid-poll rebuilds the Jobs client (fresh token) and polls to a terminal state.
 

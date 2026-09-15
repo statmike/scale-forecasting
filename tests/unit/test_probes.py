@@ -502,6 +502,50 @@ def test_ray_connect_error_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch) 
     assert result.exists is True
 
 
+class _RaisingRayJobClient:
+    """A reachable dashboard that fails the status call — the shape both tests below turn on."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def get_job_status(self, job_id: str) -> str:
+        raise self._exc
+
+
+def test_ray_a_living_cluster_with_no_such_job_is_not_found_not_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provisioning-death signature, and the whole reason this arm exists.
+
+    Kill a launcher while its Ray cluster provisions and the cluster survives — it is the orphan —
+    so the "cluster torn down" arm cannot fire, and the job id it was about to submit is one the
+    dashboard has never heard of. Degrading that to UNKNOWN is a permanent refusal: the header
+    stays RUNNING because no verb may close it, and the reaper keeps sparing the cluster *because*
+    the header says RUNNING. NOT_FOUND ages into LOST and the existing repair ladder runs itself.
+    """
+    exc = RuntimeError("Request failed with status code 404: Job job-1 does not exist.")
+    _patch_ray(monkeypatch, client=_RaisingRayJobClient(exc))
+
+    result = RayProbe().check(_ray_handle(), settings=_SETTINGS)
+
+    assert result.native_state == NATIVE_NOT_FOUND
+    assert result.exists is False
+    assert "not on it" in result.detail  # distinguishable from the torn-down cluster's detail
+
+
+def test_ray_a_status_call_that_merely_fails_still_degrades_to_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The boundary the arm above must not cross. A transport fault says we could not see, and a
+    # probe that read that as absence would let `settle` write FAILED over a running job.
+    _patch_ray(monkeypatch, client=_RaisingRayJobClient(RuntimeError("504 Gateway Timeout")))
+
+    result = RayProbe().check(_ray_handle(), settings=_SETTINGS)
+
+    assert result.native_state == NATIVE_UNKNOWN
+    assert result.exists is True
+
+
 def test_ray_pins_the_sdk_to_the_handles_region_before_reading_the_cluster(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

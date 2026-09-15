@@ -100,6 +100,29 @@ def _is_auth_expiry_error(exc: Exception) -> bool:
     return " 401" in low or "unauthorized" in low
 
 
+def _is_job_absent_error(exc: Exception) -> bool:
+    """True if ``exc`` is the dashboard saying *this job is not here* — a fact, not a fault.
+
+    The third sibling of the two classifiers above, and the one with the largest consequence. When
+    ``get_job_status`` is asked about a submission id the cluster has no record of, the SDK's
+    ``_raise_error`` renders the server's 404 body verbatim:
+    ``RuntimeError("Request failed with status code 404: Job raysubmit_… does not exist.")``. A
+    reachable dashboard answering that has *proved* the job's absence — it is the strongest such
+    statement available, and it is categorically different from the transport faults
+    `_is_recoverable_poll_error` forgives, which say only that we could not see.
+
+    Both markers are required, and the asymmetry is the reason. A false negative costs nothing: the
+    caller degrades to the UNKNOWN it would have returned anyway. A false positive lets a repair
+    verb write FAILED over a live job. So a bare ``404`` — which a misrouted proxy also returns —
+    is not enough on its own, and neither is a bare "does not exist", which the same API uses for a
+    missing runtime-env *package* at submit time. Only the two together mean what we need.
+    """
+    low = str(exc).lower()
+    if "package" in low:
+        return False
+    return " 404" in low and "does not exist" in low
+
+
 def _is_recoverable_poll_error(exc: Exception) -> bool:
     """True if a failed ``get_job_status`` says something about the *channel*, not about the job.
 
