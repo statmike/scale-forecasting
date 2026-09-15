@@ -319,17 +319,23 @@ def reap_clusters(
     return plan
 
 
-def _delete_all(
-    plan: ReapPlan, settings: Settings
-) -> tuple[str, ...]:  # pragma: no cover - GCP I/O, @gcp smoke
-    """Delete every reapable cluster in ``plan``; return the names that actually went away."""
+def _delete_all(plan: ReapPlan, settings: Settings) -> tuple[str, ...]:
+    """Delete every reapable cluster in ``plan``; return the names that actually went away.
+
+    ``gone`` is appended only on a *confirmed* delete — `teardown_shared_cluster` returns True only
+    after the resource reads ``NOT_FOUND``. Counting on "did not raise" instead would inflate the
+    tally with clusters that are still up, since the teardown path deliberately logs its failures
+    rather than raising them (a teardown that throws would mask the run's real outcome). That is the
+    docstring promise above, and getting it wrong once produced exactly the sentence it warns about:
+    ``reaped 1 Ray cluster(s)`` for a cluster left running.
+    """
     from .ray_cluster import teardown_shared_cluster
 
     gone: list[str] = []
     for candidate in plan.reapable:
         cluster = candidate.cluster
         try:
-            teardown_shared_cluster(cluster.name, cluster.region, settings)
+            confirmed = teardown_shared_cluster(cluster.name, cluster.region, settings)
         except Exception as exc:  # noqa: BLE001 - one stuck delete must not strand the rest
             _log.warning(
                 "could not delete Ray cluster %s in %s — it may still be billing: %r",
@@ -337,8 +343,15 @@ def _delete_all(
                 cluster.region,
                 exc,
             )
-        else:
+            continue
+        if confirmed:
             gone.append(cluster.name)
+        else:
+            _log.warning(
+                "Ray cluster %s in %s was NOT confirmed gone — treating it as still billing",
+                cluster.name,
+                cluster.region,
+            )
     _log.warning("reaped %d Ray cluster(s) in %s", len(gone), plan.registry)
     return tuple(gone)
 

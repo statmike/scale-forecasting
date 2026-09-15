@@ -258,6 +258,65 @@ def test_a_cluster_from_before_the_registry_label_is_still_judged_on_its_run():
     assert verdict.reap
 
 
+# --- what "reaped N" is allowed to mean ---------------------------------------------------
+
+
+def _teardowns(monkeypatch, outcomes):
+    """Stand in for the live teardown, returning a scripted verdict per cluster name."""
+    from scale_forecasting import ray_cluster
+
+    seen: list[str] = []
+
+    def _teardown(name, region, settings):
+        seen.append(name)
+        result = outcomes[name]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(ray_cluster, "teardown_shared_cluster", _teardown)
+    return seen
+
+
+def _reapable(*names):
+    return _plan(_classify([_cluster(n) for n in names], dict.fromkeys(names, "COMPLETED")))
+
+
+def test_a_delete_that_was_not_confirmed_is_not_counted_as_reaped(monkeypatch):
+    """The count is the operator's reason to stop looking, so it may only hold confirmed deletes.
+
+    `teardown_shared_cluster` logs its failures instead of raising, because a teardown that throws
+    would mask the run's real outcome. A caller that reads "did not raise" as "gone" therefore
+    reports success for a cluster that is still billing — which the docstring of the verb above
+    calls worse than no reaper at all, since it also removes the reason to go and check. Live on
+    2026-09-15 this printed ``reaped 1 Ray cluster(s)`` over a cluster that was still RUNNING.
+    """
+    plan = _reapable("sf-ray-stuck-1")
+    _teardowns(monkeypatch, {"sf-ray-stuck-1": False})
+    assert ray_reaper._delete_all(plan, _settings(REGISTRY)) == ()
+
+
+def test_a_confirmed_delete_is_counted(monkeypatch):
+    plan = _reapable("sf-ray-gone-1")
+    _teardowns(monkeypatch, {"sf-ray-gone-1": True})
+    assert ray_reaper._delete_all(plan, _settings(REGISTRY)) == ("sf-ray-gone-1",)
+
+
+def test_one_cluster_that_will_not_go_does_not_strand_the_ones_behind_it(monkeypatch):
+    """Stopping at the first failure strands the rest of the leak, which is the whole point."""
+    plan = _reapable("sf-ray-raises-1", "sf-ray-stuck-2", "sf-ray-gone-3")
+    seen = _teardowns(
+        monkeypatch,
+        {
+            "sf-ray-raises-1": RuntimeError("permission denied"),
+            "sf-ray-stuck-2": False,
+            "sf-ray-gone-3": True,
+        },
+    )
+    assert ray_reaper._delete_all(plan, _settings(REGISTRY)) == ("sf-ray-gone-3",)
+    assert seen == ["sf-ray-raises-1", "sf-ray-stuck-2", "sf-ray-gone-3"]
+
+
 # --- the launch-time sweep: the half that runs without being asked -------------------------
 
 

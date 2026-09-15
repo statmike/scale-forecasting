@@ -743,11 +743,25 @@ def provision_shared_cluster(
 
 def teardown_shared_cluster(
     name: str, region: str, settings: Settings
-) -> None:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
-    """Tear down the run's shared ephemeral Ray cluster (best-effort, like `submit_ray`'s teardown).
+) -> bool:  # pragma: no cover - live Vertex I/O, exercised by the @gpu smoke
+    """Tear down a shared ephemeral Ray cluster; True only when it is **confirmed** gone.
 
     Deletes by the deterministic resource path in the region the cluster landed in
     (`provision_shared_cluster` returns it). `_delete_cluster` swallows any error, so a cluster that
     never fully materialized is a harmless no-op.
+
+    **The `_init_vertex` call is load-bearing for every caller that did not provision.**
+    ``vertex_ray.delete_ray_cluster`` takes no location argument — it reads project and location
+    from the SDK's global state, which a process that just created a cluster has already set and a
+    *fresh* process has not. `list_clusters` builds its own regional client, so a caller can find a
+    cluster perfectly well and then delete it against the wrong endpoint: the delete comes back
+    ``Received http2 header with status: 404`` and the cluster keeps billing. That is not
+    hypothetical — the reaper is by definition a fresh process, and so is an Airflow task, so
+    neither of their deletes could ever have worked. Proven live 2026-09-15: the identical delete
+    failed without this line and confirmed absent with it, nothing else changed.
+
+    The bool is returned rather than dropped because "the call did not raise" and "the cluster is
+    gone" are different facts, and `_delete_cluster` is the only one that knows which happened.
     """
-    _delete_cluster(cluster_resource_path(settings, name, region))
+    _init_vertex(settings, region)
+    return _delete_cluster(cluster_resource_path(settings, name, region))
