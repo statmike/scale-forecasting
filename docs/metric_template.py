@@ -6,7 +6,7 @@ add a real one:
   1. Copy this file to ``src/scale_forecasting/metrics/<your_metric>.py``.
   2. Rename the class and set ``name`` to a unique, lowercase, snake_case string. It becomes a
      BigQuery column, so it must be a bare identifier.
-  3. Set ``direction`` and any ``needs_*`` flags, and fill in ``compute``.
+  3. Set ``direction``, any ``needs_*`` flags and ``mean_optimal``, and fill in ``compute``.
   4. Add one import line to ``src/scale_forecasting/metrics/__init__.py`` and one entry to
      ``METRIC_NAMES`` there, at the position you want the column to sit in the table.
 
@@ -51,6 +51,11 @@ class TemplateMetric(BaseMetric):
     needs_intervals: ClassVar[bool] = False  # True if you read ctx.lower / ctx.upper
     needs_train_history: ClassVar[bool] = False  # True if you read ctx.y_train
     needs_seasonal_period: ClassVar[bool] = False  # True if you read ctx.seasonal_period
+    # True only if your loss is quadratic in the error, i.e. the *mean* of the predictive
+    # distribution minimises it. Every absolute-error shape and every proper interval score leaves
+    # this False, because the median does. `config.corrected_arm_for` reads it to pick which
+    # corrected point forecast a run ships under `output.point_forecast="auto"`.
+    mean_optimal: ClassVar[bool] = False
 
     def compute(self, ctx: MetricContext) -> float:
         """Return this window's value, or NaN where it is undefined. Must never raise.

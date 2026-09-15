@@ -22,6 +22,8 @@ class MSE(BaseMetric):
 
     name: ClassVar[str] = "mse"
     direction: ClassVar[MetricDirection] = "lower"
+    # Squared loss is minimised by the mean. This is the canonical case.
+    mean_optimal: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:
         return float(np.mean(ctx.err**2))

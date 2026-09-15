@@ -20,6 +20,8 @@ class RMSE(BaseMetric):
 
     name: ClassVar[str] = "rmse"
     direction: ClassVar[MetricDirection] = "lower"
+    # sqrt is monotone, so it is minimised where mse is: at the mean.
+    mean_optimal: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:
         return math.sqrt(ctx.value("mse"))

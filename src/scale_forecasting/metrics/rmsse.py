@@ -24,6 +24,8 @@ class RMSSE(BaseMetric):
 
     name: ClassVar[str] = "rmsse"
     direction: ClassVar[MetricDirection] = "lower"
+    # A positive constant divides `rmse`, which does not move where the minimum is.
+    mean_optimal: ClassVar[bool] = True
     needs_train_history: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:

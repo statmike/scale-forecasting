@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from scale_forecasting.config import corrected_arm_for
 from scale_forecasting.errors import ConfigError
 from scale_forecasting.metrics import (
     METRIC_DIRECTION,
@@ -132,6 +133,38 @@ def test_the_needs_flags_are_honest_about_what_is_missing(metric_name: str) -> N
         assert math.isnan(cls().compute(_ctx(y_train=None)))
     if cls.needs_seasonal_period:
         assert math.isnan(cls().compute(_ctx(seasonal_period=None)))
+
+
+def test_the_metric_declares_which_point_forecast_its_loss_rewards(metric_name: str) -> None:
+    """`mean_optimal` is the whole of `config.corrected_arm_for` — there is no second list.
+
+    The flag used to be a frozenset of four names in `config.py`, which made the answer for a
+    sixteenth metric unreachable: a deployment adding a squared-error metric got `"median"` with
+    nowhere to say otherwise, and the run would ship a point forecast the leaderboard punishes.
+    Reading it off the class is what makes that statable, and this is the test that keeps the two
+    from drifting back apart.
+    """
+    cls = get_metric(metric_name)
+    assert isinstance(cls.mean_optimal, bool)
+    expected = "mean" if cls.mean_optimal else "median"
+    assert corrected_arm_for(metric_name) == expected
+
+
+def test_the_squared_error_metrics_are_the_ones_that_declare_the_mean() -> None:
+    """The shipped panel's answer, pinned — so a new metric's flag is a decision, not a drift.
+
+    These four are exactly the panel members whose loss is quadratic in the error (`bias` lands
+    here for a different reason: adding the mean residual drives mean error to zero). A metric
+    added later is free to join them, but one of these fifteen changing its mind is a behaviour
+    change to every `point_forecast="auto"` cell with no folds to measure, and should be seen.
+    """
+    declared = {name for name in METRIC_NAMES if get_metric(name).mean_optimal}
+    assert declared == {"rmse", "mse", "rmsse", "bias"}
+
+
+def test_a_name_no_metric_claims_falls_back_to_the_median() -> None:
+    """The unregistered case answers as the frozenset did — no existing caller reads differently."""
+    assert corrected_arm_for("no_such_metric") == "median"
 
 
 def test_a_metric_that_declares_no_need_computes_without_the_optional_inputs(

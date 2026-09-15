@@ -62,18 +62,14 @@ def _registered_metric(value: str) -> str:
 # metric column, which is why additions go at the tail.
 DecisionMetric = Annotated[str, AfterValidator(_registered_metric)]
 
-# Metrics whose loss is quadratic in the error, and for which the *mean* is therefore the optimal
-# point forecast. Everything else in the panel is absolute-error-shaped (or a proper interval
-# score), where the median is optimal. `bias` belongs here for a different reason that lands in the
-# same place: adding the mean residual drives mean error to zero by construction.
-#
-# The pairing is a theorem, not a preference, so it is what a run falls back to whenever no
-# measurement is available to do better.
-_SQUARED_ERROR_METRICS = frozenset({"rmse", "mse", "rmsse", "bias"})
-
 
 def corrected_arm_for(decision_metric: str) -> str:
     """Which *corrected* point-forecast arm a decision metric implies — `"mean"` or `"median"`.
+
+    A metric whose loss is quadratic in the error is minimised by the **mean**; everything that is
+    absolute-error-shaped, and every proper interval score, is minimised by the **median**. The
+    pairing is a theorem, not a preference, so it is what a run falls back to whenever no
+    measurement is available to do better.
 
     One rule, two callers. `calibration.select_arm` uses it under `point_forecast="auto"` to know
     which arm it is weighing `raw` against; `RunConfig._normalize`'s warning about an explicit
@@ -81,13 +77,23 @@ def corrected_arm_for(decision_metric: str) -> str:
     those two would let a fleetwide judgement and a per-series selection disagree about what
     "corrected" means, which is the kind of drift nobody notices until a leaderboard reads oddly.
 
+    **The answer is declared on the metric** (`BaseMetric.mean_optimal`), not held here as a list of
+    names. It used to be a frozenset of four, which was correct for the fifteen shipped metrics and
+    unreachable for a sixteenth: a deployment that adds a squared-error metric would have been given
+    the median, silently and wrongly, with nowhere to say otherwise. An unregistered name still
+    answers `"median"` — the same answer the frozenset gave it — so this reads identically for every
+    caller that was ever correct.
+
     No longer what an unset `output.point_forecast` resolves to: with a backtest present the
     default is `auto`, which measures the choice per series rather than deducing it fleetwide. This
     function is what `auto` falls back to when a cell has nothing to measure.
 
     Says nothing about whether a backtest exists — that is the caller's guard.
     """
-    return "mean" if decision_metric in _SQUARED_ERROR_METRICS else "median"
+    from .metrics.base_metric import _REGISTRY
+
+    metric_cls = _REGISTRY.get(decision_metric)
+    return "mean" if metric_cls is not None and metric_cls.mean_optimal else "median"
 
 
 # Ensemble strategies. "Learned" strategies train on backtest OOF and
@@ -1073,7 +1079,7 @@ class RunConfig(BaseModel):
                 "from. Use 'median' (the model's own correction) or 'raw' (no correction)."
             )
         elif self.output.point_forecast == "median" and (
-            self.backtest.decision_metric in _SQUARED_ERROR_METRICS
+            corrected_arm_for(self.backtest.decision_metric) == "mean"
         ):
             _log.warning(
                 "output.point_forecast='median' with decision_metric=%r: the median minimises "

@@ -16,8 +16,8 @@ one-thing-one-file rule, same `register(...)` at the bottom of the file.
 2. **Name it.** Rename the class and set `name = "my_metric"` (unique, lowercase, snake_case).
    This string becomes a **BigQuery column name**, so it has to be a bare identifier —
    `register()` rejects anything that isn't.
-3. **Declare and compute.** Set `direction`, set any `needs_*` flags, and fill in
-   `compute(ctx)`. See the contract below.
+3. **Declare and compute.** Set `direction`, set any `needs_*` flags, set `mean_optimal` if your
+   loss squares the error, and fill in `compute(ctx)`. See the contract below.
 4. **Register it.** Add `my_metric,` to the import block in
    `src/scale_forecasting/metrics/__init__.py`, and add `"my_metric"` to `METRIC_NAMES` at the
    position you want the column to sit in. (The import block is alphabetical and does *not* set
@@ -73,6 +73,7 @@ A metric is a `BaseMetric` subclass (see `metrics/base_metric.py`). The seams:
 | `needs_intervals` | `True` if you read `ctx.lower` / `ctx.upper` |
 | `needs_train_history` | `True` if you read `ctx.y_train` |
 | `needs_seasonal_period` | `True` if you read `ctx.seasonal_period` |
+| `mean_optimal` | `True` if your loss is quadratic in the error (defaults to `False`) |
 | `compute(ctx)` | the value for one scored window, or NaN — **never raises** |
 
 **`direction` is not cosmetic.** `loss_of` reads it to turn any metric into a comparable loss,
@@ -85,6 +86,17 @@ objective, and `prune_threshold`. Three answers, not two:
 
 Declaring `"lower"` on a higher-is-better metric doesn't fail; it silently inverts every one of
 those three consumers, which is exactly the bug the `direction` field exists to prevent.
+
+**`mean_optimal` says which point forecast your loss rewards.** A loss that is quadratic in the
+error is minimised by the **mean** of the predictive distribution; every absolute-error shape, and
+every proper interval score, is minimised by the **median**. That pairing is a theorem, not a
+preference, so the framework uses it: `config.corrected_arm_for` reads this flag, and under
+`output.point_forecast="auto"` it decides which corrected arm a series weighs its raw forecast
+against — and is the fleetwide fallback for a series with no folds to measure with. Of the fifteen
+shipped metrics, four set it: `rmse`, `mse`, `rmsse`, and `bias` (that last one for a different
+reason that lands in the same place — adding the mean residual drives mean error to zero by
+construction). Leave it `False` unless your metric squares the error; getting it wrong ships a
+point forecast your own leaderboard punishes.
 
 **`compute(ctx)` sees `ctx` and nothing else.** `MetricContext` carries `y_true` and `yhat`
 (equal-length float arrays, never empty), the precomputed `err = yhat − y_true` and `abs_err`,

@@ -23,6 +23,9 @@ class Bias(BaseMetric):
 
     name: ClassVar[str] = "bias"
     direction: ClassVar[MetricDirection] = "zero"
+    # Here for a different reason that lands in the same place: adding the mean residual
+    # drives mean error to zero by construction.
+    mean_optimal: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:
         return float(np.mean(ctx.err))

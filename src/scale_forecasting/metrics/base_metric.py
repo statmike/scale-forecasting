@@ -167,6 +167,14 @@ class BaseMetric(ABC):
     needs_train_history: ClassVar[bool] = False
     # True if the metric reads `ctx.seasonal_period`.
     needs_seasonal_period: ClassVar[bool] = False
+    # True when the *mean* is the optimal point forecast under this metric's loss, i.e. the loss is
+    # quadratic in the error. False means the median is, which is the case for every absolute-error
+    # shape and every proper interval score. `config.corrected_arm_for` is the one reader: under
+    # `output.point_forecast="auto"` it decides which corrected arm a cell weighs `raw` against, and
+    # it is the fleetwide fallback when a cell has no folds to measure with. The pairing is a
+    # theorem rather than a preference, which is why it belongs on the metric and not in a config
+    # list — a deployment's own metric can state it, and four names in a frozenset could not.
+    mean_optimal: ClassVar[bool] = False
 
     @abstractmethod
     def compute(self, ctx: MetricContext) -> float:
