@@ -165,16 +165,46 @@ def _is_abandoned_wait(fp: FamilyProgress, abandoned_after_s: float | None) -> b
     return fp.quiet_seconds > threshold
 
 
+def _has_submitted_handle(row: Mapping[str, Any]) -> bool:
+    """Whether a job row's handle carries a runtime job id — i.e. something was addressed (pure).
+
+    Every Ray and Serverless row gets a handle at *launch*, built from coordinates known before the
+    submit call, so "has a handle" says nothing about whether a job exists. The ``native_id`` is
+    the part that does: it is the id the submit was made under, so a non-empty one means the row
+    has left the capacity walk whatever its status still says.
+    """
+    handle = ProbeHandle.from_job_row(dict(row))
+    return handle is not None and bool(handle.native_id)
+
+
 def _probe_targets(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """The job rows worth escalating to a runtime, in order (pure).
 
-    A row is skipped when its status is terminal (the registry is authoritative and the runtime job
-    is very likely gone) or ``AWAITING_CAPACITY`` (no runtime job has been created yet). Everything
-    else is escalated. Pure so the "don't spend an API call on a job that provably isn't there"
-    rule is testable offline — it lives out here for the same reason `_narrow_to_job` does.
+    A row is skipped when its status is terminal — the registry is authoritative and the runtime
+    job is very likely gone. Everything else is escalated. Pure so the "don't spend an API call on
+    a job that provably isn't there" rule is testable offline — it lives out here for the same
+    reason `_narrow_to_job` does.
+
+    ``AWAITING_CAPACITY`` is skipped too, but **only while it still looks pre-launch**. The general
+    rule is sound: a family between capacity attempts has no runtime job, so escalating it spends a
+    live call to be told what we already knew. It is wrong for one row shape, seen live in
+    ``reaper-orphan-c-5873d5cca61a`` — a launcher that died seconds *after* submitting left its row
+    at ``AWAITING_CAPACITY`` with the runtime job id sitting right there in it, while the job ran
+    to completion and landed all its cells. A row carrying a ``native_id`` has provably left the
+    walk, so it is escalated and reconciles as an ordinary stale registry row. Note the condition
+    is not "has a handle" — every Ray row has one from launch — but `_has_submitted_handle`, which
+    is the part that means *submitted*, and the difference is between fixing that shape and
+    re-probing every legitimate capacity wait in the fleet.
     """
-    skip = _TERMINAL | {_AWAITING_CAPACITY}
-    return [dict(r) for r in rows if (r.get("status") or "").upper() not in skip]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        status = (r.get("status") or "").upper()
+        if status in _TERMINAL:
+            continue
+        if status == _AWAITING_CAPACITY and not _has_submitted_handle(r):
+            continue
+        out.append(dict(r))
+    return out
 
 
 def _verdict_for_family(
@@ -196,6 +226,14 @@ def _verdict_for_family(
     done) and ``AWAITING_CAPACITY`` (the work has not started). Both trust the registry, for
     opposite reasons — except for the one capacity wait that has outlived the walk that was
     supposed to end it, which is the single reading here taken from the clock alone.
+
+    The capacity short-circuit yields to a native reading when there is one. A family only arrives
+    with one if `_probe_targets` judged its row to have left the walk (`_has_submitted_handle`), and
+    a runtime's answer about a job that was actually submitted outranks the status the dead launcher
+    left behind. Such a family is never in ``stale`` — `_is_stale` measures ``RUNNING`` rows only,
+    deliberately — so a vanished job with incomplete cells reads UNKNOWN here rather than LOST. That
+    is the right conservatism: from a pre-launch-looking row we cannot tell a job that died from one
+    that never really started, and only complete artifacts settle the question.
     """
     common: dict[str, Any] = {
         "family": fp.family,
@@ -217,7 +255,10 @@ def _verdict_for_family(
     # Waiting between capacity attempts → in flight, but deliberately not progressing. There is no
     # runtime job to reconcile against and that is the expected state, not a gap in our knowledge:
     # UNKNOWN would be a lie ("we couldn't tell") about the one status where we can tell exactly.
-    if (fp.status or "").upper() == _AWAITING_CAPACITY:
+    # The `not in native` qualifier is what lets a row that *did* submit past this short-circuit:
+    # `_probe_targets` escalates an AWAITING_CAPACITY row carrying a runtime job id, and discarding
+    # that reading here would leave the escalation paying for a call it then ignored.
+    if (fp.status or "").upper() == _AWAITING_CAPACITY and fp.family not in native:
         # ...unless it has been waiting longer than any walk is allowed to. A live walk ends itself
         # at its budget; one that did not is a walk with nobody left to walk it, and saying
         # TRUST_REGISTRY there tells an operator to keep waiting for a decision that will never
@@ -400,9 +441,10 @@ def _read_and_probe(
     # --job narrows the report and the rows together, or neither — see `_narrow_to_job`.
     progress, rows = _narrow_to_job(progress, job_rows, job, run_id)
     # Escalate every non-terminal job to its runtime; terminal rows short-circuit to the registry,
-    # and so do AWAITING_CAPACITY rows — a family between capacity attempts has no runtime job to
-    # address, so escalating it would spend a live API call to be told NOT_FOUND, which we already
-    # knew. `_probe_targets` is the pure half so that decision is checkable with no cloud.
+    # and so do AWAITING_CAPACITY rows that still look pre-launch — a family between capacity
+    # attempts has no runtime job to address, so escalating it would spend a live API call to be
+    # told NOT_FOUND, which we already knew. One carrying a runtime job id *is* escalated, because
+    # it has provably left the walk. `_probe_targets` is the pure half, checkable with no cloud.
     to_probe = _probe_targets(rows)
     # A RUNNING family quiet longer than the floor is "stale" — past its startup grace, so a
     # vanished runtime job is judged LOST rather than still-starting (see `_verdict_for_family`).
@@ -411,7 +453,8 @@ def _read_and_probe(
     stale = frozenset(f.family for f in progress.families if _is_stale(f, stale_after_s))
     # And an AWAITING_CAPACITY family quiet past any walk's own budget is "abandoned" — the one
     # reading here that comes from the clock with no runtime to ask, because a pre-launch row has
-    # no runtime to ask (see `_is_abandoned_wait`). It deliberately does not widen `to_probe`.
+    # no runtime to ask (see `_is_abandoned_wait`). It deliberately does not widen `to_probe`: the
+    # clock is the witness of last resort, used only where a runtime reading was unavailable.
     abandoned = frozenset(
         f.family for f in progress.families if _is_abandoned_wait(f, abandoned_after_s)
     )

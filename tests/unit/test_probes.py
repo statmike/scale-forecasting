@@ -29,6 +29,7 @@ from scale_forecasting.probes.cancel import (
 )
 from scale_forecasting.probes.reconcile import (
     _assemble_probe_report,
+    _has_submitted_handle,
     _is_abandoned_wait,
     _is_stale,
     _narrow_to_job,
@@ -1483,6 +1484,103 @@ def test_probe_targets_still_escalates_an_unknown_or_missing_status() -> None:
     # Unrecognised is not the same as settled: a row we cannot read must still be checked.
     rows = [{"family": "ml", "status": None}, {"family": "dl", "status": "WEIRD"}]
     assert [r["family"] for r in _probe_targets(rows)] == ["ml", "dl"]
+
+
+# The one row shape the skip above gets wrong, and the pair of tests that fence it in. A launcher
+# that dies seconds *after* submitting leaves AWAITING_CAPACITY on a row that has already left the
+# walk — seen live as `reaper-orphan-c-5873d5cca61a`, whose job then ran to completion and landed
+# every cell while its row still read pre-launch. The id in the handle is what tells the two apart.
+
+_AWAITING_SUBMITTED = {
+    "family": "deep_learning",
+    "status": AWAITING_CAPACITY,
+    "probe_handle": {
+        "runtime": "ray",
+        "native_id": "raysubmit_1",
+        "region": "us-central1",
+        "resource_name": "projects/p/locations/us-central1/persistentResources/c",
+    },
+}
+_AWAITING_PRESUBMIT = {
+    **_AWAITING_SUBMITTED,
+    "probe_handle": {**_AWAITING_SUBMITTED["probe_handle"], "native_id": ""},
+}
+
+
+def test_a_capacity_wait_that_already_submitted_a_job_is_escalated_after_all() -> None:
+    assert [r["family"] for r in _probe_targets([_AWAITING_SUBMITTED])] == ["deep_learning"]
+    assert _has_submitted_handle(_AWAITING_SUBMITTED) is True
+
+
+def test_a_capacity_wait_carrying_only_its_pre_submit_handle_is_still_skipped() -> None:
+    """The qualifier that keeps this from re-probing the whole fleet.
+
+    Every Ray and Serverless row is given a handle at *launch*, built from coordinates known before
+    the submit call, so "has a handle" is true of every capacity wait there has ever been and would
+    escalate all of them. The non-empty ``native_id`` is the part that means a job was addressed.
+    """
+    assert _probe_targets([_AWAITING_PRESUBMIT]) == []
+    assert _has_submitted_handle(_AWAITING_PRESUBMIT) is False
+    assert _has_submitted_handle({"family": "dl", "status": AWAITING_CAPACITY}) is False
+
+
+def test_an_escalated_capacity_wait_reconciles_from_its_runtime_not_its_status() -> None:
+    # The short-circuit must yield to a reading it paid for. Runtime SUCCEEDED + every cell landed
+    # is an ordinary stale row, and `settle` finishes the repair the dead launcher could not.
+    fp = _fp("deep_learning", AWAITING_CAPACITY, runtime="ray", n_done=100, n_expected=100)
+    fv = _only(
+        _assemble_probe_report(
+            _progress(fp),
+            {"deep_learning": ProbeResult(NATIVE_SUCCEEDED, exists=True)},
+            frozenset(),
+        )
+    )
+    assert fv.verdict == VERDICT_STALE_REGISTRY
+    assert fv.disagreement is True
+
+
+def test_an_escalated_capacity_wait_prefers_the_runtime_over_the_abandoned_clock() -> None:
+    # Both witnesses are available and they disagree about what happened. The clock is the witness
+    # of last resort — it exists because a pre-launch row has no runtime to ask — so a row that
+    # *does* have one must not be failed for having been quiet.
+    fp = _fp(
+        "deep_learning",
+        AWAITING_CAPACITY,
+        runtime="ray",
+        quiet_seconds=5 * 3600.0,
+        n_done=100,
+        n_expected=100,
+    )
+    fv = _only(
+        _assemble_probe_report(
+            _progress(fp),
+            {"deep_learning": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+            frozenset(),
+            frozenset(),
+            frozenset({"deep_learning"}),  # the clock says abandoned
+        )
+    )
+    assert fv.verdict == VERDICT_LIKELY_COMPLETED  # the cells say otherwise, and they are right
+
+
+def test_the_orphaned_launcher_row_settles_completed_rather_than_failed() -> None:
+    """The whole repair, end to end, on the shape that motivated it.
+
+    Before this, `reaper-orphan-c-5873d5cca61a` was unreachable: the reconciler classified it from
+    its status alone, so there was nothing for `settle` to write and nothing for `close-runs` to
+    close. Escalating it turns a permanent hole into a one-line repair — and the answer is
+    COMPLETED, which is what actually happened to its 2,800 cells.
+    """
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+
+    report = _assemble_probe_report(
+        _progress(_fp("statistical", AWAITING_CAPACITY, runtime="ray", n_done=100, n_expected=100)),
+        {"statistical": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+        frozenset(),
+    )
+    (item,) = _assemble_settle_plan(report).items
+    assert item.decision is not None
+    assert (item.decision.status, item.decision.failure_reason) == ("COMPLETED", None)
 
 
 def test_report_awaiting_capacity_trusts_the_registry_rather_than_reporting_unknown() -> None:
