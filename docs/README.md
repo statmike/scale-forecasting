@@ -38,6 +38,8 @@ How it works and every knob.
 - [output_schemas.md](./output_schemas.md) — the output tables and the analyst views over them.
 - [adding_a_model.md](./adding_a_model.md) + [model_template.py](https://github.com/statmike/scale-forecasting/blob/main/docs/model_template.py) — add a model
   in one file.
+- [adding_a_metric.md](./adding_a_metric.md) + [metric_template.py](https://github.com/statmike/scale-forecasting/blob/main/docs/metric_template.py) — add a
+  metric in one file; its table column and migration are generated.
 - [editing_code_without_rebuilding.md](./editing_code_without_rebuilding.md) — why a code edit ships
   on the next run with no image rebuild.
 - [version_matrix.md](./version_matrix.md) — the Python/Spark/Ray version of every surface, and why

@@ -357,8 +357,13 @@ made it worth making: setting any one of them changes your `run_id`.
 left the digest would have to be paid for a second time to put it back.
 
 **`decision_metric` — what folds are judged on** (definitions in
-[`metrics.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics.py); `err = yhat − y_true`). This single choice drives
+[`metrics/`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics); `err = yhat − y_true`). This single choice drives
 fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold`.
+
+The fifteen below are what ships. **They are not a closed set**: the field accepts any metric the
+metric registry knows, and a deployment adds one by dropping a file into
+`src/scale_forecasting/metrics/` — see [adding_a_metric.md](./adding_a_metric.md). An unregistered
+name fails validation with the registered ones listed.
 
 | Metric | Definition | Notes |
 |--------|-----------|-------|

@@ -7,10 +7,11 @@ repo_name: statmike/scale-forecasting
 edit_uri: blob/main/docs/
 docs_dir: docs
 
-# model_template.py is a copy-me starting point, not a page — keep it in the repo (linked to GitHub)
-# but out of the built site so mkdocs-jupyter doesn't render it as a notebook.
+# The *_template.py files are copy-me starting points, not pages — keep them in the repo (linked
+# to GitHub) but out of the built site so mkdocs-jupyter doesn't render them as notebooks.
 exclude_docs: |
   model_template.py
+  metric_template.py
 
 theme:
   name: material
@@ -105,6 +106,7 @@ nav:
       - Writing results: writing_results.md
       - Output schemas: output_schemas.md
       - Adding a model: adding_a_model.md
+      - Adding a metric: adding_a_metric.md
       - Editing code without rebuilding: editing_code_without_rebuilding.md
       - Version matrix: version_matrix.md
       - Runtime dependencies: runtime_dependencies.md
@@ -121,6 +123,7 @@ nav:
       - Settings: api/settings.md
       - Errors: api/errors.md
       - Metrics: api/metrics.md
+      - BaseMetric: api/metrics_base_metric.md
       - Backtest: api/backtest.md
       - Calibration: api/calibration.md
       - Model factory: api/models.md

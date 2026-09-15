@@ -278,7 +278,7 @@ error `CellResult`, so one bad series can't sink a 100k run. Its steps
    [`hpo.tune_model`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/hpo.py) for per-series HPO.
 5. **Backtest** (if `cfg.backtest.enabled`) — `backtest.backtest_cell(...)` lays out the folds and
    fits a *fresh* model per fold ([`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py)), scoring each
-   with [`metrics.compute_metrics`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics.py).
+   with [`metrics.compute_metrics`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics/__init__.py).
 6. **Fit + predict** — `features.build_features` → `model.fit(y, X)` → `model.predict(horizon, …)`.
 7. **Persist** (if `cfg.compute.persist_models`) — `model.serialize()` to a GCS artifact.
 
@@ -288,8 +288,8 @@ predictions, OOF rows, metrics, best params, and fit time — the raw material t
 Its pure downstream helpers, each a single-capability file:
 [`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py) (fold layout),
 [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py) (transform + feature matrix),
-[`metrics.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics.py) (the metric panel, shared by worker, backtest,
-*and* the BigQuery engine).
+[`metrics/`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics) (the metric panel, one file per
+metric, shared by worker, backtest, the ensemble scorer *and* the BigQuery engine).
 
 ---
 
@@ -473,6 +473,8 @@ everywhere, one job per family, one run" real.
 
 - [configuration_reference.md](./configuration_reference.md) — every config field and option value.
 - [adding_a_model.md](./adding_a_model.md) — add a model in one file (the Layer 5 how-to).
+- [adding_a_metric.md](./adding_a_metric.md) — add a metric in one file; the same factory pattern,
+  and the table column, its migration and the leaderboard projection come with it.
 - [output_schemas.md](./output_schemas.md) — the registry tables' column-by-column layout.
 - [running_and_reviewing.md](./running_and_reviewing.md) — submit, watch, and review a run.
 - [editing_code_without_rebuilding.md](./editing_code_without_rebuilding.md) — why a code edit ships on

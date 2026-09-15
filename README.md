@@ -203,6 +203,12 @@ interactive version — pick a model, plot the forecast and its interval — ope
 into `src/scale_forecasting/models/`, add one import line, and it shows up in the
 list above automatically. Full walkthrough: [`docs/adding_a_model.md`](./docs/adding_a_model.md).
 
+**Add your own metric** the same way: copy [`docs/metric_template.py`](./docs/metric_template.py)
+into `src/scale_forecasting/metrics/`, add one import line and one entry to `METRIC_NAMES`. The
+`forecast_metadata` column, its `ADD COLUMN` migration, the write-path field spec and the
+leaderboard aggregate are all generated from that list, so nothing else changes. Full
+walkthrough: [`docs/adding_a_metric.md`](./docs/adding_a_metric.md).
+
 **Demo notebooks** (run + review against a live deployment) live in [`notebooks/`](./notebooks):
 [`01_spark_via_connect`](./notebooks/01_spark_via_connect.ipynb) drives the Spark UDF fan-out over a
 Dataproc **Spark Connect** endpoint; [`02_bigquery_native`](./notebooks/02_bigquery_native.ipynb)
