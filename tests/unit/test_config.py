@@ -864,3 +864,104 @@ def test_corrected_arm_for_is_the_single_rule_every_caller_reads(
             )
         warned = "not the one the leaderboard rewards" in caplog.text
         assert warned == (corrected_arm_for(metric) == "mean"), metric
+
+
+# --- the decision metric has to be computable ----------------------------------
+#
+# Every metric is NaN-safe, so none of these is an error. They are the combinations where the
+# ranking column comes back empty for a structural reason the config already knows about, and
+# saying so at plan time is cheaper than an operator deducing it from a finished run.
+
+
+def test_an_interval_decision_metric_with_an_ensemble_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        cfg = RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": True, "decision_metric": "coverage"},
+                ensemble={"enabled": True},
+            )
+        )
+    assert cfg.backtest.decision_metric == "coverage"  # honoured, not overridden
+    assert "every ensemble row will score NaN" in caplog.text
+
+
+def test_an_interval_decision_metric_without_an_ensemble_says_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Base models keep their prediction bands, so there is nothing undefined about this run."""
+    with caplog.at_level("WARNING"):
+        RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": "coverage"}))
+    assert "ensemble row will score NaN" not in caplog.text
+
+
+def test_a_point_forecast_metric_with_an_ensemble_says_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": True, "decision_metric": "wape"},
+                ensemble={"enabled": True},
+            )
+        )
+    assert "ensemble row will score NaN" not in caplog.text
+
+
+def test_mase_seasonal_on_a_training_window_shorter_than_one_cycle_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Weekly data has a 52-step cycle, and 30 weeks of training cannot form the seasonal naive."""
+    with caplog.at_level("WARNING"):
+        RunConfig(
+            **_minimal_dict(
+                data={"source_table": "p.d.s", "freq": "W"},
+                backtest={"enabled": True, "decision_metric": "mase_seasonal", "min_train": 30},
+            )
+        )
+    assert "seasonal naive of 52 steps" in caplog.text
+    assert "backtest.min_train above 52" in caplog.text
+
+
+def test_the_sliding_window_is_the_width_the_warning_names(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Under `sliding` the fixed window is what every fold gets, so it is the one to raise."""
+    with caplog.at_level("WARNING"):
+        RunConfig(
+            **_minimal_dict(
+                backtest={
+                    "enabled": True,
+                    "scheme": "sliding",
+                    "decision_metric": "mase_seasonal",
+                    "min_train": 400,
+                    "window": 5,
+                },
+            )
+        )
+    assert "backtest.window above 7" in caplog.text
+
+
+def test_a_long_enough_training_window_says_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": True, "decision_metric": "mase_seasonal", "min_train": 180},
+            )
+        )
+    assert "seasonal naive" not in caplog.text
+
+
+def test_a_disabled_backtest_scores_nothing_so_there_is_nothing_to_report(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No fold is scored at all — a warning about one metric would misdescribe the run."""
+    with caplog.at_level("WARNING"):
+        RunConfig(
+            **_minimal_dict(
+                backtest={"enabled": False, "decision_metric": "coverage"},
+                ensemble={"enabled": True},
+            )
+        )
+    assert "ensemble row will score NaN" not in caplog.text

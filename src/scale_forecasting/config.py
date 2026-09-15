@@ -1131,6 +1131,73 @@ class RunConfig(BaseModel):
         )
         return self
 
+    @model_validator(mode="after")
+    def _check_decision_metric_is_computable(self) -> RunConfig:
+        """Say at plan time when the chosen ``decision_metric`` will read NaN, and why.
+
+        Every metric is NaN-safe by design — an undefined metric is a NaN cell, never an error —
+        and that is the right behaviour for one odd series. It is the wrong *discovery* mechanism
+        for a whole run: a metric that is undefined for every cell produces an empty leaderboard
+        column and no explanation, and the operator's next move is to re-run something expensive
+        while they work out why.
+
+        So this reads the metric's own ``needs_*`` declarations against the config and warns on the
+        two combinations that are undefined for structural reasons rather than data ones. **It
+        warns and never raises**, because both are legal configs that someone may want for the rest
+        of the panel — the metric is still computed for every other row, and only the ranking column
+        is affected.
+
+        It rewrites nothing. The ``run_id`` is a digest taken after ``_normalize``, so a config that
+        repaired itself here would land in the registry describing a run nobody asked for.
+        """
+        from .metrics import get_metric
+        from .seasonality import seasonal_period
+
+        # Nothing is scored at all without a backtest, so no single metric is the thing to name;
+        # `output.point_forecast` and `hpo.enabled` already refuse the settings that depend on one.
+        if not self.backtest.enabled:
+            return self
+
+        name = self.backtest.decision_metric
+        metric = get_metric(name)
+
+        # 1. Ensembles are scored on blended out-of-fold predictions, which carry a point forecast
+        #    and no band (`ensemble_run` passes no bounds). Base models keep their intervals, so
+        #    `inverse_error` weighting and pruning are unaffected — what goes missing is the
+        #    ensemble's own score, i.e. the number that answers "did blending help?".
+        if metric.needs_intervals and self.ensemble.enabled:
+            _log.warning(
+                "decision_metric=%r needs prediction intervals and the ensemble's out-of-fold "
+                "predictions carry none, so every ensemble row will score NaN on it and the "
+                "ensemble cannot be ranked against the base models. The base models are scored "
+                "normally; pick a point-forecast metric to rank the whole leaderboard on one "
+                "number.",
+                name,
+            )
+
+        # 2. A seasonal-naive denominator needs a training window longer than one full cycle. Under
+        #    `sliding` that window is the same width at every origin, so this is every fold of every
+        #    series; under the expanding schemes the early folds are NaN and the later ones are not,
+        #    which is arguably worse to discover from the data.
+        if metric.needs_seasonal_period:
+            period = seasonal_period(self.data.freq)
+            width = self.backtest.window or self.backtest.min_train
+            if width <= period:
+                _log.warning(
+                    "decision_metric=%r scores against a seasonal naive of %d steps (freq=%r) but "
+                    "the shortest training window this backtest allows is %d observations, which "
+                    "is not longer than one cycle — the metric is undefined there. Raise "
+                    "backtest.%s above %d.",
+                    name,
+                    period,
+                    self.data.freq,
+                    width,
+                    "window" if self.backtest.window else "min_train",
+                    period,
+                )
+
+        return self
+
     def resolve_family_compute(self, family: str) -> ResolvedFamilyCompute:
         """Resolve one family's effective compute by layering its override on the flat defaults.
 
