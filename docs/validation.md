@@ -2425,6 +2425,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Registry ops (`registry.ops`) | CURRENT | All six `@gcp` tests in `tests/integration/test_registry_ops_live.py` pass 2026-09-02 — artifact-prefix delete correctly scoped in real GCS, `CREATE SNAPSHOT TABLE` valid against the real schema (native `JSON` columns included), `doctor`, `drop_run` preview, `drop_run` execute across every tier. One of the six had rotted and had to be repaired first — see below. **Scope: six of the seven verbs.** |
 | Registry ops — `close_runs` (7th verb) | CURRENT | Executed live 2026-09-02 against the real registry: closed 9 of the 10 stuck headers to `FAILED` and skipped the tenth with its reason, leaving `doctor` reporting exactly one in-flight run. **The first live call failed** on a column that does not exist, which no offline test could have caught — see below. |
 | Shipped baseline profile (`profiling.baseline`) | CURRENT | The numbers committed in `src/scale_forecasting/profiling/baseline.py` were harvested on 2026-09-03 from `ray-100k-dcc77a9d1e9b` — the `ray_100k` row above, a real 100,000-series Ray run — through the ordinary `read_compute_harvest` path. **This row is a claim about the numbers' provenance and nothing else.** No run has yet been *sized* from the baseline on live infrastructure; that needs a deployment with an empty registry, which this project no longer is. See below. |
+| Registry ops — job-level settle (`--settle`) | CURRENT | Run live 2026-09-04 against the one fixture reserved for it: the `statistical` family of `nb03-combo-ensemble-1788329058-c4a5e6db54a1`, `RUNNING` in the registry since 2026-09-02 while its Dataproc batch had `SUCCEEDED` with all 10 of 10 cells landed. The row now reads `COMPLETED` and carries the whole audit blob it was written on under `job_telemetry.$.settle`. **This row is being recorded 2026-09-15, eleven days after the command ran** — the proof happened and nobody wrote it down, which is the exact failure this file exists to prevent. `settled_by` is null for the P6 reason directly below, whose fix landed seven hours later the same day. The fixture class is now empty — every job row in the registry is terminal — so this cannot be re-proven without manufacturing a stale row. See below. |
 | Run audit principal (P6) | CURRENT | The `actor=None` on 2026-09-02's live cancel was a **defect**, resolved 2026-09-04: the userinfo lookup was sending the ADC quota project as `x-goog-user-project` and getting a 403 for `serviceusage.services.use` on a project unrelated to the run. Fixed by stripping the quota project (`identity._without_quota_project`) and verified live under the same ADC credential — `resolve_principal()` returns the user's email. Proven end-to-end on a real run 2026-09-05: `ray-100k-dcc77a9d1e9b`'s header row carries `user_id = <the launching user email>`, where its three pre-fix attempts are blank. That is the *launch* path; cancel-with-attribution has not been re-exercised live since the fix, though the audit *write* was already proven on 2026-09-02. See below. |
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
@@ -2863,12 +2864,61 @@ verdict (`native_state='SUCCEEDED'`, `n_done == n_expected`); nothing writes it 
 Left deliberately unclosed rather than papered over with a `CANCELLED` that would be false. It is
 also the last remaining in-flight run in the registry, so it is a standing, visible reminder.
 
-**The verb now exists; it has not been run against this row.** `main --settle` /
+**The verb was run against this row on 2026-09-04, and it held.** `main --settle` /
 `Forecaster.settle()` writes a job row from the probe's own verdict — `STALE_REGISTRY` +
-`SUCCEEDED` + all cells landed ⇒ `COMPLETED` — and refuses everything ambiguous. That is offline
-work only: **no line of it has touched live infrastructure**, so it gets no row in the table above.
-This run is the fixture reserved to prove it, and there is exactly one of it. Draft the ledger row
-before the command runs.
+`SUCCEEDED` + all cells landed ⇒ `COMPLETED` — and refuses everything ambiguous. The fixture
+reserved for it was spent on the only row there was to spend it on. The section below is the
+record, and it is being written eleven days late.
+
+### The settle ran, the fixture is gone, and nobody wrote it down for eleven days
+
+On 2026-09-04 at 16:46:15 UTC, `--settle` was pointed at
+`nb03-combo-ensemble-1788329058-c4a5e6db54a1` and did what the section above says it should. The
+`statistical` job row moved `RUNNING` → `COMPLETED`, and the evidence it moved on is still sitting
+in the row:
+
+```json
+{"settle": {"from_status": "RUNNING", "verdict": "STALE_REGISTRY", "native_state": "SUCCEEDED",
+            "n_done": 10, "n_expected": 10, "settled_by": null,
+            "settled_at": "2026-09-04T16:46:15.427462+00:00",
+            "reason": "abandoned notebook-03 run; runtime finished 2026-09-02, row never closed"}}
+```
+
+That is `_build_settle_audit`'s output field for field, on the one decision branch `settle.py`
+permits for this combination of verdict and native state — so the write came from the product, not
+from a hand-edited row. The header tier followed: the run reads `COMPLETED` today and `doctor`
+reports the registry healthy with no in-flight work.
+
+**Two things in that payload are correct and look like defects.**
+
+`ended_at` and `runtime_seconds` are still NULL on a row whose status is `COMPLETED`. That is the
+module's stated rule rather than an omission — a row settled two days after the job finished would
+otherwise report two days of runtime for a ten-minute job, so settle writes the status and declines
+to invent the time. Every consumer already tolerates those being NULL.
+
+`settled_by` is null, and that one *was* a defect — but not this verb's, and not one still open. It
+is the P6 blank-actor finding: `resolve_principal` was sending the ADC quota project as
+`x-goog-user-project` to an identity endpoint, getting a 403 back, and swallowing it by design. The
+timing is the whole story. The settle ran at 16:46 UTC; `0ab906c`, the fix for precisely that,
+landed at 23:37 UTC the same day — seven hours later. Re-checked live on 2026-09-15 under the same
+ADC credential: `resolve_principal()` returns the launching user's email. The stored null keeps its
+null, on the same rule as the two `cancelled_by` nulls above — a stored audit line is a historical
+record, not something to rewrite once it becomes inconvenient.
+
+**Being eleven days late is the finding worth keeping.** The command ran, it worked, and the audit
+trail was durable enough to reconstruct the entire event from the table alone eleven days later —
+and none of that is proof under this file's own rule, because proof is a row *here*. The
+instruction in the section above was *draft the ledger row before the command runs*, and it was not
+followed. What rescued it is that the verb writes its own evidence into the row it touches, which
+is the general argument for audit blobs: they are the part of a live proof that survives the
+operator forgetting.
+
+**There is nothing left to re-prove it with.** A registry-wide survey on 2026-09-15 returns 241 job
+rows and every one of them is terminal — 221 `COMPLETED`, 18 `FAILED`, 2 `CANCELLED`, and not a
+single `RUNNING` or `PENDING` anywhere. The fixture class is empty. Re-running this proof now would
+mean manufacturing a stale row, and a verb tested against a row we wrote ourselves is not tested
+against a row the infrastructure abandoned. Those are different tests, and only the second one was
+ever the point.
 
 ### The shipped baseline is measured numbers, and the axis it does *not* move is the interesting part
 
