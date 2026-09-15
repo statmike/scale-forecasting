@@ -54,6 +54,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from ..metrics import METRIC_NAMES
+
 # Table bodies: columns + PARTITION BY + CLUSTER BY.
 # `{d}` is the dataset ref (`project.dataset` or `dataset`). No trailing semicolon —
 # the renderer appends the OPTIONS clause and the semicolon.
@@ -109,11 +111,7 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   model_hash     STRING NOT NULL,
   ensemble_id    STRING,
   fold_id        INT64,
-  mae FLOAT64, rmse FLOAT64, mse FLOAT64, mape FLOAT64, smape FLOAT64,
-  wape FLOAT64, mase FLOAT64, rmsse FLOAT64, bias FLOAT64,
-  coverage FLOAT64, pinball FLOAT64,
-  mase_seasonal FLOAT64, maape FLOAT64,
-  interval_score FLOAT64, interval_width FLOAT64,
+{metrics}
   fit_seconds    FLOAT64,
   best_params    JSON,
   model_artifact STRING,
@@ -233,6 +231,19 @@ SOURCE_TABLE_NAMES: tuple[str, ...] = (SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE
 
 for _src in SOURCE_TABLE_NAMES:
     _TABLE_BODIES[_src] = _SOURCE_BODY_TEMPLATE.format(name=_src)
+
+# The metric panel's columns, generated from the metric registry rather than typed out beside it.
+# `metrics/` is the one place that says which metrics exist and in what order; this, the Storage
+# Write API spec and the leaderboard projection are all downstream of it, so a deployment that adds
+# a metric file gets its column here with no edit to this module — it only has to run the
+# `ADD COLUMN IF NOT EXISTS` that `render_migrations` then emits for it.
+#
+# One column per line, in panel order, because `additive_columns` splits this block on commas and
+# a reader comparing the table to the panel should be able to do it by eye. The trailing comma is
+# the one that continues the column list into `fit_seconds`.
+_TABLE_BODIES["forecast_metadata"] = _TABLE_BODIES["forecast_metadata"].replace(
+    "{metrics}", ",\n".join(f"  {_name} FLOAT64" for _name in METRIC_NAMES) + ","
+)
 
 # Both families. Kept as the default subset for every renderer so existing callers are unchanged.
 TABLE_NAMES: tuple[str, ...] = tuple(_TABLE_BODIES)

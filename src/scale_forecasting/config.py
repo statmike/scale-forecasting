@@ -20,9 +20,10 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -38,30 +39,28 @@ _log = get_logger(__name__)
 
 # --- shared vocabularies -------------------------------------------------------
 
-# The full metric panel. Kept here so the config's decision-metric field is
-# self-contained; the metrics module must match this set, in this order.
+
+def _registered_metric(value: str) -> str:
+    """Accept any metric name the metric registry knows, and no other."""
+    from .metrics import METRIC_NAMES
+
+    if value not in METRIC_NAMES:
+        raise ValueError(f"unknown decision_metric '{value}'; available: {', '.join(METRIC_NAMES)}")
+    return value
+
+
+# The decision metric: any metric the `metrics/` registry has, checked at config-validation time.
 #
-# Order is load-bearing and additions go at the *tail*: `registry.rows.METRIC_COLUMNS` is
-# `get_args` of this Literal, and both the `forecast_metadata` DDL and the Storage Write API
-# spec are generated from it. Widening the Literal itself is free for `run_id` — the digest
-# hashes dumped values, not the schema — but re-ordering it would move every metric column.
-DecisionMetric = Literal[
-    "mae",
-    "rmse",
-    "mse",
-    "mape",
-    "smape",
-    "wape",
-    "mase",
-    "rmsse",
-    "bias",
-    "coverage",
-    "pinball",
-    "mase_seasonal",
-    "maape",
-    "interval_score",
-    "interval_width",
-]
+# This used to be a hand-written `Literal` of the fifteen built-ins, which meant that adding a
+# metric to a deployment meant editing this module as well as writing the metric. The registry is
+# the one source of truth now — `metrics.METRIC_NAMES` — and `registry.rows.METRIC_COLUMNS`, the
+# `forecast_metadata` DDL and the Storage Write API spec are all generated from the same tuple.
+#
+# **Widening it costs no `run_id`.** The digest hashes dumped *values*, never the schema, and
+# `"wape"` dumps as `"wape"` whether the field is a `Literal` or a validated `str` — so this change
+# moved no id, and neither does adding a metric. Re-ordering `METRIC_NAMES` would still move every
+# metric column, which is why additions go at the tail.
+DecisionMetric = Annotated[str, AfterValidator(_registered_metric)]
 
 # Metrics whose loss is quadratic in the error, and for which the *mean* is therefore the optimal
 # point forecast. Everything else in the panel is absolute-error-shaped (or a proper interval

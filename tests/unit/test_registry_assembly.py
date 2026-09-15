@@ -1279,8 +1279,11 @@ def test_a_native_row_answers_the_scoring_question_the_same_way_a_python_cell_do
 
 
 def test_the_two_metric_vocabularies_are_the_same_vocabulary() -> None:
-    # `metrics.METRIC_NAMES` is hand-written; `METRIC_COLUMNS` is derived from the config's
-    # DecisionMetric literal. Nothing forces them to agree, and the native path spans both.
+    # Both now read the metric registry's panel order, so this passes by construction — which is
+    # the point, and it stays as the statement of that. It used to be a real risk: `METRIC_NAMES`
+    # was hand-written and `METRIC_COLUMNS` was `get_args` of a *separate* hand-written Literal in
+    # the config, nothing forced the two to agree, and the native path spans both. If anyone
+    # re-introduces a second list, this is what fails.
     from scale_forecasting.metrics import METRIC_NAMES
 
     assert METRIC_NAMES == METRIC_COLUMNS

@@ -14,16 +14,18 @@ and NaN in every case where the inputs don't support it.
 from __future__ import annotations
 
 import math
-from typing import get_args
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
-from scale_forecasting.config import DecisionMetric
+from scale_forecasting.config import BacktestConfig
 from scale_forecasting.metrics import (
     METRIC_DIRECTION,
     METRIC_NAMES,
     compute_metrics,
+    get_metric,
+    list_metrics,
     loss_of,
 )
 
@@ -48,10 +50,26 @@ def test_panel_has_every_metric() -> None:
     assert all(isinstance(v, float) for v in m.values())
 
 
-def test_metric_names_match_config_decision_metric() -> None:
-    # The panel metrics.py produces must be exactly the DecisionMetric vocabulary in the
-    # config — same order, one source of truth (metrics ↔ config ↔ DDL).
-    assert METRIC_NAMES == get_args(DecisionMetric)
+def test_config_accepts_every_panel_metric_and_no_other() -> None:
+    # `decision_metric` used to be a hand-written Literal that had to be kept equal to the panel.
+    # It is validated against the registry now, so the assertion that replaced "the two lists
+    # match" is the one that actually matters to a user: every metric the panel computes is a
+    # legal config value, and a name nobody registered is refused at validation time rather than
+    # discovered later as a column of NaN.
+    for name in METRIC_NAMES:
+        assert BacktestConfig(decision_metric=name).decision_metric == name
+    with pytest.raises(ValidationError, match="unknown decision_metric"):
+        BacktestConfig(decision_metric="not_a_metric")
+
+
+def test_the_registry_holds_exactly_the_panel() -> None:
+    # The factory's view and the panel's view of "which metrics exist" are the same set, and every
+    # registered class answers to the name it is registered under. A metric registered but left out
+    # of `METRIC_NAMES` would silently never be computed; the package raises at import if that
+    # happens, and this is the offline statement of the same rule.
+    assert sorted(METRIC_NAMES) == list_metrics()
+    for name in METRIC_NAMES:
+        assert get_metric(name).name == name
 
 
 def test_every_panel_metric_has_a_direction() -> None:

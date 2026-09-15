@@ -11,18 +11,19 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 
-from ..config import DecisionMetric
+from ..metrics import METRIC_NAMES
 
 if TYPE_CHECKING:
     from ..config import RunConfig
     from ..worker import CellResult
 
 
-# The full metric panel, in table-column order — derived from the config's DecisionMetric
-# literal so there is exactly one source of truth.
-METRIC_COLUMNS: tuple[str, ...] = get_args(DecisionMetric)
+# The full metric panel, in table-column order — the metric registry's own panel order, so there
+# is exactly one source of truth. The `forecast_metadata` DDL and the Storage Write API spec are
+# both generated from this name.
+METRIC_COLUMNS: tuple[str, ...] = METRIC_NAMES
 
 
 def cell_dedup_key(result: CellResult) -> dict[str, str]:

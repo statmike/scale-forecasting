@@ -15,8 +15,9 @@ if TYPE_CHECKING:
 class MSE(BaseMetric):
     """Mean squared error — squared units, so read it beside `rmse` rather than instead of it.
 
-    Its place in the panel is as the quadratic-loss member: `config.MEAN_OPTIMAL_METRICS` uses the
-    fact that squared error is minimised by the *mean* to pick the right point forecast.
+    Its place in the panel is as a quadratic-loss member: `config.corrected_arm_for` uses the fact
+    that squared error is minimised by the *mean* to decide which point-forecast arm a run
+    optimising this metric should be scored on.
     """
 
     name: ClassVar[str] = "mse"

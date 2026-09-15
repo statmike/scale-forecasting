@@ -190,6 +190,25 @@ def test_drop_snapshot() -> None:
     assert rendered == DROP_SNAPSHOT.read_text()
 
 
+# --- the generated metric block ------------------------------------------------
+
+
+def test_the_metric_columns_are_the_metric_panel_in_panel_order() -> None:
+    # The `forecast_metadata` metric block is generated from `metrics.METRIC_NAMES` rather than
+    # typed out beside it, and this is what makes that generation checkable without a cloud: the
+    # columns the DDL actually declares, parsed back out of the rendered body, are the panel and
+    # nothing but the panel, in the order the panel is in.
+    #
+    # Order matters as much as membership. The Storage Write API spec is generated from the same
+    # tuple, so a panel re-ordered under an already-created table would keep writing to columns
+    # that have moved.
+    from scale_forecasting.metrics import METRIC_NAMES
+
+    declared = additive_columns("forecast_metadata")
+    assert [n for n, _ in declared if n in set(METRIC_NAMES)] == list(METRIC_NAMES)
+    assert {t for n, t in declared if n in set(METRIC_NAMES)} == {"FLOAT64"}
+
+
 # --- additive schema evolution (migrations) ------------------------------------
 
 
