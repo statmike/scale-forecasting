@@ -2427,6 +2427,130 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Shipped baseline profile (`profiling.baseline`) | CURRENT | The numbers committed in `src/scale_forecasting/profiling/baseline.py` were harvested on 2026-09-03 from `ray-100k-dcc77a9d1e9b` — the `ray_100k` row above, a real 100,000-series Ray run — through the ordinary `read_compute_harvest` path. **This row is a claim about the numbers' provenance and nothing else.** No run has yet been *sized* from the baseline on live infrastructure; that needs a deployment with an empty registry, which this project no longer is. See below. |
 | Registry ops — job-level settle (`--settle`) | CURRENT | Run live 2026-09-04 against the one fixture reserved for it: the `statistical` family of `nb03-combo-ensemble-1788329058-c4a5e6db54a1`, `RUNNING` in the registry since 2026-09-02 while its Dataproc batch had `SUCCEEDED` with all 10 of 10 cells landed. The row now reads `COMPLETED` and carries the whole audit blob it was written on under `job_telemetry.$.settle`. **This row is being recorded 2026-09-15, eleven days after the command ran** — the proof happened and nobody wrote it down, which is the exact failure this file exists to prevent. `settled_by` is null for the P6 reason directly below, whose fix landed seven hours later the same day. The fixture class is now empty — every job row in the registry is terminal — so this cannot be re-proven without manufacturing a stale row. See below. |
 | Run audit principal (P6) | CURRENT | The `actor=None` on 2026-09-02's live cancel was a **defect**, resolved 2026-09-04: the userinfo lookup was sending the ADC quota project as `x-goog-user-project` and getting a 403 for `serviceusage.services.use` on a project unrelated to the run. Fixed by stripping the quota project (`identity._without_quota_project`) and verified live under the same ADC credential — `resolve_principal()` returns the user's email. Proven end-to-end on a real run 2026-09-05: `ray-100k-dcc77a9d1e9b`'s header row carries `user_id = <the launching user email>`, where its three pre-fix attempts are blank. That is the *launch* path; cancel-with-attribution has not been re-exercised live since the fix, though the audit *write* was already proven on 2026-09-02. See below. |
+| Registry ops — Ray cluster reaper (`reap-clusters`) | CURRENT | Proven live 2026-09-15 in four arms, against launchers killed on purpose to reproduce the 2026-09-12 incident. The verb **kept** a cluster whose run was still live, **named** a finished run's orphan in the preview, **reclaimed** it under `--yes` with the v1beta1 `persistentResources` read afterwards returning `{}`, and then `sweep_on_launch` reclaimed a *second* orphan with nobody asking — at 15:33:04 UTC, two seconds before the launch that triggered it began its own create. Both decision branches ran live (finished-run and unknown-run), and the 1800 s floor was watched both holding a 1476-second-old headerless cluster and releasing the same cluster at 41 minutes. **The first reclaim attempt failed and exposed two defects** — the delete was going to the wrong regional endpoint, and a failed delete was being counted as reaped — fixed in `ec73f45` and re-proven the same day. See below. |
+
+### The reaper works, and the first time it said so it was lying
+
+Four arms, each with its pass condition written down before the first launch. Three passed as
+written. The fourth failed in a way that only a live run could show, and the pass condition is the
+only reason anyone noticed.
+
+**The fixtures had to be killed on purpose, and that is worth saying plainly.** A leaked cluster is
+by definition something that happens when nobody is watching, so there was no abandoned one lying
+around to test against. The distinction that keeps this honest: manufacturing a stale *registry row*
+would fake the thing under test, because the test is about how the product reads rows. Manufacturing
+a dead *launcher* is not faking anything — it is the incident, reproduced. On 2026-09-12 a dev
+machine restarted mid-provision and left a head node, a CPU worker and a T4 billing against nothing;
+here the same thing is done with `kill -9` on the process group.
+
+Hand-timing that kill does not work, which is itself worth recording. A 100-series `theta` run
+finishes about six minutes after its cluster comes up, and a clean teardown is not a leak — the
+first attempt ran to `COMPLETED` and tore itself down before it could be killed. The kill has to be
+automated off a marker in the run's own log, and the marker has to be job submission rather than
+cluster creation, because killing at create is a race against a twelve-minute provision.
+
+**Keeping a live run's cluster.** A launcher killed during provisioning left its header at `RUNNING`.
+The preview listed its cluster under *leaving alone*, naming the run and its live status. The
+minimum-age floor was not what saved it — the cluster was minutes old, far under the floor — and
+that is the point of the arm: the floor is consulted only for clusters with no header at all, so a
+long-running job, which is older than any floor, is protected by its header instead.
+
+**Both branches, in one read.** While that run was being dealt with, a second cluster existed with
+no header in the registry and 45 minutes of age on it. The same preview named that one as reapable
+and went on sparing the first. Two different rules, two different answers, one listing.
+
+**Naming a finished run's orphan.** A second killed launcher left `reaper-orphan-b-2cac6b043a23`
+with a completed job and a standing cluster. Its header was driven terminal by the product's own
+repair ladder — `--settle` on the job row, then `close-runs` on the header — and REST confirmed
+immediately afterwards that the cluster was still `RUNNING`, because nothing in that ladder touches
+compute. The preview then moved it to *will DELETE*: "run finished but the cluster is still up:
+reaper-orphan-b-2cac6b043a23 is COMPLETED".
+
+That `--settle` is **not** a second proof of the job-level settle recorded above, for the reason in
+the paragraph about manufactured fixtures: the stale row it repaired was one we created. It is worth
+one narrower thing. It wrote a *populated* `actor`, which is the attributed end-to-end settle the
+P6 row above says had not been re-observed since the identity fix landed.
+
+#### The arm that failed: "reaped 1 Ray cluster(s)" over a cluster that was still running
+
+`reap-clusters --yes` printed its count and the SDK printed `Successfully deleted the cluster`. The
+`persistentResources` read afterwards returned the cluster, `RUNNING`. The pre-registered condition
+was that the resource has to go away and that the verb's own line is not evidence, and that is the
+only reason this was caught rather than filed as a pass.
+
+Two defects, and they hold each other up:
+
+1. **The delete never arrived.** `vertex_ray.delete_ray_cluster` takes no location argument; it
+   reads project and location from the SDK's global state. `teardown_shared_cluster` never called
+   `_init_vertex`, so it worked only when called from a process that had already provisioned in
+   that region. `list_clusters` builds its own regional client and initializes nothing — so a
+   caller can *find* a cluster perfectly well and then send the delete to the default endpoint,
+   where it returns `Received http2 header with status: 404` while the cluster keeps billing. The
+   reaper is by definition a fresh process, so its delete could never once have worked, and neither
+   could the Airflow teardown task, which is the same shape of caller.
+2. **The failure was counted as a success.** `_delete_cluster` returns a bool and logs rather than
+   raising, deliberately, because a teardown that throws would mask the run's real outcome.
+   `teardown_shared_cluster` discarded that bool, and `_delete_all` appended to its reaped list in a
+   `try/except/else` — so it counted everything that did not raise, which is everything.
+
+Together they produce the exact outcome `_delete_all`'s own docstring calls worse than no reaper at
+all, because a false all-clear also removes the operator's reason to go and look.
+
+Diagnosis was confirmed by experiment before a line changed: the identical delete, issued by hand
+after `_init_vertex(settings, "us-central1")`, returned `confirmed absent: True`. Neither defect is
+reachable offline, because the unit tests monkeypatch teardown — so alongside the fix there are now
+three tests on the counting rule, including the one that would have caught this.
+
+Re-run at 14:44:45 UTC against the same cluster: the preview named it, `--yes` deleted it, and the
+read at 14:45:00 returned `{}`.
+
+#### Reclaiming without being asked
+
+The last arm is the half of the reaper that runs when no operator is present. A third launcher was
+killed, its header cleared, and the cluster left standing and verified `RUNNING`. Then an ordinary
+Ray run was launched with `SF_REAP_ON_LAUNCH` at its default.
+
+Its log shows the sweep printing the whole plan, deleting `sf-ray-reaper-orphan-c-5873d5cca61a` with
+`verified gone` at 15:33:04, and beginning its own cluster create at 15:33:06 — reclaim strictly
+before create, which is what makes the sweep worth having, since the leaked cluster is holding the
+regional quota the create is about to ask for. REST at 15:34:02 showed one cluster in the project,
+the new one, `PROVISIONING`.
+
+That run then finished normally — `SUCCEEDED`, header `COMPLETED`, its own cluster deleted and
+verified gone by the ordinary teardown path at 15:46:54 — which is the other half of the check.
+The fix touches the function every teardown goes through, so an ordinary run unwinding cleanly
+afterwards is what says the fix did not buy the reaper's delete at the cost of the launcher's. End
+state: zero Vertex persistent resources, zero Dataproc clusters, `doctor` healthy.
+
+This arm also exercised the age floor in both directions on a single cluster. At 1476 seconds old
+with no header, the preview kept it: "no run header yet, but only 1476s old (under the 1800s floor —
+the run may still be starting)". At 41 minutes, unchanged in every other respect, the same preview
+moved it to *will DELETE*. That floor exists for exactly one race — a cluster created seconds before
+its run header lands in BigQuery — and this is it, seen from both sides.
+
+#### What this campaign could not fix, and did not pretend to
+
+Two of the three killed launchers ended up in a state no verb in the product can repair, which is
+the *original* incident and the thing the reaper was built for. A launcher killed during the
+twelve-minute provisioning window leaves an orphaned cluster **and** a header that can never be
+closed: `--probe` returns `UNKNOWN` because no job was ever submitted, `--settle` refuses `UNKNOWN`
+by design, `--cancel --force` leaves the header alone because it could not reach the job (the P5
+data-integrity property, holding correctly), `close-runs` refuses a non-terminal job row, and
+`drop-run` refuses a run in flight. And the reaper keeps sparing the cluster *because* the header
+still says `RUNNING` — which is the first arm above, the behaviour we most want.
+
+Every refusal is right on its own. The set of them is a hole, and the two halves hold each other in
+place. Both clusters were cleared by hand.
+
+The third fixture showed a sharper version of the same hole. Its launcher died fourteen seconds
+after submitting the job, so the job ran to completion on the orphaned cluster and landed all 2,800
+prediction rows for its 100 series — while its registry row still read `AWAITING_CAPACITY` with a
+`system_job_id` sitting right there in it. The reconciler classified it from the status alone,
+reporting "awaiting capacity; no runtime job exists yet" in the same line as `100/100` done. A
+pre-launch row that has a handle and every expected cell landed is provably not pre-launch, and that
+is decidable with no clock at all — stronger evidence than the two-hour abandonment timer that the
+`AWAITING_CAPACITY` repair arm waits on today. Recorded here and queued as its own work item; not
+fixed inside this campaign, on the owner's call.
 
 ### The probe's first live run found that its Ray escalation cannot reach a single-family Ray run
 
