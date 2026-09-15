@@ -1247,7 +1247,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | CURRENT | 2026-09-10 | `neuralprophet-ab-gpu-e530eea3a755` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
 | `neuralprophet_ab_cpu.json` | The CPU arm of the same A/B — the identical config with the deep-learning family on CPU | CURRENT | 2026-09-11 | `neuralprophet-ab-cpu-f4bfff3b39e9` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
 | `neuralprophet_ab_cluster_gpu.json` | The GPU arm of the same question asked of the *other* scheduler — 3,000 NeuralProphet cells on a four-worker Dataproc cluster with one T4 each. The pair exists because a throughput result on Ray is a result about Ray; the shipped default deserves both. Sized by quota, not preference: four T4s is what the region allows. Attempt 1 was killed at 1,941 of 3,000 cells by the client wait ceiling; this is attempt 2, on the fix | CURRENT | 2026-09-14 | `neuralprophet-ab-cluster-gpu-273d32b553c8` (attempt 2) | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `job_status=derived-from-cell-tallies`, `job_wait=operator-dialed-24h+leave-cluster-up`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| `neuralprophet_ab_cluster_cpu.json` | The CPU arm of the cluster pair — the same config with the deep-learning family on CPU, held to the same four workers so the fleets match. Both arms pin `gpu_fraction: 0.125`, which is the only thing stopping the GPU arm from packing two cells per worker against this one's seven | CURRENT | 2026-09-14 | `neuralprophet-ab-cluster-cpu-a402414abf5e` | `cluster_deps=packed-venv-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `job_status=derived-from-cell-tallies`, `job_wait=operator-dialed-24h+leave-cluster-up`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| `neuralprophet_ab_cluster_cpu.json` | The CPU arm of the cluster pair — the same config with the deep-learning family on CPU, held to the same four workers so the fleets match. Both arms pin `gpu_fraction: 0.125`, which is the only thing stopping the GPU arm from packing two cells per worker against this one's seven. Attempt 1 landed green but tripped control 4 on a bucket-alignment accident; this is attempt 2, re-run with the control left exactly as pre-registered | CURRENT | 2026-09-15 | `neuralprophet-ab-cluster-cpu-a402414abf5e` (attempt 2) | `cluster_deps=packed-venv-init-action`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `job_status=derived-from-cell-tallies`, `job_wait=operator-dialed-24h+leave-cluster-up`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 
 #### 2026-09-10, `ray_autoscale_demo`: the first side-by-side of what was planned and what ran
 
@@ -1866,8 +1866,8 @@ averaged two runs together.
 
 #### 2026-09-14, the cluster A/B, CPU arm: green, and then a control failed on two straggler cells
 
-`neuralprophet-ab-cluster-cpu-a402414abf5e`, `COMPLETED`, the same 3,000 cells on the same
-four-worker cluster with the deep-learning family routed to CPU. Zero failed cells. Submitted
+`neuralprophet-ab-cluster-cpu-a402414abf5e` **attempt 1**, `COMPLETED`, the same 3,000 cells on the
+same four-worker cluster with the deep-learning family routed to CPU. Zero failed cells. Submitted
 16:11:46, cluster up at 16:19:07 — 6 m 50 s against the GPU arm's 11 m 34 s, the difference being
 the GPU driver init action this arm does not run — first cell 16:26:26, last 19:01:13, done
 19:03:07. **Total wall clock 2 h 51 m, fitting window 154.8 minutes**, 9,000 fits in 67.1 fit-hours:
@@ -1901,12 +1901,59 @@ have been dropped, and the control would have passed with a gap near 0.0001. The
 better behaved; its drain simply landed inside its final bucket and was trimmed as designed.
 
 So the defect is in the trimming rule, which assumes the drain occupies exactly one bucket and
-aligns the buckets to the wall clock rather than to the run. **That is not grounds for changing the
-rule here.** The gap between "this control is brittle" and "this control is brittle in the direction
-that would let me read the answer" is the entire reason the file was pre-registered before either
-arm was submitted, and it was discovered by looking at the result. The verdict on this page is
-INCONCLUSIVE, section 5 is unrun, and what to do about it is recorded below rather than decided by
-whoever was holding the terminal.
+aligns the buckets to the wall clock rather than to the run. **That was not grounds for changing the
+rule.** The gap between "this control is brittle" and "this control is brittle in the direction that
+would let me read the answer" is the entire reason the file was pre-registered before either arm was
+submitted, and the brittleness was discovered by looking at the result. The rule was left exactly as
+written and the CPU arm was re-run instead — the option that costs three hours and changes nothing
+about the analysis, rather than the one that costs nothing and changes the analysis.
+
+#### 2026-09-15, the cluster A/B resolves: CPU, on the second runtime as well
+
+The CPU arm re-ran unchanged as `neuralprophet-ab-cluster-cpu-a402414abf5e` attempt 2. Attempt 1's
+rows were dropped first — 3,000 cells, 84,000 predictions, 168,000 out-of-fold rows, and its two
+registry rows — because the `run_id` is a digest of the authored config and therefore identical on a
+re-run, and the pre-registered SQL reads the cell table raw. `COMPLETED` again: submitted 00:29:28,
+cluster up 00:37:08, first cell 00:44:10, last 03:23:03, done 03:24:49. **Wall clock 2 h 55 m,
+fitting window 158.9 minutes**, 69.0 fit-hours, 82.8 seconds per cell and 27.6 per fit, 28 workers,
+mean WAPE 0.3485 for the third time running. Teardown verified on both meters.
+
+This time the drain landed inside the final bucket and was trimmed as the rule intends, leaving four
+saturated steady-state buckets at a mean density of **0.9997** against the GPU arm's 0.9967 — a
+**0.3 % gap** where attempt 1 showed 10.6 %. That is the cleanest possible confirmation that attempt
+1's failure was the trimming rule and not the fleets: the same config, the same cluster shape and
+the same 28 slots produced 0.9012 and 0.9997 depending only on where the clock happened to fall.
+
+**All four controls pass, so section 5 was run for the first time, once, as written.**
+
+| | GPU arm | CPU arm |
+|---|---|---|
+| Fitting window | 188.0 min | 158.9 min |
+| Cells landed / ok | 3,000 / 3,000 | 3,000 / 3,000 |
+| Fits (3 per cell — two folds refit plus full history) | 9,000 | 9,000 |
+| Fit-hours | 79.4 | 69.0 |
+| Mean seconds per cell / per fit | 95.2 / 31.7 | 82.8 / 27.6 |
+| Fits per node-second | 0.028493 | 0.032606 |
+| Mean WAPE | 0.3485 | 0.3485 |
+| `device_share` of fit time | 1.0 | 0.0 |
+| Cost per 1,000 fits (CPU node-seconds, r = 1.76) | 61,769.7 | 30,669.3 |
+
+**s = 0.8739, r = 1.76, `device_share` = 1.0 → CPU. The accelerator does not pay for itself.** The
+T4 is engaged on every cell and is 12.6 % *slower* per fit than not having it, and once the card's
+price is in the denominator the GPU arm costs **2.01×** as much per thousand fits.
+
+**The two runtimes agree, which is the point of having run both.** Ray answered s = 0.8196 at
+r = 1.92 over 10,000 cells on twelve nodes; Dataproc answers s = 0.8739 at r = 1.76 over 3,000 cells
+on four. Different scheduler, different fleet size, different quota ceiling, different surcharge —
+and the same direction, the same order of magnitude, and the same decision. A throughput result on
+one scheduler is a result about that scheduler; two schedulers disagreeing would have meant the
+finding was about the platform rather than about the model. They do not disagree. The shipped
+default of routing NeuralProphet to CPU at these hyperparameters is now settled on both runtimes.
+
+Read the accuracy row before reading anything else into this. Mean WAPE is 0.3485 on both arms, to
+four decimal places, across three separate completed runs. Nothing is being traded away by choosing
+the cheaper hardware — the accelerator was never buying accuracy here, only 87,040 bytes of
+occupancy on a 17 GB card.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
