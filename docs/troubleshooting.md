@@ -103,7 +103,7 @@ Five readings settle; everything else is refused:
 | `STALE_REGISTRY` | `FAILED` | any | `FAILED`, `failure_reason=RUNTIME_FAILED` |
 | `LIKELY_COMPLETED` | job gone | all landed | `COMPLETED` |
 | `LOST` | job gone | missing | `FAILED`, `failure_reason=RUNTIME_LOST` |
-| `ABANDONED_WAIT` | never launched | none | `FAILED`, `failure_reason=CAPACITY_ABANDONED` |
+| `ABANDONED_WAIT` | never launched | missing | `FAILED`, `failure_reason=CAPACITY_ABANDONED` |
 
 **Refusal is the feature.** `RUNNING_CONFIRMED` is live, `TRUST_REGISTRY` is already terminal or
 deliberately waiting, and `UNKNOWN` — the probe degraded, no handle was recorded, the runtime claims
@@ -116,7 +116,9 @@ Five more things worth knowing:
 - **`CAPACITY_ABANDONED` is not `CAPACITY_EXHAUSTED`, and the difference is what you do next.**
   Exhausted means the policy did its job and ran out of candidates — raise `max_attempts`, add a
   region, or accept that the region has no room. Abandoned means the driver went away mid-walk, so
-  the run tells you nothing about whether capacity existed. Just re-run it.
+  the run tells you nothing about whether capacity existed. Just re-run it. Note the `missing` in
+  that row of the table: an `AWAITING_CAPACITY` row whose every expected series is already in
+  BigQuery is refused rather than failed, because the work plainly happened whatever the row says.
 - **Settle never deletes and never invents time.** The landed data is untouched; the row gets a
   status, a `failure_reason` when there is a token for it, and an audit blob. It does **not** stamp
   `ended_at` or `runtime_seconds` — a row settled three days after the fact would report three days

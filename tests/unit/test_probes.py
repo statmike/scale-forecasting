@@ -1642,6 +1642,38 @@ def test_an_abandoned_capacity_wait_settles_failed_and_is_the_only_way_out() -> 
     assert (item.decision.status, item.decision.failure_reason) == ("FAILED", CAPACITY_ABANDONED)
 
 
+def test_an_abandoned_wait_whose_every_cell_landed_is_refused_rather_than_failed() -> None:
+    """The one arm whose completeness check is load-bearing rather than belt-and-braces.
+
+    ABANDONED_WAIT is reached from the clock alone — nothing upstream of it ever looks at the cell
+    counts — so without this guard the arm would render its own contradiction ("capacity walk
+    abandoned; 10/10 series landed") and then stamp FAILED over a run whose work is all in
+    BigQuery. That is a wrong write rather than a missing one, and it is permanent.
+    """
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+
+    report = _assemble_probe_report(
+        _progress(
+            _fp(
+                "statistical",
+                AWAITING_CAPACITY,
+                runtime="ray",
+                quiet_seconds=5 * 3600.0,
+                n_done=10,
+                n_expected=10,
+            ),
+        ),
+        {},
+        frozenset(),
+        frozenset(),
+        frozenset({"statistical"}),
+    )
+    (item,) = _assemble_settle_plan(report).items
+    assert item.verdict == VERDICT_ABANDONED_WAIT  # the verdict is unchanged; only the write is
+    assert item.decision is None
+    assert "left alone" in item.note
+
+
 def test_a_capacity_wait_inside_its_budget_is_still_refused_by_settle() -> None:
     # The refusal that keeps the new arm honest: a legitimate wait must stay untouched, or settle
     # would race the walk it is meant to clean up after and stamp FAILED on a run that was fine.

@@ -100,18 +100,25 @@ def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
       is the *normal* trace of a successful Ray run whose driver died before it closed the row.
     * ``LOST`` (runtime gone, cells missing, past the startup grace) → ``FAILED`` /
       ``RUNTIME_LOST``.
-    * ``ABANDONED_WAIT`` (still ``AWAITING_CAPACITY`` past any walk's own budget) → ``FAILED`` /
-      ``CAPACITY_ABANDONED``. The one arm with no runtime reading behind it, because a row that
-      never launched has no runtime to read. Its witness is the clock instead
-      (`reconcile._is_abandoned_wait`), and without this arm the row is unreachable by every verb
-      we have: settle had nothing to probe, and ``close-runs`` refuses the header for as long as a
-      non-terminal job row exists.
+    * ``ABANDONED_WAIT`` (still ``AWAITING_CAPACITY`` past any walk's own budget) **and cells
+      missing** → ``FAILED`` / ``CAPACITY_ABANDONED``. The one arm with no runtime reading behind
+      it, because a row that never launched has no runtime to read. Its witness is the clock
+      instead (`reconcile._is_abandoned_wait`), and without this arm the row is unreachable by
+      every verb we have: settle had nothing to probe, and ``close-runs`` refuses the header for as
+      long as a non-terminal job row exists.
 
     ``RUNNING_CONFIRMED`` is live and must be left alone. ``TRUST_REGISTRY`` is already terminal or
     deliberately waiting. ``UNKNOWN`` is the whole point of refusing: we could not tell, so we do
     not write. The completeness re-check on the two COMPLETED arms is belt-and-braces — the verdict
     already encodes it — but this is the function that turns a reading into a permanent row, and
     the cheap second look is worth more here than the deduplication.
+
+    On the ``ABANDONED_WAIT`` arm completeness is **not** belt-and-braces: nothing upstream checks
+    it, because that verdict is reached from the clock alone and never consults the cell counts. A
+    family whose every expected series is already in BigQuery has plainly not been abandoned by
+    anything, whatever its row still says, and stamping ``FAILED`` over completed work would be a
+    permanent wrong answer of exactly the kind this table exists to avoid. Refusing leaves the row
+    for the escalation path to reconcile as an ordinary vanished-runtime settle.
     """
     if (fv.registry_status or "") in _TERMINAL:
         return None
@@ -133,7 +140,7 @@ def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
         return SettleDecision(
             "FAILED", RUNTIME_LOST, f"runtime job gone; only {fv.n_done}/{exp} series landed"
         )
-    if fv.verdict == VERDICT_ABANDONED_WAIT:
+    if fv.verdict == VERDICT_ABANDONED_WAIT and not complete:
         return SettleDecision(
             "FAILED",
             CAPACITY_ABANDONED,
