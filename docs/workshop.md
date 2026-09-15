@@ -46,11 +46,16 @@ config fanned into a job per family*. Together they give notebook 07 both storie
 per-family placement.
 
 **Why the family DAG runs at 10,000 series and not 100,000.** It is the only one of the three that
-includes a deep-learning model, and NeuralProphet needs a T4. A default project is allowed **four**
-of them, which is enough for ~10,000 series in about ten hours and nowhere near enough for 100,000.
-The CPU-only configs stay at 100k because CPU quota is not the binding constraint at that scale.
-[Quota and scale](quota_and_scale.md) has the arithmetic, and the quota to request if you want to
-run the family DAG larger.
+includes a deep-learning model, and NeuralProphet fits roughly 50x slower than a statistical one.
+This config routes that family onto T4s, and a default project is allowed **four** on the Dataproc
+path — enough for ~10,000 series in about ten hours and nowhere near enough for 100,000. The
+CPU-only configs stay at 100k because CPU quota is not the binding constraint at that scale.
+
+The accelerator is not what makes this work, and the config is kept on GPU only because it is the
+run the [validation ledger](validation.md) measured its numbers on. NeuralProphet at these
+hyperparameters barely touches a card; routing the family to CPU is both faster and about half the
+cost. [Quota and scale](quota_and_scale.md) has the arithmetic, the A/B that settled it, and the
+quota to request if you want to run the family DAG larger.
 
 Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true), then:
 

@@ -142,6 +142,10 @@ for HPO and learned ensembles.
 | `window` | `int \| null` | `null` | `> 0` | A fixed `sliding` training width, decoupled from `min_train`. Defaults to `min_train`. |
 | `control_arm` | `bool` | `false` | rejected on `expanding_stale` | Also score a blind, never-refreshed arm on a refit scheme. See [The control arm](#the-control-arm) below. |
 
+This section is the field reference. For the reasoning behind it — how folds are anchored, why the
+newest fold fits nothing, what a short series loses, and what each scheme actually measures — see
+**[backtesting.md](./backtesting.md)**.
+
 **`scheme` — how the training window moves** ([`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py)).
 Folds are anchored from the **end** of each series: the latest fold validates on the final `horizon`
 points, and each earlier fold steps its validation window back by `step`. The two schemes differ only
@@ -651,8 +655,8 @@ knobs only matter for a family that runs on Ray.
 | `machine_family` | `"auto"` \| `"n1"` \| `"n2"` \| `"n2d"` \| `"e2"` \| `"c2"` | `"auto"` | — | GCE machine family for a **Dataproc cluster's** master + CPU workers (`"auto"` = `n1`). No-op on Serverless and on GPU workers — see below. |
 | `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | How a **Dataproc cluster** family gets its dependencies. `"container"` raises: it is a Serverless mechanism. See `cluster_deps._resolve_cluster_deps`. |
 | `persist_models` | `bool` | `false` | — | Persist each fitted model as a GCS artifact (lineage). |
-| `use_gpu` | `bool` | `false` | — | Enable GPU (Ray). |
-| `gpu_type` | `str` | `"T4"` | — | GPU accelerator type. |
+| `use_gpu` | `bool` | `false` | — | **Legacy.** Fleet-wide "put the deep-learning family on GPU", on *every* runtime — Ray, Serverless and a Dataproc cluster alike. Prefer `families.deep_learning.hardware`; see below. |
+| `gpu_type` | `str` | `"T4"` | — | **Legacy.** Accelerator type for the `use_gpu` pair. Prefer `families.<f>.gpu_type`. |
 | `gpu_fraction` | `"auto"` \| `float` | `"auto"` | float ∈ `(0, 1]` | `"auto"` = profile-driven fractional GPU, else a fixed fraction. |
 | `budget_usd` | `float` | `50.0` | `≥ 0.0` | Cost guardrail (USD). |
 | `ray_cluster_name` | `str` \| `null` | `null` | — | Reuse a standing Ray cluster by name; `null` = ephemeral. |
@@ -802,10 +806,33 @@ repair as for the attempt, by construction.
 
 ### `compute.profile` — measured compute profiling
 
-Sizing is otherwise a pure cell **count** (`n_series × n_models × n_folds`, divided by a flat
-cells-per-slot constant). That arithmetic cannot know that a deep-learning fit and a naive mean
-differ by orders of magnitude, so the fleet is provisioned for the count rather than for the work.
-`compute.profile` is the machinery for replacing that guess with a measurement.
+Sizing is otherwise a pure cell **count**, divided by a flat cells-per-slot constant. The count is
+
+```
+cells = n_series × n_models
+```
+
+and **folds are not in it** — a cell is one model fitted to one series, and a backtested cell is
+still one cell; it just does more fits inside itself. (This document used to write
+`n_series × n_models × n_folds`, which is why a two-fold dry run once reported three times the cells
+it would ever write a row for. `estimate_fanout` has not multiplied by folds for some time.) What
+folds do change is the *work* per cell:
+
+```
+fits = cells × (n_folds + 1)
+```
+
+— the `+ 1` being the final fit on all of the history, which is the forecast you actually ship.
+That is the same arithmetic [quota and scale](./quota_and_scale.md#1-the-arithmetic) plans a run
+with. `estimate_workload` goes one step further when it can see series lengths: the fold fits train
+on shorter windows than the final one, so it also reports `full_fit_equivalents`, which is what a
+backtested cell costs relative to the same cell with backtesting off. On four years of daily history
+with a 28-day horizon that comes out at **2.94** at two folds and **3.862** at three, against the
+3.0 and 4.0 that `n_folds + 1` would imply. Run `--feasibility` to see it for your own panel.
+
+None of that arithmetic can know that a deep-learning fit and a naive mean differ by orders of
+magnitude, so the fleet is provisioned for the count rather than for the work. `compute.profile` is
+the machinery for replacing that guess with a measurement.
 
 Think of it as the general form of `gpu_calibration_samples` / `gpu_safety_margin` above, which
 already do exactly this for one axis (GPU bytes), one model, one runtime.
@@ -934,6 +961,35 @@ behind "one run, a job per family, each on its own runtime". Every `FamilyComput
 an unset field inherits the run-level default. The `native` family is never listed here (it always
 runs in BigQuery).
 
+**This block is canonical; the flat `compute.use_gpu` / `compute.gpu_type` pair is legacy.** Both
+still work and neither is deprecated, but they are the coarse version of what `families` says
+precisely, and one sentence about `use_gpu` has been wrong in this document for a long time: it is
+**not** a Ray switch. `use_gpu` is read by `Config.resolve_family_compute`, the single resolver every
+runtime goes through, so it puts the deep-learning family on an accelerator on **Ray, Dataproc
+Serverless and a Dataproc cluster alike** — an L4 on Serverless, a T4 on the other two. It never
+touches any other family: `hardware` is `"cpu"` for `statistical` and `ml` no matter what the flag
+says.
+
+Resolution is a single layering, and the per-family value always wins:
+
+| Asked for | Resolves to |
+|---|---|
+| `families.deep_learning.hardware` set | that value — `use_gpu` is ignored for this family |
+| unset, `use_gpu: true` | `"gpu"` for `deep_learning`, `"cpu"` for everything else |
+| unset, `use_gpu: false` (default) | `"cpu"` |
+| `gpu_type` unset on a GPU family | `compute.gpu_type` — except on Serverless, which is forced to `L4` and raises if a `T4` was named |
+
+So `use_gpu: true` with `families.deep_learning.hardware: "cpu"` is not a contradiction the product
+has to guess at: the family runs on CPU and **no accelerator is provisioned for it at all**. That is
+smoke 20's whole job, and it is the reason the two settings can coexist safely. Prefer the
+per-family form in new configs — it says which family, which runtime and which device in one place,
+and it is the form the plan-time report and the device audit speak.
+
+Before reaching for `hardware: "gpu"` at all, read
+[what that setting guarantees](./quota_and_scale.md#what-hardware-gpu-guarantees-and-what-it-does-not).
+It guarantees placement, not utilisation, and for `neuralprophet` at its shipped defaults the
+measured answer is CPU.
+
 | Field | Type | Options | Purpose |
 |-------|------|---------|---------|
 | `runtime` | `str` | `"spark"` \| `"ray"` | Runtime for this family (overrides `python_runtime`). |
@@ -1048,6 +1104,15 @@ would still lose its Dataproc telemetry stamp and report a failure to whatever l
 That routes the deep-learning family (e.g. `neuralprophet`) to Ray-on-GPU while the statistical and ml
 families stay on the default Spark runtime and the native family runs in BigQuery — four families,
 three runtimes, one `run_id`. See [`configs/per_family_runtimes_demo.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/per_family_runtimes_demo.json).
+
+**If you are copying one of these, copy the CPU one.**
+[`configs/per_family_runtimes_cpu_demo.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/per_family_runtimes_cpu_demo.json)
+is the same four-family, three-runtime split with `"hardware": "cpu"` on the deep-learning family —
+the two files differ in that one word, so they read as a diff. The CPU one is the better starting
+point: on both accelerator A/B runs it finished *faster* than its GPU twin at identical accuracy and
+roughly half the cost. The GPU config is kept because the numbers quoted in
+[the validation ledger](./validation.md) were measured on it, not because the accelerator earned its
+place; see [what `hardware: "gpu"` actually buys you](./quota_and_scale.md#what-hardware-gpu-guarantees-and-what-it-does-not).
 
 ## A minimal config
 

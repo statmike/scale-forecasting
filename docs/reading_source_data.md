@@ -80,6 +80,33 @@ models.)
 
 ---
 
+## The one read that is not a cell read — `plan --feasibility`
+
+The four invariants above describe how a *run* reads the panel. There is one more read, and it
+happens before a run exists: `plan --feasibility` measures how long each series actually is, so it
+can tell you how many backtest folds your panel can support before you pay for a fleet. It is
+described from the operator's side in
+[running_and_reviewing.md](./running_and_reviewing.md) and the arithmetic it prints is explained in
+[quota_and_scale.md](./quota_and_scale.md#1-the-arithmetic).
+
+It is worth calling out separately because it breaks three of the four invariants, on purpose:
+
+- **It runs on the driver, through the query API.** `launch_plan.read_series_lengths` issues one
+  aggregation — `SELECT <ts_id>, COUNT(*) … GROUP BY ts_id ORDER BY ts_id` — with the ordinary
+  BigQuery client. No Storage Read API, no Arrow, no executors. Two columns, one shuffle, and it
+  consumes query slots, unlike everything above.
+- **It projects the id column only.** It never reads the target or the exogenous columns, because
+  all it needs is a row count per series.
+- **It is unpinned.** Snapshot pinning is a property of a run header, and at feasibility time there
+  is no run. The counts are as-of-now, which is the right answer for "can I launch this today?".
+
+It does honour the subset rule: `data.series_limit` is applied the same way the engines apply it, so
+the feasibility report describes the series the run would actually forecast. And it is best-effort —
+an unreachable environment produces a line saying so rather than an exception, so a plan never fails
+because the preflight could not reach BigQuery.
+
+---
+
 ## Bounding read parallelism — `read_max_streams`
 
 `compute.read_max_streams` caps the number of Storage Read streams the source read requests, shared

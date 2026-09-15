@@ -254,6 +254,25 @@ For the full operational picture — the six verdicts and how to read them, sett
 the verdict, cancelling safely, and what a cancelled run keeps — see
 [troubleshooting.md § In-flight runs](./troubleshooting.md#in-flight-runs--probe-settle-cancel).
 
+**Did the accelerator you paid for do anything?** Every `FamilyProgress` also carries
+`device_verdict`, the one field on the monitor that is about *cost* rather than progress. It is
+`None` for a CPU family and for a GPU family until its job finishes, because the audit runs on the
+driver once the cells are written; after that it is one of three words, which `plot_progress` prints
+at the end of the family's bar:
+
+| `device_verdict` | On the bar | Means |
+|---|---|---|
+| `MISSING_DEVICE` | `no gpu` | the family bought a device and **no** cell ran on one — a real fault, and the regression detector for the whole GPU contract |
+| `ENGAGED_IDLE` | `gpu idle` | cells ran on the device and barely touched it. Correct run, wasted money |
+| `ENGAGED_UTILISED` | `gpu used` | cells ran on the device and used a real share of it |
+
+`ENGAGED_IDLE` is the expected verdict for `neuralprophet` at its shipped defaults, and it is a
+finding rather than a failure — nothing is cancelled and no cell is refused. Act on it between runs,
+not during one: see
+[what `hardware: "gpu"` guarantees](./quota_and_scale.md#what-hardware-gpu-guarantees-and-what-it-does-not).
+The same word is a column on `v_run_jobs`, with the counts behind it in `device_use` beside it, so
+`WHERE device_verdict != 'ENGAGED_UTILISED'` is the fleet-wide version of this question.
+
 ## 4. Review — which model won
 
 ```sql

@@ -29,6 +29,8 @@ How it works and every knob.
   codebase.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
+- [backtesting.md](./backtesting.md) — the method: how folds are laid out, why the newest fold fits
+  nothing, what happens to short series, and what each of the four schemes actually measures.
 - [reading_source_data.md](./reading_source_data.md) — how each runtime reads the source panel
   (Storage Read API + Arrow, snapshot pinning, the `read_max_streams` parallelism cap).
 - [writing_results.md](./writing_results.md) — the single Storage Write API path for both table

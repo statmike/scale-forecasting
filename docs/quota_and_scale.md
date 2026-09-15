@@ -31,6 +31,13 @@ Measured, on the same config with and without backtesting (`all_families_10k` vs
 `all_families_10k_full`, 2026-09-04/05): the deep-learning family went **6,582 s → 18,372 s, 2.79x**.
 Watch that number; it is the one that sets your bill and your wall clock.
 
+It came in under 3.0 for a reason worth knowing: a fold fits on *truncated* history, so the fold
+fits are cheaper than the final one. `--feasibility` prices that exactly for your own panel and
+reports it as `full_fit_equivalents` — 2.94 rather than 3.0 on four years of daily history at two
+folds. Use `folds + 1` to size a fleet and the equivalents figure to forecast a bill. Folds never
+multiply the **cell** count; see
+[the configuration reference](configuration_reference.md#computeprofile--measured-compute-profiling).
+
 **Throughput.** Cells are independent, so they run in parallel and throughput is linear in the size
 of the fleet. What matters is throughput *per node*, measured end to end:
 
@@ -89,11 +96,27 @@ observations.
     cells over all wall clock — the same run gives **63**, and the gap is start-up and tail. Both
     rows are now derived identically so they can be compared, and the number that survives is 191.
 
-**Deep learning is a different regime entirely.** `neuralprophet` measures at **21–65 s/fit**
-against sub-second statistical models — 50x or more — and it needs a GPU. Measured at 10,000 series
-on 12 T4s, it lands at **7.6 fits/min per T4 node** (the 2026-09-04 `all_families_10k` run, 1 h
-50 m for 10,000 cells) — post-fix, like the CPU anchor. The arithmetic in [§3](#3-the-table) is
-built on both.
+**Deep learning is a different regime entirely, but not the regime this page used to claim.**
+`neuralprophet` measures at **21–65 s/fit** against sub-second statistical models — 50x or more.
+What it does *not* need is a GPU. At the shipped `n_lags=0` configuration the model is a few hundred
+parameters of trend and Fourier seasonality, so it allocates about **87 KB of device memory** —
+0.0005 % of a 16 GiB T4 — and spends **93–99.6 % of its wall clock saturating a single CPU core**.
+Two head-to-head A/B runs then measured what that costs, and the CPU arm was not merely as fast as
+the GPU arm; it was **faster**. The reversal is worked through in
+[§3](#deep-learning-is-on-a-separate-much-lower-ceiling).
+
+Both deep-learning anchors on this page are therefore **per node**, never per device:
+
+| `n1-standard-8` node (7 usable cores) | `neuralprophet` fits/min per node | Measured on |
+|---|---|---|
+| **CPU** | **10.1** | `neuralprophet-ab-cpu-f4bfff3b39e9` (2026-09-11) |
+| GPU, one T4 attached | 7.9 | `neuralprophet-ab-gpu-e530eea3a755` (2026-09-10) |
+
+Both are 30,000 fits over the run's full wall clock across twelve nodes — the same end-to-end
+measure as the 191 cells/min figure above, so the two are comparable. The older 7.6 and 8.2 figures
+elsewhere on this page are the same *GPU-node* measurement taken on `all_families_10k` and
+`all_families_10k_full`, and they agree with the 7.9 here. They were labelled "per T4"; the
+denominator was always the node. The arithmetic in [§3](#3-the-table) is built on all of them.
 
 ---
 
@@ -137,9 +160,11 @@ the quota.**
 
 ### Deep learning is on a separate, much lower ceiling
 
-`neuralprophet` needs a T4 and fits ~50x slower than a statistical model, so GPU allowance is the
-hardest limit in this product. **Which** allowance depends on the runtime, and the two are not the
-same number:
+`neuralprophet` fits ~50x slower than a statistical model, so the deep-learning family is the
+hardest limit in this product wherever you put it. **On CPU nodes it draws on the same regional vCPU
+allowance as everything else** — the looser of the two ceilings, and the shipped default. Route it to
+GPU and it moves onto an accelerator allowance roughly an order of magnitude tighter, and **which**
+allowance depends on the runtime:
 
 | Deep-learning runtime | Quota metric | Typical default |
 |---|---|---|
@@ -153,51 +178,141 @@ regionally uneven than the Compute Engine one: on the project used for the
 [validation ledger](validation.md) it is 12 in `us-central1` but **2** in both `us-east1` and
 `us-west1`, so a failover region may be a third of the capacity you sized for.
 
-At **7.6 fits/min per T4** — measured, see below — one deep-learning model over the same series
-counts, *without* backtesting (with `n_folds: 2`, multiply by three):
+At **7.6 fits/min per GPU node** and **10.1 fits/min per CPU node** — both measured, see below — one
+deep-learning model over the same series counts, *without* backtesting (with `n_folds: 2`, multiply
+by three):
 
-| Series | Wall clock on **4 T4s** (Dataproc default) | On **12 T4s** (Ray default) | T4s for a **~1-hour** run |
-|---|---|---|---|
-| **100** | ~3 min | ~1 min | 1 |
-| **1,000** | ~33 min | ~11 min | 3 |
-| **10,000** | **~5.5 hours** | **~1.8 hours** | 22 |
-| **100,000** | **~55 hours** | ~18 hours | 219 |
-| **1,000,000** | ~23 days | ~7.6 days | 2,193 |
+| Series | On **4 GPU nodes** (Dataproc T4 default) | On **12 GPU nodes** (Ray T4 default) | On **20 CPU nodes** (reference-config cap) | Nodes for a **~1-hour** run, CPU / GPU |
+|---|---|---|---|---|
+| **100** | ~3 min | ~1 min | under a minute | 1 / 1 |
+| **1,000** | ~33 min | ~11 min | ~5 min | 2 / 3 |
+| **10,000** | **~5.5 hours** | ~1.8 hours | **~50 min** | 17 / 22 |
+| **100,000** | **~55 hours** | ~18 hours | **~8.3 hours** | 165 / 219 |
+| **1,000,000** | ~23 days | ~7.6 days | **~3.4 days** | 1,650 / 2,193 |
+
+Read the CPU column first, because it is the shipped default and it wins twice. It is faster per
+node, and its nodes come out of a far looser pool: 20 CPU workers is where the reference configs cap
+themselves to stay inside a 200-vCPU Compute Engine allowance, and on Ray the same fleet bills to
+`custom_model_training_cpus`, whose `us-central1` default is 2,200. Getting to 165 CPU nodes is a
+routine vCPU request. Getting to 219 T4s is not.
 
 **A default project runs out of deep-learning headroom somewhere around 10,000–20,000 series** for a
-run you are willing to sit through, an order of magnitude before it runs out of CPU headroom. This
-is why `all_families_10k.json` is the largest config here that includes `neuralprophet`. It pins
-`ray_gpu_max_nodes: 12`, the Vertex default for `us-central1`; it previously pinned `4`, which was
-the Compute Engine number applied to a Ray run by mistake and left two-thirds of the allowance
-unused. If you deploy to a region with a smaller Vertex allowance, lower it — the pool starts at
-`ray_gpu_min_nodes` and a `max` above your quota is not an error, just a ceiling the autoscaler
-never reaches.
+run you are willing to sit through, an order of magnitude before it runs out of headroom for the
+statistical and ML families. This is why `all_families_10k.json` is the largest config here that
+includes `neuralprophet`. If you do route the family to GPU, it pins `ray_gpu_max_nodes: 12`, the
+Vertex default for `us-central1`; it previously pinned `4`, which was the Compute Engine number
+applied to a Ray run by mistake and left two-thirds of the allowance unused. If you deploy to a
+region with a smaller Vertex allowance, lower it — the pool starts at `ray_gpu_min_nodes` and a
+`max` above your quota is not an error, just a ceiling the autoscaler never reaches.
 
-**Where the 7.6 fits/min/T4 anchor comes from.** It replaces an extrapolation from runs of 100
-series or fewer, in which cluster start-up was a large fraction of the span. On 2026-09-04
-`all_families_10k.json` fit **10,000 `neuralprophet` series across 12 T4s in 1 h 50 m** — 91
-fits/min for the fleet. The 10,000-series row above is therefore not a projection; it is that run.
-`all_families_10k_full.json` re-measured it the next day at 3 fits per cell and landed at **8.2
-fits/min/T4**, which is the same number: the anchor is per *fit*, and backtesting buys more of them.
+**Where the two anchors come from, and why neither is "per T4".** The GPU figure replaces an
+extrapolation from runs of 100 series or fewer, in which cluster start-up was a large fraction of
+the span. On 2026-09-04 `all_families_10k.json` fit **10,000 `neuralprophet` series across a
+twelve-node T4 fleet in 1 h 50 m** — 91 fits/min for the fleet, 7.6 per node. The 10,000-series GPU
+row above is therefore not a projection; it is that run. `all_families_10k_full.json` re-measured it
+the next day at 3 fits per cell and landed at **8.2**, which is the same number: the anchor is per
+*fit*, and backtesting buys more of them. Both were once written "per T4" because each node carried
+exactly one card — but the card is not what produces the rate, so the label was wrong and the
+arithmetic was right. The 2026-09-10 A/B GPU arm, on the same twelve-node shape, independently gives
+**7.9 fits/min per node**.
 
-Three things about it are worth understanding before you plan with it.
+The CPU figure is new, and the project had no measurement of it until the A/B ran.
+`neuralprophet-ab-cpu-f4bfff3b39e9` landed **30,000 `neuralprophet` fits across twelve
+`n1-standard-8` CPU nodes in 14,828 s** on 2026-09-11 — 121 fits/min for the fleet, **10.1 per
+node** — against `neuralprophet-ab-gpu-e530eea3a755`'s 19,054 s for the same 30,000 fits on an
+identical fleet shape with a T4 attached to every node. Same config but for one line, 10,000 cells
+landed on both arms, WAPE identical to ten decimal places.
 
-**It is a throughput figure, not a latency figure.** The average individual fit took 43.5 s, which is
-1.4 fits/min if you watch a single series — roughly seven fits share each T4, and they contend.
-Sizing from the per-fit time will over-provision you by about 5x.
+**The same comparison was then run on a Dataproc cluster, and it agreed.**
+`neuralprophet-ab-cluster-cpu-a402414abf5e` and `neuralprophet-ab-cluster-gpu-273d32b553c8`
+(2026-09-14/15) put 3,000 cells through four workers each: 158.9 minutes of fitting on CPU against
+188.0 on GPU, 27.6 s/fit against 31.7, mean WAPE 0.3485 on both. Different scheduler, different
+fleet size, different quota pool, same direction and the same decision. A result on one runtime is a
+result about that runtime; two runtimes disagreeing would have meant the finding was about the
+platform rather than about the model. All four arms are written up in the
+[validation ledger](validation.md) under *the NeuralProphet accelerator A/B*.
+
+Four things about these anchors are worth understanding before you plan with them.
+
+**They are throughput figures, not latency figures.** The average individual fit took 43.5 s on the
+2026-09-04 run, which is 1.4 fits/min if you watch a single series — roughly seven fits share each
+node, and they contend. Sizing from the per-fit time will over-provision you by about 5x.
 
 **Your GPU pool will run out of cores before it runs out of GPU.** A deep-learning task asks for one
 vCPU *and* a fraction of a device, and on the default `n1-standard-8` GPU worker the vCPUs run out
 first: 12 nodes give 84 usable cores, so 84 fits run concurrently and the T4s sit at **8.4 of 12
 busy** — 70 % — for the whole run. That is not a defect and not the memory bug from
-[§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out); it is the machine shape. If you want the
-last 30 % of your GPU allowance, give each T4 more vCPUs by raising `ray_gpu_machine_type`, not by
-raising `ray_gpu_max_nodes` — more nodes you cannot feed cost quota and deliver nothing.
+[§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out); it is the machine shape.
 
-**And it is `neuralprophet` on a T4 at this data's shape.** A different model, a different device, or
+**But "8.4 of 12 busy" is reservation accounting, not work.** It is Ray reporting how much of the
+*declared* GPU resource is claimed by running tasks, and every one of those claims is a
+`gpu_fraction` reservation held by a model that has ~87 KB resident on the card. The remaining 30 %
+is not idle silicon you could put to work; the 70 % is not busy silicon either. Earlier versions of
+this page read that number as under-utilised hardware and told you to raise
+`ray_gpu_machine_type` so each card could be fed more tasks. That advice is withdrawn: feeding more
+tasks to a device that is doing ~nothing buys nothing. The measurement that settles it is the A/B
+above, where **taking the card away cut 22 % off the wall clock**. If your deep-learning family is
+`neuralprophet` at these hyperparameters, the lever is not a bigger GPU worker — it is
+`hardware: "cpu"`.
+
+**And this is `neuralprophet` at this data's shape.** A different model, a different device, or
 much longer series will move it. The rate is the right starting point precisely because it is now
 measured rather than guessed; it is still your own first run that tells you your number. Plan with
 these, then measure.
+
+### What `hardware: "gpu"` guarantees, and what it does not
+
+Setting a family to GPU is a statement about **placement**, and the product enforces it. It is not a
+statement about **utilisation**, and no platform can enforce that one — utilisation is a property of
+your model, not of the machinery around it. Keeping the two apart is what lets this page say "the
+card was reached" and "the card was wasted" about the same run without contradicting itself.
+
+**What the contract guarantees.** Three things, checked at three different moments:
+
+| Guarantee | When | Mechanism |
+|---|---|---|
+| **Provisioning coherence** — the hardware a job is *provisioned onto* is the hardware its cells are *routed to* | plan time, offline | both read one resolver, `resolve_family_compute`, so a fleet and its cells can never disagree. `use_gpu: true` with `families.deep_learning.hardware: "cpu"` therefore buys no accelerator at all, rather than buying one and not using it |
+| **Fail fast when the device is not there** | the first cell, on the worker | `worker._require_device`. A cell told `hardware="gpu"` that finds no CUDA device raises immediately, with the service named and the fix spelled out, instead of quietly fitting on the CPU and handing you a correct forecast and a GPU bill |
+| **Placement is recorded, never inferred** | every cell | the model writes `device_used` (`cuda` or `cpu`) and `peak_gpu_bytes` onto its `forecast_metadata` row. The verdict below is computed from what was recorded, not from what was requested |
+
+**What it does not guarantee: that the device does any work.** Once a family job's cells are
+written, `device_audit` aggregates those recorded facts into one verdict for the job:
+
+| Verdict | Meaning |
+|---|---|
+| `MISSING_DEVICE` | the family asked for a device and **no** cell reports having run on one |
+| `ENGAGED_IDLE` | cells ran on the device and barely touched it |
+| `ENGAGED_UTILISED` | cells ran on the device and used a real share of it — currently ≥ 1 % of the card's memory |
+| `None` | the family never asked for a device, so there is nothing to judge |
+
+**It warns; it never fails a job.** An idle accelerator still produces a correct run. It is a cost
+finding, not a fault, and the product's job is to name it rather than to overrule you. The verdict
+lands on the family's `run_jobs` row and surfaces as `device_verdict` in `review.py`.
+
+**How the guarantee is proved, per service.** Placement is proved in *both* directions on each of
+the three services that can carry a GPU:
+
+| Service | Positive arm — placement works | Negative arm — the guard fires |
+|---|---|---|
+| Dataproc Serverless | smoke 03 (L4) | smoke 17 |
+| Dataproc cluster | smoke 06 (T4) | smoke 18 |
+| Ray on Vertex | smoke 08 (T4) | smoke 19 |
+
+The negative arms hide the card from the worker through the environment seam each service already
+exposes, and require the run to **refuse**. They exist because three green positive arms are
+indistinguishable from `assert True` without them. Smoke 20 covers the opposite mistake —
+`use_gpu: true` against a family overridden to `cpu`, which must complete on CPU having provisioned
+no accelerator. All four are in the [validation ledger](validation.md).
+
+**And the same runs *measure* the thing the contract does not guarantee. Every positive arm comes
+back `ENGAGED_IDLE`.** That is the honest verdict for `neuralprophet` at `n_lags=0` on all three
+services, and it is the observation the A/B above was run to price. The ledger records those GPUs as
+*audited*, not as *used*.
+
+So the contract and the recommendation point in the same direction rather than against each other:
+`hardware: "gpu"` does exactly what it says, and for `neuralprophet` at these hyperparameters the
+right thing to say is `hardware: "cpu"`. See
+[the configuration reference](configuration_reference.md) for where that field lives.
 
 ---
 
@@ -350,7 +465,9 @@ So the advice inverts, and the numbers in this document are the post-fix ones:
   divides into them sensibly.
 - **Expect per-cell latency to get worse as density improves, and do not read that as a regression.**
   The re-run above made each `neuralprophet` fit 44 % slower (30.25 s → 43.48 s) while the fleet did
-  4.1x the work. Contention between packed cells is what a well-used node looks like.
+  4.1x the work. What got packed is the **8-vCPU node**, not the card on it — these were GPU nodes,
+  but the contention is seven fits sharing seven cores, which is exactly what a well-used node looks
+  like. Read the per-fit number as evidence the fleet is full, not as evidence something broke.
 
 **If you see one busy core in N, suspect a memory request before you suspect the scheduler.** The
 Ray dashboard's `/api/cluster_status` reports `usageByNode`, and a node pinned this way is obvious
@@ -362,7 +479,16 @@ note at `WARNING` when memory rather than cores is what limits a pool.
 
 ## 6. Cheaper than more quota
 
-Before filing for 460 vCPUs, three things cost nothing:
+Before filing for 460 vCPUs, four things cost nothing:
+
+**Run the deep-learning family on CPU.** It is the shipped default and it is the single largest
+lever on this page, because the deep-learning family is ~96 % of a mixed run's wall clock when it is
+present. A GPU node costs roughly **1.8–1.9x** a CPU node of the same shape, and both A/B runs found
+the CPU arm *faster* as well as cheaper: **2.34x the cost per thousand fits on Ray, 2.01x on a
+Dataproc cluster**, at identical accuracy. It also moves the family off the tightest quota in your
+project and onto the loosest. Set `compute.families.deep_learning.hardware` to `"cpu"`, or leave it
+alone — that is already the default. `configs/per_family_runtimes_cpu_demo.json` is a finished
+example to copy: it is the GPU demo config with that one word changed.
 
 **Cut cells, not corners.** `fits = series x models x (folds + 1)`. Dropping one expensive model from
 a 100,000-series run removes 100,000 cells. Backtesting with 2 folds costs ~2.8x, measured. Both are

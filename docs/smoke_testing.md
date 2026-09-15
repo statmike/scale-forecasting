@@ -297,7 +297,7 @@ terraform apply -var create_composer=false
     reliable.
 
 The deep-learning family on Ray GPU is the long pole in this smoke, and it is why `backtest.n_folds`
-is **3** rather than the 10 the other backtesting smokes use. At the measured **7.6 fits/min per T4
+is **3** rather than the 10 the other backtesting smokes use. At the measured **7.6 fits/min per GPU
 node** ([quota and scale](quota_and_scale.md)), 200 series × (3 folds + the final fit) is ~800
 NeuralProphet fits — comfortably under an hour including cluster provisioning, which keeps the run
 inside the ~60-min bearer-token expiry (a known limit). Ten folds would be ~2,200 fits and would

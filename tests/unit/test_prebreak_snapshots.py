@@ -129,6 +129,12 @@ _POST_BREAK = {
     # other instead, down to the Spark properties each arm would submit.
     "configs/neuralprophet_ab_cluster_gpu.json",
     "configs/neuralprophet_ab_cluster_cpu.json",
+    # The CPU twin of the per-family runtime demo, written 2026-09-15 once both A/B pairs had shown
+    # the accelerator losing on wall clock as well as on cost. It exists so the recommended shape is
+    # a file to copy rather than a paragraph to apply, and it is the GPU demo with one word changed
+    # — so what guards it is `per_family_runtimes_demo.json` sitting beside it, not a pre-break
+    # digest it never had.
+    "configs/per_family_runtimes_cpu_demo.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

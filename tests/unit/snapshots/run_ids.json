@@ -10,6 +10,7 @@
   "configs/neuralprophet_ab_cluster_gpu.json": "neuralprophet-ab-cluster-gpu-273d32b553c8",
   "configs/neuralprophet_ab_cpu.json": "neuralprophet-ab-cpu-f4bfff3b39e9",
   "configs/neuralprophet_ab_gpu.json": "neuralprophet-ab-gpu-e530eea3a755",
+  "configs/per_family_runtimes_cpu_demo.json": "per-family-runtimes-cpu-demo-852067735ea2",
   "configs/per_family_runtimes_demo.json": "per-family-runtimes-demo-8fe8f224a7e1",
   "configs/ray_100k.json": "ray-100k-3fbc82fe3b6d",
   "configs/ray_autoscale_demo.json": "ray-autoscale-demo-9728c900963a",
