@@ -108,7 +108,17 @@ _GPU_MACHINE_PREFIX = {"T4": "n1-", "L4": "g2-"}
 # yet) to size the pool, so sizing uses this nominal fraction (→ 2 NeuralProphet slots per T4). The
 # on-cluster `calibrate_gpu_fraction` refines the *actual* ``num_gpus`` per task once a T4 is
 # available; the node count is fixed at create time, so only the sizing math uses this.
+#
+# It is also the answer when the calibration cannot measure — which, until the probe was moved onto
+# a GPU worker (`_measure_np_peaks_on_device`), was *every run*. Treat a change to this number as a
+# change to real fleet density, not as a change to a default nobody reaches.
 _NOMINAL_AUTO_FRACTION = 0.5
+
+# How long to wait for the calibration probes before giving up and using the nominal fraction. The
+# probes are three NeuralProphet fits on whole devices; generous, because the alternative to waiting
+# is sizing the entire run off a guess, and bounded, because a GPU pool that never scales must not
+# hang the driver.
+_CALIBRATION_TIMEOUT_S = 600.0
 
 # Clamp calibrated fractions to a sane band: below this a single task barely uses the GPU (packing
 # overhead dominates), above 1.0 is meaningless (one task can't want more than a whole device).
@@ -238,17 +248,24 @@ def calibrate_gpu_fraction(
 
     The measurement is injectable so the sizing math is unit-testable **without a GPU** in the
     offline gate: pass ``measured_peaks_bytes`` to skip the live fit entirely. On a real cluster
-    (`run`) the peaks are measured live via
-    `_measure_np_peak_bytes` over ``sample_series``. With nothing to measure it falls back to
+    (`run`) the peaks are measured live by `_measure_np_peaks_on_device`, which dispatches
+    ``sample_series`` to GPU workers. With nothing to measure it falls back to
     `_NOMINAL_AUTO_FRACTION`. The chosen fraction + measurements are logged to the registry so
     the sizing decision is auditable (done by the caller).
 
     **A failed probe is not a measurement of zero, and treating it as one inverted the result.**
-    This runs on the Ray head, which has no card, so every probe raised and returned 0; ``max``
-    of three zeros is zero; and `_clamp_fraction` turns a zero raw fraction into exactly
-    ``_MIN_FRACTION`` — the *smallest legal* fraction, i.e. ten cells per device, when the honest
-    answer was two. Non-positive samples are therefore dropped before the ``max``, and a sample
-    list that empties out lands on the nominal fraction, the same as no samples at all.
+    Earlier code returned 0 from a probe that raised; ``max`` of three zeros is zero; and
+    `_clamp_fraction` turns a zero raw fraction into exactly ``_MIN_FRACTION`` — the *smallest
+    legal* fraction, i.e. the *densest* packing, on the strength of a measurement that never
+    happened. Non-positive samples are therefore dropped before the ``max``, and a sample list that
+    empties out lands on the nominal fraction, the same as no samples at all.
+
+    **That fix was correct and it was not sufficient, because the probe could not run at all.** It
+    was being called on the head node, which has no accelerator, so "no usable samples" was not an
+    edge case — it was every run, and the function's real output was whichever constant the
+    fallback held. `_measure_np_peaks_on_device` puts the probe on a worker that has a card. The
+    fallback is now what it always claimed to be: the answer when measurement is impossible, rather
+    than the answer.
     """
     fraction = cfg.compute.gpu_fraction
     if isinstance(fraction, float):
@@ -257,7 +274,7 @@ def calibrate_gpu_fraction(
     # auto: profile peak memory (injected for offline tests, measured live on the cluster).
     if measured_peaks_bytes is None:
         series = (sample_series or [])[: cfg.compute.gpu_calibration_samples]
-        measured_peaks_bytes = [_measure_np_peak_bytes(s, cfg) for s in series]
+        measured_peaks_bytes = _measure_np_peaks_on_device(series, cfg)
     usable = [peak for peak in measured_peaks_bytes if peak and peak > 0]
     if not usable:
         return _NOMINAL_AUTO_FRACTION
@@ -268,19 +285,60 @@ def calibrate_gpu_fraction(
     return _clamp_fraction(raw)
 
 
+def _measure_np_peaks_on_device(
+    series: list[pd.DataFrame], cfg: RunConfig
+) -> list[int | None]:  # pragma: no cover - live GPU path, exercised only by the @gpu smoke
+    """Measure each sample's peak device memory **on a node that has a device**.
+
+    `_measure_np_peak_bytes` needs a card. `calibrate_gpu_fraction` is called from the driver
+    section of `ray_engine.run`, and that driver is the Ray **job entrypoint — it runs on the head
+    node, which carries no accelerator.** Called inline, therefore, the probe raised on
+    ``torch.cuda.reset_peak_memory_stats`` for every sample on every run that has ever been made,
+    and ``"auto"`` silently collapsed to whatever the no-samples fallback happened to be. It was
+    never a calibration; it was a constant with a measurement's name on it. Measured live
+    2026-09-16 on a 10,000-series run: the fallback of the day put two NeuralProphet cells on each
+    T4 where cores would have allowed seven, and cost 44 % of the fleet's per-device throughput.
+
+    The fix is only to run the probe somewhere else. Each sample is dispatched as a Ray task
+    requesting a whole device, so the scheduler places it on the GPU pool. Nothing about the
+    measurement changes — it is the same module-level function, called with the same arguments.
+
+    **Dispatch is best-effort in exactly the way the measurement is.** Ray is already connected by
+    this point (`ray_engine.run` calls ``ray.init()`` before sizing) and the GPU pool is already
+    provisioned (the cluster is created before the job is submitted), so the common case is a
+    straightforward remote call. But a pool that never scales would leave the tasks pending
+    forever, and a calibration is not worth hanging a run over — hence the bounded wait, after
+    which we return "not measured" and the caller lands on the nominal fraction, which is precisely
+    the behaviour this function replaces. Degrading to the old answer is acceptable; blocking is
+    not.
+    """
+    if not series:
+        return []
+    try:
+        import ray
+
+        probe = ray.remote(num_gpus=1)(_measure_np_peak_bytes)
+        futures = [probe.remote(s, cfg) for s in series]
+        return list(ray.get(futures, timeout=_CALIBRATION_TIMEOUT_S))
+    except Exception:  # noqa: BLE001 - see above: a probe that cannot run is not a measurement
+        return [None] * len(series)
+
+
 def _measure_np_peak_bytes(
     series: pd.DataFrame, cfg: RunConfig
 ) -> int | None:  # pragma: no cover - live GPU path, exercised only by the @gpu smoke
     """Fit NeuralProphet on one series and return the peak CUDA bytes it allocated.
 
     Live-only (needs a real GPU): resets the torch allocator's high-water mark, fits one cell via
-    the shared `run_cell`, and reads ``torch.cuda.max_memory_allocated``.
+    the shared `run_cell`, and reads ``torch.cuda.max_memory_allocated``. Dispatched onto a GPU
+    worker by `_measure_np_peaks_on_device` — calling it on the driver measures nothing, which is
+    the bug that function exists to fix.
 
     Any failure returns ``None`` — *not measured* — and so does a genuine zero, because a fit that
     allocated nothing on the device is a fit that did not run on the device. Both are dropped by
-    the caller rather than being maxed as if they were footprints. The distinction is the whole
-    bug: this probe runs on a head node with no card, so it fails every time, and returning 0 made
-    `calibrate_gpu_fraction` size every cell at the *minimum* fraction it is allowed to request.
+    the caller rather than being maxed as if they were footprints. The distinction matters because
+    returning 0 made `calibrate_gpu_fraction` size every cell at the *minimum* fraction it is
+    allowed to request, which is the *densest* packing, on the strength of a probe that had failed.
     """
     try:
         import torch

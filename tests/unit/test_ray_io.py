@@ -13,6 +13,7 @@ the default: the plan carries per-pool ``[min, max]`` bounds that the launcher t
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pandas as pd
@@ -200,6 +201,116 @@ def test_the_footprint_neuralprophet_actually_has_lands_on_the_floor_not_near_it
     frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[77_824], gpu_type="T4")
     assert frac == ray_io._MIN_FRACTION
     assert (77_824 * 1.3) / ray_io.device_memory_bytes("T4") < ray_io._MIN_FRACTION
+
+
+# --- where the calibration probe runs ------------------------------------------
+
+
+class _FakeRemoteFn:
+    def __init__(self, ray: _FakeRay, fn: Any) -> None:
+        self._ray, self.fn = ray, fn
+
+    def remote(self, *_args: Any, **_kwargs: Any) -> Any:
+        self._ray.calls += 1
+        return ("future", self._ray.calls)
+
+
+class _FakeRay:
+    """The three pieces of Ray's API `_measure_np_peaks_on_device` touches, recording the options.
+
+    Deliberately not the real thing. What needs locking down is that the probe asks the scheduler
+    for a *whole device*, and that is a property of the call, not of Ray.
+    """
+
+    def __init__(self, results: list[Any]) -> None:
+        self.results = results
+        self.options: dict[str, Any] | None = None
+        self.timeout: float | None = None
+        self.calls = 0
+
+    def remote(self, **options: Any) -> Any:
+        self.options = options
+        return lambda fn: _FakeRemoteFn(self, fn)
+
+    def get(self, _futures: list[Any], timeout: float | None = None) -> list[Any]:
+        self.timeout = timeout
+        return self.results
+
+
+def _raise_timeout(*_args: Any, **_kwargs: Any) -> list[Any]:
+    raise TimeoutError("GetTimeoutError: the GPU pool never scaled")
+
+
+def _sample_frames(n: int) -> list[pd.DataFrame]:
+    return [pd.DataFrame({"ts_id": [f"s{i}"], "y": [1.0]}) for i in range(n)]
+
+
+def test_the_probe_asks_for_a_whole_device_so_it_lands_on_a_node_that_has_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entire fix, in one assertion: ``num_gpus=1``.
+
+    `calibrate_gpu_fraction` runs in the driver section of ``ray_engine.run``, and that driver is
+    the Ray job entrypoint — it executes on the **head** node, which carries no accelerator. Calling
+    the probe inline therefore measured nothing on every run ever made, and ``"auto"`` quietly
+    became whichever constant the no-samples fallback held. Requesting a whole device makes the
+    scheduler place the probe on the GPU pool, which is the only place the measurement exists.
+    """
+    fake = _FakeRay(results=[111, 222, 333])
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    peaks = ray_io._measure_np_peaks_on_device(_sample_frames(3), _cfg(compute=_compute()))
+    assert peaks == [111, 222, 333]
+    assert fake.options == {"num_gpus": 1}
+    assert fake.calls == 3
+    assert fake.timeout == ray_io._CALIBRATION_TIMEOUT_S
+
+
+def test_a_gpu_pool_that_never_scales_degrades_the_calibration_instead_of_hanging_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that cannot be scheduled is "not measured", not a stalled driver.
+
+    ``ray.get`` raises on timeout. The caller must land on the nominal fraction — exactly the
+    behaviour that existed before the probe was moved — rather than blocking a run that is
+    otherwise ready to go.
+    """
+    fake = _FakeRay(results=[])
+    monkeypatch.setattr(fake, "get", _raise_timeout)
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    cfg = _cfg(compute=_compute(gpu_fraction="auto"))
+    assert ray_io._measure_np_peaks_on_device(_sample_frames(2), cfg) == [None, None]
+    assert ray_io.calibrate_gpu_fraction(cfg, sample_series=_sample_frames(2)) == (
+        ray_io._NOMINAL_AUTO_FRACTION
+    )
+
+
+def test_no_samples_never_reaches_ray_at_all() -> None:
+    """Nothing to measure is answered locally — importing Ray to dispatch no tasks is pointless."""
+    assert ray_io._measure_np_peaks_on_device([], _cfg(compute=_compute())) == []
+
+
+def test_calibration_dispatches_the_whole_sample_set_in_one_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seam `calibrate_gpu_fraction` uses is the on-device batch, not an inline per-series fit.
+
+    A regression here would be invisible to the arithmetic tests above — they all inject
+    ``measured_peaks_bytes`` and never exercise the measuring path at all — so the wiring gets its
+    own guard. ``gpu_calibration_samples`` still truncates the list before dispatch.
+    """
+    seen: dict[str, Any] = {}
+
+    def _capture(series: list[pd.DataFrame], _cfg_arg: Any) -> list[int | None]:
+        seen["n"] = len(series)
+        return [4 * 1024**3]
+
+    monkeypatch.setattr(ray_io, "_measure_np_peaks_on_device", _capture)
+    cfg = _cfg(
+        compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.3, gpu_calibration_samples=2)
+    )
+    frac = ray_io.calibrate_gpu_fraction(cfg, sample_series=_sample_frames(5), gpu_type="T4")
+    assert seen["n"] == 2  # truncated to gpu_calibration_samples, not all five
+    assert frac == pytest.approx(0.325)
 
 
 def test_device_memory_known_and_unknown() -> None:
