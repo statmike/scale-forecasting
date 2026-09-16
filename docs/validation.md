@@ -1252,7 +1252,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `ray_autoscale_demo.json` | **The shipped `ray_autoscale=true` default**, 1→8 CPU nodes at 10,000 series | CURRENT | 2026-09-10 | `ray-autoscale-demo-9728c900963a` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-10 | `explode-100k-ef602ea229b4` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-10 | `ray-100k-3fbc82fe3b6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth` |
-| `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows | STALE | 2026-09-04 | `all-families-10k-eb01dcfecfab` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows. The re-run also measured a **throughput regression against the number this page plans from**: 4.3 NeuralProphet cells/min per T4, where the 2026-09-04 pass reached 7.6. The cause is the auto GPU fraction, and it is written up below rather than buried in the wall-clock | CURRENT | 2026-09-16 | `all-families-10k-a0f6797d69c1` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
 | `repair_demo.json` | The repair ladder's refusal — a family lost *mid-write*, leaving two models partly landed, which `--retry` classifies correctly and then declines to submit (3,000 series, two families) | CURRENT | 2026-09-11 | `repair-demo-55119d4c6f7c` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `repair_retry_demo.json` | The repair ladder end to end — a family lost *during provisioning* lands nothing, and `--retry` re-submits exactly it under a `statistical_repair` token while a second, deliberately cancelled family is left alone (300 series, two families) | CURRENT | 2026-09-11 | `repair-retry-demo-59310436a6fd` | `serverless_deps=container-image`, `serverless_cancel=operation-cancel`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
@@ -1434,6 +1434,63 @@ Two operational notes from the second pass. The Ray jobs client crossed the bear
 21:40 and refreshed itself rather than 401-ing, so the long-run failure mode from earlier campaigns
 did not recur. Teardown was REST-verified: 404 on the resource and `{}` on the collection, not the
 SDK's "Successfully deleted the cluster" line.
+
+#### 2026-09-16, re-earning that row cost 44 % of the per-device throughput it established
+
+`all-families-10k-a0f6797d69c1` re-ran the same config on today's code and passed everything asked of
+it: header `COMPLETED`, all four family jobs `COMPLETED` at attempt 1, 70,000 `forecast_metadata`
+rows every one of them `cell_status = ok` with no `error_class` on any model, 1,960,000 prediction
+cells (10,000 × 7 × 28), a seven-model leaderboard, and teardown REST-verified `{}` in all three Ray
+regions with no Dataproc resource anywhere. The row above is earned.
+
+It also took 218.9 minutes against the 122.6 of the pass it replaces, and the reason is worth more
+than the row is.
+
+**The number this page plans from moved.** The section above establishes 7.6 `neuralprophet`
+cells/min per T4 as the planning figure, and `quota_and_scale.md` uses it. This run delivers **4.3**
+— 10,000 cells across a 195.0-minute NeuralProphet cell span on twelve T4s. The two denominators are
+not identical (7.6 was taken over the deep-learning job's 109.7-minute wall, which includes ramp that
+the cell span excludes), so 4.3 is if anything the flattering reading. It is a 44 % regression
+against a documented planning constant, and nothing in the config changed to cause it.
+
+**The binding axis flipped from cores to the device.** The section above records the 2026-09-04
+fleet running seven cells per T4 with 7 of 7 cores busy per node and the T4s at 0.7 of 1.0 — cores
+decided the shape and the GPU fraction of `0.1` was slack. This run's executed plan
+(`sizing_executed.deep_learning.gpu_pool`) is `derived_units 12`, `slots_per_unit 2`,
+`total_slots 24`: two cells per card, with five of seven cores per node left idle. The GPU fraction
+is now the smallest of the three terms the fleet sizer takes a minimum over, so it, not cores,
+decides density.
+
+**The fraction moved from `0.1` to `0.5` without any measurement behind either value.**
+`compute.gpu_fraction` defaults to `"auto"`, which is meant to profile NeuralProphet's real device
+footprint and size the per-task `num_gpus` to it. That profiling is executed in the driver, the
+driver runs on the Ray head node, and the head has no accelerator — so the probe raises on every
+sample and the function returns a fallback constant. It always has. Earlier code read the failed
+probe as a measurement of zero and clamped to the *minimum* legal fraction, `0.1`; a correctness fix
+stopped treating a failure as a measurement and falls back to a nominal `0.5` instead. The reasoning
+improved and the number got worse. Neither `0.1` nor `0.5` was derived from anything measured.
+
+**Density pays sublinearly, which is why the loss is 2x and not 3.5x.** Per-cell fit times across the
+three densities this config has now been run at, all from `forecast_metadata`:
+
+| Density | What bound it | Concurrent cells | Median fit | Cells/min |
+|---|---|---|---|---|
+| 1 per T4 | memory (the 2026-09-04 defect) | 12 | 29.0 s | 22.9 |
+| 2 per T4 | **the GPU fraction (today)** | 24 | 26.0 s | 51.3 |
+| 7 per T4 | cores | 84 | 42.6 s | 103.2 |
+
+Each row is within about 10 % of `concurrency × 60 / median_fit`, so this is not a model fitted to
+its answer. Going from seven cells a card to two cuts concurrency 3.5x but costs only 2.0x in
+throughput, because seven fits contending for one T4 take 42.6 s each where two take 26.0 s. The
+denser arm spends 64 % more time per cell to win 3.5x the parallelism, and still comes out ahead.
+
+**What this does not establish.** It does not say what the right fraction is. The measured device
+footprint — 50–78 KB on a 16 GB card, across 31,356 fits recorded elsewhere on this page — argues
+the memory ceiling is nowhere near binding, but the table above shows contention is real even when
+memory is not, so the right density is a throughput question this run did not sweep. It also does
+not re-open the accelerator A/B below, which asked whether a T4 pays for itself at all and answered
+no; this is a narrower question about how many cells to put on one once you have it. And the
+regression is in throughput only: every correctness check on the run passed.
 
 #### 2026-09-10/11, the NeuralProphet accelerator A/B: the T4 is 18 % *slower*, not merely not-faster
 
