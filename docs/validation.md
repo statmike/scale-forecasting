@@ -1283,7 +1283,7 @@ the honest starting position and the reason for adding the table at all: it is t
 | `explode_100k.json` | The headline: Spark `explode` over 100,000 series | CURRENT | 2026-09-10 | `explode-100k-ef602ea229b4` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | The same work on Ray — the runtime-parity half of the scale review | CURRENT | 2026-09-10 | `ray-100k-3fbc82fe3b6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth` |
 | `all_families_10k.json` | Every family under one `run_id` — all four on Ray + BigQuery at 10,000 series, on the 12 T4s this project's Vertex quota allows. The re-run also measured a **throughput regression against the number this page plans from**: 4.3 NeuralProphet cells/min per T4, where the 2026-09-04 pass reached 7.6. The cause is the auto GPU fraction, and it is written up below rather than buried in the wall-clock. **STALE the same day it was written, by the fix that finding produced** — the throughput number is the one thing `gpu_slot_fraction` can invalidate, and it did | STALE | 2026-09-16 | `all-families-10k-a0f6797d69c1` | `gpu_slot_fraction=head-node-probe-fallback`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
-| `all_families_10k_full.json` | As above, plus backtesting and persisted artifacts | STALE | 2026-09-05 | `all-families-10k-full-e68d9341ce01` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `all_families_10k_full.json` | As above, plus two backtest folds, holidays, a `log1p` transform and persisted artifacts — the heaviest configuration in this document. 70,000 cells, 3,920,000 out-of-fold rows and 50,000 persisted models in one run, and the row that shows the **pinned** GPU fraction holding the density the page plans from: 84 cells in flight on 12 T4s, seven a card, **9.1 NeuralProphet fits/min per T4** against a planning constant of 7.6 | CURRENT | 2026-09-16 | `all-families-10k-full-92a6080476d7` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `repair_demo.json` | The repair ladder's refusal — a family lost *mid-write*, leaving two models partly landed, which `--retry` classifies correctly and then declines to submit (3,000 series, two families) | CURRENT | 2026-09-11 | `repair-demo-55119d4c6f7c` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `repair_retry_demo.json` | The repair ladder end to end — a family lost *during provisioning* lands nothing, and `--retry` re-submits exactly it under a `statistical_repair` token while a second, deliberately cancelled family is left alone (300 series, two families) | CURRENT | 2026-09-11 | `repair-retry-demo-59310436a6fd` | `serverless_deps=container-image`, `serverless_cancel=operation-cancel`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `neuralprophet_ab_gpu.json` | The GPU arm of the accelerator A/B — 10,000 NeuralProphet cells on twelve T4 nodes | CURRENT | 2026-09-10 | `neuralprophet-ab-gpu-e530eea3a755` | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_poll_recovery=transient-transport+auth` |
@@ -1530,7 +1530,34 @@ be the reason anything gets fixed. The pass conditions the row was earned agains
 the fix only lets more cells share a card — and the re-run is a re-measurement of throughput, not a
 re-litigation of whether four families run at 10,000 series under one `run_id`.
 
-#### 2026-09-10/11, the NeuralProphet accelerator A/B: the T4 is 18 % *slower*, not merely not-faster
+#### 2026-09-16, the heaviest run in this document confirms the density model without being designed to
+
+`all_families_10k_full` ran the same day, and it is the most useful control anyone could have asked
+for, because nobody set it up as one. It is the same 10,000 series and the same seven models as the
+run above, on the same twelve-T4 fleet, submitted from the same code — and it differs in exactly one
+thing that matters here: it **pins** `compute.gpu_fraction` at `0.125` instead of leaving it at
+`"auto"`, so it never reaches the calibration at all. The launcher's preflight says so in a line
+worth quoting, because it is the density decision made out loud: `this run would saturate at 1429
+nodes (10000 cells / 7 per node)`. Seven cells a card, cores binding, the good arm.
+
+| | GPU fraction | cells per T4 | concurrent cells | fits per cell | **fits/min per T4** |
+|---|---|---|---|---|---|
+| `all_families_10k` (run above) | `"auto"` → `0.5` | 2 | 24 | 1 | **4.3** |
+| `all_families_10k_full` (this row) | pinned `0.125` | 7 | 84 | 3 | **9.1** |
+
+The comparable unit is fits per minute per device, not cells, because this run backtests at two folds
+and so does roughly three NeuralProphet fits per cell where the other did one. On that unit the
+pinned configuration is **2.1x** the throughput of the automatic one — which is what the three-density
+table above predicts to within five percent, from an entirely separate pair of runs. The diagnosis
+was not fitted to this result; this result arrived afterwards and agreed with it.
+
+It is also the largest single run recorded here: 70,000 cells, all `ok`, zero `error_class`;
+1,960,000 forecast rows and 3,920,000 out-of-fold rows; 50,000 persisted model artifacts, which is
+every cell of the five Python models and none of the two BigQuery-native ones, exactly as intended.
+COMPLETED in 303.2 minutes, and the persistent-resource listing came back `{}` in all three candidate
+Ray regions afterwards with no Dataproc cluster or batch left behind. Over five hours the Ray Jobs
+client refreshed its bearer token three times without the poll ever mistaking a token expiry for a
+verdict on the run, which is the `ray_poll_recovery` axis doing the job it was added for.
 
 Two runs, identical but for one line. `neuralprophet-ab-gpu-e530eea3a755` and
 `neuralprophet-ab-cpu-f4bfff3b39e9`, 10,000 NeuralProphet cells each on a twelve-node Ray fleet,
