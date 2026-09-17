@@ -40,6 +40,14 @@ class PermissionDenied(Exception):
     pass
 
 
+class GenericSdkError(Exception):
+    """What Vertex actually raises for a failed create: a class name that classifies nothing.
+
+    Named for what it is rather than for any real type, because the point of the case it serves is
+    that no marker list and no type check can read it — only the message can.
+    """
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -151,6 +159,55 @@ def test_a_missing_resource_is_a_hard_ceiling_not_something_to_wait_for() -> Non
     """Live 2026-09-04: a network attachment is regional, so a create in a region without one 404s
     forever. Backing off and re-trying cannot make the resource appear."""
     assert cap.classify("networkAttachment was not found", NotFound()) == cap.HARD_CEILING
+
+
+def test_the_vertex_404_is_read_from_its_text_because_it_arrives_with_no_exception_type() -> None:
+    """Live 2026-09-15, and it corrects what the test above was taken to prove.
+
+    That test supplies its own ``NotFound``. The Vertex SDK never raises one — a create whose
+    network attachment is missing raises a generic "returned an error", and the 404 reaches the
+    classifier only as text appended by ``describe_failure``. So the case the module believed it
+    handled since 2026-09-04 was in fact classified ``TRANSIENT_CAPACITY``, and the region was
+    retried at about 160 s an attempt until the budget ran out.
+    """
+    message = (
+        "500 Cluster sf-ray-demo returned an error. | Unexpected response. | "
+        "HTTP/1.1 404 Not Found\n"
+        '{"error": {"code": 404, "message": "The resource '
+        "'projects/p/regions/us-east1/networkAttachments/scale-forecasting-ray' was not found\", "
+        '"reason": "notFound"}}'
+    )
+    assert cap.classify(message, GenericSdkError()) == cap.HARD_CEILING
+    # and with no exception at all, which is how a re-classification from a stored message arrives
+    assert cap.classify(message) == cap.HARD_CEILING
+
+
+def test_a_missing_thing_that_is_missing_everywhere_still_stops_the_walk() -> None:
+    """The regional-prerequisite step sits *after* the config-fault markers for this reason.
+
+    A service account, a bucket or a disabled API is absent in every region, so hopping cannot help
+    and the walk must stop. Only a resource kind known to be regional may hop.
+    """
+    assert (
+        cap.classify("The service account sa@p.iam.gserviceaccount.com was not found")
+        == cap.CONFIG_FAULT
+    )
+    # Not a regional kind, and not a named config fault either: unchanged, so the default still
+    # applies. Retrying is wasteful here but it is the documented asymmetry, not a regression.
+    assert cap.classify("The resource 'buckets/nope' was not found") == cap.TRANSIENT_CAPACITY
+
+
+def test_naming_a_regional_resource_is_not_enough_on_its_own() -> None:
+    """Both halves must be present. A message that mentions an attachment while complaining about
+    something else is not evidence the attachment is missing."""
+    assert cap.classify("networkAttachments/x is attached and healthy") == cap.TRANSIENT_CAPACITY
+
+
+def test_a_stockout_still_wins_over_the_regional_prerequisite_step() -> None:
+    """Precedence: capacity is read first, so a region that is merely out of room is still retried
+    even if the same message happens to mention an attachment."""
+    message = "Resources are insufficient in region: networkAttachments/x was not found"
+    assert cap.classify(message) == cap.TRANSIENT_CAPACITY
 
 
 def test_exception_types_are_consulted_only_after_every_text_check() -> None:

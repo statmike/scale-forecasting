@@ -161,12 +161,39 @@ _CONFIG_FAULT_EXCEPTION_NAMES: frozenset[str] = frozenset(
 # elsewhere. That is exactly `HARD_CEILING`'s meaning — hop, but never wait, because no amount of
 # patience creates a resource nobody has built.
 #
-# Also found live 2026-09-04, and it is the reason the advertised Ray multi-region failover has
-# never worked: ``SF_RAY_NETWORK_ATTACHMENT`` names a network attachment, attachments are regional,
-# and
-# Terraform builds exactly one. A create in any other region 404s on it long before quota is
-# consulted. Classified here it costs one attempt per region instead of the full retry budget.
+# Found live 2026-09-04: ``SF_RAY_NETWORK_ATTACHMENT`` names a network attachment, attachments are
+# regional, and Terraform builds exactly one. A create in any other region 404s on it long before
+# quota is consulted. Classified here it costs one attempt per region instead of the full retry
+# budget.
+#
+# This frozenset catches the services that raise a typed ``NotFound``. **Vertex is not one of them**
+# — see `_REGIONAL_PREREQUISITE_MARKERS` below, which is the same finding arriving as text.
 _HARD_CEILING_EXCEPTION_NAMES: frozenset[str] = frozenset({"NotFound"})
+
+# The same missing prerequisite, recognised from the message instead of the exception type, because
+# on the Ray path there is no exception type to recognise.
+#
+# Found live 2026-09-15, and it corrected a belief this module had held since 2026-09-04. The
+# `NotFound` entry above was written assuming the Vertex SDK raises one. It does not: a create whose
+# network attachment is missing raises a generic *"Cluster … returned an error. | Unexpected
+# response."*, and the 404 body only reaches the classifier at all because
+# `ray_cluster._describe_region_failure` reads the resource's own error before tearing it down. So
+# the text is there — ``HTTP/1.1 404 Not Found``, ``"reason": "notFound"``, *"The resource …
+# networkAttachments/… was not found"* — and every marker list was keyed on other words. The region
+# was never dropped, and a walk that failed everywhere came back to it at about 160 s an attempt.
+#
+# **Why the resource kind and not the 404.** A 404 says a thing is absent; it does not say whether
+# it is absent *only here*. A missing network attachment is regional, so hopping is right. A missing
+# bucket or service account is the same in every region, so hopping is a waste that also hides the
+# diagnosis. The only part of the message that answers the regional question is which kind of
+# resource was not found, so that is what is matched. New entries belong here when — and only when —
+# the resource kind is regional and a deployment could plausibly have built it in one region and not
+# another.
+_REGIONAL_PREREQUISITE_MARKERS: tuple[str, ...] = ("networkattachments", "network attachment")
+
+# Paired with the above: the kind alone is not enough, because a message may name a network
+# attachment while complaining about something else entirely. Both must be present.
+_ABSENCE_MARKERS: tuple[str, ...] = ("was not found", "not found", "notfound", "does not exist")
 
 
 def classify(message: str, exc: BaseException | None = None) -> str:
@@ -186,13 +213,17 @@ def classify(message: str, exc: BaseException | None = None) -> str:
     2. **Quota, when it is not also capacity, is a `HARD_CEILING`.** The region has room; this
        project is simply not allowed more. Hop, never wait.
     3. **A named region-invariant cause is a `CONFIG_FAULT`.** Stop.
-    4. **Only then, the exception's *type*.** `_CONFIG_FAULT_EXCEPTION_NAMES` (a malformed request)
+    4. **A *regional* prerequisite reported absent is a `HARD_CEILING`.** Hop, never wait. This sits
+       after step 3 on purpose: "service account … was not found" is a config fault, and a missing
+       thing that is missing everywhere must keep stopping. Only a resource kind known to be
+       regional reaches this step.
+    5. **Only then, the exception's *type*.** `_CONFIG_FAULT_EXCEPTION_NAMES` (a malformed request)
        stops; `_HARD_CEILING_EXCEPTION_NAMES` (a prerequisite that does not exist here) hops without
        waiting. Deliberately last, so it can only rescue cases that would otherwise have fallen
-       through to step 5 — every classification the text already makes is left exactly as it was.
-    5. **Everything else is `TRANSIENT_CAPACITY`.**
+       through to step 6 — every classification the text already makes is left exactly as it was.
+    6. **Everything else is `TRANSIENT_CAPACITY`.**
 
-    Step 5 is the asymmetry, and it is deliberate. The classifier used to work the other way — hop
+    Step 6 is the asymmetry, and it is deliberate. The classifier used to work the other way — hop
     only on reasons we recognised — and that inverted default cost the feature three times in one
     afternoon (2026-09-01), each to a different contentless string: "An internal error occurred on
     your cluster", "Unexpected response.", and the plural quota message above. Each read as a
@@ -214,6 +245,10 @@ def classify(message: str, exc: BaseException | None = None) -> str:
         return HARD_CEILING
     if any(marker in low for marker in _CONFIG_FAULT_MARKERS):
         return CONFIG_FAULT
+    if any(kind in low for kind in _REGIONAL_PREREQUISITE_MARKERS) and any(
+        absent in low for absent in _ABSENCE_MARKERS
+    ):
+        return HARD_CEILING
     if exc is not None:
         name = type(exc).__name__
         if name in _CONFIG_FAULT_EXCEPTION_NAMES:
