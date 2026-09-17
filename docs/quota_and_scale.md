@@ -57,26 +57,37 @@ vCPUs needed = (worker nodes x vCPUs per worker) + vCPUs for the head/driver nod
 
 ## 2. What one node actually delivers
 
-Measured, not estimated. The anchor is `ray-100k-dcc77a9d1e9b` — 100,000 series x 4 models =
-400,000 cells on Ray, 20 x `n1-standard-8` workers. It has been run twice: once before the
+Measured, not estimated. Every row below is the same shape — 100,000 series x 4 models = 400,000
+cells on Ray, 20 x `n1-standard-8` workers — and the anchor is `ray-100k-3fbc82fe3b6d`, the run the
+[validation ledger](validation.md) currently holds for that config. Its predecessor
+`ray-100k-dcc77a9d1e9b` is **superseded**, and is kept here because it was run once before the
 memory-request defect described in [§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out) was
-found, and once after. Same config, same pool, same `run_id`:
+found and once after. That pair is what makes the defect legible; nothing else on this page shows it
+as plainly.
 
-| Run | Cells | Compute wall | Cells/min | Per node |
+| Run | Cells | Wall clock | Cells/min | Per node |
 |---|---|---|---|---|
-| 2026-09-03, pre-fix | 400,000 | 19,069 s (5 h 18 m) | 1,259 | 63 |
-| **2026-09-05, post-fix** | 400,000 | **6,290 s (1 h 45 m)** | **3,816** | **191** |
+| 2026-09-03, pre-fix (superseded run) | 400,000 | 19,069 s (5 h 18 m) | 1,259 | 63 |
+| 2026-09-05, post-fix (superseded run) | 400,000 | 6,290 s (1 h 45 m) | 3,816 | 191 |
+| **2026-09-10, re-earned on the current architecture** | 400,000 | **7,405 s (2 h 3 m)** | **3,241** | **162** |
 
 So for a mixed statistical + ML workload on 8-vCPU nodes:
 
-> **~191 cells per minute per 8-vCPU node** — about 24 per vCPU per minute.
+> **160–190 cells per minute per 8-vCPU node, and plan at ~162** — about 20 per vCPU per minute.
 
-Both rows are total cells over total compute wall clock, which is the figure that plans a run. The
-pool held **139–140 of its 140 cores busy** for the post-fix hour and three quarters, with up to
-38,000 tasks queued behind it; the pre-fix run averaged roughly one busy core per node. Nothing
-changed but what a task claimed it needed.
+**Use the low end of that range, not the middle and not the top.** The last two rows are the same
+config on the same hardware, both after the fix, and they are 18% apart. That spread is what an
+autoscaled pool does: the fleet starts at `ray_cpu_min_nodes` and climbs toward
+`ray_cpu_max_nodes`, so how much of a run is spent below full width differs from attempt to attempt.
+Neither number is wrong. There is simply no single number here, and a plan built on the fastest
+attempt anyone ever observed will come up short.
 
-Per-cell fit times behind that figure, from the same run:
+All three rows are total cells over total wall clock, which is the figure that plans a run. On
+2026-09-05 the pool held **139–140 of its 140 cores busy** for its hour and three quarters, with up
+to 38,000 tasks queued behind it; the pre-fix run averaged roughly one busy core per node. Nothing
+changed between those two but what a task claimed it needed.
+
+Per-cell fit times behind that figure, from the 2026-09-05 run:
 
 | Model | Family | Avg fit | p95 fit |
 |---|---|---|---|
@@ -93,8 +104,8 @@ observations.
 !!! note "This page used to say 72, and the difference is worth a sentence"
     That figure came from the steady-state *window* of the pre-fix run (1,425–1,457 cells/min across
     20 nodes) rather than from the run end to end. Measured the way the table above measures — all
-    cells over all wall clock — the same run gives **63**, and the gap is start-up and tail. Both
-    rows are now derived identically so they can be compared, and the number that survives is 191.
+    cells over all wall clock — the same run gives **63**, and the gap is start-up and tail. Every
+    row is now derived identically so they can be compared, and the number to plan with is 162.
 
 **Deep learning is a different regime entirely, but not the regime this page used to claim.**
 `neuralprophet` measures at **21–65 s/fit** against sub-second statistical models — 50x or more.
@@ -113,10 +124,21 @@ Both deep-learning anchors on this page are therefore **per node**, never per de
 | GPU, one T4 attached | 7.9 | `neuralprophet-ab-gpu-e530eea3a755` (2026-09-10) |
 
 Both are 30,000 fits over the run's full wall clock across twelve nodes — the same end-to-end
-measure as the 191 cells/min figure above, so the two are comparable. The older 7.6 and 8.2 figures
+measure as the 162 cells/min figure above, so the two are comparable. The older 7.6 and 8.2 figures
 elsewhere on this page are the same *GPU-node* measurement taken on `all_families_10k` and
 `all_families_10k_full`, and they agree with the 7.9 here. They were labelled "per T4"; the
 denominator was always the node. The arithmetic in [§3](#3-the-table) is built on all of them.
+
+**Every GPU figure on this page predates the calibration fix, which makes them all conservative.**
+7.6, 7.9 and 8.2 were measured before `29c19dc` corrected the automatic GPU calibration probe to run
+on a node that actually has a GPU. With that fix in place, `all-families-10k-a0f6797d69c1` packs
+seven cells onto a card where it used to fit two, and measures **9.0 fits/min per node** — faster
+than anything in the table above. So no GPU projection here will leave you short; if anything you
+will ask for slightly more quota than you need. The 9.0 is not simply substituted in, because it is
+not a controlled comparison: it comes from a mixed-family run of 10,000 fits at one fit per cell,
+where 10.1 and 7.9 come from an A/B of 30,000 fits whose two arms differed by a single line of
+config. Putting 9.0 beside 10.1 would move two things at once. The CPU anchor is untouched —
+`29c19dc` changed only the GPU calibration path.
 
 ---
 

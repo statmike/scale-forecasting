@@ -18,6 +18,11 @@ and axes in the same vocabulary, and nothing checked them, so a notebook could g
 `CURRENT` across an axis change that the smoke rows were correctly downgraded for.
 
 The ledger is parsed rather than generated: one human-readable file, no second copy to drift.
+
+The last section of this file guards a *second* document, `docs/quota_and_scale.md`, for a related
+reason. The ledger can only keep itself honest; a page that quotes the ledger's numbers in prose
+cannot, because stale prose still reads perfectly. The quota page is the one an operator sizes a
+real request from, so the run ids it cites are held to the ledger. See the comment there.
 """
 
 from __future__ import annotations
@@ -288,3 +293,144 @@ def test_known_gaps_section_is_present(ledger: str) -> None:
     assert re.search(r"^## Known validation gaps", ledger, re.MULTILINE), (
         "the 'Known validation gaps' section is missing from the ledger"
     )
+
+
+# --- the quota page quotes the ledger's numbers, so it has to age with the ledger ----------
+#
+# `docs/quota_and_scale.md` is the page an operator sizes a real quota request from. It restates
+# measured rates in prose, which means it can go stale in a way the ledger cannot: the ledger's
+# rows fail the axis check above when the architecture moves, but a paragraph quoting last month's
+# throughput just keeps reading fine. That happened. The page anchored on
+# `ray-100k-dcc77a9d1e9b` at 191 cells/min/node long after the ledger had re-earned that config as
+# `ray-100k-3fbc82fe3b6d` at 162 — an operator planning from the page would have sized 18% light,
+# and nothing failed.
+#
+# Two tiers, because one rule cannot fit both jobs the page's citations do:
+#
+#   Tier 1, everywhere: a cited run must be one the ledger has *some* record of. This is the
+#   floor — it stops a number arriving from a run nobody wrote down.
+#
+#   Tier 2, in the anchor section only: a cited run must be a CURRENT ledger row, unless the same
+#   line says `superseded`. Section 2 exists to state the rates the rest of the page computes
+#   from, so that is where currency has to be enforced. The escape hatch is deliberately a word a
+#   human reads rather than a marker they skim past: if you exempt a citation, the reader sees the
+#   exemption and the reason in the same sentence. Tier 1 still applies to it.
+#
+# Citations elsewhere are narrative — section 5 has to name the pre-fix run to tell the story of
+# the defect — so they get tier 1 only.
+
+_QUOTA_PAGE = _REPO_ROOT / "docs" / "quota_and_scale.md"
+
+# Run ids are `<slug>-<12 hex>`; the slug is lowercase with hyphens.
+_RUN_ID = re.compile(r"\b[a-z0-9][a-z0-9-]*-[0-9a-f]{12}\b")
+
+_ANCHOR_HEADING = "## 2. What one node actually delivers"
+_SUPERSEDED = "superseded"
+
+
+def _cited_run_ids(markdown: str) -> list[tuple[int, str, str]]:
+    """Every ``(line number, run_id, line)`` cited in prose, skipping fenced code blocks.
+
+    Fenced blocks are example CLI output. A run id printed in a sample `--quota` report is an
+    illustration of the command's shape, not a claim about a measurement, and holding it to the
+    ledger would force the examples to be rewritten every time a config is re-run.
+    """
+    cited = []
+    fenced = False
+    for number, line in enumerate(markdown.splitlines(), start=1):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        for match in _RUN_ID.finditer(line):
+            cited.append((number, match.group(0), line))
+    return cited
+
+
+def _section(markdown: str, heading: str) -> str:
+    """The body of one ``##`` section, from its heading to the next one."""
+    lines = markdown.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            end = next(
+                (j for j in range(i + 1, len(lines)) if lines[j].startswith("## ")), len(lines)
+            )
+            return "\n".join(lines[i:end])
+    raise AssertionError(f"no section found with heading {heading!r}")
+
+
+@pytest.fixture(scope="module")
+def quota_page() -> str:
+    return _QUOTA_PAGE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def recorded_run_ids(ledger: str) -> set[str]:
+    """Every run id the ledger names anywhere — table rows and prose alike."""
+    return set(_RUN_ID.findall(ledger))
+
+
+@pytest.fixture(scope="module")
+def current_run_ids(entries: list[dict[str, str]]) -> set[str]:
+    """Run ids belonging to a CURRENT row.
+
+    Read with the same regex rather than the raw cell, because some cells qualify the id —
+    ```run-id` (attempt 2)`` — and the qualifier is not part of the id.
+    """
+    return {
+        run_id
+        for entry in entries
+        if entry["status"] == "CURRENT"
+        for run_id in _RUN_ID.findall(entry["run_id"])
+    }
+
+
+def test_the_quota_page_still_cites_runs(quota_page: str) -> None:
+    """Guard the guard: the two checks below pass trivially on a page citing nothing."""
+    assert _cited_run_ids(quota_page), (
+        "the quota page cites no run ids at all, so the currency checks below prove nothing. "
+        "Either the page stopped quoting measurements, or the citation format changed and "
+        "_RUN_ID no longer matches it."
+    )
+
+
+def test_the_quota_page_has_an_anchor_section(quota_page: str) -> None:
+    """Guard the guard: renaming the heading would silently switch tier 2 off."""
+    section = _section(quota_page, _ANCHOR_HEADING)
+    assert _cited_run_ids(section), (
+        f"the section {_ANCHOR_HEADING!r} cites no run ids. If the anchors moved to a different "
+        f"section, point _ANCHOR_HEADING at it — do not leave tier 2 guarding an empty section."
+    )
+
+
+def test_every_run_the_quota_page_cites_is_one_the_ledger_recorded(
+    quota_page: str, recorded_run_ids: set[str]
+) -> None:
+    """Tier 1. A rate quoted from a run the ledger never recorded has no provenance at all."""
+    for number, run_id, _ in _cited_run_ids(quota_page):
+        assert run_id in recorded_run_ids, (
+            f"quota_and_scale.md:{number} cites {run_id!r}, which appears nowhere in "
+            f"validation.md. Either the ledger is missing the run that produced this number, or "
+            f"the id is a typo."
+        )
+
+
+def test_the_anchor_section_cites_current_runs_unless_it_says_superseded(
+    quota_page: str, current_run_ids: set[str]
+) -> None:
+    """Tier 2. The rates the rest of the page computes from must come from CURRENT runs.
+
+    This is the check that would have caught the 191 figure. If it fails, the ledger has re-earned
+    a config and this page is still quoting the old run's number — re-derive the rate from the
+    CURRENT run, or keep the old one as context and mark its line `superseded`.
+    """
+    section = _section(quota_page, _ANCHOR_HEADING)
+    for number, run_id, line in _cited_run_ids(section):
+        if run_id in current_run_ids or _SUPERSEDED in line.lower():
+            continue
+        raise AssertionError(
+            f"the anchor section cites {run_id!r} on line {number} of the section, and it is not "
+            f"the run id of a CURRENT ledger row. Re-derive the anchor from the CURRENT run, or "
+            f"write {_SUPERSEDED!r} on that line to keep it as context."
+        )
