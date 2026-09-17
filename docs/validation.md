@@ -1331,6 +1331,14 @@ concurrency. The proof that nothing was lost is that both structures land on `sl
 only ever been read one at a time, so "the executed plan matches the planned one except where the
 axis says otherwise" was a reasonable belief rather than a recorded observation. It is now recorded.
 
+*Forward note, 2026-09-17.* The block above is what the run recorded and is left as it was recorded.
+The asymmetry it documents has since been closed from the other end: the planned `task_options` no
+longer carries `memory` either, on Ray, because the planner now omits the request rather than
+relying on the executed profile to have dropped it. The measured figure still appears on
+`slot.memory_bytes`, and the planner's own node arithmetic stopped using it, which is the point —
+the density it advertised was one the scheduler had never been asked to honour. A run of this config
+today would show the same `slots_per_unit: 7` on both sides and the same request on both sides.
+
 The GPU half of the plan is present and empty, which is also correct: this config authors no
 deep-learning model, so the deep-learning pool plans `n_cells: 0` and `derived_units: 0`, and the
 cluster came up with `gpu_node_count: 0`. No accelerator was bought for a family with nothing to run.

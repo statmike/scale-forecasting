@@ -654,7 +654,12 @@ def test_an_unprofiled_pool_asks_for_the_same_slot_and_packs_it_onto_schedulable
 
 
 def test_a_shared_cpu_pool_is_sized_for_the_heaviest_family_that_lands_on_it() -> None:
-    """statistical and ml cells go through the same worker, so its slot must hold either one."""
+    """statistical and ml cells go through the same worker, so its slot must hold either one.
+
+    The slot records the heavier footprint; the Ray task is still not asked for it
+    (`fleet._UNENFORCED_AXES`). Both halves matter — the measurement is what makes the shared pool
+    legible, and omitting the request is what keeps the pool from pinning itself to one cell a node.
+    """
     profile = build_profile(
         [
             _fit("statistical", model_type=_CPU, rss=1 * _GIB),
@@ -668,7 +673,7 @@ def test_a_shared_cpu_pool_is_sized_for_the_heaviest_family_that_lands_on_it() -
     )
     assert plan.slot.memory_bytes == 5 * _GIB
     assert plan.family == "statistical+ml"
-    assert plan.task_options["memory"] == 5 * _GIB
+    assert "memory" not in plan.task_options
 
 
 def test_a_measured_heavy_family_shrinks_the_density_and_widens_the_fleet() -> None:

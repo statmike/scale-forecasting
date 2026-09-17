@@ -218,16 +218,30 @@ def test_the_clamp_leaves_headroom_under_the_schedulable_ceiling() -> None:
     assert ask is not None
     assert ask < schedulable
 
-    plan = plan_resources(
+    # The clamp lands on the slot, which is what every runtime reads, so it is checked there.
+    on_ray = plan_resources(
         _profile(_fit(process_rss_bytes=40 * _GIB)),
         "statistical",
         "ray",
         n_cells=10,
         unit=_N1_STANDARD_8,
     )
-    # The number Ray is actually handed, not an intermediate: whatever the clamp is, a task must
-    # never ask a node for every byte the node has to give.
-    assert plan.task_options["memory"] < schedulable
+    assert on_ray.slot.memory_bytes is not None
+    assert on_ray.slot.memory_bytes < schedulable
+    # Ray is no longer handed the figure at all (`fleet._UNENFORCED_AXES`), which is a second,
+    # blunter guarantee that this particular hour of queueing cannot recur on this runtime.
+    assert "memory" not in on_ray.task_options
+
+    # On a runtime that does request memory, the clamped number is what gets requested: whatever
+    # the clamp is, a task must never ask a node for every byte the node has to give.
+    on_cluster = plan_resources(
+        _profile(_fit(process_rss_bytes=40 * _GIB)),
+        "statistical",
+        "cluster",
+        n_cells=10,
+        unit=_N1_STANDARD_8,
+    )
+    assert on_cluster.task_options["memory"] < schedulable
 
 
 def test_a_unit_of_unknown_size_bounds_nothing() -> None:
@@ -810,7 +824,15 @@ def _pin(threads: int) -> dict[str, object]:
     return {"runtime_env": {"env_vars": intraop_env_vars(threads, include_omp=False)}}
 
 
-def test_a_cpu_plan_hands_ray_its_old_options_plus_the_memory_it_never_had() -> None:
+def test_measuring_a_cell_changes_the_fleet_and_not_what_a_ray_task_asks_for() -> None:
+    """This assertion used to read ``plus the memory it never had``, and that was the defect.
+
+    A measured footprint is real and it is recorded on the slot. What it must not become is a Ray
+    resource request: Ray treats ``memory`` as a hard scheduling resource, one live run pinned
+    itself to a cell a node by asking, and every density the planner reports is now computed on the
+    assumption that nothing asks. So the measured plan hands Ray exactly what the unmeasured plan
+    below hands it.
+    """
     plan = plan_resources(
         _profile(_fit(process_rss_bytes=1 * _GIB)),
         "statistical",
@@ -818,7 +840,24 @@ def test_a_cpu_plan_hands_ray_its_old_options_plus_the_memory_it_never_had() -> 
         n_cells=100,
         unit=_N1_STANDARD_8,
     )
-    assert plan.task_options == {"num_cpus": 1, "memory": 1 * _GIB, **_pin(1)}
+    assert plan.slot.memory_bytes == 1 * _GIB
+    assert plan.task_options == {"num_cpus": 1, **_pin(1)}
+
+
+def test_a_runtime_that_schedules_on_memory_is_handed_the_measurement() -> None:
+    """The other side of the same map: dropping the axis is per-runtime, not a global deletion.
+
+    A Spark executor running N concurrent tasks is bounded by its heap for real, so there the
+    measured footprint is a constraint worth stating rather than evidence worth recording.
+    """
+    plan = plan_resources(
+        _profile(_fit(process_rss_bytes=1 * _GIB)),
+        "statistical",
+        "cluster",
+        n_cells=100,
+        unit=_N1_STANDARD_8,
+    )
+    assert plan.task_options["memory"] == 1 * _GIB
 
 
 def test_an_unmeasured_plan_hands_ray_the_scheduling_request_it_always_did() -> None:

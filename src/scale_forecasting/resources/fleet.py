@@ -207,10 +207,18 @@ class RuntimeResourcePlan:
 
         A GPU slot requests ``num_gpus`` and lets Ray default ``num_cpus`` to 1, exactly as
         the engine did before — several cells pack onto one device by summing fractions
-        against its capacity of 1.0. A CPU slot requests ``num_cpus`` explicitly. Either way
-        ``memory`` is included **only when it was measured**: Ray treats it as a hard
-        scheduling resource, so requesting a number nobody took could leave tasks
-        permanently unschedulable.
+        against its capacity of 1.0. A CPU slot requests ``num_cpus`` explicitly.
+
+        **No memory, on Ray, ever** — the request is omitted here rather than merely happening to
+        be absent. The engine sizes its tasks from the driver-side pre-pass, which drops the memory
+        axis for a live-proven reason, so in practice ``slot.memory_bytes`` has always been ``None``
+        by the time this property is reached from a submitting path. That made "Ray is never asked
+        for memory" true by accident of which profile reaches which call site, and `plan_fleet`
+        now sizes a fleet on the strength of it (`_UNENFORCED_AXES`). An invariant two modules
+        depend on should not rest on a coincidence one edit away from being untrue, so the
+        omission is stated where the request would be made. A measured footprint that a runtime
+        will not schedule against is evidence, and it survives as `density_note` and in
+        ``slot.to_dict()``; it is not a resource request.
 
         **The task also carries a per-pool thread cap, and it has to ride here rather than on the
         job.** Ray already sets ``OMP_NUM_THREADS`` per task, to that task's assigned cores, but it
@@ -236,7 +244,8 @@ class RuntimeResourcePlan:
             options["num_gpus"] = self.slot.gpu_fraction
         else:
             options["num_cpus"] = self.slot.cores
-        if self.slot.memory_bytes is not None:
+        unenforced = _UNENFORCED_AXES.get(self.runtime, frozenset())
+        if self.slot.memory_bytes is not None and "memory" not in unenforced:
             options["memory"] = self.slot.memory_bytes
         options["runtime_env"] = {
             "env_vars": intraop_env_vars(self.assigned_cores, include_omp=False)
@@ -362,13 +371,14 @@ def _bounds(slot: ResourceSlot, unit: UnitShape) -> dict[str, int]:
 
 # Axes a runtime measures but will not actually hold a task to.
 #
-# Ray enforces ``memory`` only when a task asks for it, and no Ray task ever does. The engine
-# sizes its tasks from the driver-side pre-pass, which drops the memory axis deliberately and
-# with a live-proven reason (`profiling.source._without_driver_rss`), so `task_options` never
-# carries ``memory`` and the scheduler packs on cores and cards alone. A memory bound is still
-# worth *measuring* on Ray — it is the honest footprint of a cell, and the thing to look at when
-# a pool thrashes — but it is evidence, not a constraint, and a density derived from it is one
-# the pool will never be held to.
+# Ray enforces ``memory`` only when a task asks for it, and no Ray task ever does. Two reasons,
+# and the map reads on both: the engine sizes its tasks from the driver-side pre-pass, which drops
+# the memory axis deliberately and with a live-proven reason
+# (`profiling.source._without_driver_rss`), and `RuntimeResourcePlan.task_options` consults this
+# map and omits the request outright. So the scheduler packs on cores and cards alone. A memory
+# bound is still worth *measuring* on Ray — it is the honest footprint of a cell, and the thing to
+# look at when a pool thrashes — but it is evidence, not a constraint, and a density derived from
+# it is one the pool will never be held to.
 #
 # Spark is absent from this map on purpose. A Spark executor running N concurrent tasks really is
 # bounded by its heap, so there the memory term decides something.
