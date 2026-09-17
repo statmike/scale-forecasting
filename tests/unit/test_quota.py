@@ -350,6 +350,37 @@ def test_advice_on_an_unthrottled_run_is_not_throttled():
     assert not advice.throttled
 
 
+def test_the_density_note_prints_next_to_the_node_count_it_qualifies():
+    """The width on a quota request is ``n_cells / slots_per_unit``, so the caveat belongs here.
+
+    It used to surface only in the engine's own log, minutes into the run and pages away from the
+    number it explains — which is no use at all to the person filling in the request beforehand.
+    """
+    outcome = quota.reconcile(gpu_demand(1, 12), reading(12))
+    advice = quota.advise(
+        outcome,
+        n_cells=1200,
+        slots_per_unit=2,
+        saturating_units=600,
+        seconds_per_cell=10.0,
+        density_note="memory is holding this deep_learning pool to 2 concurrent cells per unit",
+    )
+    rendered = advice.render()
+    saturation = next(i for i, line in enumerate(rendered) if "saturate at 600" in line)
+    assert rendered[saturation + 1].strip().startswith("density: memory is holding")
+    assert advice.to_dict()["density_note"] == advice.density_note
+    assert advice.to_dict()["slots_per_unit"] == 2
+
+
+def test_an_unqualified_density_prints_no_note():
+    outcome = quota.reconcile(gpu_demand(1, 12), reading(12))
+    advice = quota.advise(
+        outcome, n_cells=1200, slots_per_unit=2, saturating_units=600, seconds_per_cell=10.0
+    )
+    assert not any("density:" in line for line in advice.render())
+    assert advice.to_dict()["density_note"] is None
+
+
 # --- applying it to a plan ----------------------------------------------------------------------
 
 
@@ -373,6 +404,42 @@ def test_a_clean_region_leaves_the_plan_identical():
     assert not pre.blocked
     assert not pre.clamped
     assert quota.apply_to_ray_plan(plan, pre) is plan
+
+
+def test_the_preflight_carries_the_pool_s_density_caveat_into_its_own_output():
+    """End to end: a note computed in `fleet` reaches the text an operator reads before launching.
+
+    The pool below measures an 8 GiB footprint against 21 GiB schedulable, which looks like two
+    cells a node — but Ray packs it seven deep, because Ray is never told about the memory. Both
+    numbers have to appear, or the node count reads as unexplained.
+    """
+    memory_bound = RuntimeResourcePlan(
+        runtime="ray",
+        family="deep_learning",
+        slot=ResourceSlot(
+            family="deep_learning",
+            cores=1,
+            memory_bytes=8 * 1024**3,
+            gpu_fraction=0.125,
+            device_bytes=None,
+        ),
+        unit=UnitShape(cores=8, memory_bytes=30 * 1024**3, accelerators=1),
+        n_cells=10_000,
+        slots_per_unit=7,
+        derived_units=12,
+        saturating_units=1429,
+        min_units=1,
+        max_units=12,
+        target_cells_per_slot=1,
+    )
+    pre = _preflight_for(
+        ray_plan(gpu_pool=memory_bound),
+        "us-central1",
+        {T4.metric: "12", CPUS.metric: "2200"},
+    )
+    rendered = "\n".join(pre.render())
+    assert "ray is never asked for memory" in rendered
+    assert "the pool will run 7" in rendered
 
 
 def test_a_short_region_lowers_the_gpu_pool_and_nothing_else():

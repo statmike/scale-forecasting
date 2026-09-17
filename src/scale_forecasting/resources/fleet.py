@@ -22,6 +22,13 @@ seven usable cores. Ten cells were never going to run; the arithmetic just never
 **Nameplate is not schedulable, on either axis.** `schedulable_memory_bytes` takes the
 plasma store and the OS off the RAM; `schedulable_cores` takes `_RESERVED_CORES_PER_UNIT`
 off the vCPUs for the node's own agents. Every bound here goes through one of the two.
+
+**And a bound is not a rule until some scheduler enforces it.** ``min(device, cores, memory)``
+answers "what do these three axes allow", which on Ray is not the same question as "what will
+this pool actually run" — nothing on the Ray path ever requests memory, so the scheduler packs
+on cores and cards alone and a memory-derived density is one the pool sails straight past. So
+`slots_per_unit` keeps the three-axis arithmetic, `enforced_bounds` drops whatever the runtime
+will not hold a task to, and `plan_fleet` sizes from the latter. See `_UNENFORCED_AXES`.
 """
 
 from __future__ import annotations
@@ -115,42 +122,71 @@ class RuntimeResourcePlan:
     def binding_axis(self) -> str:
         """Which resource holds this pool's density down — ``memory``/``device``/``cores``.
 
+        Measured over the axes this runtime *enforces*, so it names the axis that actually held
+        the pool down rather than one the scheduler was never asked about. On Ray that means an
+        oversized memory figure can no longer be reported as the binding axis; it is surfaced by
+        `density_note` instead, which is where an unenforced number belongs.
+
         ``"scheduler"`` when the stored density did not come from this module's arithmetic at
         all (`plan_fleet`'s ``density`` override — Serverless), because then no axis here is
         the one that decided.
         """
-        if slots_per_unit(self.slot, self.unit) != self.slots_per_unit:
+        bounds = enforced_bounds(self.slot, self.unit, self.runtime)
+        if max(1, min(bounds.values())) != self.slots_per_unit:
             return "scheduler"
-        return _binding_axis(self.slot, self.unit)
+        return _tightest(bounds, _defining_axis(self.slot))[0]
 
     @property
     def density_note(self) -> str | None:
-        """One line, only when *memory* is what holds the density down (pure; else ``None``).
+        """One line about the memory axis, when there is something to say (pure; else ``None``).
 
         A pool bound by cores is a pool doing the obvious thing, and saying so on every run is
-        noise. A pool bound by memory is the one that goes wrong silently: `slots_per_unit`
-        takes the min of the two bounds and returns a single integer, so a slot sized at 97% of
-        a node collapses the pool to one cell per unit and reports it as a density with no
-        indication that the other axis had room to spare. That is exactly what a live 10,000-
-        series Ray run did — one cell per node, seven of eight cores and 90% of every T4 idle,
-        and nothing in the record said why (see `profiling.source._without_driver_rss` for the
-        cause).
+        noise. Memory is the axis that goes wrong quietly, and it now does so in two opposite
+        ways, so this says which one is happening.
 
-        So the memory axis has to speak up. It names both sides of the comparison and what the
-        *tightest other* axis would have packed, which is the difference between "this family is
-        genuinely memory-heavy, buy bigger nodes" and "the slot is mis-measured."
+        **It binds.** `slots_per_unit` takes the min of the bounds and returns a single integer,
+        so a slot sized at 97% of a node collapses the pool to one cell per unit and reports it
+        as a density with no indication that the other axis had room to spare. That is exactly
+        what a live 10,000-series Ray run did — one cell per node, seven of eight cores and 90%
+        of every T4 idle, and nothing in the record said why (see
+        `profiling.source._without_driver_rss` for the cause). Naming both sides of the
+        comparison, and what the *tightest other* axis would have packed, is the difference
+        between "this family is genuinely memory-heavy, buy bigger nodes" and "the slot is
+        mis-measured".
+
+        **It is measured but unenforced.** On Ray nothing ever requests memory, so a large
+        per-cell figure no longer shrinks the plan — and the silent failure inverts. A reader who
+        knows the min takes three axes will assume the low number won, and size a quota request
+        for a fleet twice the one the run needs. A 10,000-cell run advertised 3,334 nodes on a
+        harvested 6.05 GiB per cell and then packed seven cells a node. So when the figure would
+        have bound and does not, the note says so in as many words rather than going quiet.
         """
         schedulable = schedulable_memory_bytes(self.unit)
         if schedulable is None or not self.slot.memory_bytes:
             return None
+        implied = _memory_bound(self.slot, self.unit)
+        if implied is None:
+            return None
+        per_cell = self.slot.memory_bytes / _GIB
+        against = f"{per_cell:.2f} GiB per cell against {schedulable / _GIB:.2f} GiB schedulable"
+
+        if "memory" in _UNENFORCED_AXES.get(self.runtime, frozenset()):
+            if implied >= self.slots_per_unit:
+                return None
+            return (
+                f"memory looks like it should hold this {self.family} pool to {implied} "
+                f"concurrent cells per unit ({against}), but {self.runtime} is never asked for "
+                f"memory, so it does not: the pool will run {self.slots_per_unit}. The figure is "
+                f"the footprint to watch, not a reason to size a larger fleet."
+            )
+
         if self.binding_axis != "memory":
             return None
         others = {a: v for a, v in _bounds(self.slot, self.unit).items() if a != "memory"}
         axis, packed = _tightest(others, _defining_axis(self.slot))
         return (
             f"memory is holding this {self.family} pool to {self.slots_per_unit} concurrent "
-            f"cells per unit: {self.slot.memory_bytes / _GIB:.2f} GiB per cell against "
-            f"{schedulable / _GIB:.2f} GiB schedulable, where "
+            f"cells per unit: {against}, where "
             f"{'devices' if axis == 'device' else axis} alone would have packed {packed}."
         )
 
@@ -324,6 +360,31 @@ def _bounds(slot: ResourceSlot, unit: UnitShape) -> dict[str, int]:
     return bounds
 
 
+# Axes a runtime measures but will not actually hold a task to.
+#
+# Ray enforces ``memory`` only when a task asks for it, and no Ray task ever does. The engine
+# sizes its tasks from the driver-side pre-pass, which drops the memory axis deliberately and
+# with a live-proven reason (`profiling.source._without_driver_rss`), so `task_options` never
+# carries ``memory`` and the scheduler packs on cores and cards alone. A memory bound is still
+# worth *measuring* on Ray — it is the honest footprint of a cell, and the thing to look at when
+# a pool thrashes — but it is evidence, not a constraint, and a density derived from it is one
+# the pool will never be held to.
+#
+# Spark is absent from this map on purpose. A Spark executor running N concurrent tasks really is
+# bounded by its heap, so there the memory term decides something.
+_UNENFORCED_AXES: dict[str, frozenset[str]] = {"ray": frozenset({"memory"})}
+
+
+def enforced_bounds(slot: ResourceSlot, unit: UnitShape, runtime: str) -> dict[str, int]:
+    """`_bounds` less the axes ``runtime`` will not hold a task to (pure).
+
+    Never empty: ``cores`` always has a basis and is enforced everywhere, so filtering can only
+    ever remove the optional axes around it.
+    """
+    ignored = _UNENFORCED_AXES.get(runtime, frozenset())
+    return {axis: value for axis, value in _bounds(slot, unit).items() if axis not in ignored}
+
+
 def _defining_axis(slot: ResourceSlot) -> str:
     """The axis the slot is *defined* by — ``device`` when it carries a fraction, else ``cores``."""
     return "device" if slot.gpu_fraction is not None else "cores"
@@ -360,14 +421,19 @@ def slots_per_unit(slot: ResourceSlot, unit: UnitShape) -> int:
       not supply one: an ``n1-standard-8`` + 1 T4 at the 0.1 fraction floor is ten cells by the
       device bound and seven by this one, and seven is the number the node can actually run.
     * **memory** — ``floor(schedulable_memory / slot.memory_bytes)``, when both sides are known.
-      What stops eight 4 GiB cells landing on a 30 GiB node. It applies to a GPU slot too,
-      because `RuntimeResourcePlan.task_options` requests ``memory`` alongside ``num_gpus`` and
-      Ray enforces it: a density this function reports but Ray will not honour is a density the
-      pool never reaches.
+      What stops eight 4 GiB cells landing on a 30 GiB node, and what a Spark executor's heap
+      really does impose on the tasks sharing it.
 
     An axis with no basis is *absent*, not zero — an unmeasured memory footprint must not shrink
     a fleet it knows nothing about, which is the property that keeps turning the profiler on from
     ever making a run worse.
+
+    **This is the arithmetic, not the plan.** It answers "what do these three axes allow", which
+    is not the same question as "what will this runtime hold a task to" — on Ray they differ,
+    because nothing there ever requests memory. `plan_fleet` sizes from `enforced_bounds` for
+    that reason and callers wanting the number a pool will actually reach should do the same.
+    A density reported but not honoured is a density the pool never reaches, and it used to be
+    reported here: see `_UNENFORCED_AXES`.
 
     Always at least 1. A slot too big for its unit has already been clamped to fit by
     `resource_slot`, so the floor here is a belt-and-braces guard against a caller
@@ -483,8 +549,18 @@ def plan_fleet(
     nothing else, so a fleet sized off `slots_per_unit`'s device arithmetic would be sized off a
     density the platform never grants (`spark_tasks_per_executor`). Left ``None`` — every Ray
     caller — the derivation stands.
+
+    Without an override the density comes from `enforced_bounds` rather than `slots_per_unit`,
+    which is the same principle one level finer. The override drops a whole derivation because
+    another scheduler owns it; this drops a single *axis* because this scheduler is never asked
+    about it. Both exist so that the number this function reports is a number the pool can
+    actually reach — see `_UNENFORCED_AXES` for the Ray memory case that made it necessary.
     """
-    per_unit = max(1, density) if density is not None else slots_per_unit(slot, unit)
+    per_unit = (
+        max(1, density)
+        if density is not None
+        else max(1, min(enforced_bounds(slot, unit, runtime).values()))
+    )
     cells_per_unit = max(1, per_unit * max(1, target_cells_per_slot))
     saturating = math.ceil(n_cells / per_unit) if n_cells > 0 else 0
     if n_cells <= 0:

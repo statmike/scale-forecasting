@@ -494,8 +494,20 @@ So the advice inverts, and the numbers in this document are the post-fix ones:
 **If you see one busy core in N, suspect a memory request before you suspect the scheduler.** The
 Ray dashboard's `/api/cluster_status` reports `usageByNode`, and a node pinned this way is obvious
 in it: cores idle, memory at the ceiling. The product now names the condition itself —
-`RuntimeResourcePlan.binding_axis` lands in the run's telemetry and the Ray engine logs a density
-note at `WARNING` when memory rather than cores is what limits a pool.
+`RuntimeResourcePlan.binding_axis` lands in the run's telemetry, and both the quota preflight and
+the Ray engine print a density note whenever memory and the scheduler disagree about how many cells
+fit on a node.
+
+**A footnote on how that note reads on Ray, because it is the opposite of what you might expect.**
+The 2026-09-04 fix did not correct the memory request; it stopped making one. A Ray task now asks
+for cores and a GPU fraction and nothing else, which means Ray has no memory figure to schedule
+against and a memory bound cannot hold a Ray pool below its cores no matter how large the measured
+footprint is. The product still *measures* the footprint — it is the honest cost of a cell, and the
+thing to look at when a pool thrashes — so when the measurement implies a lower density than the
+one Ray will run, the note says so in as many words and tells you the figure is a footprint rather
+than a limit. Do not size a Ray fleet off it. On a Dataproc cluster or on Serverless it is a
+different story: an executor running N concurrent tasks really is bounded by its heap, memory binds
+there for real, and the same note reports it as the constraint it is.
 
 ---
 

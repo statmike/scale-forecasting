@@ -186,11 +186,15 @@ def test_a_slot_wider_than_the_machine_is_clamped_and_the_clamp_is_recorded() ->
 
 
 def test_a_slot_heavier_than_the_machine_is_clamped_to_fit_inside_it() -> None:
-    """Same failure mode on the memory axis, and the same answer."""
+    """Same failure mode on the memory axis, and the same answer.
+
+    Asked of ``cluster`` rather than ``ray`` because the density assertion is the point, and Ray
+    does not enforce memory at all (`fleet._UNENFORCED_AXES`). The clamp is runtime-neutral.
+    """
     plan = plan_resources(
         _profile(_fit(process_rss_bytes=40 * _GIB)),
         "statistical",
-        "ray",
+        "cluster",
         n_cells=10,
         unit=_N1_STANDARD_8,
     )
@@ -470,7 +474,10 @@ def test_a_light_family_packs_one_cell_per_schedulable_core() -> None:
 
 
 def test_a_heavy_family_is_packed_by_memory_not_by_cores() -> None:
-    """Eight 4 GiB cells do not run on a 30 GiB node however many cores it has."""
+    """Eight 4 GiB cells do not run on a 30 GiB node however many cores it has.
+
+    On a runtime that asks for the memory. Ray does not — see the pair of tests below.
+    """
     plan = plan_resources(
         _profile(
             _fit(
@@ -480,7 +487,7 @@ def test_a_heavy_family_is_packed_by_memory_not_by_cores() -> None:
             )
         ),
         "deep_learning",
-        "ray",
+        "cluster",
         n_cells=1000,
         unit=_N1_STANDARD_8,
     )
@@ -488,13 +495,57 @@ def test_a_heavy_family_is_packed_by_memory_not_by_cores() -> None:
     assert plan.slots_per_unit < _N1_STANDARD_8.cores
 
 
+def test_the_same_heavy_family_on_ray_is_packed_by_cores_because_nothing_asks_for_memory() -> None:
+    """The item-21 fix. Same profile, same node, different runtime, and the density moves.
+
+    Ray's tasks request cores and a GPU fraction and never memory, because the engine sizes them
+    from the driver pre-pass and that drops the memory axis on purpose
+    (`profiling.source._without_driver_rss`). So a memory figure cannot shrink a Ray pool, and
+    reporting a density as though it could is what sent an operator to size twice the fleet.
+    """
+    profile = _profile(
+        _fit(model_type="neuralprophet", family="deep_learning", process_rss_bytes=4 * _GIB)
+    )
+    on_ray = plan_resources(profile, "deep_learning", "ray", n_cells=1000, unit=_N1_STANDARD_8)
+    on_cluster = plan_resources(
+        profile, "deep_learning", "cluster", n_cells=1000, unit=_N1_STANDARD_8
+    )
+    assert on_ray.slots_per_unit == 7  # cores, the axis Ray actually schedules on
+    assert on_cluster.slots_per_unit == 5  # memory, which a Spark executor's heap really imposes
+    assert on_ray.binding_axis == "cores"
+    assert on_cluster.binding_axis == "memory"
+
+
+def test_the_saturating_node_count_is_the_one_the_pool_can_actually_reach() -> None:
+    """The number an operator reads out of the preflight and turns into a quota request.
+
+    It is derived from the density, so an unenforced axis shrinking that density inflates the
+    node count by the same factor. A live 10,000-cell run advertised 3,334 nodes against a
+    harvested per-cell footprint and then packed seven cells a node.
+    """
+    profile = _profile(
+        _fit(model_type="neuralprophet", family="deep_learning", process_rss_bytes=4 * _GIB)
+    )
+    on_ray = plan_resources(profile, "deep_learning", "ray", n_cells=1000, unit=_N1_STANDARD_8)
+    on_cluster = plan_resources(
+        profile, "deep_learning", "cluster", n_cells=1000, unit=_N1_STANDARD_8
+    )
+    assert on_ray.saturating_units == math.ceil(1000 / 7)  # 143
+    assert on_cluster.saturating_units == math.ceil(1000 / 5)  # 200
+
+
 def test_an_unmeasured_memory_axis_leaves_density_exactly_where_it_was() -> None:
     """No basis → no bound. The memory rule must not shrink a fleet it knows nothing about."""
     assert slots_per_unit(resource_slot(None, "statistical"), _N1_STANDARD_8) == 7  # cores only
 
 
-def test_host_memory_bounds_a_gpu_slot_too_because_ray_enforces_the_request() -> None:
-    """4 cards would hold 4 cells; 30 GiB of host RAM at 8 GiB a cell holds 2. Ray honours both."""
+def test_host_memory_bounds_a_gpu_slot_too_and_not_only_its_cards() -> None:
+    """4 cards would hold 4 cells; 30 GiB of host RAM at 8 GiB a cell holds 2.
+
+    `slots_per_unit` is the arithmetic layer — what the three axes *allow*. Whether a given
+    runtime will hold a task to the memory answer is a separate question, asked by
+    `enforced_bounds` and answered differently for Ray.
+    """
     unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=4)
     slot = _slot("deep_learning", memory_bytes=8 * _GIB, gpu_fraction=1.0, measured=_HOST_AXES)
     assert slots_per_unit(slot, unit) == 2
@@ -573,7 +624,7 @@ def test_a_memory_bound_pool_says_so_and_names_what_cores_would_have_packed() ->
             _fit(model_type="neuralprophet", family="deep_learning", process_rss_bytes=17 * _GIB)
         ),
         "deep_learning",
-        "ray",
+        "cluster",
         n_cells=1000,
         unit=_N1_STANDARD_8,
     )
@@ -585,6 +636,44 @@ def test_a_memory_bound_pool_says_so_and_names_what_cores_would_have_packed() ->
     assert "21.00 GiB schedulable" in note  # 0.7 x 30 GiB, the figure the packing divides
 
 
+def test_the_same_pool_on_ray_says_the_opposite_because_the_figure_is_not_enforced() -> None:
+    """The inverted silent failure, and the reason the note could not simply go quiet.
+
+    With memory unenforced the old note stops firing, which reads as "nothing to see here" on
+    precisely the run where a reader who knows the min takes three axes will assume the low
+    number won. So the note stays, and says that the figure is a footprint rather than a limit.
+    """
+    plan = plan_resources(
+        _profile(
+            _fit(model_type="neuralprophet", family="deep_learning", process_rss_bytes=17 * _GIB)
+        ),
+        "deep_learning",
+        "ray",
+        n_cells=1000,
+        unit=_N1_STANDARD_8,
+    )
+    assert plan.slots_per_unit == 7
+    assert plan.binding_axis == "cores"
+    note = plan.density_note
+    assert note is not None
+    assert "ray is never asked for memory" in note
+    assert "the pool will run 7" in note
+    assert "not a reason to size a larger fleet" in note
+
+
+def test_an_unenforced_memory_figure_that_would_not_have_bound_stays_quiet() -> None:
+    """The note is for the discrepancy, not for the axis. No discrepancy, no line."""
+    plan = plan_resources(
+        _profile(_fit(process_rss_bytes=900 * _MIB)),
+        "statistical",
+        "ray",
+        n_cells=1000,
+        unit=_N1_STANDARD_8,
+    )
+    assert plan.binding_axis == "cores"
+    assert plan.density_note is None
+
+
 def test_a_memory_bound_gpu_pool_names_the_devices_it_left_idle_not_its_cores() -> None:
     """The note reports the *tightest other* axis, so it names the one worth acting on.
 
@@ -594,11 +683,24 @@ def test_a_memory_bound_gpu_pool_names_the_devices_it_left_idle_not_its_cores() 
     """
     unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=4)
     slot = _slot("deep_learning", memory_bytes=8 * _GIB, gpu_fraction=1.0, measured=_HOST_AXES)
-    plan = fleet.plan_fleet(slot, runtime="ray", n_cells=100, unit=unit)
+    plan = fleet.plan_fleet(slot, runtime="cluster", n_cells=100, unit=unit)
     assert plan.slots_per_unit == 2
     assert plan.binding_axis == "memory"
     assert plan.density_note is not None
     assert "devices alone would have packed 4" in plan.density_note
+
+
+def test_the_serverless_density_override_still_wins_over_the_enforced_bounds() -> None:
+    """The coarser version of the same principle must keep taking precedence over the finer one.
+
+    Serverless hands `plan_fleet` a density outright because its own scheduler is the authority.
+    Routing the default through `enforced_bounds` must not quietly reopen that decision.
+    """
+    unit = UnitShape(cores=8, memory_bytes=30 * _GIB, accelerators=4)
+    slot = _slot("deep_learning", memory_bytes=8 * _GIB, gpu_fraction=1.0, measured=_HOST_AXES)
+    plan = fleet.plan_fleet(slot, runtime="serverless", n_cells=100, unit=unit, density=3)
+    assert plan.slots_per_unit == 3
+    assert plan.binding_axis == "scheduler"
 
 
 def test_a_cores_bound_pool_stays_quiet_because_that_is_the_ordinary_case() -> None:

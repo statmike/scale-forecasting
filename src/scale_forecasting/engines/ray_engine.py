@@ -523,7 +523,9 @@ def run(
                 source, cfg, run_id, cpu_models, gpu_models, profile, gpu_fraction
             )
             _log.info("ray sizing: cpu=%s gpu=%s", cpu_plan.to_dict(), gpu_plan.to_dict())
-            # A memory-bound pool is the one that under-runs silently — say so out loud.
+            # Whichever way memory and the scheduler disagree, the disagreement is the thing worth
+            # saying out loud: the pool that under-runs silently, or the footprint the pool is
+            # about to ignore. `fleet.RuntimeResourcePlan.density_note` words both cases.
             for note in (cpu_plan.density_note, gpu_plan.density_note):
                 if note:
                     _log.warning("ray sizing: %s", note)

@@ -673,6 +673,16 @@ class QuotaAdvice:
     slots_per_unit: int
     seconds_per_cell: float | None
     projections: tuple[tuple[int, float | None], ...] = field(default=())
+    density_note: str | None = None
+    """`fleet.RuntimeResourcePlan.density_note`, carried here so it prints where it matters.
+
+    The note explains where ``slots_per_unit`` came from when the answer is not the obvious one —
+    memory holding a pool below what its cores allow, or a measured memory bound that the runtime
+    will not actually enforce. It used to be logged only by the engine, minutes into a run and
+    nowhere near the node count it qualifies. But the person reading the saturating width is
+    sizing a quota request from it, and that number is ``n_cells / slots_per_unit`` — so the
+    sentence explaining ``slots_per_unit`` belongs beside it, not in a different log.
+    """
 
     @property
     def throttled(self) -> bool:
@@ -689,6 +699,8 @@ class QuotaAdvice:
             "ceiling_units": self.ceiling_units,
             "saturating_units": self.saturating_units,
             "throttled": self.throttled,
+            "slots_per_unit": self.slots_per_unit,
+            "density_note": self.density_note,
             "projections": [
                 {"units": units, "estimated_wall_s": seconds} for units, seconds in self.projections
             ],
@@ -705,6 +717,10 @@ class QuotaAdvice:
                 f"({self.n_cells} cells / {self.slots_per_unit} per node); the ceiling holds it "
                 f"to {self.ceiling_units}"
             )
+        # Printed whether or not the run is throttled: it qualifies the per-node density, and the
+        # density is what turns a cell count into a node count in either case.
+        if self.density_note:
+            lines.append(f"  density: {self.density_note}")
         # A column of "~unknown" is not a projection table, it is three rows of noise. With nothing
         # measured, the ceiling and the throttle ratio above are the whole of what can be said.
         for units, seconds in self.projections:
@@ -749,6 +765,7 @@ def advise(
     slots_per_unit: int,
     saturating_units: int,
     seconds_per_cell: float | None,
+    density_note: str | None = None,
 ) -> QuotaAdvice:
     """Price the current ceiling against the alternatives it is being compared to (pure).
 
@@ -780,6 +797,7 @@ def advise(
         slots_per_unit=slots_per_unit,
         seconds_per_cell=seconds_per_cell,
         projections=projections,
+        density_note=density_note,
     )
 
 
@@ -980,6 +998,7 @@ def preflight_ray(
                         seconds_per_cell=(
                             gpu_seconds_per_cell if demand.pool == "gpu" else cpu_seconds_per_cell
                         ),
+                        density_note=pool_plan.density_note,
                     )
                 )
         result[region] = QuotaPreflight(

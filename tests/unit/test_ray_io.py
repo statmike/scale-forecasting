@@ -591,15 +591,26 @@ def test_plan_finer_gpu_fraction_packs_more_and_needs_fewer_nodes() -> None:
 _GIB = 1024**3
 
 
-def _fit(family: str, *, model_type: str, rss: int | None, gpu_bytes: int | None = None):
-    """One measurement for ``family``, single-threaded, at the given process footprint."""
+def _fit(
+    family: str,
+    *,
+    model_type: str,
+    rss: int | None,
+    gpu_bytes: int | None = None,
+    cpu_s: float = 1.0,
+):
+    """One measurement for ``family``, single-threaded, at the given process footprint.
+
+    ``cpu_s`` against a fixed one-second wall clock *is* the effective-core reading, so raising it
+    is how a test says "this cell is four cores' worth of work".
+    """
     return MeasuredFit(
         ts_id="s1",
         model_type=model_type,
         family=family,
         n_obs=1000,
         wall_s=1.0,
-        cpu_s=1.0,
+        cpu_s=cpu_s,
         peak_rss_bytes=1024,
         peak_gpu_bytes=gpu_bytes,
         ok=True,
@@ -661,7 +672,38 @@ def test_a_shared_cpu_pool_is_sized_for_the_heaviest_family_that_lands_on_it() -
 
 
 def test_a_measured_heavy_family_shrinks_the_density_and_widens_the_fleet() -> None:
-    """The behaviour change W6 exists for: sizing follows the work, not just the cell count."""
+    """The behaviour change W6 exists for: sizing follows the work, not just the cell count.
+
+    Measured here on cores, which is the axis Ray actually schedules against. A cell that keeps
+    four cores busy is four cells' worth of work, and a fleet that has to run the same cell count
+    at once has to be wider by the same factor.
+    """
+    cfg = _cfg(data={"source_table": "s", "series_limit": 200}, compute=_compute(use_gpu=False))
+    light = ray_io.plan_cluster(cfg, [_CPU], run_id="r")
+    heavy = ray_io.plan_cluster(
+        cfg,
+        [_CPU],
+        run_id="r",
+        profile=build_profile(
+            [_fit("statistical", model_type=_CPU, rss=None, cpu_s=4.0)],
+            memory_margin=1.0,
+            time_margin=1.0,
+        ),
+    )
+    assert heavy.cpu_pool.slots_per_unit < light.cpu_pool.slots_per_unit
+    assert heavy.cpu_node_count > light.cpu_node_count
+
+
+def test_a_heavy_memory_footprint_does_not_widen_a_ray_fleet_that_will_not_hear_of_it() -> None:
+    """Sizing follows the work, but only along an axis the scheduler is actually told about.
+
+    This assertion used to read the other way: an 8 GiB measured footprint shrank the planned
+    density and the cluster was widened to compensate. The fleet that arrived was three times the
+    nodes it needed, because the tasks it then ran asked Ray for cores and a GPU fraction and
+    nothing else — the memory bound the plan sized around was never communicated to the scheduler,
+    so the pool packed itself back to its core density and most of those nodes sat idle. The plan
+    now models the scheduler it submits to; the footprint survives as `density_note`.
+    """
     cfg = _cfg(data={"source_table": "s", "series_limit": 200}, compute=_compute(use_gpu=False))
     light = ray_io.plan_cluster(cfg, [_CPU], run_id="r")
     heavy = ray_io.plan_cluster(
@@ -674,8 +716,9 @@ def test_a_measured_heavy_family_shrinks_the_density_and_widens_the_fleet() -> N
             time_margin=1.0,
         ),
     )
-    assert heavy.cpu_pool.slots_per_unit < light.cpu_pool.slots_per_unit
-    assert heavy.cpu_node_count > light.cpu_node_count
+    assert heavy.cpu_pool.slots_per_unit == light.cpu_pool.slots_per_unit
+    assert heavy.cpu_node_count == light.cpu_node_count
+    assert "is never asked for memory" in (heavy.cpu_pool.density_note or "")
 
 
 def test_a_measured_device_footprint_beats_the_nominal_sizing_fraction() -> None:
