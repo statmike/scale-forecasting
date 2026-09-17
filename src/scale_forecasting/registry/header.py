@@ -1,9 +1,15 @@
-"""The run header — one ``run_registry`` row per run, written once and updated in place.
+"""The run header — one ``run_registry`` row per *attempt*, written once and updated in place.
 
 The whole life of that row: the input-data snapshot every job pins its source read to
 (`resolve_snapshot_millis` / `snapshot_millis_for`), the opening INSERT and the later UPDATEs, the
 accreting ``job_telemetry`` merge (several jobs of one run each record their own sizing without
 overwriting each other), and the status read the pollers go through.
+
+**One row per attempt, not one per run, and every statement here has to mean it.** ``run_id`` is a
+pure digest of the config, so a ``--force`` re-run appends a *second* header under the same id with
+its own ``created_at``. The read side has always known that and takes the newest. The write side did
+not, until `render_latest_header_guard` — see its docstring for the live case where a re-run erased
+the attempt before it.
 """
 
 from __future__ import annotations
@@ -143,6 +149,61 @@ def write_header(
         raise RegistryError(f"write_header failed for run {run_id}: {exc}") from exc
 
 
+def render_latest_header_guard(table_ref: str) -> str:
+    """The ``AND created_at = (SELECT MAX(…))`` tail that narrows an UPDATE to one attempt (pure).
+
+    ``run_id`` is a pure digest of the config, so it is **not** unique in ``run_registry``: a
+    ``--force`` re-run of the same config appends a second header with its own ``created_at`` and
+    its own ``snapshot_millis``. Every reader already knows this and takes the newest —
+    `header_status`, `snapshot_millis_for`, `reads.read_run_config` and ``v_run_summary`` all order
+    by ``created_at`` descending and keep one row. This is the write-side mirror of that rule, and
+    it exists because the writers did **not** have it.
+
+    Found 2026-09-16 on a re-run of ``all_families_10k``: the finalize matched on ``run_id`` alone,
+    so the second attempt's 7,054.6 s and its terminal status landed on *both* headers and the
+    first attempt's 13,134.2 s was gone. It survived only because the validation ledger had written
+    it down by hand. The per-cell tables were never affected — they are append-only and separable by
+    ``created_at`` — so the damage was confined to exactly the columns a finalize touches, which is
+    also the set an operator reads first.
+
+    The job layer never had this problem, and the contrast is the clearest statement of the fix.
+    A ``job_id`` is ``sf-<run_id>-<family>-a<attempt>``; `ids.decide_attempt` reads the family's
+    current max out of the registry and returns ``current_max + 1`` under ``--force``, so
+    `jobs.update_job` can match one id and honestly claim one row. The header has no attempt
+    counter and adding one would be a schema change, a DDL migration, and a new identity concept.
+    Selecting the newest ``created_at`` gets the same guarantee out of a column that is already
+    there, and — the part that matters more — states it in exactly the words the read side already
+    uses, so the two sides cannot drift into disagreeing about which attempt is *the* attempt.
+
+    A tie needs two headers stamped in the same microsecond by `write_header`'s
+    ``datetime.now(UTC)``, which is two launches of one config inside a microsecond; the
+    pre-submit existence check (`header_status`) stops that long before it reaches here.
+    """
+    return f" AND created_at = (SELECT MAX(created_at) FROM `{table_ref}` WHERE run_id=@run_id)"
+
+
+def render_header_update(
+    table_ref: str, columns: Sequence[str], unless_status_in: Sequence[str] = ()
+) -> str:
+    """The whole ``UPDATE … SET … WHERE`` a `update_header` call issues (pure).
+
+    Separated from the client call for the same reason `render_header_telemetry_merge` is: a
+    statement that only exists inside a ``# pragma: no cover`` GCP function can only be checked by
+    reading it. The overwrite this module's `render_latest_header_guard` now prevents lived in
+    exactly that blind spot — the WHERE clause was assembled inline, no test could see it, and the
+    bug was found on a live run instead.
+
+    ``columns`` renders ``col = @col`` in the order given; the caller binds a parameter per name
+    plus ``@run_id``. The two tails are the latest-attempt guard (always) and the status guard
+    (only when ``unless_status_in`` is non-empty).
+    """
+    set_clause = ", ".join(f"{col} = @{col}" for col in columns)
+    return (
+        f"UPDATE `{table_ref}` SET {set_clause} WHERE run_id=@run_id"
+        f"{render_latest_header_guard(table_ref)}{render_status_guard(unless_status_in)}"
+    )
+
+
 def update_header(
     run_id: str,
     *,
@@ -150,11 +211,14 @@ def update_header(
     unless_status_in: Sequence[str] = (),
     **fields: Any,
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Update named columns on a run's header row, e.g. status/runtime_seconds.
+    """Update named columns on a run's **latest** header row, e.g. status/runtime_seconds.
 
     ``update_header(run_id, status="COMPLETED", runtime_seconds=42.0)`` → a parameterized
-    ``UPDATE … SET … WHERE run_id=@run_id``. Unknown column names raise `RegistryError`;
-    a no-op call (no fields) returns without touching BigQuery.
+    ``UPDATE … SET … WHERE run_id=@run_id AND created_at = (SELECT MAX(…))``. Unknown column names
+    raise `RegistryError`; a no-op call (no fields) returns without touching BigQuery.
+
+    The ``created_at`` tail is `render_latest_header_guard`, and it is what keeps a forced re-run
+    from overwriting the attempt before it — read that docstring for the case that motivated it.
 
     ``unless_status_in`` adds a status guard to the WHERE (`render_status_guard`), leaving a header
     already in one of those states untouched. Same reason as `registry.jobs.update_job`: the state
@@ -171,12 +235,8 @@ def update_header(
         raise RegistryError(f"update_header: unknown run_registry column(s): {sorted(unknown)}")
 
     resolved = _resolve_settings(settings)
-    set_clause = ", ".join(f"{col} = @{col}" for col in fields)
     table = resolved.registry_table_ref("run_registry")
-    sql = (
-        f"UPDATE `{table}` SET {set_clause} WHERE run_id=@run_id"
-        f"{render_status_guard(unless_status_in)}"
-    )
+    sql = render_header_update(table, list(fields), unless_status_in)
     params = [_header_param(col, value) for col, value in fields.items()]
     params.append(_header_param("run_id", run_id))
     if unless_status_in:
@@ -195,8 +255,16 @@ def render_header_telemetry_merge(table_ref: str, paths: Sequence[str]) -> str:
     itself is `params.render_telemetry_merge`, shared with the job-row writer; this wraps it in the
     header's statement. Parameters are named ``@t0…@tN`` positionally against ``paths``; the caller
     binds them in the same order.
+
+    Carries the same `render_latest_header_guard` tail as `update_header`, for the same reason and
+    with one extra edge of its own: ``JSON_SET`` merges rather than replaces, so without the guard a
+    re-run would not overwrite the first attempt's telemetry but *blend into* it — one document
+    holding two runs' sizing under the same paths, with nothing in it to say so.
     """
-    return f"UPDATE `{table_ref}` SET {render_telemetry_merge(paths)} WHERE run_id=@run_id"
+    return (
+        f"UPDATE `{table_ref}` SET {render_telemetry_merge(paths)} WHERE run_id=@run_id"
+        f"{render_latest_header_guard(table_ref)}"
+    )
 
 
 def sizing_telemetry_path(sizing: Mapping[str, Any]) -> str:

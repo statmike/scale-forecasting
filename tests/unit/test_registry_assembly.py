@@ -20,6 +20,8 @@ from scale_forecasting.registry.harvest import rank_harvest_candidates
 from scale_forecasting.registry.header import (
     merge_header_telemetry,
     render_header_telemetry_merge,
+    render_header_update,
+    render_latest_header_guard,
     sizing_telemetry_path,
 )
 from scale_forecasting.registry.lifecycle import run_job
@@ -1137,7 +1139,66 @@ def test_the_telemetry_merge_sets_each_path_against_the_existing_document() -> N
     assert "IFNULL(job_telemetry, JSON '{}')" in sql
     assert "'$.total_wall_s', @t0" in sql
     assert "'$.sizing.ml', @t1" in sql
-    assert sql.endswith("WHERE run_id=@run_id")
+    assert "WHERE run_id=@run_id" in sql
+
+
+# --- one header row per attempt, and only the newest is written -----------------
+
+
+def test_a_header_update_names_the_newest_attempt_and_not_merely_the_run() -> None:
+    """Live 2026-09-16: `run_id` is a config digest, so `--force` gives a run a second header.
+
+    The finalize matched on ``run_id`` alone, so the re-run's runtime and status landed on both
+    rows and the first attempt's numbers were gone. The per-cell tables were fine — append-only,
+    separable by ``created_at`` — so the loss was confined to exactly the columns an operator
+    reads first.
+    """
+    sql = render_header_update("p.d.run_registry", ["status", "runtime_seconds"])
+    assert sql.startswith("UPDATE `p.d.run_registry` SET status = @status, runtime_seconds = ")
+    assert "WHERE run_id=@run_id" in sql
+    assert "created_at = (SELECT MAX(created_at) FROM `p.d.run_registry` WHERE run_id=@run_id)" in (
+        sql
+    )
+
+
+def test_the_write_side_narrows_the_same_way_every_reader_already_does() -> None:
+    # `header_status`, `snapshot_millis_for`, `reads.read_run_config` and `v_run_summary` all keep
+    # the newest `created_at`. The guard exists so a writer cannot disagree with them about which
+    # attempt is *the* attempt — the failure mode is not a crash, it is two sides of the module
+    # quietly describing different rows.
+    guard = render_latest_header_guard("p.d.run_registry")
+    assert guard.startswith(" AND created_at = (SELECT MAX(created_at)")
+    assert guard.endswith("WHERE run_id=@run_id)")
+    # Same table on both sides: a guard that sub-selected from anywhere else would silently match
+    # nothing and turn every finalize into a no-op.
+    assert guard.count("`p.d.run_registry`") == 1
+
+
+def test_the_telemetry_merge_is_guarded_too_because_merging_is_worse_than_overwriting() -> None:
+    # `JSON_SET` accretes, so an unguarded re-run would not replace the first attempt's telemetry
+    # but blend into it: one document holding two runs' sizing under the same paths, with nothing
+    # inside it to say two runs were involved.
+    sql = render_header_telemetry_merge("p.d.run_registry", ["sizing.deep_learning"])
+    assert render_latest_header_guard("p.d.run_registry") in sql
+
+
+def test_the_status_guard_and_the_attempt_guard_both_survive_being_combined() -> None:
+    # Two independent narrowings on one statement, and each answers a different question: which
+    # attempt to write (`created_at`) and whether that attempt is in a state someone else owns
+    # (`status`). Rendering one must not drop the other.
+    sql = render_header_update("p.d.run_registry", ["status"], ("CANCELLED", "FAILED"))
+    assert render_latest_header_guard("p.d.run_registry") in sql
+    assert render_status_guard(("CANCELLED", "FAILED")) in sql
+    assert sql.index("created_at") < sql.index("status NOT IN")
+
+
+def test_an_unguarded_update_is_the_shape_that_caused_the_loss() -> None:
+    # The regression this file is actually holding: a header UPDATE whose WHERE ends at the run_id
+    # touches every attempt of that config. Asserted as a property of the rendered SQL rather than
+    # as a call count, because the statement is the whole mechanism.
+    sql = render_header_update("p.d.run_registry", ["runtime_seconds"])
+    where = sql[sql.index("WHERE") :]
+    assert where != "WHERE run_id=@run_id"
 
 
 def test_each_family_files_its_sizing_under_its_own_path() -> None:
