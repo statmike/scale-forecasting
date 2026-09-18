@@ -1685,6 +1685,13 @@ twenty-eight-step horizon. Nothing was missing; the comment named the wrong tabl
 genuinely open is smaller and duller — `n_fits` and `train_rows_total` are declared in the row spec
 and written by nobody, and should either be wired up or removed.
 
+*Closed 2026-09-18, offline.* Both are now counted at the fit site and written, with `n_hpo_fits`
+added beside them for what a per-series search burns. The derivation this analysis fell back on is
+kept in the SQL rather than replaced, because these rows predate the column and will always be NULL
+— and it is worth recording that the fallback was not merely inconvenient: `n_folds_achieved + 1`
+is correct only under `per_fold`, and would have overstated any frozen arm it was applied to. No
+live run has yet written the column; the first one that does is what would put a row in this ledger.
+
 **On placement versus utilisation.** The GPU arm's `device_audit` recorded that the deep-learning
 family "used its device but barely touched it (peak 87,040 bytes on a T4)". Both halves of that are
 the point. Placement works — the routing, the fraction, the probe and the audit all did their jobs,

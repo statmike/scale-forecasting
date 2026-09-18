@@ -53,8 +53,6 @@ _RESERVED_METADATA = {
     "achieved_min_train",
     "first_val_date",
     "last_val_date",
-    "n_fits",
-    "train_rows_total",
 }
 
 

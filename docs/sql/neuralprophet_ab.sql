@@ -274,6 +274,15 @@ JOIN w USING (arm);
 --
 -- Phase 0 predicted s in [0.95, 1.07]. Writing that down before the run is the whole discipline: if
 -- the measurement lands there, it confirms a prediction rather than discovering a result.
+--
+-- SUPERSEDED FOR FUTURE RUNS, 2026-09-18. `n_fits` is now written by the worker, counted at the
+-- fit site rather than derived, along with `train_rows_total` and `n_hpo_fits` beside it. The
+-- derivation below stays exactly as it is, because the rows THIS analysis reads were written before
+-- the column existed and will always be NULL; rewriting it to `SUM(n_fits)` would turn a working
+-- query back into the broken one. Any analysis over rows written after this date should read the
+-- column instead — and should note that the derivation was not merely inconvenient but wrong off
+-- the `per_fold` path: a frozen scheme fits twice for a whole cell, not once, and a control arm
+-- adds a fit to a refit scheme. See `docs/output_schemas.md`, "What the cell paid for, in fits".
 -- ============================================================================================
 WITH all_fits AS (
   SELECT

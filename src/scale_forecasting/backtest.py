@@ -49,7 +49,7 @@ branch gives up something different — folds (``adapt``), fold independence (``
 history (``shrink_train``), the series (``skip``) or the run (``error``). `resolve_geometry` is the
 one place that reasoning lives; `make_folds` reads its answer and never re-derives it.
 
-Public surface: ``Fold``, ``FoldGeometry``, ``BacktestOutcome``, ``OOF_COLUMNS``,
+Public surface: ``Fold``, ``FoldGeometry``, ``BacktestOutcome``, ``FitTally``, ``OOF_COLUMNS``,
 ``achievable_folds``, ``assert_panel_supports_folds``, ``holdout_fold_id``,
 ``hpo_scoring_claim``, ``make_folds``, ``fit_rows``, ``resolve_geometry``, ``suggest_min_train``,
 ``training_width``, ``training_window``, ``backtest_cell``.
@@ -141,6 +141,39 @@ class BacktestOutcome:
 
     refit_mode: str
     staleness_gap: float | None
+
+
+@dataclass
+class FitTally:
+    """A running count of ``.fit()`` calls and the observations handed to them. Mutable.
+
+    Passed *down* into the fold loop and written to as fits happen, rather than returned up, for
+    the same reason `resources.slot.resource_slot` hands its ``measured``/``assumed``/``notes``
+    lists down: the call sites are scattered across branches that already return something else,
+    and threading a second return value through each of them would obscure what they are for. One
+    tally per question — the caller decides what it is counting by deciding which tally it passes.
+
+    **Why counting is not arithmetic.** `fit_rows` estimates this at plan time as
+    ``[n, *fold_windows]``, which assumes a fresh fit per fold. That is right for ``expanding`` and
+    ``sliding`` and wrong for everything else: ``expanding_stale`` fits *once* for the whole cell,
+    ``expanding_frozen`` fits twice (the frozen arm and the blind control arm) and then refits only
+    the folds where reconditioning fell over, and ``backtest.control_arm`` adds one fit to a refit
+    scheme. Six branches of `_walk_folds`, six different answers. The gap between the plan-time
+    estimate and this tally is not an error in either — it is the cost of the scheme, and a run
+    that records both can be asked what freezing actually saved.
+
+    ``train_rows`` sums the training observations across those fits, because a fold trains on less
+    history than the final full-history fit does; four years of daily history backtested twice at a
+    28-day horizon is 2.94 whole-history fits, not 3.
+    """
+
+    n_fits: int = 0
+    train_rows: int = 0
+
+    def record(self, n_rows: int) -> None:
+        """Count one fit on ``n_rows`` training observations."""
+        self.n_fits += 1
+        self.train_rows += int(n_rows)
 
 
 @dataclass(frozen=True)
@@ -576,16 +609,36 @@ def _forecast_validation(
     return frame.iloc[gap:] if gap else frame
 
 
+def _fit_one(
+    est: BaseModel,
+    y: pd.Series,
+    X: pd.DataFrame | None,
+    fold: Fold,
+    tally: FitTally | None,
+) -> BaseModel:
+    """Fit ``est`` on ``fold``'s training window and count it (pure but for the fit itself).
+
+    Every ``.fit()`` in this module goes through here, which is the point: `_walk_folds` has six
+    branches and each fits a different number of times, so a tally maintained per branch would be
+    the kind of arithmetic that goes quietly wrong the next time a branch is added.
+    """
+    window = y.iloc[fold.train_start : fold.train_end]
+    est.fit(window, _cut(X, fold.train_start, fold.train_end))
+    if tally is not None:
+        tally.record(len(window))
+    return est
+
+
 def _fit_predict(
     model_factory: Callable[[], BaseModel],
     y: pd.Series,
     X: pd.DataFrame | None,
     fold: Fold,
     gap: int,
+    tally: FitTally | None = None,
 ) -> pd.DataFrame:
     """A fresh model fit on this fold's training window and asked for its validation window."""
-    est = model_factory()
-    est.fit(y.iloc[fold.train_start : fold.train_end], _cut(X, fold.train_start, fold.train_end))
+    est = _fit_one(model_factory(), y, X, fold, tally)
     return _forecast_validation(est, X, fold, gap)
 
 
@@ -611,11 +664,14 @@ def _walk_folds(
     X: pd.DataFrame | None,
     model_factory: Callable[[], BaseModel],
     cfg: RunConfig,
+    tally: FitTally | None = None,
 ) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame | None]], str]:
     """Produce each fold's forecast frames, and report how the model was carried between them.
 
     Returns ``(arms, refit_mode)``, where ``arms[i]`` is ``(primary, blind_or_None)`` for
-    ``folds[i]`` and ``refit_mode`` is one of `BacktestOutcome`'s four values.
+    ``folds[i]`` and ``refit_mode`` is one of `BacktestOutcome`'s four values. ``tally``, when
+    given, counts every fit this walk performs — which is a different number on each of the six
+    branches below, and the reason `FitTally` exists.
 
     Freezing is anchored on ``folds[0]`` — the **oldest** surviving fold. Its training window is a
     prefix of every later fold's, so a model fit there has seen nothing any fold is scored on.
@@ -632,7 +688,7 @@ def _walk_folds(
     """
     scheme, gap = cfg.backtest.scheme, cfg.backtest.gap
     if scheme in ("expanding", "sliding"):
-        primaries = [_fit_predict(model_factory, y, X, f, gap) for f in folds]
+        primaries = [_fit_predict(model_factory, y, X, f, gap, tally) for f in folds]
         if not cfg.backtest.control_arm:
             return [(p, None) for p in primaries], "per_fold"
         # The control arm on a refit scheme: one extra fit for the whole cell, on the oldest fold's
@@ -645,9 +701,7 @@ def _walk_folds(
         control = model_factory()
         if not control.supports_extrapolate:
             return [(p, None) for p in primaries], "per_fold"
-        control.fit(
-            y.iloc[base.train_start : base.train_end], _cut(X, base.train_start, base.train_end)
-        )
+        _fit_one(control, y, X, base, tally)
         blind = [_predict_blind(control, X, base, f, gap) for f in folds]
         return list(zip(primaries, blind, strict=True)), "per_fold"
 
@@ -657,8 +711,10 @@ def _walk_folds(
         # No blind seam at all, so neither frozen scheme can be honoured. Checked before the fit is
         # paid for. No model in this tree lands here — all sixteen opt in — but an out-of-tree model
         # inherits the ``False`` default, and it has to degrade to a refit rather than raise.
-        return [(_fit_predict(model_factory, y, X, f, gap), None) for f in folds], "unsupported"
-    blind.fit(y.iloc[base.train_start : base.train_end], _cut(X, base.train_start, base.train_end))
+        return [
+            (_fit_predict(model_factory, y, X, f, gap, tally), None) for f in folds
+        ], "unsupported"
+    _fit_one(blind, y, X, base, tally)
 
     if scheme == "expanding_stale":
         # The primary arm *is* the blind arm here, so there is no second arm and ``yhat_stale``
@@ -671,15 +727,17 @@ def _walk_folds(
         # says so — but the blind arm is already fitted and costs only a forecast, so the control
         # arm still runs and the staleness diagnostic is still available for this model.
         arms = [
-            (_fit_predict(model_factory, y, X, f, gap), _predict_blind(blind, X, base, f, gap))
+            (
+                _fit_predict(model_factory, y, X, f, gap, tally),
+                _predict_blind(blind, X, base, f, gap),
+            )
             for f in folds
         ]
         return arms, "unsupported"
 
     # The frozen arm proper: a second fit on the same window, then walked forward on the real
     # observations between origins with its parameters held fixed.
-    frozen = model_factory()
-    frozen.fit(y.iloc[base.train_start : base.train_end], _cut(X, base.train_start, base.train_end))
+    frozen = _fit_one(model_factory(), y, X, base, tally)
 
     arms: list[tuple[pd.DataFrame, pd.DataFrame | None]] = []
     mode, cursor = "recondition", base.train_end
@@ -693,7 +751,7 @@ def _walk_folds(
         primary = (
             _forecast_validation(frozen, X, fold, gap)
             if mode == "recondition"
-            else _fit_predict(model_factory, y, X, fold, gap)
+            else _fit_predict(model_factory, y, X, fold, gap, tally)
         )
         arms.append((primary, _predict_blind(blind, X, base, fold, gap)))
     return arms, mode
@@ -721,6 +779,7 @@ def backtest_cell(
     model_factory: Callable[[], BaseModel],
     cfg: RunConfig,
     lam: float | None = None,
+    tally: FitTally | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, float]], BacktestOutcome]:
     """Run CV for one series and model factory.
 
@@ -732,6 +791,9 @@ def backtest_cell(
         cfg: the run config (drives features, fold geometry and `backtest.scheme`).
         lam: the cell's fitted Box-Cox λ (None for stateless transforms), so the forward
             transform here matches the inverse the folds' models apply — one λ per cell.
+        tally: a `FitTally` to count this cell's fold fits into, or None to count nothing. The
+            caller owns it, because the final full-history fit that `worker.run_cell` performs
+            afterwards belongs in the same total and does not happen here.
 
     Returns:
         ``(oof, fold_metrics, outcome)`` where ``oof`` is the canonical OOF frame (`OOF_COLUMNS`)
@@ -750,7 +812,7 @@ def backtest_cell(
     n = len(y)
     folds = make_folds(n, cfg)
     arms, refit_mode = (
-        _walk_folds(folds, y, X, model_factory, cfg)
+        _walk_folds(folds, y, X, model_factory, cfg, tally)
         if folds
         else ([], _NOMINAL_MODE[cfg.backtest.scheme])
     )

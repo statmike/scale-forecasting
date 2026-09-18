@@ -268,9 +268,9 @@ JOIN w USING (arm);
 -- The decision variable is COST PER THOUSAND FITS, not per-fit latency. A GPU that is 8% faster and
 -- 40% more expensive is a worse machine for this workload however good the latency looks.
 --
--- The fit count is derived from the backtest columns rather than read from `n_fits`. That is not a
--- refinement, it is the only form that works: `n_fits` is declared in the `forecast_metadata` row
--- spec (`registry/write_api.py`) and populated by no writer, so it is NULL on every row ever
+-- The fit count is derived from the backtest columns rather than read from `n_fits`. That was, when
+-- this was written, the only form that worked: `n_fits` was declared in the `forecast_metadata` row
+-- spec (`registry/write_api.py`) and populated by no writer, so it was NULL on every row ever
 -- written. The Ray file's version of this query used it, produced a NULL denominator, and fell
 -- through to INCONCLUSIVE — a repair recorded there as a dated note. This file simply starts from
 -- the working form. With `backtest_refit='per_fold'` a cell fits once per fold plus once on full
@@ -278,6 +278,12 @@ JOIN w USING (arm);
 -- Both arms here are `per_fold` at 2 folds, so 3 fits per cell and 9,000 per arm — and because both
 -- arms run the identical backtest block, any per-cell fit constant cancels in `s`, which is a ratio
 -- between the arms.
+--
+-- SUPERSEDED FOR FUTURE RUNS, 2026-09-18: the worker now counts `n_fits` at the fit site and writes
+-- it, so an analysis over rows written after that date should read the column. The derivation stays
+-- here because the rows this query reads predate it and are NULL. Note also that the derivation is
+-- only correct on the `per_fold` path it was used on — a frozen scheme fits *twice* for a cell, not
+-- once, and `backtest.control_arm` adds a fit to a refit scheme.
 --
 -- Let s = throughput ratio (GPU fits per node-second / CPU fits per node-second)
 --     r = accel_surcharge (declared above)

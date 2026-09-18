@@ -112,3 +112,15 @@ never recover one from an estimate that was already adjusted.
   honored. Run `pytest tests/unit/test_models_contract.py -k my_model`.
 - **HPO** (optional): implement `search_space(cls, trial)` to expose an Optuna search space;
   it's used only when `hpo.enabled` in the config.
+- **Fit diagnostics** (optional): implement `diagnostics()` to return whatever your library says
+  about the fit — an AIC, the order an `auto_arima` picked, the epoch an early stop landed on. It
+  is called once per cell after the final fit and lands in `forecast_metadata.fit_diagnostics`, a
+  JSON bag beside `best_params`.
+
+  Do **not** put a scored metric here. A metric is a pure function of `(y_true, yhat, y_train,
+  bounds)` that the framework computes, so it means the same thing across every model and a
+  leaderboard can rank on it; a diagnostic is whatever your library happened to expose, exists for
+  some models and not others, and two models' "AIC" are not on the same scale. A key named after a
+  metric is dropped with a warning rather than written. So is a value `json.dumps` cannot carry —
+  cast numpy scalars to `float`/`int` before returning them. Anything the method raises is caught
+  and the cell simply reports no diagnostics: describing a fit must never cost the forecast.

@@ -286,6 +286,23 @@ def assemble_metadata_row(
         # series' own length under per-series tuning, and a reader comparing two rows of the same
         # run cannot recover that from the config.
         "hpo_scoring": result.hpo_scoring,
+        # What the cell paid for, counted rather than derived. It cannot be derived: the plan-time
+        # estimate assumes a fresh fit per fold, and only two of the six refit schemes work that
+        # way — a frozen scheme fits twice for a whole cell, so `n_folds_achieved + 1` overstates
+        # it, which is precisely the approximation one A/B analysis had to fall back on when this
+        # column was still NULL. `n_fits` is the fits behind the published forecast and lines up
+        # with the plan-time `config.Workload.n_fits`; `n_hpo_fits` is what a per-series search
+        # burned on top, kept in its own column so `fit_seconds / n_fits` stays a cost-per-shipped-
+        # fit and total-paid-for is still recoverable as the sum. `train_rows_total` is the
+        # observations those fits saw, which is not `n_fits × n_obs` — a fold trains on less.
+        "n_fits": result.n_fits,
+        "train_rows_total": result.train_rows_total,
+        "n_hpo_fits": result.n_hpo_fits,
+        # What the fitting library said about the fit: AIC, a chosen (p,d,q), an early-stop epoch.
+        # A JSON bag beside `best_params`, deliberately not metric columns — these exist for some
+        # models and not others, and two models' "AIC" are not on a comparable scale, so a
+        # leaderboard column would look uniform and not be. See `BaseModel.diagnostics`.
+        "fit_diagnostics": _as_json(result.diagnostics),
         # How the *cell* went. `run_cell` has always computed this and thrown it away at the table
         # boundary: an error cell was written as a row of NULL metrics with `fit_seconds = 0`, and
         # telling it apart from a successful cell that simply was not scored meant knowing that

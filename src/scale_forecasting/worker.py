@@ -12,6 +12,7 @@ behavior, so it is the clean seam between compute and lineage.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import time
@@ -22,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from .backtest import achievable_folds, backtest_cell, resolve_geometry
+from .backtest import FitTally, achievable_folds, backtest_cell, resolve_geometry
 from .calibration import apply_calibration, calibrate_from_oof, compare_arms, select_arm
 from .config import corrected_arm_for
 from .errors import ConfigError, get_logger
@@ -158,6 +159,26 @@ class CellResult:
     # optimised against). None = no search ran for this cell, which is the common case. The
     # ensemble's counterpart lives on the run's ensemble rows as `ensemble_scoring`.
     hpo_scoring: str | None = None
+    # Whatever the fitting library reported about the final full-history fit — AIC, an
+    # `auto_arima`'s chosen (p,d,q), an early-stop epoch count. Per-model and not comparable across
+    # models, which is exactly why it is a JSON bag and not a metric column. See
+    # `models.base_model.BaseModel.diagnostics` for the distinction and `_collect_diagnostics` for
+    # how a misbehaving one is contained.
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    # --- what this cell actually paid for, in fits ---------------------------------------------
+    # `n_fits` counts every ``.fit()`` behind the *published* forecast: the backtest arms plus the
+    # final full-history fit. It is the measured counterpart of `config.Workload.n_fits`, the
+    # plan-time estimate, and the two disagree by exactly what the refit scheme saved — a frozen
+    # scheme fits twice where the estimate assumed one fit per fold. `train_rows_total` sums the
+    # training observations across those fits, because a fold trains on less history than the final
+    # fit does. `n_hpo_fits` counts what a per-series hyperparameter search burned; those fits
+    # produce no shipped forecast, so they are counted separately, and total-paid-for is the sum of
+    # the two. An error cell reports them too — 0 if it died before fitting anything, and the real
+    # count if it died after, which is the difference between a cheap failure and an expensive one.
+    # None only on a `CellResult` built outside `run_cell`.
+    n_fits: int | None = None
+    train_rows_total: int | None = None
+    n_hpo_fits: int | None = None
 
 
 def _worker_id() -> str:
@@ -337,6 +358,7 @@ def _resolve_params(
     cfg: RunConfig,
     ctx: ModelContext,
     params: dict[str, Any] | None,
+    tally: FitTally | None = None,
 ) -> dict[str, Any]:
     """Resolve the hyperparameters this cell builds its model with (see `run_cell`).
 
@@ -354,6 +376,11 @@ def _resolve_params(
 
     Kept tiny and separate so the resolution policy is one readable place and the HPO import stays
     lazy (Optuna loads only when a run actually tunes).
+
+    ``tally`` counts the fits a per-series search burns. It is a *different* tally from the one the
+    cell's own fits go into: a search costs ``n_trials × folds`` fits that produce no shipped
+    forecast, and adding them to ``n_fits`` would make ``fit_seconds / n_fits`` mean nothing. The
+    fleetwide branch passes nothing — that pre-pass ran on the driver before this cell existed.
     """
     authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
     if params is not None:
@@ -361,7 +388,7 @@ def _resolve_params(
     if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
         from .hpo import tune_model
 
-        return {**authored, **tune_model(model_name, [series], cfg, ctx)}
+        return {**authored, **tune_model(model_name, [series], cfg, ctx, tally)}
     return authored
 
 
@@ -407,6 +434,64 @@ def _empty_predictions() -> pd.DataFrame:
     return pd.DataFrame({c: pd.Series(dtype="object") for c in PREDICTION_COLUMNS})
 
 
+def _collect_diagnostics(model: BaseModel, ts_id: str, model_name: str) -> dict[str, Any]:
+    """Ask a fitted model what its library reported about the fit, and contain the answer.
+
+    Two containments, and this helper exists so both are enforced at the runtime boundary rather
+    than trusted to sixteen model authors and to whatever models ship out of tree:
+
+    * **Never fatal.** Anything raised is caught and the cell simply reports no diagnostics, on the
+      same reasoning as `BaseModel.serialize` two blocks down in `run_cell`: a forecast that was
+      produced must not be thrown away because a library could not describe how it was produced.
+    * **No key may be named after a metric.** ``best_params``, the metric panel and this bag are
+      all read off one ``forecast_metadata`` row, and a diagnostic called ``mase`` makes "which
+      mase is this" a real question the first time anything flattens the JSON beside the columns.
+      A colliding key is dropped and named in a warning, which keeps the rest of the bag.
+    * **Every value must survive ``json.dumps``.** The bag lands in a BigQuery ``JSON`` column, and
+      the Storage Write API rejects the *whole append* on one bad row — in a Spark or Ray worker
+      that kills the task and cascades to the run. A model returning a numpy scalar or a fitted
+      object would do exactly that, thousands of cells downstream of here, so each value is tested
+      individually and an unserializable one is dropped rather than left to detonate at the writer.
+
+    The offline counterpart to 8e's static guard (``test_metrics_contract``, which checks that no
+    *hyperparameter* is named after a metric) could not take the same shape here: `diagnostics` is
+    an instance method needing a fitted model, so there is nothing to inspect at class-collection
+    time, and a static guard over the zero models that currently ship diagnostics would be vacuous.
+    Enforcing at the boundary is the stronger version anyway — it covers models this repo has never
+    seen.
+    """
+    try:
+        raw = model.diagnostics()
+    except Exception as e:  # noqa: BLE001 - describing a fit is best-effort, never fatal
+        _log.warning("diagnostics failed for %s/%s: %r", ts_id, model_name, e)
+        return {}
+    if not isinstance(raw, dict):
+        _log.warning(
+            "diagnostics for %s/%s returned %s, not a dict — dropped",
+            ts_id,
+            model_name,
+            type(raw).__name__,
+        )
+        return {}
+    kept: dict[str, Any] = {}
+    dropped: list[str] = []
+    for key, value in raw.items():
+        if key in METRIC_NAMES:
+            dropped.append(f"{key} (named after a metric)")
+            continue
+        try:
+            json.dumps({key: value})
+        except (TypeError, ValueError):
+            dropped.append(f"{key} (not JSON-serializable)")
+            continue
+        kept[key] = value
+    if dropped:
+        _log.warning(
+            "diagnostics for %s/%s dropped key(s): %s", ts_id, model_name, ", ".join(dropped)
+        )
+    return kept
+
+
 def run_cell(
     series: pd.DataFrame,
     model_name: str,
@@ -439,6 +524,10 @@ def run_cell(
     # What this worker can see, memoized per process. Read up here so an error cell carries it too:
     # a cell that failed *because* the accelerator was missing is the row most worth the evidence.
     available, device_name = visible_device()
+    # Two tallies, one question each: what the published forecast cost, and what a per-series
+    # search cost on top of it. Created up here so the error path below can report them — a cell
+    # that died after forty fits burned forty fits, and that is the row worth finding.
+    fits, hpo_fits = FitTally(), FitTally()
 
     def _error(exc: BaseException, engine: str) -> CellResult:
         return CellResult(
@@ -461,6 +550,9 @@ def run_cell(
             cell_ended_at=datetime.now(UTC),
             device_available=available,
             device_name=device_name,
+            n_fits=fits.n_fits,
+            train_rows_total=fits.train_rows,
+            n_hpo_fits=hpo_fits.n_fits,
         )
 
     try:
@@ -485,7 +577,7 @@ def run_cell(
         lam = fit_transform_lambda(_target(series, cfg), cfg.features.transform)
         ctx = _model_context(cfg, transform_lambda=lam, family=model_cls.family)
         _require_device(ctx.device, model_cls.family, engine)
-        resolved = _resolve_params(series, model_name, cfg, ctx, params)
+        resolved = _resolve_params(series, model_name, cfg, ctx, params, hpo_fits)
 
         # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.
         #
@@ -508,7 +600,7 @@ def run_cell(
         if cfg.backtest.enabled:
             try:
                 oof, fold_metrics, bt = backtest_cell(
-                    series, lambda: model_cls(resolved, ctx), cfg, lam
+                    series, lambda: model_cls(resolved, ctx), cfg, lam, fits
                 )
                 metrics = _rollup_metrics(fold_metrics)
                 n_folds_achieved = len(fold_metrics)
@@ -529,6 +621,7 @@ def run_cell(
         y, X = build_features(series, cfg, lam)
         model = model_cls(resolved, ctx)
         model.fit(y, X)
+        fits.record(len(y))
         # The design frame for the horizon, indexed by the *future* dates: holiday flags and
         # Fourier phase are recomputed there (exact — they are functions of the date), the
         # level-shift step is carried forward, and only user-supplied exog falls back to a
@@ -634,6 +727,10 @@ def run_cell(
             # keep *for this series*, rather than asking anyone to trust a fleetwide average.
             point_forecast_margin=arm_comparison.get("margin"),
             hpo_scoring=hpo_scoring_basis(len(series), cfg, params),
+            diagnostics=_collect_diagnostics(model, ts_id, model_name),
+            n_fits=fits.n_fits,
+            train_rows_total=fits.train_rows,
+            n_hpo_fits=hpo_fits.n_fits,
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(e, engine)

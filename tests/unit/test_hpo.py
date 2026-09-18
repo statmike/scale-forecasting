@@ -218,7 +218,7 @@ def test_the_objective_and_the_leaderboard_read_disjoint_folds() -> None:
     ]
     seen: list[int] = []
 
-    def _fake_backtest_cell(series, factory, cfg_, lam=None):  # type: ignore[no-untyped-def]
+    def _fake_backtest_cell(series, factory, cfg_, lam=None, tally=None):  # type: ignore[no-untyped-def]
         seen.extend(p["fold_id"] for p in panels)
         return pd.DataFrame(), panels, BacktestOutcome("per_fold", None)
 
@@ -244,7 +244,7 @@ def test_a_series_with_only_the_holdout_fold_scores_on_it_rather_than_dropping_o
         "s1": [{"fold_id": 1, "wape": 0.50}],  # achieved only the newest fold
     }
 
-    def _fake_backtest_cell(series, factory, cfg_, lam=None):  # type: ignore[no-untyped-def]
+    def _fake_backtest_cell(series, factory, cfg_, lam=None, tally=None):  # type: ignore[no-untyped-def]
         return (
             pd.DataFrame(),
             by_id[str(series["ts_id"].iloc[0])],

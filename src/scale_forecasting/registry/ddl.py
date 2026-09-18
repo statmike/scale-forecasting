@@ -31,9 +31,8 @@ ships they read NULL. Keep the list in ``tests/unit/test_registry_column_parity.
 (``_RESERVED_*``) in step — it is the record of which columns have no producer yet, and it must
 shrink to empty.
 Reserved today: on ``forecast_metadata``, the backtest-methodology block (``achieved_step``,
-``achieved_min_train``, ``first_val_date``, ``last_val_date``, ``n_fits``, ``train_rows_total``)
-and the two ``*_scoring`` columns; on ``backtest_oof`` and ``forecast_predictions``, only
-``created_at``.
+``achieved_min_train``, ``first_val_date``, ``last_val_date``) and the two ``*_scoring`` columns;
+on ``backtest_oof`` and ``forecast_predictions``, only ``created_at``.
 
 The bodies below carry no SQL comments inside the parentheses — ``additive_columns`` splits the
 column block on commas and would read a comment line as a column.
@@ -143,6 +142,8 @@ CREATE TABLE IF NOT EXISTS `{d}.forecast_metadata` (
   hpo_scoring    STRING,
   n_fits         INT64,
   train_rows_total INT64,
+  n_hpo_fits     INT64,
+  fit_diagnostics JSON,
   device_requested STRING,
   device_available STRING,
   device_used    STRING,

@@ -126,6 +126,10 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `backtest_status` | `STRING` | How the *scoring* went, which is not how the cell went: `full` / `reduced` / `unscored` / `failed`. `reduced` covers any geometry other than the one the config asked for, not just a shorter fold list. NULL means backtesting was never asked for. |
 | `n_folds_achieved` | `INT64` | Folds actually scored (`0` on `unscored`/`failed`). |
 | `backtest_note` | `STRING` | Why the backtest was not `full` — the shortfall arithmetic, or the `short_series` policy and what it traded away, or the exception. NULL when it was. |
+| `n_fits` | `INT64` | Fits behind the **published forecast**: the backtest arms plus the final full-history fit. Measured, not derived — see [What the cell paid for](#what-the-cell-paid-for-in-fits) for why `n_folds_achieved + 1` is wrong on four of six refit paths. |
+| `train_rows_total` | `INT64` | Training observations those fits saw, summed. Not `n_fits × n_obs`: a fold trains on a prefix. |
+| `n_hpo_fits` | `INT64` | Fits a **per-series** hyperparameter search burned. None of them ship a forecast, so they are counted apart; total paid for is `n_fits + n_hpo_fits`. `0` under a fleetwide search, which runs on the driver and belongs to no row. |
+| `fit_diagnostics` | `JSON` | Whatever the fitting library said about this fit (AIC, a chosen `(p,d,q)`, an early-stop epoch). Per-model and **not** comparable across models, which is why it is a bag and not a metric column. NULL fleet-wide today — no model in this tree opts in yet. |
 
 ### Why a cell failed, in a word you can group by
 
@@ -327,11 +331,68 @@ jobs wasted their card" is one `WHERE` clause; and `review.monitor_run` carries 
 family's bar. A GPU family's bar is otherwise indistinguishable from a CPU family's, which is how
 the accelerator went unnoticed for twenty-one jobs in the first place.
 
+### What the cell paid for, in fits
+
+Three columns, and the reason there are three is that "how many fits did this cost" turns out to be
+two different questions.
+
+| Column | Counts |
+|--------|--------|
+| `n_fits` | Every `.fit()` behind the **published forecast** — the backtest arms plus the final full-history fit. |
+| `train_rows_total` | The training observations those fits saw, summed. |
+| `n_hpo_fits` | What a **per-series** hyperparameter search burned. Those fits ship nothing. |
+
+Total paid for is `n_fits + n_hpo_fits`. They are kept apart so that `fit_seconds / n_fits` stays a
+cost-per-shipped-fit — a search that runs inside the cell is already inside `fit_seconds`, and
+folding its fits into `n_fits` would make the ratio mean nothing. A *fleetwide* search contributes
+nothing to either column: it runs once on the driver before any cell exists, so its cost belongs to
+the run rather than to any one row.
+
+**`n_fits` is measured, not derived, and that is the whole point.** The plan-time estimate
+(`Workload.n_fits`, what `plan_run` prints) assumes a fresh fit per fold. Only two of the six refit
+paths actually work that way:
+
+| Scheme | Three folds cost | The estimate says |
+|--------|------------------|-------------------|
+| `expanding` / `sliding` | 3 fits + 1 final | 4 — agrees |
+| …with `control_arm: true` | 4 + 1 | 4 — one low |
+| `expanding_stale` | 1 + 1 | 4 — two high |
+| `expanding_frozen` (model can recondition) | 2 + 1 | 4 — one high |
+| `expanding_frozen` (model cannot) | 4 + 1 | 4 — one low |
+
+So the difference between the plan and the column is not an error in either: it is what the scheme
+cost or saved, and a run that records both can be asked that question directly. A reader tempted to
+substitute `n_folds_achieved + 1` should note that it is correct only on the first row of that
+table — one A/B analysis in this repo's history did exactly that and quietly overstated every frozen
+arm.
+
+An error cell reports these too, with `0` meaning the cell died before fitting anything. A cell that
+burned forty fits and then failed is an expensive failure, and without the column it looks exactly
+like a cheap one.
+
+### What the model said about its own fit
+
+`fit_diagnostics` is a nullable JSON bag, beside `best_params`, holding whatever the fitting library
+reports about *this* fit: an AIC or log-likelihood, the `(p,d,q)` an `auto_arima` chose, a boosting
+round an early stop landed on, a changepoint count.
+
+It is deliberately **not** in the metric panel. A scored metric is a pure function of
+`(y_true, yhat, y_train, bounds)` that the framework computes, so it means the same thing for every
+model and a leaderboard can rank on it. A diagnostic is whatever a library happened to expose: it
+exists for some models and not others, and where two models both report an "AIC" the two numbers are
+not on a comparable scale. A leaderboard column built on one would look uniform and not be.
+
+No model in this tree ships diagnostics yet, so the column is NULL fleet-wide today; the seam is
+`BaseModel.diagnostics()` and it defaults to `{}`. Two guards apply at the worker boundary rather
+than being left to model authors: a key named after a metric is dropped (with a warning naming it),
+and so is a value `json.dumps` cannot carry — the Storage Write API rejects a whole append on one
+bad row, which in a Spark or Ray worker kills the task and cascades to the run.
+
 ### Columns that exist but are not filled yet
 
 `SELECT *` on this table also returns
-`achieved_step`, `achieved_min_train`, `first_val_date`, `last_val_date`, `n_fits`, and
-`train_rows_total`. **They are all NULL today.** They are
+`achieved_step`, `achieved_min_train`, `first_val_date`, and `last_val_date`. **They are all NULL
+today.** They are
 declared ahead of the code that writes them because adding a column to a deployed table is a
 migration every deployment has to run, and doing that once is better than doing it five times.
 Don't build a reader on them yet — `NULL` here means "not recorded", not "no".

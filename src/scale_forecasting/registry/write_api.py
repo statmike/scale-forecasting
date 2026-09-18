@@ -124,8 +124,16 @@ _META_SPEC: tuple[tuple[str, str], ...] = (
     ("point_forecast_margin", "D"),
     ("ensemble_scoring", "S"),
     ("hpo_scoring", "S"),
+    # What the cell paid for, in fits. `n_fits` is the backtest arms plus the final full-history
+    # fit — the measured counterpart of the plan-time `config.Workload.n_fits`. `n_hpo_fits` is what
+    # a per-series search burned on top, kept separate so `fit_seconds / n_fits` stays readable and
+    # total-paid-for is still available as the sum.
     ("n_fits", "I"),
     ("train_rows_total", "I"),
+    ("n_hpo_fits", "I"),
+    # Whatever the fitting library said about the fit — per-model, not comparable across models,
+    # and deliberately not a metric column. Same shape as `best_params`: a JSON bag.
+    ("fit_diagnostics", "S"),
     # Reserved — what hardware the cell asked for, what it found, and what it actually ran on.
     ("device_requested", "S"),
     ("device_available", "S"),

@@ -26,6 +26,7 @@ from scale_forecasting.resources.catalog import _INTRAOP_ENV_VARS
 from scale_forecasting.worker import ERROR_CLASSES, CellResult, classify_error, run_cell
 
 HORIZON = 7
+_CREATED = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 def _series(n: int = 120, ts_id: str = "series-a") -> pd.DataFrame:
@@ -729,3 +730,191 @@ def test_a_tuned_cell_carries_the_basis_onto_its_registry_row() -> None:
     assert res.hpo_scoring == "holdout"
     row = assemble_metadata_row(res, datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
     assert row["hpo_scoring"] == "holdout"
+
+
+# --- what the cell paid for, in fits ---------------------------------------------
+#
+# Two columns that were declared for months and written by nobody. The gap mattered: one A/B
+# analysis found its `SUM(n_fits)` denominator NULL and fell back to `n_folds_achieved + 1`, which
+# is only correct under a per-fold refit and overstates every frozen scheme. The branch-by-branch
+# arithmetic lives in `test_backtest.py`; these are about the columns arriving populated.
+
+
+def test_a_cell_with_no_backtest_paid_for_exactly_one_fit() -> None:
+    res = run_cell(_series(), "theta", _cfg())
+    assert res.n_fits == 1
+    assert res.train_rows_total == 120
+    assert res.n_hpo_fits == 0
+
+
+def test_a_backtested_cell_counts_its_folds_plus_the_published_fit() -> None:
+    """`n_fits` is the measured counterpart of the plan-time `Workload.n_fits`, and under the
+    default refit scheme the two agree exactly — which is what makes a disagreement elsewhere
+    readable as the cost of a scheme rather than as a bug in one of them."""
+    from scale_forecasting.config import estimate_workload
+
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "horizon": 7, "step": 7, "min_train": 30})
+    res = run_cell(_series(), "theta", cfg)
+    assert res.n_folds_achieved == 3
+    assert res.n_fits == 4
+    assert res.n_fits == estimate_workload(cfg, obs_counts=[120]).n_fits
+    # Not `n_fits * n_obs`: the folds train on prefixes, so the observations paid for are fewer.
+    assert 120 < (res.train_rows_total or 0) < res.n_fits * 120
+
+
+def test_a_frozen_scheme_reports_fewer_fits_than_the_plan_assumed() -> None:
+    """The reason the column cannot be derived from `n_folds_achieved`. The estimate says four,
+    the scheme paid two, and only one of those numbers is a measurement."""
+    from scale_forecasting.config import estimate_workload
+
+    cfg = _cfg(
+        models=["naive_mean"],
+        backtest={
+            "enabled": True,
+            "n_folds": 3,
+            "horizon": 7,
+            "step": 7,
+            "min_train": 30,
+            "scheme": "expanding_frozen",
+        },
+    )
+    res = run_cell(_series(), "naive_mean", cfg)
+    assert res.backtest_refit == "recondition"
+    assert res.n_fits == 3  # two frozen-scheme fits + the final full-history one
+    assert estimate_workload(cfg, obs_counts=[120]).n_fits == 4
+    assert (res.n_folds_achieved or 0) + 1 == 4  # the approximation this column replaces
+
+
+def test_a_per_series_search_is_counted_separately_from_the_published_fits() -> None:
+    """Both numbers, kept apart. Adding the search's fits to `n_fits` would make
+    ``fit_seconds / n_fits`` meaningless; dropping them would hide most of what the cell cost.
+    Total paid for is the sum. `theta` rather than `naive_mean` because a model with no search
+    space returns before creating a study, and this test would then be vacuous."""
+    cfg = _hpo_cfg(hpo={"enabled": True, "granularity": "per_series", "n_trials": 2})
+    res = run_cell(_series(n=200), "theta", cfg)
+    assert res.status == "ok"
+    assert res.n_fits == 4  # three folds plus the published fit — unmoved by the search
+    assert (res.n_hpo_fits or 0) > 0
+    assert res.n_hpo_fits == 6  # 2 trials x 3 folds, none of which ships a forecast
+
+
+def test_a_fleetwide_search_charges_the_cell_nothing() -> None:
+    """It ran on the driver before this cell existed, so there is nowhere honest to put it."""
+    res = run_cell(_series(n=200), "naive_mean", _hpo_cfg(), {})
+    assert res.status == "ok"
+    assert res.n_hpo_fits == 0
+
+
+def test_a_cell_that_dies_before_fitting_reports_zero_rather_than_null() -> None:
+    """Zero is a measurement — it says the failure was cheap. NULL would say nobody counted."""
+    res = run_cell(_series(), "no_such_model", _cfg(models=["no_such_model"]))
+    assert res.status == "error"
+    assert (res.n_fits, res.train_rows_total, res.n_hpo_fits) == (0, 0, 0)
+
+
+def test_a_cell_that_dies_after_fitting_reports_what_it_burned(monkeypatch: Any) -> None:
+    """The row worth finding: an expensive failure looks exactly like a cheap one without this."""
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("no future frame for you")
+
+    monkeypatch.setattr(worker, "build_future_features", boom)
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "horizon": 7, "step": 7, "min_train": 30})
+    res = run_cell(_series(), "theta", cfg)
+    assert res.status == "error"
+    assert res.n_fits == 4
+
+
+def test_the_fit_counts_reach_the_registry_row() -> None:
+    from scale_forecasting.registry.rows import assemble_metadata_row
+
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "horizon": 7, "step": 7, "min_train": 30})
+    row = assemble_metadata_row(run_cell(_series(), "theta", cfg), _CREATED)
+    assert row["n_fits"] == 4
+    assert row["train_rows_total"] > 120
+    assert row["n_hpo_fits"] == 0
+
+
+# --- fit diagnostics -------------------------------------------------------------
+#
+# Whatever the library says about the fit, contained at the runtime boundary. The containment is
+# here rather than in a static test over model classes because `diagnostics()` is an instance
+# method needing a fitted model — there is nothing to inspect at collection time, and a static
+# guard over the zero models that ship one today would be vacuous. Enforcing here also covers
+# models this repo has never seen.
+
+
+class _Diagnosing:
+    """A stand-in for a fitted model that reports whatever it is constructed with."""
+
+    def __init__(self, answer: Any) -> None:
+        self._answer = answer
+
+    def diagnostics(self) -> Any:
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
+
+
+def _collect(answer: Any) -> dict[str, Any]:
+    return worker._collect_diagnostics(_Diagnosing(answer), "series-a", "theta")  # type: ignore[arg-type]
+
+
+def test_every_model_reports_no_diagnostics_by_default() -> None:
+    """The base returns ``{}``, so the column is NULL for the whole fleet until a model opts in —
+    and `_as_json` collapses an empty bag to NULL rather than writing ``{}``."""
+    from scale_forecasting.registry.rows import assemble_metadata_row
+
+    res = run_cell(_series(), "theta", _cfg())
+    assert res.diagnostics == {}
+    assert assemble_metadata_row(res, _CREATED)["fit_diagnostics"] is None
+
+
+def test_a_models_own_numbers_pass_through_untouched() -> None:
+    assert _collect({"aic": 412.5, "order": "(1,1,1)", "epochs": 30}) == {
+        "aic": 412.5,
+        "order": "(1,1,1)",
+        "epochs": 30,
+    }
+
+
+def test_a_diagnostic_named_after_a_metric_is_dropped_not_written() -> None:
+    """Otherwise "which mase is this" becomes a real question the first time anything flattens the
+    JSON beside the metric columns it sits next to."""
+    metric = next(iter(METRIC_NAMES))
+    assert _collect({metric: 0.1, "aic": 9.0}) == {"aic": 9.0}
+
+
+def test_a_value_json_cannot_carry_is_dropped_before_it_reaches_the_writer() -> None:
+    """The Storage Write API rejects the whole append on one bad row, which in a Spark or Ray
+    worker kills the task and cascades. One model's numpy scalar must not do that to a batch."""
+    assert _collect({"weights": np.array([1.0, 2.0]), "aic": 9.0}) == {"aic": 9.0}
+
+
+def test_a_raising_diagnostics_costs_the_bag_and_nothing_else() -> None:
+    """Same reasoning as `serialize`: a forecast that was produced must not be thrown away because
+    a library could not describe how it was produced."""
+    assert _collect(RuntimeError("the library has opinions")) == {}
+
+
+def test_a_diagnostics_that_is_not_a_dict_is_refused_whole() -> None:
+    assert _collect([1, 2, 3]) == {}
+
+
+def test_a_populated_bag_reaches_the_registry_row_as_json() -> None:
+    import json
+
+    from scale_forecasting.registry.rows import assemble_metadata_row
+
+    res = run_cell(_series(), "theta", _cfg())
+    row = assemble_metadata_row(
+        replace_diagnostics(res, {"aic": 412.5, "order": "(1,1,1)"}), _CREATED
+    )
+    assert json.loads(row["fit_diagnostics"]) == {"aic": 412.5, "order": "(1,1,1)"}
+
+
+def replace_diagnostics(res: CellResult, diagnostics: dict[str, Any]) -> CellResult:
+    """`CellResult` is frozen; rebuild it with a populated bag (no model in-tree ships one yet)."""
+    import dataclasses
+
+    return dataclasses.replace(res, diagnostics=diagnostics)

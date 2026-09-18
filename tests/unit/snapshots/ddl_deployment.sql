@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_metadata` (
   hpo_scoring    STRING,
   n_fits         INT64,
   train_rows_total INT64,
+  n_hpo_fits     INT64,
+  fit_diagnostics JSON,
   device_requested STRING,
   device_available STRING,
   device_used    STRING,

@@ -216,6 +216,41 @@ class BaseModel(ABC):
         """Resolved params actually used (post-HPO). Logged to ``forecast_metadata.best_params``."""
         return dict(self.params)
 
+    def diagnostics(self) -> dict[str, Any]:
+        """Whatever the fitting library reports about *this* fit. Default: nothing.
+
+        Called once per cell after the final full-history fit, and written to
+        ``forecast_metadata.fit_diagnostics``. Examples of what belongs here: AIC or
+        log-likelihood, the ``(p,d,q)`` an ``auto_arima`` selected, XGBoost's ``best_iteration``,
+        a changepoint count, the number of epochs an early stop actually ran.
+
+        **Why these are not metrics, and why that distinction is load-bearing.** A scored metric is
+        a pure function of ``(y_true, yhat, y_train, bounds)`` that the *framework* computes, so it
+        means the same thing for all sixteen models and a leaderboard can rank on it. A diagnostic
+        is whatever the library happened to expose: it exists for some models and not others, and
+        where two models both report an "AIC" the two numbers are not on a comparable scale. Put
+        one in the metric panel and you get a leaderboard column that looks uniform and is not —
+        which is exactly the failure the framework-computes-metrics rule exists to prevent. So this
+        is a bag in its own JSON column, next to ``best_params``, which is already the precedent
+        for per-model numbers nobody aggregates across models. Nothing here reaches the panel, the
+        leaderboard projection, or ``decision_metric``.
+
+        **Key names may not collide with a metric name.** ``best_params`` and the metric panel are
+        read off one ``forecast_metadata`` row, and a diagnostic called ``mase`` would make "which
+        mase is this" a real question the first time anything flattens the JSON beside the columns.
+        `worker` drops a colliding key and logs it rather than failing the cell — see
+        `worker._collect_diagnostics`.
+
+        **Best-effort, never fatal.** Anything raised here is caught and the cell simply reports no
+        diagnostics, on the same reasoning as `serialize`: a forecast that was produced must not be
+        thrown away because a library could not describe how it was produced. Return plain
+        JSON-serializable scalars — the bag is written with ``json.dumps`` into a BigQuery ``JSON``
+        column, so a numpy scalar or a fitted object is dropped (with a warning) rather than
+        allowed to fail the append for every other cell in the same batch. Cast to
+        ``float``/``int``/``str`` here and the value survives.
+        """
+        return {}
+
     def serialize(self) -> bytes | None:
         """Serialize the fitted model for artifact persistence.
 

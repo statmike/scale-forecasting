@@ -1320,6 +1320,13 @@ class Workload:
     ``n_cells`` counts. It deliberately does **not** multiply by folds: folds happen *inside* a
     cell, and the old fold-multiplied number made a backtested run look like it scheduled three
     times the work when it schedules the same work three times as deep.
+
+    **This is the estimate; the run records the measurement.** ``forecast_metadata.n_fits`` and
+    ``train_rows_total`` are the same two quantities counted at the fit site by `worker.run_cell`.
+    The two disagree on four of the six refit paths, because the estimate below assumes a fresh fit
+    per fold and only ``expanding``/``sliding`` do that — see `backtest.FitTally`. That gap is not
+    an error in either number. It is what the scheme cost or saved, and a completed run can be
+    asked for it.
     """
 
     n_series: int | None  # None = unlimited (unknown until the data is read)

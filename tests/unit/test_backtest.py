@@ -17,6 +17,7 @@ import pytest
 
 from scale_forecasting.backtest import (
     OOF_COLUMNS,
+    FitTally,
     Fold,
     achievable_folds,
     assert_panel_supports_folds,
@@ -1121,6 +1122,83 @@ def test_n_fits_equals_the_factory_calls_the_cell_actually_makes() -> None:
 
     backtest_cell(_series(n), counting, cfg)
     assert estimate_workload(cfg, obs_counts=[n]).n_fits == calls + 1
+
+
+# --- FitTally: what the cell actually paid, branch by branch --------------------
+#
+# `fit_rows` above is the *estimate*, and it assumes a fresh fit per fold. `_walk_folds` has six
+# branches and only two of them work that way, so the tally and the estimate are different numbers
+# on four of six — which is the whole reason the tally exists rather than being derived from
+# `n_folds_achieved`. Every branch is pinned below, because a seventh branch added without a fit
+# going through `_fit_one` would otherwise undercount in silence.
+
+
+def _tallied(factory: Any, cfg: RunConfig, n: int = 200) -> FitTally:
+    tally = FitTally()
+    backtest_cell(_random_walk(n), factory, cfg, tally=tally)
+    return tally
+
+
+def test_a_refit_scheme_counts_one_fit_per_fold() -> None:
+    for scheme in ("expanding", "sliding"):
+        tally = _tallied(_real_factory("naive_mean", 5), _scheme_cfg(scheme))
+        assert tally.n_fits == 3, scheme
+
+
+def test_the_control_arm_adds_exactly_one_fit_to_a_refit_scheme() -> None:
+    """The counterfactual is one extra fit for the whole cell, not one per fold — and that claim
+    is now a recorded number rather than a comment."""
+    assert _tallied(_real_factory("naive_mean", 5), _control_cfg("expanding")).n_fits == 4
+
+
+def test_a_control_arm_nobody_can_fit_costs_nothing() -> None:
+    """`_LastValue` has no blind seam, so the arm is abandoned *before* the fit is paid for. The
+    tally is how you can tell the early return actually returns early."""
+    assert _tallied(_factory(), _control_cfg("expanding")).n_fits == 3
+
+
+def test_the_frozen_scheme_costs_two_fits_where_the_estimate_assumed_four() -> None:
+    """Three folds, two fits (frozen arm + blind arm), against a plan-time estimate of one fit per
+    fold plus the final one. The gap is what freezing saved, and it is only visible because both
+    numbers are recorded."""
+    tally = _tallied(_real_factory("naive_mean", 5), _scheme_cfg("expanding_frozen"))
+    assert tally.n_fits == 2
+    assert len(fit_rows(200, _scheme_cfg("expanding_frozen"))) == 4
+
+
+def test_a_frozen_scheme_on_a_model_without_the_seam_pays_for_the_fallback() -> None:
+    """`theta` cannot absorb an observation, so the blind fit happens and then every fold refits
+    anyway: 1 + 3. This is the branch that costs *more* than the plain refit scheme, and a reader
+    comparing `n_fits` across two rows is the only way to find it."""
+    assert _tallied(_real_factory("theta", 5), _scheme_cfg("expanding_frozen")).n_fits == 4
+
+
+def test_a_frozen_scheme_on_a_model_with_no_seams_at_all_is_just_a_refit() -> None:
+    """Checked before the blind fit is paid for, so it costs exactly what `expanding` costs."""
+    assert _tallied(_factory(), _scheme_cfg("expanding_frozen")).n_fits == 3
+
+
+def test_the_stale_scheme_costs_one_fit_for_the_whole_cell() -> None:
+    assert _tallied(_real_factory("theta", 5), _scheme_cfg("expanding_stale")).n_fits == 1
+
+
+def test_the_tally_sums_the_rows_each_fit_actually_trained_on() -> None:
+    """Not ``n_fits × n_obs``: a fold trains on a prefix, so the observations paid for are the fold
+    windows, not the whole series repeated."""
+    cfg = _scheme_cfg("expanding")
+    tally = _tallied(_real_factory("naive_mean", 5), cfg)
+    assert tally.train_rows == sum(f.train_size for f in make_folds(200, cfg))
+    assert tally.train_rows < tally.n_fits * 200
+
+
+def test_a_cell_run_without_a_tally_behaves_identically() -> None:
+    """The tally is an optional out-parameter; passing none must change no shipped number."""
+    cfg = _control_cfg("expanding")
+    plain, _, _ = backtest_cell(_random_walk(200), _real_factory("naive_mean", 5), cfg)
+    counted, _, _ = backtest_cell(
+        _random_walk(200), _real_factory("naive_mean", 5), cfg, tally=FitTally()
+    )
+    pd.testing.assert_frame_equal(plain, counted)
 
 
 def test_suggest_min_train_reports_the_ceiling_the_marginal_series_sets() -> None:

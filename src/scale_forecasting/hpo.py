@@ -37,6 +37,7 @@ from .models.base_model import BaseModel
 if TYPE_CHECKING:
     import pandas as pd
 
+    from .backtest import FitTally
     from .config import RunConfig
     from .models.base_model import ModelContext
 
@@ -87,6 +88,7 @@ def _score_params(
     sample: list[pd.DataFrame],
     cfg: RunConfig,
     ctx: ModelContext,
+    tally: FitTally | None = None,
 ) -> float:
     """One trial's objective: mean decision-metric (as a minimize-scalar) over the sample.
 
@@ -131,7 +133,7 @@ def _score_params(
             # run's own scheme, and the control arm answers a question about refit cadence that no
             # choice of hyperparameter changes.
             _, fold_metrics, _ = backtest_cell(
-                series, partial(model_cls, params, series_ctx), cfg, lam
+                series, partial(model_cls, params, series_ctx), cfg, lam, tally
             )
         except Exception as e:  # noqa: BLE001 - a bad series must not sink the whole trial
             _log.debug("hpo: skipping a series for %s: %r", model_name, e)
@@ -150,7 +152,11 @@ def _score_params(
 
 
 def tune_model(
-    model_name: str, sample: list[pd.DataFrame], cfg: RunConfig, ctx: ModelContext | None = None
+    model_name: str,
+    sample: list[pd.DataFrame],
+    cfg: RunConfig,
+    ctx: ModelContext | None = None,
+    tally: FitTally | None = None,
 ) -> dict[str, Any]:
     """Tune one model on ``sample`` and return its winning params (``{}`` if nothing to tune).
 
@@ -167,6 +173,13 @@ def tune_model(
 
     A model with no search space returns ``{}`` rather than the authored params: nothing was tuned,
     and `worker._resolve_params` applies the authored layer at the cell either way.
+
+    ``tally`` counts the fits the *search* paid for, and only the ``per_series`` granularity passes
+    one. A search costs ``n_trials × sample × folds`` fits and none of them produce a shipped
+    forecast, so they are counted separately from the cell's own — `worker.run_cell` keeps two
+    tallies and writes them to ``n_hpo_fits`` and ``n_fits``. The fleetwide pre-pass passes nothing:
+    it runs on the driver before any cell exists, so its fits belong to the run rather than to any
+    one row, and there is nowhere honest to put them.
     """
     model_cls = get_model(model_name)
     authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
@@ -184,7 +197,7 @@ def tune_model(
 
     def objective(trial: optuna.Trial) -> float:
         return _score_params(
-            model_name, {**authored, **model_cls.search_space(trial)}, sample, cfg, ctx
+            model_name, {**authored, **model_cls.search_space(trial)}, sample, cfg, ctx, tally
         )
 
     study.optimize(objective, n_trials=cfg.hpo.n_trials)
