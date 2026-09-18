@@ -193,14 +193,52 @@ def test_the_footprint_neuralprophet_actually_has_lands_on_the_floor_not_near_it
 
     76 KiB is the peak device memory a live NeuralProphet fit reached on a T4 — 0.00045% of the
     card. Solved honestly that is a fraction of about six millionths, which would ask Ray to pack
-    ~160,000 cells onto one device. Nothing in the memory arithmetic stops that; `_MIN_FRACTION`
-    does, and this test exists so that the floor is never mistaken for a rounding detail. The real
-    limit on GPU density is the node's cores, which is `resources.fleet`'s job, not this one.
+    ~160,000 cells onto one device. Nothing in the memory arithmetic stops that; the floor does,
+    and this test exists so that the floor is never mistaken for a rounding detail. The real limit
+    on GPU density is the node's cores — and on the shipped ``n1-standard-8`` those seven cores are
+    tighter than the ten cells `_MIN_FRACTION` allows, which is why the constant is still the
+    answer here. On a wider node it is not; see the test below.
     """
     cfg = _cfg(compute=_compute(gpu_fraction="auto", gpu_safety_margin=1.3))
     frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[77_824], gpu_type="T4")
     assert frac == ray_io._MIN_FRACTION
     assert (77_824 * 1.3) / ray_io.device_memory_bytes("T4") < ray_io._MIN_FRACTION
+
+
+def test_the_same_footprint_on_a_wider_node_lands_below_the_constant() -> None:
+    """The floor belongs to the node, not to a constant, and this is where that starts to matter.
+
+    Double the machine type and ``0.1`` becomes the binding thing: it caps a card at ten cells
+    while fifteen cores stand ready. The calibration has to hand `plan_pool` a fraction those
+    cores can actually use, or the two halves of the sizing disagree about the same card.
+    """
+    cfg = _cfg(
+        compute=_compute(
+            gpu_fraction="auto", gpu_safety_margin=1.3, ray_gpu_machine_type="n1-standard-16"
+        )
+    )
+    frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[77_824], gpu_type="T4")
+    assert frac < ray_io._MIN_FRACTION
+    assert ray_io.gpu_slots_per_device(frac) == 15  # n1-standard-16 less the reserved core
+
+
+def test_the_pool_and_the_calibration_read_the_same_node() -> None:
+    """One `pool_unit_shape`, two callers — the seam that keeps the two floors identical.
+
+    `calibrate_gpu_fraction` decides how finely to split a card and `plan_pool` decides how many
+    cells that card then holds. Both bound the answer by the node's cores, so both have to be
+    looking at the same node; building the shape twice is how they drift.
+    """
+    cfg = _cfg(
+        compute=_compute(
+            gpu_fraction="auto", gpu_safety_margin=1.3, ray_gpu_machine_type="n1-standard-16"
+        )
+    )
+    frac = ray_io.calibrate_gpu_fraction(cfg, measured_peaks_bytes=[77_824], gpu_type="T4")
+    plan = ray_io.plan_pool(cfg, [_GPU], 1000, gpu=True, gpu_type="T4", gpu_fraction=frac)
+    assert plan.slot.gpu_fraction == frac
+    assert plan.slots_per_unit == 15
+    assert plan.binding_axis == "cores"
 
 
 # --- where the calibration probe runs ------------------------------------------

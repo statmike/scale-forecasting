@@ -42,12 +42,13 @@ from typing import TYPE_CHECKING, Any
 
 # The measured-profile → runtime-knobs translation. It lives at the top level rather than under
 # ``engines/`` and depends on no engine, so importing it here cannot cycle.
-from ..resources.catalog import machine_cores, machine_memory_bytes
+from ..resources.catalog import device_floor_fraction, machine_cores, machine_memory_bytes
 from ..resources.fleet import (
     RuntimeResourcePlan,
     UnitShape,
     max_slot_memory_bytes,
     plan_fleet,
+    schedulable_cores,
 )
 from ..resources.slot import merge_slots, resource_slot
 
@@ -122,6 +123,10 @@ _CALIBRATION_TIMEOUT_S = 600.0
 
 # Clamp calibrated fractions to a sane band: below this a single task barely uses the GPU (packing
 # overhead dominates), above 1.0 is meaningless (one task can't want more than a whole device).
+#
+# The floor is a *default*. `catalog.device_floor_fraction` lowers it on a node whose cores would
+# have run more cells than ``0.1`` permits, because a card split ten ways on a sixteen-core node is
+# the device axis idling cores — read that function before changing this number.
 _MIN_FRACTION = 0.1
 
 # Safety ceiling on chunk count, mirroring spark_io's bucket ceiling: even a huge run shouldn't
@@ -199,9 +204,9 @@ def resolve_job_gpu(cfg: RunConfig) -> tuple[bool, str | None]:
 # --- pure: auto-fraction calibration -------------------------------------------
 
 
-def _clamp_fraction(fraction: float) -> float:
-    """Clamp a GPU fraction to ``[_MIN_FRACTION, 1.0]`` (pure)."""
-    return max(_MIN_FRACTION, min(1.0, fraction))
+def _clamp_fraction(fraction: float, floor: float | None = None) -> float:
+    """Clamp a GPU fraction to ``[floor, 1.0]``, defaulting to `_MIN_FRACTION` (pure)."""
+    return max(_MIN_FRACTION if floor is None else floor, min(1.0, fraction))
 
 
 def gpu_slots_per_device(fraction: float) -> int:
@@ -224,6 +229,22 @@ def device_memory_bytes(gpu_type: str | None) -> int:
     return _DEVICE_MEMORY_BYTES.get(gpu_type or "", _DEFAULT_DEVICE_MEMORY_BYTES)
 
 
+def pool_unit_shape(cfg: RunConfig, *, gpu: bool) -> UnitShape:
+    """One worker node of the CPU or GPU pool: cores and RAM from the machine type (pure).
+
+    Shared by `plan_pool` and `calibrate_gpu_fraction` because the two have to agree about the
+    node. The calibration decides how finely to split a card, `plan_pool` decides how many cells
+    that card then holds, and both answers are bounded by the same cores — sizing them off two
+    independently-built shapes is how the two drift apart.
+    """
+    machine_type = cfg.compute.ray_gpu_machine_type if gpu else cfg.compute.ray_cpu_machine_type
+    return UnitShape(
+        cores=machine_cores(machine_type),
+        memory_bytes=machine_memory_bytes(machine_type),
+        accelerators=cfg.compute.accelerator_count if gpu else 0,
+    )
+
+
 def calibrate_gpu_fraction(
     cfg: RunConfig,
     *,
@@ -239,7 +260,9 @@ def calibrate_gpu_fraction(
     * **``"auto"``** → size the fraction to the model's real footprint: fit NeuralProphet on a few
       sample series measuring peak GPU memory, take the worst case, add a safety margin, and divide
       by **the device's** memory — so ``fraction ≈ peak × margin / device_bytes`` and
-      ``floor(1/fraction)`` tasks pack without an OOM. Clamped to ``[_MIN_FRACTION, 1.0]``.
+      ``floor(1/fraction)`` tasks pack without an OOM. Clamped to ``[floor, 1.0]``, where the
+      floor is `_MIN_FRACTION` or lower — see `catalog.device_floor_fraction`, which lets it drop
+      on a node whose cores would have run more cells than a flat ``0.1`` allows.
 
     ``gpu_type`` picks that denominator (`device_memory_bytes`); ``None`` falls back to
     ``compute.gpu_type``. It is an argument rather than read from ``cfg`` because a family's
@@ -282,7 +305,8 @@ def calibrate_gpu_fraction(
     raw = (max(usable) * cfg.compute.gpu_safety_margin) / device_memory_bytes(
         gpu_type or cfg.compute.gpu_type
     )
-    return _clamp_fraction(raw)
+    unit = pool_unit_shape(cfg, gpu=True)
+    return _clamp_fraction(raw, device_floor_fraction(schedulable_cores(unit), unit.accelerators))
 
 
 def _measure_np_peaks_on_device(
@@ -515,11 +539,10 @@ def plan_pool(
 ) -> RuntimeResourcePlan:
     """Size one Ray worker pool from the measured profile, or from the old constants (pure).
 
-    The single place the Ray runtime turns a `ComputeProfile` into hardware. Builds the
-    pool's `UnitShape` from its configured machine type (cores from the name, RAM from
-    `machine_memory_bytes`, devices from ``accelerator_count``), sizes one slot per family
-    that lands on the pool, `merge_slots` them into the one slot a shared worker needs, and
-    hands the result to `plan_fleet`.
+    The single place the Ray runtime turns a `ComputeProfile` into hardware. Takes the pool's
+    `UnitShape` from `pool_unit_shape`, sizes one slot per family that lands on the pool,
+    `merge_slots` them into the one slot a shared worker needs, and hands the result to
+    `plan_fleet`.
 
     **``profile=None`` asks for nothing the measurement would have asked for**: a slot is one
     core, no memory request, and — on the GPU pool — `_sizing_fraction`. What that slot then packs
@@ -540,12 +563,7 @@ def plan_pool(
     `ray_engine` passes the cluster's already-resolved ``[cpu|gpu]_max_nodes`` so that
     `tasks_for_ceiling` counts against the ceiling the pool can really reach.
     """
-    machine_type = cfg.compute.ray_gpu_machine_type if gpu else cfg.compute.ray_cpu_machine_type
-    unit = UnitShape(
-        cores=machine_cores(machine_type),
-        memory_bytes=machine_memory_bytes(machine_type),
-        accelerators=cfg.compute.accelerator_count if gpu else 0,
-    )
+    unit = pool_unit_shape(cfg, gpu=gpu)
     ceiling = max_units if max_units is not None else _pool_ceiling(cfg, gpu=gpu)
     floor_nodes = cfg.compute.ray_gpu_min_nodes if gpu else cfg.compute.ray_cpu_min_nodes
 
@@ -559,6 +577,7 @@ def plan_pool(
             static_gpu_fraction=(
                 gpu_fraction if gpu_fraction is not None else _sizing_fraction(cfg)
             ),
+            min_gpu_fraction=device_floor_fraction(schedulable_cores(unit), unit.accelerators),
             max_cores=unit.cores if unit.cores > 0 else None,
             max_memory_bytes=max_slot_memory_bytes(unit),
         )

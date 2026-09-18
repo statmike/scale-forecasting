@@ -312,6 +312,89 @@ def test_the_gpu_band_matches_the_engine_it_replaces() -> None:
     assert catalog._NOMINAL_GPU_FRACTION == ray_io._NOMINAL_AUTO_FRACTION
 
 
+# --- the GPU floor: a constant that was quietly a density ceiling ---------------
+
+
+def test_the_floor_only_ever_moves_down_never_up() -> None:
+    """The one-way property, and the reason a pinned fraction is safe from this function.
+
+    A floor that could rise would silently overrule an operator who pinned a small fraction on
+    purpose, and the shipped A/B config does exactly that (`gpu_fraction: 0.125`). Relaxation is
+    allowed to hand a pool more density than the constant would have; it is never allowed to take
+    density away.
+    """
+    for cores in (1, 2, 4, 8, 15, 16, 31, 32, 64, 96):
+        for cards in (0, 1, 2, 4, 8):
+            assert catalog.device_floor_fraction(cores, cards) <= catalog._MIN_GPU_FRACTION
+
+
+def test_the_shipped_eight_core_node_keeps_the_floor_it_always_had() -> None:
+    """Seven usable cores are tighter than ten cells, so there is nothing to relax.
+
+    This is the whole installed base: every config in the tree pins ``n1-standard-8``. The fix
+    below must not move a single shipped run, and this is the assertion that says so.
+    """
+    assert catalog.device_floor_fraction(7, 1) == catalog._MIN_GPU_FRACTION
+
+
+def test_a_wider_node_lowers_the_floor_instead_of_idling_its_cores() -> None:
+    """``0.1`` caps a card at ten cells; a sixteen-core node can run fifteen.
+
+    Left alone, the constant decides the density and five cores sit idle — and because the
+    device axis is the one reporting, an operator is pointed at a GPU knob that cannot move the
+    answer. The floor now falls far enough that the cores are what run out.
+    """
+    for cores in (15, 31, 47, 63, 95):
+        floor = catalog.device_floor_fraction(cores, 1)
+        assert floor < catalog._MIN_GPU_FRACTION
+        # The reciprocal has to land on the core count *exactly* — `fleet._device_bound` takes
+        # ``floor(1 / fraction)``, and a float that came back as 14.999 would give away a cell.
+        assert math.floor(1.0 / floor) == cores
+
+
+def test_several_cards_on_one_node_round_up_rather_than_leaving_a_core_short() -> None:
+    """Two cards splitting fifteen cores need eight each, not seven — ``ceil``, not ``floor``.
+
+    ``floor`` would give ``2 x 7 == 14`` against fifteen cores: one core idle for the sake of a
+    rounding choice, which is the very thing this function exists to stop.
+    """
+    floor = catalog.device_floor_fraction(15, 2)
+    assert 2 * math.floor(1.0 / floor) >= 15
+
+
+def test_a_node_with_no_card_has_no_device_axis_to_relax() -> None:
+    """Nothing consults the floor on a CPU pool; returning the default keeps it a no-op."""
+    assert catalog.device_floor_fraction(95, 0) == catalog._MIN_GPU_FRACTION
+
+
+def test_a_footprint_lifted_by_the_floor_says_so_in_the_slot_notes() -> None:
+    """The number in the slot is not the number anybody measured, and that has to be legible.
+
+    NeuralProphet's real peak is about six millionths of a T4. Before this note, telemetry showed
+    a fraction sitting on the floor and no way to tell a measurement that landed there from a
+    measurement the floor overruled.
+    """
+    profile = _profile(
+        _fit(model_type="neuralprophet", family="deep_learning", peak_gpu_bytes=77_824)
+    )
+    slot = resource_slot(profile, "deep_learning", use_gpu=True, device_bytes=16 * _GIB)
+    assert slot.gpu_fraction == catalog._MIN_GPU_FRACTION
+    assert "gpu_fraction" in slot.measured  # it *was* measured; the floor just won
+    assert any("raised to the floor" in note for note in slot.notes)
+
+
+def test_a_pinned_fraction_is_left_exactly_where_the_operator_put_it() -> None:
+    """A relaxed floor is a lower bound, so a pin above it is untouched — config wins (G2)."""
+    slot = resource_slot(
+        None,
+        "deep_learning",
+        use_gpu=True,
+        static_gpu_fraction=0.125,
+        min_gpu_fraction=catalog.device_floor_fraction(31, 1),
+    )
+    assert slot.gpu_fraction == 0.125
+
+
 # --- merging: one pool, several families ---------------------------------------
 
 
@@ -548,6 +631,39 @@ def test_the_saturating_node_count_is_the_one_the_pool_can_actually_reach() -> N
     assert on_cluster.saturating_units == math.ceil(1000 / 5)  # 200
 
 
+def test_a_wider_gpu_node_buys_the_cores_it_paid_for_end_to_end() -> None:
+    """The floor fix as an operator sees it: one node shape changed, three node counts moved.
+
+    NeuralProphet's measured peak is 76 KiB on a 16 GiB T4, so the honest fraction is six
+    millionths and the floor decides the packing on every auto-calibrated run. With a flat
+    ``0.1`` that floor is ten cells per card whatever the node is, so paying for four times the
+    cores bought no extra density at all — and the plan said ``device``, pointing at the one knob
+    that could not help. Each line below is now the node's usable core count.
+    """
+    profile = _profile(
+        _fit(model_type="neuralprophet", family="deep_learning", peak_gpu_bytes=77_824)
+    )
+
+    def plan(cores: int) -> fleet.RuntimeResourcePlan:
+        return plan_resources(
+            profile,
+            "deep_learning",
+            "ray",
+            n_cells=1000,
+            unit=UnitShape(cores=cores, memory_bytes=cores * 4 * _GIB, accelerators=1),
+            use_gpu=True,
+            device_bytes=16 * _GIB,
+            max_units=500,
+        )
+
+    assert [plan(c).slots_per_unit for c in (8, 16, 32)] == [7, 15, 31]
+    # The shipped node is the one that does not move: seven cores were already tighter than ten.
+    assert plan(8).binding_axis == "cores"
+    assert plan(32).binding_axis == "cores"
+    # And the quota request an operator would file falls with it: 100 nodes become 33.
+    assert plan(32).saturating_units == math.ceil(1000 / 31)
+
+
 def test_an_unmeasured_memory_axis_leaves_density_exactly_where_it_was() -> None:
     """No basis → no bound. The memory rule must not shrink a fleet it knows nothing about."""
     assert slots_per_unit(resource_slot(None, "statistical"), _N1_STANDARD_8) == 7  # cores only
@@ -626,6 +742,25 @@ def test_a_tie_is_credited_to_the_axis_the_slot_is_defined_by() -> None:
     tied = UnitShape(cores=8, memory_bytes=30 * _GIB)  # 21 GiB / 3 GiB == 7 == schedulable cores
     assert fleet._memory_bound(cpu, tied) == fleet._core_bound(cpu, tied) == 7
     assert fleet._binding_axis(cpu, tied) == "cores"
+
+
+def test_a_tie_the_floor_manufactured_is_credited_to_the_cores_that_caused_it() -> None:
+    """The one tie that must *not* go to the device, and the test above is why it is subtle.
+
+    `catalog.device_floor_fraction` derives the floor from the node's cores, so a slot resting on
+    that floor has a device bound equal to its core bound **by construction**. The rule above
+    would call that a balanced GPU pool and point the operator at the fraction — but the fraction
+    came from the cores, so pinning a smaller one gets clamped straight back and pinning a larger
+    one only loses density. The lever that moves this number is the machine type.
+    """
+    unit = UnitShape(cores=16, memory_bytes=60 * _GIB, accelerators=1)
+    slot = _slot("deep_learning", gpu_fraction=catalog.device_floor_fraction(15, 1))
+    assert fleet._device_bound(slot, unit) == fleet._core_bound(slot, unit) == 15
+    assert fleet._binding_axis(slot, unit) == "cores"
+
+    # A fraction the *model* earned, on the same node, is still the device's answer to give.
+    earned = _slot("deep_learning", gpu_fraction=0.5)
+    assert fleet._binding_axis(earned, unit) == "device"
 
 
 # --- density: the axis that bound it has to say so ------------------------------

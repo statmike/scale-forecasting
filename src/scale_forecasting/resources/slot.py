@@ -82,9 +82,14 @@ class ResourceSlot:
         }
 
 
-def _clamp_gpu_fraction(fraction: float) -> float:
-    """Clamp a GPU fraction to ``[_MIN_GPU_FRACTION, 1.0]`` (pure)."""
-    return max(_MIN_GPU_FRACTION, min(1.0, fraction))
+def _clamp_gpu_fraction(fraction: float, floor: float | None = None) -> float:
+    """Clamp a GPU fraction to ``[floor, 1.0]``, defaulting to `_MIN_GPU_FRACTION` (pure).
+
+    The floor is passed in rather than read from the constant because how small a fraction is
+    worth asking for depends on the node it will be asked on — see
+    `catalog.device_floor_fraction`.
+    """
+    return max(_MIN_GPU_FRACTION if floor is None else floor, min(1.0, fraction))
 
 
 def resource_slot(
@@ -94,6 +99,7 @@ def resource_slot(
     use_gpu: bool = False,
     device_bytes: int | None = None,
     static_gpu_fraction: float | None = None,
+    min_gpu_fraction: float | None = None,
     max_cores: int | None = None,
     max_memory_bytes: int | None = None,
 ) -> ResourceSlot:
@@ -114,6 +120,10 @@ def resource_slot(
     * **gpu_fraction** — ``None`` unless ``use_gpu``. When measured *and* ``device_bytes``
       is known: ``slot_gpu_bytes / device_bytes``, clamped to the band. Otherwise
       ``static_gpu_fraction`` (the operator's pin), and failing that the nominal.
+      ``min_gpu_fraction`` is the bottom of that band — pass `catalog.device_floor_fraction`
+      for the unit so the floor cannot cap a device below what the node's cores would run;
+      omitting it keeps the flat default, which is right only for a direct caller with no node
+      in mind.
 
     ``profile`` may be ``None`` (profiling off, or the pre-pass produced nothing) and the
     family may simply be absent from it; both take every fallback, which reproduces the
@@ -157,8 +167,10 @@ def resource_slot(
         use_gpu=use_gpu,
         device_bytes=device_bytes,
         static_gpu_fraction=static_gpu_fraction,
+        min_gpu_fraction=min_gpu_fraction,
         measured=measured,
         assumed=assumed,
+        notes=notes,
     )
 
     return ResourceSlot(
@@ -247,8 +259,10 @@ def _resolve_gpu_fraction(
     use_gpu: bool,
     device_bytes: int | None,
     static_gpu_fraction: float | None,
+    min_gpu_fraction: float | None,
     measured: list[str],
     assumed: list[str],
+    notes: list[str],
 ) -> float | None:
     """The device share one cell needs: measured, else pinned, else nominal (pure).
 
@@ -256,14 +270,26 @@ def _resolve_gpu_fraction(
     than two, and inlining its ladder buried the other two. ``None`` when no GPU is
     provisioned — a CPU-only family must not carry a fraction, or a consumer will schedule
     against a device that isn't there.
+
+    A measurement lifted by the floor earns a note, because that is the case where the number
+    in the slot is not the number anybody took: the deep-learning family's real footprint is
+    small enough that the floor decides the packing, and until it was written down nobody
+    reading the telemetry could tell that apart from a measurement that happened to land there.
     """
     if not use_gpu:
         return None
     slot_gpu = cost.slot_gpu_bytes if cost is not None else None
     if slot_gpu is not None and device_bytes:
         measured.append("gpu_fraction")
-        return _clamp_gpu_fraction(slot_gpu / device_bytes)
+        raw = slot_gpu / device_bytes
+        clamped = _clamp_gpu_fraction(raw, min_gpu_fraction)
+        if clamped > raw:
+            notes.append(
+                f"gpu fraction {raw:.3g} raised to the floor {clamped:.3g}; "
+                f"the footprint packs denser than a device is worth splitting"
+            )
+        return clamped
     assumed.append("gpu_fraction")
     if static_gpu_fraction is not None:
-        return _clamp_gpu_fraction(static_gpu_fraction)
+        return _clamp_gpu_fraction(static_gpu_fraction, min_gpu_fraction)
     return _NOMINAL_GPU_FRACTION

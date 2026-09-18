@@ -2214,6 +2214,20 @@ because the shipped baseline carries no deep-learning family, which means it can
 does move the id. Nothing above is retracted — it describes a run that happened — but the config
 that produced it is no longer the config in the tree.
 
+*Forward note, 2026-09-18.* The pin above is still the right thing for an A/B — two arms have to
+match — but re-reading it later turned up something the block did not know it was recording. The
+floor it works around was a constant, `0.1`, and it applied whatever node the card was bolted to.
+On the eight-core worker both arms ran on, that constant was slack: seven usable cores are tighter
+than ten cells, so `auto` would have reported seven either way and the 25 % gap the pin closes is
+between ten and eight on the *device* axis alone. On a sixteen-core worker the same constant stops
+being slack and becomes the density ceiling, capping a card at ten cells with five cores idle — and
+naming `device` as the axis to go and change, when nothing about the device could move it. The
+floor is now derived from the node's cores (`catalog.device_floor_fraction`), so it can only ever
+fall below `0.1`, never rise above it. Every config in the tree pins `n1-standard-8`, where the two
+answers are identical, so no run on this page would come out differently today. The pinned `0.125`
+is likewise untouched: the relaxed floor is a lower bound, and an operator's chosen fraction sits
+above it.
+
 **On 2026-09-02 the whole Ray track stopped provisioning, and the elimination is the useful part.**
 `ray_100k` was attempted and never reached a job: Vertex returned the contentless
 `"An internal error occurred on your cluster. Please try recreating one in a few minutes."` in

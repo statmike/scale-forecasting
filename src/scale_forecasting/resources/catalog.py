@@ -20,6 +20,7 @@ OOMs). Only one of those is recoverable, and every unknown here leans that way.
 
 from __future__ import annotations
 
+import math
 import re
 
 # --- fallbacks: what a slot is worth when nothing measured it ------------------
@@ -33,6 +34,9 @@ _DEFAULT_SLOT_CORES = 1
 # device and packing overhead dominates; above 1.0 is meaningless. Duplicated rather than
 # imported because this module must not depend on an engine — a drift test pins the two
 # together instead (`tests/unit/test_resources.py`).
+#
+# The floor is a *default*, not a ceiling on density — `device_floor_fraction` lowers it on a
+# node whose cores would have run more. Read that function before changing this number.
 _MIN_GPU_FRACTION = 0.1
 _NOMINAL_GPU_FRACTION = 0.5
 
@@ -40,6 +44,46 @@ _NOMINAL_GPU_FRACTION = 0.5
 # ``compute.ray_target_cells_per_slot``. Only a default for direct callers; every engine
 # passes the configured value.
 _DEFAULT_TARGET_CELLS_PER_SLOT = 8
+
+
+def device_floor_fraction(schedulable_cores: int, accelerators: int) -> float:
+    """The smallest GPU fraction worth asking for on a node of this shape (pure).
+
+    `_MIN_GPU_FRACTION` unless the node's cores would have run more cells than that floor
+    permits, in which case it drops far enough to let them.
+
+    **Why a flat floor was wrong.** ``0.1`` caps a device at ten concurrent cells, and the
+    justification for it — below this a task barely uses the card, so packing overhead
+    dominates — describes a model that is actually using the accelerator. The deep-learning
+    family we ship is not: a NeuralProphet fit peaks at 50–78 KB on a 16 GB card, so the honest
+    fraction is about six millionths and *every* auto-calibrated run lands on the floor. The
+    fraction stopped being a measurement and became a constant. On an eight-core node that was
+    invisible, because seven usable cores bind before ten cells do; on a sixteen-core node with
+    the same single card the floor binds at ten and five cores sit idle, and `binding_axis`
+    reports ``device`` — sending an operator to change a GPU setting when the real limit is a
+    number in this file. It has already cost one config a hand-pinned fraction to work around
+    (see the 2026-09-09 note in the validation ledger).
+
+    **What replaces it.** Cores are the density a node can genuinely sustain — one cell needs a
+    core to run on whatever the card thinks — so the floor is never allowed to sit above the
+    fraction those cores imply. ``ceil`` on the per-device share keeps the device bound at or
+    above the core bound rather than one short of it when a node carries several cards. The
+    floor only ever moves *down*: a pinned fraction an operator chose is theirs, and a node too
+    small to want the relaxation keeps the default it always had.
+
+    **Only the Ray path passes this today, and that is deliberate.** Both Spark translators own a
+    second density derivation of their own (`cluster._cluster_density`,
+    `serverless._serverless_gpu_cores`), each live-proven on its platform's executor shapes, and
+    relaxing a floor underneath arithmetic this has not been measured against would be trading a
+    known conservative answer for an unmeasured one. They keep the flat default by not passing an
+    argument. `fleet.plan_resources` — the generic, runtime-neutral entry point — does pass it.
+
+    ``accelerators <= 0`` returns the default unchanged — there is no device axis to bound.
+    """
+    if accelerators <= 0:
+        return _MIN_GPU_FRACTION
+    per_device = max(1, math.ceil(max(1, schedulable_cores) / accelerators))
+    return min(_MIN_GPU_FRACTION, 1.0 / per_device)
 
 
 # --- machine shapes: memory a GCE machine type implies -------------------------

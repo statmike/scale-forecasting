@@ -19,6 +19,12 @@ The device axis in particular used to stand alone: a GPU slot's density was
 ``n1-standard-8`` with one T4 at the 0.1 fraction floor reported ten concurrent cells onto
 seven usable cores. Ten cells were never going to run; the arithmetic just never said so.
 
+Adding the core term stopped the over-count and left the mirror-image problem behind it: that
+``0.1`` floor is a *constant*, so on a sixteen-core node it capped a card at ten cells and left
+five cores idle, with the device named as the axis to go and fix. `catalog.device_floor_fraction`
+now derives the floor from the node instead, and `_defining_axis` knows that a fraction which came
+from the cores is not a statement about the card.
+
 **Nameplate is not schedulable, on either axis.** `schedulable_memory_bytes` takes the
 plasma store and the OS off the RAM; `schedulable_cores` takes `_RESERVED_CORES_PER_UNIT`
 off the vCPUs for the node's own agents. Every bound here goes through one of the two.
@@ -40,8 +46,10 @@ from typing import TYPE_CHECKING, Any
 from .catalog import (
     _DEFAULT_TARGET_CELLS_PER_SLOT,
     _MAX_SLOT_MEMORY_FRACTION,
+    _MIN_GPU_FRACTION,
     _RESERVED_CORES_PER_UNIT,
     _SCHEDULABLE_MEMORY_FRACTION,
+    device_floor_fraction,
     intraop_env_vars,
 )
 from .slot import ResourceSlot, resource_slot
@@ -134,7 +142,7 @@ class RuntimeResourcePlan:
         bounds = enforced_bounds(self.slot, self.unit, self.runtime)
         if max(1, min(bounds.values())) != self.slots_per_unit:
             return "scheduler"
-        return _tightest(bounds, _defining_axis(self.slot))[0]
+        return _tightest(bounds, _defining_axis(self.slot, self.unit))[0]
 
     @property
     def density_note(self) -> str | None:
@@ -183,7 +191,7 @@ class RuntimeResourcePlan:
         if self.binding_axis != "memory":
             return None
         others = {a: v for a, v in _bounds(self.slot, self.unit).items() if a != "memory"}
-        axis, packed = _tightest(others, _defining_axis(self.slot))
+        axis, packed = _tightest(others, _defining_axis(self.slot, self.unit))
         return (
             f"memory is holding this {self.family} pool to {self.slots_per_unit} concurrent "
             f"cells per unit: {against}, where "
@@ -395,9 +403,20 @@ def enforced_bounds(slot: ResourceSlot, unit: UnitShape, runtime: str) -> dict[s
     return {axis: value for axis, value in _bounds(slot, unit).items() if axis not in ignored}
 
 
-def _defining_axis(slot: ResourceSlot) -> str:
-    """The axis the slot is *defined* by — ``device`` when it carries a fraction, else ``cores``."""
-    return "device" if slot.gpu_fraction is not None else "cores"
+def _defining_axis(slot: ResourceSlot, unit: UnitShape) -> str:
+    """The axis the slot is *defined* by — ``device`` when it carries a fraction, else ``cores``.
+
+    **Unless the fraction is only echoing the cores.** `catalog.device_floor_fraction` lowers the
+    GPU floor on a node whose cores would have run more cells than a flat ``0.1`` allows, and a
+    slot sitting on that relaxed floor carries a fraction that was *computed from the core count*.
+    Its device bound then equals its core bound by construction, not by coincidence — so calling
+    the device axis "defining" would hand `_tightest` a tie it resolves the wrong way, and tell an
+    operator to reach for a GPU knob that cannot move the answer. Only the machine type can.
+    """
+    if slot.gpu_fraction is None:
+        return "cores"
+    floor = device_floor_fraction(schedulable_cores(unit), unit.accelerators)
+    return "cores" if floor < _MIN_GPU_FRACTION and slot.gpu_fraction <= floor else "device"
 
 
 def _tightest(bounds: dict[str, int], defining: str) -> tuple[str, int]:
@@ -417,7 +436,7 @@ def _tightest(bounds: dict[str, int], defining: str) -> tuple[str, int]:
 
 def _binding_axis(slot: ResourceSlot, unit: UnitShape) -> str:
     """Which of the three bounds in `slots_per_unit` is the one that decided (pure)."""
-    return _tightest(_bounds(slot, unit), _defining_axis(slot))[0]
+    return _tightest(_bounds(slot, unit), _defining_axis(slot, unit))[0]
 
 
 def slots_per_unit(slot: ResourceSlot, unit: UnitShape) -> int:
@@ -517,6 +536,7 @@ def plan_resources(
         use_gpu=use_gpu,
         device_bytes=device_bytes,
         static_gpu_fraction=static_gpu_fraction,
+        min_gpu_fraction=device_floor_fraction(schedulable_cores(unit), unit.accelerators),
         max_cores=unit.cores if unit.cores > 0 else None,
         max_memory_bytes=max_slot_memory_bytes(unit),
     )

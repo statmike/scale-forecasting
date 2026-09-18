@@ -266,6 +266,17 @@ first: 12 nodes give 84 usable cores, so 84 fits run concurrently and the T4s si
 busy** — 70 % — for the whole run. That is not a defect and not the memory bug from
 [§5](#5-cores-are-the-unit-and-it-took-a-bug-to-find-out); it is the machine shape.
 
+*It stays true on a wider machine, and that took a second fix.* The fraction a task requests has a
+floor, because a card split into slivers is a card nobody is really using. That floor used to be a
+flat `0.1` — ten cells per device, whatever the device was bolted to — and since NeuralProphet's
+measured footprint is about six millionths of a T4, every auto-calibrated run landed on it. On an
+eight-core worker nobody could tell, because seven cores are tighter than ten cells anyway. On a
+sixteen-core worker the constant would have been the limit: ten cells, five cores idle, and the run
+record naming `device` as the axis to go and fix, when the only thing that could move the number
+was the machine type. The floor is now derived from the node's own cores, so a wider GPU worker
+buys the density you paid for. Whether you *should* buy one is the question the next two paragraphs
+answer, and for `neuralprophet` the answer is no.
+
 **But "8.4 of 12 busy" is reservation accounting, not work.** It is Ray reporting how much of the
 *declared* GPU resource is claimed by running tasks, and every one of those claims is a
 `gpu_fraction` reservation held by a model that has ~87 KB resident on the card. The remaining 30 %
