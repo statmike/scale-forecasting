@@ -166,15 +166,59 @@ def _is_abandoned_wait(fp: FamilyProgress, abandoned_after_s: float | None) -> b
 
 
 def _has_submitted_handle(row: Mapping[str, Any]) -> bool:
-    """Whether a job row's handle carries a runtime job id — i.e. something was addressed (pure).
+    """Whether a job row's handle names a runtime job at all — something to ask about (pure).
 
-    Every Ray and Serverless row gets a handle at *launch*, built from coordinates known before the
-    submit call, so "has a handle" says nothing about whether a job exists. The ``native_id`` is
-    the part that does: it is the id the submit was made under, so a non-empty one means the row
-    has left the capacity walk whatever its status still says.
+    This is a "worth an API call" test, not a "was submitted" test, and the distinction is worth
+    stating because it was originally read the other way. A non-empty ``native_id`` looks like
+    evidence of a submit and is not: every runtime stamps the id it is *about to* submit under into
+    the entry handle before launching, so the id is there from the moment the row is written. What
+    it means is narrower — that we know a name to ask about, so escalating this row buys a real
+    answer rather than a guaranteed 404 on the empty string.
+
+    Deciding what that answer is allowed to *do* to an ``AWAITING_CAPACITY`` row is a separate
+    question, and it belongs with the reading rather than with the handle:
+    `_capacity_reading_is_informative`.
     """
     handle = ProbeHandle.from_job_row(dict(row))
     return handle is not None and bool(handle.native_id)
+
+
+def _capacity_reading_is_informative(result: ProbeResult | None, artifacts_complete: bool) -> bool:
+    """Whether a runtime reading may overrule an ``AWAITING_CAPACITY`` row (pure).
+
+    `_probe_targets` escalates a capacity wait whose handle carries a job id, and this decides
+    whether the answer is worth anything. Only two kinds of reading are: the runtime naming a job
+    it has (``RUNNING``/``FAILED``/``SUCCEEDED`` — a job that exists was submitted, whatever the
+    status says), or a complete set of artifacts (work that landed was done by something).
+
+    Everything else has to yield, and the reason is that it cannot tell the two halves of the
+    status apart. A family walking regions has no runtime job *because it has not submitted one*;
+    a family whose launcher died after submitting has no runtime job *because the job is gone*.
+    Both read ``NOT_FOUND`` with incomplete cells, so treating that as evidence would report every
+    healthy capacity wait in the fleet as ``UNKNOWN`` — the one verdict an operator is told to go
+    investigate — while the registry could have said exactly what was happening.
+
+    Why this guard is here and not in `_has_submitted_handle`, which is where the split was
+    originally drawn: that helper infers "a job was submitted" from a non-empty ``native_id``, and
+    the inference does not hold. Every runtime stamps the id it is *about to* submit under into the
+    entry handle before launching, precisely so the probe can address the job during the window
+    before the submit call returns. So the id is present from the start and says nothing about
+    whether a submit happened. The reading does.
+
+    A capacity wait that genuinely lost its job is not abandoned here — it falls back to the
+    registry and the abandoned-wait clock picks it up, which is the witness of last resort that
+    clock exists to be.
+
+    Note the order of the two tests. Completeness **corroborates** a reading; it is not one. A row
+    that was never escalated has complete cells and no runtime answer, and it must still reach the
+    capacity branch — that is where the abandoned-wait clock lives, and where `settle`'s
+    completeness guard refuses to write ``FAILED`` over a run whose every cell landed.
+    """
+    if result is None:
+        return False
+    if result.native_state in (NATIVE_RUNNING, NATIVE_FAILED, NATIVE_SUCCEEDED):
+        return True
+    return artifacts_complete
 
 
 def _probe_targets(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -185,16 +229,17 @@ def _probe_targets(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     a job that provably isn't there" rule is testable offline — it lives out here for the same
     reason `_narrow_to_job` does.
 
-    ``AWAITING_CAPACITY`` is skipped too, but **only while it still looks pre-launch**. The general
-    rule is sound: a family between capacity attempts has no runtime job, so escalating it spends a
-    live call to be told what we already knew. It is wrong for one row shape, seen live in
-    ``reaper-orphan-c-5873d5cca61a`` — a launcher that died seconds *after* submitting left its row
-    at ``AWAITING_CAPACITY`` with the runtime job id sitting right there in it, while the job ran
-    to completion and landed all its cells. A row carrying a ``native_id`` has provably left the
-    walk, so it is escalated and reconciles as an ordinary stale registry row. Note the condition
-    is not "has a handle" — every Ray row has one from launch — but `_has_submitted_handle`, which
-    is the part that means *submitted*, and the difference is between fixing that shape and
-    re-probing every legitimate capacity wait in the fleet.
+    ``AWAITING_CAPACITY`` is skipped when its handle names no job to ask about, because then the
+    call is guaranteed to tell us nothing. With a name it is escalated, for the row shape seen live
+    in ``reaper-orphan-c-5873d5cca61a``: a launcher that died seconds *after* submitting left its
+    row at ``AWAITING_CAPACITY`` with the runtime job id sitting right there in it, while the job
+    ran to completion and landed all its cells.
+
+    That escalation reaches healthy capacity waits as well — the id in the handle is written before
+    the submit, not by it — so the cost of this rule is one live call per waiting family. It is
+    bounded (a probe is invoked by an operator, not by a loop) and it buys the only reading that
+    can find an orphan. What must *not* follow is the reading overruling the registry on no
+    evidence, and that is `_capacity_reading_is_informative`'s job, over in `_verdict_for_family`.
     """
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -227,13 +272,14 @@ def _verdict_for_family(
     opposite reasons — except for the one capacity wait that has outlived the walk that was
     supposed to end it, which is the single reading here taken from the clock alone.
 
-    The capacity short-circuit yields to a native reading when there is one. A family only arrives
-    with one if `_probe_targets` judged its row to have left the walk (`_has_submitted_handle`), and
-    a runtime's answer about a job that was actually submitted outranks the status the dead launcher
-    left behind. Such a family is never in ``stale`` — `_is_stale` measures ``RUNNING`` rows only,
-    deliberately — so a vanished job with incomplete cells reads UNKNOWN here rather than LOST. That
-    is the right conservatism: from a pre-launch-looking row we cannot tell a job that died from one
-    that never really started, and only complete artifacts settle the question.
+    The capacity short-circuit yields to a native reading, but only to one that proves a job was
+    submitted — the runtime naming a job it has, or a complete set of artifacts
+    (`_capacity_reading_is_informative`). A runtime's answer about a job that really exists outranks
+    the status a dead launcher left behind; a bare "no such job" does not, because a family still
+    walking regions gives exactly the same answer. Such a family is never in ``stale`` either —
+    `_is_stale` measures ``RUNNING`` rows only, deliberately — so nothing on this path can read
+    LOST. From a pre-launch-looking row we cannot tell a job that died from one that never started,
+    and where no runtime reading settles it the abandoned-wait clock is the witness of last resort.
     """
     common: dict[str, Any] = {
         "family": fp.family,
@@ -255,10 +301,16 @@ def _verdict_for_family(
     # Waiting between capacity attempts → in flight, but deliberately not progressing. There is no
     # runtime job to reconcile against and that is the expected state, not a gap in our knowledge:
     # UNKNOWN would be a lie ("we couldn't tell") about the one status where we can tell exactly.
-    # The `not in native` qualifier is what lets a row that *did* submit past this short-circuit:
-    # `_probe_targets` escalates an AWAITING_CAPACITY row carrying a runtime job id, and discarding
-    # that reading here would leave the escalation paying for a call it then ignored.
-    if (fp.status or "").upper() == _AWAITING_CAPACITY and fp.family not in native:
+    #
+    # A row that really did submit gets past this short-circuit, but only on a reading that proves
+    # it — see `_capacity_reading_is_informative`. Escalation alone is not enough: every runtime now
+    # writes its job id into the handle *before* submitting, so `_probe_targets` escalates healthy
+    # capacity waits too, and letting a bare "no such job" through would answer UNKNOWN for a family
+    # that is simply hopping regions.
+    if (fp.status or "").upper() == _AWAITING_CAPACITY and not _capacity_reading_is_informative(
+        native.get(fp.family),
+        fp.n_expected is not None and fp.n_done >= fp.n_expected,
+    ):
         # ...unless it has been waiting longer than any walk is allowed to. A live walk ends itself
         # at its budget; one that did not is a walk with nobody left to walk it, and saying
         # TRUST_REGISTRY there tells an operator to keep waiting for a decision that will never

@@ -161,10 +161,18 @@ class SparkProbe:
             return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
 
     def _check_cluster(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
-        # A cluster job's real id is server-assigned and only stamped back after submission, so the
-        # entry handle carries native_id="" for the launch window. Without an id we can't address
-        # the job — report UNKNOWN (exists=True) rather than a false NOT_FOUND, honouring the entry-
-        # handle contract that a probe never asserts an id it doesn't truly have.
+        # An empty id used to be the normal state of a cluster row for the whole launch window,
+        # because the path let Dataproc name the job and only stamped the id back afterwards. It
+        # names its own job now (`cluster_submit.build_job`), so a handle written by
+        # `job_launch.launch_family_job` always carries one and the read below is reachable during
+        # the provisioning window — which is the window that matters, since that is where a killed
+        # launcher leaves a row behind.
+        #
+        # The guard stays for the rows that predate the change and for any caller that builds a
+        # handle by hand. Without an id we cannot address the job, and UNKNOWN is the honest answer:
+        # a probe must never assert an id it does not truly have. Note what that costs, and why it
+        # was worth removing from the common path — UNKNOWN is a permanent refusal by design, so a
+        # row that lands here never ages into anything a repair verb will accept.
         if not handle.native_id:
             return ProbeResult(
                 NATIVE_UNKNOWN, exists=True, detail="cluster job id not yet assigned"

@@ -366,8 +366,8 @@ def test_spark_cluster_error_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch
 
 
 def test_spark_cluster_empty_native_id_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A cluster job's id is server-assigned and only stamped back after submission, so the entry
-    # handle carries native_id="" for the launch window. The probe must NOT call get_cluster_job("")
+    # A launch writes an id now, so this is the legacy row and the hand-built handle rather than
+    # the launch window. The behaviour still holds: the probe must NOT call get_cluster_job("")
     # (that would 404 → a false NOT_FOUND/LOST); it reports UNKNOWN(exists=True) without any I/O.
     import scale_forecasting.cluster_telemetry as telemetry_mod
 
@@ -382,6 +382,43 @@ def test_spark_cluster_empty_native_id_is_unknown(monkeypatch: pytest.MonkeyPatc
     assert result.native_state == NATIVE_UNKNOWN
     assert result.exists is True
     assert "not yet assigned" in result.detail
+
+
+def test_a_cluster_job_that_was_never_submitted_reads_not_found_not_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Signature 4: a launcher killed while its Dataproc cluster was still provisioning.
+
+    The distinction this pins is the whole repair. ``UNKNOWN`` never ages into anything — it is a
+    permanent refusal, by design, so a verb that saw it could never close the header and the row
+    stayed stranded. ``NOT_FOUND`` ages: past the startup grace the reconciler calls it ``LOST``,
+    settle writes FAILED/RUNTIME_LOST, and close-runs releases the header.
+
+    Which of the two words comes back used to depend on whether the submit call had returned yet,
+    because the id only existed in the response. Now the launch writes the id it is about to submit
+    under, so the probe addresses a real job name during the provisioning window and Dataproc's own
+    ``NotFound`` is the answer.
+    """
+    from google.api_core.exceptions import NotFound
+
+    import scale_forecasting.cluster_telemetry as telemetry_mod
+    from scale_forecasting.registry.ids import dataproc_job_id, make_job_key
+
+    def _raise(*a: Any, **kw: Any) -> tuple[str, str]:
+        raise NotFound("Not found: Job projects/proj-x/regions/us-west1/jobs/...")
+
+    monkeypatch.setattr(telemetry_mod, "get_cluster_job", _raise)
+    launch_written = ProbeHandle(
+        "spark",
+        native_id=dataproc_job_id(make_job_key("run-abc", "statistical", 1)),
+        region="us-west1",
+        spark_mode="cluster",
+    )
+
+    result = SparkProbe().check(launch_written, settings=_SETTINGS)
+
+    assert result.native_state == NATIVE_NOT_FOUND
+    assert result.exists is False
 
 
 # --- RayProbe ------------------------------------------------------------------
@@ -1244,7 +1281,8 @@ def test_spark_cluster_cancel_calls_cancel_job(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_spark_cluster_cancel_no_id_reports_failure() -> None:
-    # No server-assigned id yet → nothing addressable to cancel (and no false "already gone").
+    # A legacy or hand-built handle with no id → nothing addressable to cancel, and the honest
+    # report is "could not", not a false "already gone".
     handle = ProbeHandle("spark", native_id="", region="us-west1", spark_mode="cluster")
     result = SparkProbe().cancel(handle, settings=_SETTINGS)
     assert result.stopped is False and result.already_gone is False
@@ -1512,16 +1550,95 @@ def test_a_capacity_wait_that_already_submitted_a_job_is_escalated_after_all() -
     assert _has_submitted_handle(_AWAITING_SUBMITTED) is True
 
 
-def test_a_capacity_wait_carrying_only_its_pre_submit_handle_is_still_skipped() -> None:
-    """The qualifier that keeps this from re-probing the whole fleet.
+def test_a_capacity_wait_with_no_job_to_ask_about_is_skipped() -> None:
+    """A handle with no ``native_id`` names nothing, so the call could only 404 on the empty string.
 
-    Every Ray and Serverless row is given a handle at *launch*, built from coordinates known before
-    the submit call, so "has a handle" is true of every capacity wait there has ever been and would
-    escalate all of them. The non-empty ``native_id`` is the part that means a job was addressed.
+    This used to be described as the qualifier that keeps escalation from re-probing the fleet, on
+    the reading that a non-empty ``native_id`` means a submit happened. It does not: every runtime
+    writes the id it is *about to* submit under into the entry handle before launching — see
+    `test_launch_family_job_dispatches_ray_for_ray_family` and its cluster counterpart, which pin
+    exactly that — so a healthy capacity wait carries one too. What stops a healthy wait being
+    *overruled* is `_capacity_reading_is_informative`, not this. The rows below are the ones where
+    there is genuinely nothing to address.
     """
     assert _probe_targets([_AWAITING_PRESUBMIT]) == []
     assert _has_submitted_handle(_AWAITING_PRESUBMIT) is False
     assert _has_submitted_handle({"family": "dl", "status": AWAITING_CAPACITY}) is False
+
+
+def test_a_healthy_capacity_wait_is_not_reported_unknown_just_because_it_was_probed() -> None:
+    """The cost of escalating every capacity wait, and the guard that stops it being paid.
+
+    A family hopping regions for a stocked-out GPU carries a job id in its handle (written at
+    launch) and so gets escalated and probed. The cluster it named does not exist yet, so the
+    runtime answers "no such job" — the same answer an orphaned launcher's vanished job gives.
+    Letting that displace the registry reports a perfectly healthy wait as UNKNOWN, which is the
+    one verdict `docs/troubleshooting.md` tells an operator means *go look*.
+    """
+    fp = _fp("deep_learning", AWAITING_CAPACITY, runtime="ray", n_done=0, n_expected=100)
+    fv = _only(
+        _assemble_probe_report(
+            _progress(fp),
+            {"deep_learning": ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="cluster gone")},
+            frozenset(),
+        )
+    )
+    assert fv.verdict == VERDICT_TRUST_REGISTRY
+    assert fv.disagreement is False
+    assert "awaiting capacity" in fv.detail
+
+
+def test_a_degraded_probe_does_not_overrule_a_capacity_wait_either() -> None:
+    # UNKNOWN means the probe could not reach the runtime. That is strictly less than what the
+    # registry already knows about this row, so it cannot be what the row reports.
+    fp = _fp("deep_learning", AWAITING_CAPACITY, runtime="ray", n_done=0, n_expected=100)
+    fv = _only(
+        _assemble_probe_report(
+            _progress(fp),
+            {"deep_learning": ProbeResult(NATIVE_UNKNOWN, exists=True, detail="transport down")},
+            frozenset(),
+        )
+    )
+    assert fv.verdict == VERDICT_TRUST_REGISTRY
+
+
+@pytest.mark.parametrize(
+    ("native_state", "complete", "informative"),
+    [
+        # A job the runtime can name was submitted, whatever the row's status still says.
+        (NATIVE_RUNNING, False, True),
+        (NATIVE_FAILED, False, True),
+        (NATIVE_SUCCEEDED, False, True),
+        # No job, no cells: indistinguishable from a family still walking. Yield.
+        (NATIVE_NOT_FOUND, False, False),
+        (NATIVE_UNKNOWN, False, False),
+        # Cells that landed were produced by something, so a submit provably happened — this is
+        # `reaper-orphan-c-5873d5cca61a`, and it is the reading the whole escalation exists for.
+        (NATIVE_NOT_FOUND, True, True),
+        (NATIVE_UNKNOWN, True, True),
+    ],
+)
+def test_only_a_reading_that_proves_a_submit_may_overrule_a_capacity_wait(
+    native_state: str, complete: bool, informative: bool
+) -> None:
+    from scale_forecasting.probes.reconcile import _capacity_reading_is_informative
+
+    result = ProbeResult(native_state, exists=native_state != NATIVE_NOT_FOUND)
+    assert _capacity_reading_is_informative(result, complete) is informative
+
+
+def test_a_capacity_wait_that_was_never_escalated_is_unaffected() -> None:
+    """Completeness corroborates a reading; on its own it is not one.
+
+    The second assertion is the one with teeth, and the suite caught it being wrong. A row that was
+    never escalated has no runtime answer, and if complete cells alone were enough to call that
+    "informative" the row would skip the capacity branch entirely — taking the abandoned-wait clock
+    and `settle`'s completeness guard with it, which is defect 3 reintroduced from the other side.
+    """
+    from scale_forecasting.probes.reconcile import _capacity_reading_is_informative
+
+    assert _capacity_reading_is_informative(None, False) is False
+    assert _capacity_reading_is_informative(None, True) is False
 
 
 def test_an_escalated_capacity_wait_reconciles_from_its_runtime_not_its_status() -> None:

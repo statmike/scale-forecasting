@@ -130,9 +130,11 @@ class SparkSubmitter:
             )
             return None  # in-process: nothing submitted, no platform id
         if spark_mode == "cluster":
-            # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named). Its
-            # id is server-assigned, so the handle carries the real id (differs from system_job_id)
-            # for the caller to record (reverse-trace), plus the region the job actually ran in.
+            # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named).
+            # ``job_id`` names the job on the wire, so the id that comes back is normally the
+            # ``system_job_id`` we passed. It is still read back rather than assumed, because the
+            # region is not knowable up front — an ephemeral create walks capacity candidates, and
+            # the handle has to record the region the job actually ran in.
             from .cluster_submit import submit_cluster_job
 
             real_id, region = submit_cluster_job(

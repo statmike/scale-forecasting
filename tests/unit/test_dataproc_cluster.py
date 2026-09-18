@@ -639,6 +639,48 @@ def test_build_job_defaults_omit_oncluster_flags() -> None:
     assert "--manage-header" not in args
 
 
+def test_build_job_names_the_job_when_given_an_id() -> None:
+    # The id goes on the wire, which is what lets the probe handle carry it *before* the submit
+    # returns. Without that the cluster path is the one surface whose job cannot be addressed
+    # during its own provisioning window.
+    job = cluster_submit.build_job(
+        cluster="sf-cluster-run-abc",
+        launcher_uri="gs://c/spark_main.py",
+        package_uri="gs://c/pkg.zip",
+        config_uri="gs://c/run.json",
+        settings=_settings(),
+        job_id="run-abc-statistical-1",
+    )
+    assert job.reference.job_id == "run-abc-statistical-1"
+
+
+def test_build_job_without_an_id_leaves_the_naming_to_dataproc() -> None:
+    # An unset JobReference is how the API is told to assign one. Asserting the empty string rather
+    # than absence because proto3 has no null: what matters is that we sent no id.
+    job = cluster_submit.build_job(
+        cluster="sf-cluster-run-abc",
+        launcher_uri="gs://c/spark_main.py",
+        package_uri="gs://c/pkg.zip",
+        config_uri="gs://c/run.json",
+        settings=_settings(),
+    )
+    assert job.reference.job_id == ""
+
+
+def test_the_family_job_key_is_a_legal_dataproc_cluster_job_id() -> None:
+    # The id `job_launch` puts in the handle is the one `build_job` submits, so it has to be legal
+    # for a *cluster job* and not only for a Serverless batch. Dataproc's job-id charset is the
+    # wider of the two, so a batch-legal id qualifies — pinned here rather than argued, because the
+    # whole repair path now rests on the two ids being the same string.
+    import re
+
+    from scale_forecasting.registry.ids import JOB_FAMILIES, dataproc_job_id, make_job_key
+
+    for family in JOB_FAMILIES:
+        job_id = dataproc_job_id(make_job_key("run-abc", family, 1))
+        assert re.fullmatch(r"[a-zA-Z0-9_-]{4,100}", job_id), job_id
+
+
 # --- packed-venv delivery (cluster dependency mechanism) -----------------------
 
 
@@ -1062,6 +1104,34 @@ def test_a_job_that_finishes_still_tears_its_ephemeral_cluster_down(
     )
     assert (job_id, region) == ("real-job-id", "us-central1")
     assert len(lifecycle.deleted) == 1
+
+
+def test_the_deterministic_id_reaches_the_submitted_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `job_id` used to be a return-value fallback and nothing else — it never reached the wire, so
+    # Dataproc named the job and the registry could not know the name until the call came back.
+    _ClusterLifecycle(monkeypatch, _done_job())
+    built: dict[str, Any] = {}
+    monkeypatch.setattr(cluster_submit, "build_job", lambda **k: built.update(k) or object())
+
+    cluster_submit.submit_cluster_job(
+        _venv_cfg(), settings=_settings(), infra=_infra_with_venv(), job_id="run-abc-statistical-1"
+    )
+
+    assert built["job_id"] == "run-abc-statistical-1"
+
+
+def test_a_submit_that_returns_no_id_still_reports_the_one_we_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Once we name the job, an empty id in the response is a gap in the response and not a gap in
+    # our knowledge. Returning "" here would throw away an id the caller is about to record.
+    _ClusterLifecycle(monkeypatch, ("", "DONE", ""))
+
+    job_id, _region = cluster_submit.submit_cluster_job(
+        _venv_cfg(), settings=_settings(), infra=_infra_with_venv(), job_id="run-abc-statistical-1"
+    )
+
+    assert job_id == "run-abc-statistical-1"
 
 
 def test_a_job_that_fails_still_tears_its_ephemeral_cluster_down(

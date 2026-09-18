@@ -208,12 +208,13 @@ def test_launch_family_job_dispatches_ray_for_ray_family(
     }
 
 
-def test_launch_family_job_cluster_entry_handle_omits_unresolved_id(
+def test_launch_family_job_cluster_entry_handle_carries_the_id_it_will_submit_under(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A cluster job's real id is server-assigned, unknown at entry. The ENTRY handle must not assert
-    # an id it doesn't have (that would risk a false NOT_FOUND on probe), so native_id is empty
-    # until the stamp-back refresh fills it in.
+    # The cluster path names its own job, so the ENTRY handle can address it from the moment the
+    # row is written — before the submit call returns, which is the window a killed launcher leaves
+    # behind. This is not a prediction like the Ray resource path above: it is the exact string
+    # `cluster_submit.build_job` puts on the JobReference.
     import scale_forecasting.submitters as submitters_mod
 
     seen = _fake_job_lifecycle(monkeypatch)
@@ -229,13 +230,18 @@ def test_launch_family_job_cluster_entry_handle_omits_unresolved_id(
     assert job.compute is not None and job.compute.spark_mode == "cluster"
     job_launch.launch_family_job(cfg, job, "rid-0", _SETTINGS)
 
+    from scale_forecasting.registry.ids import dataproc_job_id, make_job_key
+
+    expected = dataproc_job_id(make_job_key("rid-0", "statistical", 1))
     assert seen["job"]["probe_handle"] == {
         "runtime": "spark",
-        "native_id": "",
+        "native_id": expected,
         "region": "us-central1",
         "id_kind": "exact",
         "spark_mode": "cluster",
     }
+    # The same id the Serverless branch would have used — one rule, all four surfaces.
+    assert seen["job"]["system_job_id"] == expected
 
 
 def test_launch_native_job_runs_bigquery_engine_inline(

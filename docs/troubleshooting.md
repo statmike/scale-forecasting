@@ -60,7 +60,7 @@ says and what the runtime says; `disagreement` is set only when they contradict 
 | `ABANDONED_WAIT` | Still `AWAITING_CAPACITY` past any walk's own budget. | The driver that was waiting is gone. `--settle`, then re-run. |
 | `UNKNOWN` | Couldn't tell — no handle, or the probe degraded. | Re-probe; treat the registry as authoritative meanwhile. |
 
-Two distinctions in that table are deliberate and easy to misread:
+Some distinctions in that table are deliberate and easy to misread:
 
 - **`LIKELY_COMPLETED` vs `LOST`** is decided by *artifact evidence*, not by the runtime. Both are
   "the job is gone"; the landed-vs-expected cell count is what separates a run that finished from
@@ -78,6 +78,14 @@ Two distinctions in that table are deliberate and easy to misread:
   `FAILED`/`CAPACITY_EXHAUSTED`, so a row still `AWAITING_CAPACITY` at twice that (2 h,
   `abandoned_after_s` to override) was written by a walk that stopped existing — a Ctrl-C, a closed
   shell, a restarted kernel. Under that window the wait is legitimate and reads `TRUST_REGISTRY`.
+- **A capacity wait *is* asked, and usually ignored.** Every job row carries the runtime id it was
+  going to submit under from the moment it is written, so the probe can address the job during the
+  launch window rather than only after it. A side effect is that a family still hopping regions gets
+  asked about a job that does not exist yet. Its answer — "no such job" — is word-for-word what an
+  orphaned launcher's vanished job gives, so it is not allowed to change the row: only the runtime
+  naming a job it actually has, or a complete set of landed cells, can overrule an
+  `AWAITING_CAPACITY` status. Without that rule every healthy capacity wait in the fleet would
+  report `UNKNOWN`.
 
 ### Settle a stale row
 
@@ -247,9 +255,13 @@ cluster. This is a **live, non-terminal** state — the work has not started and
   Each attempt carries its candidate, the verdict, and the **cloud's verbatim message**. A shared
   cluster is provisioned before any job row exists, so its ledger is on the run header instead —
   same key, in `v_run_summary.capacity`, one entry per service.
-- **`--cancel` cannot interrupt a walk.** The loop runs inside the submitting process, and an
-  `AWAITING_CAPACITY` row has no runtime job to stop — cancel reports "no handle recorded" and
-  leaves the row alone. Stop the launching process (or let the budget expire) instead.
+- **`--cancel` cannot interrupt a walk.** The loop runs inside the submitting process, so there is
+  no server-side thing to cancel: stop the launching process, or let the budget expire. The row
+  itself is addressable — it carries a handle like any other — so cancel will try, and report that
+  it stopped nothing. That is honest rather than a failure. (This bullet used to say the row "has no
+  runtime job to stop" and that cancel reports "no handle recorded". Both were too absolute: cancel
+  joins rows to handles directly and never consulted the escalation filter, so a row whose job *was*
+  submitted before its launcher died has always been cancellable.)
 
 ### A job FAILED with `failure_reason = CAPACITY_EXHAUSTED`
 **Symptom:** a family went terminal without ever running.

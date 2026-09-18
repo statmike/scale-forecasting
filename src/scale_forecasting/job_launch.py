@@ -196,9 +196,11 @@ def launch_family_job(
     shared_spark_name = shared_spark[0] if shared_spark else None
     shared_spark_region = shared_spark[1] if shared_spark else None
     # The ENTRY probe handle, built from coordinates known before submit — the handle the probe
-    # actually reads while a job is RUNNING. It never asserts an id it doesn't truly have (a cluster
-    # job's real id is server-assigned, so native_id is empty until the stamp-back refresh below),
-    # so a probe degrades to registry-only rather than emitting a false NOT_FOUND.
+    # actually reads while a job is RUNNING. Every runtime can fill it now, because every runtime
+    # names its own job: Serverless passes ``batch_id``, Ray passes ``submission_id``, and the
+    # cluster path passes ``JobReference.job_id``. The one coordinate still predicted rather than
+    # known is the region of an ephemeral create, which a capacity hop can move; the stamp-back
+    # refresh below corrects it, and a probe that misses degrades to registry-only.
     if compute.runtime == "ray":
         from .engines.ray_io import cluster_name as ray_cluster_name_for
         from .ray_cluster import cluster_resource_path
@@ -226,9 +228,19 @@ def launch_family_job(
             resource_name=resource_name,
         )
     elif compute.spark_mode == "cluster":
+        # The cluster path names its own job now (`cluster_submit.build_job` puts this id on the
+        # submitted ``JobReference``), so the handle carries it from here rather than waiting for a
+        # server-assigned id to come back. That ordering is the whole point: the window this handle
+        # exists to serve is the one *before* the response arrives. While it wrote "" instead, a
+        # launcher killed during a cluster provision left a row the probe could not address, so
+        # `SparkProbe._check_cluster` returned a permanent UNKNOWN and no repair verb would touch
+        # the header — the Dataproc shape of the provisioning-death hole the Ray path closed first.
+        #
+        # The region is the same one guess the Ray branch above makes: an ephemeral create can hop
+        # on a capacity failover, and the stamp-back corrects the record at the end.
         entry_handle = ProbeHandle(
             "spark",
-            native_id="",  # real id is server-assigned; filled in at the stamp-back refresh
+            native_id=system_job_id,
             region=shared_spark_region or settings.region,
             spark_mode="cluster",
         )
@@ -289,10 +301,12 @@ def launch_family_job(
                 telemetry={"probe_handle": entry_blob, "capacity": exc.ledger.to_json()},
             )
             raise
-        # Stamp-back refresh: replace the entry handle with post-submit truths (a cluster's real id,
-        # the landed region + Ray resource path). A cluster job's id is server-assigned, so when the
-        # returned native_id differs from system_job_id, also stamp the real id back for
-        # reverse-trace. The in-process session submits nothing and returns None (no refresh).
+        # Stamp-back refresh: replace the entry handle with post-submit truths (the landed region,
+        # the Ray resource path, and any id that turned out to differ from the one we asked for).
+        # That last case is rarer than it was — now that the cluster path names its own job, all
+        # three remote runtimes should echo ``system_job_id`` straight back — but the comparison
+        # stays, because it costs nothing and it is what would record the surprise if a platform
+        # ever renamed a job on us. The in-process session submits nothing and returns None.
         #
         # The handle refresh is a *merge*: a family that walked regions before it got a cluster has
         # its whole attempt ledger under ``$.capacity`` by now, and replacing the column here would

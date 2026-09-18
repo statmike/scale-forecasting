@@ -58,6 +58,7 @@ def build_job(
     use_venv: bool = False,
     properties: dict[str, str] | None = None,
     provisioned_hardware: str | None = None,
+    job_id: str | None = None,
 ) -> object:
     """Assemble the ``dataproc_v1.Job`` (a PySpark job placed on ``cluster``) (pure).
 
@@ -83,6 +84,18 @@ def build_job(
     `hardware`). It matters most here, because a Dataproc cluster is the one surface that can be
     *mixed*: a card is visible to an executor that a CPU family must not use, and only an explicit
     device selection can keep that family off it.
+
+    ``job_id`` names the job rather than letting Dataproc name it. ``JobReference.job_id`` is
+    optional on the wire — omit it and the server assigns one — and for a long time this path
+    omitted it, which is why it was the only surface whose id could not be known before submit.
+    That cost a repair path: kill a launcher mid-provision and the registry row carried an empty
+    id, so `probes.runtimes.SparkProbe` had nothing to address and returned a permanent ``UNKNOWN``
+    instead of the ``NOT_FOUND`` that would have let the row settle. Naming the job ourselves puts
+    this surface on the same footing as the other three — Serverless passes ``batch_id``, Ray
+    passes ``submission_id``, and both stamp the id into the probe handle *before* submitting. The
+    id to pass is the family's `registry.ids.dataproc_job_id`, which has always been legal here:
+    Dataproc job ids accept a strictly wider charset than batch ids, so a batch-legal id is a
+    job-legal id. Left ``None`` the server assigns one, as before.
     """
     from google.cloud import dataproc_v1 as dataproc
 
@@ -97,7 +110,9 @@ def build_job(
     if use_venv:
         job_properties.update(_VENV_JOB_PROPERTIES)
     job_properties.update(spark_executor_env(provisioned_hardware))
+    reference = dataproc.JobReference(job_id=job_id) if job_id else None
     return dataproc.Job(
+        reference=reference,
         placement=dataproc.JobPlacement(cluster_name=cluster),
         pyspark_job=dataproc.PySparkJob(
             main_python_file_uri=launcher_uri,
@@ -147,8 +162,9 @@ def _submit_job_and_wait(
     The wait is `job_wait.wait_for_job`, the same loop the Serverless submitter uses, so a cluster
     job that never writes a cell is now cancelled on the same rule rather than left to bill until
     the cluster's max age. A wait that runs out of patience instead of evidence raises `WaitExpired`
-    carrying the server-assigned job id, which is the one thing the caller needs to follow the run
-    after it has stopped watching.
+    carrying the job id, which is the one thing the caller needs to follow the run after it has
+    stopped watching. The id comes off ``op.metadata`` either way — when `build_job` named the job
+    the server echoes our id back, and when it did not the server's own id arrives here.
     """
     from concurrent.futures import TimeoutError as FuturesTimeoutError
 
@@ -203,9 +219,11 @@ def submit_cluster_job(
 
     ``models``/``manage_header`` carry the on-cluster contract; ``hardware``/``gpu_type`` size the
     workers' accelerator (a cluster is the T4 Spark path). ``job_id`` is the deterministic
-    per-family id (the orchestrator's `registry.ids.dataproc_job_id`), used only as a fallback: the
-    returned id is Dataproc's own server-assigned ``reference.job_id`` (the console-resolvable one)
-    when we waited. The returned ``region`` is where the job actually ran (the reuse target's
+    per-family id (the orchestrator's `registry.ids.dataproc_job_id`) and it *names the job*: it
+    goes on the submitted ``JobReference``, so the id is known before the call rather than read off
+    the response, and the returned id is the same string. Left ``None`` — the pure-builder tests and
+    any direct caller — the server assigns one and the response still carries it. The returned
+    ``region`` is where the job actually ran (the reuse target's
     region, or the region an ephemeral create landed in after any capacity failover) so the caller
     can record a probe-able coordinate. With ``wait`` a non-DONE terminal state raises so a failed
     job never exits 0.
@@ -308,6 +326,7 @@ def submit_cluster_job(
             use_venv=True,
             properties=job_properties,
             provisioned_hardware=hardware,
+            job_id=job_id,
         )
         submitted_id, state_name, detail = _submit_job_and_wait(
             job_client,
@@ -320,9 +339,9 @@ def submit_cluster_job(
             grace_s=infra.stall_grace_seconds,
             since=since,
         )
-        # A cluster job id is server-assigned (not client-set), so return the *real* id Dataproc
-        # assigned (``reference.job_id``) — that's what resolves in the console for reverse-trace.
-        # Fall back to the deterministic per-family id only when we didn't wait and no id came back.
+        # Return the id the response carries — which, when we named the job, is the id we passed.
+        # The fallback is kept for the case where we did name it and the response still came back
+        # without one: the id is ours and we already know it, so there is no reason to return "".
         final_id = submitted_id or job_id or ""
         if wait and state_name != "DONE":
             raise EngineError(
