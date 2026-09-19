@@ -2651,8 +2651,9 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Registry ops — job-level settle (`--settle`) | CURRENT | Run live 2026-09-04 against the one fixture reserved for it: the `statistical` family of `nb03-combo-ensemble-1788329058-c4a5e6db54a1`, `RUNNING` in the registry since 2026-09-02 while its Dataproc batch had `SUCCEEDED` with all 10 of 10 cells landed. The row now reads `COMPLETED` and carries the whole audit blob it was written on under `job_telemetry.$.settle`. **This row is being recorded 2026-09-15, eleven days after the command ran** — the proof happened and nobody wrote it down, which is the exact failure this file exists to prevent. `settled_by` is null for the P6 reason directly below, whose fix landed seven hours later the same day. The fixture class is now empty — every job row in the registry is terminal — so this cannot be re-proven without manufacturing a stale row. See below. |
 | Run audit principal (P6) | CURRENT | The `actor=None` on 2026-09-02's live cancel was a **defect**, resolved 2026-09-04: the userinfo lookup was sending the ADC quota project as `x-goog-user-project` and getting a 403 for `serviceusage.services.use` on a project unrelated to the run. Fixed by stripping the quota project (`identity._without_quota_project`) and verified live under the same ADC credential — `resolve_principal()` returns the user's email. Proven end-to-end on a real run 2026-09-05: `ray-100k-dcc77a9d1e9b`'s header row carries `user_id = <the launching user email>`, where its three pre-fix attempts are blank. That is the *launch* path; cancel-with-attribution has not been re-exercised live since the fix, though the audit *write* was already proven on 2026-09-02. See below. |
 | Registry ops — Ray cluster reaper (`reap-clusters`) | CURRENT | Proven live 2026-09-15 in four arms, against launchers killed on purpose to reproduce the 2026-09-12 incident. The verb **kept** a cluster whose run was still live, **named** a finished run's orphan in the preview, **reclaimed** it under `--yes` with the v1beta1 `persistentResources` read afterwards returning `{}`, and then `sweep_on_launch` reclaimed a *second* orphan with nobody asking — at 15:33:04 UTC, two seconds before the launch that triggered it began its own create. Both decision branches ran live (finished-run and unknown-run), and the 1800 s floor was watched both holding a 1476-second-old headerless cluster and releasing the same cluster at 41 minutes. **The first reclaim attempt failed and exposed two defects** — the delete was going to the wrong regional endpoint, and a failed delete was being counted as reaped — fixed in `ec73f45` and re-proven the same day. See below. |
-| Repair ladder end to end — a launcher killed mid-provision (`--probe` → `--settle` → `close-runs` → `reap-clusters`) | CURRENT | Proven live 2026-09-15 against `deadlock-11h-d09a1bf19be9`, a Ray CPU run whose launcher was `kill -9`'d six minutes into its twelve-minute cluster create. The Vertex create finished server-side with nobody owning it, leaving exactly the state that had no exit before: an orphaned cluster, a `RUNNING` header, and a `RUNNING` job row whose runtime job was never submitted. The four verbs then walked it to a clean registry and an empty region **with no manual step** — no `drop-run --force`, no hand-deleted cluster, no edited row. `--probe` read the family as native `NOT_FOUND` / verdict `LOST` (`cluster alive; ray job not on it`) where before the fix it read a permanent `UNKNOWN`; `--settle --force` wrote `FAILED` / `RUNTIME_LOST`; `close-runs --yes` took the header `RUNNING → FAILED`; `reap-clusters --yes` named the orphan by its now-terminal run and reclaimed it. Every state change was verified by reading it back — `v_run_jobs`, `run_registry`, and the v1beta1 `persistentResources` endpoint returning `{}` with a direct GET returning 404 — never by a verb's own success line. **Scope is signature 1 only:** killed *before* the submit. Signature 2 (killed after submit, row stuck at `AWAITING_CAPACITY`) was proven separately the same day — its own row is below. Signature 4 (the Dataproc-cluster shape) is not proven by either run. See below. |
-| Repair ladder end to end — a launcher killed *after* the submit, row stuck at `AWAITING_CAPACITY` | CURRENT | Proven live 2026-09-15 against `orphan-11h-28d65b370b23`, the other half of the same incident. A Ray CPU run was `kill -9`'d 23 seconds after its job reached the cluster, so the job ran to completion on a cluster whose launcher no longer existed — 100/100 cells landed — while the registry still described a family waiting for capacity. The row read `AWAITING_CAPACITY`, not `RUNNING`, because the capacity walk had recorded a failed `us-east1` attempt and nothing rewrites the status after a later region succeeds. The ladder walked it to a clean registry with **no manual step**: `--probe` escalated the row instead of skipping it (`escalated=True`, `statistical ray AWAITING_CAPACITY SUCCEEDED STALE_REGISTRY 100/100`), `--settle --force` wrote `COMPLETED` with no failure reason, `close-runs --yes` took the header `RUNNING → COMPLETED`, and `reap-clusters --yes` reclaimed the orphan. Every state change verified by reading it back — `v_run_jobs`, `run_registry`, all three regions' v1beta1 `persistentResources` returning `{}` and a direct GET returning 404. The run has predictions and no leaderboard, which is expected: the launcher died before ensemble and finalize. **The failed region's verdict came back `TRANSIENT_CAPACITY` where the classifier's own comment predicts `HARD_CEILING`** — a real, low-severity finding recorded below. Signature 4 remains unproven. See below. |
+| Repair ladder end to end — a launcher killed mid-provision (`--probe` → `--settle` → `close-runs` → `reap-clusters`) | CURRENT | Proven live 2026-09-15 against `deadlock-11h-d09a1bf19be9`, a Ray CPU run whose launcher was `kill -9`'d six minutes into its twelve-minute cluster create. The Vertex create finished server-side with nobody owning it, leaving exactly the state that had no exit before: an orphaned cluster, a `RUNNING` header, and a `RUNNING` job row whose runtime job was never submitted. The four verbs then walked it to a clean registry and an empty region **with no manual step** — no `drop-run --force`, no hand-deleted cluster, no edited row. `--probe` read the family as native `NOT_FOUND` / verdict `LOST` (`cluster alive; ray job not on it`) where before the fix it read a permanent `UNKNOWN`; `--settle --force` wrote `FAILED` / `RUNTIME_LOST`; `close-runs --yes` took the header `RUNNING → FAILED`; `reap-clusters --yes` named the orphan by its now-terminal run and reclaimed it. Every state change was verified by reading it back — `v_run_jobs`, `run_registry`, and the v1beta1 `persistentResources` endpoint returning `{}` with a direct GET returning 404 — never by a verb's own success line. **Scope is signature 1 only:** killed *before* the submit. Signature 2 (killed after submit, row stuck at `AWAITING_CAPACITY`) was proven separately the same day — its own row is below. Signature 4 (the Dataproc-cluster shape) has its own row below, proven 2026-09-19. See below. |
+| Repair ladder end to end — a launcher killed *after* the submit, row stuck at `AWAITING_CAPACITY` | CURRENT | Proven live 2026-09-15 against `orphan-11h-28d65b370b23`, the other half of the same incident. A Ray CPU run was `kill -9`'d 23 seconds after its job reached the cluster, so the job ran to completion on a cluster whose launcher no longer existed — 100/100 cells landed — while the registry still described a family waiting for capacity. The row read `AWAITING_CAPACITY`, not `RUNNING`, because the capacity walk had recorded a failed `us-east1` attempt and nothing rewrites the status after a later region succeeds. The ladder walked it to a clean registry with **no manual step**: `--probe` escalated the row instead of skipping it (`escalated=True`, `statistical ray AWAITING_CAPACITY SUCCEEDED STALE_REGISTRY 100/100`), `--settle --force` wrote `COMPLETED` with no failure reason, `close-runs --yes` took the header `RUNNING → COMPLETED`, and `reap-clusters --yes` reclaimed the orphan. Every state change verified by reading it back — `v_run_jobs`, `run_registry`, all three regions' v1beta1 `persistentResources` returning `{}` and a direct GET returning 404. The run has predictions and no leaderboard, which is expected: the launcher died before ensemble and finalize. **The failed region's verdict came back `TRANSIENT_CAPACITY` where the classifier's own comment predicts `HARD_CEILING`** — a real, low-severity finding recorded below. Signature 4 is proven separately, 2026-09-19 — its own row is below. See below. |
+| Repair ladder end to end — the **Dataproc-cluster** shape of a launcher killed mid-provision | CURRENT | Proven live 2026-09-19 against `sig4-11h-35c7c0d03d55`, the third and last signature of the same incident. A Dataproc-cluster run (`theta`, 100 series, `spark_mode: cluster`) was `kill -9`'d at 13:13:00 UTC while its ephemeral cluster was still `CREATING`, so no job was ever submitted. The create finished server-side 42 seconds after its client died. **The arm that matters is the probe's first reading**, because until commit `021f71f` the cluster path let Dataproc name the job and the row carried `native_id=""` — nothing to ask about, so the probe returned `UNKNOWN`, which never ages, and no repair verb could ever touch the row. With the deterministic id now on the submitted `JobReference` and in the entry handle, the same live state read native `NOT_FOUND` / `cluster job not found` instead. Checking both handles against the same live job id makes the difference explicit: the pre-fix empty handle returns `UNKNOWN / cluster job id not yet assigned`, the handle this run actually wrote returns `NOT_FOUND / cluster job not found`. The existing ladder then did the rest with **no manual step**: verdict `UNKNOWN` inside the 15-minute grace, `LOST` at 13:21:49 once past it, `--settle --force` → `FAILED` / `RUNTIME_LOST` (`0/100` series landed, `ended_at` null), `close-runs --yes` → header `RUNNING → FAILED` at 13:22:53 — nine minutes fifty-three seconds after the kill. A control read confirmed the job genuinely did not exist (`gcloud dataproc jobs describe` → `NOT_FOUND`), so the probe's reading was a true reading. **There is no Dataproc reaper and none is needed:** the cluster reclaimed itself on its idle TTL with no verb involved, `DELETING` at 13:44:38 and `describe` returning `NOT_FOUND` afterwards. Every state change verified by reading it back — `v_run_jobs`, `run_registry`, and `gcloud dataproc clusters describe` — never by a verb's own success line. **Two measured findings recorded below:** the idle clock runs from `RUNNING` rather than from the `idleStartTime` the API advertises, and the residual about job-history retention is untouched by this run. |
 
 ### A launcher killed mid-provision now finds its own way out
 
@@ -2764,6 +2765,78 @@ read-it-back discipline the reaper had to learn the hard way, already in place o
 correct despite a capacity hop. That is luck of geography, not a property: the hop happened to land
 on the run's default region. A hop to a third region would still miss and degrade the probe to a
 registry-only read, exactly as documented. Nothing here tests that.
+
+### The third signature: one path let the server name its job, and that cost the whole repair ladder
+
+The Dataproc-cluster shape of the same accident, proven 2026-09-19 against
+`sig4-11h-35c7c0d03d55`, and the interesting part is how small the defect turned out to be.
+
+Three of the four runtime surfaces name their own job when they submit it. Serverless passes a
+`batch_id`, Ray passes a `submission_id`, BigQuery uses a job-id prefix. The Dataproc-cluster path
+passed nothing, so the server assigned an id and the client learned it only from the response. The
+entry handle — the record the probe reads while a job is in flight — is written *before* the submit,
+which is the whole reason it exists. So on that one path it was written with an empty `native_id`
+and stayed empty for the entire provisioning window.
+
+An empty id means the probe has nothing to address. It returned `UNKNOWN`, and `UNKNOWN` is a
+permanent refusal by design: unlike `NOT_FOUND`, it never ages into `LOST`, so no repair verb will
+ever accept it. A launcher killed during a cluster provision therefore left a row that nothing in
+the product could resolve — not later, not ever. The first two signatures, both on Ray, could not
+show this because Ray always had an id to ask about.
+
+**The fix was to stop opting out.** `dataproc_v1.JobReference.job_id` is client-settable; omitting
+it is what makes the server assign one. The deterministic per-family id the orchestrator already
+computes is legal as a cluster job id — the cluster charset is `[a-zA-Z0-9_-]{4,100}`, strictly
+wider than a Serverless batch id's — so it now goes on the submitted `JobReference` and into the
+handle before the call.
+
+| Arm | Pass condition, fixed before the launch | Observed |
+|---|---|---|
+| A — the handle carries an id | non-empty `native_id` on the job row | `sf-sig4-11h-35c7c0d03d55-statistical-a1`, identical to the job key |
+| A′ — the job really is absent | `describe` returns `NOT_FOUND` | `NOT_FOUND` |
+| B — the probe reads absence, not ignorance | native `NOT_FOUND` inside the grace | `NOT_FOUND` / `cluster job not found`, verdict `UNKNOWN` (grace) |
+| C — it ages | native `NOT_FOUND`, verdict `LOST` | `LOST`, `0/100`, `disagreement=True` |
+| D — settle accepts it | `FAILED` / `RUNTIME_LOST` | as written; `ended_at` null |
+| E — the header closes | `RUNNING → FAILED` | as written, 13:22:53 |
+| F — the cluster reclaims itself, no verb | `DELETING` by ~TTL | `DELETING` 13:44:38, then `NOT_FOUND` |
+
+Arm B is the whole rehearsal. Checking both handles against the same live job id, minutes apart,
+makes the difference concrete:
+
+```
+handle as it WOULD have been written before the fix:
+   native_state=UNKNOWN    exists=True  detail=cluster job id not yet assigned
+handle as it WAS written by this run:
+   native_state=NOT_FOUND  exists=False detail=cluster job not found
+```
+
+Nothing else in the ladder changed. `UNKNOWN` on the left is where the run stops forever.
+`NOT_FOUND` on the right aged into `LOST` eight minutes later and the ordinary verbs finished the
+job — kill to closed header in nine minutes fifty-three seconds, with nothing touched by hand.
+
+**There is no Dataproc reaper, and arm F is why none is needed.** Unlike a Vertex Ray cluster, an
+ephemeral Dataproc cluster is created with two server-side ceilings: an idle TTL (1800 s by default)
+and a 24-hour `autoDeleteTime`. Neither requires a verb, a label, or a living client. The orphan
+here went `DELETING` on its own and `describe` returned `NOT_FOUND` afterwards. What a killed
+launcher strands on this path is a registry header, not a meter.
+
+**A measured finding about that TTL, because it would mislead a spend estimate.** The cluster
+advertised `idleStartTime: 13:07:01` — its create time — with `idleDeleteTtl: 1800s`, which predicts
+a delete at 13:37:01. It deleted at 13:44:38 instead. Measured from the moment the cluster actually
+reached `RUNNING` (13:13:42) that is 1,856 seconds: the TTL plus about a minute of detection lag. So
+the idle clock runs from readiness, not from the field the API reports, and the real ceiling on an
+orphan is roughly *create time + TTL + a minute*.
+
+**Confirmed again, and faster.** The orphan finished provisioning after its launcher was dead —
+created 13:07:01, client killed 13:13:00, `RUNNING` at 13:13:42. Forty-two seconds of a server-side
+operation completing for a process that no longer existed, against Vertex's five minutes for the
+same shape.
+
+**What this does not prove.** The kill was manufactured, as in the first two rehearsals. And the
+residual the fix documents is untouched: a `NOT_FOUND` for a job whose history has aged out would
+read identically to one that was never submitted. This run probed minutes after the kill, so it says
+nothing about the retention horizon. The startup grace and the cell-count check are what contain
+that, the same way they contain it on the Ray path.
 
 ### The reaper works, and the first time it said so it was lying
 
