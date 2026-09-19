@@ -13,7 +13,7 @@
 --
 -- This is the second half of one experiment, not a separate one. The Ray pair
 -- (docs/sql/neuralprophet_ab.sql) answered the same question on the other runtime and landed on
--- CPU; the decision rule in section 3 of PLAN_REFINEMENT_V2 requires both runtimes before the
+-- CPU; the decision rule this pair was registered under requires both runtimes to agree before the
 -- shipped default is treated as settled, because a result on one scheduler is a result about that
 -- scheduler. Everything structural below is deliberately identical to the Ray file so the two
 -- analyses can be read side by side. What differs, and why, is written down at each point.

@@ -1643,6 +1643,11 @@ and distinct series, device telemetry present on the GPU arm and absent on the C
 and measured wave density within 1.0E-4 across 119 waves. The decision rule then fired cleanly:
 **s = 0.8196, r = 1.92, `device_share` = 1.0 → CPU, the accelerator does not pay for itself.**
 
+That density figure was re-measured on 2026-09-19 and it does not mean what it appears to. Both arms
+carried a ramp bucket and a drain bucket, and the 1.0E-4 is the two contaminations cancelling rather
+than the two fleets agreeing. The control still passes on this pair — by 0.24% once measured
+properly — so the decision above is unaffected. See *control 4 re-measured*, below.
+
 **The prediction was wrong, and in the interesting direction.** Phase 0 pre-registered s in
 [0.95, 1.07] — the expectation was rough parity, an accelerator that neither helps nor hurts on a
 model that allocates 87 KB of device memory. The measurement is 0.82. Attaching a T4 did not fail to
@@ -2163,6 +2168,78 @@ Read the accuracy row before reading anything else into this. Mean WAPE is 0.348
 four decimal places, across three separate completed runs. Nothing is being traded away by choosing
 the cheaper hardware — the accelerator was never buying accuracy here, only 87,040 bytes of
 occupancy on a 17 GB card.
+
+#### 2026-09-19, control 4 re-measured: the rule was worse than the record said, and the record stands anyway
+
+Nothing below changes a verdict. It is here because the reasoning behind one of them turned out to
+be luck, and a ledger that only records outcomes is not recording enough.
+
+Control 4's trimming rule was diagnosed on 2026-09-11 as brittle, and deliberately left alone
+because the brittleness was found by looking at the answer. That decision was right and is not being
+revisited. What had not been done was measuring how brittle, so it was measured against every arm
+that still has cells in BigQuery: both cluster arms and both Ray arms, 26,000 cells in all.
+
+**The Ray pair passed by coincidence.** The record above says its density agreed "within 1.0E-4
+across 119 waves", and that figure is real but it is the difference between two contaminated
+numbers. An autoscaled fleet ramps for longer than one bucket — worker count climbed 4 → 108 → 84
+on the CPU arm — and it drains for longer than one too, so dropping exactly one bucket at each end
+left both arms carrying a ramp bucket and a drain bucket. The GPU arm's steady-state set included
+densities of 0.6659 and 0.4505; the CPU arm's included 0.4485 and 0.8650. The two means came out
+0.9008 and 0.9009. The contamination was very nearly equal, so it cancelled. Measured properly the
+two arms are at 0.9997 and 0.9973 — still a pass, by 0.24% instead of 0.01%.
+
+So the defect was not confined to one unlucky cluster run whose last two cells crossed the hour. It
+was present in every arm of both pairs; on the cluster pair it happened to trim correctly, and on
+the Ray pair it happened to cancel.
+
+**Two candidate repairs were tested against the surviving data and both are worse than the rule they
+would replace.**
+
+* *Trim to the run's maximum node count.* On a fixed cluster all 28 workers are present through the
+  drain — the 0.251 drain bucket has every node in it — so the drain survives the trim. On an
+  autoscaled fleet the maximum is 108 and it occurs during the ramp, so the ramp survives and the
+  steady state is discarded. It fails in both directions at once.
+* *Normalise by node coverage and drop the windowing entirely*, charging each worker only from the
+  moment it joined. This removes every tunable, which is the attractive part, but it bills churned
+  workers from their first cell to the end of the run: steady-state density on two arms that are
+  demonstrably saturated falls to 0.7317 and 0.7695, and the arms then differ by 5.2% purely because
+  the autoscaler drew 108 workers in one and 102 in the other. It trades a correctable bias for one
+  that cannot be corrected.
+
+**The repair that works measures the window start instead of assuming it.** Take the moment the last
+worker joined the fleet, tile whole buckets forward from there, and stop one bucket before the last
+cell end. The start is then an observable rather than a guess, which matters more than it sounds: on
+the Ray GPU arm the fleet was still growing 28.8 minutes after the first cell finished, so a fixed
+30-minute ramp trim would have cleared the ramp by 1.2 minutes. The obvious repair would also have
+worked by luck.
+
+| Arm | Original rule | Repaired rule | Nodes per steady bucket |
+|---|---|---|---|
+| Cluster CPU | 4 buckets, 0.9997 | 4 buckets, 0.9921 | 28.0 |
+| Cluster GPU | 5 buckets, 0.9967 | 5 buckets, 0.9916 | 28.0 |
+| Ray CPU | 7 buckets, 0.9009 | 5 buckets, 0.9973 | 84.0 |
+| Ray GPU | 9 buckets, 0.9008 | 7 buckets, 0.9997 | 84.0 |
+
+The last column is the check that the window is right rather than merely flattering: every steady
+bucket in all four arms contains exactly the fleet its arm was planned with. Gaps become 0.05% on
+the cluster pair and 0.24% on the Ray pair. **Both pairs still PASS, so no decision on this page
+moves.**
+
+**Neither pre-registered rule was edited.** `docs/sql/neuralprophet_ab.sql` and
+`docs/sql/neuralprophet_ab_cluster.sql` still carry control 4 exactly as registered, defect and all,
+and `tests/unit/test_ab_density_window.py` now fails if anyone repairs them in place. The corrected
+rule is a separate file, `docs/sql/ab_density_window.sql`, for the next A/B to pre-register. The
+reason is the one that got the CPU arm re-run rather than the rule rewritten: a pre-registered
+analysis that can be improved after the numbers land was never pre-registered. Improving it here
+would have cost nothing and proved nothing, which is the combination to be suspicious of. One
+comment in the cluster file did change in the same commit, for an unrelated reason — it named a
+document that does not ship — and no line of its analysis moved.
+
+The repaired rule keeps two known limitations, both written into its header rather than tuned away.
+A fit already running when the window opens is charged to no bucket, so bucket zero is short by up
+to one fit per worker — visible above as the cluster arms' 0.9921 and 0.9916 against per-bucket
+maxima above 1.0. And a worker that churns *inside* the window still depresses the bucket it worked
+in, because the denominator counts any node that ran a cell there. Both land on the two arms alike.
 
 ### `all_families_10k_full` — the last NEVER_RUN config, and it corrected the arithmetic on this page
 
