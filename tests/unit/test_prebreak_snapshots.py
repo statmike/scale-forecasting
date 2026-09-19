@@ -148,33 +148,65 @@ _HORIZON = 28
 _FOLD_OBS = 1460
 
 # Absolute vs relative tolerance for the numbers: an exact pin in everything but name, and what
-# most of the panel is held to. Ten of the fifteen models reproduce bit-for-bit on any machine.
+# most of the panel is held to. Six of the fifteen models reproduce bit for bit on every machine
+# the fleet survey below reached, and four more move by less than this band: `prophet` and
+# `naive_moving_average` by a single ULP, `regression_lags` by 4.5e-13, `stl_bagging` by 4.3e-10.
+# That last one has only about twice the room it needs, so it is the name to look at first if this
+# band ever fails on a runner and passes at a desk.
 _RTOL = 1e-9
 _ATOL = 1e-9
 
 # The other five, and the one place this module admits a number it cannot pin exactly.
 #
-# These five fit by iterative numerical optimisation inside `statsmodels`, and an optimiser does
-# not stop at the same point on two different CPUs: the BLAS kernels chosen depend on the
-# instruction set found at load time, the reduction order changes with them, and the search halts
-# a few ULPs away. The evidence that it is the machine and not the code: on the CI runner exactly
-# these five moved and the other ten moved nothing at all, while locally the whole panel is
-# reproducible to the bit under any thread count. Note that `stl_bagging` also fits an ARIMA and
-# did *not* move — so this set is what was observed, not a category anyone reasoned their way to.
-# A sixth name belongs here only with the same kind of evidence behind it.
+# These five fit by iterative numerical optimisation inside `statsmodels`, and the optimiser does
+# not halt at the same point on every machine: the BLAS kernel it dispatches to depends on the
+# instruction set found at load time, the reduction order changes with the kernel, and the search
+# stops an iteration sooner or later. The evidence that it is the machine and not the code: exactly
+# these five move on CI and the other ten stay inside the exact band, while locally the whole panel
+# is reproducible to the bit under any thread count. Note that `stl_bagging` also fits an ARIMA and
+# stayed inside the exact band — so this set is what was observed, not a category anyone reasoned
+# their way to. A sixth name belongs here only with the same kind of evidence behind it.
 #
-# The two bands are sized from the runner's actual movements rather than guessed. Forecast values
-# moved at most 2.1e-6 relative; metrics moved at most 4.1e-3, and that outlier is `bias` — a
-# near-zero average of errors on a series whose level is ~270, so an absolute shift of 0.008 reads
-# as a large fraction of itself. Error metrics amplify by construction; the forecast is the
-# scale-free signal, so it keeps the tighter band.
+# **The bands are measured, and here is the measurement.** The first pair of numbers came off a
+# single runner, which is a sample of one drawn from a fleet that is heterogeneous by CPU make and
+# generation — so the band was right for that machine and too tight for the fleet, and CI went red
+# on a commit that had changed nothing numeric. A 48-sample survey replaced the guess: 24 runners,
+# two panel builds each, six CPU families (AMD EPYC 7763 / 9V45 / 9V74, Intel Xeon Platinum 8370C /
+# 8573C, Xeon 6973P-C). Three findings, all of which shape the bands below.
 #
-# What the loose band still catches: item 2.5, the last deliberate movement in this panel, moved
-# WAPE by 5.7e-2 — fourteen times the metric band and four orders above the forecast one. A change
-# with a cause is not subtle.
+#   * **The movement is discrete, not noisy.** Forecast values landed on exactly three results:
+#     0, 2.7682023e-05 and 8.9757297e-05 relative, and nothing in between. Both builds on a machine
+#     agreed every time, 24 out of 24. That is kernel dispatch picking one of a few code paths,
+#     deterministic once picked — not an optimiser wandering.
+#   * **The CPU model does not predict which path you get.** The EPYC 9V74 produced 0 on four
+#     runners and 2.768e-05 on a fifth. So there is nothing to key a per-machine expectation on,
+#     and the band has to cover the worst path rather than the likely one.
+#   * **The five are not one population.** `autoets` and `holtwinters` move 9.0e-05, `ucm` 1.1e-06,
+#     `sarimax` 1.8e-09, `theta` 2.7e-11 — seven orders of spread. One flat band is therefore sized
+#     by the worst two and is very loose for the other three, and that is a deliberate trade: a
+#     band fitted tightly to `theta` would go red the first time an unsampled runner dispatches
+#     `theta` down a different path, and a permanently-red test gets muted.
+#
+# `_UNSTABLE_FIT_RTOL_FORECAST` is five times the worst movement observed, the same headroom the
+# original band used. At 5e-4 it is still two orders below any change that reaches a model's
+# parameters, which moves forecasts by percent rather than by parts per million.
+#
+# **`bias` carries its own band and every other metric keeps the tight one.** Across the same
+# survey `bias` moved 7.0e-03 while no other metric moved more than 1.4e-04 — fifty times less.
+# `bias` averages *signed* errors, so they cancel and what is left is small: the pinned value is
+# -1.97 on a series whose level is ~270, and a 0.0137 absolute shift is a large fraction of itself
+# while being invisible inside `mae`. One band wide enough for `bias` would have to be ~4e-2, and
+# that is what the split buys, because of the next paragraph.
+#
+# What the metric band still catches: item 2.5, the last deliberate movement in this panel, moved
+# WAPE by 5.7e-2. Against the band WAPE is actually held to that is 5.7x, and against the largest
+# movement WAPE made anywhere in the survey (1.2e-04) it is nearly five hundred times. Absorbing
+# `bias` into the shared band instead would have left that margin at 1.4x. A change with a cause is
+# not subtle, and the point of splitting `bias` out is to keep it that way.
 _UNSTABLE_FIT = frozenset({"autoets", "holtwinters", "sarimax", "theta", "ucm"})
-_UNSTABLE_FIT_RTOL_FORECAST = 1e-5
+_UNSTABLE_FIT_RTOL_FORECAST = 5e-4
 _UNSTABLE_FIT_RTOL_METRIC = 1e-2
+_UNSTABLE_FIT_RTOL_BIAS = 4e-2
 
 # `neuralprophet` is excluded from the numeric panel for two independent reasons, and both would
 # have to stop being true to include it: it costs ~51 s for this one series (85% of the panel's
@@ -386,8 +418,10 @@ def _cell_complaints(
 
     Shared by both panel tests so that "unchanged" means one thing rather than two. Numbers are
     compared with `_close`, at the exact tolerance for most models and at the wider cross-machine
-    band for the five named in `_UNSTABLE_FIT` — see the comment there for why those five and why
-    that width. A pin that fails on a difference between two CPUs is a pin someone switches off.
+    band for the five named in `_UNSTABLE_FIT` — with `bias` wider still, being the one metric whose
+    signed errors cancel. See the comment by those constants for why those five, why `bias` is on
+    its own, and where every width was measured. A pin that fails on a difference between two CPUs
+    is a pin someone switches off.
 
     `newly_scored` names metrics allowed to have gone from "not computed" to a number since the
     snapshot was taken. It is one-directional on purpose — the reverse move, a metric that used to
@@ -427,7 +461,11 @@ def _cell_complaints(
             w, g = want["metrics"][key], got["metrics"][key]
             if key in newly_scored and w is None and g is not None:
                 continue  # the movement 2.3 declared, in the only direction it declared it
-            if compare_values and not _close(g, w, metric_rtol):
+            # `bias` is the one metric whose signed errors cancel, so the same absolute wobble is
+            # a fifty-times larger fraction of it than of anything else. It gets its own band so
+            # the shared one can stay tight enough to still catch a deliberate change.
+            rtol = _UNSTABLE_FIT_RTOL_BIAS if unstable and key == "bias" else metric_rtol
+            if compare_values and not _close(g, w, rtol):
                 out.append(f"{model}: metric {key} moved {w!r} -> {g!r}")
         if len(got["yhat"]) != len(want["yhat"]):
             out.append(f"{model}: forecast length {len(want['yhat'])} -> {len(got['yhat'])}")
@@ -540,6 +578,33 @@ def test_the_cross_machine_band_is_wide_for_five_models_and_for_no_others() -> N
 
     assert not _cell_complaints({"autoets": nudged}, {"autoets": base})
     assert _cell_complaints({"croston": nudged}, {"croston": base})
+
+
+def test_bias_gets_its_own_band_and_takes_nothing_else_with_it() -> None:
+    """The split is the reason the shared metric band could stay tight, so test that it held.
+
+    A movement between the two widths must be tolerated in `bias` and reported in every other
+    metric of the same cell — otherwise the split has quietly become a general loosening, which is
+    exactly what it was chosen over.
+    """
+    base = {
+        "status": "ok",
+        "metrics": {"bias": -1.97, "wape": 0.0577},
+        "columns": ["yhat"],
+        "yhat": [100.0],
+        "n_oof_rows": 3,
+    }
+    between = (_UNSTABLE_FIT_RTOL_METRIC + _UNSTABLE_FIT_RTOL_BIAS) / 2
+    assert _UNSTABLE_FIT_RTOL_METRIC < between < _UNSTABLE_FIT_RTOL_BIAS
+
+    moved_bias = {**base, "metrics": {"bias": -1.97 * (1 + between), "wape": 0.0577}}
+    moved_wape = {**base, "metrics": {"bias": -1.97, "wape": 0.0577 * (1 + between)}}
+
+    assert not _cell_complaints({"autoets": moved_bias}, {"autoets": base})
+    assert _cell_complaints({"autoets": moved_wape}, {"autoets": base})
+    # And the wide `bias` band is the unstable five's alone — an exactly-pinned model keeps the
+    # exact tolerance for every metric it has, `bias` included.
+    assert _cell_complaints({"croston": moved_bias}, {"croston": base})
 
 
 def _write() -> None:
