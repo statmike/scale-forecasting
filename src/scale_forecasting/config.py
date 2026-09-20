@@ -443,8 +443,12 @@ class EnsembleCompute(BaseModel):
 
     Distinct from `EnsembleConfig` (which selects the ensemble *strategies*): this picks *where* and
     *when* the ensemble runs. ``mode="barrier"`` ensembles once after every base model finishes;
-    ``mode="microbatch"`` ensembles each series as soon as its upstream base models complete. Inert
-    until the DAG orchestrator consumes it.
+    ``mode="microbatch"`` ensembles each series as soon as its upstream base models complete, so the
+    ensemble overlaps the families instead of queueing behind the slowest one.
+
+    Both modes are live. The microbatch shape was measured on Airflow in smoke 15 (2026-09-20): the
+    ensemble task started in the same second as the four family tasks, ran 2,879 s alongside them,
+    and finished 20 s after the last member — which is not a shape barrier mode can produce.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

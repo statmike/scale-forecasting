@@ -654,6 +654,7 @@ knobs only matter for a family that runs on Ray.
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
 | `families` | `dict[family → FamilyCompute]` | `{}` | keys ∈ `statistical`/`ml`/`deep_learning` | Per-family runtime/hardware overrides (see below). |
+| `ensemble` | `EnsembleCompute` | `{}` | — | *When* the ensemble node runs relative to the families (see below). |
 | `max_parallelism` | `int` | `1000` | `> 0` | Max parallel tasks. |
 | `bucket_target_cells` | `int` | `8` | `> 0` | Target cells per Spark bucket (shuffle-partition sizing). |
 | `max_executors` | `int \| null` | `null` | `> 0` | Operator ceiling on the Spark fleet — most executors a batch may scale to, most workers a cluster may hold. `null` sizes to the fan-out alone, which at 100k series asks for hundreds and is rejected outright by a regional CPU quota. Budget for concurrency: a run's families submit together. |
@@ -1118,6 +1119,47 @@ point: on both accelerator A/B runs it finished *faster* than its GPU twin at id
 roughly half the cost. The GPU config is kept because the numbers quoted in
 [the validation ledger](./validation.md) were measured on it, not because the accelerator earned its
 place; see [what `hardware: "gpu"` actually buys you](./quota_and_scale.md#what-hardware-gpu-guarantees-and-what-it-does-not).
+
+### `compute.ensemble` — when the consensus is computed
+
+`compute.families` says where each base family runs. `compute.ensemble` says *when* the node that
+blends their predictions runs. It is a separate block because it answers a separate question, and it
+is not the same thing as the top-level `ensemble` (`EnsembleConfig`, above), which picks *which*
+blending strategies to compute.
+
+| Field | Type | Default | Constraint | Purpose |
+|-------|------|---------|-----------|---------|
+| `mode` | `"barrier"` \| `"microbatch"` | `"barrier"` | — | Blend once after every family finishes, or drain series as they become ready. |
+| `microbatch_interval_s` | `float` | `60.0` | `> 0` | Seconds between readiness polls in `microbatch` mode. Inert in `barrier`. |
+| `runtime` | `"spark"` \| `"ray"` | `"spark"` | — | **Accepted and not read** — see the warning below. |
+| `spark_mode` | `"serverless"` \| `"cluster"` | `null` | Spark only | **Accepted and not read** — see the warning below. |
+| `spark_cluster_name` | `str` | `null` | requires `spark_mode="cluster"` | **Accepted and not read** — see the warning below. |
+
+**The two modes differ in when, not in what.** Both run on the driver, both write the same
+`ensemble_<strategy>` prediction and leaderboard rows, and both honour the rule that a series is
+blended only once *every* configured base model has landed for it — so a family that fails leaves no
+series ready and produces no ensembles either way.
+
+`barrier` waits for the whole fan-out, then blends in one pass. It is the default because it is the
+simpler thing to reason about and it costs nothing when the families finish at similar times.
+
+`microbatch` starts the ensemble node *alongside* the families and drains series incrementally,
+polling every `microbatch_interval_s`. It is worth setting when one family is much slower than the
+rest, because the blending work then happens during that family's tail instead of queueing behind
+it. The shape is visible in a real task graph: in smoke 15 on Airflow (2026-09-20) the `ensemble`
+task started in the same second as the four family tasks, ran 2,879 s beside them, and ended 20 s
+after the last member finished.
+
+A shorter interval reaps series sooner and issues more BigQuery readiness queries; 60 s is a
+deliberate middle for runs measured in tens of minutes. Below a few seconds you are paying query
+cost to discover nothing has changed.
+
+> **Warning — `runtime`, `spark_mode` and `spark_cluster_name` here do nothing today.** The ensemble
+> node is hardcoded to run in BigQuery plus driver-side pandas: it reads predictions, blends them and
+> writes rows, taking no Spark or Ray cluster of its own. These three fields are accepted by the
+> config loader and then ignored. They are still part of the config digest, so setting one changes
+> your `run_id` — and therefore starts a *new* run — while changing nothing about how the run
+> executes. Leave them unset.
 
 ## A minimal config
 
