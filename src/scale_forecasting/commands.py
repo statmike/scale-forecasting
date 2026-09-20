@@ -96,6 +96,7 @@ def build_spark_commands(
     manage_header: bool = True,
     properties: dict[str, str] | None = None,
     provisioned_hardware: str | None = None,
+    gpu_type: str | None = None,
 ) -> LaunchCommands:
     """Both command tiers for a Dataproc Serverless (Spark) run.
 
@@ -120,6 +121,13 @@ def build_spark_commands(
     ``spark.executorEnv.SF_PROVISIONED_HARDWARE`` property that carries the same fact to every
     executor (see `hardware`). Both halves are emitted here so the printed command reconstructs the
     device behaviour of the batch and not just its shape. On a CPU job both are empty.
+
+    **The universal command has to carry the family's shape too.** A multi-family run submits one
+    batch per family, so the naked ``submit --config-uri …`` line — which would run the whole config
+    on CPU under the derived ``sf-<run_id>`` id — describes none of them, and two families' copies
+    of it would collide on that one id. ``--models`` / ``--batch-id`` / ``--hardware`` /
+    ``--gpu-type`` are emitted whenever they differ from those standalone defaults, which is what
+    keeps the two tiers describing the same batch.
     """
     driver = build_driver_args(
         config_uri,
@@ -157,13 +165,17 @@ def build_spark_commands(
         f"--subnet={infra.subnetwork_uri}",
         f"--ttl={infra.ttl_seconds}s",
     ]
-    props: dict[str, str] = {
-        **dep_props,
-        **(properties or {}),
-        **spark_executor_env(provisioned_hardware),
-    }
+    props: dict[str, str] = {**dep_props, **(properties or {})}
     if max_executors is not None:
         props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
+    if provisioned_hardware == "gpu":
+        # The accelerator attachment and its knock-on sizing, from the same function `build_batch`
+        # applies — ordered after the overlay and the executor cap for the same reason it is there,
+        # since its memory/failure defaults read the values those two settled.
+        from .submit import apply_gpu_properties
+
+        apply_gpu_properties(props, gpu_type=gpu_type, max_executors=max_executors)
+    props.update(spark_executor_env(provisioned_hardware))
     if props:
         gcloud.append("--properties=" + ",".join(f"{k}={v}" for k, v in props.items()))
     gcloud += ["--", *driver]
@@ -171,6 +183,16 @@ def build_spark_commands(
     universal_argv = ["python", "-m", "scale_forecasting.submit", "--config-uri", config_uri]
     if max_executors is not None:
         universal_argv += ["--max-executors", str(max_executors)]
+    if models is not None:
+        universal_argv += ["--models", ",".join(models)]
+    # Always stated, never derived. The derived id is `sf-<run_id>`, which this function has no
+    # run_id to recompute — and where the caller passed the derived id anyway, naming it explicitly
+    # submits the identical batch. Guessing would be the only way to get this wrong.
+    universal_argv += ["--batch-id", batch_id]
+    if provisioned_hardware == "gpu":
+        universal_argv += ["--hardware", "gpu"]
+        if gpu_type:
+            universal_argv += ["--gpu-type", gpu_type]
 
     return LaunchCommands(
         runtime="spark",

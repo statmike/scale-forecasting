@@ -81,9 +81,11 @@ class LaunchPlan:
 
     Produced offline by `plan_run` (``staged=False`` — URIs are the *templates* where artifacts will
     land; no GCS is touched) or by `stage_run` (``staged=True`` — artifacts uploaded, URIs real and
-    the commands runnable). ``commands`` maps a tier name (``"main"``/``"spark"``/``"ray"``) to its
-    `LaunchCommands`; it is ``None`` only when the GCP infra identity can't be resolved offline (no
-    ``SF_*`` env), in which case the run_id + fanout + runtime split are still returned.
+    the commands runnable). ``commands`` maps a tier name to its `LaunchCommands`: ``"main"``,
+    ``"ray"``, and one ``"spark:<family>"`` per Serverless family (``"spark:statistical"``, …) —
+    per-family because each family resolves its own hardware and batch id, so one command cannot
+    stand for all of them. It is ``None`` only when the GCP infra identity can't be resolved offline
+    (no ``SF_*`` env), in which case the run_id + fanout + runtime split are still returned.
 
     ``idempotency`` is the exists-vs-new verdict for this config's id; ``force`` records that the
     caller intends to re-run an already-run config (it only shapes the emitted guidance — a re-run
@@ -197,6 +199,7 @@ def _assemble_commands(
     plan: _RunPlan,
     settings: Settings,
     infra: object,
+    nodes: Sequence[DagNode],
     *,
     config_uri: str,
     package_uri: str | None,
@@ -206,10 +209,25 @@ def _assemble_commands(
 
     Always emits ``"main"`` — ``python -m scale_forecasting.main --config-uri …``, the orchestrator
     that reproduces the *full* run (both engines under one run_id). When there are Python-runtime
-    models it adds the per-runtime tier: ``"ray"`` (universal only) or ``"spark"`` (native
-    ``gcloud`` + universal). The Spark tier restricts to ``--models`` **only** for a mixed run (so
-    the batch runs just its subset while BigQuery runs the rest); a Python-only config emits no
-    ``--models`` so the standalone batch runs the whole config under its own header.
+    models it adds the per-runtime tier: ``"ray"`` (universal only) or one ``"spark:<family>"``
+    entry per Serverless family (native ``gcloud`` + universal).
+
+    **The Spark tier is keyed by family because the run is.** A Serverless executor's shape is
+    fixed at batch creation and each family resolves its own hardware, so one command cannot
+    describe a run whose statistical family is on CPU and whose deep-learning family holds a GPU.
+    Emitting one per family is what makes the printed command reproduce the batch `run` submits:
+    same ``--batch`` id (`registry.ids.dataproc_job_id` over the family's planned ``job_key``),
+    same ``--models`` subset, same sizing overlay derived at that family's hardware, and
+    ``--provisioned-hardware gpu`` where the family bought a device.
+
+    Each command stands alone — ``manage_header=True``, so copy-pasting one reproduces that
+    family's batch under its own header rather than needing the orchestrator to own one.
+
+    **Cluster-mode families get no command, deliberately.** `build_spark_commands` renders
+    ``gcloud dataproc batches submit``, which is the Serverless form; a cluster family's job goes
+    to ``gcloud dataproc jobs submit`` against a cluster the run *creates*, so there is no
+    standalone line to copy. Emitting the Serverless form for it would print a command that runs
+    and runs the wrong thing.
     """
     from .commands import build_main_command, build_ray_commands, build_spark_commands
 
@@ -224,25 +242,34 @@ def _assemble_commands(
 
     from .batch_infra import BatchInfra
     from .profiling.source import profile_for_run
-    from .submit import _batch_id, sizing_properties
+    from .registry.ids import dataproc_job_id
+    from .submit import sizing_properties
 
     assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
-    models_arg = plan.python_models if plan.bq_models else None
-    commands["spark"] = build_spark_commands(
-        settings=settings,
-        infra=infra,
-        batch_id=_batch_id(plan.run_id),
-        package_uri=package_uri or "",
-        launcher_uri=launcher_uri or "",
-        config_uri=config_uri,
-        models=models_arg,
-        manage_header=True,
-        # The emitted gcloud command has to carry the sizing overlay the SDK path applies, or
-        # copy-pasting it would submit a differently-shaped batch than `run` would.
-        properties=sizing_properties(
-            cfg, models_arg, profile=profile_for_run(cfg, settings=settings)
-        ),
-    )
+    profile = profile_for_run(cfg, settings=settings)
+    for node in nodes:
+        if node.runtime != "spark" or node.spark_mode == "cluster":
+            continue
+        models = list(node.models)
+        hardware = node.hardware or "cpu"
+        commands[f"spark:{node.family}"] = build_spark_commands(
+            settings=settings,
+            infra=infra,
+            batch_id=dataproc_job_id(node.job_key),
+            package_uri=package_uri or "",
+            launcher_uri=launcher_uri or "",
+            config_uri=config_uri,
+            models=models,
+            manage_header=True,
+            # The emitted gcloud command has to carry the sizing overlay the SDK path applies, or
+            # copy-pasting it would submit a differently-shaped batch than `run` would. The overlay
+            # is hardware-dependent, which is the whole reason this is resolved per family.
+            properties=sizing_properties(
+                cfg, models, hardware=hardware, gpu_type=node.gpu_type, profile=profile
+            ),
+            provisioned_hardware=hardware,
+            gpu_type=node.gpu_type,
+        )
     return commands
 
 
@@ -397,6 +424,7 @@ def plan_run(
             plan,
             settings,
             resolved_infra,
+            nodes,
             config_uri=config_uri,
             package_uri=package_uri,
             launcher_uri=launcher_uri,
@@ -668,6 +696,7 @@ def stage_run(
         plan,
         settings,
         resolved_infra,
+        nodes,
         config_uri=config_uri,
         package_uri=package_uri,
         launcher_uri=launcher_uri,

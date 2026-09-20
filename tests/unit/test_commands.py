@@ -149,6 +149,38 @@ def test_spark_native_command_reconstructs_the_exact_batch() -> None:
     assert native[dash + 1 :] == list(ps.args)
 
 
+def test_spark_native_gpu_command_reconstructs_the_gpu_batchs_properties() -> None:
+    # The failure this locks down: a command that says `--provisioned-hardware gpu` — telling the
+    # code it has a device — while naming no accelerator, so the copy-paste run pays for nothing and
+    # every fit lands on the CPU. Both sides resolve the GPU block through `submit.apply_gpu_
+    # properties`, and this compares the resulting property maps rather than trusting that.
+    settings, infra = _settings(), _infra()
+    common = dict(
+        package_uri="gs://code-bkt/runs/pkg-1234.zip",
+        launcher_uri="gs://code-bkt/runs/spark_main.py",
+        config_uri="gs://code-bkt/runs/run-abc.json",
+        models=["neuralprophet"],
+        max_executors=6,
+    )
+    cmds = build_spark_commands(
+        settings=settings,
+        infra=infra,
+        batch_id="sf-run-abc-deep-learning-1",
+        provisioned_hardware="gpu",
+        gpu_type="L4",
+        **common,  # type: ignore[arg-type]
+    )
+    batch = build_batch(infra=infra, settings=settings, hardware="gpu", gpu_type="L4", **common)  # type: ignore[arg-type]
+
+    native = shlex.split(cmds.native)
+    flag = next(t for t in native if t.startswith("--properties="))
+    printed = dict(kv.split("=", 1) for kv in flag[len("--properties=") :].split(","))
+    assert printed == dict(batch.runtime_config.properties)
+    assert printed["spark.dataproc.executor.resource.accelerator.type"] == "l4"
+    # And the driver args still match byte for byte, GPU flag included.
+    assert native[native.index("--") + 1 :] == list(batch.pyspark_batch.args)
+
+
 def test_spark_native_command_follows_the_packed_venv_envelope() -> None:
     # The emitted command and the submitted batch resolve dependency delivery through the SAME
     # helper, so a deployment with no Artifact Registry prints a command with no --container-image
@@ -197,6 +229,8 @@ def test_spark_max_executors_sets_native_property_and_universal_flag() -> None:
         "gs://c/r.json",
         "--max-executors",
         "4",
+        "--batch-id",
+        "sf-x",
     ]
 
 
@@ -210,13 +244,55 @@ def test_spark_universal_omits_max_executors_when_unset() -> None:
         config_uri="gs://c/r.json",
     )
     assert "--properties=" not in cmds.native
+    # The batch id is always stated. It is the one thing that tells two families' batches apart
+    # under a shared run_id, and naming it is a no-op where it is the derived id anyway.
     assert shlex.split(cmds.universal) == [
         "python",
         "-m",
         "scale_forecasting.submit",
         "--config-uri",
         "gs://c/r.json",
+        "--batch-id",
+        "sf-x",
     ]
+
+
+def test_spark_universal_carries_the_family_shape_not_just_the_config() -> None:
+    # The GPU deep-learning family of a multi-family run. A naked `submit --config-uri` would run
+    # every model on CPU under the derived id, so the universal tier has to name the subset, the
+    # device and the batch — otherwise it describes a different batch than the gcloud line beside
+    # it, and two families' copies of it would collide on one id.
+    cmds = build_spark_commands(
+        settings=_settings(),
+        infra=_infra(),
+        batch_id="sf-run-deep-learning-1",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        models=["neuralprophet"],
+        provisioned_hardware="gpu",
+        gpu_type="L4",
+    )
+    universal = shlex.split(cmds.universal)
+    assert universal[universal.index("--models") + 1] == "neuralprophet"
+    assert universal[universal.index("--batch-id") + 1] == "sf-run-deep-learning-1"
+    assert universal[universal.index("--hardware") + 1] == "gpu"
+    assert universal[universal.index("--gpu-type") + 1] == "L4"
+
+
+def test_spark_universal_omits_the_device_flags_on_a_cpu_family() -> None:
+    # "cpu" and "absent" select the same behaviour, so emitting the flag would add noise, not fact.
+    cmds = build_spark_commands(
+        settings=_settings(),
+        infra=_infra(),
+        batch_id="sf-run-statistical-1",
+        package_uri="gs://c/p.zip",
+        launcher_uri="gs://c/e.py",
+        config_uri="gs://c/r.json",
+        models=["theta"],
+        provisioned_hardware="cpu",
+    )
+    assert "--hardware" not in cmds.universal and "--gpu-type" not in cmds.universal
 
 
 # --- build_ray_commands: universal-only, anti-drift vs build_entrypoint --------

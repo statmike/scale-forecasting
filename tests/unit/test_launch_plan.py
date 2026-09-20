@@ -128,19 +128,34 @@ def _batch_infra() -> Any:
     )
 
 
-def test_plan_run_spark_emits_main_and_spark_command_templates() -> None:
+def test_plan_run_spark_emits_main_and_a_command_per_family() -> None:
     result = launch_plan.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
     assert result.commands is not None
-    assert set(result.commands) == {"main", "spark"}
+    # theta is the statistical family, and the Spark tier is keyed per family — not one "spark".
+    assert set(result.commands) == {"main", "spark:statistical"}
     config_uri = f"gs://bkt-code/runs/{result.run_id}.json"
     assert result.config_uri == config_uri
-    # main = the orchestrator command; spark = native gcloud + universal, both referencing the URI.
+    # main = the orchestrator command; the family = native gcloud + universal, both on the URI.
     assert result.commands["main"].universal.endswith(config_uri)
     assert result.commands["main"].native is None
-    spark = result.commands["spark"]
+    spark = result.commands["spark:statistical"]
     assert spark.native is not None and "gcloud" in spark.native and config_uri in spark.native
-    # A Python-only config emits no --models (the standalone batch runs the whole config).
-    assert "--models" not in spark.native
+    # Each family names its own subset, even when it is the only one — the run submits it that way.
+    assert "--models" in spark.native and _SPARK in spark.native
+
+
+def test_plan_run_family_commands_carry_the_batch_ids_the_run_will_use() -> None:
+    # The printed command is only worth printing if it submits the batch `run` submits. Its --batch
+    # id therefore has to be the planned node's id, not the derived single-batch `sf-<run_id>`.
+    from scale_forecasting.registry.ids import dataproc_job_id
+
+    result = launch_plan.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert result.commands is not None
+    node = next(n for n in result.nodes if n.family == "statistical")
+    expected = dataproc_job_id(node.job_key)
+    spark = result.commands["spark:statistical"]
+    assert spark.native is not None and f"--batch={expected}" in spark.native
+    assert f"--batch-id {expected}" in spark.universal
 
 
 def test_plan_run_mixed_spark_restricts_the_spark_subset() -> None:
@@ -148,9 +163,59 @@ def test_plan_run_mixed_spark_restricts_the_spark_subset() -> None:
         _cfg(models=[_SPARK, *_NATIVE]), settings=_SETTINGS, infra=_batch_infra()
     )
     assert result.commands is not None
-    spark = result.commands["spark"]
-    # A mixed run restricts the Spark batch to just its Python model(s) via --models.
+    # The BigQuery-native models run in BigQuery, so no Spark command mentions them.
+    assert set(result.commands) == {"main", "spark:statistical"}
+    spark = result.commands["spark:statistical"]
     assert spark.native is not None and "--models" in spark.native and _SPARK in spark.native
+    assert not any(m in spark.native for m in _NATIVE)
+
+
+def test_plan_run_gpu_family_emits_a_gpu_shaped_command_and_the_cpu_one_stays_cpu() -> None:
+    # Two Spark families on different devices is exactly the case one command cannot describe: a
+    # Serverless executor's shape is fixed at batch creation, so the deep-learning line has to buy
+    # an L4 and the statistical line beside it must not.
+    result = launch_plan.plan_run(
+        _cfg(
+            models=[_SPARK, "neuralprophet"],
+            compute={"families": {"deep_learning": {"hardware": "gpu", "gpu_type": "L4"}}},
+        ),
+        settings=_SETTINGS,
+        infra=_batch_infra(),
+    )
+    assert result.commands is not None
+    assert set(result.commands) == {"main", "spark:statistical", "spark:deep_learning"}
+    dl = result.commands["spark:deep_learning"]
+    assert dl.native is not None
+    assert "--provisioned-hardware gpu" in dl.native
+    assert "spark.dataproc.executor.resource.accelerator.type=l4" in dl.native
+    assert "--hardware gpu" in dl.universal and "--gpu-type L4" in dl.universal
+    stat = result.commands["spark:statistical"]
+    assert stat.native is not None and "--provisioned-hardware" not in stat.native
+    assert "--hardware" not in stat.universal
+    # Different families, different batches — the ids the run fans out under must not collide.
+    assert dl.universal != stat.universal
+
+
+def test_plan_run_skips_a_cluster_mode_family_rather_than_misdescribe_it() -> None:
+    # `gcloud dataproc batches submit` is the Serverless form. A cluster family's job goes to a
+    # cluster the run creates, so there is no standalone line to copy — and printing the Serverless
+    # one would give a reader a command that runs and runs the wrong thing.
+    result = launch_plan.plan_run(
+        _cfg(
+            models=[_SPARK, "neuralprophet"],
+            compute={
+                "families": {
+                    "deep_learning": {"spark_mode": "cluster", "hardware": "gpu", "gpu_type": "T4"}
+                }
+            },
+        ),
+        settings=_SETTINGS,
+        infra=_batch_infra(),
+    )
+    assert result.commands is not None
+    assert set(result.commands) == {"main", "spark:statistical"}
+    # The node is still planned and still in the DAG — only its *command* is withheld.
+    assert any(n.family == "deep_learning" and n.spark_mode == "cluster" for n in result.nodes)
 
 
 def test_plan_run_ray_emits_universal_only_ray_command() -> None:
@@ -260,13 +325,13 @@ def test_stage_run_spark_uploads_and_builds_runnable_commands(
     assert result.staged is True
     assert result.config_uri == f"gs://bkt-code/runs/{result.run_id}.json"
     assert result.commands is not None
-    spark = result.commands["spark"]
+    spark = result.commands["spark:statistical"]
     assert spark.native is not None and "gs://bkt-code/runs/pkg.zip" in spark.native
 
     manifest = captured["manifest"]
     assert manifest["run_id"] == result.run_id
     assert manifest["config_uri"] == result.config_uri
-    assert set(manifest["commands"]) == {"main", "spark"}
+    assert set(manifest["commands"]) == {"main", "spark:statistical"}
     assert manifest["fanout"]["n_cells"] == result.fanout.n_cells
     assert "created_at" in manifest  # caller-stamped timestamp
     # The manifest records the re-run intent and the exists-vs-new verdict it was staged under.

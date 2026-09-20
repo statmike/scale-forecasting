@@ -149,6 +149,32 @@ def _gpu_executor_failures(max_executors: int | None) -> int:
     return max(_GPU_MIN_EXECUTOR_FAILURES, _GPU_EXECUTOR_FAILURE_FACTOR * max_executors)
 
 
+def apply_gpu_properties(
+    props: dict[str, str], *, gpu_type: str | None = None, max_executors: int | None = None
+) -> None:
+    """Add the Serverless GPU block to ``props`` in place — the accelerator and what it costs.
+
+    Three separable things, all consequences of asking for a device: the accelerator attachment
+    itself (`_serverless_gpu_properties`), the executor memory the service stops defaulting once a
+    ``spark.rapids.*`` property is named, and a bound on executor churn. The last two are
+    ``setdefault`` — a measured sizing overlay or a config override has a better number and keeps
+    it; these are floors under a failure mode, not policy.
+
+    **This exists as one function because two callers must produce the same batch.**
+    `build_batch` builds the message the SDK submits and `commands.build_spark_commands` prints the
+    ``gcloud`` line a reader copies. If the GPU block lived only in the first, the printed command
+    would say ``--provisioned-hardware gpu`` — telling the code it has a device — while provisioning
+    none, and the fits would silently run on CPU.
+    """
+    from .resources.serverless import serverless_gpu_executor_memory_mb
+
+    props.update(_serverless_gpu_properties(gpu_type or _SERVERLESS_GPU_TYPE))
+    cores = int(props.get("spark.executor.cores", _SERVERLESS_DEFAULT_GPU_CORES))
+    props.setdefault("spark.executor.memory", f"{serverless_gpu_executor_memory_mb(cores)}m")
+    props.setdefault("spark.executor.maxNumFailures", str(_gpu_executor_failures(max_executors)))
+    props.setdefault("spark.executor.failuresValidityInterval", _GPU_EXECUTOR_FAILURE_WINDOW)
+
+
 def _estimated_series(
     cfg: RunConfig, settings: Settings
 ) -> int | None:  # pragma: no cover - GCP I/O, exercised by the @gcp smokes
@@ -373,20 +399,7 @@ def build_batch(
     if max_executors is not None:
         props["spark.dynamicAllocation.maxExecutors"] = str(max_executors)
     if hardware == "gpu":
-        from .resources.serverless import serverless_gpu_executor_memory_mb
-
-        props.update(_serverless_gpu_properties(gpu_type or _SERVERLESS_GPU_TYPE))
-        # Restoring, not overriding: the RAPIDS property above switches off the service's own
-        # GPU memory defaulting, so this puts back the value it would have derived. `setdefault`
-        # because a measured sizing overlay has a better number and must keep it.
-        cores = int(props.get("spark.executor.cores", _SERVERLESS_DEFAULT_GPU_CORES))
-        props.setdefault("spark.executor.memory", f"{serverless_gpu_executor_memory_mb(cores)}m")
-        # And a bound on executor churn (see the constants). `setdefault` so a config-supplied
-        # override still wins — this is a floor under the failure mode, not a policy.
-        props.setdefault(
-            "spark.executor.maxNumFailures", str(_gpu_executor_failures(max_executors))
-        )
-        props.setdefault("spark.executor.failuresValidityInterval", _GPU_EXECUTOR_FAILURE_WINDOW)
+        apply_gpu_properties(props, gpu_type=gpu_type, max_executors=max_executors)
     props.update(spark_executor_env(hardware))
 
     return dataproc.Batch(
@@ -549,7 +562,15 @@ def submit_batch(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI: ``python -m scale_forecasting.submit --config run.json``."""
+    """CLI: ``python -m scale_forecasting.submit --config run.json``.
+
+    ``--models`` / ``--batch-id`` / ``--hardware`` / ``--gpu-type`` are the *reproduce one family of
+    a multi-family run* flags. A run fans out one batch per model family, each shaped for its own
+    device and carrying its own id under the shared ``run_id``; the launch-plan emitter prints one
+    command per family, and these are what let a plain CLI line be one of them. Left off, the CLI
+    submits the whole config as a single CPU batch under the derived ``sf-<run_id>`` — the
+    standalone behavior every existing caller already gets.
+    """
     from .config import load_config_uri
 
     p = argparse.ArgumentParser(prog="submit", description="Submit a forecast run to Dataproc.")
@@ -559,6 +580,27 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--n-series", type=int, default=None, help="override series_limit (scale knob)")
     p.add_argument(
         "--max-executors", type=int, default=None, help="cap dynamicAllocation executors"
+    )
+    p.add_argument(
+        "--models",
+        default=None,
+        help="comma-separated subset to execute on-cluster; the FULL config is still staged, so "
+        "the run_id is unchanged (default: every model in the config)",
+    )
+    p.add_argument(
+        "--batch-id",
+        default=None,
+        help="override the derived sf-<run_id> batch id — needed when several batches fan out "
+        "under one run_id, since the derived id would collide",
+    )
+    p.add_argument(
+        "--hardware",
+        choices=("cpu", "gpu"),
+        default="cpu",
+        help="device class to provision per executor (default cpu)",
+    )
+    p.add_argument(
+        "--gpu-type", default=None, help="accelerator name when --hardware gpu (serverless is L4)"
     )
     p.add_argument("--no-wait", action="store_true", help="return once submitted (don't block)")
     p.add_argument(
@@ -589,6 +631,10 @@ def main(argv: list[str] | None = None) -> None:
         n_series=ns.n_series,
         infra=infra,
         max_executors=ns.max_executors,
+        models=ns.models.split(",") if ns.models else None,
+        batch_id=ns.batch_id,
+        hardware=ns.hardware,
+        gpu_type=ns.gpu_type,
         wait=not ns.no_wait,
         wait_timeout=ns.wait_timeout,
     )

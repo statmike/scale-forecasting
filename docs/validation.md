@@ -3383,7 +3383,7 @@ library; useless for a CLI whose entire job in this command is to *tell you what
 
 `_main` now installs a handler when the root logger has none (guarded, so importing it from Airflow
 or a notebook does not double every line; `SF_LOG_LEVEL` overrides). The same command now prints the
-run id, `fanout=Fanout(n_series=100000, n_models=4, …)`, both DAG nodes and both launch commands.
+run id, `fanout=Fanout(n_series=100000, n_models=4, …)`, the DAG nodes and the launch commands.
 
 **Why no test caught it, and why the new one is written the way it is.** pytest attaches its own
 handler to the root logger, so a `caplog` assertion passes against the broken code — the records
