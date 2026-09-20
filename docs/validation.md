@@ -2731,31 +2731,77 @@ than the 10,000-series demo run it would have had to use yesterday.
 
 All eight notebooks were executed headless against a live deployment and committed with their
 output cells at `ff1f8bf` (2026-08-28), which lands **after** the Ray re-architecture — so the Ray
-notebook reflects the current path. **Seven were re-executed on 2026-09-02** against current code and
-re-committed with their new outputs, clearing the last `STALE` row in this table. The executed
-notebooks were diffed against the committed ones first: source cells were byte-identical in all
-seven, so only outputs changed.
+notebook reflects the current path. Seven were re-executed on 2026-09-02, and **all eight were
+re-executed on 2026-09-20**, which is what the rows below record.
+
+The 2026-09-20 wave is the one that matters for reading them today. Every row in this table had gone
+`STALE`, and a notebook is the one surface where a stale row is also a *visible* lie: it ships its
+output cells, so a reader sees numbers produced by code that no longer exists. The wave ran the
+`full` tier of the headless acceptance harness — each notebook on its Colab Enterprise runtime
+template, as the runner service account, against **published `main` at `2ff1d4c`**, which is the
+code the notebooks' own bootstrap cells clone. Seven passed on the first attempt and `03` passed on
+a second; all eight reported **zero cell errors**.
+
+The executed notebooks were diffed against the committed ones before being swapped in: **source
+cells were byte-identical in all eight**, cell counts unchanged, so only outputs moved. The four
+notebooks that launch a run produced `nb01-spark-connect-1789915628-061e1744d4e7`,
+`nb02-bq-native-1789913623-ece832b57959`, `nb03-combo-ensemble-1789919864-67b161ae368e`,
+`nb04-ray-bq-1789918508-344fc058e7f8` and `nb08-run-monitor-1789916865-d173fc0b6464`. `07` and `09`
+launch nothing — they read runs that already exist — and `model_playground` never leaves the kernel.
 
 | Notebook | Status | Date | Axes at proof |
 |----------|--------|------|---------------|
-| `01_spark_via_connect.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only` |
-| `02_bigquery_native.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
-| `03_combo_and_ensemble.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `04_ray_on_vertex.ipynb` | STALE | 2026-08-28 | `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `07_scale_review.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
-| `08_run_and_monitor.ipynb` | STALE | 2026-09-02 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay`, `run_id_inputs=authored-config-only` |
-| `09_review_run.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
-| `model_playground.ipynb` | STALE | 2026-09-02 | `python=3.11`, `run_id_inputs=authored-config-only` |
+| `01_spark_via_connect.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| `02_bigquery_native.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only-v3` |
+| `03_combo_and_ensemble.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
+| `04_ray_on_vertex.ipynb` | CURRENT | 2026-09-20 | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only-v3` |
+| `07_scale_review.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
+| `08_run_and_monitor.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
+| `09_review_run.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
+| `model_playground.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 
-**`03` took three attempts, and the two failures had two different causes.** Neither was a defect in
-the notebook — it reported **zero cell errors** every time.
+Several rows now declare more axes than they did on 2026-09-02, because the notebooks were read for
+what they actually exercise rather than inheriting the old list. `02`, `03`, `04` and `08` all fit
+BigQuery-native models, so they rest on `native_source_pin`; `03` computes ensembles, so it rests on
+`ensemble_weighting`; `04` leaves `ray_autoscale` at its shipped default, so it rests on
+`ray_pool_shape`; and `08`/`09` display job state, which is `job_status`. Declaring an axis makes a
+row go `STALE` sooner, which is the safe direction to be wrong in — the dangerous direction is a row
+that stays `CURRENT` after its foundation moved.
 
-The first attempt died before it started: `Quota 'CPUS' exceeded. Limit: 200.0 in region
-us-central1`, because six sibling notebooks held the region's Colab runtimes at that moment. The
-region measured 36/200 once the wave drained, so this was contention inside the harness's own
-fan-out, not a standing shortage. Worth recording for a second reason: **Vertex names a quota
-failure explicitly when that is what happened**, which independently strengthens the elimination
-above — the Ray outage's contentless "internal error" really was not quota.
+### `03`'s quota failure is not what we said it was
+
+**`03` has now failed the same way twice, and the explanation recorded here for the first one is
+wrong.** Both times it was `Quota 'CPUS' exceeded. Limit: 200.0 in region us-central1`, raised
+before the notebook started, with zero cell errors.
+
+The 2026-09-02 account blamed contention inside the harness's own fan-out — six sibling notebooks
+holding the region's Colab runtimes at that instant. **The 2026-09-20 wave rules that out.** It ran
+through `run_acceptance`, which is strictly sequential: submit one notebook, poll it to terminal,
+then submit the next. There were no siblings. `03` failed anyway.
+
+What the timings show instead is that `03` was submitted at 15:04:44 while `01_spark_via_connect`
+was still finishing at 15:08:07 — and `01` is the notebook that holds a **Dataproc Serverless Spark
+Connect session**. The limit the error names, `200.0`, is exactly the region's Compute Engine `CPUS`
+quota, which Colab runtimes and Dataproc Serverless both draw from; the region measured 4/200 once
+everything drained. So the likely contender is the *previous notebook's own Spark workload*, not a
+parallel notebook. This is stated as the reading the evidence supports, not as proof — nobody was
+watching the meter at 15:04:44, and it cannot be reconstructed after the fact.
+
+The operational consequence is the part worth keeping: **running the notebooks one at a time does
+not make the quota safe.** A notebook can release its Colab runtime while the cluster or session it
+launched is still holding CPUs, so the harness's own serialization says nothing about what the next
+submit will find. Retrying `03` alone against a drained region succeeded, which is the same repair
+the `--only` path was added for.
+
+Worth recording for a second reason, unchanged from 2026-09-02: **Vertex names a quota failure
+explicitly when that is what happened**, which independently strengthens the elimination above — the
+Ray outage's contentless "internal error" really was not quota.
+
+### `03`'s deadline failure, 2026-09-02
+
+On 2026-09-02 `03` took three attempts, and the two failures had different causes. The first was the
+quota one above. The other two are recorded here because the second is a failure mode that outlives
+its wave.
 
 The second attempt, re-run alone against a quiet region, hit `Job deadline exceeded` at its 1800 s
 ceiling. **The work had actually succeeded** — Dataproc batch
@@ -2773,6 +2819,10 @@ and took roughly the 30 minutes the old limit allowed. **That is the confirmatio
 not just the fix for it:** if the deadline had been a symptom rather than the cause, widening it
 would have produced a longer failure instead of a pass. It also exercised the new `--only` selection
 path end to end, which is what made a one-notebook retry affordable enough to run three times.
+
+The 2026-09-20 retry corroborates the ceiling from the other side: `03` ran 15:56:45 → 16:25, about
+29 minutes, which is inside 3600 s and would have been outside 1800 s. The widened deadline was not
+generous, it was the minimum that fits the work.
 
 ## Other capabilities
 

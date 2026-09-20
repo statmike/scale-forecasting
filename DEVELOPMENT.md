@@ -198,8 +198,12 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   stays registry-only, because a poll loop must never fan native calls. The age is a *fact* the
   monitor reports and the escalation *threshold* stays with the probe
   (`probes.reconcile._is_stale`, which now reads `quiet_seconds` rather than re-parsing rows), so
-  the two can never disagree about how quiet a family has been. Notebook 08's escalate-on-quiet
-  loop lands with its next live re-execution.
+  the two can never disagree about how quiet a family has been. **Notebook 08 does not use this
+  yet** — it calls `monitor_run` without `probe`. An earlier note here said the escalate-on-quiet
+  loop would land "with the next live re-execution", which was never how it could arrive:
+  re-executing a notebook refreshes its output cells and changes no source. The notebook was
+  re-executed on 2026-09-20 and its source is unchanged; wiring the loop in is a notebook edit
+  followed by another live run.
 - Run-inspection layer (`review.py`): keyed on a bare `run_id` (reads the run's own `raw_config`
   back to recover its plan), with the same pure/I-O seam as `sdk`. `monitor_run` → a `RunProgress`
   (per-family job state on its runner, `n_done / n_expected` cells, mean fit time, run-wide fraction)
