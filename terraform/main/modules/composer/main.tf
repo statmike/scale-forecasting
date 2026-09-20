@@ -8,7 +8,7 @@
 #   (the dag_gcs_prefix output below). A fresh environment is idle until you import a DAG.
 #
 #   START  (turn scheduling on):
-#     set create_composer = true, then `terraform apply`. ~25 min to build. This starts the meter
+#     set create_composer = true, then `terraform apply`. ~40 min to build. This starts the meter
 #     (~$300-400/mo, smallest env). Import an emitted DAG to give it something to run.
 #
 #   RUN:

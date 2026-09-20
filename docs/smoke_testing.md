@@ -261,10 +261,14 @@ point, and none of them come from GitHub at runtime:
 Provision it, deliver the code, run the smoke, then turn the meter back off:
 
 ```bash
-# 1. Provision (~25 min build; ~$300–400/mo while up — the smallest env). This also sets the
-#    workers' SF_* env + submit-side pypi packages.
+# 1. Provision (~40 min build, measured 2026-09-20; ~$300–400/mo while up — the smallest env).
+#    This also sets the workers' SF_* env + submit-side pypi packages.
+#    Read the plan first: a *full* apply also re-submits the seed batch if the seed code has moved
+#    since the last one, which blocks for about an hour at 100k series. `-target=module.composer`
+#    provisions the environment and nothing else.
 cd terraform/main
-terraform apply -var create_composer=true
+terraform plan -var create_composer=true -target=module.composer -out=composer.tfplan
+terraform apply composer.tfplan
 
 # 2. Deliver this working tree's src/ to the workers (the code-delivery step; re-run after edits).
 cd ..
@@ -275,8 +279,12 @@ make composer-sync
     --composer-env scale-forecasting --location "$SF_REGION"
 
 # 4. Stop the meter — destroys just the environment; data/registry/buckets untouched.
+#    Same targeting on the way down, and same reason: `terraform show` the plan and confirm it
+#    reads "1 to destroy" before applying it.
 cd terraform/main
-terraform apply -var create_composer=false
+terraform plan -var create_composer=false -target=module.composer -out=composer-down.tfplan
+terraform show -no-color composer-down.tfplan
+terraform apply composer-down.tfplan
 ```
 
 !!! warning "Why the harness talks REST, not `gcloud composer environments run`"

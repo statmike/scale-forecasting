@@ -384,7 +384,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 12 | `12_ensemble_microbatch.json` | Ensembling in microbatch mode — the ensemble node runs alongside the members for the whole 24 minutes, gathering as they land; re-run under the weighting fix as attempt 2, and the barrier pair of this row is the proof that gather mode is now a scheduling choice only | CURRENT | 2026-09-11 | `smoke-12-ensemble-microbatch-9bcd1d294437` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 13 | `13_native_format.json` | Reading the native BigQuery source table | CURRENT | 2026-09-11 | `smoke-13-native-format-0995c922faab` | `native_source_pin=unpinned-all-sources`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 14 | `14_full_dag.json` | Flagship: all four families + native + ensemble under one run_id (DL on a Serverless L4). Also the row that proves the ensemble write timestamp: 11,200 blended prediction rows, none NULL | CURRENT | 2026-09-11 | `smoke-14-full-dag-2cef0feb95da` | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
-| 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow | STALE | 2026-09-03 | `smoke-15-airflow-multi-engine-5ec2924b3374` | `ray_deps=stock-image+uv-runtime-env`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only`, `dl_gpu_routing=flat-compute.use_gpu` |
+| 15 | `15_airflow_multi_engine.json` | The whole DAG orchestrated by Composer/Airflow. **Re-earned 2026-09-20**, the last `STALE` row in this table: seven Airflow tasks all `success` in 49 minutes, under the `run_id` the local planner had resolved before the trigger — and the header's `user_id` is the **runner service account** rather than the launching user, so the row can only have been written from a Composer worker. The `ensemble` task started in the same second as the four family tasks and ran 2,879 s beside them, which is the microbatch gather visible in the task graph and not only in the data. Also the first Airflow row whose Ray family actually held its T4 | CURRENT | 2026-09-20 | `smoke-15-airflow-multi-engine-60d76b813135` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 16 | `16_cluster_split_hardware.json` | One run needing **two** Dataproc clusters at once — a CPU one and a GPU one. Both were observed `CREATING` in the same `clusters list`, which is the live proof that the per-hardware creates now run side by side; and the two images in that same listing were `2.2.87-debian12` for CPU (the floating alias) against `2.2.85-debian12` for GPU (the pin), so the split is visible in one frame. 300 cells over three models on two clusters, COMPLETED | CURRENT | 2026-09-13 | `smoke-16-cluster-split-hardware-8a15339afe9b` | `cluster_provisioning=concurrent-per-hardware`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 17 | `17_gpu_absent_serverless.json` | **Negative arm:** a Serverless L4 job with the device hidden fails every cell with the contract message naming the service, and the batch stops instead of churning executors | CURRENT | 2026-09-10 | `smoke-17-gpu-absent-serverless-ea3341fa9fd5` | `gpu_fault_injection=probe-mode-default`, `gpu_batch_churn=executor-failure-budget+stall-watchdog`, `job_status=derived-from-cell-tallies`, `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 18 | `18_gpu_absent_cluster.json` | **Negative arm:** a cluster T4 job with the device hidden fails every cell with the contract message, naming the service — and the run closes `FAILED` on both registry tiers, counting only its own attempt's cells. **Re-run 2026-09-13 on the pinned image:** attempt 5 wrote 6 `error` cells, all `CONFIG_REPAIRABLE` and all carrying the contract message; the `run_jobs` row and the `run_registry` header both read `FAILED`; and the tally is the attempt's own 6, not the 24 error cells the run_id has accumulated across attempts | CURRENT | 2026-09-13 | `smoke-18-gpu-absent-cluster-ef1858b8b83d` | `gpu_fault_injection=probe-mode-default`, `job_status=derived-from-cell-tallies`, `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
@@ -672,8 +672,72 @@ every one, `hardware='cpu'` and a NULL `gpu_type` on the `run_jobs` row, and a N
 because there is no GPU contract to audit when none was requested for that family. 1688 s, pool torn
 down and the resource list read back empty.
 
+### The Airflow row was re-earned on 2026-09-20, and it says more than the one it replaces
+
+`smoke-15-airflow-multi-engine-60d76b813135`, 2026-09-20, PASS. The Composer row had been `STALE`
+since 2026-09-03 — eight axes had moved under it, including the two that decide the `run_id` and the
+fleet — and it was the only open live rung left in this document. A fresh environment was built, the
+working tree's `src/` delivered to it, the run orchestrated end to end, and the environment
+destroyed again.
+
+```
+begin_run                                                    18 s
+statistical    spark/cpu       Dataproc Serverless batch   1,511 s
+ml             spark/cpu       Dataproc Serverless batch   1,436 s
+native         bigquery        BigQuery job                  159 s
+deep_learning  ray/gpu/T4      Vertex Ray submission       2,858 s
+ensemble       bigquery        BigQuery job (microbatch)   2,879 s
+finalize_run                                                  5 s
+```
+
+All seven Airflow tasks reached `success`; the DAG run spanned 00:07:22 → 00:56:24, 49 minutes.
+Nine leaderboard entries at 200 cells each — `timesfm` 0.3473 leading, then `neuralprophet` 0.3611
+and the four ensembles between 0.3622 and 0.3689, with `xgboost`, `arima_plus` and `theta` behind
+them — and 50,400 prediction rows, 5,600 per model, no NULL `yhat`.
+
+**Three things this run establishes that the 2026-09-03 one did not.**
+
+1. **The header was written by the runner service account, not by the launching user.** The old row
+   rested entirely on `run_id` equality, and that argument has a hole in it: a matching id shows the
+   two planners agree about identity, not that the remote one did the work — the local harness
+   resolves and stages before it ever triggers Airflow. The principal recorded on the header is what
+   says where the run was created. It reads as the runner SA, which is what a Composer worker runs
+   as and is not what a local launch writes. This was almost certainly true last time too; it was
+   not checked, so it was not proof.
+2. **Microbatch gathering is visible in the task graph.** `ensemble` started in the same second as
+   the four family tasks, not after them, and ran 2,879 s alongside — finishing 20 s behind the last
+   member. Watched from outside while it ran, its four strategies stood at 15 cells apiece when
+   `neuralprophet` had 15, then 166 against 171, then 194; all four finished at 200. Barrier mode
+   could not produce that shape.
+3. **The Ray family actually held its T4.** On 2026-09-05 this claim was narrowed on purpose: the
+   deep-learning family in the old run asked for a T4 per-family and got no device, so what Airflow
+   was proven to orchestrate was Ray-on-Vertex and not Ray-on-Vertex *GPU*. Under
+   `dl_gpu_routing=resolved-per-family` it got one — 200 of 200 cells `device_used='cuda'` on a
+   `Tesla T4`. The verdict is `ENGAGED_IDLE` at 71,680 bytes of peak device memory, which is the
+   expected reading for `neuralprophet` at `n_lags=0` and the same one every other GPU row here
+   carries: placement passed, utilisation did not.
+
+The T4 pool was quota-clamped and said so in advance. Sizing derived 13 nodes;
+`custom_model_training_nvidia_t4_gpus` allows 12 in the region, so the preflight reported the clamp
+before the run rather than leaving it to be inferred from the wall clock afterwards.
+
+Teardown was verified by reading state back, not from a success line: the Vertex v1beta1
+`persistentResources` endpoint returned `{}`, and both Serverless batches show `SUCCEEDED`.
+
+**Three operational notes worth having in writing.** The environment took about **40 minutes** to
+build, not the ~25 the runbook advertised — that page now says 40, because the number is there for
+someone deciding whether to start it. An Airflow REST read returned `502` in the minute after
+the run and succeeded on a retry: the harness's parse loop already treats transient errors as "not
+confirmed yet" rather than as failure, and this is that tolerance being needed rather than assumed.
+And the apply that would have provisioned the environment was read before it was run, which was
+worth the minute: a *full* apply wanted to re-submit the 100,000-series seed batch, because the seed
+code had moved since the last one and the batch id is keyed on it. That is an hour of blocking for
+byte-identical tables. `-target=module.composer` planned exactly one resource, and the runbook now
+shows the targeted plan-then-apply on the way up and on the way down.
+
 ### Airflow orchestrated the whole DAG, and the two bugs it found are both invisible from a checkout
 
+**Superseded by the re-run directly above; kept for the two deployment bugs, which still stand.**
 `smoke-15-airflow-multi-engine-5ec2924b3374`, 2026-09-03: Composer 3 / Airflow 2.10.5 ran the
 emitted `dag_<run_id>.py` end to end — 200 series, five models, three backtest folds, a microbatch
 ensemble — and reached `COMPLETED` in 80 minutes.
@@ -2718,7 +2782,7 @@ path end to end, which is what made a one-notebook retry affordable enough to ru
 | Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | Headless execution of the tour notebooks against a fresh deployment. The notebook rows above were proven by the acceptance harness, which is not the same path. Its documented `--tier` table was walked on 2026-09-02 and was two notebooks out of date (3/5/6 against the registry's 4/7/8); corrected. |
 | Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | The tour notebooks opened and run interactively on the `sf-main` runtime, reading Act 1's runs. The tour table listed six on 2026-09-02 while Act 2 pre-rendered eight; `08_run_and_monitor` and `09_review_run` were added, so the count is now eight. |
 | Run-inspection layer (`review.py`) | CURRENT | Exercised live through notebooks 08 + 09 at `ff1f8bf`. Its `@gcp` registry readers ran against a real deployment. |
-| Airflow DAG emitter (`airflow_emit`) | CURRENT | Smoke 15, 2026-09-03: an emitted `dag_<run_id>.py` was parsed by a real Composer 3 / Airflow 2.10.5 scheduler (`has_import_errors: false`) and orchestrated a five-family run across Serverless Spark, Ray-on-Vertex and BigQuery to `COMPLETED`. The Airflow-produced `run_id` equalled the locally-resolved one — the same-code local↔Composer claim. **Narrowed 2026-09-05:** the Ray family in that run asked for a T4 per-family and got no device (see the `dl_gpu_routing` section), so what Airflow is proven to orchestrate is Ray-on-Vertex, not Ray-on-Vertex *GPU*. Orchestration is what this row claims and orchestration held. See below. |
+| Airflow DAG emitter (`airflow_emit`) | CURRENT | Smoke 15, **re-earned 2026-09-20** on `smoke-15-airflow-multi-engine-60d76b813135`: an emitted `dag_<run_id>.py` was parsed by a real Composer 3 / Airflow 2.10.5 scheduler (`has_import_errors: false`) and orchestrated a five-family run across Serverless Spark, Ray-on-Vertex and BigQuery to `COMPLETED` — seven tasks, all `success`, 49 minutes. The Airflow-produced `run_id` equalled the locally-resolved one, and the header's `user_id` is the runner SA, so the row was written from a Composer worker rather than from the launch that staged it. **The 2026-09-05 narrowing is now lifted:** the Ray family in the first run asked for a T4 per-family and got no device, so the claim was Ray-on-Vertex and not Ray-on-Vertex *GPU*; under `dl_gpu_routing=resolved-per-family` the re-run put 200 of 200 cells on a `Tesla T4`. See below. |
 | RuntimeProbe read path (P1–P4) | CURRENT | First live probe 2026-09-02 against `wave-62-mixed-runtimes-cpu-a7d04b6a9c8e` mid-flight: correct `TRUST_REGISTRY` + done/expected for the three terminal families, and a correct refusal on the running Ray one. `RayProbe.check` was then driven live out-of-process against that job and returned `RUNNING` — after the missing `_init_vertex` was fixed. The handle fix then landed and was re-proven live the same day: `--probe` against `ray-dl-on-cpu-probe-2e8a9f3f5c8d`, a single-family ephemeral Ray run, escalated out-of-process and returned `RUNNING_CONFIRMED`. Scope is now the whole verb, on every runtime. |
 | RuntimeProbe cancel (P5) | CURRENT | A real Ray job was stopped live 2026-09-02 (`RayProbe.cancel` → `stopped: True`, job reached `STOPPED`, the run's own poll loop saw it and unwound). The **data-integrity property is proven by a genuine failure**: when `--cancel --force` could not reach that family, the registry was *not* marked CANCELLED. **Re-run live 2026-09-02 against a purpose-built single-family Ray job and the verb now reaches it** (`deep_learning cancelled — ray job stop issued`, count line correct at `1 of 1`, launcher unwound and tore the cluster down, teardown REST-verified). **New scope: the cancellation does not survive.** The launcher finalized the run `FAILED` 17 s after the cancel wrote `header=CANCELLED`, so the registry cannot distinguish a deliberate stop from a crash. See below. |
 | Custom IAM roles (P6) | CURRENT | Applied live 2026-09-01: `projects/statmike-scale-forecasting/roles/sfProbeReader` and `roles/sfJobCanceller` now exist. Until then they had only ever been `validate`-clean. Creation is not use — that the permission sets are *sufficient* for a probe or a cancel is the P1–P5 rows below, not this one. |
