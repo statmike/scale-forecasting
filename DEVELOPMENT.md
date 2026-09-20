@@ -198,12 +198,17 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   stays registry-only, because a poll loop must never fan native calls. The age is a *fact* the
   monitor reports and the escalation *threshold* stays with the probe
   (`probes.reconcile._is_stale`, which now reads `quiet_seconds` rather than re-parsing rows), so
-  the two can never disagree about how quiet a family has been. **Notebook 08 does not use this
-  yet** — it calls `monitor_run` without `probe`. An earlier note here said the escalate-on-quiet
-  loop would land "with the next live re-execution", which was never how it could arrive:
-  re-executing a notebook refreshes its output cells and changes no source. The notebook was
-  re-executed on 2026-09-20 and its source is unchanged; wiring the loop in is a notebook edit
-  followed by another live run.
+  the two can never disagree about how quiet a family has been. **Notebook 08 demonstrates the
+  split**: its monitor loop polls registry-only every 15 s and upgrades to `probe=True` once the
+  quietest unfinished family has been silent for 300 s, rate-limited to one probe per 120 s. Those
+  two numbers decide *when to ask*; the probe's own 900-second grace decides *what the silence
+  means*, so asking early costs a few native reads and never produces a premature `LOST`. Its
+  2026-09-20 execution is the worked proof: six consecutive escalations read `RUNNING_CONFIRMED`
+  against a Spark family that had been quiet for 13 to 24 minutes, and the seventh read
+  `STALE_REGISTRY` with `disagreement=True` — the runtime had succeeded about twenty seconds before
+  the registry row caught up. `clear_output` keeps only the last frame, so the loop accumulates
+  those lines in an `events` list and reprints the tail under every dashboard; without that the
+  escalations would not survive into the saved notebook at all.
 - Run-inspection layer (`review.py`): keyed on a bare `run_id` (reads the run's own `raw_config`
   back to recover its plan), with the same pure/I-O seam as `sdk`. `monitor_run` → a `RunProgress`
   (per-family job state on its runner, `n_done / n_expected` cells, mean fit time, run-wide fraction)

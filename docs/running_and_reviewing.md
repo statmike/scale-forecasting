@@ -250,6 +250,12 @@ tell them apart, and they cost differently:
   enough to be suspicious, not on every poll. An already-terminal run short-circuits and touches no
   runtime at all.
 
+`08`'s monitor loop is the worked example of that policy: it polls registry-only every 15 seconds
+and upgrades to `probe=True` only once the quietest unfinished family has been silent for 300
+seconds, with a 120-second floor between probes. Those two numbers decide *when to ask*; the probe's
+own 900-second startup grace decides *what the silence means*, so escalating after five minutes buys
+information without risking a `LOST` verdict on a job that is merely still starting.
+
 For the full operational picture — the six verdicts and how to read them, settling a stale row from
 the verdict, cancelling safely, and what a cancelled run keeps — see
 [troubleshooting.md § In-flight runs](./troubleshooting.md#in-flight-runs--probe-settle-cancel).

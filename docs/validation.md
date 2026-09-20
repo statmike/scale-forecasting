@@ -2748,6 +2748,8 @@ notebooks that launch a run produced `nb01-spark-connect-1789915628-061e1744d4e7
 `nb02-bq-native-1789913623-ece832b57959`, `nb03-combo-ensemble-1789919864-67b161ae368e`,
 `nb04-ray-bq-1789918508-344fc058e7f8` and `nb08-run-monitor-1789916865-d173fc0b6464`. `07` and `09`
 launch nothing — they read runs that already exist — and `model_playground` never leaves the kernel.
+**`08` was then edited and re-executed twice more the same day** — its shipped outputs come from the
+third execution, `nb08-run-monitor-1789936442-1a6aaebcac7f`; see the note below.
 
 | Notebook | Status | Date | Axes at proof |
 |----------|--------|------|---------------|
@@ -2756,7 +2758,7 @@ launch nothing — they read runs that already exist — and `model_playground` 
 | `03_combo_and_ensemble.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
 | `04_ray_on_vertex.ipynb` | CURRENT | 2026-09-20 | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only-v3` |
 | `07_scale_review.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
-| `08_run_and_monitor.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
+| `08_run_and_monitor.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `job_status=derived-from-cell-tallies`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
 | `09_review_run.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
 | `model_playground.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 
@@ -2767,6 +2769,60 @@ BigQuery-native models, so they rest on `native_source_pin`; `03` computes ensem
 `ray_pool_shape`; and `08`/`09` display job state, which is `job_status`. Declaring an axis makes a
 row go `STALE` sooner, which is the safe direction to be wrong in — the dangerous direction is a row
 that stays `CURRENT` after its foundation moved.
+
+`08` also gained `ensemble_weighting` later the same day, and for a reason worth saying out loud: it
+had always *configured* three ensemble strategies and had never once *run* them. See below.
+
+### `08`'s monitor cap was 90 seconds short, and that is why it had never finished
+
+`08` was edited on 2026-09-20 to wire in the escalate-on-quiet probe loop, which meant re-executing
+it. That re-execution (`nb08-run-monitor-1789934055-952614a65ac1`) reported zero cell errors and
+ended on `final: status=RUNNING 20/60 cells` — and so had the execution before it, and, on the
+evidence of its committed output, every execution before that.
+
+The cause is a number, not a defect in the run. The notebook's monitor loop had `MAX_WALL_S = 1500`,
+and the Dataproc Serverless batch for the `statistical` family measured **26 minutes 14 seconds**
+end to end (created 19:54:38, `SUCCEEDED` 20:20:52). The cap fired about **90 seconds early**. The
+notebook is the run's *driver*: when its last cell returns the kernel exits, the background launch
+thread dies with it, and nothing is left to write the family's terminal row, join the tracks, or
+launch the ensembler. So the notebook shipped a truncated run, and the registry kept a `RUNNING` row
+for a job that had already succeeded.
+
+The probe loop diagnosed its own notebook. Probing the abandoned run afterwards returned
+`statistical`: registry `RUNNING`, runtime `SUCCEEDED`, verdict `STALE_REGISTRY`, run-wide
+`disagreement=True` — which is exactly the reading the probe exists to produce. Both that run and
+the earlier `nb08-run-monitor-1789916865-d173fc0b6464` were repaired with `probes.settle.settle_run`,
+which took the runtime's verdict and moved each `statistical` row to `COMPLETED`. Their **headers
+were deliberately left at `RUNNING`**: `registry.ops.close_runs` proposed `RUNNING -> COMPLETED` for
+both, on the rule "every job row is terminal", but neither run ever submitted an `ensemble` job at
+all, so there is no row for it to find non-terminal. Closing them would have stamped `COMPLETED` on
+runs that landed 30 of 60 expected cells.
+
+Raising the cap to `MAX_WALL_S = 2700` fixed it. The third execution,
+`nb08-run-monitor-1789936442-1a6aaebcac7f`, is the one whose outputs ship: `statistical` ran
+20:34:16 → 20:59:59, the ensembler fired at 21:00:03 and finished at 21:00:15, and the notebook
+closed on `final: status=COMPLETED 60/60 cells`. That is the first execution of `08` on record that
+shows a run landing, which is also why the row above now declares `ensemble_weighting` — the axis
+was always configured in the notebook and had never actually been exercised by it.
+
+The escalation behaviour is visible in the shipped output because the loop keeps an `events` list:
+`clear_output` retains only the final frame, so anything printed in an earlier frame is gone, and
+without the list the probe's work would have left no trace at all. What survived is a clean record
+of both verdicts the probe can give on a healthy job:
+
+```
+[  812s] probed after 798s quiet → escalated=True disagreement=False  statistical=RUNNING_CONFIRMED
+[ 1554s] probed after 1540s quiet → escalated=True disagreement=True   statistical=STALE_REGISTRY
+[ 1574s] statistical: RUNNING → COMPLETED
+[ 1592s] ensemble: RUNNING → COMPLETED
+```
+
+Six escalations in a row read `RUNNING_CONFIRMED` against a family that had been silent for 13 to 24
+minutes — silence that a registry-only monitor cannot distinguish from death. The seventh read
+`STALE_REGISTRY`: the batch had finished and its row had not caught up yet. Twenty seconds later it
+did. **The probe was right, twenty seconds before the registry was**, and both readings are the
+intended behaviour rather than a fault — the probe's 900-second grace is what kept the first six from
+crying wolf.
 
 ### `03`'s quota failure is not what we said it was
 
