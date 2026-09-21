@@ -218,6 +218,34 @@ def test_a_gpu_cluster_pins_the_image_and_a_cpu_cluster_does_not() -> None:
     assert dataproc_cluster._GPU_IMAGE_VERSION.startswith("2.2.")
 
 
+def test_the_gpu_image_pin_is_still_in_date() -> None:
+    """Fails on a date, on purpose. The pin is not wrong — nobody has looked at it lately.
+
+    The cached NVIDIA kernel-module tarball for `_GPU_IMAGE_VERSION` is what makes a GPU cluster
+    create in minutes rather than compiling from source, and it is retained for a window measured
+    from the image's release (around 2026-11-21 for ``2.2.85-debian12``). What makes that worth a
+    calendar alarm is the shape of the failure: the create does not break, it gets slow, then
+    slower, then one day the from-source build meets a kernel it cannot compile against and stops —
+    and nothing in that error mentions a version pin, so the person who meets it debugs a GPU driver
+    instead of reading one line of our code.
+
+    This is the only test in the suite that fails without a code change, which is the entire point.
+    When it goes red: check whether the driver builds on the current 2.2 line again (if it does, the
+    pin can be dropped), otherwise move `_GPU_IMAGE_VERSION` to the newest sub-minor that still
+    builds, push `_GPU_IMAGE_PIN_REVIEW_BY` out, and re-run the cluster GPU smoke to prove it.
+    """
+    from datetime import date
+
+    review_by = date.fromisoformat(dataproc_cluster._GPU_IMAGE_PIN_REVIEW_BY)
+    assert date.today() <= review_by, (
+        f"_GPU_IMAGE_VERSION ({dataproc_cluster._GPU_IMAGE_VERSION}) is past its review date "
+        f"({review_by}). The cached GPU-driver tarball for that image is expiring: cluster GPU "
+        f"creates go from fast to slow to broken, and the error will not name the pin. Re-check "
+        f"the current 2.2 line, re-pin if needed, move _GPU_IMAGE_PIN_REVIEW_BY, and re-run the "
+        f"cluster GPU smoke."
+    )
+
+
 def test_build_cluster_gpu_disables_secure_boot_only_on_gpu() -> None:
     # The GPU-driver install action loads unsigned NVIDIA kernel modules, which Secure Boot blocks;
     # a GPU cluster turns Secure Boot off (vTPM + integrity monitoring stay on).

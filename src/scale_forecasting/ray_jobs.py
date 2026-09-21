@@ -24,8 +24,9 @@ Three long-run hazards live here and nowhere else, which is most of why the modu
 
 from __future__ import annotations
 
+import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .errors import get_logger
@@ -60,6 +61,40 @@ _CLIENT_MAX_AGE_SECONDS = 2700  # 45 min
 # budget on top of this, so the real tolerance per attempt is larger than the backoff suggests.
 _POLL_RETRY_ATTEMPTS = 4
 _POLL_RETRY_BACKOFF_SECONDS = 15
+
+# Fault injection for the recovery path above, and the only reason it exists: that path is eight
+# offline tests and **zero live executions**. The condition it recovers from — a dropped request or
+# an expired token mid-poll — cannot be scheduled. It happened once, on 2026-09-10, and cost a
+# twenty-node fleet; every long Ray run since has polled cleanly, so the code that was written in
+# response has never actually run against the real proxy, the real token and the real reconnect.
+#
+# A green run does not prove the recovery works. It proves the fault did not arrive. Arming this on
+# a run that is happening anyway makes the fault arrive on purpose: the next poll of each Ray job
+# raises a recoverable error, `_status_with_recovery` forgives it, `_connect_job_client` mints a
+# genuinely fresh token, and the poll resumes — and the run's log carries the retry line that is the
+# evidence. The run itself still completes normally, which is what makes this cheap to carry.
+#
+# Two shapes because the recovery has two doors and they are classified by different functions:
+# ``transport`` is the proxy blip (`_is_dashboard_warmup_error`), ``auth`` is the expired bearer
+# token (`_is_auth_expiry_error`). Comma-separate them — ``SF_RAY_POLL_FAULT=transport,auth`` — to
+# spend two of the four attempts on one poll, proving both doors and the shared reconnect in one go.
+#
+# Infra-level, like ``SF_HIDE_DEVICES`` and ``SF_SERVERLESS_DEPS``, and for the same reason: it is
+# not a property of the science, so it must not enter ``ComputeConfig`` and therefore the run_id.
+# It is read only in the process that polls — the driver that submitted the job — so unlike the
+# device fault there is nothing to carry to a worker.
+POLL_FAULT_ENV = "SF_RAY_POLL_FAULT"
+_POLL_FAULT_AUTH = "auth"
+_POLL_FAULT_TRANSPORT = "transport"
+# Shaped like the SDK's own ``_raise_error`` rendering, because the classifiers read the *string*:
+# a message that failed to match would inject an *unrecoverable* fault and kill the run it rode in
+# on. `test_every_armed_fault_is_one_the_poll_forgives` is what keeps these two facts together.
+_POLL_FAULT_MESSAGES = {
+    _POLL_FAULT_AUTH: "Request failed with status code 401: Unauthorized (SF_RAY_POLL_FAULT)",
+    _POLL_FAULT_TRANSPORT: (
+        "Request failed with status code 503: Service Temporarily Unavailable (SF_RAY_POLL_FAULT)"
+    ),
+}
 
 
 def _is_dashboard_warmup_error(exc: Exception) -> bool:
@@ -182,6 +217,52 @@ def _status_with_recovery(
     raise AssertionError("unreachable: the loop returns or raises on every attempt")
 
 
+def armed_poll_faults() -> tuple[str, ...]:
+    """Which faults ``SF_RAY_POLL_FAULT`` arms, in the order they fire — ``()`` when it is unset.
+
+    Anything truthy that is not ``"auth"`` reads as ``"transport"``, which is the same fail-*closed*
+    choice `hardware.hide_devices_mode` makes and for the same reason: a typo'd value that armed
+    nothing would turn a deliberate negative arm into an ordinary run and report it as proof.
+    """
+    raw = (os.environ.get(POLL_FAULT_ENV) or "").strip().lower()
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    return tuple(
+        _POLL_FAULT_AUTH if t == _POLL_FAULT_AUTH else _POLL_FAULT_TRANSPORT for t in tokens
+    )
+
+
+def _arm_poll_faults(
+    poll: Callable[[], str], job_id: str, *, shapes: Sequence[str] | None = None
+) -> Callable[[], str]:
+    """Wrap ``poll`` so each armed fault raises once, on consecutive calls, before the real poll.
+
+    The queue is a closure local rather than module state, so "once" means once per job rather than
+    once per process: a run with a statistical job and a deep-learning job exercises the recovery
+    twice, on two different Ray jobs, for the price of one armed run.
+
+    Consecutive rather than spread out, because consecutive is the harder case.
+    `_status_with_recovery` counts *consecutive* failures against its budget, so two in a row spend
+    two of the four attempts and prove it keeps its patience across a reconnect — where two an hour
+    apart would only ever prove the first attempt works twice.
+    """
+    queue = list(armed_poll_faults() if shapes is None else shapes)
+
+    def _armed() -> str:
+        if not queue:
+            return poll()
+        shape = queue.pop(0)
+        _log.warning(
+            "%s is armed: injecting a %s fault into this poll of %s (%d left)",
+            POLL_FAULT_ENV,
+            shape,
+            job_id,
+            len(queue),
+        )
+        raise RuntimeError(_POLL_FAULT_MESSAGES[shape])
+
+    return _armed
+
+
 def _client_needs_refresh(
     born_monotonic: float,
     now_monotonic: float,
@@ -290,10 +371,14 @@ def _submit_and_poll(
         client = _connect_job_client(cluster_resource_name)
         client_born = time.monotonic()
 
+    # `_arm_poll_faults` is a pass-through unless SF_RAY_POLL_FAULT is set, so an ordinary run pays
+    # one empty-list check per poll and its behaviour is unchanged. Wrapped once, outside `_status`,
+    # because the queue lives in the wrapper: rebuilding it every poll would re-arm the fault
+    # forever and the job would never reach terminal.
+    _poll_once = _arm_poll_faults(lambda: str(_fresh_client().get_job_status(job_id)), job_id)
+
     def _status() -> str:
-        return _status_with_recovery(
-            lambda: str(_fresh_client().get_job_status(job_id)), _reconnect
-        )
+        return _status_with_recovery(_poll_once, _reconnect)
 
     if not wait:
         return job_id, _status(), ""

@@ -103,6 +103,47 @@ move a `run_id`, and a config runs under one identity whether the card is hidden
 each, because there is no reason to buy a hundred series' worth of fleet to watch a job refuse to
 start.
 
+### Arming the Ray poll recovery (`SF_RAY_POLL_FAULT`)
+
+The same idea as `SF_HIDE_DEVICES`, aimed at a different unproven promise, and unlike 17–19 it needs
+no config of its own — it rides a run you were going to make anyway.
+
+A Ray job is watched by a poll loop that talks to Vertex's managed dashboard proxy every fifteen
+seconds for as long as the run lasts. Sooner or later one of those requests dies in transit, or the
+client's hour-long OAuth token expires underneath it, and neither says anything about the job. The
+loop forgives both and reconnects. That behaviour was written after a dropped request ended a
+100,000-series run at minute 79 and tore down a twenty-node fleet — and since then **every long Ray
+run has polled cleanly, so the recovery has never actually executed against the live proxy.** Green
+runs do not prove it works; they prove the fault did not arrive.
+
+```bash
+SF_RAY_POLL_FAULT=transport,auth .venv/bin/python tests/smokes/smoke_harness.py \
+  configs/smokes/08_gpu_ray.json
+```
+
+The first poll of **each Ray job** in the run raises a fault instead of calling the dashboard, the
+recovery absorbs it, and `_connect_job_client` mints a genuinely fresh token before the poll
+resumes. Two values, one per door the recovery has: `transport` imitates a proxy 5xx, `auth`
+imitates the expired bearer token. Comma-separate them to spend two of the loop's four attempts on
+one poll, which proves both doors and the shared reconnect in a single run. Anything else truthy
+reads as `transport`, for the same reason a typo'd `SF_HIDE_DEVICES` still arms something.
+
+**The run still completes normally — that is the point, and it is also why the evidence is a log
+line rather than a result.** Look in the driver's output for:
+
+```
+SF_RAY_POLL_FAULT is armed: injecting a transport fault into this poll of sf-<run_id>-…
+Ray job poll failed on attempt 1/4 (…); reconnecting and retrying
+```
+
+Both lines together are the proof: the first says the fault was delivered, the second says the
+recovery caught it. A run with the first and not the second is a finding.
+
+Like `SF_HIDE_DEVICES`, this is infrastructure rather than config, so arming it does not move a
+`run_id`. Do not arm more than three faults — the loop forgives three consecutive failures and gives
+up on the fourth, which ends the run and tears the fleet down, exactly as it would for a channel
+that really had gone.
+
 **Why 20 exists, and why it is the mirror image of 17–19.** Those three ask what happens when a job
 is told to use a device it cannot see. 20 asks the opposite question: what happens when the two
 places that decide about accelerators disagree in the other direction. Its config sets the flat

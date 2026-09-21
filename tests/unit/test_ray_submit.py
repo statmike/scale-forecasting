@@ -950,6 +950,114 @@ def test_status_with_recovery_budget_is_per_call_not_cumulative(
     assert len(reconnects) == 2
 
 
+# --- arming the recovery on purpose (SF_RAY_POLL_FAULT) ----------------------------------------
+
+# Everything below tests the *knob*, not the recovery — the recovery is already covered above. What
+# the knob has to get right is narrow and easy to get wrong silently: an ordinary run must be
+# untouched, an armed run must raise something the poll actually forgives, and the arm must run out.
+
+
+def test_nothing_is_armed_when_the_switch_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole-suite property: every run that does not ask for a fault gets exactly today's poll.
+    monkeypatch.delenv(ray_jobs.POLL_FAULT_ENV, raising=False)
+    assert ray_jobs.armed_poll_faults() == ()
+    polls: list[int] = []
+    armed = ray_jobs._arm_poll_faults(lambda: (polls.append(1), "RUNNING")[1], "job-1")
+    assert [armed() for _ in range(3)] == ["RUNNING"] * 3
+    assert len(polls) == 3  # not one call was intercepted
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("transport", ("transport",)),
+        ("auth", ("auth",)),
+        ("transport,auth", ("transport", "auth")),
+        (" AUTH , Transport ", ("auth", "transport")),  # case and whitespace are an operator typing
+        ("1", ("transport",)),  # anything truthy that is not "auth" arms the transport fault...
+        ("trnasport", ("transport",)),  # ...including a typo, which must never arm *nothing*
+        ("", ()),
+        ("   ", ()),
+    ],
+)
+def test_what_the_switch_arms(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: tuple[str, ...]
+) -> None:
+    monkeypatch.setenv(ray_jobs.POLL_FAULT_ENV, raw)
+    assert ray_jobs.armed_poll_faults() == expected
+
+
+def test_every_armed_fault_is_one_the_poll_forgives() -> None:
+    """The load-bearing test. An injected message the classifier misses would kill the live run.
+
+    The knob's entire promise is that it can be carried on a run that is happening anyway: the
+    fault arrives, the recovery absorbs it, the run completes. That promise is two independent
+    strings agreeing — the message here and the marker list in `_is_dashboard_warmup_error` /
+    `_is_auth_expiry_error` — and nothing but this test holds them together. Tighten a marker and
+    the arm silently becomes a run-killer.
+    """
+    for shape, message in ray_jobs._POLL_FAULT_MESSAGES.items():
+        assert ray_jobs._is_recoverable_poll_error(RuntimeError(message)) is True, shape
+    # And each one has to arrive at the door it was written for, not just at *a* door.
+    assert ray_jobs._is_auth_expiry_error(RuntimeError(ray_jobs._POLL_FAULT_MESSAGES["auth"]))
+    assert ray_jobs._is_dashboard_warmup_error(
+        RuntimeError(ray_jobs._POLL_FAULT_MESSAGES["transport"])
+    )
+
+
+def test_an_armed_fault_fires_once_and_then_gets_out_of_the_way() -> None:
+    polls: list[int] = []
+    armed = ray_jobs._arm_poll_faults(
+        lambda: (polls.append(1), "RUNNING")[1], "job-1", shapes=["transport"]
+    )
+    with pytest.raises(RuntimeError, match="503"):
+        armed()
+    assert polls == []  # the injected poll never reached the dashboard
+    # A fault that re-armed itself would leave the job polling forever and never reach terminal.
+    assert [armed() for _ in range(3)] == ["RUNNING"] * 3
+
+
+def test_two_armed_faults_fire_in_order_on_consecutive_polls() -> None:
+    armed = ray_jobs._arm_poll_faults(lambda: "RUNNING", "job-1", shapes=["transport", "auth"])
+    with pytest.raises(RuntimeError, match="503"):
+        armed()
+    with pytest.raises(RuntimeError, match="401"):
+        armed()
+    assert armed() == "RUNNING"
+
+
+def test_the_arm_is_per_job_so_a_two_family_run_proves_the_recovery_twice() -> None:
+    # Module state would have made "once" mean once per process, and the second Ray job of a run
+    # would sail through unarmed — half the evidence, silently.
+    first = ray_jobs._arm_poll_faults(lambda: "RUNNING", "job-statistical", shapes=["transport"])
+    second = ray_jobs._arm_poll_faults(lambda: "RUNNING", "job-deep-learning", shapes=["transport"])
+    for armed in (first, second):
+        with pytest.raises(RuntimeError, match="503"):
+            armed()
+
+
+def test_an_armed_run_still_polls_to_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The knob riding a real recovery: fault, forgive, reconnect, finish. Nothing is lost."""
+    monkeypatch.setattr(ray_jobs.time, "sleep", lambda _s: None)
+    reconnects: list[int] = []
+    armed = ray_jobs._arm_poll_faults(lambda: "SUCCEEDED", "job-1", shapes=["transport", "auth"])
+    assert ray_jobs._status_with_recovery(armed, lambda: reconnects.append(1)) == "SUCCEEDED"
+    # Two injected faults, two reconnects, one real poll — and a status the caller can act on.
+    assert len(reconnects) == 2
+
+
+def test_arming_more_faults_than_the_budget_forgives_still_ends_the_run() -> None:
+    """An operator can over-arm, and the answer is the ordinary give-up, not a hang.
+
+    Worth pinning because the failure it would otherwise cause is expensive: the poll giving up
+    tears the fleet down. Four attempts forgive three faults, so four arms is one too many — and
+    the run ends with the injected message in the log, which at least says what killed it.
+    """
+    armed = ray_jobs._arm_poll_faults(lambda: "SUCCEEDED", "job-1", shapes=["transport"] * 4)
+    with pytest.raises(RuntimeError, match="SF_RAY_POLL_FAULT"):
+        ray_jobs._status_with_recovery(armed, lambda: None, attempts=4, backoff_s=0)
+
+
 def test_submit_and_poll_survives_a_transport_blip(monkeypatch: pytest.MonkeyPatch) -> None:
     """End to end through `_submit_and_poll`: the live 2026-09-10 failure now polls to SUCCEEDED.
 

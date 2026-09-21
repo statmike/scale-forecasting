@@ -1495,6 +1495,17 @@ which drive it with the verbatim error string the proxy actually sent. Those are
 claims and the ledger should not blur them — which is the same distinction that made the old axis
 value misleading in the first place.
 
+**Waiting for a dropped request is not a plan, so the fault can now be armed.** Setting
+`SF_RAY_POLL_FAULT=transport,auth` makes the first poll of each Ray job raise a recoverable error
+instead of calling the dashboard, so the recovery runs against the real proxy, the real token and a
+real reconnect on any Ray run that happens to be going — the run still completes, and the evidence
+is the retry line in the driver's log. The switch is infrastructure rather than config, so arming it
+does not move a `run_id`, and the runbook is in
+[smoke testing](smoke_testing.md#arming-the-ray-poll-recovery-sf_ray_poll_fault). **As of
+2026-09-21 it has not been carried on a live run**, so the paragraph above still stands: the
+recovery is proven offline and unexercised in production. Nothing on this page may say otherwise
+until a driver log shows both the injection line and the retry that answered it.
+
 **`all_families_10k` ran twice on 2026-09-04, and the pair is the `ray_slot_memory` A/B.** The first
 pass is the run that found the defect; the second is the identical config under the fix, submitted
 with `--force` so it kept the same `run_id`. Both reached the same result — all four families under

@@ -78,6 +78,18 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- **Two promises the test suite could not keep on its own now have alarms on them.** The Ray poll's
+  recovery from a dropped request or an expired token is covered by eight offline tests and has
+  never executed live, because the condition cannot be scheduled — so `SF_RAY_POLL_FAULT` arms it:
+  the first poll of each Ray job raises a recoverable error on purpose, the recovery absorbs it
+  against the real proxy and mints a real token, and the run finishes normally with the retry line
+  in its log as the evidence. It is infrastructure, not config, so arming it does not move a
+  `run_id`, and the message shapes are pinned to the classifiers by a test — an injected fault the
+  poll did *not* forgive would kill the run it rode in on. Separately, the Dataproc cluster GPU
+  image pin (`_GPU_IMAGE_VERSION`) sits on a cached driver tarball with a shelf life, and its
+  expiry is silent: builds go from fast to slow to broken with nothing in the error naming a
+  version. `test_the_gpu_image_pin_is_still_in_date` now fails the offline gate two weeks before
+  the estimate. It is the only test here that goes red without a code change, on purpose.
 - **`close-runs` used to close an abandoned run to `COMPLETED` while a family it planned had never
   run at all.** The verb reads a run's job rows and rolls them up into the header status the run
   itself failed to write, and the whole rule turned on "is every row terminal?" — which a family

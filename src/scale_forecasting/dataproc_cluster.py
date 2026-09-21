@@ -111,6 +111,20 @@ _GPU_INIT_TIMEOUT = timedelta(minutes=30)
 # adds a conftest for the new signature, or Debian updates its driver package.
 _GPU_IMAGE_VERSION = "2.2.85-debian12"
 
+# **This pin has a shelf life, and it expires quietly.** The cached driver tarball is what makes a
+# GPU cluster create in minutes instead of half an hour, and it is retained for a window measured
+# from the image's release — roughly 2026-11-21 for ``2.2.85-debian12``. Past that the create does
+# not fail; it gets slow, then slower, then one day the from-source build runs into whatever kernel
+# the image boots by then and stops. Nothing in the error will mention a version pin, so whoever
+# meets it will be reading NVIDIA build logs instead of this comment.
+#
+# So the date is a constant rather than prose, and `test_the_gpu_image_pin_is_still_in_date` fails
+# the offline gate when it passes. That test is not asserting the pin is *wrong* — it is asserting
+# nobody has looked at it lately. Two weeks of runway before the estimate, which is enough to check
+# whether the driver builds on the current 2.2 line again, move the pin if it does not, and re-run
+# the cluster GPU smoke.
+_GPU_IMAGE_PIN_REVIEW_BY = "2026-11-07"
+
 # How long to block on a control-plane operation — creating the cluster, deleting it — before
 # giving up. These are the operations whose duration is genuinely bounded and has nothing to do with
 # the size of the run: the slowest create observed is a GPU cluster building its driver at init,
