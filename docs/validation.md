@@ -2812,9 +2812,24 @@ runs that landed 30 of 60 expected cells.
 `close_runs` has since been taught to compare the job rows against the families the run's own
 `raw_config` planned, so a family that never submitted is no longer invisible to it: for this shape
 it now closes to `FAILED`, the same word `job_outcome.combined_run_status` writes when a requested
-ensemble does not exist. That change is **offline-proven only** — unit-tested, never yet executed
-against the live registry — and the two headers above are still `RUNNING`, waiting to be its first
-live subjects.
+ensemble does not exist.
+
+**Those two headers are what proved it, on 2026-09-21, and the evidence is that the answer changed.**
+The same two runs that made the verb propose `RUNNING -> COMPLETED` on 2026-09-20 now make it
+propose:
+
+```
+nb08-run-monitor-1789916865-d173fc0b6464  RUNNING -> FAILED  [every job COMPLETED; 1 planned family never recorded a row: ensemble]
+nb08-run-monitor-1789934055-952614a65ac1  RUNNING -> FAILED  [every job COMPLETED; 1 planned family never recorded a row: ensemble]
+```
+
+Both were closed with `--yes` and both read back `FAILED` from `run_registry` — read back, rather
+than taken from the verb's own success line, because a repair verb reporting its own success is the
+one claim on this page that is worth nothing. A second preview afterwards finds no stuck headers.
+This is a live proof of a deliberately small claim: it covers the *missing-family* shape on a real
+abandoned run against the real registry, which is the shape the defect was found in. The other paths
+through `roll_up_against_plan` — a mixed roll-up, an all-`CANCELLED` run, a run whose config no
+longer validates — remain unit-tested only.
 
 Raising the cap to `MAX_WALL_S = 2700` fixed it. The third execution,
 `nb08-run-monitor-1789936442-1a6aaebcac7f`, is the one whose outputs ship: `statistical` ran
