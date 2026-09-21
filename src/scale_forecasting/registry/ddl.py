@@ -27,12 +27,12 @@ without the CREATE and the migration ever drifting apart (``ensure_tables`` runs
 **Some columns are declared ahead of the code that fills them, on purpose.** Adding a column
 to a deployed table is a migration every existing deployment has to run, so the columns the
 next few phases need land in one batch rather than one at a time; until their producer
-ships they read NULL. Keep the list in ``tests/unit/test_registry_column_parity.py``
-(``_RESERVED_*``) in step — it is the record of which columns have no producer yet, and it must
-shrink to empty.
-Reserved today: on ``forecast_metadata``, the backtest-methodology block (``achieved_step``,
-``achieved_min_train``, ``first_val_date``, ``last_val_date``) and the two ``*_scoring`` columns;
-on ``backtest_oof`` and ``forecast_predictions``, only ``created_at``.
+ships they read NULL. Which ones those are is recorded in exactly one place — the ``_RESERVED_*``
+sets in ``tests/unit/test_registry_column_parity.py``, which assert equality against the union of
+every producer's keys, so a column declared here with no writer and no entry there fails the gate.
+That list must shrink to empty. It is deliberately **not** restated in this docstring: a second
+copy is unenforced, and the copy that used to live here had drifted three entries out of date
+before anyone noticed.
 
 The bodies below carry no SQL comments inside the parentheses — ``additive_columns`` splits the
 column block on commas and would read a comment line as a column.
