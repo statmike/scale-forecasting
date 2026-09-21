@@ -71,6 +71,7 @@ destructive verbs run on (``ArtifactPrefix``, ``split_gcs_uri``, ``run_id_from_b
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -249,9 +250,9 @@ def roll_up_job_statuses(job_statuses: Sequence[str | None]) -> tuple[str | None
     """Roll a run's job-row statuses into the header status it should have had (pure).
 
     Returns ``(status, reason)``; ``status`` is ``None`` when the run must **not** be closed and
-    ``reason`` says why. The policy matches `main._combined_status`, which is what a run that
-    finished normally would have written — this verb's whole job is to write the status the run
-    itself failed to, never a different one:
+    ``reason`` says why. This verb's whole job is to write the status the run itself failed to,
+    never a different one, so the policy tracks `job_outcome.combined_run_status` — what a run that
+    finished normally would have written:
 
     * every job ``COMPLETED`` ⇒ ``COMPLETED``
     * every job ``FAILED`` ⇒ ``FAILED``; every job ``CANCELLED`` ⇒ ``CANCELLED``
@@ -265,6 +266,11 @@ def roll_up_job_statuses(job_statuses: Sequence[str | None]) -> tuple[str | None
     * **no job rows at all ⇒ ``FAILED``.** The run wrote a header and then never recorded a single
       family — it died in the submit path. ``FAILED`` rather than ``COMPLETED`` because nothing
       completed, and rather than ``CANCELLED`` because nobody stopped it.
+
+    **It can only see rows that exist**, which is the one thing a status list cannot tell you: a
+    family that was planned and never submitted leaves nothing behind to be counted. That gap is
+    `roll_up_against_plan`'s to close, and it is the entry point `plan_close_runs` uses whenever the
+    run's config is readable. Everything here stays the row-only answer, for when it isn't.
     """
     if not job_statuses:
         return "FAILED", "no job rows — the run never recorded a family"
@@ -277,6 +283,68 @@ def roll_up_job_statuses(job_statuses: Sequence[str | None]) -> tuple[str | None
         only = distinct.pop()
         return only, f"every job {only}"
     return "PARTIAL", f"mixed terminal statuses: {', '.join(sorted(distinct))}"
+
+
+def roll_up_against_plan(
+    job_rows: Sequence[tuple[str, str | None]],
+    *,
+    planned_families: Sequence[str],
+    ensemble_enabled: bool,
+) -> tuple[str | None, str]:
+    """Roll a run's ``(family, status)`` job rows up against the families its config planned (pure).
+
+    `roll_up_job_statuses` reads the rows and nothing else, so a family that was planned and never
+    submitted is invisible to it — and that is exactly the shape the dead-driver case takes. A run
+    whose kernel died after its last family finished, before the ensemble node could start, reads as
+    "every job COMPLETED" and closes to ``COMPLETED``, claiming an ensemble that never ran. Two live
+    runs were mis-reported that way on 2026-09-20.
+
+    So the plan comes in too: every planned family with no row enters the picture as ``None``, and
+    the whole map goes to `job_outcome.combined_run_status` — the same function `main.run` and the
+    Airflow ``finalize_run`` task use to write the header in the first place. One policy, in one
+    place, so a repaired header says what the run would have said for itself. A missing ensemble on
+    an otherwise-complete run is therefore ``FAILED`` (the requested output does not exist), and a
+    missing *base* family alongside completed ones is ``PARTIAL`` (what did land is still usable).
+
+    Once a plan is in hand the delegation is unconditional, not just for the missing-family case,
+    because the two readings had drifted in a second place too: a *present* ``FAILED`` ensemble row
+    alongside completed base families rolls up to ``PARTIAL`` on the rows alone, where the run
+    itself would have written ``FAILED`` for the same reason a missing one does.
+
+    Three answers are decided before the plan is consulted, and all three are the row-only ones:
+
+    * **no rows at all ⇒ ``FAILED``**, unchanged — there is no partial anything to describe.
+    * **any *present* non-terminal row ⇒ ``None``**, unchanged, for the same reason as ever: only a
+      runtime probe can tell a live job from a stale row. A *missing* row must not refuse, or the
+      abandoned runs this verb exists to repair could never be closed at all.
+    * **every present row ``CANCELLED`` ⇒ ``CANCELLED``.** Cancelling is a normal way for a planned
+      family to end up with no row, and `combined_run_status` would call it ``FAILED`` — it never
+      sees a cancelled run, because cancelling skips the finalizer that calls it.
+
+    A family with more than one row (``sf-<run_id>-<family>-a<attempt>``: retries share the family,
+    not the ``job_id``) folds to ``COMPLETED`` only if *every* one of its rows is, which never
+    upgrades a family and matches how the row-only roll-up already reads a failed-then-retried pair.
+    """
+    from ..job_outcome import combined_run_status
+
+    statuses = [status for _family, status in job_rows]
+    rolled, reason = roll_up_job_statuses(statuses)
+    if not statuses or rolled is None or rolled == "CANCELLED" or not planned_families:
+        return rolled, reason
+
+    status_by_family: dict[str, str | None] = {}
+    for family, status in job_rows:
+        if status_by_family.get(family, "COMPLETED") == "COMPLETED":
+            status_by_family[family] = (status or "").upper()  # a second row never upgrades
+
+    missing = tuple(f for f in planned_families if f not in status_by_family)
+    merged = {**status_by_family, **dict.fromkeys(missing, None)}
+    status = combined_run_status(merged, ensemble_enabled=ensemble_enabled)
+    if not missing:
+        return status, reason
+    plural = "y" if len(missing) == 1 else "ies"
+    note = f"{len(missing)} planned famil{plural} never recorded a row: {', '.join(missing)}"
+    return status, f"{reason}; {note}"
 
 
 def human_bytes(n: int) -> str:
@@ -793,10 +861,13 @@ def _stuck_run_ids(settings: Settings) -> tuple[str, ...]:  # pragma: no cover -
         ) from exc
 
 
-def _job_statuses(
+def _job_rows(
     settings: Settings, run_ids: Sequence[str]
-) -> dict[str, tuple[str | None, ...]]:  # pragma: no cover - GCP I/O, @gcp smoke
-    """``{run_id: (latest status per job_id, …)}`` for the named runs (one query).
+) -> dict[str, tuple[tuple[str, str | None], ...]]:  # pragma: no cover - GCP I/O, @gcp smoke
+    """``{run_id: ((family, latest status), … per job_id)}`` for the named runs (one query).
+
+    The family rides along because `roll_up_against_plan` compares the rows that exist against the
+    families the run's config planned, and a bare status list cannot name what is missing.
 
     ``job_id`` is the row identity here, not ``job_key`` — `jobs.update_job` moves a job to its
     terminal status with an ``UPDATE … WHERE job_id=@job_id`` **in place**, so unlike the
@@ -813,8 +884,9 @@ def _job_statuses(
     from ..errors import RegistryError
 
     sql = (
-        "SELECT run_id, ARRAY_AGG(status) AS statuses FROM (\n"
+        "SELECT run_id, ARRAY_AGG(STRUCT(family, status) ORDER BY family) AS jobs FROM (\n"
         "  SELECT run_id, job_id,\n"
+        "         ARRAY_AGG(family ORDER BY created_at DESC LIMIT 1)[OFFSET(0)] AS family,\n"
         "         ARRAY_AGG(status ORDER BY created_at DESC LIMIT 1)[OFFSET(0)] AS status\n"
         f"  FROM `{settings.registry_table_ref('run_jobs')}`\n"
         "  WHERE run_id IN UNNEST(@run_ids)\n"
@@ -831,7 +903,62 @@ def _job_statuses(
         raise RegistryError(
             f"could not read job statuses from {settings.registry_dataset_ref}: {exc}"
         ) from exc
-    return {str(r["run_id"]): tuple(r["statuses"]) for r in rows}
+    return {
+        str(r["run_id"]): tuple((str(j["family"]), j["status"]) for j in r["jobs"]) for r in rows
+    }
+
+
+def _run_plans(
+    settings: Settings, run_ids: Sequence[str]
+) -> dict[str, tuple[tuple[str, ...], bool]]:  # pragma: no cover - GCP I/O, @gcp smoke
+    """``{run_id: (planned families, ensemble_enabled)}`` for the named runs (one query).
+
+    The run's own ``raw_config`` is the only record of what it *meant* to do, and it is right there
+    in the header — so this reads every stuck run's config in one shot (the bulk shape `_statuses`
+    uses) and rebuilds each into a `config.RunConfig` to ask `dag.planned_families`.
+
+    A run is simply left out of the result when its config is missing or no longer parses, and the
+    caller then falls back to the row-only roll-up. Both cases are real: a header can be written
+    before its config column is, and a config written under an older schema may not validate today.
+    Neither is a reason to refuse to close an abandoned header — it only means the plan is unknown,
+    and an unknown plan is the situation `roll_up_job_statuses` was already handling alone.
+    """
+    from google.cloud import bigquery
+
+    from ..config import RunConfig
+    from ..dag import planned_families
+    from ..errors import RegistryError
+
+    sql = (
+        "SELECT run_id,\n"
+        "       ARRAY_AGG(TO_JSON_STRING(raw_config) ORDER BY created_at DESC LIMIT 1)[OFFSET(0)]"
+        " AS raw_config\n"
+        f"FROM `{settings.registry_table_ref('run_registry')}`\n"
+        "WHERE run_id IN UNNEST(@run_ids)\nGROUP BY run_id"
+    )
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", list(run_ids))]
+    )
+    client = bigquery.Client(project=settings.project_id)
+    try:
+        rows = list(client.query(sql, job_config).result())
+    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+        raise RegistryError(
+            f"could not read run configs from {settings.registry_dataset_ref}: {exc}"
+        ) from exc
+
+    plans: dict[str, tuple[tuple[str, ...], bool]] = {}
+    for row in rows:
+        raw = row["raw_config"]
+        if not raw:
+            continue
+        try:
+            cfg = RunConfig.model_validate(json.loads(raw))
+        except Exception as exc:  # noqa: BLE001 - an unreadable plan is not a failure to close
+            _log.warning("close-runs: could not rebuild the config for %s (%s)", row["run_id"], exc)
+            continue
+        plans[str(row["run_id"])] = (planned_families(cfg), cfg.ensemble.enabled)
+    return plans
 
 
 def plan_close_runs(
@@ -843,6 +970,11 @@ def plan_close_runs(
     wants the registry consistent, not a particular run. Naming runs explicitly narrows it, and a
     named run whose header is *not* stuck is reported in ``unknown`` rather than silently rewritten
     — this verb repairs abandoned headers and must never touch a settled one.
+
+    Three bulk reads, whatever the number of runs: the headers, the job rows, and the configs. The
+    configs are what let `roll_up_against_plan` notice a family that was planned and never submitted
+    — the exact hole an abandoned run leaves, and invisible to the job rows alone. A run whose
+    config cannot be read falls back to the row-only `roll_up_job_statuses`.
     """
     resolved = _resolved(settings)
     targets = list(_stuck_run_ids(resolved) if run_ids is None else run_ids)
@@ -855,16 +987,24 @@ def plan_close_runs(
     if not stuck:
         return ClosePlan(registry=resolved.registry_dataset_ref, unknown=unknown)
 
-    jobs = _job_statuses(resolved, stuck)
+    jobs = _job_rows(resolved, stuck)
+    plans = _run_plans(resolved, stuck)
     candidates = []
     for run_id in stuck:
-        job_statuses = jobs.get(run_id, ())
-        new_status, reason = roll_up_job_statuses(job_statuses)
+        job_rows = jobs.get(run_id, ())
+        plan = plans.get(run_id)
+        if plan is None:
+            new_status, reason = roll_up_job_statuses([s for _f, s in job_rows])
+        else:
+            families, ensemble_enabled = plan
+            new_status, reason = roll_up_against_plan(
+                job_rows, planned_families=families, ensemble_enabled=ensemble_enabled
+            )
         candidates.append(
             CloseCandidate(
                 run_id=run_id,
                 header_status=header.get(run_id),
-                job_statuses=job_statuses,
+                job_statuses=tuple(s for _f, s in job_rows),
                 new_status=new_status,
                 reason=reason,
             )
@@ -892,6 +1032,11 @@ def close_runs(
     reason, because only a runtime probe can tell a live job from a stale row — that is
     `probes.reconcile`'s job, and conflating the two is how an operator "cleans up" a running job.
     So the safe order is `sdk.Forecaster.monitor` (``probe=True``) first, then this.
+
+    **What it closes to is decided against the run's own plan,** not just its rows — see
+    `roll_up_against_plan`. Reading the rows alone cannot see a family that was planned and never
+    submitted, which is precisely the hole an abandoned run leaves, so a run whose last family
+    happened to finish used to close ``COMPLETED`` while claiming an ensemble that never ran.
 
     Preview is the default; ``yes=True`` executes. Returns the plan either way.
     """

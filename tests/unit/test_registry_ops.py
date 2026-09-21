@@ -440,8 +440,9 @@ def test_forecaster_hands_out_a_registry_on_the_same_settings():
     ],
 )
 def test_roll_up_matches_the_status_a_finished_run_would_have_written(statuses, expected):
-    # Same policy as main._combined_status: all green → COMPLETED, all failed → FAILED, mix →
-    # PARTIAL. This verb writes the status the run itself failed to write, never a different one.
+    # All green → COMPLETED, all failed → FAILED, mix → PARTIAL. This verb writes the status the run
+    # itself failed to write, never a different one. The row-only reading is what close-runs falls
+    # back to when the run's config is unreadable; `roll_up_against_plan` is the usual path.
     status, _reason = ops.roll_up_job_statuses(statuses)
     assert status == expected
 
@@ -481,6 +482,161 @@ def test_close_runs_will_not_settle_a_run_that_is_still_waiting_for_capacity():
     status, reason = ops.roll_up_job_statuses(["COMPLETED", "AWAITING_CAPACITY"])
     assert status is None
     assert "AWAITING_CAPACITY" in reason
+
+
+# --- roll_up_against_plan (the same decision, with the run's own plan in hand) ------
+#
+# The row-only roll-up can only count rows that exist. A family that was planned and never submitted
+# leaves none, so an abandoned run whose last family happened to finish reads as "every job
+# COMPLETED". Two live runs closed that way on 2026-09-20, each claiming an ensemble that never ran.
+# These pin the repair, and pin it to `job_outcome.combined_run_status` rather than to a second
+# opinion about what the statuses mean.
+
+_PLAN = ("statistical", "native", "ensemble")
+
+
+def test_a_run_that_never_submitted_its_ensemble_does_not_close_as_completed():
+    """The defect, written down. Both base families landed; the ensemble node never started.
+
+    FAILED rather than PARTIAL because that is what the run itself would have written: an ensemble
+    was requested and does not exist, so the requested output is incomplete. The reason names the
+    family, because "FAILED" on a run whose forecasts are all present needs an explanation.
+    """
+    status, reason = ops.roll_up_against_plan(
+        [("statistical", "COMPLETED"), ("native", "COMPLETED")],
+        planned_families=_PLAN,
+        ensemble_enabled=True,
+    )
+    assert status == "FAILED"
+    assert "never recorded a row: ensemble" in reason
+
+
+def test_a_missing_base_family_closes_partial_because_what_landed_is_still_usable():
+    status, reason = ops.roll_up_against_plan(
+        [("statistical", "COMPLETED"), ("ensemble", "COMPLETED")],
+        planned_families=_PLAN,
+        ensemble_enabled=True,
+    )
+    assert status == "PARTIAL"
+    assert "never recorded a row: native" in reason
+
+
+def test_an_ensemble_that_failed_fails_the_run_even_though_every_forecast_landed():
+    """The second place the two readings had drifted, found while fixing the first.
+
+    On the rows alone this is a mix of terminals and therefore PARTIAL. The run itself would have
+    written FAILED, and for the same reason a *missing* ensemble does: an ensemble was asked for and
+    does not exist. Whether the node failed or never started is not a difference the header cares
+    about.
+    """
+    status, _reason = ops.roll_up_against_plan(
+        [("statistical", "COMPLETED"), ("native", "COMPLETED"), ("ensemble", "FAILED")],
+        planned_families=_PLAN,
+        ensemble_enabled=True,
+    )
+    assert status == "FAILED"
+    assert ops.roll_up_job_statuses(["COMPLETED", "COMPLETED", "FAILED"])[0] == "PARTIAL"
+
+
+def test_the_plan_aware_roll_up_agrees_with_what_the_run_would_have_written():
+    """One policy, in one place — the anti-drift test.
+
+    The row-only roll-up used to cite a ``main._combined_status`` that no longer existed, and the
+    two readings had quietly diverged. This asserts the equivalence directly rather than describing
+    it in a docstring, so the next divergence fails a test instead of mis-closing a header.
+    """
+    from scale_forecasting.job_outcome import combined_run_status
+
+    for rows in (
+        [("statistical", "COMPLETED"), ("native", "COMPLETED")],
+        [("statistical", "COMPLETED"), ("native", "FAILED")],
+        [("statistical", "FAILED"), ("native", "FAILED")],
+        [("statistical", "COMPLETED"), ("native", "COMPLETED"), ("ensemble", "FAILED")],
+        [("statistical", "COMPLETED"), ("ensemble", "COMPLETED")],
+    ):
+        landed = dict(rows)
+        expected = combined_run_status(
+            landed | {f: None for f in _PLAN if f not in landed}, ensemble_enabled=True
+        )
+        status, _reason = ops.roll_up_against_plan(
+            rows, planned_families=_PLAN, ensemble_enabled=True
+        )
+        assert status == expected, rows
+
+
+def test_a_run_that_recorded_every_planned_family_is_unaffected_by_the_plan():
+    rows = [("statistical", "COMPLETED"), ("native", "COMPLETED"), ("ensemble", "COMPLETED")]
+    assert ops.roll_up_against_plan(rows, planned_families=_PLAN, ensemble_enabled=True) == (
+        ops.roll_up_job_statuses([s for _f, s in rows])
+    )
+
+
+def test_with_no_plan_in_hand_it_is_exactly_the_row_only_roll_up():
+    """The fallback path: a header whose ``raw_config`` is missing or no longer validates.
+
+    An unreadable plan is not a reason to refuse to close an abandoned header — it only means we are
+    back to the situation the row-only roll-up always handled alone.
+    """
+    rows = [("statistical", "COMPLETED"), ("native", "FAILED")]
+    assert ops.roll_up_against_plan(rows, planned_families=(), ensemble_enabled=False) == (
+        ops.roll_up_job_statuses([s for _f, s in rows])
+    )
+
+
+def test_a_present_non_terminal_row_still_refuses_even_with_a_family_missing():
+    """The load-bearing refusal is unchanged and comes first — the plan never overrides it."""
+    status, reason = ops.roll_up_against_plan(
+        [("statistical", "RUNNING")], planned_families=_PLAN, ensemble_enabled=True
+    )
+    assert status is None
+    assert "not terminal" in reason
+
+
+def test_a_missing_row_never_refuses_to_close():
+    """Missing and non-terminal must stay different answers, or the verb stops working.
+
+    Refusing on a *missing* family would strand exactly the abandoned runs close-runs exists to
+    repair: their whole signature is a family that never wrote anything at all.
+    """
+    status, _reason = ops.roll_up_against_plan(
+        [("statistical", "COMPLETED")], planned_families=_PLAN, ensemble_enabled=True
+    )
+    assert status is not None
+
+
+def test_a_cancelled_run_stays_cancelled_even_though_it_skipped_its_ensemble():
+    """Cancelling is the ordinary way a planned family ends up with no row.
+
+    `combined_run_status` would call this FAILED — it never sees a cancelled run, because cancelling
+    skips the finalizer that calls it. CANCELLED is the truer word and the one the operator stopped
+    the run to get.
+    """
+    status, _reason = ops.roll_up_against_plan(
+        [("statistical", "CANCELLED"), ("native", "CANCELLED")],
+        planned_families=_PLAN,
+        ensemble_enabled=True,
+    )
+    assert status == "CANCELLED"
+
+
+def test_a_header_with_no_job_rows_is_still_failed_when_a_plan_exists():
+    status, reason = ops.roll_up_against_plan([], planned_families=_PLAN, ensemble_enabled=True)
+    assert status == "FAILED"
+    assert "never recorded a family" in reason
+
+
+def test_a_second_attempt_never_upgrades_a_family_off_its_first_row():
+    """Retries share the family and differ only in ``job_id``, so a family can hold two rows.
+
+    Folding them the other way — letting a later COMPLETED erase an earlier FAILED — is the same lie
+    the repair token exists to prevent, just arriving through a different door.
+    """
+    status, _reason = ops.roll_up_against_plan(
+        [("statistical", "FAILED"), ("statistical", "COMPLETED"), ("native", "COMPLETED")],
+        planned_families=("statistical", "native"),
+        ensemble_enabled=False,
+    )
+    assert status == "PARTIAL"
 
 
 # --- a repair must not close a family it only partly repaired ----------------------

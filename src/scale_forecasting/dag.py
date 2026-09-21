@@ -171,6 +171,23 @@ def group_models_by_family(cfg: RunConfig) -> dict[str, list[str]]:
     return {family: grouped[family] for family in _FAMILY_ORDER if family in grouped}
 
 
+def planned_families(cfg: RunConfig) -> tuple[str, ...]:
+    """Every family this config expects to see a ``run_jobs`` row for, in DAG order (pure).
+
+    `group_models_by_family` answers "which families have models", which is the same question right
+    up until ensembling is on: the ensemble node writes a job row of its own under the family
+    ``ensemble``, and a reader comparing rows against a plan has to know to expect it. That reader
+    is `registry.ops.roll_up_against_plan`, which closes an abandoned header — and the whole reason
+    it needs a plan is that a family which never submitted leaves no row to notice its absence by.
+
+    Repair families are deliberately absent. A repair only exists because a first pass left cells
+    missing, so it is never *planned* — it is a row that may or may not appear, and treating it as
+    expected work would make every un-repaired run look incomplete.
+    """
+    families = tuple(group_models_by_family(cfg))
+    return families + ("ensemble",) if cfg.ensemble.enabled else families
+
+
 def check_model_params(cfg: RunConfig) -> None:
     """Validate ``cfg.model_params`` against the model registry. Raises `errors.ConfigError`.
 

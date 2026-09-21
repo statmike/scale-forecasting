@@ -218,6 +218,14 @@ unblocks.
 The driver died in the submit path before it recorded a single family, so there is nothing to probe.
 `registry.ops close-runs` closes it as `FAILED`; nothing completed and nobody stopped it.
 
+**Symptom: every job row says `COMPLETED`, but a family you configured has no row at all.**
+The driver died between families — after the last one finished, before the next was submitted — so
+the missing family left nothing behind to notice its absence by. `close-runs` catches this by
+comparing the rows against the families the run's own config planned, and closes the header to what
+the run would have written: `FAILED` when the gap is the ensemble (you asked for an ensemble and
+there isn't one), `PARTIAL` when a base family is missing and the others landed (their forecasts are
+still usable). Nothing is deleted either way, and the predictions that did land stay queryable.
+
 **Symptom: `no handle recorded`.**
 The job predates the probe surface, or its telemetry blob is malformed. There is no way to address
 the runtime job, so the verdict is `UNKNOWN` and cancel reports the family as not cancellable. Stop

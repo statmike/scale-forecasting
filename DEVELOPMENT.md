@@ -78,6 +78,29 @@ Plain-language rationale for the choices that aren't obvious from the code alone
   skips when unavailable.
 
 ### Recently done
+- **`close-runs` used to close an abandoned run to `COMPLETED` while a family it planned had never
+  run at all.** The verb reads a run's job rows and rolls them up into the header status the run
+  itself failed to write, and the whole rule turned on "is every row terminal?" — which a family
+  that never submitted answers by leaving no row. So a driver that died between families, after the
+  last one finished and before the ensembler started, read as "every job COMPLETED" and proposed
+  `RUNNING -> COMPLETED` for a run holding half its expected cells. Two live runs hit that shape on
+  2026-09-20 and their headers were deliberately left alone rather than closed wrong. The fix gives
+  the roll-up the run's own plan: `plan_close_runs` now reads each stuck run's `raw_config` in one
+  bulk query, `dag.planned_families` turns it into the families that should have written a row (the
+  model families, plus `ensemble` when enabled, never a repair token — a repair is never *planned*
+  work), and `ops.roll_up_against_plan` enters every missing family as `None` before handing the
+  whole map to `job_outcome.combined_run_status`. That is the same function `main.run` and Airflow's
+  `finalize_run` call, so there is now one policy in one place instead of two that had drifted: a
+  missing ensemble is `FAILED` (the output you asked for does not exist), a missing base family
+  alongside completed ones is `PARTIAL` (what landed is still usable). Three answers are still
+  decided on the rows alone and come first — no rows at all is `FAILED`, a *present* non-terminal
+  row still refuses to close, and an all-`CANCELLED` run keeps `CANCELLED` (cancelling is an
+  ordinary way for a planned family to have no row, and it skips the finalizer that
+  `combined_run_status` serves). A *missing* row deliberately does not refuse; refusing would strand
+  exactly the abandoned runs the verb exists for. Scoping the fix turned up a second drift worth
+  naming: a *present* `FAILED` ensemble row rolled up to `PARTIAL` on the rows alone where the run
+  itself writes `FAILED`, so the delegation is unconditional once a plan is in hand, and a test
+  asserts the equivalence directly rather than a docstring claiming it.
 - **A Ray cluster that outlives the process that made it (`ray_reaper.py`, `reap-clusters`).** Ray
   teardown is a `finally` block, which is a promise only as strong as the launching process: kill it
   and the Vertex cluster stays up. The Dataproc path has no equivalent exposure — every cluster it

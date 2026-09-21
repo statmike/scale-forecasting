@@ -47,6 +47,49 @@ def test_group_omits_absent_families() -> None:
     assert set(grouped) == {"statistical", "native"}
 
 
+# --- planned_families (what close-runs compares job rows against) ----------------
+
+
+def test_planned_families_are_the_model_families_in_dag_order() -> None:
+    assert dag.planned_families(_cfg(models=[_NATIVE, _STAT])) == ("statistical", "native")
+
+
+def test_planned_families_adds_the_ensemble_only_when_ensembling_is_on() -> None:
+    """The ensemble node writes a job row of its own, so a plan that omits it under-counts.
+
+    This is the whole point of the helper: the run that stranded `registry.ops.close_runs` had both
+    its base families COMPLETED and an ensemble that never started, and nothing in the job rows said
+    an ensemble had ever been asked for.
+    """
+    off = _cfg(models=[_STAT, _NATIVE])
+    on = _cfg(models=[_STAT, _NATIVE], ensemble={"enabled": True, "strategies": ["mean"]})
+    assert dag.planned_families(off) == ("statistical", "native")
+    assert dag.planned_families(on) == ("statistical", "native", "ensemble")
+
+
+def test_planned_families_never_expects_a_repair_row() -> None:
+    """A repair exists only because cells went missing — it is never *planned* work.
+
+    If it were listed, every run that simply did not need repairing would read as having skipped a
+    family, and close-runs would refuse to call any of them COMPLETED.
+    """
+    from scale_forecasting.registry.ids import REPAIR_JOB_FAMILIES
+
+    planned = dag.planned_families(_cfg(ensemble={"enabled": True, "strategies": ["mean"]}))
+    assert not set(planned) & set(REPAIR_JOB_FAMILIES)
+
+
+def test_planned_families_matches_the_job_rows_a_full_dag_would_write() -> None:
+    """The plan and the DAG must agree, or the comparison is against a fiction.
+
+    ``dag_nodes`` is what actually executes and therefore what writes the rows; this pins the helper
+    to it rather than to a second reading of the config.
+    """
+    cfg = _cfg(ensemble={"enabled": True, "strategies": ["mean", "median"]})
+    nodes = dag.dag_nodes(dag.plan_dag(cfg))
+    assert dag.planned_families(cfg) == tuple(n.family for n in nodes)
+
+
 # --- plan_dag ------------------------------------------------------------------
 
 

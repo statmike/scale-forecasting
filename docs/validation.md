@@ -2798,6 +2798,13 @@ both, on the rule "every job row is terminal", but neither run ever submitted an
 all, so there is no row for it to find non-terminal. Closing them would have stamped `COMPLETED` on
 runs that landed 30 of 60 expected cells.
 
+`close_runs` has since been taught to compare the job rows against the families the run's own
+`raw_config` planned, so a family that never submitted is no longer invisible to it: for this shape
+it now closes to `FAILED`, the same word `job_outcome.combined_run_status` writes when a requested
+ensemble does not exist. That change is **offline-proven only** — unit-tested, never yet executed
+against the live registry — and the two headers above are still `RUNNING`, waiting to be its first
+live subjects.
+
 Raising the cap to `MAX_WALL_S = 2700` fixed it. The third execution,
 `nb08-run-monitor-1789936442-1a6aaebcac7f`, is the one whose outputs ship: `statistical` ran
 20:34:16 → 20:59:59, the ensembler fired at 21:00:03 and finished at 21:00:15, and the notebook

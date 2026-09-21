@@ -470,14 +470,23 @@ to touch a run whose header is still `RUNNING` or `PENDING`; check with `monitor
 **`close-runs` is the one for a header that is stuck rather than wrong.** A driver that dies after
 writing its header leaves a `RUNNING` row forever, and none of the other verbs fit: `--cancel`
 stamps `CANCELLED` over families that actually completed, `drop-run` destroys real predictions to
-repair a status field, and `--probe` only reads. `close-runs` writes the header status its own job
-rows already imply — every job `COMPLETED` ⇒ `COMPLETED`, a mix of terminals ⇒ `PARTIAL`, no job
-rows at all ⇒ `FAILED` (the run died in the submit path) — and touches nothing else:
+repair a status field, and `--probe` only reads. `close-runs` writes the header status the run
+itself would have written, and touches nothing else — every family `COMPLETED` ⇒ `COMPLETED`, a mix
+⇒ `PARTIAL`, no job rows at all ⇒ `FAILED` (the run died in the submit path):
 
 ```bash
 python -m scale_forecasting.registry.ops close-runs          # preview every stuck header
 python -m scale_forecasting.registry.ops close-runs --yes
 ```
+
+It reads the run's **config** as well as its job rows, and that matters more than it sounds. A
+family that was planned and never submitted leaves no row at all, so on the rows alone an abandoned
+run whose last family happened to finish looks like "every job `COMPLETED`" — which is how it used
+to close `COMPLETED` while claiming an ensemble that never ran. Comparing the rows against the plan
+closes that hole: a missing ensemble on an otherwise-complete run is `FAILED`, because the output
+you asked for does not exist, and a missing *base* family alongside completed ones is `PARTIAL`,
+because what did land is still usable. Those are the same answers the run's own finalizer would have
+written. A run whose config cannot be read falls back to the rows alone.
 
 It **skips any run that still has a non-terminal job row**, with the reason printed, because only a
 runtime probe can tell a live job from a stale one. Settling those rows is what unblocks it, so the
