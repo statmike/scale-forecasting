@@ -47,9 +47,13 @@ def _cfg(**over: Any) -> RunConfig:
 def _no_live_header_check(monkeypatch: pytest.MonkeyPatch) -> None:
     # The exists-vs-new verdict queries the registry; default it to "new run" so offline plan/stage
     # tests never touch BigQuery. The idempotency tests below override this explicitly.
-    from scale_forecasting.registry import header
+    from scale_forecasting.registry import header, jobs
 
     monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
+    # So does the attempt re-stamp (`_nodes_with_submit_attempts`), on the same reachable-registry
+    # path. Default it to "this family has never run" → attempt 1, which is what every emitted-id
+    # assertion in this file expects; the re-stamp tests below override it.
+    monkeypatch.setattr(jobs, "latest_job_attempt", lambda *a, **k: None)
 
 
 # --- _plan: run_id parity + the per-runtime split ------------------------------
@@ -364,6 +368,130 @@ def test_plan_run_resolves_dag_nodes_offline() -> None:
     ensemble = result.nodes[-1]
     assert ensemble.job_key == make_job_key(result.run_id, "ensemble", 1)
     assert set(ensemble.depends_on) == {n.job_key for n in result.nodes if n.family != "ensemble"}
+
+
+# --- the attempt a paste would actually use -------------------------------------
+
+
+def _prior_attempt(monkeypatch: pytest.MonkeyPatch, highest: int | None) -> None:
+    """Pretend the registry already holds jobs for this run up to attempt ``highest``."""
+    from scale_forecasting.registry import jobs
+
+    monkeypatch.setattr(jobs, "latest_job_attempt", lambda *a, **k: highest)
+
+
+def test_a_forced_re_run_emits_the_next_attempt_not_the_planners_attempt_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `plan_dag` is pure, so every planned job_key says `a1`. That is right for the DAG builder and
+    # wrong for a human: the job_key is the platform's own --batch id, so pasting an `a1` command
+    # for a run that has already executed is rejected with ALREADY_EXISTS. Found live 2026-09-22.
+    _prior_attempt(monkeypatch, 2)
+    result = launch_plan.plan_run(
+        _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True
+    )
+    node = next(n for n in result.nodes if n.family == "statistical")
+    assert node.job_key.endswith("-statistical-a3")
+    # And the emitted command carries it, which is the whole point of re-stamping.
+    assert result.commands is not None
+    spark = result.commands["spark:statistical"]
+    assert spark.native is not None and "-statistical-a3" in spark.native
+
+
+def test_an_unforced_re_run_emits_the_attempt_it_would_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without --force the policy reuses the existing job rather than making a new one, so the honest
+    # id to print is that job's — not `a1`, and not a fresh `a3` no submit would ever create.
+    _prior_attempt(monkeypatch, 2)
+    result = launch_plan.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    node = next(n for n in result.nodes if n.family == "statistical")
+    assert node.job_key.endswith("-statistical-a2")
+
+
+def test_a_run_that_never_executed_still_says_attempt_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prior_attempt(monkeypatch, None)
+    result = launch_plan.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    node = next(n for n in result.nodes if n.family == "statistical")
+    assert node.job_key.endswith("-statistical-a1")
+
+
+def test_the_ensemble_still_depends_on_jobs_that_exist_after_the_re_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `depends_on` holds job_keys. Re-stamping the keys without rewriting the edges would leave the
+    # ensemble pointing at family ids that exist nowhere — a silently broken DAG manifest.
+    _prior_attempt(monkeypatch, 2)
+    result = launch_plan.plan_run(
+        _cfg(
+            models=[_SPARK, "arima_plus"],
+            backtest={"enabled": True},
+            ensemble={"enabled": True, "strategies": ["mean", "median"]},
+        ),
+        settings=_SETTINGS,
+        infra=_batch_infra(),
+        force=True,
+    )
+    ensemble = result.nodes[-1]
+    assert ensemble.family == "ensemble"
+    assert ensemble.job_key.endswith("-ensemble-a3")
+    assert set(ensemble.depends_on) == {n.job_key for n in result.nodes if n.family != "ensemble"}
+    assert all(key.endswith("-a3") for key in ensemble.depends_on)
+
+
+def test_staged_commands_carry_the_re_stamped_attempt_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Staging is the path whose commands a human actually pastes, so it needs the fix more than
+    # plan does — and the manifest it writes is the record of what was staged.
+    import scale_forecasting.staging as staging_mod
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        staging_mod, "stage_config", lambda cfg, rid, bkt: f"gs://{bkt}/runs/{rid}.json"
+    )
+    monkeypatch.setattr(
+        staging_mod,
+        "stage_code",
+        lambda bkt: (f"gs://{bkt}/runs/pkg.zip", f"gs://{bkt}/runs/spark_main.py"),
+    )
+
+    def _fake_manifest(manifest: dict[str, Any], rid: str, bkt: str) -> str:
+        captured["manifest"] = manifest
+        return f"gs://{bkt}/runs/{rid}.plan.json"
+
+    monkeypatch.setattr(staging_mod, "stage_manifest", _fake_manifest)
+    _prior_attempt(monkeypatch, 4)
+
+    result = launch_plan.stage_run(
+        _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True
+    )
+    assert captured["manifest"]["dag"][0]["job_key"].endswith("-statistical-a5")
+    assert result.commands is not None
+    spark = result.commands["spark:statistical"]
+    assert spark.native is not None and "-statistical-a5" in spark.native
+
+
+def test_an_unreachable_registry_leaves_attempt_one_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Best-effort, like every other registry consult the plan layers on: a stale suggestion beats no
+    # plan. What it must not do is look authoritative, so the degrade is a warning, not silence.
+    from scale_forecasting.registry import jobs
+
+    def _boom(*a: Any, **k: Any) -> int:
+        raise RuntimeError("no credentials")
+
+    monkeypatch.setattr(jobs, "latest_job_attempt", _boom)
+    with caplog.at_level("WARNING"):
+        result = launch_plan.plan_run(
+            _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True
+        )
+    node = next(n for n in result.nodes if n.family == "statistical")
+    assert node.job_key.endswith("-statistical-a1")
+    assert any("could not resolve submit attempts" in r.message for r in caplog.records)
 
 
 def test_stage_run_requires_infra(monkeypatch: pytest.MonkeyPatch) -> None:

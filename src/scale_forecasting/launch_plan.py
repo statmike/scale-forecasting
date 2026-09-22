@@ -371,6 +371,65 @@ def lock_profile_source(cfg: RunConfig, *, settings: Settings | None = None) -> 
     return cfg.model_copy(update={"compute": cfg.compute.model_copy(update={"profile": profile})})
 
 
+def _nodes_with_submit_attempts(
+    nodes: Sequence[DagNode], run_id: str, *, force: bool, settings: Settings | None
+) -> tuple[DagNode, ...]:
+    """Re-stamp every node's ``job_key`` with the attempt a submit *right now* would use.
+
+    `dag.plan_dag` is pure and therefore stamps attempt 1 on everything — "a planned identity has no
+    history behind it". That is the right property for the DAG builder and the wrong string to hand
+    a human. The emitted ``gcloud dataproc batches submit`` command carries the job key as the
+    platform's own ``--batch`` id, so on any run that has already executed, pasting the emitted
+    command is rejected with ``ALREADY_EXISTS`` — found 2026-09-22 by pasting one, which is the only
+    way it could have been found: every offline test compares the emitted string to what the
+    *submitter* would build from the same nodes, so both sides carried the same stale ``a1``.
+
+    The history lookup lives here rather than in `dag` because `plan_run` and `stage_run` already
+    consult the registry (`_check_idempotency`) while `plan_dag` must stay callable with no
+    environment at all. Purity is preserved where it was load-bearing and paid for where it was not.
+
+    ``depends_on`` is rewritten through the same map. Re-stamping the keys without it would leave
+    the ensemble node depending on a family job id that no longer exists anywhere.
+
+    The attempt is whatever the policy hands out, including the unforced-re-run case where that is
+    the *existing* job's number rather than a fresh one — printing an id no submit would create
+    would be a different lie in place of the old one.
+
+    Best-effort, like everything else `plan_run` layers on top of the pure plan: if the registry
+    cannot be reached the original attempt-1 nodes come back with a warning, because a stale
+    suggestion is worth more than no plan at all — but it says so rather than looking authoritative.
+    """
+    from dataclasses import replace
+
+    from .registry.ids import make_job_key
+    from .registry.jobs import next_job_attempt
+
+    try:
+        attempts: dict[str, int] = {}
+        for node in nodes:
+            if node.family not in attempts:
+                attempts[node.family] = next_job_attempt(
+                    run_id, node.family, force=force, settings=settings
+                )[0]
+    except Exception as exc:  # noqa: BLE001 - a stale attempt is a worse plan, not a failed one
+        _log.warning(
+            "could not resolve submit attempts from the registry (%r); the emitted commands say "
+            "attempt 1, which will be rejected as ALREADY_EXISTS if this run has already executed",
+            exc,
+        )
+        return tuple(nodes)
+
+    rekeyed = {n.job_key: make_job_key(run_id, n.family, attempts[n.family]) for n in nodes}
+    return tuple(
+        replace(
+            node,
+            job_key=rekeyed[node.job_key],
+            depends_on=tuple(rekeyed.get(dep, dep) for dep in node.depends_on),
+        )
+        for node in nodes
+    )
+
+
 def plan_run(
     cfg: RunConfig,
     *,
@@ -416,6 +475,10 @@ def plan_run(
     try:
         settings = settings or _resolve_settings()
         idempotency = _check_idempotency(plan.run_id, settings)
+        # Only now that a registry is reachable — see `_nodes_with_submit_attempts`. Rebinding
+        # `nodes` rather than using a second name is deliberate: the LaunchPlan below carries these
+        # too, so what a reader sees in the plan is what a paste of the command would submit.
+        nodes = _nodes_with_submit_attempts(nodes, plan.run_id, force=force, settings=settings)
         resolved_infra = _resolve_infra(cfg, infra)
         code_bucket = resolved_infra.code_bucket  # type: ignore[attr-defined]
         config_uri, package_uri, launcher_uri = _template_uris(cfg, plan, code_bucket)
@@ -678,6 +741,9 @@ def stage_run(
     fanout = estimate_fanout(cfg)
     nodes = dag_nodes(plan_dag(cfg))
     idempotency = _check_idempotency(plan.run_id, settings)
+    # Staging is the path whose commands a human actually pastes, so the attempt has to be the one
+    # a submit would use rather than the planner's attempt 1 — see `_nodes_with_submit_attempts`.
+    nodes = _nodes_with_submit_attempts(nodes, plan.run_id, force=force, settings=settings)
     resolved_infra = _resolve_infra(cfg, infra)
     code_bucket: str = resolved_infra.code_bucket  # type: ignore[attr-defined]
 

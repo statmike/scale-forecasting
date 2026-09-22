@@ -59,9 +59,12 @@ def _cfg(**over: Any) -> RunConfig:
 def _no_live_header_check(monkeypatch: pytest.MonkeyPatch) -> None:
     # The exists-vs-new verdict queries the registry; default it to "new run" so offline plan/stage
     # tests never touch BigQuery. The idempotency tests below override this explicitly.
-    from scale_forecasting.registry import harvest, header
+    from scale_forecasting.registry import harvest, header, jobs
 
     monkeypatch.setattr(header, "header_status", lambda *a, **k: None)
+    # The plan re-stamps each job_key with the attempt a submit would use, which is another registry
+    # read on the same path. Offline there is no history, so every id here stays attempt 1.
+    monkeypatch.setattr(jobs, "latest_job_attempt", lambda *a, **k: None)
     # Locking `profile.source: "auto"` before the digest is also a registry query, on every verb.
     # Offline there is nothing to discover, so it pins "baseline" — the deterministic remainder of
     # the chain — and every id in this file is the id of a baseline-pinned config.
