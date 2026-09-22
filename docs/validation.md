@@ -376,7 +376,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU — and the create-then-delete half of the lifecycle: its cluster was `NOT_FOUND` the moment the run ended | CURRENT | 2026-09-12 | `smoke-04-cluster-cpu-9196365250ac` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 05 | `05_cluster_reuse.json` | Reusing a standing Dataproc cluster by name — both family jobs ran on `sf-smoke-cluster` and it was still `RUNNING` afterwards | CURRENT | 2026-09-12 | `smoke-05-cluster-reuse-adbe6bd63644` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 06 | `06_cluster_gpu.json` | Dataproc cluster GPU (T4), incl. zone failover. **Re-run 2026-09-13 on the pinned image:** the cluster created `RUNNING` with `2.2.85-debian12`, so the driver init action that had been failing at ~200 s on the floating alias now completes on both GPU workers; 100 cells, COMPLETED | CURRENT | 2026-09-13 | `smoke-06-cluster-gpu-eea70f834c66` | `cluster_deps=packed-venv-init-action`, `gpu_cluster_image=driver-init-action+image-pinned-2.2.85`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
-| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU — two families sharing one cluster, and the row that replaces the un-rederivable `run_id` the note below records. Re-run on 2026-09-22 with `SF_RAY_POLL_FAULT=transport,auth` armed, which is what moved `ray_poll_recovery` from an offline claim to a live one | CURRENT | 2026-09-22 | `smoke-07-ray-cpu-ed27e03a2083` (attempt 2) | `ray_poll_recovery=transient-transport+auth`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 07 | `07_ray_cpu.json` | Ray on Vertex, CPU — two families sharing one cluster, and the row that replaces the un-rederivable `run_id` the note below records. Run twice on 2026-09-22 with `SF_RAY_POLL_FAULT=transport,auth` armed, which is what moved `ray_poll_recovery` from an offline claim to a live one; the second of the two is the run on which the injection and retry lines finally printed together | CURRENT | 2026-09-22 | `smoke-07-ray-cpu-ed27e03a2083` (attempts 2 and 3) | `ray_poll_recovery=transient-transport+auth`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 08 | `08_ray_gpu.json` | Ray on Vertex, GPU T4 (neuralprophet) | CURRENT | 2026-09-09 | `smoke-08-ray-gpu-497c57c3ad2c` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 09 | `09_shared_ray.json` | Several families on one shared Ray cluster (CPU + GPU pools) — all three landed on one cluster, the two CPU families in ~6 min each and the GPU one in ~17, and the device audit called the T4 `ENGAGED_IDLE` unprompted | CURRENT | 2026-09-12 | `smoke-09-shared-ray-859750fc97a5` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 10 | `10_mixed_runtimes.json` | Spark + Ray + BigQuery families concurrently under one run_id — genuinely concurrent, not merely all-present: BigQuery finished in 41 s while the two Serverless batches were still fitting and the Ray T4 family ran on past both | CURRENT | 2026-09-12 | `smoke-10-mixed-runtimes-7aef85d2117b` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
@@ -3807,13 +3807,30 @@ job are about sixteen seconds apart, which is not a coincidence of timing: the o
 code path that consumes time between two polls is `time.sleep(_POLL_RETRY_BACKOFF_SECONDS)` inside
 the retry loop, set to fifteen seconds. The gap is the recovery, measured.
 
-**What this row does not claim.** The literal pair of lines the runbook asks for has still not been
-witnessed on a live run. The fix is committed — the retry line is now a warning, which is also the
-honest level for it, since a poll failure forcing a reconnect is an anomaly on a long fleet run
-rather than routine progress and across every live Ray run before the fault was armed on purpose
-this branch executed zero times. `test_both_halves_of_the_evidence_survive_the_same_log_level`
-asserts both halves at one level, so splitting them again fails offline rather than during a live
-wave. The next armed run will show the pair; this one shows the recovery by its effects.
+**What this row did not claim, and the run that closed it the same afternoon.** The paragraph above
+used to end by saying the literal pair of lines had never been witnessed live. It has now. The fix —
+the retry line raised to WARNING, which is also the honest level for it, since a poll failure forcing
+a reconnect is an anomaly on a long fleet run rather than routine progress — was carried on a second
+armed run at **15:18–15:37 on 2026-09-22**, the same config re-submitted with `--force` at attempt 3
+under the unchanged `smoke-07-ray-cpu-ed27e03a2083`. **Four injections, four answering retry lines,
+all eight at WARNING, each retry one millisecond behind its arm:**
+
+```
+15:30:49,379 WARNING …ray_jobs: SF_RAY_POLL_FAULT is armed: injecting a transport fault into this poll of …-ml-a3 (1 left)
+15:30:49,380 WARNING …ray_jobs: Ray job poll failed on attempt 1/4 (RuntimeError('Request failed with status code 503: Service Temporarily Unavailable (SF_RAY_POLL_FAULT)')); reconnecting and retrying
+15:33:36,212 WARNING …ray_jobs: SF_RAY_POLL_FAULT is armed: injecting a auth fault into this poll of …-ml-a3 (0 left)
+15:33:36,213 WARNING …ray_jobs: Ray job poll failed on attempt 2/4 (RuntimeError('Request failed with status code 401: Unauthorized (SF_RAY_POLL_FAULT)')); reconnecting and retrying
+```
+
+The `statistical` job printed the same four lines 30 ms and 200 ms behind `ml`'s. **Both doors are
+proven separately** — `transport` as a 503 and `auth` as a 401, the latter being the one that mints a
+fresh token in `_connect_job_client` — and the attempt counter walking `1/4` then `2/4` shows the
+loop's forgiveness budget being spent and two attempts still in hand, which is the property that
+keeps a real outage from being absorbed silently. Both families reached `COMPLETED` (`ml` 378.5 s,
+`statistical` 363.5 s, both started 15:30:39), the harness returned `PASS` with the board unchanged
+on re-run, and the cluster was gone afterwards — the v1beta1 persistent-resource endpoint returned
+`{}`. `test_both_halves_of_the_evidence_survive_the_same_log_level` asserts both halves at one level,
+so splitting them again fails offline rather than during a live wave.
 
 **One thing happened on the way in that is worth recording separately.** The Ray cluster's first
 create attempt failed with *"An internal error occurred on your cluster"*, the capacity layer
@@ -3876,13 +3893,13 @@ half of the claim: the re-stamp took a *new* attempt rather than colliding with 
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
 
-- **The Ray poll recovery has been witnessed by its effects, not by the line that announces it.** The
-  2026-09-22 armed run proved the recovery ran — the run survived four injected faults that would
-  each have ended it under the old behaviour, and the fifteen-second backoff is visible in the
-  spacing of the driver log. What the runbook actually asks for is the injection line and the retry
-  line side by side, and that pair has never been printed on live infrastructure, because until that
-  day the retry logged at a level the harness filters out. The fix is committed and offline-guarded;
-  closing this costs one more armed Ray run and nothing else.
+- **~~The Ray poll recovery has been witnessed by its effects, not by the line that announces it.~~
+  Closed 2026-09-22 by the second armed run.** The first armed run that day proved the recovery ran
+  but could not print the line that says so, because the retry logged below the level the harness
+  uses. The fix was carried the same afternoon at attempt 3 and the pair appeared: four injections,
+  four answering retries, all eight at WARNING, both doors (503 and 401) separately. See
+  [the armed poll fault](#the-armed-poll-fault-fired-and-the-evidence-for-it-was-invisible-at-the-level-the-runbook-logs-at)
+  above. Nothing is owed here.
 
 - **A run that paid for a GPU and never touched one is now *named*, but still not failed.** The
   verdict this bullet used to ask for exists: `device_audit` runs at the end of every
