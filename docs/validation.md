@@ -3966,6 +3966,83 @@ no-transcription method the first paragraph above had to learn. It created the b
 `CANCELLED` at 14:15:07Z. The `a1` batch was untouched and is still `SUCCEEDED`, which is the other
 half of the claim: the re-stamp took a *new* attempt rather than colliding with the old one.
 
+### The launcher now asks the platform before it stamps an id, and proving that found one more hole
+
+The entry above ends with a re-stamp that took a new attempt instead of colliding with an old one.
+That fix trusts the registry to know every attempt ever spent, and the registry does not: the
+attempt counter is `MAX(attempt)` over `run_jobs`, while job-id uniqueness is enforced by the
+platform. The launcher writes its row before it submits, so those two always agree — but a job
+created by a pasted command, or by anything else that is not this launcher, exists on the platform
+with no row at all. The counter then re-issues an id somebody already holds.
+
+**The walk was proven on 2026-09-22 by constructing exactly that disagreement.** A throwaway PySpark
+batch that prints one line was submitted directly through `gcloud`, deliberately outside the
+launcher, under the id `sf-smoke-01-serverless-cpu-7a3d4234e0e1-statistical-a3` at 17:47:29Z. That
+run's registry sat at `MAX(attempt) = 2`, so nothing in `run_jobs` knew attempt 3 was spent — the
+registry-blind state, reproduced rather than waited for.
+
+`--force` on `configs/smokes/01_serverless_cpu.json` then walked past it:
+
+```
+WARNING job_launch: force: sf-smoke-01-serverless-cpu-7a3d4234e0e1-statistical-a3
+                    already exists on spark (state RUNNING); trying attempt 4
+```
+
+**Both arms of the walk are in that one launch, which is the part worth keeping.** The attempt
+counter is per-family, so `statistical` and `ml` both started from 2, both asked for 3, and differed
+only in what the platform said back. `statistical` found a3 taken and walked to
+`…-statistical-a4`; `ml` found a3 free and stayed at `…-ml-a3`. Both were submitted within a second
+of each other (17:48:53Z and 17:48:54Z), both reached SUCCEEDED, and the run finished COMPLETED at
+18:16:50Z. Before the fix the first of those two submits would have been refused outright.
+
+**The pre-launch row was proven separately, and then it was proven wrong.** Staging
+`smoke-02-bq-native-e354a8652712` at 17:48:08Z filed an `EMITTED` row at attempt 2 carrying a
+correctly-formed BigQuery prefix handle — `native_id` of `sf-smoke-02-bq-native-e354a8652712-native-a2-`,
+`id_kind` of `prefix` — which is what lets a reconciler ask whether the command was ever run. Then
+the same thing was tried on a config that had *never* run, and `--settle` reported `0 of 0` against
+an `EMITTED` row sitting plainly in the table, 992 seconds old and well past its grace.
+
+The cause is a gate nothing offline could see. `probes.reconcile` reads a run's config off its
+`run_registry` header and reads **no job rows at all** when that comes back empty, because the config
+is how a verdict knows the work it is measuring against. `stage_run` filed job rows and never wrote
+a header. So for a config staged before it had ever run — precisely the case the pre-launch row
+exists for — every repair verb was blind to the rows it had just written. The earlier check passed
+only because that config's previous run had left a header behind. The offline tests missed it
+because they stub the registry write and assert on the row dict; none of them asked whether a later
+read could find it.
+
+**The fix and the re-proof.** `stage_run` now writes the run header when the exists-vs-new check
+positively reports there is none — never otherwise, or re-staging a finished config would walk its
+header backwards from COMPLETED to RUNNING. A fresh virgin config staged at 19:06:05Z got its header
+at 19:05:58Z, and from there the whole ladder is visible:
+
+| when | age | registry | native | verdict | settle would write |
+|---|---|---|---|---|---|
+| 19:06:27Z | 22 s | `EMITTED` | `NOT_FOUND` | `UNKNOWN` | nothing |
+| 19:21:57Z | 950 s | `EMITTED` | `NOT_FOUND` | `LOST` | `FAILED` / `NEVER_LAUNCHED` |
+
+The first row is the startup grace doing its job: a command pasted a moment ago must not be reaped
+before anyone could plausibly have run it. The second row is the one that required widening the
+staleness test to cover `EMITTED` as well as `RUNNING` — without that an `EMITTED` row could never
+go stale, the verdict would have stayed `UNKNOWN` forever, and the settle arm below it would have
+been unreachable code that every offline test still passed. `--settle --force` wrote
+`EMITTED -> FAILED (emitted command never run; 0/100 series landed)`, and the row in `v_run_jobs`
+now reads `FAILED` with `failure_reason = NEVER_LAUNCHED`.
+
+**The arm that distinguishes "never run" from "already done" was observed too, by accident.**
+Settling the `EMITTED` row on `smoke-02-bq-native-e354a8652712` — a run whose work had all landed on
+an earlier attempt — returned `EMITTED -> COMPLETED (runtime job gone; all 200/200 series landed)`
+rather than calling it a loss. A vanished pre-launch job whose results are nonetheless present is
+finished, not lost, and the decision table says so before it reaches the `NEVER_LAUNCHED` arm.
+
+**What is not proven, and cannot easily be.** Two of the four changes are defence in depth *behind*
+the walk: the typed `JobIdTaken` that classifies an `ALREADY_EXISTS` refusal, and the registry
+capture that records it as a `failure_reason` with the exception type and message. The walk's whole
+purpose is to prevent the collision that raises them, so reaching them live means defeating the walk
+first. They are covered offline across all three submit seams and are recorded here as untested
+live. The Dataproc-cluster submit seam has no offline test either — that path has no offline harness
+in the tree at all.
+
 ## Known validation gaps
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.

@@ -431,7 +431,12 @@ def _nodes_with_submit_attempts(
 
 
 def _file_emitted_rows(
-    cfg: RunConfig, nodes: Sequence[DagNode], run_id: str, settings: Settings
+    cfg: RunConfig,
+    nodes: Sequence[DagNode],
+    run_id: str,
+    settings: Settings,
+    *,
+    idempotency: Idempotency,
 ) -> None:
     """File one ``EMITTED`` ``run_jobs`` row per staged node — the attempt numbers we just spent.
 
@@ -467,11 +472,29 @@ def _file_emitted_rows(
     the staged command may well have been pasted in the meantime — and it costs one attempt number,
     not one job. ``main.run`` is unaffected: it stages its own artifacts through `staging` and never
     comes through here.
+
+    **Why this also writes the run header.** `probes.reconcile` reads a run's config off its
+    ``run_registry`` header and reads no job rows at all when that comes back empty — the config is
+    how it knows the *expected* work a verdict is measured against. A config staged before it has
+    ever run has no header, so without one here the rows above would be filed into a run every
+    repair verb is blind to: exactly the case they exist for. Proven live 2026-09-22, where a
+    ``--settle`` over a freshly staged virgin run found ``0 of 0`` job rows with the EMITTED row
+    plainly sitting in the table. The header goes in only when the idempotency check positively
+    said there is none — re-staging a config that already ran must not reset its header to RUNNING.
+
+    The header status is ``RUNNING``, which overstates a run nobody launched; the honest alternative
+    is a pre-launch status in ``run_registry`` too, and that vocabulary reaches `registry.ops`,
+    `review`, and the ledger tripwire, so it is deliberately not paid for here. One visible
+    consequence: after staging, the exists-vs-new verdict reports this config "already ran". The
+    guidance that verdict gives is still the right guidance — the ids *are* spent, and an unforced
+    re-run correctly reuses the attempt the staged command was told to use — only the word "ran"
+    runs ahead of the facts.
     """
     from datetime import UTC, datetime
 
     from .job_launch import _entry_handle, _system_job_id
     from .probes.vocabulary import ProbeHandle
+    from .registry.header import write_header
     from .registry.ids import parse_job_key
     from .registry.jobs import write_job
     from .registry.rows import EMITTED, assemble_job_row
@@ -479,6 +502,8 @@ def _file_emitted_rows(
 
     try:
         ensure_tables(cfg, settings=settings)
+        if idempotency.checked and not idempotency.exists:
+            write_header(cfg, run_id, settings=settings)
         created_at = datetime.now(UTC)
         for node in nodes:
             _, family, attempt = parse_job_key(node.job_key)
@@ -878,10 +903,11 @@ def stage_run(
     )
     _log.info("wrote run manifest: %s", manifest_uri)
     # Last, once the commands are real and the artifacts are up: record the attempt numbers those
-    # commands just spent, so the counter can see a launch this process will never make. `plan_run`
+    # commands just spent, so the counter can see a launch this process will never make, and give
+    # the run a header if it has none so the repair verbs can reach those rows. `plan_run`
     # deliberately does not do this — a dry preview hands out nothing, and filing rows for it would
     # burn an attempt every time somebody looked at a plan.
-    _file_emitted_rows(cfg, nodes, plan.run_id, settings)
+    _file_emitted_rows(cfg, nodes, plan.run_id, settings, idempotency=idempotency)
     _emit_plan(result)
     return result
 

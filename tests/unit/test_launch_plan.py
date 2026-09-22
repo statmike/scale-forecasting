@@ -519,13 +519,86 @@ def _fake_staging(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _capture_emitted_rows(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Record every row the registry is asked to write, with the table creation stubbed out."""
-    from scale_forecasting.registry import jobs, tables
+    """Record every job row the registry is asked to write, with the other writes stubbed out.
+
+    The header write is stubbed to a no-op here so a test about *rows* never depends on it;
+    `_capture_headers` re-patches it for the tests that are about the header itself.
+    """
+    from scale_forecasting.registry import header, jobs, tables
 
     rows: list[dict[str, Any]] = []
     monkeypatch.setattr(tables, "ensure_tables", lambda cfg, *, settings=None: None)
+    monkeypatch.setattr(header, "write_header", lambda cfg, rid, *, settings=None: None)
     monkeypatch.setattr(jobs, "write_job", lambda row, *, settings=None: rows.append(row))
     return rows
+
+
+def _capture_headers(monkeypatch: pytest.MonkeyPatch, prior: str | None) -> list[str]:
+    """Pin the exists-vs-new answer to ``prior`` and record which run_ids get a header written.
+
+    ``prior=None`` is a config that has never run; a status string is one that has. Patching
+    `registry.header.header_status` is what `_check_idempotency` reads, so this drives the same
+    verdict the operator sees printed.
+    """
+    from scale_forecasting.registry import header
+
+    written: list[str] = []
+    monkeypatch.setattr(header, "header_status", lambda rid, *, settings=None: prior)
+    monkeypatch.setattr(
+        header, "write_header", lambda cfg, rid, *, settings=None: written.append(rid)
+    )
+    return written
+
+
+def test_staging_a_config_that_never_ran_gives_it_a_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a header `probes.reconcile` reads no job rows at all, so the EMITTED rows above
+    would land in a run every repair verb is blind to — the exact case they exist for."""
+    _fake_staging(monkeypatch)
+    rows = _capture_emitted_rows(monkeypatch)
+    written = _capture_headers(monkeypatch, None)
+
+    result = launch_plan.stage_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+
+    assert written == [result.run_id]
+    assert [row["status"] for row in rows] == ["EMITTED"]
+
+
+def test_staging_a_config_that_already_ran_leaves_its_header_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`write_header` inserts a RUNNING header. Re-staging a finished config must not walk its
+    header backwards from COMPLETED — the rows it files are new, the run is not."""
+    _fake_staging(monkeypatch)
+    _capture_emitted_rows(monkeypatch)
+    written = _capture_headers(monkeypatch, "COMPLETED")
+
+    launch_plan.stage_run(
+        _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True
+    )
+
+    assert written == []
+
+
+def test_a_registry_we_could_not_ask_about_gets_no_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown answer degrades to leaving the header alone. Writing one on a guess risks
+    resetting a real run's status; not writing one only costs the repair verbs their reach."""
+    from scale_forecasting.registry import header
+
+    _fake_staging(monkeypatch)
+    _capture_emitted_rows(monkeypatch)
+    written = _capture_headers(monkeypatch, None)
+
+    def _unreachable(rid: str, *, settings: Any = None) -> str | None:
+        raise RuntimeError("no credentials")
+
+    monkeypatch.setattr(header, "header_status", _unreachable)
+    launch_plan.stage_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+
+    assert written == []
 
 
 def test_staging_files_a_row_for_every_job_id_it_hands_out(

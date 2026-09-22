@@ -432,6 +432,16 @@ row disappears from every read with no cleanup. If you never run it, `--settle` 
 `FAILED` with `failure_reason = NEVER_LAUNCHED` once the platform confirms the id was never created
 — spelled apart from `RUNTIME_LOST` because nothing ran, so there is nothing to go looking for.
 
+**One thing that surprises people: after staging, the run reports that it "already ran".** Staging a
+config that has never run also opens its `run_registry` header, because `--probe`, `--settle` and
+`--retry` read a run's expected work off that header and skip the run entirely when it is missing —
+without one they could not see the `EMITTED` rows at all. The header opens as `RUNNING`, so the
+exists-vs-new verdict on your next command calls the config already-run. The guidance that verdict
+gives is still the right guidance, because the ids really are spent; only the wording runs ahead of
+the facts. An unforced re-run reuses the attempt the staged command was told to use, which is what
+you want if nobody pasted it. `--force` takes the next attempt, which is what you want if somebody
+might have.
+
 ### An immediate re-run double-counts rows
 **Symptom:** re-running the same config right away appears to duplicate rows.
 **Cause:** the Storage Write API streaming buffer (~90 min) blocks a same-key DELETE, so the design
