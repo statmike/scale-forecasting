@@ -3861,6 +3861,17 @@ or the ensemble node would depend on family job ids that exist nowhere; if the r
 unreachable the attempt-1 nodes come back with a warning that says so. Six offline tests now cover
 it, including the one this paragraph exists for: a re-stamp that leaves the edges behind.
 
+**The fix was then carried live, on the same afternoon, against the config best placed to catch it.**
+`smoke-01-serverless-cpu-7a3d4234e0e1` has a statistical job that has existed and SUCCEEDED since
+2026-09-09T22:05:45Z, so a pre-fix emit would have printed `…-statistical-a1` and been rejected
+outright. With the fix in, `plan_run(force=True)` emitted
+`sf-smoke-01-serverless-cpu-7a3d4234e0e1-statistical-a2`. `stage_run(force=True)` then uploaded the
+real artifacts and the emitted command was written to a file and executed from it — the same
+no-transcription method the first paragraph above had to learn. It created the batch it named:
+`…-statistical-a2` reached `RUNNING` at 2026-09-22T14:09:40Z, was cancelled, and `describe` returned
+`CANCELLED` at 14:15:07Z. The `a1` batch was untouched and is still `SUCCEEDED`, which is the other
+half of the claim: the re-stamp took a *new* attempt rather than colliding with the old one.
+
 ## Known validation gaps
 
 Things that are true today and that no entry above covers. Keep this list short and act on it.
