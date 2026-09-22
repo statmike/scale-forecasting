@@ -23,6 +23,7 @@ importing their symbols. The two exceptions are ``ray_submit``'s own names, ``_s
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -1024,6 +1025,27 @@ def test_two_armed_faults_fire_in_order_on_consecutive_polls() -> None:
     with pytest.raises(RuntimeError, match="401"):
         armed()
     assert armed() == "RUNNING"
+
+
+def test_both_halves_of_the_evidence_survive_the_same_log_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`smoke_testing.md` promises two log lines and calls one-without-the-other a finding.
+
+    The first armed live run (2026-09-22) produced exactly that: four injection lines and no
+    answering retries, because the injection logged at WARNING and the retry at INFO while the
+    harness logs at WARNING. The recovery had worked — the run reached COMPLETED — but the runbook's
+    own invocation could not show it. Asserting both lines at *one* level is what keeps the promise
+    and the code in step; splitting them again fails here rather than during a live wave.
+    """
+    caplog.set_level(logging.WARNING, logger="scale_forecasting.ray_jobs")
+    armed = ray_jobs._arm_poll_faults(lambda: "SUCCEEDED", "job-1", shapes=["transport"])
+    assert ray_jobs._status_with_recovery(armed, lambda: None, backoff_s=0) == "SUCCEEDED"
+
+    text = caplog.text
+    assert "SF_RAY_POLL_FAULT is armed: injecting a transport fault" in text
+    assert "Ray job poll failed on attempt 1/4" in text
+    assert "reconnecting and retrying" in text
 
 
 def test_the_arm_is_per_job_so_a_two_family_run_proves_the_recovery_twice() -> None:

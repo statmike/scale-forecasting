@@ -118,7 +118,7 @@ runs do not prove it works; they prove the fault did not arrive.
 
 ```bash
 SF_RAY_POLL_FAULT=transport,auth .venv/bin/python tests/smokes/smoke_harness.py \
-  configs/smokes/08_gpu_ray.json
+  configs/smokes/07_ray_cpu.json --force
 ```
 
 The first poll of **each Ray job** in the run raises a fault instead of calling the dashboard, the
@@ -138,6 +138,13 @@ Ray job poll failed on attempt 1/4 (…); reconnecting and retrying
 
 Both lines together are the proof: the first says the fault was delivered, the second says the
 recovery caught it. A run with the first and not the second is a finding.
+
+**Both are logged at WARNING, and that is deliberate — it used to be the bug.** The first armed run
+(2026-09-22, smoke 07) printed four injection lines and not one answering retry, because the retry
+logged at INFO while the harness logs at WARNING. The recovery had in fact worked and the run
+reached `COMPLETED`; what was broken was that the runbook's own invocation could not show it. If you
+ever see the two lines split across levels again, that is the regression, not a recovery failure —
+`test_both_halves_of_the_evidence_survive_the_same_log_level` is what holds them together.
 
 Like `SF_HIDE_DEVICES`, this is infrastructure rather than config, so arming it does not move a
 `run_id`. Do not arm more than three faults — the loop forgives three consecutive failures and gives

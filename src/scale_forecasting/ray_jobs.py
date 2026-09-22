@@ -199,6 +199,15 @@ def _status_with_recovery(
     to clear before we spend a handshake on it. ``reconnect`` failures are *not* caught: if we
     cannot re-establish contact at all then contact really is lost, and `_connect_job_client` has
     already spent its own retry budget deciding that.
+
+    The retry line is a **warning**, not info, and that is load-bearing. It was info until
+    2026-09-22, when the first armed run showed the injection lines and none of the answering
+    retries: the harness — and every runbook invocation — logs at WARNING, so the one line that
+    says the recovery fired could not appear, and a reader following `smoke_testing.md` exactly
+    would have read a working recovery as a broken one. Warning is also the honest level on its own
+    terms. A poll failure that forces a reconnect is an anomaly on a long fleet run, not routine
+    progress, and it is rare enough to carry no spam risk: across every live Ray run before the
+    fault was armed on purpose, this branch executed zero times.
     """
     for attempt in range(1, attempts + 1):
         try:
@@ -206,7 +215,7 @@ def _status_with_recovery(
         except Exception as exc:  # noqa: BLE001 - classify, recover the channel, re-raise faults
             if not _is_recoverable_poll_error(exc) or attempt == attempts:
                 raise
-            _log.info(
+            _log.warning(
                 "Ray job poll failed on attempt %d/%d (%r); reconnecting and retrying",
                 attempt,
                 attempts,
