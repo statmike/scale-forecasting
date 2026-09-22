@@ -370,7 +370,7 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
-| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML) | CURRENT | 2026-09-09 | `smoke-01-serverless-cpu-7a3d4234e0e1` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
+| 01 | `01_serverless_cpu.json` | Spark on Dataproc Serverless, CPU (statistical + ML). **The pass is attempt 1, on 2026-09-09.** This config was later borrowed twice as a cancel/attempt target (2026-09-22), so the same `run_id` carries a second, deliberately-interrupted `run_registry` header reading `FAILED`; the attempt-1 job rows and header are untouched beside it, since both tables keep a row per launch | CURRENT | 2026-09-09 | `smoke-01-serverless-cpu-7a3d4234e0e1` (attempt 1) | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 02 | `02_bq_native.json` | BigQuery-native models (`arima_plus`, `timesfm`) | CURRENT | 2026-09-11 | `smoke-02-bq-native-e354a8652712` | `native_source_pin=unpinned-all-sources`, `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 | 03 | `03_serverless_gpu.json` | Serverless GPU (deep-learning on an L4) | CURRENT | 2026-09-09 | `smoke-03-serverless-gpu-92763e0f2242` | `serverless_deps=container-image`, `serverless_gpu_allocator=rapids-pool-released`, `gpu_device_probe=trainer-root-device`, `dl_gpu_routing=resolved-per-family`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | 04 | `04_cluster_cpu.json` | Spark on an ephemeral Dataproc cluster, CPU — and the create-then-delete half of the lifecycle: its cluster was `NOT_FOUND` the moment the run ended | CURRENT | 2026-09-12 | `smoke-04-cluster-cpu-9196365250ac` | `cluster_deps=packed-venv-init-action`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
@@ -3506,6 +3506,83 @@ is what made it worth chasing rather than dismissing as a cosmetic gap. Root-cau
 2026-09-04 (quota project on the userinfo call); these two rows keep their nulls, since a stored
 audit line is a historical record and is not rewritten.
 
+### The cancel headline, re-observed on Spark — and the job id it tried to reuse was already taken
+
+Both cancels above ran on Ray. On 2026-09-22 the verb was pointed at the serverless Spark path for
+the first time: `smoke-01-serverless-cpu-7a3d4234e0e1` was relaunched from
+`configs/smokes/01_serverless_cpu.json` with `--force`, and once the `ml` family was running,
+`--cancel --force` was issued from a second process. Four things came back. Only the first was the
+one being looked for.
+
+**The headline counts outcomes, and it does so on the Spark path.**
+
+```
+Cancelled run smoke-01-serverless-cpu-7a3d4234e0e1: 1 of 1 in-flight job(s) stopped; partial results are RETAINED
+  family         runtime          status     effect
+  statistical    spark            FAILED     already FAILED, untouched
+  ml             spark            RUNNING    will cancel; 100/100 series landed (retained)
+actor=<the launching user email>  reason=wave C: observing the cancel headline in flight  header=PARTIAL
+  ml             cancelled      batch cancel issued
+```
+
+Taken off the platform rather than off that line: `gcloud dataproc batches describe
+sf-smoke-01-serverless-cpu-7a3d4234e0e1-ml-a2` returned `CANCELLED` with `stateTime`
+`2026-09-22T15:49:58Z`, and the registry row reads `ml CANCELLED` with
+`job_telemetry.cancel.n_done_at_cancel: 100` and `native_state_at_cancel: "RUNNING"` — the 100
+series the summary promised were retained are the 100 the telemetry records. Billing telemetry was
+stamped for the cancelled attempt too (`total_wall_s: 344.6`, `dcu_milli_seconds: 3046150`), so a
+stopped job still accounts for what it spent.
+
+**What `1 of 1` settles, and what it does not.** It settles the *denominator*. The plan listed two
+families and the count said one, because `n_cancellable` excludes a job that is already terminal —
+a count of the run's jobs would have printed two, and the per-family line spells out why the other
+one was passed over. What it cannot settle on its own is the numerator: in any cancel where every
+issued stop succeeds, "outcomes" and "plans" are the same number, so no clean live run can tell the
+two readings apart. That discrimination was made offline and stays there. This row claims the
+live-path behaviour, not the arithmetic.
+
+**`cancelled_by` is populated, which is the last piece of the P6 finding.** The stored telemetry
+reads `"cancelled_by": "<the launching user email>"`. Both earlier cancel rows carry `null` there,
+and the note above says in as many words that the cancel path "writes its actor through the same
+resolver but has not been re-exercised live since the fix." It has now. The quota-project fix
+reaches stored state on the cancel route, not only on launch, and the audit line and the JSON column
+agree with each other.
+
+**Then the thing nobody was looking for: the `--force` re-stamp reused an id the platform already
+held.** The statistical family never started. It failed twelve seconds after submit with
+
+```
+google.api_core.exceptions.AlreadyExists: 409 Already exists: Failed to create batch:
+Batch projects/…/locations/us-central1/batches/sf-smoke-01-serverless-cpu-7a3d4234e0e1-statistical-a2
+```
+
+The reason is a seam, not a bug in the counter. `--force` derives the next attempt from the
+registry: the highest attempt on record for this run was `1`, so it stamped `a2`. But a batch named
+`…-statistical-a2` already existed, created at 14:09:40 earlier the same day by the
+paste-the-emitted-command exercise recorded further down this file — which reached the platform
+through `plan_run` and `stage_run` and a shell, never through the launcher. **The launcher writes the `run_jobs` row before it submits; a command
+you run yourself does not.** So that batch lived, ran, and was cancelled without the registry ever
+learning it existed, and the next `--force` walked straight into its name. The attempt counter is
+registry-derived; uniqueness is enforced by the platform; the emitted-command path can put those two
+out of step.
+
+Two details make it worse than it first reads. The collision is silent in the registry:
+`run_jobs.statistical.failure_reason` is **null** on that row, so an operator reading the registry
+sees a family that failed for no stated reason and has to go to the launcher's stdout to learn it
+was a name clash. And the surviving object is a *cancelled* batch, so there is nothing to adopt and
+nothing to resume — the only paths forward are a different `run_id` or a manual attempt bump. Both
+belong on the plan→stage→submit surface, which is exactly the surface that has no narrative page.
+
+**And the launcher had the last word on the header, again.** The cancel wrote `header=PARTIAL` at
+15:47; the launcher finalized the run `FAILED` at 15:51:36 and that is what the header reads now.
+This is not the sticky-cancellation defect returning — the guard does what it was built to do, and
+here the run genuinely did contain a failure that the cancel did not cause, so `FAILED` is the more
+truthful header. It is the same *shape* showing up one guard-slot over: the guard protects
+`CANCELLED`, and a cancel that lands on a run with an already-failed family writes `PARTIAL`
+instead, which nothing protects. As before, the evidence survives in `job_telemetry.cancel` and only
+the header forgets. Whether a cancel-written `PARTIAL` deserves the same stickiness is a judgment
+call this row does not make; it records that the case exists and has now been seen.
+
 ### The workshop's first command printed nothing, and every offline test passed anyway
 
 `docs/workshop.md` opens Act 1 with an offline sanity check:
@@ -4129,11 +4206,16 @@ Things that are true today and that no entry above covers. Keep this list short 
 - **Nothing runs the `@gcp` tests or the control-tower tools on a schedule.** Both rotted (above).
   A cheap mitigation is import-only smoke coverage for the tools and a periodic `-m gcp` collection
   pass (`--collect-only` catches neither of these; the `CellResult` break needed execution).
-- **The `--cancel` summary line miscounts.** It reported `1 in-flight job(s) stopped` on a run where
-  the per-family line said `NOT cancelled`. One-line fix; not made mid-campaign only because it sits
-  in the same function as the handle fix. **Fixed offline** — the headline now counts outcomes
-  (`n of N stopped`) after executing, and the plan count only in preview, with tests; the live
-  re-observation still belongs to the next spend window.
+- ~~**The `--cancel` summary line miscounts.** It reported `1 in-flight job(s) stopped` on a run
+  where the per-family line said `NOT cancelled`. One-line fix; not made mid-campaign only because
+  it sits in the same function as the handle fix. **Fixed offline** — the headline now counts
+  outcomes (`n of N stopped`) after executing, and the plan count only in preview, with tests; the
+  live re-observation still belongs to the next spend window.~~ **Closed 2026-09-22** — re-observed
+  live on the serverless Spark path, and the denominator proved to be the cancellable set rather
+  than the job count: two families in the plan, `1 of 1` in the headline, with the already-failed
+  family named and passed over. Recorded above, along with the two findings that run turned up on
+  the way — the limit of what any clean live cancel can discriminate, and an `ALREADY_EXISTS`
+  collision between the registry-derived attempt counter and a batch created outside the registry.
 - **The recorded `run_id`s for smokes 01–06 are no longer re-derivable.** W5 added
   `compute.profile` to `ComputeConfig`, and `run_id` is a digest of the whole config, so feeding
   those same config files to today's code yields different ids. **No row was marked `STALE` for
