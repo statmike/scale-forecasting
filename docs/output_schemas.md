@@ -55,7 +55,7 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 | `decision_metric` | `STRING` | The metric folds were judged on (when backtesting). |
 | `ensemble_strategies` | `ARRAY<STRING>` | Which consensus strategies ran (e.g. `median`, `nnls`). |
 | `raw_config` | `JSON` | **The entire validated config, verbatim** — the experiment record. |
-| `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED`. |
+| `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED`. A run that was *staged* rather than launched opens at `STAGED` instead — its artifacts are up and its job ids are handed out, but no compute exists yet ([why](./troubleshooting.md#a-submit-is-refused--the-job-id-is-already-taken)). |
 | `n_series` | `INT64` | Series count actually run. |
 | `n_models` | `INT64` | Model count actually run. |
 | `runtime_seconds` | `FLOAT64` | The engine's own compute time (excludes cluster stand-up). |

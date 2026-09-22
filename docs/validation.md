@@ -4013,7 +4013,7 @@ read could find it.
 
 **The fix and the re-proof.** `stage_run` now writes the run header when the exists-vs-new check
 positively reports there is none — never otherwise, or re-staging a finished config would walk its
-header backwards from COMPLETED to RUNNING. A fresh virgin config staged at 19:06:05Z got its header
+header backwards from a terminal status. A fresh virgin config staged at 19:06:05Z got its header
 at 19:05:58Z, and from there the whole ladder is visible:
 
 | when | age | registry | native | verdict | settle would write |
@@ -4034,6 +4034,14 @@ Settling the `EMITTED` row on `smoke-02-bq-native-e354a8652712` — a run whose 
 an earlier attempt — returned `EMITTED -> COMPLETED (runtime job gone; all 200/200 series landed)`
 rather than calling it a loss. A vanished pre-launch job whose results are nonetheless present is
 finished, not lost, and the decision table says so before it reaches the `NEVER_LAUNCHED` arm.
+
+**One detail has changed since the run above, deliberately, and it does not touch the proof.** The
+header written at 19:05:58Z said `RUNNING`, which overstated a run nobody had launched. It now opens
+at `STAGED` — the header counterpart of `EMITTED`, non-terminal and in `registry.ops.LIVE_STATUSES`
+so no destructive verb drops a run whose command is still in somebody's hands. Everything measured
+above is a `run_jobs` reconciliation: the probe reads the job row's status and the platform's answer,
+and the header's only job in it is to exist so the config can be read. That rename is covered
+offline and has not been re-proven live, because nothing in the ladder above reads the value.
 
 **What is not proven, and cannot easily be.** Two of the four changes are defence in depth *behind*
 the walk: the typed `JobIdTaken` that classifies an `ALREADY_EXISTS` refusal, and the registry

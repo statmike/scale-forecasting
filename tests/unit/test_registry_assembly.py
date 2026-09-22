@@ -531,6 +531,14 @@ def test_header_row_snapshots_config() -> None:
     assert row["raw_config"]["models"] == ["theta", "sarimax"]
 
 
+def test_header_row_opens_staged_when_asked() -> None:
+    # `launch_plan.stage_run` opens a header for a run it will not launch; RUNNING would claim
+    # compute that does not exist. Every other caller takes the RUNNING default asserted above.
+    from scale_forecasting.registry.rows import STAGED
+
+    assert assemble_header_row(_cfg(), "rid", _CREATED, status=STAGED)["status"] == "STAGED"
+
+
 def test_header_row_carries_snapshot_millis_when_given() -> None:
     row = assemble_header_row(_cfg(), "rid", _CREATED, snapshot_millis=1_724_000_000_000)
     assert row["snapshot_millis"] == 1_724_000_000_000

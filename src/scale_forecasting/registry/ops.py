@@ -81,6 +81,7 @@ from ..errors import get_logger
 from . import artifacts
 from .artifacts import ArtifactPrefix
 from .ddl import REGISTRY_TABLE_NAMES
+from .rows import STAGED
 
 if TYPE_CHECKING:
     from ..settings import Settings
@@ -91,8 +92,11 @@ _log = get_logger(__name__)
 # forced. Anything else (COMPLETED / FAILED / PARTIAL / CANCELLED) is terminal and safe.
 # `AWAITING_CAPACITY` is in the set because this is a *deny*-list for destructive verbs: the default
 # for an unrecognised status here is "safe to drop", so a live status that was left out would let
-# `drop_run` delete a run that is merely waiting for the cloud to have room.
-LIVE_STATUSES: frozenset[str] = frozenset({"RUNNING", "PENDING", AWAITING_CAPACITY})
+# `drop_run` delete a run that is merely waiting for the cloud to have room. `STAGED` is in for the
+# same reason one tier up: nothing is running yet, but the commands are printed and the job ids are
+# spent, so dropping the run out from under an operator who is about to paste one is exactly the
+# surprise this list exists to prevent.
+LIVE_STATUSES: frozenset[str] = frozenset({"RUNNING", "PENDING", AWAITING_CAPACITY, STAGED})
 
 # The terminal ``run_jobs`` statuses, for `roll_up_job_statuses`. A local dup of
 # `probes.vocabulary._TERMINAL` for the same reason that one is a dup of `sdk._TERMINAL_STATUSES`:

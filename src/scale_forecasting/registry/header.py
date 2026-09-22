@@ -107,9 +107,9 @@ def snapshot_millis_for(
 
 
 def write_header(
-    cfg: RunConfig, run_id: str, *, settings: Settings | None = None
+    cfg: RunConfig, run_id: str, *, settings: Settings | None = None, status: str = "RUNNING"
 ) -> None:  # pragma: no cover - GCP I/O, covered by the @gcp round-trip test
-    """Insert the run's ``run_registry`` header row (status RUNNING) from its config.
+    """Insert the run's ``run_registry`` header row from its config.
 
     A single-row parameterized INSERT (not the Write API — no benefit for one row, and the
     header is updated in place later by `update_header`). Resolves the run's input-data snapshot
@@ -118,6 +118,10 @@ def write_header(
     (`identity.resolve_principal`, best-effort) into ``user_id`` so *launch* is attributable in the
     audit trail — alongside the cancel actor recorded by the P5 cancel path. Raises `RegistryError`
     on failure.
+
+    ``status`` opens the run and defaults to ``RUNNING``, which is right for every caller that is
+    about to do work. `launch_plan.stage_run` passes ``STAGED`` instead: it opens a header so the
+    repair verbs can see the job rows it filed, for a run it is not going to launch.
     """
     from datetime import UTC, datetime
 
@@ -134,6 +138,7 @@ def write_header(
         datetime.now(UTC),
         snapshot_millis=snapshot_millis,
         user_id=resolve_principal(resolved),
+        status=status,
     )
     columns = list(row)
     placeholders = ", ".join(f"@{col}" for col in columns)

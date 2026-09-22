@@ -304,6 +304,28 @@ def test_emit_idempotency_warns_on_existing_and_notes_force(
     assert any("re-run (--force)" in r.message for r in caplog.records)
 
 
+def test_a_staged_header_is_reported_as_staged_not_as_already_ran(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Staging opens a header, so a staged-only config *has* a prior header — but saying it "ran"
+    would be false, and the next move differs: unforced re-staging reissues the same job ids."""
+    from scale_forecasting.registry import header
+
+    monkeypatch.setattr(header, "header_status", lambda *a, **k: "STAGED")
+
+    with caplog.at_level("INFO"):
+        launch_plan.plan_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
+    assert any("already staged" in r.message for r in caplog.records)
+    assert not any("already ran" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        launch_plan.plan_run(
+            _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True
+        )
+    assert any("re-stage (--force)" in r.message for r in caplog.records)
+
+
 def test_stage_run_spark_uploads_and_builds_runnable_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -528,48 +550,57 @@ def _capture_emitted_rows(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any
 
     rows: list[dict[str, Any]] = []
     monkeypatch.setattr(tables, "ensure_tables", lambda cfg, *, settings=None: None)
-    monkeypatch.setattr(header, "write_header", lambda cfg, rid, *, settings=None: None)
+    monkeypatch.setattr(
+        header, "write_header", lambda cfg, rid, *, settings=None, status="RUNNING": None
+    )
     monkeypatch.setattr(jobs, "write_job", lambda row, *, settings=None: rows.append(row))
     return rows
 
 
-def _capture_headers(monkeypatch: pytest.MonkeyPatch, prior: str | None) -> list[str]:
-    """Pin the exists-vs-new answer to ``prior`` and record which run_ids get a header written.
+def _capture_headers(monkeypatch: pytest.MonkeyPatch, prior: str | None) -> list[tuple[str, str]]:
+    """Pin the exists-vs-new answer to ``prior``; record the ``(run_id, status)`` headers written.
 
     ``prior=None`` is a config that has never run; a status string is one that has. Patching
     `registry.header.header_status` is what `_check_idempotency` reads, so this drives the same
-    verdict the operator sees printed.
+    verdict the operator sees printed. The status is captured because *which* status staging opens
+    the header at is the point — RUNNING would claim compute that does not exist.
     """
     from scale_forecasting.registry import header
 
-    written: list[str] = []
+    written: list[tuple[str, str]] = []
     monkeypatch.setattr(header, "header_status", lambda rid, *, settings=None: prior)
     monkeypatch.setattr(
-        header, "write_header", lambda cfg, rid, *, settings=None: written.append(rid)
+        header,
+        "write_header",
+        lambda cfg, rid, *, settings=None, status="RUNNING": written.append((rid, status)),
     )
     return written
 
 
-def test_staging_a_config_that_never_ran_gives_it_a_header(
+def test_staging_a_config_that_never_ran_gives_it_a_staged_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a header `probes.reconcile` reads no job rows at all, so the EMITTED rows above
-    would land in a run every repair verb is blind to — the exact case they exist for."""
+    would land in a run every repair verb is blind to — the exact case they exist for.
+
+    The status is STAGED, not RUNNING: nothing has launched, and every status reader downstream
+    (`review`, ``--probe``, the exists-vs-new verdict) would otherwise repeat the overstatement.
+    """
     _fake_staging(monkeypatch)
     rows = _capture_emitted_rows(monkeypatch)
     written = _capture_headers(monkeypatch, None)
 
     result = launch_plan.stage_run(_cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra())
 
-    assert written == [result.run_id]
+    assert written == [(result.run_id, "STAGED")]
     assert [row["status"] for row in rows] == ["EMITTED"]
 
 
 def test_staging_a_config_that_already_ran_leaves_its_header_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`write_header` inserts a RUNNING header. Re-staging a finished config must not walk its
-    header backwards from COMPLETED — the rows it files are new, the run is not."""
+    """Re-staging a finished config must not walk its header backwards from COMPLETED to STAGED —
+    the rows it files are new, the run is not."""
     _fake_staging(monkeypatch)
     _capture_emitted_rows(monkeypatch)
     written = _capture_headers(monkeypatch, "COMPLETED")

@@ -274,12 +274,35 @@ def _assemble_commands(
 
 
 def _emit_idempotency(result: LaunchPlan) -> None:
-    """Log the exists-vs-new verdict and, when re-running, the ``--force`` guidance."""
+    """Log the exists-vs-new verdict and, when re-running, the ``--force`` guidance.
+
+    A header in `registry.rows.STAGED` gets its own wording. Staging opens a header (see
+    `_file_emitted_rows`), so a config that has only ever been staged *does* have a prior header —
+    but saying it "already ran" would be false, and the operator's next move is different: the job
+    ids from the earlier staging are spent, and re-staging without ``--force`` deliberately reissues
+    those same ids so the commands they are already holding stay the right ones.
+    """
+    from .registry.rows import STAGED
+
     idem = result.idempotency
     if not idem.checked:
         return  # registry not consulted (offline / unreachable) — verdict unknown, say nothing
     if not idem.exists:
         _log.info("  new run — this config has not run before")
+        return
+    if idem.prior_status == STAGED:
+        if result.force:
+            _log.info(
+                "  re-stage (--force): this config was staged but never launched; --force spends a "
+                "fresh attempt, so any command emitted earlier names a job id this run no longer "
+                "uses"
+            )
+        else:
+            _log.info(
+                "  already staged: this config was staged but never launched. Re-staging reissues "
+                "the same job ids, so commands emitted earlier stay valid; pass --force to spend a "
+                "fresh attempt instead."
+            )
         return
     if result.force:
         _log.info(
@@ -480,15 +503,15 @@ def _file_emitted_rows(
     repair verb is blind to: exactly the case they exist for. Proven live 2026-09-22, where a
     ``--settle`` over a freshly staged virgin run found ``0 of 0`` job rows with the EMITTED row
     plainly sitting in the table. The header goes in only when the idempotency check positively
-    said there is none — re-staging a config that already ran must not reset its header to RUNNING.
+    said there is none — re-staging a config that already ran must not reset its header, and an
+    unreachable registry that leaves the answer unknown is treated as "already ran" here.
 
-    The header status is ``RUNNING``, which overstates a run nobody launched; the honest alternative
-    is a pre-launch status in ``run_registry`` too, and that vocabulary reaches `registry.ops`,
-    `review`, and the ledger tripwire, so it is deliberately not paid for here. One visible
-    consequence: after staging, the exists-vs-new verdict reports this config "already ran". The
-    guidance that verdict gives is still the right guidance — the ids *are* spent, and an unforced
-    re-run correctly reuses the attempt the staged command was told to use — only the word "ran"
-    runs ahead of the facts.
+    The header opens as `registry.rows.STAGED`, not RUNNING: nothing is running, and calling it
+    RUNNING would have every status reader — `review`, ``--probe``, the exists-vs-new verdict —
+    repeat that overstatement. STAGED is non-terminal, so `probes.settle` and ``close-runs`` still
+    treat the run as open work to be resolved, and it *is* in `registry.ops.LIVE_STATUSES`, so no
+    destructive verb silently drops a run whose command somebody may still be holding. When the
+    command is finally pasted, the launch appends its own RUNNING header and the latest row wins.
     """
     from datetime import UTC, datetime
 
@@ -497,13 +520,13 @@ def _file_emitted_rows(
     from .registry.header import write_header
     from .registry.ids import parse_job_key
     from .registry.jobs import write_job
-    from .registry.rows import EMITTED, assemble_job_row
+    from .registry.rows import EMITTED, STAGED, assemble_job_row
     from .registry.tables import ensure_tables
 
     try:
         ensure_tables(cfg, settings=settings)
         if idempotency.checked and not idempotency.exists:
-            write_header(cfg, run_id, settings=settings)
+            write_header(cfg, run_id, settings=settings, status=STAGED)
         created_at = datetime.now(UTC)
         for node in nodes:
             _, family, attempt = parse_job_key(node.job_key)

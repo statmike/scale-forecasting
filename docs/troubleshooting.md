@@ -432,15 +432,19 @@ row disappears from every read with no cleanup. If you never run it, `--settle` 
 `FAILED` with `failure_reason = NEVER_LAUNCHED` once the platform confirms the id was never created
 — spelled apart from `RUNTIME_LOST` because nothing ran, so there is nothing to go looking for.
 
-**One thing that surprises people: after staging, the run reports that it "already ran".** Staging a
-config that has never run also opens its `run_registry` header, because `--probe`, `--settle` and
-`--retry` read a run's expected work off that header and skip the run entirely when it is missing —
-without one they could not see the `EMITTED` rows at all. The header opens as `RUNNING`, so the
-exists-vs-new verdict on your next command calls the config already-run. The guidance that verdict
-gives is still the right guidance, because the ids really are spent; only the wording runs ahead of
-the facts. An unforced re-run reuses the attempt the staged command was told to use, which is what
-you want if nobody pasted it. `--force` takes the next attempt, which is what you want if somebody
-might have.
+**A staged run has a header too, and its status is `STAGED`.** Staging a config that has never run
+opens its `run_registry` header, because `--probe`, `--settle` and `--retry` read a run's expected
+work off that header and skip the run entirely when it is missing — without one they could not see
+the `EMITTED` rows at all. The status is `STAGED` rather than `RUNNING` because nothing is running:
+the artifacts are up and the job ids are spent, but no compute exists. It is non-terminal, so
+`--settle` and `close-runs` still treat the run as open work, and it is a live status, so
+`drop-run` will not quietly delete a run whose command you may still be holding. When you finally
+paste the command, the launch appends its own `RUNNING` header and the newest row wins.
+
+Your next command on that config will say **"already staged"**, not "new run" and not "already ran".
+An unforced re-stage reuses the attempt the staged command was told to use, which is what you want
+if nobody pasted it — the commands you are already holding stay valid. `--force` spends the next
+attempt, which is what you want if somebody might have.
 
 ### An immediate re-run double-counts rows
 **Symptom:** re-running the same config right away appears to duplicate rows.

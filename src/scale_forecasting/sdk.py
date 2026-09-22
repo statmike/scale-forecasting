@@ -321,7 +321,9 @@ class Forecaster:
         """The current registry status of a run (``RUNNING``/``COMPLETED``/``FAILED``/``PARTIAL``).
 
         Reads the run's header (`registry.header.header_status`); returns ``None`` when this config
-        has never run. ``run_id`` defaults to this config's deterministic id, so
+        has never run, and ``STAGED`` when it has only been staged — the artifacts and the commands
+        exist, but nothing has launched them, so `wait` on such a run polls to its timeout.
+        ``run_id`` defaults to this config's deterministic id, so
         ``forecaster.status()`` answers "did my config's run finish?" — the reattach path for a
         ``wait=False`` submit.
         """

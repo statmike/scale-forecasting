@@ -36,6 +36,20 @@ def test_a_run_awaiting_capacity_cannot_be_dropped():
     assert "AWAITING_CAPACITY" in ops.LIVE_STATUSES
 
 
+def test_a_staged_run_cannot_be_dropped():
+    """Same deny-list argument one tier up: a staged run has no compute, and that is not terminal.
+
+    `launch_plan.stage_run` opens the header at `registry.rows.STAGED` and hands the operator
+    commands naming job ids it has already spent. Nothing is running, so the run looks droppable to
+    anything that reasons from activity — and dropping it would delete the artifacts those commands
+    are about to reference.
+    """
+    from scale_forecasting.registry.rows import STAGED
+
+    assert STAGED in ops.LIVE_STATUSES
+    assert ops.blocking_runs({"r1": STAGED}) == ("r1",)
+
+
 @pytest.mark.parametrize("status", ["COMPLETED", "FAILED", "PARTIAL", "CANCELLED"])
 def test_terminal_statuses_do_not_block(status):
     assert ops.blocking_runs({"r1": status}) == ()

@@ -42,6 +42,18 @@ METRIC_COLUMNS: tuple[str, ...] = METRIC_NAMES
 # EMITTED row whose id the platform cannot find to FAILED / ``NEVER_LAUNCHED``.
 EMITTED = "EMITTED"
 
+# The header counterpart, one tier up: a run whose artifacts are staged and whose job ids are handed
+# out, but which nothing has launched. `launch_plan.stage_run` opens the header so the repair verbs
+# can reach the EMITTED rows under it — `probes.reconcile` reads a run's expected work off the
+# header and skips the run entirely without one — and RUNNING would be the wrong word for it,
+# because no compute exists. Non-terminal, so `close-runs` and `settle` treat it as open; and *in*
+# `registry.ops.LIVE_STATUSES`, unlike EMITTED one tier down, because that set is a deny-list for
+# destructive verbs whose default is "unrecognised ⇒ safe to drop" — and silently dropping a run
+# whose command somebody may still paste is exactly the surprise the deny-list exists to prevent.
+# A real launch writes its own RUNNING header afterwards and the latest row wins, so this never
+# needs clearing.
+STAGED = "STAGED"
+
 
 def cell_dedup_key(result: CellResult) -> dict[str, str]:
     """The run-scoped identity anchor for a cell's rows.
@@ -341,6 +353,7 @@ def assemble_header_row(
     *,
     snapshot_millis: int | None = None,
     user_id: str | None = None,
+    status: str = "RUNNING",
 ) -> dict[str, Any]:
     """Build the ``run_registry`` header row from a config.
 
@@ -348,7 +361,11 @@ def assemble_header_row(
     ``run_registry.raw_config`` is a native ``JSON`` column, and the client's JSON query
     parameter serializes the value itself (``json.dumps``), so the row must carry the dict, not
     a pre-serialized string (a string would be double-encoded). ``bq_models`` is left empty here
-    and filled by the router once model runtimes are known; status starts RUNNING.
+    and filled by the router once model runtimes are known.
+
+    ``status`` opens the run. It defaults to ``RUNNING`` because nearly every caller is a launcher
+    that is about to do work; the exception is `launch_plan.stage_run`, which opens a header for a
+    run it will not launch and passes `STAGED` so the word matches the facts.
 
     ``user_id`` is the principal that launched the run (the ADC identity resolved by `write_header`
     via `identity.resolve_principal` — a runner SA under Composer/CI, a user's email on a laptop),
@@ -374,7 +391,7 @@ def assemble_header_row(
         "decision_metric": cfg.backtest.decision_metric,
         "ensemble_strategies": list(cfg.ensemble.strategies) if cfg.ensemble.enabled else [],
         "raw_config": cfg.model_dump(mode="json"),
-        "status": "RUNNING",
+        "status": status,
         "n_series": cfg.data.series_limit,
         "n_models": len(cfg.models),
         "runtime_seconds": None,

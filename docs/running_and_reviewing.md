@@ -464,8 +464,10 @@ reg.drop_run("abc123", yes=True)
 
 `drop-run` and `sweep-orphans` are **previews by default** — they print the exact runs, object
 counts and byte totals they would touch and change nothing until you add `--yes`. They also refuse
-to touch a run whose header is still `RUNNING` or `PENDING`; check with `monitor(probe=True)` first
-(a `RUNNING` row can also be a dead job), then `--force` if you're sure.
+to touch a run whose header is still live — `RUNNING`, `PENDING`, `AWAITING_CAPACITY`, or `STAGED`
+(a run whose commands are emitted and whose job ids are spent, but which nothing has launched);
+check with `monitor(probe=True)` first (a `RUNNING` row can also be a dead job), then `--force` if
+you're sure.
 
 **`close-runs` is the one for a header that is stuck rather than wrong.** A driver that dies after
 writing its header leaves a `RUNNING` row forever, and none of the other verbs fit: `--cancel`
