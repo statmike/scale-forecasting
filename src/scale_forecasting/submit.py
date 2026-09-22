@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
 from .commands import build_driver_args
-from .errors import ConfigError, EngineError, get_logger
+from .errors import ConfigError, EngineError, JobIdTaken, get_logger
 from .hardware import spark_executor_env
 from .job_wait import wait_for_job
 from .staging import stage_code, stage_config
@@ -479,6 +479,8 @@ def submit_batch(
     # `batch_telemetry`'s two names are bound per call, not at module load. They are what a test
     # substitutes to run this function without a network, and a module-level import would freeze
     # the originals here where `monkeypatch.setattr(batch_telemetry, ...)` can no longer reach them.
+    from google.api_core.exceptions import AlreadyExists
+
     from .batch_telemetry import _batch_client, _stamp_job_telemetry
     from .job_outcome import launch_window_start
     from .profiling.source import profile_for_run
@@ -525,7 +527,17 @@ def submit_batch(
     parent = f"projects/{settings.project_id}/locations/{settings.region}"
     _log.info("submitting batch %s to %s", batch_id, parent)
     since = launch_window_start()  # before submit: nothing this batch writes can predate it
-    operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
+    try:
+        operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
+    except AlreadyExists as exc:
+        # The platform holds this batch id already. Translated here rather than left to surface as
+        # a raw 409 so the row records *why* and the operator is told the two ways out — see
+        # `errors.JobIdTaken` for how the id is reachable while the registry has no row for it.
+        raise JobIdTaken(
+            f"batch {batch_id} already exists in {parent}: the platform holds this job id but the "
+            f"registry has no attempt for it. Re-run with a different run_id, or bump the attempt "
+            f"by letting --force walk past it (job_launch checks the platform before stamping)."
+        ) from exc
     if wait:
         # Block until terminal, with a patience that outlasts the batch's own ttl — the api-core
         # polling default is 900s and even the old 2h ceiling was short of a 100k run, and a wait

@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from .errors import get_logger
+from .errors import JobIdTaken, get_logger
 
 _log = get_logger(__name__)
 
@@ -95,6 +95,19 @@ _POLL_FAULT_MESSAGES = {
         "Request failed with status code 503: Service Temporarily Unavailable (SF_RAY_POLL_FAULT)"
     ),
 }
+
+
+def _is_submission_id_taken_error(exc: Exception) -> bool:
+    """True if ``exc`` is Ray refusing a ``submission_id`` the cluster already knows.
+
+    Ray's job-submission client has no typed exception for this — the dashboard answers 400 and the
+    SDK re-raises a bare ``RuntimeError`` — so the classification is by message, the same way the
+    two poll classifiers below work. Matched narrowly: both the id vocabulary *and* the word
+    "exists" have to be present, because a false positive would relabel an unrelated failure as a
+    name clash and send the operator looking for a job that was never created.
+    """
+    low = str(exc).lower()
+    return "exists" in low and ("submission_id" in low or "submission id" in low or "job id" in low)
 
 
 def _is_dashboard_warmup_error(exc: Exception) -> bool:
@@ -357,7 +370,19 @@ def _submit_and_poll(
     submit_kwargs: dict[str, Any] = {"entrypoint": entrypoint, "runtime_env": runtime_env}
     if submission_id is not None:
         submit_kwargs["submission_id"] = submission_id
-    job_id = client.submit_job(**submit_kwargs)
+    try:
+        job_id = client.submit_job(**submit_kwargs)
+    except Exception as exc:
+        # A submission_id the cluster already holds is the Ray face of the same clash the Dataproc
+        # paths raise `AlreadyExists` for; everything else goes out untouched.
+        if _is_submission_id_taken_error(exc):
+            raise JobIdTaken(
+                f"Ray submission_id {submission_id} already exists on "
+                f"{cluster_resource_name}: the cluster holds this job id but the registry has no "
+                f"attempt for it. Re-run with a different run_id, or bump the attempt by letting "
+                f"--force walk past it."
+            ) from exc
+        raise
     _log.info("submitted Ray job %s", job_id)
 
     def _fresh_client() -> Any:

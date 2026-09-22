@@ -794,6 +794,21 @@ def test_is_stale_unknown_quiet_time_is_not_stale() -> None:
     assert _is_stale(_quiet(None, None), None) is False
 
 
+def test_an_emitted_row_gets_the_same_startup_grace_as_a_running_one() -> None:
+    """Both statuses are written before the thing they describe exists on the platform — a RUNNING
+    row before the submit returns, an EMITTED row before anybody pastes the command — so both need
+    a grace period before "the runtime has no such job" means anything. Without this the settle arm
+    for a never-run command would be unreachable: the verdict would stay UNKNOWN forever."""
+    assert _is_stale(_quiet("EMITTED", 30.0), None) is False
+    assert _is_stale(_quiet("EMITTED", 3600.0), None) is True
+
+
+def test_a_capacity_wait_is_still_never_stale() -> None:
+    # It keeps its own, far longer clock (`_is_abandoned_wait`); sharing this one would fail a
+    # legitimate multi-hour GPU wait as if its job had vanished.
+    assert _is_stale(_quiet("AWAITING_CAPACITY", 7 * 3600.0), None) is False
+
+
 # --- P3: reconciliation matrix (_assemble_probe_report) -----------------------
 #
 # One test per row of the §4 verdict matrix over a single family, plus the terminal short-circuit,
@@ -1940,6 +1955,103 @@ def test_a_capacity_wait_inside_its_budget_is_still_refused_by_settle() -> None:
     (item,) = plan.items
     assert item.decision is None
     assert plan.n_settleable == 0
+
+
+# --- item 29: the emitted command nobody ran ----------------------------------
+#
+# `launch_plan.stage_run` files an EMITTED row for every job id it hands out, so the attempt
+# counter can see a launch this process will never make. When the operator never pastes the
+# command, that row is a phantom, and settle is what reaps it.
+
+
+def _emitted_report(**over: Any) -> Any:
+    """A report over one EMITTED family whose id the runtime has never heard of, past its grace."""
+    fields: dict[str, Any] = {"n_done": 0, "n_expected": 10}
+    fields.update(over)
+    return _assemble_probe_report(
+        _progress(_fp("statistical", "EMITTED", **fields)),
+        {"statistical": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+        frozenset(),
+        frozenset({"statistical"}),  # past the startup grace
+    )
+
+
+def test_an_emitted_command_that_was_never_run_settles_as_never_launched() -> None:
+    """The phantom row's only way out.
+
+    Nothing else can clear it: the runtime has no job to probe because none was ever created, and
+    ``close-runs`` refuses the header for as long as a non-terminal job row exists. NEVER_LAUNCHED
+    is spelled apart from RUNTIME_LOST because the two facts are opposites — one job ran and
+    vanished with work unfinished, the other never started, so there is nothing to go looking for.
+    """
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+    from scale_forecasting.probes.vocabulary import NEVER_LAUNCHED
+
+    (item,) = _assemble_settle_plan(_emitted_report()).items
+    assert item.verdict == VERDICT_LOST  # the reconciler's reading is unchanged
+    assert item.decision is not None
+    assert (item.decision.status, item.decision.failure_reason) == ("FAILED", NEVER_LAUNCHED)
+    assert "never run" in item.decision.reason
+
+
+def test_the_same_reading_on_a_running_row_is_still_a_loss() -> None:
+    # The pair that proves the arm is keyed on the registry status and not on the probe: identical
+    # NOT_FOUND readings, opposite conclusions, because only one of these rows describes a job that
+    # somebody actually submitted.
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+    from scale_forecasting.probes.vocabulary import RUNTIME_LOST
+
+    report = _assemble_probe_report(
+        _progress(_fp("statistical", "RUNNING", n_done=0, n_expected=10)),
+        {"statistical": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+        frozenset(),
+        frozenset({"statistical"}),
+    )
+    (item,) = _assemble_settle_plan(report).items
+    assert item.decision is not None and item.decision.failure_reason == RUNTIME_LOST
+
+
+def test_an_emitted_command_somebody_did_run_is_left_alone() -> None:
+    # The operator pasted it and the job is live. Settling here would stamp FAILED over a running
+    # job, which is the one mistake this verb must never make.
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+
+    report = _assemble_probe_report(
+        _progress(_fp("statistical", "EMITTED", n_done=0, n_expected=10)),
+        {"statistical": ProbeResult(NATIVE_RUNNING, exists=True)},
+        frozenset(),
+        frozenset({"statistical"}),
+    )
+    (item,) = _assemble_settle_plan(report).items
+    assert item.verdict == VERDICT_RUNNING
+    assert item.decision is None
+
+
+def test_an_emitted_command_whose_work_all_landed_settles_completed_not_failed() -> None:
+    # A staged command that ran to completion, where the launcher died before closing the row: the
+    # artifacts are the witness, and the general LIKELY_COMPLETED arm handles it. The
+    # never-launched arm must not get in front of that, or it would fail a finished run.
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+
+    (item,) = _assemble_settle_plan(_emitted_report(n_done=10, n_expected=10)).items
+    assert item.verdict == VERDICT_LIKELY_COMPLETED
+    assert item.decision is not None and item.decision.status == "COMPLETED"
+
+
+def test_a_freshly_emitted_command_is_left_alone_until_its_grace_runs_out() -> None:
+    # An operator who is merely slow to paste must not have their command reaped out from under
+    # them. Before the grace expires the reading is UNKNOWN, and settle writes on no such reading.
+    from scale_forecasting.probes.settle import _assemble_settle_plan
+
+    report = _assemble_probe_report(
+        _progress(_fp("statistical", "EMITTED", n_done=0, n_expected=10)),
+        {"statistical": ProbeResult(NATIVE_NOT_FOUND, exists=False)},
+        frozenset(),
+        frozenset(),  # still inside the startup grace
+    )
+    (item,) = _assemble_settle_plan(report).items
+    assert item.verdict == VERDICT_UNKNOWN
+    assert item.decision is None
 
 
 @pytest.mark.parametrize(

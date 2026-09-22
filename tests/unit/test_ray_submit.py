@@ -670,6 +670,41 @@ def test_is_dashboard_warmup_error_false_for_real_faults(message: str) -> None:
     assert ray_jobs._is_dashboard_warmup_error(Exception(message)) is False
 
 
+# --- submission-id clash classifier: name the one failure a re-run can fix ---------------------
+#
+# Ray answers a duplicate submission_id with a 400 the SDK re-raises as a bare RuntimeError, so the
+# only thing to classify on is the message. Getting it wrong costs something in either direction:
+# too narrow and the clash goes out as a nameless launcher failure, too wide and an unrelated
+# failure is relabelled as a name clash, sending the operator to look for a job nobody created.
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Job with submission_id sf-rid-statistical-a2 already exists",
+        "RuntimeError: Job with submission id sf-rid-ml-a1 already exists.",
+        "job id 'sf-rid-dl-a3' exists on this cluster",
+    ],
+)
+def test_a_duplicate_submission_id_is_recognised(message: str) -> None:
+    assert ray_jobs._is_submission_id_taken_error(Exception(message)) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "401 Client Error: Unauthorized",
+        "runtime_env setup failed: no such file",
+        # Both halves have to be present. An id with no "exists" is not a clash...
+        "submission_id sf-rid-statistical-a2 was rejected",
+        # ...and an "exists" about something that is not the job id is not one either.
+        "the working directory already exists",
+    ],
+)
+def test_anything_else_stays_the_failure_it_was(message: str) -> None:
+    assert ray_jobs._is_submission_id_taken_error(Exception(message)) is False
+
+
 def test_connect_job_client_uses_resource_name_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

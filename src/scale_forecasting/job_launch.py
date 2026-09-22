@@ -47,8 +47,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .capacity import CapacityLedger
-    from .config import RunConfig
+    from .config import ResolvedFamilyCompute, RunConfig
     from .dag import FamilyJob, RunDag
+    from .probes.vocabulary import ProbeHandle
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -109,6 +110,149 @@ def _capacity_publisher(
     return publish
 
 
+def _entry_handle(
+    cfg: RunConfig,
+    run_id: str,
+    compute: ResolvedFamilyCompute,
+    system_job_id: str,
+    settings: Settings,
+    *,
+    ray_cluster_name: str | None = None,
+    ray_cluster_region: str | None = None,
+    shared_spark_region: str | None = None,
+) -> ProbeHandle:
+    """The ENTRY probe handle for one family's job — the coordinates known *before* submit.
+
+    This is the handle a probe reads while the job is running, so it asserts only what is truly
+    known at launch time. Every runtime can fill it, because every runtime names its own job:
+    Serverless passes ``batch_id``, Ray passes ``submission_id``, and the cluster path passes
+    ``JobReference.job_id`` (`cluster_submit.build_job`). The one coordinate still *predicted*
+    rather than known is the region of an ephemeral create, which a capacity hop can move — the
+    stamp-back refresh in `launch_family_job` corrects it at the end, and in the meantime a probe
+    that misses degrades to registry-only.
+
+    A free function rather than inline code because it is called twice per launch now: once for the
+    row that gets written, and once per candidate attempt by `_attempt_free_of_taken_ids`, which
+    needs a handle for an id it has not committed to yet.
+    """
+    from .probes.vocabulary import ProbeHandle
+
+    if compute.runtime == "ray":
+        from .engines.ray_io import cluster_name as ray_cluster_name_for
+        from .ray_cluster import cluster_resource_path
+
+        # A shared cluster hands us its name and landed region; a *single*-family Ray run has no
+        # shared cluster, and `submit_ray` creates one only once we call it — so the name is derived
+        # here from the same pure rule the submitter will use. It has to be: `launch` blocks until
+        # the job finishes, so the stamp-back lands only at the very end, and a handle without a
+        # resource_name leaves the probe and the cancel with nothing to reach for during the whole
+        # window they exist to serve.
+        resource_name = cluster_resource_path(
+            settings,
+            ray_cluster_name or ray_cluster_name_for(cfg, run_id),
+            ray_cluster_region,
+        )
+        return ProbeHandle(
+            "ray",
+            native_id=system_job_id,
+            region=ray_cluster_region or settings.region,
+            resource_name=resource_name,
+        )
+    if compute.spark_mode == "cluster":
+        # Naming our own cluster job is what makes this branch addressable during the provisioning
+        # window — the window a killed launcher leaves a row behind in. While it wrote "" instead,
+        # `SparkProbe._check_cluster` returned a permanent UNKNOWN and no repair verb would touch
+        # the header.
+        return ProbeHandle(
+            "spark",
+            native_id=system_job_id,
+            region=shared_spark_region or settings.region,
+            spark_mode="cluster",
+        )
+    return ProbeHandle(
+        "spark",
+        native_id=system_job_id,
+        region=settings.region,
+        spark_mode="serverless",
+    )
+
+
+# How many ids the force-path walk will step over before it gives up and lets the submit speak.
+# Twenty is not a tuning knob so much as a runaway guard: each step is a live platform read, and a
+# run whose last twenty attempts all exist on the platform has a problem no amount of further
+# walking will fix.
+_MAX_ID_WALK = 20
+
+
+def _attempt_free_of_taken_ids(
+    attempt: int,
+    cfg: RunConfig,
+    job: FamilyJob,
+    run_id: str,
+    settings: Settings,
+    **handle_kwargs: Any,
+) -> int:
+    """Walk ``attempt`` forward past any job id the platform already holds (force path only).
+
+    **The gap this closes.** The attempt counter is derived from the registry
+    (`registry.jobs.next_job_attempt` → ``MAX(attempt)`` over ``run_jobs``), while job-id uniqueness
+    is enforced by the *platform*. Those two agree only as long as every job that ever reached a
+    platform also wrote a registry row — and the emitted-command path does not go through this
+    launcher at all (`launch_plan.stage_run` hands a runnable command to a shell or to Airflow).
+    So a job can exist on the platform with no row here, the next ``--force`` re-issues that same
+    id, and the submit comes back ``ALREADY_EXISTS``. Observed live 2026-09-22; see
+    ``docs/validation.md`` and `errors.JobIdTaken`.
+
+    **Why only on force.** Without ``--force`` the attempt is 1 for a run_id that has never been
+    launched, and a collision there means the *run* is a duplicate — which `main.run`'s existence
+    check already catches, and which walking would paper over rather than report. Force is the verb
+    that means "I know this ran before, give me the next one", so force is where "next" should mean
+    next on the platform too.
+
+    **Why NOT_FOUND is the only answer that stops the walk.** A probe is advisory and never raises;
+    anything it cannot determine comes back ``NATIVE_UNKNOWN``. Treating UNKNOWN as "taken" would
+    let one flaky read push a run's attempt number up forever, so an UNKNOWN degrades: log it and
+    return the attempt as stamped, exactly the way every other probe consumer in this codebase
+    handles a probe that misses. The submit is still there to refuse a genuine clash, and it now
+    refuses with `errors.JobIdTaken` rather than a raw 409.
+    """
+    from .probes.runtimes import get_probe
+    from .probes.vocabulary import NATIVE_NOT_FOUND, NATIVE_UNKNOWN
+    from .registry.ids import make_job_key
+
+    compute = job.compute
+    assert compute is not None
+    probe = get_probe(compute.runtime)
+    for _ in range(_MAX_ID_WALK):
+        candidate = _system_job_id(make_job_key(run_id, job.family, attempt), compute.runtime)
+        handle = _entry_handle(cfg, run_id, compute, candidate, settings, **handle_kwargs)
+        result = probe.check(handle, settings=settings)
+        if result.native_state == NATIVE_NOT_FOUND:
+            return attempt
+        if result.native_state == NATIVE_UNKNOWN:
+            _log.warning(
+                "force: could not confirm whether %s is free (%s); using attempt %d as stamped",
+                candidate,
+                result.detail or "probe degraded",
+                attempt,
+            )
+            return attempt
+        _log.warning(
+            "force: %s already exists on %s (state %s); trying attempt %d",
+            candidate,
+            compute.runtime,
+            result.native_state,
+            attempt + 1,
+        )
+        attempt += 1
+    _log.warning(
+        "force: gave up walking past taken job ids after %d attempts; submitting attempt %d",
+        _MAX_ID_WALK,
+        attempt,
+    )
+    return attempt
+
+
 def launch_family_job(
     cfg: RunConfig,
     job: FamilyJob,
@@ -164,7 +308,6 @@ def launch_family_job(
     """
     from .device_audit import audit_device_use
     from .job_outcome import audit_cells, launch_window_start
-    from .probes.vocabulary import ProbeHandle
     from .registry.ids import make_job_key
     from .registry.jobs import next_job_attempt
     from .registry.lifecycle import run_job
@@ -173,7 +316,6 @@ def launch_family_job(
     compute = job.compute
     assert compute is not None  # a Python family always resolves compute (native is handled inline)
     attempt, _ = next_job_attempt(run_id, job.family, force=force, settings=settings)
-    system_job_id = _system_job_id(make_job_key(run_id, job.family, attempt), compute.runtime)
     # A shared Ray cluster (provisioned by the orchestrator for a multi-Ray-family run) is targeted
     # only by Ray families; every other runtime ignores it.
     ray_cluster_name = ray_cluster[0] if ray_cluster and compute.runtime == "ray" else None
@@ -195,62 +337,18 @@ def launch_family_job(
     )
     shared_spark_name = shared_spark[0] if shared_spark else None
     shared_spark_region = shared_spark[1] if shared_spark else None
-    # The ENTRY probe handle, built from coordinates known before submit — the handle the probe
-    # actually reads while a job is RUNNING. Every runtime can fill it now, because every runtime
-    # names its own job: Serverless passes ``batch_id``, Ray passes ``submission_id``, and the
-    # cluster path passes ``JobReference.job_id``. The one coordinate still predicted rather than
-    # known is the region of an ephemeral create, which a capacity hop can move; the stamp-back
-    # refresh below corrects it, and a probe that misses degrades to registry-only.
-    if compute.runtime == "ray":
-        from .engines.ray_io import cluster_name as ray_cluster_name_for
-        from .ray_cluster import cluster_resource_path
-
-        # A shared cluster hands us its name and landed region; a *single*-family Ray run has no
-        # shared cluster, and `submit_ray` creates one only once we call it — so the name is derived
-        # here from the same pure rule the submitter will use. It has to be: `launch` blocks until
-        # the job finishes, so the stamp-back below lands only at the very end, and a handle without
-        # a resource_name leaves the probe and the cancel with nothing to reach for during the whole
-        # window they exist to serve.
-        #
-        # The region is the one guess in it. A capacity hop would move the cluster off
-        # ``settings.region`` and the predicted path would miss — the probe degrades to
-        # registry-only, exactly as it does today, and the stamp-back corrects the record at the
-        # end. A path that is right in the common case beats one that is never populated at all.
-        resource_name = cluster_resource_path(
-            settings,
-            ray_cluster_name or ray_cluster_name_for(cfg, run_id),
-            ray_cluster_region,
-        )
-        entry_handle = ProbeHandle(
-            "ray",
-            native_id=system_job_id,
-            region=ray_cluster_region or settings.region,
-            resource_name=resource_name,
-        )
-    elif compute.spark_mode == "cluster":
-        # The cluster path names its own job now (`cluster_submit.build_job` puts this id on the
-        # submitted ``JobReference``), so the handle carries it from here rather than waiting for a
-        # server-assigned id to come back. That ordering is the whole point: the window this handle
-        # exists to serve is the one *before* the response arrives. While it wrote "" instead, a
-        # launcher killed during a cluster provision left a row the probe could not address, so
-        # `SparkProbe._check_cluster` returned a permanent UNKNOWN and no repair verb would touch
-        # the header — the Dataproc shape of the provisioning-death hole the Ray path closed first.
-        #
-        # The region is the same one guess the Ray branch above makes: an ephemeral create can hop
-        # on a capacity failover, and the stamp-back corrects the record at the end.
-        entry_handle = ProbeHandle(
-            "spark",
-            native_id=system_job_id,
-            region=shared_spark_region or settings.region,
-            spark_mode="cluster",
-        )
-    else:
-        entry_handle = ProbeHandle(
-            "spark",
-            native_id=system_job_id,
-            region=settings.region,
-            spark_mode="serverless",
-        )
+    handle_kwargs: dict[str, Any] = {
+        "ray_cluster_name": ray_cluster_name,
+        "ray_cluster_region": ray_cluster_region,
+        "shared_spark_region": shared_spark_region,
+    }
+    # Ask the platform before stamping, but only when ``--force`` said "next attempt". The registry
+    # is not the authority on which ids are taken — see `_attempt_free_of_taken_ids` for the gap and
+    # for why an inconclusive probe declines to walk rather than guessing.
+    if force:
+        attempt = _attempt_free_of_taken_ids(attempt, cfg, job, run_id, settings, **handle_kwargs)
+    system_job_id = _system_job_id(make_job_key(run_id, job.family, attempt), compute.runtime)
+    entry_handle = _entry_handle(cfg, run_id, compute, system_job_id, settings, **handle_kwargs)
     entry_blob = entry_handle.to_blob()
     job_id = make_job_key(run_id, job.family, attempt)
     # Taken before the row is even written, so the two audits below count this attempt's cells and

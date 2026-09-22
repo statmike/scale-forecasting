@@ -68,7 +68,9 @@ Some distinctions in that table are deliberate and easy to misread:
   `LIKELY_COMPLETED` — it degrades to `LOST` rather than claiming success it can't prove.
 - **A young job that 404s is `UNKNOWN`, not `LOST`.** The `RUNNING` row is written *before* the
   native job exists, so a probe fired seconds after launch legitimately finds nothing. Only a family
-  quiet past the startup grace (15 min, `stale_after_s` to override) is judged `LOST`.
+  quiet past the startup grace (15 min, `stale_after_s` to override) is judged `LOST`. An `EMITTED`
+  row — a staged command whose job id has been handed out but which nobody has run yet — gets the
+  same grace for the same reason.
 - **A native family reporting `SUCCEEDED` with incomplete artifacts is `UNKNOWN`, not stale.** A
   BigQuery family's statements go `DONE` one at a time, so an all-`DONE` reading mid-run is a lull
   between statements. The probe declines to overrule the registry on that.
@@ -103,15 +105,16 @@ Forecaster(cfg).settle()                                    # preview
 Forecaster(cfg).settle(yes=True, reason="…")                # execute
 ```
 
-Five readings settle; everything else is refused:
+Six readings settle; everything else is refused:
 
-| Verdict | Runtime says | Cells | Settles to |
-|---|---|---|---|
-| `STALE_REGISTRY` | `SUCCEEDED` | all landed | `COMPLETED` |
-| `STALE_REGISTRY` | `FAILED` | any | `FAILED`, `failure_reason=RUNTIME_FAILED` |
-| `LIKELY_COMPLETED` | job gone | all landed | `COMPLETED` |
-| `LOST` | job gone | missing | `FAILED`, `failure_reason=RUNTIME_LOST` |
-| `ABANDONED_WAIT` | never launched | missing | `FAILED`, `failure_reason=CAPACITY_ABANDONED` |
+| Verdict | Registry says | Runtime says | Cells | Settles to |
+|---|---|---|---|---|
+| `STALE_REGISTRY` | any | `SUCCEEDED` | all landed | `COMPLETED` |
+| `STALE_REGISTRY` | any | `FAILED` | any | `FAILED`, `failure_reason=RUNTIME_FAILED` |
+| `LIKELY_COMPLETED` | any | job gone | all landed | `COMPLETED` |
+| `LOST` | `EMITTED` | job gone | missing | `FAILED`, `failure_reason=NEVER_LAUNCHED` |
+| `LOST` | anything else | job gone | missing | `FAILED`, `failure_reason=RUNTIME_LOST` |
+| `ABANDONED_WAIT` | `AWAITING_CAPACITY` | never launched | missing | `FAILED`, `failure_reason=CAPACITY_ABANDONED` |
 
 **Refusal is the feature.** `RUNNING_CONFIRMED` is live, `TRUST_REGISTRY` is already terminal or
 deliberately waiting, and `UNKNOWN` — the probe degraded, no handle was recorded, the runtime claims
@@ -119,8 +122,16 @@ deliberately waiting, and `UNKNOWN` — the probe degraded, no handle was record
 *not* touch and why, because "left alone: verdict `UNKNOWN`" is the line that means *go look*, and a
 count of what was settled is exactly how the one row that mattered gets missed.
 
-Five more things worth knowing:
+Six more things worth knowing:
 
+- **`NEVER_LAUNCHED` is not `RUNTIME_LOST`, and it is the same distinction in the other direction.**
+  Both rows read "job gone, work missing". `RUNTIME_LOST` means a job ran and vanished, so there is
+  something to go and look for — a driver log, an OOM, a cancelled batch. `NEVER_LAUNCHED` means
+  nothing ever ran: the row was filed by `stage` to reserve the job id it printed, and nobody pasted
+  the command. There is nothing to investigate; just run it, or drop the run. See
+  [A submit is refused](#a-submit-is-refused--the-job-id-is-already-taken) for why the row exists at
+  all. Settling it early is safe even if you are merely slow: a launch that happens afterwards files
+  a fresh row at the same attempt, and `v_run_jobs` takes the later one.
 - **`CAPACITY_ABANDONED` is not `CAPACITY_EXHAUSTED`, and the difference is what you do next.**
   Exhausted means the policy did its job and ran out of candidates — raise `max_attempts`, add a
   region, or accept that the region has no room. Abandoned means the driver went away mid-walk, so
@@ -388,6 +399,38 @@ look when one stage's tasks finish long after the rest.
 **Cause:** transient backend/routing blips on the Storage Write API over sustained streams.
 **Fix:** handled — `_append_via_write_api` retries with exponential backoff (all four engines route
 writes through it). A *genuine* 400 (real bad request) still fails fast.
+
+### A submit is refused — the job id is already taken
+**Symptom:** a launch fails immediately with `ALREADY_EXISTS` from Dataproc, or "job with
+submission_id … already exists" from Ray. The registry row for it says
+`failure_reason = JOB_ID_TAKEN`.
+
+**Cause:** two different things decide the same name. The attempt number in a job id comes from the
+registry — `MAX(attempt)` over `run_jobs` for that run and family — while the *uniqueness* of the id
+is enforced by the platform. Those two agree only while every job that reached a platform also left
+a row behind, and one path breaks that: a command that `stage`, `plan` or the Airflow emitter
+printed is run by **you**, not by the launcher, so the job exists on Dataproc or Ray while the
+registry never hears about it. The next `--force` reads the same `MAX(attempt)`, hands out the same
+id, and the platform refuses it.
+
+**Fix:** nothing, usually — a forced launch now asks the platform whether the id it is about to
+stamp is free, and walks the attempt forward until it finds one that is. You reach this error only
+when that check could not get an answer (a degraded probe declines to walk rather than inflating the
+attempt on a flaky read) or when twenty consecutive ids were taken. Either way the move is the same:
+re-run with `--force`. To see what the platform actually holds before you do, probe the run:
+
+```bash
+python -m scale_forecasting.main --config CONFIG --probe
+```
+
+**What you will see in the registry.** Staging now files a row for every job id it hands out, with
+status `EMITTED` — "this id has been spent, whether or not anyone ran the command". It is a live
+status, so it holds a repair back the way a `RUNNING` row does, and it is why the counter no longer
+loses track of a pasted command. Two things clear it. If you run the command, the launch writes a
+real row at the same attempt and the serving view `v_run_jobs` takes the later one, so the `EMITTED`
+row disappears from every read with no cleanup. If you never run it, `--settle` reaps the row to
+`FAILED` with `failure_reason = NEVER_LAUNCHED` once the platform confirms the id was never created
+— spelled apart from `RUNTIME_LOST` because nothing ran, so there is nothing to go looking for.
 
 ### An immediate re-run double-counts rows
 **Symptom:** re-running the same config right away appears to duplicate rows.

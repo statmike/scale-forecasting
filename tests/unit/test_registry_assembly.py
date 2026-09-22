@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from scale_forecasting.config import RunConfig
+from scale_forecasting.errors import JobIdTaken
 from scale_forecasting.registry import artifacts, jobs, write_api
 from scale_forecasting.registry.harvest import rank_harvest_candidates
 from scale_forecasting.registry.header import (
@@ -24,7 +25,7 @@ from scale_forecasting.registry.header import (
     render_latest_header_guard,
     sizing_telemetry_path,
 )
-from scale_forecasting.registry.lifecycle import run_job
+from scale_forecasting.registry.lifecycle import JOB_ID_TAKEN, LAUNCHER_EXCEPTION, run_job
 from scale_forecasting.registry.params import (
     _HEADER_PARAM_TYPES,
     _JOB_PARAM_TYPES,
@@ -705,9 +706,74 @@ def test_run_job_records_failed_and_reraises(monkeypatch: Any) -> None:
     assert fields["status"] == "FAILED"
     assert "runtime_seconds" in fields
     assert fields["ended_at"] is not None  # a crashed job still records its wall-clock end
-    # Nothing was finalized, so no merge is sent — an empty patch would render a JSON_SET that
-    # rewrites the column to itself.
-    assert fields["merge_telemetry"] is None
+    # The body named no reason, so the handler derives one rather than leaving the column NULL —
+    # otherwise the registry records *that* a job failed and nothing about why, and the message
+    # lives only in a launcher's stdout, which is gone the moment the shell closes.
+    assert fields["failure_reason"] == LAUNCHER_EXCEPTION
+    assert fields["merge_telemetry"] == {"failure": {"type": "ValueError", "message": "boom"}}
+
+
+def test_a_taken_job_id_gets_its_own_failure_token(monkeypatch: Any) -> None:
+    """`errors.JobIdTaken` is spelled apart from every other launcher crash, on the row.
+
+    That is the whole reason the exception class exists rather than a bare message: the clash is a
+    registry-vs-platform disagreement about which attempt numbers are free, and an operator reading
+    the table a week later needs to be able to filter for exactly it.
+    """
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(JobIdTaken):
+        with run_job("rid-0123456789ab", "ml", 2):
+            raise JobIdTaken("batch sf-rid-0123456789ab-ml-a2 already exists")
+
+    _, fields = cap["updates"][0]
+    assert fields["status"] == "FAILED"
+    assert fields["failure_reason"] == JOB_ID_TAKEN
+    assert fields["merge_telemetry"]["failure"]["type"] == "JobIdTaken"
+    assert "already exists" in fields["merge_telemetry"]["failure"]["message"]
+
+
+def test_a_reason_the_body_set_is_never_overwritten_by_the_derived_one(monkeypatch: Any) -> None:
+    """`job_launch` knows more than the exception does, and what it knew has to survive.
+
+    A capacity walk that gave up finalizes ``CAPACITY_EXHAUSTED`` *and then* re-raises. Deriving a
+    reason over the top would replace the one fact worth recording with a generic one.
+    """
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(RuntimeError):
+        with run_job("rid-0123456789ab", "deep_learning", 1) as job:
+            job.finalize(failure_reason="CAPACITY_EXHAUSTED", telemetry={"capacity": {"tries": 4}})
+            raise RuntimeError("no room anywhere")
+
+    _, fields = cap["updates"][0]
+    assert fields["failure_reason"] == "CAPACITY_EXHAUSTED"
+    # ...and no derived patch is merged either, so the ledger is the whole story.
+    assert fields["merge_telemetry"] == {"capacity": {"tries": 4}}
+
+
+def test_a_messageless_exception_still_records_something(monkeypatch: Any) -> None:
+    """``str(exc)`` is empty for a bare ``KeyboardInterrupt``; the row should not be, either."""
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        with run_job("rid-0123456789ab", "ml", 1):
+            raise KeyboardInterrupt
+
+    _, fields = cap["updates"][0]
+    assert fields["failure_reason"] == LAUNCHER_EXCEPTION
+    assert fields["merge_telemetry"]["failure"] == {
+        "type": "KeyboardInterrupt",
+        "message": "(no message)",
+    }
+
+
+def test_the_recorded_failure_message_is_capped(monkeypatch: Any) -> None:
+    """A library that puts a whole DataFrame in its message must not put it in the registry."""
+    cap = _capture_job_io(monkeypatch)
+    with pytest.raises(ValueError):
+        with run_job("rid-0123456789ab", "ml", 1):
+            raise ValueError("x" * 9000)
+
+    _, fields = cap["updates"][0]
+    assert len(fields["merge_telemetry"]["failure"]["message"]) == 2000
 
 
 def test_the_failure_write_carries_what_the_body_finalized_before_it_raised(

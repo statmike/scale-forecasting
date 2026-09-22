@@ -80,7 +80,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, family`.
 | `hardware` | `STRING` | The resolved hardware profile for this family (else NULL). |
 | `gpu_type` | `STRING` | The GPU type when the family ran on GPUs (e.g. Ray deep-learning), else NULL. |
 | `system_job_id` | `STRING` | The platform's own job id (`dataproc_job_id` / `ray_submission_id` / `bigquery_job_id`) — jump straight to the platform console. |
-| `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED` for this job. |
+| `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED` for this job. Two pre-launch statuses can come first: `AWAITING_CAPACITY` while a family walks regions looking for machines, and `EMITTED` for a job id a staged command handed out but this process never launched ([why](./troubleshooting.md#a-submit-is-refused--the-job-id-is-already-taken)). |
 | `created_at` | `TIMESTAMP` | When the job row was written. |
 | `runtime_seconds` | `FLOAT64` | The job's own compute time (excludes cluster stand-up). |
 | `job_telemetry` | `JSON` | Per-job overlay: `total_wall_s`, `dcu_milli_seconds`, sizing, and — for a GPU family — `device_use`, the verdict on whether the accelerator did anything ([below](#was-the-accelerator-you-paid-for-actually-used)). Unpacked by `v_run_jobs`. |

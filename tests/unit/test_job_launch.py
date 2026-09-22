@@ -455,6 +455,130 @@ def test_an_ordinary_launch_failure_records_no_capacity_reason(
     assert "failure_reason" not in seen["fin"].extra
 
 
+# --- the force path asks the platform which ids are free -----------------------
+#
+# The attempt counter reads ``run_jobs``; job-id uniqueness is enforced by the platform. The two
+# agree only while every job that reached a platform also wrote a row — and the emitted-command
+# path does not go through this launcher at all. See `job_launch._attempt_free_of_taken_ids`.
+
+
+def _stub_probe(monkeypatch: pytest.MonkeyPatch, states: list[str]) -> dict[str, Any]:
+    """Answer ``check()`` with ``states`` in order, recording the id each call asked about."""
+    from scale_forecasting.probes import runtimes
+    from scale_forecasting.probes.vocabulary import NATIVE_NOT_FOUND, ProbeResult
+
+    seen: dict[str, Any] = {"asked": []}
+    queue = list(states)
+
+    class _Probe:
+        def check(self, handle: Any, *, settings: Any) -> ProbeResult:
+            seen["asked"].append(handle.native_id)
+            state = queue.pop(0) if queue else NATIVE_NOT_FOUND
+            return ProbeResult(state, exists=state != NATIVE_NOT_FOUND, detail="stub")
+
+    monkeypatch.setattr(runtimes, "get_probe", lambda runtime: _Probe())
+    return seen
+
+
+def _launch_and_capture(
+    monkeypatch: pytest.MonkeyPatch, *, force: bool, attempt: int = 1
+) -> dict[str, Any]:
+    """Launch the statistical family offline with the counter pinned to ``attempt``.
+
+    The pin goes on *after* `_fake_job_lifecycle`, which pins the same seam to 1 for every other
+    test in this module — the walk is the one behaviour that needs a counter value it did not pick.
+    """
+    import scale_forecasting.submitters as submitters_mod
+    from scale_forecasting.registry import jobs
+
+    seen = _fake_job_lifecycle(monkeypatch)
+    monkeypatch.setattr(
+        jobs,
+        "next_job_attempt",
+        lambda run_id, family, *, force=False, settings=None: (attempt, False),
+    )
+
+    class _Noop:
+        def launch(self, cfg: RunConfig, **kw: Any) -> None:
+            return None
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _Noop())
+    cfg = _cfg(models=[_SPARK])
+    job = dag.plan_dag(cfg).python_jobs[0]
+    job_launch.launch_family_job(cfg, job, "rid-0", _SETTINGS, force=force)
+    return seen
+
+
+def test_an_unforced_launch_never_asks_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Attempt 1 of a run that never launched is not a collision to walk past — it is a duplicate
+    run, which the existence check already reports. Walking there would paper over it, and it would
+    put a live API call in front of every ordinary launch."""
+    asked = _stub_probe(monkeypatch, [])
+    seen = _launch_and_capture(monkeypatch, force=False, attempt=1)
+
+    assert asked["asked"] == []
+    assert seen["job"]["attempt"] == 1
+
+
+def test_a_forced_launch_walks_past_an_id_the_platform_already_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape observed live: a job exists on the platform with no registry row behind it."""
+    from scale_forecasting.probes.vocabulary import NATIVE_NOT_FOUND, NATIVE_RUNNING
+    from scale_forecasting.registry.ids import dataproc_job_id, make_job_key
+
+    asked = _stub_probe(monkeypatch, [NATIVE_RUNNING, NATIVE_NOT_FOUND])
+    seen = _launch_and_capture(monkeypatch, force=True, attempt=2)
+
+    # It asked about attempt 2, was told that id exists, and moved to 3 — which is then what the
+    # row, the platform id and the probe handle all say.
+    assert asked["asked"] == [
+        dataproc_job_id(make_job_key("rid-0", "statistical", 2)),
+        dataproc_job_id(make_job_key("rid-0", "statistical", 3)),
+    ]
+    assert seen["job"]["attempt"] == 3
+    assert seen["job"]["system_job_id"] == dataproc_job_id(make_job_key("rid-0", "statistical", 3))
+    assert seen["job"]["probe_handle"]["native_id"] == seen["job"]["system_job_id"]
+
+
+def test_a_forced_launch_on_a_free_id_stays_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One live read, no walk — the common case has to stay cheap and unsurprising."""
+    from scale_forecasting.probes.vocabulary import NATIVE_NOT_FOUND
+
+    asked = _stub_probe(monkeypatch, [NATIVE_NOT_FOUND])
+    seen = _launch_and_capture(monkeypatch, force=True, attempt=2)
+
+    assert len(asked["asked"]) == 1
+    assert seen["job"]["attempt"] == 2
+
+
+def test_an_inconclusive_probe_does_not_push_the_attempt_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNKNOWN means "we could not tell", and walking on it would let one flaky read inflate a
+    run's attempt number permanently. Degrade to the stamped attempt; the submit is still there to
+    refuse a real clash, now as `errors.JobIdTaken`."""
+    from scale_forecasting.probes.vocabulary import NATIVE_UNKNOWN
+
+    asked = _stub_probe(monkeypatch, [NATIVE_UNKNOWN])
+    seen = _launch_and_capture(monkeypatch, force=True, attempt=4)
+
+    assert len(asked["asked"]) == 1
+    assert seen["job"]["attempt"] == 4
+
+
+def test_the_walk_gives_up_rather_than_looping_forever(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every step is a live platform read. A run whose next twenty ids are all taken has a problem
+    more walking will not solve, so the guard bounds the spend and says so."""
+    from scale_forecasting.probes.vocabulary import NATIVE_RUNNING
+
+    asked = _stub_probe(monkeypatch, [NATIVE_RUNNING] * 50)
+    seen = _launch_and_capture(monkeypatch, force=True, attempt=1)
+
+    assert len(asked["asked"]) == job_launch._MAX_ID_WALK
+    assert seen["job"]["attempt"] == 1 + job_launch._MAX_ID_WALK
+
+
 # --- ensemble DAG node: identity + mode dispatch -------------------------------
 
 

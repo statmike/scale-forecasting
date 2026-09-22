@@ -494,6 +494,127 @@ def test_an_unreachable_registry_leaves_attempt_one_and_says_so(
     assert any("could not resolve submit attempts" in r.message for r in caplog.records)
 
 
+# --- the attempts a staged command already spent --------------------------------
+#
+# The counter reads ``MAX(attempt)`` off run_jobs; the ids staging hands out are created on the
+# platform by whoever pastes the command, which writes nothing. `launch_plan._file_emitted_rows`
+# closes that by filing the row itself.
+
+
+def _fake_staging(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the three GCS uploads so `stage_run` runs offline."""
+    import scale_forecasting.staging as staging_mod
+
+    monkeypatch.setattr(
+        staging_mod, "stage_config", lambda cfg, rid, bkt: f"gs://{bkt}/runs/{rid}.json"
+    )
+    monkeypatch.setattr(
+        staging_mod,
+        "stage_code",
+        lambda bkt: (f"gs://{bkt}/runs/pkg.zip", f"gs://{bkt}/runs/spark_main.py"),
+    )
+    monkeypatch.setattr(
+        staging_mod, "stage_manifest", lambda manifest, rid, bkt: f"gs://{bkt}/runs/{rid}.plan.json"
+    )
+
+
+def _capture_emitted_rows(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record every row the registry is asked to write, with the table creation stubbed out."""
+    from scale_forecasting.registry import jobs, tables
+
+    rows: list[dict[str, Any]] = []
+    monkeypatch.setattr(tables, "ensure_tables", lambda cfg, *, settings=None: None)
+    monkeypatch.setattr(jobs, "write_job", lambda row, *, settings=None: rows.append(row))
+    return rows
+
+
+def test_staging_files_a_row_for_every_job_id_it_hands_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.registry.ids import dataproc_job_id, parse_job_key
+
+    _fake_staging(monkeypatch)
+    rows = _capture_emitted_rows(monkeypatch)
+    _prior_attempt(monkeypatch, 2)
+
+    result = launch_plan.stage_run(
+        _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["run_id"] == result.run_id
+    assert row["family"] == "statistical"
+    assert row["status"] == "EMITTED"
+    # The row's attempt is the one the printed command carries — that is the whole point: the next
+    # --force must see attempt 3 as spent even though this process launches nothing.
+    assert parse_job_key(result.nodes[0].job_key)[2] == 3
+    assert row["attempt"] == 3
+    assert row["system_job_id"] == dataproc_job_id(result.nodes[0].job_key)
+    # And it carries probe coordinates, so a reconciler can ask the platform whether it ever ran.
+    handle = row["job_telemetry"]["probe_handle"]
+    assert handle["runtime"] == "spark"
+    assert handle["native_id"] == row["system_job_id"]
+
+
+def test_a_bigquery_node_is_filed_under_the_prefix_the_native_launcher_uses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A native family runs as several BigQuery statements sharing an id prefix, so its handle is a
+    # prefix handle. A staged row that recorded an exact id would probe for a job that never exists.
+    _fake_staging(monkeypatch)
+    rows = _capture_emitted_rows(monkeypatch)
+
+    launch_plan.stage_run(
+        _cfg(models=["arima_plus"], ensemble={"enabled": True, "strategies": ["mean"]}),
+        settings=_SETTINGS,
+        infra=_batch_infra(),
+    )
+
+    by_family = {row["family"]: row for row in rows}
+    assert set(by_family) == {"native", "ensemble"}
+    for row in by_family.values():
+        handle = row["job_telemetry"]["probe_handle"]
+        assert handle["runtime"] == "bigquery"
+        assert handle["id_kind"] == "prefix"
+        assert handle["native_id"] == f"{row['system_job_id']}-"
+
+
+def test_a_dry_plan_files_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A preview hands out no ids. Filing rows for one would burn an attempt every time somebody
+    looked at a plan, which is the opposite of the problem this solves."""
+    rows = _capture_emitted_rows(monkeypatch)
+
+    launch_plan.plan_run(
+        _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra(), force=True
+    )
+
+    assert rows == []
+
+
+def test_a_registry_that_cannot_be_reached_only_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The staging's actual product — uploaded artifacts and correct commands — is already done by
+    # the time this runs, so failing here would throw away good work over bookkeeping.
+    from scale_forecasting.registry import tables
+
+    _fake_staging(monkeypatch)
+
+    def _boom(*a: Any, **k: Any) -> None:
+        raise RuntimeError("no credentials")
+
+    monkeypatch.setattr(tables, "ensure_tables", _boom)
+    with caplog.at_level("WARNING"):
+        result = launch_plan.stage_run(
+            _cfg(models=[_SPARK]), settings=_SETTINGS, infra=_batch_infra()
+        )
+
+    assert result.staged is True
+    assert result.commands is not None
+    assert any("could not record the emitted attempts" in r.message for r in caplog.records)
+
+
 def test_stage_run_requires_infra(monkeypatch: pytest.MonkeyPatch) -> None:
     # stage_run touches GCS, so a missing SF_* identity raises rather than degrading (unlike plan).
     import scale_forecasting.settings as settings_mod

@@ -28,6 +28,7 @@ from ..errors import ConfigError
 from .runtimes import get_probe
 from .vocabulary import (
     _AWAITING_CAPACITY,
+    _EMITTED,
     _REGISTRY_RUNNING,
     _TERMINAL,
     NATIVE_FAILED,
@@ -66,6 +67,10 @@ _DEFAULT_STALE_S = 900.0
 # row sitting a while longer. Tunable per call via `probe_run(abandoned_after_s=...)` for a
 # deployment that raised its own budget (G2).
 _DEFAULT_ABANDONED_WAIT_S = 7200.0
+
+# The statuses the startup grace above applies to — see `_is_stale` for why these two and not the
+# third non-terminal one.
+_STALEABLE = frozenset({_REGISTRY_RUNNING, _EMITTED})
 
 # --- reconciliation (pure) ----------------------------------------------------
 # The layer above the probes: fuse a run's registry+artifact progress (`review.RunProgress`) with
@@ -118,27 +123,36 @@ class ProbeReport:
 
 
 def _is_stale(fp: FamilyProgress, stale_after_s: float | None) -> bool:
-    """Whether a ``RUNNING`` family has gone quiet long enough to be past its startup grace.
+    """Whether a pre-terminal family has gone quiet long enough to be past its startup grace.
 
-    A family is stale when its status is ``RUNNING`` and its ``quiet_seconds`` — the age of its
-    last registry signal, measured once by `review._assemble_progress` so every family in a report
-    is judged against the same instant — exceeds ``stale_after_s`` (default `_DEFAULT_STALE_S`).
-    A stale family whose runtime job has vanished (native NOT_FOUND, artifacts incomplete) is
-    judged LOST; a *young* one is still-starting, so it reads UNKNOWN (the grace that stops a probe
-    crying wolf during a normal launch window). Any non-``RUNNING`` status is never stale. Pure and
-    defensive: a family whose timestamps didn't parse has no ``quiet_seconds`` and is treated as
+    A family is stale when its status is one of `_STALEABLE` and its ``quiet_seconds`` — the age of
+    its last registry signal, measured once by `review._assemble_progress` so every family in a
+    report is judged against the same instant — exceeds ``stale_after_s`` (default
+    `_DEFAULT_STALE_S`). A stale family whose runtime job has vanished (native NOT_FOUND, artifacts
+    incomplete) is judged LOST; a *young* one is still-starting, so it reads UNKNOWN (the grace that
+    stops a probe crying wolf during a normal launch window). Any other status is never stale. Pure
+    and defensive: a family whose timestamps didn't parse has no ``quiet_seconds`` and is treated as
     *not* stale, never raising.
 
-    That ``RUNNING``-only test is what keeps ``AWAITING_CAPACITY`` out of the staleness math, and it
-    should stay that way: a family waiting on a stocked-out region is quiet *on purpose* and can
-    legitimately stay quiet for an hour, so measuring its silence against a launch-window grace
-    would report every capacity wait as a lost job.
+    Two statuses qualify and they need the same grace for the same reason. ``RUNNING`` is the
+    original case: the row is written before the platform job exists, so a fresh 404 means
+    "starting", not "gone". ``EMITTED`` is the staged-command case (`registry.rows.EMITTED`): the
+    row is written when `launch_plan.stage_run` hands out the job id, and the operator pasting the
+    command takes a little while to do it, so an immediate 404 means "not pasted yet". Past the same
+    grace, both readings mean the job is not coming — and `settle._settle_decision` splits them into
+    ``RUNTIME_LOST`` vs ``NEVER_LAUNCHED``, because a job that ran and vanished is worth
+    investigating and one that never started is not.
+
+    What stays out is ``AWAITING_CAPACITY``, and it should: a family waiting on a stocked-out region
+    is quiet *on purpose* and can legitimately stay quiet for an hour, so measuring its silence
+    against a launch-window grace would report every capacity wait as a lost job. It has its own,
+    far longer clock in `_is_abandoned_wait`.
 
     This is the judgement half of a two-part split: the monitor reports the age (a fact anyone can
     read off a frozen bar), and the threshold that turns it into an escalation lives here, with the
     probe that acts on it.
     """
-    if (fp.status or "").upper() != _REGISTRY_RUNNING or fp.quiet_seconds is None:
+    if (fp.status or "").upper() not in _STALEABLE or fp.quiet_seconds is None:
         return False
     threshold = _DEFAULT_STALE_S if stale_after_s is None else stale_after_s
     return fp.quiet_seconds > threshold
@@ -277,9 +291,14 @@ def _verdict_for_family(
     (`_capacity_reading_is_informative`). A runtime's answer about a job that really exists outranks
     the status a dead launcher left behind; a bare "no such job" does not, because a family still
     walking regions gives exactly the same answer. Such a family is never in ``stale`` either —
-    `_is_stale` measures ``RUNNING`` rows only, deliberately — so nothing on this path can read
-    LOST. From a pre-launch-looking row we cannot tell a job that died from one that never started,
-    and where no runtime reading settles it the abandoned-wait clock is the witness of last resort.
+    `_is_stale` deliberately leaves ``AWAITING_CAPACITY`` out, because a capacity wait has its own
+    far longer clock — so nothing on this path can read LOST. From a pre-launch-looking row we
+    cannot tell a job that died from one that never started, and where no runtime reading settles
+    it the abandoned-wait clock is the witness of last resort.
+
+    ``EMITTED`` takes no short-circuit at all: it reconciles exactly like ``RUNNING``, and the one
+    place the two part company is `settle`, which reads a vanished ``EMITTED`` job as a command
+    nobody ran rather than as a loss.
     """
     common: dict[str, Any] = {
         "family": fp.family,

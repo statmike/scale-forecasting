@@ -25,6 +25,23 @@ if TYPE_CHECKING:
 # both generated from this name.
 METRIC_COLUMNS: tuple[str, ...] = METRIC_NAMES
 
+# The pre-launch ``run_jobs.status``: an attempt whose id has been *handed out* but which this
+# process is not running and will never finalize.
+#
+# It exists because the attempt counter and the uniqueness rule live in different places. The
+# counter is derived from this table (`registry.jobs.next_job_attempt` → ``MAX(attempt)``, no status
+# filter, which is why an EMITTED row occupies its number for free); uniqueness is enforced by the
+# platform. `launch_plan.stage_run` and the Airflow emitter hand a runnable command — carrying a
+# job id — to something that is not the launcher, so without this row the launch is invisible here
+# and the next ``--force`` re-issues the same id. Observed live 2026-09-22.
+#
+# Deliberately neither live nor terminal. Not in `registry.ops.LIVE_STATUSES`, because nothing is
+# running and `drop_run` must not be blocked by a command nobody ever pasted; not in
+# ``registry.ops._TERMINAL_JOB_STATUSES``, because no outcome was ever recorded and `close-runs`
+# should refuse a run that still has one. The repair ladder reaps it: `probes.settle` settles an
+# EMITTED row whose id the platform cannot find to FAILED / ``NEVER_LAUNCHED``.
+EMITTED = "EMITTED"
+
 
 def cell_dedup_key(result: CellResult) -> dict[str, str]:
     """The run-scoped identity anchor for a cell's rows.
@@ -394,7 +411,8 @@ def assemble_job_row(
     (`config.RunConfig.resolve_family_compute` for a model family, the ensemble node's own config
     for ``ensemble``) and hands them over. ``status`` starts RUNNING; ``runtime_seconds``,
     ``failure_reason`` and ``job_telemetry`` are NULL until the job finishes and the submitter
-    updates the row.
+    updates the row. The one caller that passes ``status`` explicitly is `launch_plan.stage_run`,
+    which files an `EMITTED` row for a command it hands to somebody else to run.
 
     ``started_at`` is the job's execution start (defaults to ``created_at`` when not given); the
     matching ``ended_at`` is NULL here and stamped by `run_job` at exit — together they give the

@@ -430,6 +430,99 @@ def _nodes_with_submit_attempts(
     )
 
 
+def _file_emitted_rows(
+    cfg: RunConfig, nodes: Sequence[DagNode], run_id: str, settings: Settings
+) -> None:
+    """File one ``EMITTED`` ``run_jobs`` row per staged node — the attempt numbers we just spent.
+
+    **What this closes.** Staging hands out job ids: every command it prints names its own job
+    (``--batch``, a Ray ``submission_id``, a BigQuery job prefix), and the attempt in those ids came
+    from `_nodes_with_submit_attempts` reading ``MAX(attempt)`` off this very table. Whoever pastes
+    the command creates a job on the platform — and, not being this launcher, writes no row. The
+    registry then still reads ``MAX(attempt) = N-1``, so the next ``--force`` hands out ``N`` again
+    and the submit is refused with ``ALREADY_EXISTS``. Observed live 2026-09-22; see
+    `errors.JobIdTaken` and ``docs/validation.md``.
+
+    Writing the row here makes the handed-out attempt visible to the counter, which is all it takes:
+    `registry.jobs.latest_job_attempt` is ``MAX(attempt)`` with no status filter, so an EMITTED row
+    occupies its number whether or not anyone ever runs the command.
+
+    **The phantom-row question, and why it is answered rather than traded off.** A command that is
+    emitted and never pasted leaves a row for a job that does not exist. Three things keep that from
+    being a new kind of mess. The row carries a probe handle, so `probes.reconcile` escalates it
+    like any other non-terminal row and `probes.settle` reaps it to FAILED / ``NEVER_LAUNCHED`` once
+    the platform confirms the id was never created. Its status is not in
+    `registry.ops.LIVE_STATUSES`, so it never blocks a destructive verb. And if the operator *does*
+    eventually paste the command, the launch writes a fresh ``RUNNING`` row at the same attempt with
+    a later ``created_at`` — and ``v_run_jobs`` orders by ``attempt DESC, created_at DESC``, so the
+    real launch supersedes this row with no cleanup at all.
+
+    Best-effort for the same reason as `_nodes_with_submit_attempts`: an unreachable registry must
+    not fail a staging whose actual product — the uploaded artifacts and the printed commands — is
+    already correct. It says so rather than failing quietly.
+
+    One knock-on worth naming: staging and then launching *in this process* with ``--force`` now
+    lands on attempt N+1 rather than N, because the row written here is exactly the evidence that N
+    is spent. That is the intended reading — a forced launch asks for an id nobody has taken, and
+    the staged command may well have been pasted in the meantime — and it costs one attempt number,
+    not one job. ``main.run`` is unaffected: it stages its own artifacts through `staging` and never
+    comes through here.
+    """
+    from datetime import UTC, datetime
+
+    from .job_launch import _entry_handle, _system_job_id
+    from .probes.vocabulary import ProbeHandle
+    from .registry.ids import parse_job_key
+    from .registry.jobs import write_job
+    from .registry.rows import EMITTED, assemble_job_row
+    from .registry.tables import ensure_tables
+
+    try:
+        ensure_tables(cfg, settings=settings)
+        created_at = datetime.now(UTC)
+        for node in nodes:
+            _, family, attempt = parse_job_key(node.job_key)
+            system_job_id = _system_job_id(node.job_key, node.runtime)
+            if node.runtime == "bigquery":
+                # The native and ensemble nodes run as several statements under a shared id prefix,
+                # recorded exactly as `job_launch.launch_native_job` records them.
+                handle = ProbeHandle(
+                    "bigquery",
+                    native_id=f"{system_job_id}-",
+                    region=settings.region,
+                    id_kind="prefix",
+                )
+            else:
+                # The same builder the launcher uses, so a staged row and a launched row are
+                # probe-able through one code path. No shared cluster exists at staging time, which
+                # is the default the builder already handles.
+                handle = _entry_handle(
+                    cfg, run_id, cfg.resolve_family_compute(family), system_job_id, settings
+                )
+            write_job(
+                assemble_job_row(
+                    run_id,
+                    family,
+                    attempt,
+                    created_at,
+                    runtime=node.runtime,
+                    spark_mode=node.spark_mode,
+                    hardware=node.hardware,
+                    gpu_type=node.gpu_type,
+                    system_job_id=system_job_id,
+                    status=EMITTED,
+                    probe_handle=handle.to_blob(),
+                ),
+                settings=settings,
+            )
+    except Exception as exc:  # noqa: BLE001 - an unrecorded emit is a worse stage, not a failed one
+        _log.warning(
+            "could not record the emitted attempts in the registry (%r); the commands above are "
+            "still correct, but a later --force may re-issue a job id these ones already took",
+            exc,
+        )
+
+
 def plan_run(
     cfg: RunConfig,
     *,
@@ -784,6 +877,11 @@ def stage_run(
         _manifest_dict(result, created_at=datetime.now(UTC).isoformat()), plan.run_id, code_bucket
     )
     _log.info("wrote run manifest: %s", manifest_uri)
+    # Last, once the commands are real and the artifacts are up: record the attempt numbers those
+    # commands just spent, so the counter can see a launch this process will never make. `plan_run`
+    # deliberately does not do this — a dry preview hands out nothing, and filing rows for it would
+    # burn an attempt every time somebody looked at a plan.
+    _file_emitted_rows(cfg, nodes, plan.run_id, settings)
     _emit_plan(result)
     return result
 

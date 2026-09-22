@@ -708,6 +708,38 @@ def test_submit_batch_applies_n_series_and_wires_client(monkeypatch: pytest.Monk
     assert staged["wait_timeout"] == job_wait._WATCHDOG_INTERVAL_SECONDS
 
 
+def test_a_batch_id_the_platform_already_holds_raises_its_own_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clash the registry cannot see coming.
+
+    The attempt number in the batch id comes from ``MAX(attempt)`` over ``run_jobs``, but the id is
+    unique on Dataproc, not in the registry — so a job that reached the platform without leaving a
+    row (a staged command somebody pasted) makes the counter hand the same id out twice. Naming it
+    `errors.JobIdTaken` is what lets the registry record ``JOB_ID_TAKEN`` instead of a nameless
+    launcher failure, and what tells a reader the fix is a new attempt rather than a new debugging
+    session. Observed live 2026-09-22.
+    """
+    from google.api_core.exceptions import AlreadyExists
+
+    from scale_forecasting import batch_telemetry, submit
+    from scale_forecasting.errors import JobIdTaken
+
+    class _TakenClient:
+        def create_batch(self, *, parent: str, batch: Any, batch_id: str) -> Any:
+            raise AlreadyExists(f"Batch {batch_id} already exists")
+
+    monkeypatch.setattr(submit, "stage_code", lambda bucket: ("gs://p.zip", "gs://m.py"))
+    monkeypatch.setattr(submit, "_stage_config", lambda *a, **k: "gs://cfg.json")
+    monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _TakenClient())
+
+    with pytest.raises(JobIdTaken) as err:
+        submit.submit_batch(_cfg(models=["theta"]), settings=_settings(), infra=_infra())
+    # The refused id is in the message: the operator's next move is to pick a different attempt,
+    # and they cannot do that without knowing which one was refused.
+    assert "sf-" in str(err.value)
+
+
 def test_the_batch_wait_deadline_comes_from_infra_unless_a_caller_names_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

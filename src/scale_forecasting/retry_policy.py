@@ -88,8 +88,12 @@ RETRY_VERDICTS: frozenset[str] = frozenset({RETRY_AS_IS, RETRY_WITH_MORE_MEMORY,
 # still agree. Copying the words is cheap; copying them silently is not.
 
 #: Registry job statuses that mean the family has not finished. `capacity.AWAITING_CAPACITY` is one
-#: of them: a job waiting for a GPU has not failed, it has not started.
-LIVE_JOB_STATUSES: frozenset[str] = frozenset({"RUNNING", "AWAITING_CAPACITY"})
+#: of them: a job waiting for a GPU has not failed, it has not started. So is
+#: `registry.rows.EMITTED` — a staged command whose job id has been handed out but which this
+#: process never ran; treating it as finished would let a repair submit over a command somebody
+#: pasted thirty seconds ago. The probe overrules both, which is how an emitted command that was
+#: never actually run stops holding a repair back.
+LIVE_JOB_STATUSES: frozenset[str] = frozenset({"RUNNING", "AWAITING_CAPACITY", "EMITTED"})
 
 #: `probes.vocabulary` verdicts that settle a family as *finished*, whatever the registry says. The
 #: probe reads the runtime directly, so when the two disagree the probe is the one that looked.

@@ -37,6 +37,33 @@ if TYPE_CHECKING:
 _STICKY_STATUSES: tuple[str, ...] = ("CANCELLED",)
 _NON_GREEN_STATUSES = frozenset({"FAILED", "PARTIAL"})
 
+# --- failure_reason tokens this module writes ---------------------------------
+# `run_jobs.failure_reason` is a short token, not a sentence — `capacity.CAPACITY_EXHAUSTED` was the
+# first and the settle verb's three (`probes.vocabulary`) followed. Until these two existed, a job
+# that raised anywhere outside the capacity walk went FAILED with the column NULL, so the registry
+# recorded *that* it failed and nothing about why; the message lived only in the launcher's stdout,
+# which is gone the moment the shell closes. Observed live 2026-09-22, when an ``ALREADY_EXISTS``
+# job-id clash left a FAILED row with no reason on it at all.
+#
+# The token stays a token and the prose goes to `job_telemetry.failure`, so the column keeps being
+# filterable while the detail is one JSON_QUERY away.
+JOB_ID_TAKEN = "JOB_ID_TAKEN"  # the platform already held the job id we asked for
+LAUNCHER_EXCEPTION = "LAUNCHER_EXCEPTION"  # anything else that raised out of the job body
+
+
+def _failure_record(exc: BaseException) -> tuple[str, dict[str, Any]]:
+    """The ``(failure_reason, telemetry_patch)`` for a job body that raised (pure).
+
+    Kept deliberately shallow — the exception's type name and its message, truncated. A traceback
+    belongs in the logs; what the registry needs is enough to tell one failure mode from another a
+    week later without re-running anything.
+    """
+    from ..errors import JobIdTaken
+
+    reason = JOB_ID_TAKEN if isinstance(exc, JobIdTaken) else LAUNCHER_EXCEPTION
+    message = str(exc).strip() or "(no message)"
+    return reason, {"failure": {"type": type(exc).__name__, "message": message[:2000]}}
+
 
 def _sticky_guard(status: str) -> tuple[str, ...]:
     """Statuses that a write of ``status`` must not overwrite — empty when it may overwrite (pure).
@@ -220,8 +247,17 @@ def run_job(
     started = time.perf_counter()
     try:
         yield fin
-    except BaseException:
+    except BaseException as exc:
         if manage:
+            # A body that already named the reason keeps it — `job_launch` sets
+            # ``failure_reason=CAPACITY_EXHAUSTED`` on the finalizer before it gives up, and that is
+            # a better answer than anything derivable from the exception. Only the silent case gets
+            # filled in.
+            extra = dict(fin.extra)
+            telemetry = dict(fin.telemetry)
+            if not extra.get("failure_reason"):
+                extra["failure_reason"], patch = _failure_record(exc)
+                telemetry.update(patch)
             update_job(
                 job_id,
                 settings=settings,
@@ -229,8 +265,8 @@ def run_job(
                 runtime_seconds=time.perf_counter() - started,
                 ended_at=datetime.now(UTC),
                 unless_status_in=_STICKY_STATUSES,
-                merge_telemetry=fin.telemetry or None,
-                **fin.extra,
+                merge_telemetry=telemetry or None,
+                **extra,
             )
         raise
     if manage:

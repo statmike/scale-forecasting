@@ -50,6 +50,12 @@ NATIVE_UNKNOWN = "UNKNOWN"
 _REGISTRY_RUNNING = "RUNNING"
 _CANCELLED = "CANCELLED"
 _TERMINAL = frozenset({"COMPLETED", "FAILED", "PARTIAL", _CANCELLED})
+# A local dup of `registry.rows.EMITTED`, kept here for the same reason `_TERMINAL` dups
+# `sdk._TERMINAL_STATUSES`: probes is imported low and registry high. The status means a job id was
+# handed out by `launch_plan.stage_run` to be run by somebody who is not the launcher. It is
+# non-terminal, so it *is* escalated to its runtime — which is the point, since the only question
+# worth asking about such a row is whether the command was ever actually run.
+_EMITTED = "EMITTED"
 
 # `capacity.AWAITING_CAPACITY` is re-exported here so the three probe layers can name it without
 # each importing the capacity module. It is the one non-terminal status that must **not** be
@@ -87,6 +93,13 @@ RUNTIME_LOST = "RUNTIME_LOST"  # the runtime job is gone with its artifacts inco
 # went away mid-walk (Ctrl-C, a closed shell, a restarted kernel) and nothing was ever asked for
 # again — the run tells you nothing about whether capacity existed.
 CAPACITY_ABANDONED = "CAPACITY_ABANDONED"  # the walk stopped being walked; no verdict was reached
+# The fourth: the emitted command nobody ran. `launch_plan.stage_run` files an `_EMITTED` row for
+# every job id it hands out, so the attempt counter can see a launch the launcher will never make
+# (`registry.rows.EMITTED`). When the platform confirms that id was never created, the row is a
+# phantom and this is what it settles as. Spelled apart from ``RUNTIME_LOST`` because the two facts
+# are opposites: LOST means a job ran and vanished with work unfinished — go look for what happened
+# to it. NEVER_LAUNCHED means nothing ever ran, and there is nothing to look for.
+NEVER_LAUNCHED = "NEVER_LAUNCHED"  # a staged command that was emitted and never executed
 
 
 @dataclass(frozen=True)

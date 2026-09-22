@@ -48,7 +48,7 @@ from .dag import group_models_by_family
 from .device_audit import verdict_label
 from .registry.ids import base_family, is_repair_family
 from .registry.reads import parse_ts
-from .registry.rows import METRIC_COLUMNS
+from .registry.rows import EMITTED, METRIC_COLUMNS
 
 if TYPE_CHECKING:
     from .probes.reconcile import ProbeReport
@@ -933,10 +933,10 @@ def review_run(
 #   - status green/blue/vermillion #009E73/#0072B2/#D55E00 (PASS separation); pending is gray
 #     #999999 by design (a status, not a categorical hue) and every bar is annotated with its status
 #     text, so identity is never colour-alone.
-#   - AWAITING_CAPACITY shares PENDING's gray on purpose rather than taking a seventh hue: it is the
-#     same fact to a reader scanning the chart (this family has not started), the status text on the
-#     bar carries the difference, and a new hue would have to be re-validated for CVD separation
-#     against six existing ones to add nothing.
+#   - AWAITING_CAPACITY and EMITTED share PENDING's gray on purpose rather than taking a seventh and
+#     eighth hue: all three are the same fact to a reader scanning the chart (this family has not
+#     started), the status text on the bar carries the difference, and a new hue would have to be
+#     re-validated for CVD separation against six existing ones to add nothing.
 _BASE_COLOR = "#0072B2"
 _ENSEMBLE_COLOR = "#E69F00"
 _STATUS_COLORS: dict[str | None, str] = {
@@ -944,6 +944,7 @@ _STATUS_COLORS: dict[str | None, str] = {
     "RUNNING": "#0072B2",
     "PENDING": "#999999",
     AWAITING_CAPACITY: "#999999",
+    EMITTED: "#999999",
     "FAILED": "#D55E00",
     "PARTIAL": "#E69F00",
     "CANCELLED": "#CC79A7",

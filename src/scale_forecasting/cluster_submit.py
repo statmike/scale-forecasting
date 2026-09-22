@@ -34,7 +34,7 @@ from .dataproc_cluster import (
     cluster_name,
     cluster_sizing,
 )
-from .errors import EngineError, get_logger
+from .errors import EngineError, JobIdTaken, get_logger
 from .hardware import spark_executor_env
 from .job_wait import wait_for_job
 from .staging import stage_code, stage_config
@@ -168,9 +168,21 @@ def _submit_job_and_wait(
     """
     from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-    op = client.submit_job_as_operation(
-        request={"project_id": project_id, "region": region, "job": job}
-    )
+    from google.api_core.exceptions import AlreadyExists
+
+    try:
+        op = client.submit_job_as_operation(
+            request={"project_id": project_id, "region": region, "job": job}
+        )
+    except AlreadyExists as exc:
+        # `build_job` names the job, so the cluster path can collide on an id exactly as the
+        # Serverless path can. Same translation, same reason — see `errors.JobIdTaken`.
+        named = getattr(getattr(job, "reference", None), "job_id", "") or "(server-named)"
+        raise JobIdTaken(
+            f"cluster job {named} already exists in {project_id}/{region}: the platform holds this "
+            f"job id but the registry has no attempt for it. Re-run with a different run_id, or "
+            f"bump the attempt by letting --force walk past it."
+        ) from exc
     submitted = op.metadata.job_id
     if not wait:
         return (submitted or "", "SUBMITTED", "")

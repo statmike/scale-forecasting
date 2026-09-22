@@ -42,11 +42,13 @@ from typing import TYPE_CHECKING, Any
 
 from .reconcile import ProbeReport, _read_and_probe
 from .vocabulary import (
+    _EMITTED,
     _TERMINAL,
     CAPACITY_ABANDONED,
     NATIVE_FAILED,
     NATIVE_NOT_FOUND,
     NATIVE_SUCCEEDED,
+    NEVER_LAUNCHED,
     RUNTIME_FAILED,
     RUNTIME_LOST,
     VERDICT_ABANDONED_WAIT,
@@ -89,7 +91,7 @@ class SettleDecision:
 def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
     """The status a family's stale row should be repaired to, or ``None`` to leave it alone (pure).
 
-    Five arms write, everything else refuses:
+    Six arms write, everything else refuses:
 
     * ``STALE_REGISTRY`` + runtime ``SUCCEEDED`` + every expected cell landed → ``COMPLETED``.
     * ``STALE_REGISTRY`` + runtime ``FAILED`` → ``FAILED`` / ``RUNTIME_FAILED``. The runtime is
@@ -98,6 +100,10 @@ def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
       to exist or the verb cannot repair the runtime that needs it most: a Ray cluster is garbage-
       collected when its job finishes, so "no record of the job, and all the work is in BigQuery"
       is the *normal* trace of a successful Ray run whose driver died before it closed the row.
+    * ``LOST`` **on an ``EMITTED`` row** → ``FAILED`` / ``NEVER_LAUNCHED``. Checked before the
+      general LOST arm: an EMITTED row is an id `launch_plan.stage_run` handed to somebody else, so
+      "the runtime has never heard of this job" means the command was never run, not that a running
+      job vanished. Same write, a truthful token.
     * ``LOST`` (runtime gone, cells missing, past the startup grace) → ``FAILED`` /
       ``RUNTIME_LOST``.
     * ``ABANDONED_WAIT`` (still ``AWAITING_CAPACITY`` past any walk's own budget) **and cells
@@ -135,6 +141,21 @@ def _settle_decision(fv: FamilyVerdict) -> SettleDecision | None:
     if fv.verdict == VERDICT_LIKELY_COMPLETED and fv.native_state == NATIVE_NOT_FOUND and complete:
         return SettleDecision(
             "COMPLETED", None, f"runtime job gone; all {fv.n_done}/{exp} series landed"
+        )
+    if fv.verdict == VERDICT_LOST and (fv.registry_status or "") == _EMITTED:
+        # Ahead of the general LOST arm, because for an EMITTED row "the runtime has no such job"
+        # is not evidence of a loss — it is evidence that nothing was ever started. The row exists
+        # only so the attempt counter can see an id `launch_plan.stage_run` handed out; if the
+        # operator never pasted the command, this is the phantom that leaves behind.
+        #
+        # Settling it early is safe even when the operator is simply slow. A launch that happens
+        # after this write files a *new* row at the same attempt with a later ``created_at``, and
+        # ``v_run_jobs`` takes the latest — so a premature settle is superseded by the real run
+        # rather than fighting it.
+        return SettleDecision(
+            "FAILED",
+            NEVER_LAUNCHED,
+            f"emitted command never run; {fv.n_done}/{exp} series landed",
         )
     if fv.verdict == VERDICT_LOST:
         return SettleDecision(
