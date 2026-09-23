@@ -1,0 +1,44 @@
+{
+  "run_name": "smoke_21_full_catalogue",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 50
+  },
+  "models": [
+    "autoets",
+    "croston",
+    "holtwinters",
+    "naive_drift",
+    "naive_mean",
+    "naive_moving_average",
+    "naive_seasonal",
+    "prophet",
+    "sarimax",
+    "stl_bagging",
+    "theta",
+    "ucm",
+    "lightgbm",
+    "regression_lags",
+    "xgboost",
+    "neuralprophet",
+    "arima_plus",
+    "timesfm"
+  ],
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": ["mean", "median", "inverse_error", "nnls", "ridge", "xgb"]
+  },
+  "compute": {
+    "ensemble": {
+      "mode": "barrier"
+    }
+  }
+}

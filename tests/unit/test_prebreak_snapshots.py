@@ -135,6 +135,13 @@ _POST_BREAK = {
     # — so what guards it is `per_family_runtimes_demo.json` sitting beside it, not a pre-break
     # digest it never had.
     "configs/per_family_runtimes_cpu_demo.json",
+    # The catalogue sweep, written 2026-09-23 — also nothing to hash before the break. It is the
+    # first config to name every registered model at once, and it exists because the twenty smokes
+    # before it named only seven of the eighteen between them, so eleven had never executed anywhere
+    # but a unit test. A pre-break digest could not have covered it and would say nothing about what
+    # it proves: what guards this file is the live row it owes in `docs/validation.md`, not an
+    # identity recorded before the models were ever run.
+    "configs/smokes/21_full_catalogue.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

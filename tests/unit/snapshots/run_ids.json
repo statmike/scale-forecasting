@@ -37,5 +37,6 @@
   "configs/smokes/17_gpu_absent_serverless.json": "smoke-17-gpu-absent-serverless-ea3341fa9fd5",
   "configs/smokes/18_gpu_absent_cluster.json": "smoke-18-gpu-absent-cluster-ef1858b8b83d",
   "configs/smokes/19_gpu_absent_ray.json": "smoke-19-gpu-absent-ray-1c033f10707b",
-  "configs/smokes/20_gpu_intent_cpu_family.json": "smoke-20-gpu-intent-cpu-family-239ba1e33242"
+  "configs/smokes/20_gpu_intent_cpu_family.json": "smoke-20-gpu-intent-cpu-family-239ba1e33242",
+  "configs/smokes/21_full_catalogue.json": "smoke-21-full-catalogue-98e3cb319f96"
 }

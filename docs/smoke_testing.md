@@ -38,9 +38,21 @@ Run them cheap → expensive; each is numbered in that order.
 | 18 | `18_gpu_absent_cluster.json` | The same refusal on a Dataproc cluster GPU worker |
 | 19 | `19_gpu_absent_ray.json` | The same refusal on a Ray GPU worker |
 | 20 | `20_gpu_intent_cpu_family.json` | The **opposite** mistake: `use_gpu: true` with the deep-learning family overridden to `cpu`. The run must finish on CPU, having bought no accelerator |
+| 21 | `21_full_catalogue.json` | Every registered model — all eighteen — in one run, and every ensemble strategy including the two learned ones no other config selects |
 
 Every other smoke reads the managed-Iceberg source table, so 13 gives the native-format read its own
 proof; together they validate both source formats.
+
+**Why 21 exists, given 14 already runs all four families.** 14 proves the *shape* of a full run: four
+families, a native leg and an ensemble under one identity. It does that with six models. The other
+twenty smokes between them name seven of the eighteen registered models, so the remaining eleven had
+never executed anywhere but a local unit test — and the way a broken model fails on the distributed
+path is quiet. Its fold loop completes, its metrics come out as NaN, the row-builder maps those to
+NULL exactly as designed, and the cell lands as a well-formed row of nothing. Nobody sees a stack
+trace; the model simply never wins a leaderboard. 21 is deliberately cheap and plain — Serverless
+CPU, fifty series, no holiday or transform features — so that the only thing it varies is which
+models and which blending strategies are in play. The same reasoning covers `ridge` and `xgb`: both
+are selectable today, and neither had ever been fitted outside a unit test.
 
 **Why 16 exists, given 04 and 06 already cover CPU and GPU clusters.** They cover them one run at a
 time. A Dataproc cluster has exactly one worker machine type, so a run whose ephemeral cluster
