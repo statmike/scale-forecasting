@@ -1,0 +1,24 @@
+{
+  "run_name": "smoke_25_backtest_skip",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 20
+  },
+  "models": [
+    "theta",
+    "holtwinters",
+    "naive_seasonal"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 6,
+    "step": 28,
+    "min_train": 1300,
+    "scheme": "expanding",
+    "short_series": "skip",
+    "decision_metric": "maape"
+  }
+}

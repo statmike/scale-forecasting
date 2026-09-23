@@ -38,5 +38,9 @@
   "configs/smokes/18_gpu_absent_cluster.json": "smoke-18-gpu-absent-cluster-ef1858b8b83d",
   "configs/smokes/19_gpu_absent_ray.json": "smoke-19-gpu-absent-ray-1c033f10707b",
   "configs/smokes/20_gpu_intent_cpu_family.json": "smoke-20-gpu-intent-cpu-family-239ba1e33242",
-  "configs/smokes/21_full_catalogue.json": "smoke-21-full-catalogue-98e3cb319f96"
+  "configs/smokes/21_full_catalogue.json": "smoke-21-full-catalogue-98e3cb319f96",
+  "configs/smokes/22_backtest_sliding_overlap.json": "smoke-22-backtest-sliding-overlap-eca75eb54835",
+  "configs/smokes/23_backtest_frozen_shrink.json": "smoke-23-backtest-frozen-shrink-ce2793df03f2",
+  "configs/smokes/24_backtest_stale.json": "smoke-24-backtest-stale-1c0d92a16531",
+  "configs/smokes/25_backtest_skip.json": "smoke-25-backtest-skip-d28444e0a889"
 }

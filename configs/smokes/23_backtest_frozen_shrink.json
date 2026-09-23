@@ -1,0 +1,25 @@
+{
+  "run_name": "smoke_23_backtest_frozen_shrink",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 20
+  },
+  "models": [
+    "theta",
+    "holtwinters",
+    "naive_seasonal"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 6,
+    "step": 28,
+    "min_train": 1300,
+    "scheme": "expanding_frozen",
+    "short_series": "shrink_train",
+    "min_train_floor": 1000,
+    "decision_metric": "mae"
+  }
+}

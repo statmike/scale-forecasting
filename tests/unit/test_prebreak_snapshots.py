@@ -142,6 +142,15 @@ _POST_BREAK = {
     # it proves: what guards this file is the live row it owes in `docs/validation.md`, not an
     # identity recorded before the models were ever run.
     "configs/smokes/21_full_catalogue.json",
+    # The backtest-semantics quartet, written 2026-09-23 — post-break like the rest, and grouped
+    # here because they are one sweep rather than four runtime combinations. Each over-asks the fold
+    # grid on purpose so that a `short_series` policy actually *branches*: naming a policy in a
+    # config that the data comfortably satisfies exercises nothing, and a coverage tool reading
+    # configs cannot tell the difference.
+    "configs/smokes/22_backtest_sliding_overlap.json",
+    "configs/smokes/23_backtest_frozen_shrink.json",
+    "configs/smokes/24_backtest_stale.json",
+    "configs/smokes/25_backtest_skip.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

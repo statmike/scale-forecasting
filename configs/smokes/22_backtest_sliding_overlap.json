@@ -1,0 +1,26 @@
+{
+  "run_name": "smoke_22_backtest_sliding_overlap",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 20
+  },
+  "models": [
+    "theta",
+    "holtwinters",
+    "naive_seasonal"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 6,
+    "step": 28,
+    "min_train": 1300,
+    "scheme": "sliding",
+    "window": 400,
+    "short_series": "overlap",
+    "control_arm": true,
+    "decision_metric": "rmse"
+  }
+}

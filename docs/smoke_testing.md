@@ -39,6 +39,10 @@ Run them cheap → expensive; each is numbered in that order.
 | 19 | `19_gpu_absent_ray.json` | The same refusal on a Ray GPU worker |
 | 20 | `20_gpu_intent_cpu_family.json` | The **opposite** mistake: `use_gpu: true` with the deep-learning family overridden to `cpu`. The run must finish on CPU, having bought no accelerator |
 | 21 | `21_full_catalogue.json` | Every registered model — all eighteen — in one run, and every ensemble strategy including the two learned ones no other config selects |
+| 22 | `22_backtest_sliding_overlap.json` | The `sliding` scheme, the `overlap` short-series policy, and a `control_arm` on a refitting scheme |
+| 23 | `23_backtest_frozen_shrink.json` | The `expanding_frozen` scheme and the `shrink_train` policy working against its `min_train_floor` |
+| 24 | `24_backtest_stale.json` | The `expanding_stale` scheme — one fit walked forward across every fold |
+| 25 | `25_backtest_skip.json` | The `skip` policy: a short series goes unscored, but still gets its forecast |
 
 Every other smoke reads the managed-Iceberg source table, so 13 gives the native-format read its own
 proof; together they validate both source formats.
@@ -53,6 +57,31 @@ trace; the model simply never wins a leaderboard. 21 is deliberately cheap and p
 CPU, fifty series, no holiday or transform features — so that the only thing it varies is which
 models and which blending strategies are in play. The same reasoning covers `ridge` and `xgb`: both
 are selectable today, and neither had ever been fitted outside a unit test.
+
+**Why 22–25 are one sweep rather than four smokes.** Everything above this point varies a runtime, a
+piece of hardware or an ensemble mode. These four vary what a *fold* means, and they have to be four
+files only because `backtest.scheme` and `backtest.short_series` each hold one value at a time.
+
+They share one deliberate trick. Every series in the seeded panel is exactly 1,460 observations, so
+a short-series policy fires for all of them or for none — and the only way to make one *branch* is
+to ask for a fold grid the data cannot quite meet. All four ask for six folds of 28 at a minimum
+training length of 1,300, which 1,460 misses by a small margin, and then each answers the shortfall
+in its own way: 22 shrinks the step to 26 and buys all six folds at the cost of fold independence,
+23 drops the training minimum to 1,292 and keeps the step, 24 takes the default and settles for five
+of six, and 25 declines to score the series at all while still forecasting it. Copying one of these
+files and relaxing the grid would leave the policy named but never exercised, which is the mistake
+they are shaped to avoid.
+
+`short_series="error"` has no smoke on purpose: it refuses the panel at pre-flight instead of
+running, so there is no run to record.
+
+**Read `backtest_refit`, not the scheme you asked for.** Smoke 23 requests `expanding_frozen`, which
+asks every model to fit once and then be handed the intervening observations — `recondition`. Only
+`naive_seasonal` can do that. `holtwinters` and `theta` have no reconditioning seam, so the engine
+refit them per fold and recorded `backtest_refit='unsupported'` on their cells. Both outcomes are
+correct behaviour, and the column is the only place the difference shows: the config, the leaderboard
+and the fold count all look identical either way. If you are comparing a frozen scheme against a
+refitting one, check this column first, or you may be comparing a scheme against itself.
 
 **Why 16 exists, given 04 and 06 already cover CPU and GPU clusters.** They cover them one run at a
 time. A Dataproc cluster has exactly one worker machine type, so a run whose ephemeral cluster
