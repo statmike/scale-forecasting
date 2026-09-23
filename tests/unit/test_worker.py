@@ -235,6 +235,36 @@ def test_auto_on_an_unscorable_series_falls_back_and_says_so() -> None:
     assert res.point_forecast_decision == "auto-no-backtest"
 
 
+def test_the_same_fallback_under_a_squared_error_metric_ships_the_mean_arm() -> None:
+    """The one place `backtest.decision_metric` changes which number is published.
+
+    Everywhere else the decision metric only ranks models. Here it decides what "corrected" means:
+    `corrected_arm_for` reads `BaseMetric.mean_optimal`, so a squared-error metric gets the mean
+    and everything else gets the median — and a cell that cannot measure the choice for itself
+    falls back to exactly that. The test above is this test with the default metric; only the
+    metric differs, so a regression that hard-coded the median would pass there and fail here.
+
+    Every shipped config has used `wape`, which is not mean-optimal, so this branch has never run
+    outside this file.
+    """
+    cfg = _cfg(
+        backtest={
+            "enabled": True,
+            "n_folds": 2,
+            "horizon": HORIZON,
+            "step": HORIZON,
+            "min_train": 30,
+            "decision_metric": "rmse",
+        },
+        output={"point_forecast": "auto"},
+    )
+    res = run_cell(_series(30 + HORIZON - 1), "theta", cfg)
+    assert res.status == "ok"
+    assert len(res.predictions) == HORIZON
+    assert res.point_forecast_source == "mean"
+    assert res.point_forecast_decision == "auto-no-backtest"
+
+
 # --- a scoring shortfall must never cost the forecast --------------------------
 #
 # The whole point of this section: backtesting *scores* a model, it does not produce the forecast.
@@ -783,6 +813,65 @@ def test_a_frozen_scheme_reports_fewer_fits_than_the_plan_assumed() -> None:
     assert res.n_fits == 3  # two frozen-scheme fits + the final full-history one
     assert estimate_workload(cfg, obs_counts=[120]).n_fits == 4
     assert (res.n_folds_achieved or 0) + 1 == 4  # the approximation this column replaces
+
+
+def test_the_stale_scheme_pays_one_fit_and_still_scores_every_fold() -> None:
+    """The cheapest scheme there is, and the one whose cost is easiest to get wrong.
+
+    ``expanding_stale`` fits **once** and walks that model forward blind through every fold, so
+    three folds cost one fit rather than four — the largest gap between plan-time estimate and
+    measurement of any scheme. Scoring all three folds off a single fit is the whole proposition;
+    a version that quietly refit per fold would produce better numbers, agree with the estimate,
+    and answer a different question than the one the scheme was selected to ask.
+    """
+    from scale_forecasting.config import estimate_workload
+
+    cfg = _cfg(
+        models=["naive_mean"],
+        backtest={
+            "enabled": True,
+            "n_folds": 3,
+            "horizon": 7,
+            "step": 7,
+            "min_train": 30,
+            "scheme": "expanding_stale",
+        },
+    )
+    res = run_cell(_series(), "naive_mean", cfg)
+    assert res.status == "ok"
+    assert res.backtest_refit == "extrapolate"
+    assert res.n_folds_achieved == 3
+    assert res.n_fits == 2  # the one frozen fit, plus the final full-history one that ships
+    assert estimate_workload(cfg, obs_counts=[120]).n_fits == 4
+    assert math.isfinite(float(res.metrics["wape"]))
+
+
+def test_the_sliding_scheme_refits_per_fold_on_a_fixed_width_window() -> None:
+    """Same fit count as `expanding`, strictly less training data — which is the point of it.
+
+    The two refit schemes are indistinguishable on `n_fits` and on `backtest_refit`, so the only
+    observable that separates them is how much history each fold trained on. `train_rows_total`
+    is that observable: under a 40-observation window three folds can never pay for more than
+    120 rows, where the expanding scheme's third fold alone trains on more than 100.
+    """
+    geometry: dict[str, Any] = {
+        "enabled": True,
+        "n_folds": 3,
+        "horizon": 7,
+        "step": 7,
+        "min_train": 30,
+    }
+    sliding = run_cell(
+        _series(), "theta", _cfg(backtest={**geometry, "scheme": "sliding", "window": 40})
+    )
+    expanding = run_cell(_series(), "theta", _cfg(backtest=geometry))
+
+    assert sliding.status == "ok"
+    assert sliding.backtest_refit == "per_fold"
+    assert sliding.n_folds_achieved == expanding.n_folds_achieved == 3
+    assert sliding.n_fits == expanding.n_fits == 4
+    assert (sliding.train_rows_total or 0) < (expanding.train_rows_total or 0)
+    assert math.isfinite(float(sliding.metrics["wape"]))
 
 
 def test_a_per_series_search_is_counted_separately_from_the_published_fits() -> None:

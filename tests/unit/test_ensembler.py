@@ -119,6 +119,60 @@ def test_ridge_returns_weight_per_model() -> None:
     assert set(weights["ridge"]) == set(cfg.models)
 
 
+def test_xgb_weights_are_normalized_importances_not_coefficients() -> None:
+    """The third learned strategy, and the one whose weights mean something different.
+
+    ``nnls`` and ``ridge`` return regression coefficients; ``xgb`` returns the meta-learner's
+    **normalized feature importances**. That distinction is why it is asserted separately:
+    importances are non-negative and sum to one by construction, so a blend built from them is
+    always a convex combination, where a ridge coefficient can legitimately be negative. A change
+    that started returning raw importances, or coefficients, would still produce a plausible
+    weight per model and quietly change what the ensemble is.
+    """
+    cfg = _cfg(["xgb"])
+    weights, artifacts, _ = fit_learned(_oof(cfg.models), cfg)
+
+    w = weights["xgb"]
+    assert set(w) == set(cfg.models)
+    assert all(v >= 0.0 for v in w.values())
+    assert sum(w.values()) == pytest.approx(1.0)
+    assert artifacts["xgb"]
+
+
+def test_xgbs_artifact_is_the_fitted_model_where_the_others_are_a_dict() -> None:
+    """An asymmetry in the payload, pinned because a reader would not expect it.
+
+    ``nnls`` and ``ridge`` pickle a plain ``{"strategy", "models", "weights"}`` dict — the weights
+    are everything needed to re-apply them. ``xgb`` pickles the estimator itself, because its
+    importances summarise the model rather than being the model. Anything consuming these
+    artifacts has to handle both shapes, so both shapes are asserted rather than assumed.
+    """
+    import pickle
+
+    cfg = _cfg(["ridge", "xgb"])
+    weights, artifacts, _ = fit_learned(_oof(cfg.models), cfg)
+
+    assert isinstance(pickle.loads(artifacts["ridge"]), dict)
+    revived = pickle.loads(artifacts["xgb"])
+    assert not isinstance(revived, dict)
+    assert hasattr(revived, "predict"), "the xgb artifact should be the fitted estimator"
+    assert set(weights) == {"ridge", "xgb"}
+
+
+def test_the_learned_dispatch_has_a_branch_for_every_learned_strategy() -> None:
+    """`fit_learned` ends in a bare ``else:  # xgb``, so an unhandled strategy is fit as xgb.
+
+    That is correct for three known strategies and silently wrong for a fourth. There would be no
+    error to catch — a new learned strategy would produce weights, an artifact and a leaderboard
+    entry under its own name, all of them xgb's. This is the tripwire: extending
+    `LEARNED_STRATEGIES` without extending the dispatch fails here rather than shipping a
+    mislabelled ensemble.
+    """
+    from scale_forecasting.config import LEARNED_STRATEGIES
+
+    assert LEARNED_STRATEGIES == {"nnls", "ridge", "xgb"}
+
+
 def test_multi_strategy_fits_each_learned() -> None:
     cfg = _cfg(["nnls", "ridge"])
     weights, artifacts, _ = fit_learned(_oof(cfg.models), cfg)
