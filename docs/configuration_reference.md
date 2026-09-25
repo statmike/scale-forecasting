@@ -1131,9 +1131,16 @@ blending strategies to compute.
 |-------|------|---------|-----------|---------|
 | `mode` | `"barrier"` \| `"microbatch"` | `"barrier"` | — | Blend once after every family finishes, or drain series as they become ready. |
 | `microbatch_interval_s` | `float` | `60.0` | `> 0` | Seconds between readiness polls in `microbatch` mode. Inert in `barrier`. |
-| `runtime` | `"spark"` \| `"ray"` | `"spark"` | — | **Accepted and not read** — see the warning below. |
-| `spark_mode` | `"serverless"` \| `"cluster"` | `null` | Spark only | **Accepted and not read** — see the warning below. |
-| `spark_cluster_name` | `str` | `null` | requires `spark_mode="cluster"` | **Accepted and not read** — see the warning below. |
+
+**Those are the only two fields, and there is no choice of *where* the ensemble runs.** The node is
+hardcoded to BigQuery plus driver-side pandas — it reads predictions, blends them and writes rows,
+taking no Spark or Ray cluster of its own. This block used to declare `runtime`, `spark_mode` and
+`spark_cluster_name` alongside them, accepted by the loader and read by nothing; they were removed,
+so a config that still sets one now fails at load rather than quietly starting a differently-keyed
+run that behaves identically. **No `run_id` changed when they went.** Removing a defaulted field
+would normally re-key every config, since the digest covers defaults too, so the three keys stay
+pinned inside the digest at the values they used to carry — safe precisely because nothing read
+them, which means no id on record ever meant anything other than what it means now.
 
 **The two modes differ in when, not in what.** Both run on the driver, both write the same
 `ensemble_<strategy>` prediction and leaderboard rows, and both honour the rule that a series is
@@ -1153,13 +1160,6 @@ after the last member finished.
 A shorter interval reaps series sooner and issues more BigQuery readiness queries; 60 s is a
 deliberate middle for runs measured in tens of minutes. Below a few seconds you are paying query
 cost to discover nothing has changed.
-
-> **Warning — `runtime`, `spark_mode` and `spark_cluster_name` here do nothing today.** The ensemble
-> node is hardcoded to run in BigQuery plus driver-side pandas: it reads predictions, blends them and
-> writes rows, taking no Spark or Ray cluster of its own. These three fields are accepted by the
-> config loader and then ignored. They are still part of the config digest, so setting one changes
-> your `run_id` — and therefore starts a *new* run — while changing nothing about how the run
-> executes. Leave them unset.
 
 ## A minimal config
 

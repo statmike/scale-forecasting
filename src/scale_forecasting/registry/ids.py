@@ -88,6 +88,29 @@ _NOT_IDENTITY: tuple[tuple[str, ...], ...] = (
     ("compute", "capacity"),
 )
 
+# Fields that have been *removed* from the config models but are pinned back into the digest at the
+# defaults they used to carry, so that deleting them did not re-key every run in the registry.
+#
+# ``_canonical_config`` hashes ``model_dump()``, which includes defaults — so dropping a defaulted
+# field moves the id of every config in existence, whether or not any of them ever set it. That cost
+# is worth paying when a field's *meaning* changes, because then the old ids genuinely describe a
+# different question. It is not worth paying to delete a field that was never read: nothing about
+# any recorded result changes, and the whole validation ledger goes stale to buy a tidier digest.
+#
+# 2026-09-25 — ``compute.ensemble.runtime`` / ``.spark_mode`` / ``.spark_cluster_name``. The
+# ensemble node is hard-wired to the driver, so all three were inert. See ``EnsembleCompute``.
+#
+# **Do not extend this casually.** Every entry is a key in the digest describing a config shape a
+# reader can no longer see anywhere else, and enough of them turn the digest into fiction. The bar
+# is the one met above: the field was read by nothing, so no id here ever meant what it claimed.
+_REMOVED_DEFAULTS: dict[tuple[str, ...], dict[str, object]] = {
+    ("compute", "ensemble"): {
+        "runtime": "spark",
+        "spark_mode": None,
+        "spark_cluster_name": None,
+    },
+}
+
 
 def _canonical_config(cfg: RunConfig) -> str:
     """Serialize a config to a stable, order-independent JSON string.
@@ -107,6 +130,12 @@ def _canonical_config(cfg: RunConfig) -> str:
     telemetry keeps the full ``provenance`` block naming the run the measurements came from. A
     re-run therefore lands on the same ``run_id`` even if it is sized from newer evidence, which is
     what append-only-plus-dedupe-on-read requires.
+
+    ``_REMOVED_DEFAULTS`` then puts back the keys of fields the models no longer have, at the values
+    they used to default to. That keeps a deleted-but-never-read field from re-keying every run in
+    the registry. It is the mirror image of the exclusion above: one drops a key the config carries,
+    the other restores a key it no longer does, and both exist so identity tracks the question a run
+    was asked rather than the shape of the file that asked it.
     """
     payload = cfg.model_dump(mode="json")
     for *parents, leaf in _NOT_IDENTITY:
@@ -117,6 +146,15 @@ def _canonical_config(cfg: RunConfig) -> str:
                 break
         if isinstance(node, dict):
             node.pop(leaf, None)
+    for path, defaults in _REMOVED_DEFAULTS.items():
+        node = payload
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict):
+            for key, value in defaults.items():
+                node.setdefault(key, value)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

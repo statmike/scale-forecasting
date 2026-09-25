@@ -622,7 +622,7 @@ def test_launch_ensemble_job_microbatch_mode(monkeypatch: pytest.MonkeyPatch) ->
     _patch_ensemble_seams(monkeypatch, calls)
     cfg = _cfg(
         ensemble={"enabled": True, "strategies": ["mean"]},
-        compute={"ensemble": {"runtime": "spark", "mode": "microbatch"}},
+        compute={"ensemble": {"mode": "microbatch"}},
     )
     job_launch.launch_ensemble_job(cfg, "run-abc", _SETTINGS)
     assert calls.get("microbatch") is True

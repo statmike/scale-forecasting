@@ -439,37 +439,40 @@ class FamilyCompute(BaseModel):
 
 
 class EnsembleCompute(BaseModel):
-    """Compute for the ensemble DAG node — its own runtime and trigger mode.
+    """*When* the ensemble DAG node runs. Not *where* — there is only one where.
 
-    Distinct from `EnsembleConfig` (which selects the ensemble *strategies*): this picks *where* and
-    *when* the ensemble runs. ``mode="barrier"`` ensembles once after every base model finishes;
-    ``mode="microbatch"`` ensembles each series as soon as its upstream base models complete, so the
-    ensemble overlaps the families instead of queueing behind the slowest one.
+    Distinct from `EnsembleConfig`, which selects the ensemble *strategies*. ``mode="barrier"``
+    ensembles once after every base model finishes; ``mode="microbatch"`` ensembles each series as
+    soon as its upstream base models complete, so the ensemble overlaps the families instead of
+    queueing behind the slowest one.
 
     Both modes are live. The microbatch shape was measured on Airflow in smoke 15 (2026-09-20): the
     ensemble task started in the same second as the four family tasks, ran 2,879 s alongside them,
     and finished 20 s after the last member — which is not a shape barrier mode can produce.
+
+    **This model used to carry ``runtime``, ``spark_mode`` and ``spark_cluster_name`` too.** They
+    were accepted by the loader, documented as inert, and read by nothing: the ensemble node is
+    hard-wired to the driver (`dag.build_dag_nodes` stamps it ``runtime="bigquery"``, and
+    `job_launch.run_ensemble` blends in driver pandas, taking no cluster of its own). Because they
+    were still in the config digest, setting one started a new run and changed nothing about it.
+    They are gone rather than documented-as-inert so the surface stops offering a choice that does
+    not exist. Setting one now fails at load, which beats quietly starting a differently-keyed run
+    that behaves identically.
+
+    **No ``run_id`` moved.** Identity hashes ``model_dump()``, defaults included, so dropping three
+    defaulted fields would ordinarily re-key every config in existence and stale the whole
+    validation ledger to buy a tidier surface. ``registry.ids._REMOVED_DEFAULTS`` pins the three
+    keys back into the digest at the values they used to carry, which is legitimate here precisely
+    because nothing ever read them: no id on record ever meant anything different from what it
+    means now.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    runtime: Runtime = "spark"
     mode: EnsembleMode = "barrier"
-    spark_mode: SparkMode | None = None
-    spark_cluster_name: str | None = None
     # Seconds between readiness polls in ``mode="microbatch"`` (how often the ensemble drains the
     # series whose base models have all landed). Inert in ``barrier`` mode. Part of the run_id.
     microbatch_interval_s: float = Field(default=60.0, gt=0)
-
-    @model_validator(mode="after")
-    def _check(self) -> EnsembleCompute:
-        if self.runtime == "ray" and (
-            self.spark_mode is not None or self.spark_cluster_name is not None
-        ):
-            raise ValueError("spark_mode/spark_cluster_name are only valid when runtime is 'spark'")
-        if self.spark_cluster_name is not None and self.spark_mode not in (None, "cluster"):
-            raise ValueError("spark_cluster_name requires spark_mode='cluster'")
-        return self
 
 
 class ProfileConfig(BaseModel):

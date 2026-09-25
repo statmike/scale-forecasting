@@ -31,7 +31,7 @@ def _cfg(**compute: Any) -> RunConfig:
 def test_omitting_families_keeps_defaults() -> None:
     cfg = _cfg()
     assert cfg.compute.families == {}
-    assert cfg.compute.ensemble == EnsembleCompute()  # runtime=spark, mode=barrier
+    assert cfg.compute.ensemble == EnsembleCompute()  # mode=barrier, interval=60s
 
 
 def test_resolve_inherits_flat_defaults() -> None:
@@ -189,14 +189,18 @@ def test_inherited_serverless_t4_rejected_at_load() -> None:
 
 
 def test_ensemble_compute_defaults_and_override() -> None:
-    cfg = _cfg(ensemble={"runtime": "ray", "mode": "microbatch"})
-    assert cfg.compute.ensemble.runtime == "ray"
+    cfg = _cfg(ensemble={"mode": "microbatch"})
     assert cfg.compute.ensemble.mode == "microbatch"
+    assert cfg.compute.ensemble.microbatch_interval_s == 60.0
 
 
-def test_ensemble_ray_rejects_spark_fields() -> None:
-    with pytest.raises(ValidationError):
-        _cfg(ensemble={"runtime": "ray", "spark_mode": "cluster"})
+@pytest.mark.parametrize("field", ["runtime", "spark_mode", "spark_cluster_name"])
+def test_the_ensemble_node_offers_no_choice_of_where_it_runs(field: str) -> None:
+    """These three were accepted and read by nothing — the node is hard-wired to the driver. They
+    were removed rather than left documented-as-inert, so a config that still sets one now fails
+    loudly at load instead of silently re-keying the run and changing nothing."""
+    with pytest.raises(ValidationError, match="extra"):
+        _cfg(ensemble={"mode": "barrier", field: "spark"})
 
 
 # --- resolver guards -----------------------------------------------------------

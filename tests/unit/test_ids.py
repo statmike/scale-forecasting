@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from scale_forecasting.config import RunConfig
-from scale_forecasting.registry.ids import make_model_hash, make_run_id
+from scale_forecasting.registry.ids import _canonical_config, make_model_hash, make_run_id
 
 
 def _cfg(**over: Any) -> RunConfig:
@@ -91,6 +95,37 @@ def test_the_resolved_profile_source_does_not_move_the_run_id() -> None:
 def test_the_rest_of_the_profile_block_still_moves_the_run_id() -> None:
     """Only `source` is exempt — the sizing knobs themselves describe a different experiment."""
     assert make_run_id(_cfg(compute={"profile": {"measure": "controlled"}})) != make_run_id(_cfg())
+
+
+# --- removed fields, pinned back into the digest ---------------------------------
+#
+# `test_prebreak_snapshots` is what actually proves no id moved — it pins the digest of all 44
+# shipped configs, and deleting `_REMOVED_DEFAULTS` turns every one of them red at once. What that
+# failure cannot do is *say why*: it reports 44 digests that changed, which reads like an intended
+# surface break rather than a removed compatibility pin. These two tests are the label on it.
+
+
+def test_the_digest_still_carries_the_removed_ensemble_fields() -> None:
+    """The three `EnsembleCompute` fields deleted 2026-09-25 are pinned at their old defaults.
+
+    They were read by nothing (the ensemble node is hard-wired to the driver), so removing them
+    changed no behaviour — but the digest includes defaults, so without this pin every run in the
+    registry would be re-keyed and the whole validation ledger staled to buy a tidier config model.
+    """
+    ensemble = json.loads(_canonical_config(_cfg()))["compute"]["ensemble"]
+    assert ensemble["runtime"] == "spark"
+    assert ensemble["spark_mode"] is None
+    assert ensemble["spark_cluster_name"] is None
+
+
+def test_a_removed_field_cannot_be_set_even_though_the_digest_names_it() -> None:
+    """The pin lives in the digest only. The config surface still refuses the field.
+
+    This is the pairing that keeps the shim honest: were the model to start accepting these again,
+    the pin would silently swallow whatever was set and two different configs would share an id.
+    """
+    with pytest.raises(ValidationError):
+        _cfg(compute={"ensemble": {"runtime": "ray"}})
 
 
 # --- model_hash ----------------------------------------------------------------

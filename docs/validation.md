@@ -28,8 +28,8 @@ and `bool` state reachable from `RunConfig` — against the shipped configs and 
 in the tables below, and every value left over must be written down as one of four things: covered
 by a named unit test, a genuine gap, unreachable, or exercised somewhere the join cannot see. The
 set is checked for equality, so a value that becomes unproven fails the build until somebody
-classifies it, and one that becomes proven fails until its entry is deleted. Today that is **119
-declared values: 79 proven live, 34 exercised offline, 4 genuine gaps, 2 not work.**
+classifies it, and one that becomes proven fails until its entry is deleted. Today that is **114
+declared values: 77 proven live, 34 exercised offline, 1 genuine gap, 2 not work.**
 
 ## Architecture axes
 

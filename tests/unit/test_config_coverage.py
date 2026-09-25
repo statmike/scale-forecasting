@@ -154,29 +154,9 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_dataproc_cluster.py::"
         "test_preflight_off_asks_for_the_planned_fleet_and_never_reads_the_quota"
     ),
-    # --- the ensemble node's compute, which is declared and not wired ----------------------------
-    # `EnsembleCompute.runtime`, `.spark_mode` and `.spark_cluster_name` are read by nothing. The
-    # ensemble node is hard-wired to the driver: `dag.build_dag_nodes` stamps it `runtime=bigquery`
-    # with `spark_mode=None`, and `job_launch.run_ensemble` blends in driver pandas and says so. The
-    # two live fields on that model — `mode` and `microbatch_interval_s` — are covered elsewhere.
-    #
-    # These entries are `gap:` rather than `reason:` on purpose. A declared value nothing reads is
-    # not exempt work; it is worse than untested, because the reference promises a choice the
-    # product does not offer. It closes by wiring the fields up or by deleting them, and deleting
-    # them re-keys every run_id (`_canonical_config` dumps defaults too), so it is an owner call.
-    "compute.ensemble.runtime=ray": (
-        "gap: nothing reads `cfg.compute.ensemble.runtime`. A test asserts the field accepts the "
-        "value and rejects Spark-only siblings beside it, which is validation, not behaviour — the "
-        "ensemble runs on the driver either way."
-    ),
-    "compute.ensemble.spark_mode=cluster": (
-        "gap: nothing reads `cfg.compute.ensemble.spark_mode`. The only test naming this value "
-        "asserts it is *rejected* alongside `runtime=ray`; no accepting path exists to cover."
-    ),
-    "compute.ensemble.spark_mode=serverless": (
-        "gap: nothing reads `cfg.compute.ensemble.spark_mode`. Setting it is documented, accepted, "
-        "and inert."
-    ),
+    # The ensemble node's `runtime`/`spark_mode`/`spark_cluster_name` used to sit here as gaps. They
+    # were read by nothing — the node is hard-wired to the driver — so they were deleted from
+    # `EnsembleCompute` rather than exempted. A value that no longer exists needs no entry.
     "compute.families.runtime=spark": (
         "tests/unit/test_airflow_emit.py::test_two_cluster_spark_families_emit_a_shared_dataproc_bracket"
     ),
