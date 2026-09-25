@@ -21,6 +21,16 @@ to the old value is mechanically stale, and the tripwire
 (`tests/unit/test_validation_ledger.py`, part of the offline gate) refuses to let it keep claiming
 `CURRENT`. You either re-run it or mark it `STALE` — you cannot quietly do neither.
 
+**A second tripwire reads this file from the other direction.**
+`tests/unit/test_config_coverage.py` asks not "is this result still true?" but "does this
+*documented option* have any result at all?" It joins the config surface — every `Literal` member
+and `bool` state reachable from `RunConfig` — against the shipped configs and against the statuses
+in the tables below, and every value left over must be written down as one of four things: covered
+by a named unit test, a genuine gap, unreachable, or exercised somewhere the join cannot see. The
+set is checked for equality, so a value that becomes unproven fails the build until somebody
+classifies it, and one that becomes proven fails until its entry is deleted. Today that is **119
+declared values: 79 proven live, 32 exercised offline, 6 genuine gaps, 2 not work.**
+
 ## Architecture axes
 
 The facts a live result depends on. Change one of these in the code and every entry recording its
