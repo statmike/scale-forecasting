@@ -17,7 +17,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -122,6 +122,15 @@ class CellResult:
     # What the blind control arm cost, in the run's decision metric: blind loss minus primary loss,
     # positive when never refreshing the model hurts. Only the frozen schemes run a control arm.
     staleness_gap: float | None = None
+    # The geometry this cell was actually scored on, which under `short_series` of `overlap` or
+    # `shrink_train` is not the geometry the config asked for. `backtest_note` says so in prose;
+    # these say it in numbers, so "which series got a shrunken step" is a GROUP BY rather than a
+    # string search. The dates are the span the folds covered — the only cross-series comparable,
+    # since `fold_id` is an ordinal within one series' plan. All four None when no fold ran.
+    achieved_step: int | None = None
+    achieved_min_train: int | None = None
+    first_val_date: date | None = None
+    last_val_date: date | None = None
     # `error` says what went wrong in the words of whatever raised; this says what *kind* of thing
     # it was, from a fixed vocabulary (`ERROR_CLASSES`). One is for reading, the other for grouping
     # and for deciding whether a retry could possibly help. None on an ok cell.
@@ -597,6 +606,12 @@ def run_cell(
         # that never ran.
         backtest_refit: str | None = None
         staleness_gap: float | None = None
+        # The geometry actually used and the window it covered — NULL on the same terms, since both
+        # describe a fold loop rather than the config that asked for one.
+        achieved_step: int | None = None
+        achieved_min_train: int | None = None
+        first_val_date: date | None = None
+        last_val_date: date | None = None
         if cfg.backtest.enabled:
             try:
                 oof, fold_metrics, bt = backtest_cell(
@@ -606,6 +621,8 @@ def run_cell(
                 n_folds_achieved = len(fold_metrics)
                 backtest_status, backtest_note = _backtest_outcome(n_folds_achieved, cfg, series)
                 backtest_refit, staleness_gap = bt.refit_mode, bt.staleness_gap
+                achieved_step, achieved_min_train = bt.achieved_step, bt.achieved_min_train
+                first_val_date, last_val_date = bt.first_val_date, bt.last_val_date
                 if n_folds_achieved == 0:
                     oof = None  # an empty frame would write zero rows and read as "not asked"
             except Exception as e:  # noqa: BLE001 - scoring is not the forecast; degrade, don't fail
@@ -616,6 +633,8 @@ def run_cell(
                 metrics = {name: float("nan") for name in METRIC_NAMES}
                 backtest_status, n_folds_achieved, backtest_note = "failed", 0, repr(e)
                 backtest_refit, staleness_gap = None, None
+                achieved_step, achieved_min_train = None, None
+                first_val_date, last_val_date = None, None
 
         # Final fit on the full history, then forecast the horizon.
         y, X = build_features(series, cfg, lam)
@@ -711,6 +730,10 @@ def run_cell(
             backtest_note=backtest_note,
             backtest_refit=backtest_refit,
             staleness_gap=staleness_gap,
+            achieved_step=achieved_step,
+            achieved_min_train=achieved_min_train,
+            first_val_date=first_val_date,
+            last_val_date=last_val_date,
             # A class attribute, so this is the model's own declaration rather than an inference
             # from the frame — a residual band on a model with no recorded residuals collapses to
             # bounds equal to `yhat`, which is indistinguishable from a native zero-width interval

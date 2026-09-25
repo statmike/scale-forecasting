@@ -8,6 +8,7 @@ fold planner), and OOF frame shape/units.
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from itertools import pairwise
 from typing import Any
 
@@ -19,6 +20,7 @@ from scale_forecasting.backtest import (
     OOF_COLUMNS,
     FitTally,
     Fold,
+    _as_py_date,
     achievable_folds,
     assert_panel_supports_folds,
     backtest_cell,
@@ -1015,6 +1017,87 @@ def test_a_series_too_short_to_score_still_names_the_scheme_it_would_have_used(
     assert list(oof.columns) == list(OOF_COLUMNS)
     assert outcome.refit_mode == mode
     assert outcome.staleness_gap is None
+
+
+# --- the scored geometry -------------------------------------------------------
+
+
+def test_the_recorded_span_is_exactly_the_window_the_oof_rows_cover() -> None:
+    """The two dates are the only cross-series comparable thing about a cell's backtest: two series
+    whose histories end on different days are scored over different windows, and `n_folds_achieved`
+    cannot tell you that. Asserting against the OOF frame rather than against a computed date keeps
+    the columns honest — if the fold loop ever scored a window the span did not describe, the row
+    would be a claim about data that is not there."""
+    cfg = _cfg({"n_folds": 3, "horizon": 4, "step": 4, "min_train": 10})
+    oof, _, outcome = backtest_cell(_series(40), _factory(), cfg)
+
+    assert outcome.first_val_date == oof["ds"].min().date()
+    assert outcome.last_val_date == oof["ds"].max().date()
+
+
+def test_the_recorded_step_is_the_one_the_folds_used_not_the_one_the_config_asked_for() -> None:
+    """Under `overlap` the planner buys folds by shortening the step, so `backtest.step` stops
+    describing the run. This is the case the column exists for: the note says "step 4 -> 3" in
+    prose, and this is the same fact as a number you can GROUP BY."""
+    cfg = _cfg({"n_folds": 6, "horizon": 4, "step": 4, "min_train": 20, "short_series": "overlap"})
+    _, fold_metrics, outcome = backtest_cell(_series(40), _factory(), cfg)
+
+    assert len(fold_metrics) == 6
+    assert cfg.backtest.step == 4
+    assert outcome.achieved_step == 3
+    assert outcome.achieved_min_train == 20  # untouched: overlap pays in step, not in training
+
+
+def test_the_recorded_min_train_is_the_shrunken_one_when_that_is_what_bought_the_folds() -> None:
+    cfg = _cfg(
+        {
+            "n_folds": 6,
+            "horizon": 4,
+            "step": 4,
+            "min_train": 20,
+            "short_series": "shrink_train",
+            "min_train_floor": 10,
+        }
+    )
+    _, fold_metrics, outcome = backtest_cell(_series(40), _factory(), cfg)
+
+    assert len(fold_metrics) == 6
+    assert outcome.achieved_step == 4  # the other currency: this policy pays in training width
+    assert outcome.achieved_min_train == 16
+    assert outcome.achieved_min_train < cfg.backtest.min_train
+
+
+def test_a_cell_that_scored_nothing_records_no_geometry_rather_than_the_planned_one() -> None:
+    """A row that reported the *requested* step here would read as evidence of a run that never
+    happened. NULL is the honest answer, and it is what `backtest_status` is already saying."""
+    cfg = _cfg({"n_folds": 3, "horizon": 4, "step": 4, "min_train": 10})
+    _, fold_metrics, outcome = backtest_cell(_series(8), _factory(), cfg)
+
+    assert fold_metrics == []
+    assert outcome.achieved_step is None
+    assert outcome.achieved_min_train is None
+    assert outcome.first_val_date is None
+    assert outcome.last_val_date is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (pd.Timestamp("2026-03-04 11:30"), date(2026, 3, 4)),
+        (datetime(2026, 3, 4, 11, 30), date(2026, 3, 4)),
+        (date(2026, 3, 4), date(2026, 3, 4)),
+        (5, None),
+        ("2026-03-04", None),
+    ],
+)
+def test_a_positional_index_records_nothing_rather_than_a_date_in_1970(
+    value: Any, expected: date | None
+) -> None:
+    """`pd.Timestamp(5)` does not raise — it reads the 5 as nanoseconds since the epoch and hands
+    back 1970-01-01. A model contract test or a caller assembling a frame by hand can supply an
+    integer index, and writing four 1970 dates into the registry would be strictly worse than
+    writing none. The time component is dropped too: the column is a DATE."""
+    assert _as_py_date(value) == expected
 
 
 def test_fold_dataclass_helpers() -> None:

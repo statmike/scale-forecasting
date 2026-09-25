@@ -316,6 +316,23 @@ def test_a_long_series_is_untouched_by_the_clamp_and_reports_a_full_backtest() -
     assert res.oof is not None and res.oof["fold_id"].nunique() == 2
 
 
+def test_the_cell_reports_the_window_it_scored_and_reports_nothing_when_it_scored_none() -> None:
+    # The worker is the seam where the backtest's answer becomes a registry row, and these four
+    # travelled nowhere until now: `backtest_cell` could return them and the row would still read
+    # NULL. Asserting the span against the OOF frame the same cell returned keeps the two in step.
+    scored = run_cell(_series(), "theta", _bt_cfg())
+    assert scored.achieved_step == HORIZON
+    assert scored.achieved_min_train == 30
+    assert scored.oof is not None
+    assert scored.first_val_date == scored.oof["ds"].min().date()
+    assert scored.last_val_date == scored.oof["ds"].max().date()
+
+    unscored = run_cell(_series(30 + HORIZON - 1), "theta", _bt_cfg())
+    assert unscored.n_folds_achieved == 0
+    assert (unscored.achieved_step, unscored.achieved_min_train) == (None, None)
+    assert (unscored.first_val_date, unscored.last_val_date) == (None, None)
+
+
 def test_the_note_names_the_arithmetic_so_a_reader_knows_how_much_history_was_needed() -> None:
     """Restating the status would be useless; the actionable part is the shortfall itself."""
     res = run_cell(_series(30 + HORIZON - 1), "theta", _bt_cfg())

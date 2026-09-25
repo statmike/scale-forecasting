@@ -47,13 +47,7 @@ _CREATED = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 # some named phase fills it; deleting the entry is part of landing that phase.
 _RESERVED_PREDICTIONS: set[str] = set()  # created_at landed in P10 7.2
 _RESERVED_OOF: set[str] = set()  # created_at landed in P10 7.2
-_RESERVED_METADATA = {
-    # cell outcome + backtest methodology
-    "achieved_step",
-    "achieved_min_train",
-    "first_val_date",
-    "last_val_date",
-}
+_RESERVED_METADATA: set[str] = set()  # the scored-geometry block landed with the backtest sweep
 
 
 def _cfg(**over: Any) -> RunConfig:

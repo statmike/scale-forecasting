@@ -284,6 +284,20 @@ def assemble_metadata_row(
         # that mixed frozen and refit rows without saying so would be comparing two questions.
         "backtest_refit": result.backtest_refit,
         "staleness_gap": _as_float(result.staleness_gap),
+        # The geometry the cell was *scored on*, which under a `short_series` policy of `overlap` or
+        # `shrink_train` is not the geometry the config asked for. `backtest_note` above already
+        # states the substitution, but it states it in prose — these make it a number a query can
+        # group by, which is the difference between a reader noticing that half a panel was scored
+        # on a shrunken step and a reader having to LIKE '%step%' to find out.
+        #
+        # The dates are the span the folds actually covered, and they are the only cross-series
+        # comparable of the four: `fold_id` is an ordinal within one series' plan, so on a ragged
+        # panel "fold 3" is not the same window for two series, while "validated over these dates"
+        # always is.
+        "achieved_step": result.achieved_step,
+        "achieved_min_train": result.achieved_min_train,
+        "first_val_date": _as_date(result.first_val_date),
+        "last_val_date": _as_date(result.last_val_date),
         # Where this cell's prediction bounds came from — and therefore what its `coverage`,
         # `pinball` and `interval_score` are evidence *about*. A model with native intervals is
         # reporting its own uncertainty; a model without one is being scored on the empirical

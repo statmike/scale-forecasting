@@ -405,6 +405,34 @@ def test_metadata_row_carries_the_scoring_verdict_separately_from_the_cell_outco
     assert row["backtest_note"] == "2 of 3 folds"
 
 
+def test_metadata_row_carries_the_geometry_the_cell_was_actually_scored_over() -> None:
+    # The four columns the note describes in prose. `backtest_note` says "step 28 -> 26" in a
+    # sentence; these say the same thing as numbers a query can group by, and the two dates say
+    # *which window*, which is the part no other column carries and the only thing that makes two
+    # series with different history lengths comparable.
+    row = assemble_metadata_row(
+        _result(
+            achieved_step=26,
+            achieved_min_train=1292,
+            first_val_date=date(2024, 7, 26),
+            last_val_date=date(2024, 12, 30),
+        ),
+        _CREATED,
+    )
+    assert row["achieved_step"] == 26
+    assert row["achieved_min_train"] == 1292
+    assert row["first_val_date"] == date(2024, 7, 26)
+    assert row["last_val_date"] == date(2024, 12, 30)
+
+
+def test_a_cell_that_scored_nothing_carries_no_geometry() -> None:
+    # Not the requested step: a row quoting the config here would read as evidence of a window that
+    # was never scored, and these columns are read as evidence.
+    row = assemble_metadata_row(_result(), _CREATED)
+    for column in ("achieved_step", "achieved_min_train", "first_val_date", "last_val_date"):
+        assert row[column] is None, column
+
+
 def test_a_cell_that_was_never_asked_to_score_leaves_all_three_scoring_columns_null() -> None:
     # All three NULL is the one case where a NULL metric panel is not a shortfall. A NULL panel on
     # its own cannot say that — it is also what a series too short to score looks like.
@@ -1411,6 +1439,32 @@ def test_a_native_row_answers_the_scoring_question_the_same_way_a_python_cell_do
         None,
         None,
     )
+
+
+def test_a_native_row_reports_the_same_scored_geometry_a_python_cell_would() -> None:
+    # Same argument as the three scoring columns above, one step further: a column only one engine
+    # fills breaks the cross-engine GROUP BY these columns exist for. The native path takes the
+    # step and min_train straight from the config because BQML plans no fold grid of its own —
+    # there is no `overlap` to diverge from — while the span is accumulated from the folds it
+    # actually scored, which is the half that cannot be read off the config.
+    from scale_forecasting.engines.bigquery_engine import _meta_row
+
+    panel = dict.fromkeys(METRIC_COLUMNS, 0.5)
+    cfg = _cfg(backtest={"enabled": True, "n_folds": 3, "step": 7, "min_train": 40})
+
+    row = _meta_row(
+        "r", "s", "arima_plus", panel, "{}", _CREATED, cfg, 3, date(2026, 2, 1), date(2026, 3, 1)
+    )
+    assert row["achieved_step"] == 7
+    assert row["achieved_min_train"] == 40
+    assert row["first_val_date"] == date(2026, 2, 1)
+    assert row["last_val_date"] == date(2026, 3, 1)
+
+    # Nothing scored: the config still says 7, and reporting it would be a claim about a window
+    # that does not exist. Matches what `backtest_cell` writes on a series too short to score.
+    unscored = _meta_row("r", "s", "arima_plus", panel, "{}", _CREATED, cfg, 0)
+    for column in ("achieved_step", "achieved_min_train", "first_val_date", "last_val_date"):
+        assert unscored[column] is None, column
 
 
 def test_the_two_metric_vocabularies_are_the_same_vocabulary() -> None:

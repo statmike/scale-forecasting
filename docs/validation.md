@@ -411,14 +411,16 @@ running, so its proof is a submission that never happens — which belongs in a 
 in a table of runs.
 
 **What the sweep found that it was not looking for.** Four columns of `forecast_metadata` —
-`achieved_step`, `achieved_min_train`, `first_val_date` and `last_val_date` — have never been
-written, not by these runs and not by any of the 5.47 million cells recorded before them. They are
-declared in the DDL and encoded in the Write API field list, but nothing assembles them into a row,
-so they are structurally always NULL. Smoke 22 is what made this visible: its note says "step 28 ->
-26" in prose while `achieved_step`, the column that exists to hold exactly that number, is empty.
-Nothing in the harness could have caught it, because an always-NULL column is indistinguishable from
-an inapplicable one, and nothing that reads configs could have caught it either — the gap is in
-registry output, not in the configuration surface.
+`achieved_step`, `achieved_min_train`, `first_val_date` and `last_val_date` — had never been
+written, not by these runs and not by any of the 5.47 million cells recorded before them. They were
+declared in the DDL ahead of the code meant to fill them, so that a deployment migrates once rather
+than once per phase, and `tests/unit/test_registry_column_parity.py` carried all four in its
+`_RESERVED_METADATA` set: a deliberate, tracked promise, not an accident. What the sweep supplied
+was the case that made the promise worth keeping. Smoke 22's note says "step 28 -> 26" in prose
+while `achieved_step`, the column that exists to hold exactly that number, was empty — so the one
+run where the achieved geometry differs from the requested one is the one run that could not be
+queried for it. The columns are now populated on both the Python and BigQuery-native paths and the
+reserved set is empty; the rows above predate that fix and still read NULL.
 
 **On every GPU row in this table, the accelerator was *audited*, not *used*.** Smokes 03, 06, 08,
 09, 10, 14, 15 and 16 put the deep-learning family on a card, and each of them proves exactly two

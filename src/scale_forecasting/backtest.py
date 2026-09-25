@@ -60,7 +60,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -137,10 +138,45 @@ class BacktestOutcome:
 
     A cell that achieved zero folds still reports the nominal mode for its scheme; nothing was
     scored, and ``backtest_status`` on the same row already says so.
+
+    The remaining four are the **geometry this cell was actually scored on**, which under
+    ``overlap`` or ``shrink_train`` is not the geometry the config asked for. ``backtest_note``
+    states the substitution in prose; these state it as numbers a query can group by, which is the
+    difference between a reader noticing that one series was scored on a shrunken step and a reader
+    having to parse English to find out. ``achieved_step`` and ``achieved_min_train`` are
+    `resolve_geometry`'s effective values; ``first_val_date`` and ``last_val_date`` are the span of
+    dates the folds actually scored, and they are dates rather than fold counts because ``fold_id``
+    is an ordinal within one series' plan — on a ragged panel the same ``fold_id`` is not the same
+    window, so two series are only comparable on the dates they were measured over. All four are
+    ``None`` when no fold ran.
     """
 
     refit_mode: str
     staleness_gap: float | None
+    achieved_step: int | None = None
+    achieved_min_train: int | None = None
+    first_val_date: date | None = None
+    last_val_date: date | None = None
+
+
+def _as_py_date(value: Any) -> date | None:
+    """A series index label as a plain `datetime.date`, or None if it is not a date at all.
+
+    The index is normally a `DatetimeIndex`, but a model contract test or a caller assembling a
+    frame by hand can hand us an integer one, and recording the scored window must never be the
+    thing that fails a cell. The check is `isinstance` rather than a `pd.Timestamp(...)` conversion
+    on purpose: that constructor accepts an int happily and reads it as nanoseconds since the epoch,
+    so a positional index would land four *dates in 1970* in the registry instead of nothing — a
+    wrong answer being strictly worse here than an absent one.
+
+    Returns a `date` rather than a `Timestamp` because the Write API ISO-formats whatever it is
+    given, and a `Timestamp` would carry a time component into a DATE column.
+    """
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else None
 
 
 @dataclass
@@ -929,5 +965,21 @@ def backtest_cell(
         if oof_parts
         else pd.DataFrame(columns=list(OOF_COLUMNS))
     )
-    outcome = BacktestOutcome(refit_mode, _staleness_gap(fold_metrics, stale_metrics, cfg))
+    # The geometry that was *used*, recovered from the folds themselves rather than from the config
+    # — under `overlap` or `shrink_train` the two differ, and the whole reason to record this is the
+    # case where they do. `resolve_geometry` is pure and already ran inside `make_folds`; calling it
+    # again is cheaper than threading its result out through the fold list.
+    geom = resolve_geometry(n, cfg)
+    # Min/max rather than `folds[0]` / `folds[-1]`: survivors keep their fold_id from the full plan
+    # and the oldest are the ones dropped, so ordering is an assumption this does not need to make.
+    first_val = min((f.val_start for f in folds), default=None)
+    last_val = max((f.val_end for f in folds), default=None)
+    outcome = BacktestOutcome(
+        refit_mode,
+        _staleness_gap(fold_metrics, stale_metrics, cfg),
+        achieved_step=geom.step if folds else None,
+        achieved_min_train=geom.min_train if folds else None,
+        first_val_date=_as_py_date(y.index[first_val]) if first_val is not None else None,
+        last_val_date=_as_py_date(y.index[last_val - 1]) if last_val is not None else None,
+    )
     return oof, fold_metrics, outcome

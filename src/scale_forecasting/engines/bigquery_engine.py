@@ -202,6 +202,13 @@ def run(
                 for model_name in models:
                     best_params = json.dumps(bqml_options(cfg, model_name), sort_keys=True)
                     panels_by_ts: dict[str, list[dict[str, float]]] = {}
+                    # The span of dates each series was actually scored over, accumulated from the
+                    # rows as they are produced. The native fold grid is uniform across the panel,
+                    # so this is less surprising here than on the Python path — but it is recorded
+                    # for the same reason the Python path records it: one reader has to be able to
+                    # compare a native model against a Python one without knowing which engine
+                    # wrote the row, and a column that only one engine fills breaks that.
+                    span_by_ts: dict[str, tuple[Any, Any]] = {}
                     for fold_id, back_steps in plan:
                         for stmt in build_fold_create_statements(
                             cfg,
@@ -249,10 +256,15 @@ def run(
                             created_at=created_at,
                         )
                         oof_rows.extend(fold_oof)
+                        for row in fold_oof:
+                            d = row["forecast_date"]
+                            lo, hi = span_by_ts.get(row["ts_id"], (d, d))
+                            span_by_ts[row["ts_id"]] = (min(lo, d), max(hi, d))
                         for ts_id, panel in fold_panels.items():
                             panels_by_ts.setdefault(ts_id, []).append(panel)
                     for ts_id, panels in panels_by_ts.items():
                         rolled = _rollup_metrics(panels)
+                        first_val, last_val = span_by_ts.get(ts_id, (None, None))
                         meta_rows.append(
                             _meta_row(
                                 run_id,
@@ -263,6 +275,8 @@ def run(
                                 created_at,
                                 cfg,
                                 n_folds_achieved=len(panels),
+                                first_val_date=first_val,
+                                last_val_date=last_val,
                             )
                         )
             else:
@@ -422,6 +436,8 @@ def _meta_row(
     created_at: Any,
     cfg: RunConfig,
     n_folds_achieved: int | None = None,
+    first_val_date: Any = None,
+    last_val_date: Any = None,
 ) -> dict[str, Any]:
     """Assemble one ``forecast_metadata`` row (``fold_id=NULL``) for a native model (pure).
 
@@ -442,10 +458,15 @@ def _meta_row(
     fills the same three columns, and the whole point of them is that one reader can compare a
     native model against a Python one without knowing which engine wrote the row; a native family
     that left them NULL while backtesting would read as "never asked".
+
+    ``first_val_date`` / ``last_val_date`` are the span this series was scored over, accumulated by
+    the caller from the fold rows. They complete the same parity argument one level down: the
+    scored-geometry columns are only useful in a cross-engine ``GROUP BY``, so an engine that fills
+    some of them and not others is worse than one that fills none — the gaps read as differences.
     """
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_model_hash
-    from ..registry.rows import _as_float
+    from ..registry.rows import _as_date, _as_float
 
     status, note = None, None
     if n_folds_achieved is not None:
@@ -507,6 +528,16 @@ def _meta_row(
         # model out of the comparison. There is no frozen arm to compare against, so no gap.
         "backtest_refit": "per_fold" if n_folds_achieved is not None else None,
         "staleness_gap": None,
+        # The scored geometry. There is no `short_series` policy on this path — `fold_plan` steps a
+        # single global cutoff back uniformly — so the effective step and training floor are the
+        # authored ones, and saying so is a fact rather than an assumption. They are filled for the
+        # same reason `backtest_refit` above is: a reader grouping a leaderboard by scored geometry
+        # would otherwise drop every native model out of the comparison, which is the one thing
+        # these columns exist to make possible.
+        "achieved_step": cfg.backtest.step if n_folds_achieved else None,
+        "achieved_min_train": cfg.backtest.min_train if n_folds_achieved else None,
+        "first_val_date": _as_date(first_val_date),
+        "last_val_date": _as_date(last_val_date),
     }
 
 
