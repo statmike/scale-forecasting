@@ -77,6 +77,37 @@ def test_spark_cluster_mode_with_reuse_name() -> None:
     assert r.spark_cluster_name == "warm-1"
 
 
+def test_spark_mode_serverless_written_out_resolves_the_same_but_is_a_different_run() -> None:
+    """Serverless is what a Spark family inherits, so writing it out changes nothing it *runs* —
+    and every other test reaches it by omission. Stating it explicitly is documented, and two
+    things about it are worth pinning.
+
+    The resolution is identical, so a config author who spells out the default gets no surprise at
+    execution time. The **run_id is not**, because identity hashes the config as authored rather
+    than as resolved: the same fleet under a different name, which is a rerun rather than a
+    no-op. That is the price of a snapshot that can be diffed against what was written down.
+    """
+    from scale_forecasting.registry.ids import make_run_id
+
+    inherited, explicit = _cfg(), _cfg(families={"statistical": {"spark_mode": "serverless"}})
+    assert explicit.resolve_family_compute("statistical") == inherited.resolve_family_compute(
+        "statistical"
+    )
+    assert explicit.resolve_family_compute("statistical").spark_mode == "serverless"
+    assert make_run_id(explicit) != make_run_id(inherited)
+
+
+def test_two_families_can_take_different_spark_modes_in_one_run() -> None:
+    """The reason `spark_mode` lives on the family and not on the run: a statistical family is
+    cheap enough for serverless while an ml family wants a warm cluster, and both go in one config.
+    Each half of the pair has to be stated for the mix to exist."""
+    cfg = _cfg(
+        families={"statistical": {"spark_mode": "serverless"}, "ml": {"spark_mode": "cluster"}}
+    )
+    assert cfg.resolve_family_compute("statistical").spark_mode == "serverless"
+    assert cfg.resolve_family_compute("ml").spark_mode == "cluster"
+
+
 def test_deep_learning_gpu_serverless_forces_l4() -> None:
     cfg = _cfg(families={"deep_learning": {"hardware": "gpu"}})  # spark serverless inherited
     r = cfg.resolve_family_compute("deep_learning")

@@ -29,7 +29,7 @@ in the tables below, and every value left over must be written down as one of fo
 by a named unit test, a genuine gap, unreachable, or exercised somewhere the join cannot see. The
 set is checked for equality, so a value that becomes unproven fails the build until somebody
 classifies it, and one that becomes proven fails until its entry is deleted. Today that is **119
-declared values: 79 proven live, 32 exercised offline, 6 genuine gaps, 2 not work.**
+declared values: 79 proven live, 34 exercised offline, 4 genuine gaps, 2 not work.**
 
 ## Architecture axes
 

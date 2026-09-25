@@ -151,30 +151,38 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_capacity.py::test_disabling_capacity_retry_beats_an_authored_pass_count"
     ),
     "compute.capacity.preflight=false": (
-        "gap: nothing turns the quota preflight off. `test_quota.py` covers the preflight itself "
-        "at length, but every one of those tests calls it directly — none asks whether it should "
-        "have run. The flag exists for an operator who knows their quota and wants the submit "
-        "path shorter, and that path has never been taken."
+        "tests/unit/test_dataproc_cluster.py::"
+        "test_preflight_off_asks_for_the_planned_fleet_and_never_reads_the_quota"
     ),
+    # --- the ensemble node's compute, which is declared and not wired ----------------------------
+    # `EnsembleCompute.runtime`, `.spark_mode` and `.spark_cluster_name` are read by nothing. The
+    # ensemble node is hard-wired to the driver: `dag.build_dag_nodes` stamps it `runtime=bigquery`
+    # with `spark_mode=None`, and `job_launch.run_ensemble` blends in driver pandas and says so. The
+    # two live fields on that model — `mode` and `microbatch_interval_s` — are covered elsewhere.
+    #
+    # These entries are `gap:` rather than `reason:` on purpose. A declared value nothing reads is
+    # not exempt work; it is worse than untested, because the reference promises a choice the
+    # product does not offer. It closes by wiring the fields up or by deleting them, and deleting
+    # them re-keys every run_id (`_canonical_config` dumps defaults too), so it is an owner call.
     "compute.ensemble.runtime=ray": (
-        "tests/unit/test_config_families.py::test_ensemble_compute_defaults_and_override"
+        "gap: nothing reads `cfg.compute.ensemble.runtime`. A test asserts the field accepts the "
+        "value and rejects Spark-only siblings beside it, which is validation, not behaviour — the "
+        "ensemble runs on the driver either way."
     ),
     "compute.ensemble.spark_mode=cluster": (
-        "gap: the only test naming it asserts it is *rejected* alongside `runtime=ray`. Running "
-        "the ensemble node on a Dataproc cluster is a legal, documented combination that nothing "
-        "has ever built."
+        "gap: nothing reads `cfg.compute.ensemble.spark_mode`. The only test naming this value "
+        "asserts it is *rejected* alongside `runtime=ray`; no accepting path exists to cover."
     ),
     "compute.ensemble.spark_mode=serverless": (
-        "gap: the ensemble node inherits its spark mode when unset, so no test or config states "
-        "it. Setting it explicitly is documented and has never been done."
+        "gap: nothing reads `cfg.compute.ensemble.spark_mode`. Setting it is documented, accepted, "
+        "and inert."
     ),
     "compute.families.runtime=spark": (
         "tests/unit/test_airflow_emit.py::test_two_cluster_spark_families_emit_a_shared_dataproc_bracket"
     ),
     "compute.families.spark_mode=serverless": (
-        "gap: every test naming it on a family expects a *rejection* — serverless paired with a "
-        "cluster name, or with a T4. The accepting path is reached only by inheritance, which this "
-        "join cannot distinguish from never being set."
+        "tests/unit/test_config_families.py::"
+        "test_spark_mode_serverless_written_out_resolves_the_same_but_is_a_different_run"
     ),
     "compute.machine_family=c2": (
         "tests/unit/test_dataproc_cluster.py::test_machine_family_selects_the_cpu_worker_and_master_family"
@@ -190,8 +198,7 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_dataproc_cluster.py::test_machine_family_selects_the_cpu_worker_and_master_family"
     ),
     "compute.machine_family=n2d": (
-        "gap: the one member of this Literal that appears nowhere but the Literal. Not a test, "
-        "not a config, not a docstring. Adding it to the parametrize list beside `n2` closes it."
+        "tests/unit/test_dataproc_cluster.py::test_machine_family_selects_the_cpu_worker_and_master_family"
     ),
     "compute.profile.measure=controlled": (
         "tests/unit/test_resources.py::"

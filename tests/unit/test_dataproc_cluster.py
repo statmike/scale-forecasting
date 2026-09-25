@@ -458,8 +458,10 @@ def test_the_worker_machine_is_read_from_one_place_by_both_readers() -> None:
 def test_machine_family_selects_the_cpu_worker_and_master_family() -> None:
     """`compute.machine_family` was declared-but-inert for a long time; this is the wiring."""
     assert dataproc_cluster.worker_machine_type("cpu", None, "n2") == "n2-standard-8"
+    assert dataproc_cluster.worker_machine_type("cpu", None, "n2d") == "n2d-standard-8"
     assert dataproc_cluster.worker_machine_type("cpu", None, "e2") == "e2-standard-8"
     assert dataproc_cluster.master_machine_type("c2") == "c2-standard-4"
+    assert dataproc_cluster.master_machine_type("n2d") == "n2d-standard-4"
 
 
 def test_machine_family_auto_is_exactly_todays_behaviour() -> None:
@@ -1054,6 +1056,65 @@ def test_an_unreadable_meter_leaves_every_candidate_standing(monkeypatch):
     assert len(live) == 3
     assert granted == {}
     assert not ledger.attempts
+
+
+def _walk_with_preflight(monkeypatch, *, preflight: bool, limits: dict) -> dict:
+    """Drive the capacity walk with the create stubbed out; return the kwargs the create saw.
+
+    Everything here is offline: `quota.preflight_cluster` reads a table instead of the API and
+    `_attempt_cluster_at` records rather than provisions, so the only live thing left is the
+    branch under test.
+    """
+    from scale_forecasting import dataproc_cluster as dc
+
+    _stub_preflights(monkeypatch, limits)
+    seen: dict = {}
+
+    def fake_attempt(cand, *, project_id, name, build_kwargs):
+        seen.update(build_kwargs)
+        return cand
+
+    monkeypatch.setattr(dc, "_attempt_cluster_at", fake_attempt)
+    dc._create_cluster_across_candidates(
+        _candidates(),
+        project_id="p",
+        name="sf-cluster-run-abc",
+        build_kwargs={
+            "hardware": "gpu",
+            "gpu_type": "T4",
+            "worker_count": 8,
+            "machine_family": "auto",
+        },
+        preflight=preflight,
+    )
+    return seen
+
+
+_TIGHT_QUOTA = {
+    "compute.googleapis.com/nvidia_t4_gpus": {"us-central1": "4", "us-east1": "4"},
+    "compute.googleapis.com/cpus": {"us-central1": "200", "us-east1": "200"},
+}
+
+
+def test_the_preflight_clamps_the_create_to_what_the_region_will_grant(monkeypatch):
+    """The on case, stated so the off case below means something."""
+    assert (
+        _walk_with_preflight(monkeypatch, preflight=True, limits=_TIGHT_QUOTA)["worker_count"] == 4
+    )
+
+
+def test_preflight_off_asks_for_the_planned_fleet_and_never_reads_the_quota(monkeypatch):
+    """`compute.capacity.preflight=false` is the documented escape for an operator who knows their
+    quota and wants the submit path shorter. Skipping the read has to mean *both* halves: no API
+    call, and no clamp — the create asks for the eight workers that were planned and finds out from
+    Dataproc, exactly as it did before the preflight existed."""
+    from scale_forecasting import quota
+
+    def boom(*args, **kwargs):  # the read is the thing being skipped; calling it fails the test
+        raise AssertionError("preflight=False still read the quota")
+
+    monkeypatch.setattr(quota, "preflight_cluster", boom)
+    assert _walk_with_preflight(monkeypatch, preflight=False, limits={})["worker_count"] == 8
 
 
 # --- the wait on a cluster job: patience vs. teardown --------------------------
