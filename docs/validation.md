@@ -405,6 +405,45 @@ tripwire enforces that this table has exactly one row per config — no ghosts, 
 | 23 | `23_backtest_frozen_shrink.json` | **Backtest semantics 2 of 4:** the `expanding_frozen` scheme and the `shrink_train` policy against its `min_train_floor`, decided by `mae`. The policy branched as asked — `min_train 1300 -> 1292 (floor 1000)` to reach 6 of 6 folds, `backtest_status=reduced` — which is the floor doing its job: it permitted the eight observations the grid needed and would have refused a demand below 1000. The more valuable result is that **`backtest_refit` records what happened, not what was requested**. `expanding_frozen` asks every model for `recondition`; only `naive_seasonal` delivered it, while `holtwinters` and `theta` came back `unsupported` — they have no reconditioning seam, so the engine refit them and said so rather than quietly reporting the scheme it was handed. `staleness_gap` (the decision metric's loss on the blind arm minus the primary) is positive on average for all three — +13.06 holtwinters, +3.81 theta, +0.60 naive_seasonal — so never refreshing the model costs accuracy, and costs it least for the model that could actually recondition. All 60 cells `ok`, no NULL in any metric | CURRENT | 2026-09-23 | `smoke-23-backtest-frozen-shrink-ce2793df03f2` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
 | 24 | `24_backtest_stale.json` | **Backtest semantics 3 of 4:** the `expanding_stale` scheme — one fit walked forward across every fold — decided by `smape`. All three models recorded `backtest_refit=extrapolate`, meaning each was fitted once and then asked to predict later origins blind, never shown the actuals that arrived in between. This config carries no `short_series` policy, so it is also the live reading of the `adapt` default: the run asked for six folds, the panel supports five, and the cell gave up the sixth and said exactly why — "1460 observations support 5 of 6 folds; 1468 needed for all of them (min_train=1300 + gap=0 + horizon=28 + (n_folds-1)*step=28)". `staleness_gap` is NULL on every cell here, and that is the correct answer rather than a missing one: under `expanding_stale` the primary arm already *is* the blind arm, so a gap would be zero by construction, and recording a real-looking 0.0 would be worse than recording nothing. All 60 cells `ok`, no NULL in any metric | CURRENT | 2026-09-23 | `smoke-24-backtest-stale-1c0d92a16531` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
 | 25 | `25_backtest_skip.json` | **Backtest semantics 4 of 4:** the `skip` policy, which leaves a short series unscored but must never cost it a forecast, decided by `maape`. Both halves held. The scoring half went away exactly as declared — `backtest_status=unscored`, `n_folds_achieved=0`, every metric NULL, and **zero** rows in `backtest_oof` — under the note "1460 observations support 5 of 6 folds, and this policy scores only series that reach all of them". The forecasting half was untouched: all 60 cells `ok` and all 560 predictions per model present with no NULL `yhat`. This run is also the clearest evidence for why the leaderboard cannot be the acceptance signal — the harness reported `PASS` with `wape=None` on all three models, which is right here and would be equally right-looking if the nulls came from a broken model instead of a policy. What separates the two is `backtest_status`, not the leaderboard | CURRENT | 2026-09-23 | `smoke-25-backtest-skip-d28444e0a889` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
+| 26 | `26_hpo_fleetwide.json` | **HPO 1 of 2:** `hpo.enabled` with `granularity="fleetwide"` — an Optuna study tunes each model once on a sample of the fleet and the winner is stamped onto every cell. Expected reading: `best_params` **identical across all 50 series** for a given model | NEVER_RUN | — | — | — |
+| 27 | `27_hpo_per_series.json` | **HPO 2 of 2:** the same config with `granularity="per_series"`, so the study runs inside each cell instead. Expected reading: `best_params` **varying across series**, most visibly on `naive_moving_average`, whose search space is a single integer `window` over 2–30 and therefore cannot look tuned by coincidence | NEVER_RUN | — | — | — |
+| 28 | `28_features_off.json` | **Features baseline:** six feature-consuming models on 50 series with no `features` block at all. Proves nothing by itself — it exists so 29–31 have something to be read against | NEVER_RUN | — | — | — |
+| 29 | `29_features_on.json` | **Features 1 of 3:** `fourier`, `level_shift` and `lags: [1, 7, 28]` together. Expected reading: out-of-fold metrics that differ from 28 on the models that consume a design frame | NEVER_RUN | — | — | — |
+| 30 | `30_features_boxcox.json` | **Features 2 of 3:** `transform: "boxcox"`, which needs its own arm because `transform` is a single field. Expected reading is a **partial** one and that is the point — Box-Cox requires strictly positive `y`, and 20 of the 50 series `series_limit` selects are not, so those cells should fail individually with the positivity guard's message while the other 30 score and the job survives | NEVER_RUN | — | — | — |
+| 31 | `31_features_exog.json` | **Features 3 of 3:** `features.exog`, reading the source table's own `is_holiday` column. Proves the exog path end to end — projected at the source, validated numeric, carried into the cell, and extended over the horizon by the documented last-`horizon`-rows fallback | NEVER_RUN | — | — | — |
+
+**Smokes 28–31 are one baseline and three arms.** A feature knob leaves no trace of its own: nothing
+in `forecast_metadata` records which design-frame columns a cell built, so "the Fourier terms
+reached the model" is not a claim a single run can support. The evidence is out-of-fold metrics
+moving against a run that is the same fifty series, the same folds and the same six models with the
+features off, which is what 28 is for. The four are pinned against each other offline
+(`test_each_features_arm_differs_from_the_baseline_only_in_features`) before any of them is
+submitted.
+
+**Two of the three arms are constrained by the shipped demo panel, and both constraints are the
+finding rather than an obstacle to it.** Box-Cox loses about 40% of the fleet — 18.2M of the
+source's 146M rows are `<= 0` and only 61,676 of the 100,000 series are strictly positive — which is
+something a reader choosing a transform needs told, and a run that scores 30 of 50 tells it more
+plainly than a note would. And `features.exog` has exactly one numeric column available to it,
+because the panel ships `ts_id`, `ds`, `y`, `archetype` (a per-series string) and `is_holiday`. That
+last one is usable only with `features.holidays` left unset: `build_features` writes declared exog
+first and the generated holiday flag second, so setting both would overwrite the source column with
+the calendar one and the arm would quietly prove the path it already had. A tripwire holds that
+open, since every number would still look right.
+
+**Smokes 26–27 are one experiment in two files, and the result is the diff.** Either run alone
+stamps `best_params` that read as credible: a `window` of 9 is a plausible answer whether it was
+tuned on a ten-series sample or on that series' own history. What distinguishes the granularities is
+whether the stamped params are the same for every series, which is a comparison and not a
+measurement — so the two configs are pinned against each other offline
+(`tests/smokes/test_smoke_configs.py::test_the_hpo_pair_differs_only_in_granularity`) before either
+is submitted, exactly as the GPU A/B arms are. Neither sets `sample_size`: the fleetwide arm would
+read it and the per-series arm would ignore it, which is a difference between the files that is not
+the difference the experiment names.
+
+This pair also carries a second obligation that costs nothing extra. HPO requires a backtest, so
+these runs exercise the four `forecast_metadata` geometry columns that smokes 22–25 first filled —
+and they do it on a fold grid the panel comfortably meets, which none of those four did.
 
 **Smokes 22–25 are one sweep, not four.** Every series in the seeded panel is exactly 1,460
 observations, so a `short_series` policy fires for all of them or none — which means the only way to

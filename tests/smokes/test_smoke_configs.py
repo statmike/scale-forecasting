@@ -155,3 +155,85 @@ def test_at_least_one_native_source_format_smoke() -> None:
     tables = {load_config(str(p)).data.source_table for p in _CONFIGS}
     assert "source_series_native" in tables, "add a smoke reading the native-format source table"
     assert "source_series_iceberg" in tables, "add a smoke reading the Iceberg source table"
+
+
+def test_the_hpo_pair_differs_only_in_granularity() -> None:
+    """Smokes 26 and 27 are one experiment in two files, and the diff between them is the result.
+
+    Neither run proves anything alone. Both stamp `best_params` onto every cell, and on a single
+    run those params look equally credible either way — a plausible `window` for
+    `naive_moving_average` is a plausible `window` whether it was tuned on a ten-series sample or
+    on that series. What tells the two granularities apart is whether the stamped params are
+    *identical across series*: `fleetwide` tunes once and applies the winner to all fifty, so they
+    must be; `per_series` tunes inside each cell, so they must not be.
+
+    That comparison is only meaningful if the runs are otherwise the same fleet on the same data
+    with the same folds, so the pin is the same one the GPU A/B arms get in
+    `test_ab_preregistration`: diff the raw JSON and allow exactly the field under test. Note in
+    particular that neither file sets `sample_size` — it would be read by the fleetwide arm and
+    ignored by the other, which is a difference between the files that is not the difference the
+    experiment names.
+    """
+    fleetwide = json.loads((_SMOKE_DIR / "26_hpo_fleetwide.json").read_text())
+    per_series = json.loads((_SMOKE_DIR / "27_hpo_per_series.json").read_text())
+
+    assert fleetwide.pop("run_name") == "smoke_26_hpo_fleetwide"
+    assert per_series.pop("run_name") == "smoke_27_hpo_per_series"
+    assert fleetwide["hpo"].pop("granularity") == "fleetwide"
+    assert per_series["hpo"].pop("granularity") == "per_series"
+
+    assert fleetwide == per_series, (
+        "the HPO arms differ somewhere other than hpo.granularity, so a difference in their "
+        f"best_params would not be attributable to it: {fleetwide} != {per_series}"
+    )
+
+
+# The features quartet: one baseline and three one-knob arms, all measured against the baseline.
+_FEATURES_ARMS = {
+    "29_features_on.json": {"fourier": True, "level_shift": True, "lags": [1, 7, 28]},
+    "30_features_boxcox.json": {"transform": "boxcox"},
+    "31_features_exog.json": {"exog": ["is_holiday"]},
+}
+
+
+@pytest.mark.parametrize("arm", sorted(_FEATURES_ARMS), ids=lambda n: n[:2])
+def test_each_features_arm_differs_from_the_baseline_only_in_features(arm: str) -> None:
+    """Smoke 28 is the baseline the other three are read against, and nothing else may vary.
+
+    A feature knob leaves no trace of its own in the output. There is no column recording which
+    design-frame columns a cell built, so "the Fourier terms reached the model" is not something a
+    single run can show — the only evidence is the out-of-fold metrics moving against a run that is
+    the same fleet, the same fifty series, the same folds and the same six models with the features
+    switched off. That is what 28 is for, and it only works if the arms are otherwise identical.
+
+    Three arms rather than one because `transform` is a single field, so Box-Cox cannot ride along
+    with the others, and because `exog` has to run with `holidays` unset (see the test below).
+    """
+    baseline = json.loads((_SMOKE_DIR / "28_features_off.json").read_text())
+    candidate = json.loads((_SMOKE_DIR / arm).read_text())
+
+    assert baseline.pop("run_name") == "smoke_28_features_off"
+    assert candidate.pop("run_name") == f"smoke_{arm.removesuffix('.json')}"
+    assert "features" not in baseline, "the baseline arm must carry no features block at all"
+    assert candidate.pop("features") == _FEATURES_ARMS[arm]
+
+    assert baseline == candidate, (
+        f"{arm} differs from the baseline somewhere other than `features`, so a metric difference "
+        f"between them would not be attributable to the feature: {baseline} != {candidate}"
+    )
+
+
+def test_the_exog_arm_leaves_holidays_unset() -> None:
+    """Setting both would void the proof silently, which is why this is a tripwire and not a note.
+
+    The only numeric column the shipped source tables carry besides the target is `is_holiday`, so
+    that is what the exog arm reads. But `features.holidays` *generates* a column of exactly that
+    name, and `features.build_features` writes the declared exog first and the generated flag
+    second — so the calendar flag overwrites the source column, the arm proves the holiday path it
+    already had instead of the exog path it was written for, and every number still looks right.
+    """
+    raw = json.loads((_SMOKE_DIR / "31_features_exog.json").read_text())
+    assert not raw["features"].get("holidays"), (
+        "31_features_exog.json sets holidays as well as exog; the generated `is_holiday` column "
+        "would overwrite the one read from the source table and the arm would prove nothing"
+    )

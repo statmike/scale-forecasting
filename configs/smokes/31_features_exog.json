@@ -1,0 +1,28 @@
+{
+  "run_name": "smoke_31_features_exog",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 50
+  },
+  "models": [
+    "prophet",
+    "sarimax",
+    "ucm",
+    "regression_lags",
+    "lightgbm",
+    "xgboost"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 2,
+    "step": 28
+  },
+  "features": {
+    "exog": [
+      "is_holiday"
+    ]
+  }
+}

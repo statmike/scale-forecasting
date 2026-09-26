@@ -151,6 +151,25 @@ _POST_BREAK = {
     "configs/smokes/23_backtest_frozen_shrink.json",
     "configs/smokes/24_backtest_stale.json",
     "configs/smokes/25_backtest_skip.json",
+    # The HPO granularity pair, written 2026-09-26 — post-break, and a pair for the same reason the
+    # A/B arms above are: neither config proves anything alone. `fleetwide` tunes once on a sample
+    # and applies the winner to all 50 series; `per_series` tunes inside every cell. A single run of
+    # either lands `best_params` that look equally plausible, and what distinguishes them is whether
+    # those params are *identical across series* — which only a second run with the other setting
+    # can show. They are otherwise the same config, so the guard that matters is the diff between
+    # them, not a digest either one had before the break.
+    "configs/smokes/26_hpo_fleetwide.json",
+    "configs/smokes/27_hpo_per_series.json",
+    # The features quartet, written 2026-09-26 — post-break, and one baseline with three arms for
+    # the same reason again. A feature knob writes nothing of its own: no column records which
+    # design-frame columns a cell built, so the only evidence that `fourier` reached a model is the
+    # metrics moving against a run with it switched off. Smoke 28 is that run, and 29–31 are read
+    # against it. A digest pins one file; what this experiment needs pinned is the diff between
+    # four, which `tests/smokes/test_smoke_configs.py` does instead.
+    "configs/smokes/28_features_off.json",
+    "configs/smokes/29_features_on.json",
+    "configs/smokes/30_features_boxcox.json",
+    "configs/smokes/31_features_exog.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

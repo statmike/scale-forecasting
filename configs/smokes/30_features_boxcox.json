@@ -1,0 +1,26 @@
+{
+  "run_name": "smoke_30_features_boxcox",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 50
+  },
+  "models": [
+    "prophet",
+    "sarimax",
+    "ucm",
+    "regression_lags",
+    "lightgbm",
+    "xgboost"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 2,
+    "step": 28
+  },
+  "features": {
+    "transform": "boxcox"
+  }
+}

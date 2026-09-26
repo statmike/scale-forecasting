@@ -42,5 +42,11 @@
   "configs/smokes/22_backtest_sliding_overlap.json": "smoke-22-backtest-sliding-overlap-eca75eb54835",
   "configs/smokes/23_backtest_frozen_shrink.json": "smoke-23-backtest-frozen-shrink-ce2793df03f2",
   "configs/smokes/24_backtest_stale.json": "smoke-24-backtest-stale-1c0d92a16531",
-  "configs/smokes/25_backtest_skip.json": "smoke-25-backtest-skip-d28444e0a889"
+  "configs/smokes/25_backtest_skip.json": "smoke-25-backtest-skip-d28444e0a889",
+  "configs/smokes/26_hpo_fleetwide.json": "smoke-26-hpo-fleetwide-3df8ee4169b8",
+  "configs/smokes/27_hpo_per_series.json": "smoke-27-hpo-per-series-343ed2bdf272",
+  "configs/smokes/28_features_off.json": "smoke-28-features-off-f9298e722d7a",
+  "configs/smokes/29_features_on.json": "smoke-29-features-on-d4a9473b8fe1",
+  "configs/smokes/30_features_boxcox.json": "smoke-30-features-boxcox-96c5368ce4ca",
+  "configs/smokes/31_features_exog.json": "smoke-31-features-exog-8bc96fed0e7a"
 }
