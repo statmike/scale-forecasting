@@ -337,10 +337,15 @@ def run(
         # exception to re-raise, so one is made here — otherwise the header would say FAILED while
         # the CLI exited zero, and every unattended caller (Composer, a shell script, the SDK)
         # would read the run as fine. The registry rows carry the detail; this only sets the exit.
+        # Say "did not complete", not "produced nothing". A family here may be FAILED (no usable
+        # cell) or PARTIAL (most cells fine, some errored), and `job_statuses` cannot tell them
+        # apart — it holds one status per family, not the tallies behind it. Claiming the stronger
+        # of the two sends an operator away from a run that mostly worked. The tally is one query
+        # from here, so the message points at it rather than guessing.
         failed = sorted(f for f, s in job_statuses.items() if s != "COMPLETED")
         raise EngineError(
-            f"run {run_id} finished {status}: {', '.join(failed)} produced no usable forecasts "
-            f"(see run_jobs.job_telemetry.$.cells)"
+            f"run {run_id} finished {status}: {', '.join(failed)} did not complete "
+            f"(per-family cell tallies in run_jobs.job_telemetry.$.cells)"
         )
     _log.info("run %s done: status=%s", run_id, status)
     return run_id
