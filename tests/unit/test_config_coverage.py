@@ -212,10 +212,6 @@ UNPROVEN: dict[str, str] = {
     "features.transform=boxcox": (
         "tests/unit/test_features.py::test_boxcox_roundtrips_with_fitted_lambda"
     ),
-    # --- hpo -------------------------------------------------------------------------------------
-    "hpo.granularity=per_series": (
-        "tests/unit/test_worker.py::test_per_series_hpo_tunes_and_records_best_params"
-    ),
     # --- output ------------------------------------------------------------------------------
     "output.point_forecast=(unset)": (
         "reason: unreachable rather than unproven. The field is declared `… | None = None`, but "
