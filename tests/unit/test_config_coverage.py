@@ -209,9 +209,6 @@ UNPROVEN: dict[str, str] = {
     "features.level_shift=true": (
         "tests/unit/test_features.py::test_build_features_level_shift_column_is_opt_in"
     ),
-    "features.transform=boxcox": (
-        "tests/unit/test_features.py::test_boxcox_roundtrips_with_fitted_lambda"
-    ),
     # --- output ------------------------------------------------------------------------------
     "output.point_forecast=(unset)": (
         "reason: unreachable rather than unproven. The field is declared `… | None = None`, but "
