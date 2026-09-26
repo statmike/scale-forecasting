@@ -23,10 +23,15 @@
   "features": {
     "fourier": true,
     "level_shift": true,
-    "lags": [
-      1,
-      7,
-      28
-    ]
+    "exog": [
+      "is_holiday"
+    ],
+    "exog_lags": {
+      "is_holiday": [
+        1,
+        7,
+        28
+      ]
+    }
   }
 }

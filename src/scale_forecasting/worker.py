@@ -615,7 +615,12 @@ def run_cell(
         if cfg.backtest.enabled:
             try:
                 oof, fold_metrics, bt = backtest_cell(
-                    series, lambda: model_cls(resolved, ctx), cfg, lam, fits
+                    series,
+                    lambda: model_cls(resolved, ctx),
+                    cfg,
+                    lam,
+                    fits,
+                    model_cls.lags_covariates_internally,
                 )
                 metrics = _rollup_metrics(fold_metrics)
                 n_folds_achieved = len(fold_metrics)
@@ -637,15 +642,15 @@ def run_cell(
                 first_val_date, last_val_date = None, None
 
         # Final fit on the full history, then forecast the horizon.
-        y, X = build_features(series, cfg, lam)
+        y, X = build_features(series, cfg, lam, model_cls.lags_covariates_internally)
         model = model_cls(resolved, ctx)
         model.fit(y, X)
         fits.record(len(y))
         # The design frame for the horizon, indexed by the *future* dates: holiday flags and
         # Fourier phase are recomputed there (exact — they are functions of the date), the
-        # level-shift step is carried forward, and only user-supplied exog falls back to a
-        # recency stand-in because it is genuinely unknown. Tree models ignore any lag_*
-        # columns here (see _lag_forecaster).
+        # level-shift step is carried forward, lagged covariates are read off their own source
+        # column, and only user-supplied exog falls back to a recency stand-in because it is
+        # genuinely unknown.
         future_exog = build_future_features(y, X, cfg)
         predictions = model.predict(cfg.data.horizon, future_exog)
 

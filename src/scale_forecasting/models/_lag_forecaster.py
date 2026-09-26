@@ -14,22 +14,44 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..errors import ModelError
+
 # Lag depths and calendar features used by the tree models. Fixed here (not config-driven)
 # because the recursion depends on knowing them; HPO tunes the estimator, not the lags.
 LAGS: tuple[int, ...] = (1, 2, 3, 7, 14, 28)
 
+# Every column name `build_design` produces on its own. An exog column that lands on one of
+# these would replace it rather than join it — see `_check_not_reserved`.
+_RESERVED: frozenset[str] = frozenset(
+    [f"lag_{lag}" for lag in LAGS] + ["dow", "dom", "month", "doy"]
+)
 
-def _true_exog(exog: pd.DataFrame | None) -> pd.DataFrame | None:
-    """Drop any ``lag_*`` columns from an exog frame.
 
-    Tree models own their lags via the recursion below, so config-driven ``features.lags``
-    (which arrive as ``lag_*`` columns in ``exog``) must not leak in — otherwise a config
-    lag that overlaps `LAGS` would silently overwrite the recursively-computed value.
+def _check_not_reserved(exog: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Refuse an exog frame that would overwrite a feature this model owns.
+
+    `build_design` merges exog into the same flat column dict as the target lags and the
+    calendar terms, so a covariate sharing one of those names does not sit alongside it — it
+    replaces it, and the recursion below then feeds a stale value into a coefficient fitted on
+    the real one. Nothing about the output looks wrong when that happens, which is why this
+    raises instead of dropping.
+
+    The predecessor to this check silently dropped ``lag_*`` columns, because the config used
+    to be able to build target lags and those genuinely had to be kept out. That field is gone
+    — target lags are model-owned (see ``FeaturesConfig``) — so the only way to land on one of
+    these names now is to have a source column called ``lag_7`` or ``month``, which is a
+    collision worth a message rather than a silent drop. Lagged *covariates* are named
+    ``<column>_lag_<k>`` and never collide, which is why they pass straight through to the
+    tree models like any other regressor.
     """
     if exog is None:
         return None
-    keep = [c for c in exog.columns if not c.startswith("lag_")]
-    return exog[keep] if keep else None
+    if clash := sorted(set(exog.columns) & _RESERVED):
+        raise ModelError(
+            f"exog column(s) {clash} collide with features this model builds itself "
+            f"({sorted(_RESERVED)}); rename them in the source table"
+        )
+    return exog
 
 
 def _calendar(index: pd.DatetimeIndex) -> dict[str, np.ndarray]:
@@ -53,7 +75,7 @@ def build_design(
     idx = pd.DatetimeIndex(y.index)
     cols: dict[str, np.ndarray] = {f"lag_{lag}": y.shift(lag).to_numpy() for lag in LAGS}
     cols.update(_calendar(idx))
-    exog = _true_exog(exog)  # tree models own their lags; ignore any lag_* from config
+    exog = _check_not_reserved(exog)  # a covariate must not overwrite a feature we build
     if exog is not None:
         for c in exog.columns:
             cols[c] = exog[c].to_numpy(dtype=float)
@@ -76,7 +98,7 @@ def recursive_predict(
     exog), predicts, and appends the prediction to the history for the next step.
     """
     series = history.copy()
-    future_exog = _true_exog(future_exog)  # match build_design: recursion owns the lags
+    future_exog = _check_not_reserved(future_exog)  # match build_design: same reserved names
     preds: list[float] = []
     for i, ts in enumerate(future_index):
         row: dict[str, float] = {f"lag_{lag}": float(series.iloc[-lag]) for lag in LAGS}

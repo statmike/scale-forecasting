@@ -73,7 +73,7 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
 | `holidays` | `list[str]` | `[]` | Holiday country codes to add (e.g. `["US"]`). |
 | `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform, inverted on output. |
 | `exog` | `list[str]` | `[]` | Exogenous driver columns — a **started-but-unexampled** seam: consumed by `sarimax`/`ucm`/`prophet`/`lightgbm`/`xgboost`, but the shipped source is univariate (bring your own table with these columns to use it). |
-| `lags` | `list[int]` | `[]` | Lag features. |
+| `exog_lags` | `dict[str, list[int]]` | `{}` | Lagged copies of declared `exog` columns — `{"promo": [1, 7]}` adds `promo_lag_1` and `promo_lag_7`. Keys must appear in `exog`; lags must be positive and distinct. **There is no `lags` field for the target** — see "Why there is no target-lag knob" below. |
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
 | `level_shift` | `bool` | `false` | Detect one abrupt regime change and add it as a `level_shift` step dummy. |
 
@@ -89,8 +89,19 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
 - **`holidays`** — adds a single `is_holiday` flag (1.0 on holiday dates) from the `holidays` package
   for each ISO country code (e.g. `["US", "GB"]`). The same calendar feeds the BigQuery-native models,
   so holiday handling matches across runtimes. An unknown code fails fast.
-- **`lags`** — for each integer `L`, adds a `lag_{L}` column (the target shifted back `L` steps).
-  Gives the ML models (`lightgbm`/`xgboost`) autoregressive signal. Values must be positive.
+- **`exog_lags`** — for each declared `exog` column and each integer `L`, adds a `{column}_lag_{L}`
+  column (that **covariate** shifted back `L` steps). Use it when a driver acts on the target with a
+  delay: a promotion that lifts demand the following week, a price change that takes a month to bite.
+  Values must be positive and distinct, and the key must already be in `exog` — all three are checked
+  at config load, not in the first cell.
+  - The first `L` rows of history have no `L`-step-ago value, so the frame's **head is dropped**
+    rather than filled: at a maximum lag of 28, a series trains on its observations from day 29
+    onward. A filled value at the head is a fabricated coefficient everywhere.
+  - Over the forecast horizon each lag is read off **its own source column's timeline**. For the
+    first `L` steps that is a genuine past observation; from there it is whatever the unlagged
+    covariate itself resolves to — a real forward value if your source table extends past the
+    cutoff, otherwise the same recency stand-in the unlagged column gets. A lagged covariate is
+    exactly as knowable as the covariate it lags, and never more.
 - **`fourier`** — adds sine/cosine **yearly** seasonality terms (order 3 → 6 columns). Smooth periodic
   signal for the regression-based models.
 - **`exog`** — passes named driver columns straight from the source table through to the models that
@@ -107,19 +118,52 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
   contains them by construction (`data_gen.generator` plants one per series with archetype-specific
   probability).
 
+### Why there is no target-lag knob
+
+There is no `features.lags`, and that is a design rule rather than a gap. "Lag" means two different
+things, and only one of them can be built in a config:
+
+- **A lag of the target** is only honest at predict time if the model rolls its own forecasts
+  forward one step at a time. That is *recursion*, and it belongs to the model. The models that need
+  it already own it: `lightgbm`, `xgboost` and `regression_lags` share a recursive lag forecaster
+  with fixed depths `(1, 2, 3, 7, 14, 28)`, and `neuralprophet` has autoregression behind
+  `model_params.neuralprophet.n_lags`. A config cannot supply one, because nobody knows the future
+  target — the only way to fill those horizon rows is to invent them.
+- **A lag of a covariate** is honest, because a covariate's future is as knowable as the covariate
+  itself. No model in the suite lags one internally, so that is the gap `exog_lags` fills.
+
+The field used to exist and was removed in favour of the split above. What it actually did, for the
+models that were not already stripping it out, was extend the history with a flat line at the last
+observation and read the lags off that: at a 28-step horizon, `lag_1` was one genuine observation
+followed by twenty-seven copies of the last data point. The model fitted a coefficient against real
+lagged history and then applied it to a straight line. Setting `lags` now fails at config load
+rather than being quietly ignored, so a config written against the old surface says so.
+
+**Precedence, if the two ever meet.** The model wins. A model that lags its covariates internally
+sets `lags_covariates_internally` on its class and is handed the unlagged columns only, so a
+covariate is never lagged twice — once by the config and once by the model. Every shipped model
+leaves that flag off, which is correct rather than pending: the tree models and NeuralProphet lag
+the target, and `prophet`/`sarimax`/`ucm` take covariates contemporaneously.
+
 **How these features are valued over the forecast horizon.** A model is fit on history and then
 asked to predict dates it has never seen, so the same feature columns have to exist for those
 dates too (`features.build_future_features`). Most of them are a deterministic function of the
 date and are therefore **recomputed exactly** at the future dates — `is_holiday` reflects the
 holidays that actually fall in the horizon, and the Fourier terms continue the real seasonal
-phase. `level_shift` is carried forward as `1`. Configured `lag_L` columns are genuine
-observations for the first `L` steps and then hold the last observed level.
+phase. `level_shift` is carried forward as `1`.
 
 The one exception is **`exog`**, which is genuinely unknown until the future arrives: those
 columns fall back to the most recent `horizon` observed rows, so an exog-driven forecast is
 *indicative* rather than authoritative. To get a real forward-looking exog path, extend your
 source table past the target cutoff with the driver values (a price plan, a promo calendar, a
 published index) — the read picks them up with no config change.
+
+`exog_lags` columns inherit whichever of those two cases applies to their source. A
+`{column}_lag_L` value is a genuine past observation for the first `L` horizon steps, and from
+step `L` onward it reads exactly what the unlagged column resolved to `L` steps earlier — real if
+you extended the table, the recency stand-in if you did not. Nothing is fabricated that the
+covariate did not already carry, which is why lagging a covariate is offered and lagging the
+target is not.
 
 ## `backtest` — `BacktestConfig`
 

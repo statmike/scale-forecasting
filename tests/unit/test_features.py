@@ -191,13 +191,35 @@ def test_build_features_holiday_flag() -> None:
     assert X["is_holiday"].iloc[1] == 0.0
 
 
-def test_build_features_lags() -> None:
-    y, X = build_features(_series(6), _cfg(features={"lags": [1, 2]}))
+def test_build_features_exog_lags() -> None:
+    """Lags are built from the *covariate*, and the undefined head leaves the frame."""
+    cfg = _cfg(features={"exog": ["price_index"], "exog_lags": {"price_index": [1, 2]}})
+    y, X = build_features(_series(6, with_exog=True), cfg)
     assert X is not None
-    assert {"lag_1", "lag_2"} <= set(X.columns)
-    # lag_1 of a 1..6 series: first is NaN, then y[t-1]
-    assert np.isnan(X["lag_1"].iloc[0])
-    assert X["lag_1"].iloc[1] == pytest.approx(1.0)
+    assert {"price_index_lag_1", "price_index_lag_2"} <= set(X.columns)
+
+    # A lag of k is undefined for the first k rows. Those rows are dropped rather than
+    # filled, so six observations at a maximum lag of two leave four — and nothing in the
+    # frame a model fits on is a fabricated value.
+    assert len(X) == len(y) == 4
+    assert not X.isna().to_numpy().any()
+
+    raw = _series(6, with_exog=True)["price_index"].to_numpy(dtype=float)
+    assert X["price_index_lag_1"].to_numpy() == pytest.approx(raw[1:5])
+    assert X["price_index_lag_2"].to_numpy() == pytest.approx(raw[0:4])
+
+
+def test_build_features_skips_exog_lags_for_a_model_that_owns_them() -> None:
+    """Precedence: a model that lags covariates internally is handed the unlagged columns.
+
+    The config does not get a second opinion, so nothing is lagged twice — and the head is
+    not dropped either, because no column in the frame is undefined at the start.
+    """
+    cfg = _cfg(features={"exog": ["price_index"], "exog_lags": {"price_index": [1, 2]}})
+    y, X = build_features(_series(6, with_exog=True), cfg, owns_covariate_lags=True)
+    assert X is not None
+    assert list(X.columns) == ["price_index"]
+    assert len(X) == len(y) == 6
 
 
 def test_build_features_fourier_terms() -> None:
@@ -209,10 +231,10 @@ def test_build_features_fourier_terms() -> None:
 
 
 def test_build_features_X_aligned_to_y() -> None:
-    cfg = _cfg(features={"exog": ["price_index"], "lags": [1]})
+    cfg = _cfg(features={"exog": ["price_index"], "exog_lags": {"price_index": [1]}})
     y, X = build_features(_series(7, with_exog=True), cfg)
     assert X is not None
-    assert X.index.equals(y.index)
+    assert X.index.equals(y.index), "the head-drop must cut y and X together, never one of them"
 
 
 def test_build_features_missing_target_raises() -> None:
@@ -288,7 +310,12 @@ def test_build_future_features_matches_training_columns_exactly() -> None:
     """Column *order* is load-bearing: `_lag_forecaster.recursive_predict` reads exog
     positionally, so a reordered frame feeds the wrong column to the wrong coefficient."""
     cfg = _future_cfg(
-        {"exog": ["price_index"], "holidays": ["US"], "fourier": True, "lags": [1, 3]}
+        {
+            "exog": ["price_index"],
+            "holidays": ["US"],
+            "fourier": True,
+            "exog_lags": {"price_index": [1, 3]},
+        }
     )
     y, X = build_features(_series(30, with_exog=True), cfg)
     future = build_future_features(y, X, cfg)
@@ -353,15 +380,27 @@ def test_build_future_features_level_shift_stays_zero_when_none_detected() -> No
     assert not future["level_shift"].any()
 
 
-def test_build_future_features_lags_are_real_observations_then_persist() -> None:
-    cfg = _future_cfg({"lags": [3]}, horizon=5)
-    y, X = build_features(_series(20), cfg)
+def test_build_future_features_exog_lags_read_the_covariates_own_timeline() -> None:
+    """The soundness property: a lagged covariate is exactly as knowable as its source.
+
+    Nothing is invented here that the covariate did not already carry. The first ``k`` future
+    steps read genuine observations, and from there the column reads whatever the *unlagged*
+    covariate itself resolves to. That self-consistency is the whole reason lagging a covariate
+    is sound where lagging the target was not: no one knows the future target, so the removed
+    ``features.lags`` had to fill the horizon with a flat line and hand it to a coefficient
+    fitted on real history.
+    """
+    cfg = _future_cfg({"exog": ["price_index"], "exog_lags": {"price_index": [3]}}, horizon=5)
+    y, X = build_features(_series(20, with_exog=True), cfg)
     future = build_future_features(y, X, cfg)
-    assert future is not None
-    lag3 = future["lag_3"].to_numpy()
-    # Steps 1..3 look back into real history; beyond that the history is persistence-extended.
-    assert lag3[:3] == pytest.approx(y.to_numpy()[-3:])
-    assert lag3[3:] == pytest.approx(np.full(2, float(y.iloc[-1])))
+    assert future is not None and X is not None
+
+    lag3 = future["price_index_lag_3"].to_numpy()
+    # Steps 0..2 look back into real history: the last three observed covariate values.
+    assert lag3[:3] == pytest.approx(X["price_index"].to_numpy()[-3:])
+    # Steps 3..4 look back into the horizon, so they read exactly what the unlagged column
+    # resolves to at steps 0..1 — never a value the covariate did not itself take.
+    assert lag3[3:] == pytest.approx(future["price_index"].to_numpy()[:2])
 
 
 def test_build_future_features_exog_falls_back_to_the_most_recent_rows() -> None:

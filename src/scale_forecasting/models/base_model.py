@@ -118,6 +118,22 @@ class BaseModel(ABC):
     family: ClassVar[Family]
     supports_exog: ClassVar[bool] = False
     supports_native_intervals: ClassVar[bool] = False
+    # Does this model build its *own* lags of the covariates it is given? If so, the driver hands
+    # it the unlagged columns only and withholds anything `features.exog_lags` built, so a
+    # covariate is never lagged twice — once by the config and once by the model.
+    #
+    # The rule this encodes is "the model wins", and it is the same rule that governs lags of the
+    # *target*: a model that owns a lag owns it, and the config does not get a second opinion. The
+    # target half needs no flag because it admits no exception — nobody can supply a future target,
+    # so `FeaturesConfig` offers no way to try. The covariate half does need one, because a
+    # covariate's future is knowable and building its lags in the config is therefore legitimate
+    # right up until a model says it already did.
+    #
+    # Every shipped model leaves this False, and that is correct rather than pending: the tree
+    # models and NeuralProphet lag the target, not their regressors, and Prophet/SARIMAX/UCM take
+    # covariates contemporaneously. It exists ahead of its first user because the alternative is a
+    # model arriving later, quietly double-lagging, and producing plausible numbers while it does.
+    lags_covariates_internally: ClassVar[bool] = False
     # Can this model put a device to work *at all* — is there a tensor library under it? A static
     # property of the model, not of a run. False for everything that fits on CPU by construction
     # (statsmodels, the tree models, the naives). Distinct from `gpu_useful`, which asks the much

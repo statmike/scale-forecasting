@@ -167,6 +167,28 @@ class FeaturesConfig(BaseModel):
 
     Defaults are conservative/generic (no transform, no holidays); the shipped
     ``example_config.json`` turns on holidays + log1p.
+
+    **There is no ``lags`` field, and the reason is a design rule rather than an omission.**
+    "Lag" means two different things, and only one of them can be built out here:
+
+    - A lag of the **target** is only honest at predict time if the model rolls its own
+      forecasts forward one step at a time. That is recursion, it belongs to the model, and
+      the models that need it already own it — `_lag_forecaster` does it for ``lightgbm`` /
+      ``xgboost`` / ``regression_lags``, and NeuralProphet does it behind ``n_lags``. A
+      config cannot supply one, because nobody knows the future target; the removed field
+      filled the horizon with a flat line at the last observation and handed the result to
+      models that had fitted coefficients against real history.
+    - A lag of a **covariate** is honest, because a covariate's future is as knowable as the
+      covariate itself. No model in the suite lags one internally, so this is the gap that
+      ``exog_lags`` fills.
+
+    ``exog_lags`` maps an ``exog`` column to the lags to build from it: ``{"promo": [1, 7]}``
+    adds ``promo_lag_1`` and ``promo_lag_7``. They are ordinary columns by the time any model
+    sees them, so every ``supports_exog`` model can use them.
+
+    Precedence, when the two rules ever meet: **the model wins.** A model that lags covariates
+    internally sets ``lags_covariates_internally`` and is handed the unlagged columns only, so
+    a covariate is never lagged twice. Every shipped model leaves that flag False today.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -174,9 +196,42 @@ class FeaturesConfig(BaseModel):
     holidays: list[str] = Field(default_factory=list)
     transform: Literal["none", "log1p", "boxcox"] = "none"
     exog: list[str] = Field(default_factory=list)
-    lags: list[int] = Field(default_factory=list)
+    exog_lags: dict[str, list[int]] = Field(default_factory=dict)
     fourier: bool = False
     level_shift: bool = False
+
+    @model_validator(mode="after")
+    def _check_exog_lags(self) -> FeaturesConfig:
+        """Reject a bad ``exog_lags`` at load, not at the first cell.
+
+        Every failure here is one a reader can fix by looking at their own config: a column
+        that was never declared, a lag that cannot be built, or a generated name that would
+        quietly overwrite a column they asked for. Raising at load turns all three into one
+        message before a single worker starts.
+        """
+        declared = set(self.exog)
+        for name, lags in self.exog_lags.items():
+            if name not in declared:
+                raise ValueError(
+                    f"features.exog_lags names '{name}', which is not in features.exog "
+                    f"{sorted(declared)} — a lag can only be built from a declared covariate"
+                )
+            if not lags:
+                raise ValueError(f"features.exog_lags['{name}'] is empty; drop the key instead")
+            if len(set(lags)) != len(lags):
+                raise ValueError(f"features.exog_lags['{name}'] repeats a lag: {lags}")
+            for lag in lags:
+                if lag <= 0:
+                    raise ValueError(
+                        f"features.exog_lags['{name}'] must be positive, got {lag} — "
+                        f"a zero lag is the column itself and a negative one reads the future"
+                    )
+                if (built := f"{name}_lag_{lag}") in declared:
+                    raise ValueError(
+                        f"features.exog_lags would build '{built}', which is already a "
+                        f"declared exog column; rename one of them"
+                    )
+        return self
 
 
 class BacktestConfig(BaseModel):

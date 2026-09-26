@@ -965,3 +965,50 @@ def test_a_disabled_backtest_scores_nothing_so_there_is_nothing_to_report(
             )
         )
     assert "ensemble row will score NaN" not in caplog.text
+
+
+# --- features.exog_lags ---------------------------------------------------------
+#
+# Every rejection here is one the reader can fix by looking at their own config, so all of them
+# fail at load rather than in the first cell of a fleet-sized run.
+
+
+@pytest.mark.parametrize(
+    ("features", "expected"),
+    [
+        # A lag can only be built from a column the run was told to read.
+        ({"exog_lags": {"promo": [1]}}, "not in features.exog"),
+        ({"exog": ["price"], "exog_lags": {"promo": [1]}}, "not in features.exog"),
+        # Zero is the column itself and a negative lag reads the future.
+        ({"exog": ["promo"], "exog_lags": {"promo": [0]}}, "must be positive"),
+        ({"exog": ["promo"], "exog_lags": {"promo": [-1]}}, "must be positive"),
+        # An empty list asks for nothing; say so rather than carrying a key that does nothing.
+        ({"exog": ["promo"], "exog_lags": {"promo": []}}, "is empty"),
+        # A repeat would build one column and look like it built two.
+        ({"exog": ["promo"], "exog_lags": {"promo": [7, 7]}}, "repeats a lag"),
+        # The generated name would silently take over a column the user asked for by name.
+        (
+            {"exog": ["promo", "promo_lag_1"], "exog_lags": {"promo": [1]}},
+            "already a declared exog column",
+        ),
+    ],
+)
+def test_a_bad_exog_lags_is_rejected_at_load(features: dict[str, Any], expected: str) -> None:
+    with pytest.raises(ValidationError, match=expected):
+        RunConfig(**_minimal_dict(features=features))
+
+
+def test_target_lags_are_not_a_config_field_at_all() -> None:
+    """`features.lags` is gone, and `extra="forbid"` turns a stale config into a clear failure.
+
+    Nobody knows the future target, so a config cannot supply a lag of it — the models that need
+    one build it recursively. A reader upgrading an old config should be told that, not have the
+    field quietly ignored.
+    """
+    with pytest.raises(ValidationError):
+        RunConfig(**_minimal_dict(features={"lags": [1, 7]}))
+
+
+def test_a_well_formed_exog_lags_loads() -> None:
+    cfg = RunConfig(**_minimal_dict(features={"exog": ["promo"], "exog_lags": {"promo": [1, 7]}}))
+    assert cfg.features.exog_lags == {"promo": [1, 7]}

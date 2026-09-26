@@ -214,20 +214,30 @@ def level_shift_step(y: pd.Series) -> np.ndarray:
 
 
 def build_features(
-    series: pd.DataFrame, cfg: RunConfig, lam: float | None = None
+    series: pd.DataFrame,
+    cfg: RunConfig,
+    lam: float | None = None,
+    owns_covariate_lags: bool = False,
 ) -> tuple[pd.Series, pd.DataFrame | None]:
     """Build ``(y, X)`` fit inputs for one series.
 
     ``series`` is one ts_id's rows with the configured date/target (and optional exog)
     columns. ``y`` is returned indexed by ds, sorted, with the transform applied. ``X``
-    carries any configured exog, an ``is_holiday`` flag, Fourier terms, and lag columns —
-    aligned to ``y`` — or None when nothing is configured.
+    carries any configured exog, an ``is_holiday`` flag, Fourier terms, and lagged
+    covariates — aligned to ``y`` — or None when nothing is configured.
 
     ``lam`` is the fitted Box-Cox λ (from `fit_transform_lambda`), threaded in so the
     forward transform matches the inverse a model applies at predict; ``None`` (the default)
     for the stateless transforms.
+
+    ``owns_covariate_lags`` is the receiving model's ``lags_covariates_internally``. When set,
+    ``features.exog_lags`` is skipped entirely for this frame — the model builds its own, and
+    the config does not get a second opinion. It is a parameter rather than something read off
+    the model because both callers (`worker.run_cell` and `backtest.backtest_cell`) build the
+    frame before, or independently of, the model instance that will receive it.
     """
     d, f = cfg.data, cfg.features
+    exog_lags = {} if owns_covariate_lags else f.exog_lags
     if d.date_col not in series or d.target_col not in series:
         raise ConfigError(
             f"series missing required columns '{d.date_col}'/'{d.target_col}'; "
@@ -265,15 +275,27 @@ def build_features(
     if f.level_shift:
         cols["level_shift"] = level_shift_step(y)
 
-    # Lag features from the (transformed) target.
-    for lag in f.lags:
-        if lag <= 0:
-            raise ConfigError(f"lags must be positive, got {lag}")
-        cols[f"lag_{lag}"] = y.shift(lag).to_numpy()
+    # Lagged covariates. Only ever built from a declared exog column — `FeaturesConfig` has
+    # already rejected a name that is not in `exog`, so the lookup below cannot miss.
+    for name, lags in exog_lags.items():
+        for lag in lags:
+            cols[f"{name}_lag_{lag}"] = frame[name].astype(float).shift(lag).to_numpy()
 
     if not cols:
         return y, None
     X = pd.DataFrame(cols, index=frame.index)
+
+    if exog_lags:
+        # A lag of k is undefined for the first k observations, so those rows leave the
+        # training frame. They are dropped rather than filled because a fabricated value at
+        # the head becomes a fabricated coefficient everywhere, and dropped from the *head*
+        # specifically rather than by `dropna` because the head is the only place the lags
+        # are undefined — cutting scattered interior rows would leave an irregularly spaced
+        # index, which several models read the frequency off. This is the same rule
+        # `_lag_forecaster.build_design` applies to the target lags it owns.
+        head = max(lag for lags in exog_lags.values() for lag in lags)
+        X, y = X.iloc[head:], y.iloc[head:]
+
     return y, X
 
 
@@ -294,10 +316,12 @@ def build_future_features(
       functions of the date, so these are *exact*, not estimated.
     - ``level_shift`` — 1.0 throughout: a detected regime change is still in force over the
       horizon. (0.0 throughout when none was detected, matching the historical column.)
-    - ``lag_*`` — the configured lags, read off the history extended by a naive persistence
-      forecast. For step ``i <= lag`` the value is a genuine observation; beyond that it is
-      the last observed level. (Tree models discard these and own their own recursion; see
-      `_lag_forecaster._true_exog`.)
+    - ``<name>_lag_<k>`` — the configured ``features.exog_lags``, read off the covariate's own
+      past-and-future run. For step ``i < k`` that is a genuine observation; from ``i >= k``
+      it is whatever the covariate itself resolves to at step ``i - k``, by the rule in the
+      next bullet. **A lagged covariate is exactly as knowable as the covariate it lags** —
+      it inherits its source's honesty rather than inventing its own, which is the whole
+      reason lagging a covariate is sound where lagging the target is not.
     - anything else — user-supplied ``features.exog``, which is genuinely unknown until the
       real future arrives. Falls back to the **most recent** ``horizon`` observed rows, so an
       exog-driven forecast stays indicative-only but at least reflects the current regime.
@@ -318,17 +342,36 @@ def build_future_features(
         known.update(_fourier_terms(future, d.freq, order=3))
     if f.level_shift:
         known["level_shift"] = np.full(horizon, float(X["level_shift"].to_numpy()[-1]))
-    if f.lags:
-        # Persistence-extended history: lag_k is observed for the first k steps, then holds.
-        extended = np.concatenate([y.to_numpy(dtype=float), np.full(horizon, float(y.iloc[-1]))])
-        steps = np.arange(len(y), len(y) + horizon)
-        for lag in f.lags:
-            known[f"lag_{lag}"] = extended[np.clip(steps - lag, 0, len(extended) - 1)]
 
     # Recency stand-in for the columns we cannot know: the last `horizon` observed rows.
     # Clipped, so a history shorter than the horizon repeats its earliest row instead of
     # returning a frame that silently disagrees in length with the future index.
-    tail = X.iloc[np.clip(np.arange(len(X) - horizon, len(X)), 0, len(X) - 1)]
+    tail_rows = np.clip(np.arange(len(X) - horizon, len(X)), 0, len(X) - 1)
+    tail = X.iloc[tail_rows]
+
+    if f.exog_lags:
+        # Each lagged covariate is read off its source column's own timeline, history followed
+        # by whatever that source resolves to over the horizon — a real forward covariate when
+        # the table extends past the cutoff, otherwise the same recency stand-in the unlagged
+        # column gets just above. Nothing is invented here that the covariate did not already
+        # carry, which is the difference between this and the target lags that used to live
+        # here: those had to fill the horizon with a flat line because no one knows the future
+        # target, and a coefficient fitted on real history was then applied to that flat line.
+        #
+        # Which lags to build is read off ``X`` rather than off the config, so that a model
+        # that owns its covariate lags (`lags_covariates_internally`, which made `build_features`
+        # skip them) gets a horizon frame shaped like the one it was fitted on. Same reason the
+        # column *order* comes from ``X`` below: parity by construction, not by convention.
+        steps = np.arange(len(X), len(X) + horizon)
+        for name, lags in f.exog_lags.items():
+            wanted = [lag for lag in lags if f"{name}_lag_{lag}" in X.columns]
+            if not wanted:
+                continue
+            column = X[name].to_numpy(dtype=float)
+            source = np.concatenate([column, column[tail_rows]])
+            for lag in wanted:
+                known[f"{name}_lag_{lag}"] = source[np.clip(steps - lag, 0, len(source) - 1)]
+
     cols = {
         name: known[name] if name in known else tail[name].to_numpy(dtype=float)
         for name in X.columns

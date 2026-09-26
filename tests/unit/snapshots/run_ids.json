@@ -46,7 +46,7 @@
   "configs/smokes/26_hpo_fleetwide.json": "smoke-26-hpo-fleetwide-3df8ee4169b8",
   "configs/smokes/27_hpo_per_series.json": "smoke-27-hpo-per-series-343ed2bdf272",
   "configs/smokes/28_features_off.json": "smoke-28-features-off-f9298e722d7a",
-  "configs/smokes/29_features_on.json": "smoke-29-features-on-d4a9473b8fe1",
+  "configs/smokes/29_features_on.json": "smoke-29-features-on-e4ad80d90817",
   "configs/smokes/30_features_boxcox.json": "smoke-30-features-boxcox-96c5368ce4ca",
   "configs/smokes/31_features_exog.json": "smoke-31-features-exog-8bc96fed0e7a"
 }

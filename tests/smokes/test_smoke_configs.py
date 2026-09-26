@@ -188,9 +188,17 @@ def test_the_hpo_pair_differs_only_in_granularity() -> None:
     )
 
 
-# The features quartet: one baseline and three one-knob arms, all measured against the baseline.
+# The features quartet: one baseline and three arms, all measured against the baseline. Arm 29
+# carries `exog` as well, because `exog_lags` can only lag a declared covariate — so 31, which is
+# that covariate and nothing else, is 29's nearer control: the gap between them is fourier +
+# level_shift + the lagged copies of a column both arms already had.
 _FEATURES_ARMS = {
-    "29_features_on.json": {"fourier": True, "level_shift": True, "lags": [1, 7, 28]},
+    "29_features_on.json": {
+        "fourier": True,
+        "level_shift": True,
+        "exog": ["is_holiday"],
+        "exog_lags": {"is_holiday": [1, 7, 28]},
+    },
     "30_features_boxcox.json": {"transform": "boxcox"},
     "31_features_exog.json": {"exog": ["is_holiday"]},
 }
@@ -208,6 +216,10 @@ def test_each_features_arm_differs_from_the_baseline_only_in_features(arm: str) 
 
     Three arms rather than one because `transform` is a single field, so Box-Cox cannot ride along
     with the others, and because `exog` has to run with `holidays` unset (see the test below).
+
+    Arm 29 is read against 31 as well as against 28. Both declare the same covariate, so their
+    difference is the lagged copies of it plus the two calendar knobs, which is a sharper question
+    than 29-vs-28 can ask: whether lagging a covariate is worth anything *given* the covariate.
     """
     baseline = json.loads((_SMOKE_DIR / "28_features_off.json").read_text())
     candidate = json.loads((_SMOKE_DIR / arm).read_text())

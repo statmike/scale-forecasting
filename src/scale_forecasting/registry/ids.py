@@ -100,6 +100,12 @@ _NOT_IDENTITY: tuple[tuple[str, ...], ...] = (
 # 2026-09-25 — ``compute.ensemble.runtime`` / ``.spark_mode`` / ``.spark_cluster_name``. The
 # ensemble node is hard-wired to the driver, so all three were inert. See ``EnsembleCompute``.
 #
+# 2026-09-26 — ``features.lags``. Target lags are model-owned (see ``FeaturesConfig``), and the
+# field reached no model: the three lag-native models stripped its columns before building their
+# design matrix, and the models that would have taken them failed on the NaN head first. Every
+# config on record leaves it ``[]``, so pinning that value back is not an approximation — it is
+# exactly what each recorded id already meant.
+#
 # **Do not extend this casually.** Every entry is a key in the digest describing a config shape a
 # reader can no longer see anywhere else, and enough of them turn the digest into fiction. The bar
 # is the one met above: the field was read by nothing, so no id here ever meant what it claimed.
@@ -109,6 +115,31 @@ _REMOVED_DEFAULTS: dict[tuple[str, ...], dict[str, object]] = {
         "spark_mode": None,
         "spark_cluster_name": None,
     },
+    ("features",): {"lags": []},
+}
+
+# Fields *added* to the config models that are dropped from the digest while they sit at their
+# default, so that adding them did not re-key every run in the registry.
+#
+# This is the mirror of ``_REMOVED_DEFAULTS`` — that one restores a key the config no longer
+# carries, this one drops a key it did not used to. Both exist so identity tracks the question a
+# run was asked rather than the shape of the file that asked it.
+#
+# It cannot merge two runs that ask different questions. A key is elided only when it holds its
+# default, and "absent" and "at default" describe the same run by construction; any *other* value
+# stays in the payload and keys its own id. ``test_declared_ahead_fields`` still holds, because
+# what that file actually guards is that setting a field moves the id, and setting one does.
+#
+# **The bar is narrow: the default must reproduce exactly what the code did before the field
+# existed.** That is what makes eliding it faithful rather than convenient. A new field whose
+# default changes behaviour has genuinely changed what every old config means, and then the id
+# *should* move — pay the break and stale the ledger. ``test_ids`` pins each entry against the
+# pre-break digest so a default that drifts is caught offline.
+#
+# 2026-09-26 — ``features.exog_lags``. Empty means no covariate lags are built, which is what
+# every run before it did, having had no way to ask for any.
+_DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
+    ("features", "exog_lags"): {},
 }
 
 
@@ -132,10 +163,12 @@ def _canonical_config(cfg: RunConfig) -> str:
     what append-only-plus-dedupe-on-read requires.
 
     ``_REMOVED_DEFAULTS`` then puts back the keys of fields the models no longer have, at the values
-    they used to default to. That keeps a deleted-but-never-read field from re-keying every run in
-    the registry. It is the mirror image of the exclusion above: one drops a key the config carries,
-    the other restores a key it no longer does, and both exist so identity tracks the question a run
-    was asked rather than the shape of the file that asked it.
+    they used to default to, and ``_DEFAULT_ELIDED`` drops the keys of fields the models have only
+    just gained while they sit at their default. Together they keep a change to the config's *shape*
+    from re-keying runs whose *question* did not change. It is the mirror image of the exclusion
+    above: one drops a key the config carries, the others restore or withhold one, and all three
+    exist so identity tracks the question a run was asked rather than the shape of the file that
+    asked it.
     """
     payload = cfg.model_dump(mode="json")
     for *parents, leaf in _NOT_IDENTITY:
@@ -155,6 +188,14 @@ def _canonical_config(cfg: RunConfig) -> str:
         if isinstance(node, dict):
             for key, value in defaults.items():
                 node.setdefault(key, value)
+    for *parents, leaf in _DEFAULT_ELIDED:
+        node = payload
+        for key in parents:
+            node = node.get(key) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, dict) and node.get(leaf) == _DEFAULT_ELIDED[(*parents, leaf)]:
+            node.pop(leaf, None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

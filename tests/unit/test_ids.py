@@ -128,6 +128,52 @@ def test_a_removed_field_cannot_be_set_even_though_the_digest_names_it() -> None
         _cfg(compute={"ensemble": {"runtime": "ray"}})
 
 
+def test_the_digest_no_longer_carries_the_removed_target_lags() -> None:
+    """`features.lags`, deleted 2026-09-26, is pinned back at the `[]` every run on record had.
+
+    Target lags are model-owned (see `FeaturesConfig`), and the field reached no model at all: the
+    lag-native models stripped its columns and the rest failed on its NaN head. So the pin is not
+    an approximation of what old ids meant — it is exactly what they meant.
+    """
+    assert json.loads(_canonical_config(_cfg()))["features"]["lags"] == []
+    with pytest.raises(ValidationError):
+        _cfg(features={"lags": [1, 7]})
+
+
+# --- added fields, elided from the digest while they hold their default ----------
+#
+# The mirror of the block above, and it carries the same risk in the other direction: an elision
+# that stops matching the pre-break payload merges two different questions under one id instead of
+# splitting one question across two.
+
+
+def test_a_default_exog_lags_is_absent_from_the_digest() -> None:
+    """Adding `features.exog_lags` did not re-key a single run, and this is the reason.
+
+    The digest hashes `model_dump()` including defaults, so a new field would ordinarily move every
+    id in existence. Eliding it while empty makes a config that asks for no covariate lags hash
+    exactly as it did before the field existed — which is faithful, because that *is* the same run.
+    """
+    assert "exog_lags" not in json.loads(_canonical_config(_cfg()))["features"]
+
+
+def test_asking_for_covariate_lags_still_moves_the_run_id() -> None:
+    """The other half of the bargain: elision must never merge two different questions.
+
+    Only the default is dropped. Any real value stays in the payload and keys its own id, so a run
+    that lags a covariate can never collide with the run that does not.
+    """
+    plain = _cfg(features={"exog": ["promo"]})
+    lagged = _cfg(features={"exog": ["promo"], "exog_lags": {"promo": [1]}})
+    assert make_run_id(plain) != make_run_id(lagged)
+    assert json.loads(_canonical_config(lagged))["features"]["exog_lags"] == {"promo": [1]}
+
+
+def test_an_explicitly_empty_exog_lags_is_the_same_run_as_an_absent_one() -> None:
+    """ "Absent" and "at default" describe the same run, so they must share an id."""
+    assert make_run_id(_cfg(features={"exog_lags": {}})) == make_run_id(_cfg())
+
+
 # --- model_hash ----------------------------------------------------------------
 
 

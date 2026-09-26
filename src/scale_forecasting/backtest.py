@@ -816,6 +816,7 @@ def backtest_cell(
     cfg: RunConfig,
     lam: float | None = None,
     tally: FitTally | None = None,
+    owns_covariate_lags: bool = False,
 ) -> tuple[pd.DataFrame, list[dict[str, float]], BacktestOutcome]:
     """Run CV for one series and model factory.
 
@@ -830,6 +831,8 @@ def backtest_cell(
         tally: a `FitTally` to count this cell's fold fits into, or None to count nothing. The
             caller owns it, because the final full-history fit that `worker.run_cell` performs
             afterwards belongs in the same total and does not happen here.
+        owns_covariate_lags: the model's `lags_covariates_internally`, forwarded to
+            `build_features` so the folds are scored on the same frame the final fit will see.
 
     Returns:
         ``(oof, fold_metrics, outcome)`` where ``oof`` is the canonical OOF frame (`OOF_COLUMNS`)
@@ -844,7 +847,7 @@ def backtest_cell(
         it would be picked up as if it were a second model. It lives in ``oof["yhat_stale"]`` and is
         summarised once as ``outcome.staleness_gap``.
     """
-    y, X = build_features(series, cfg, lam)
+    y, X = build_features(series, cfg, lam, owns_covariate_lags)
     n = len(y)
     folds = make_folds(n, cfg)
     arms, refit_mode = (
