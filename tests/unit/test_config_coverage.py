@@ -213,17 +213,6 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_features.py::test_boxcox_roundtrips_with_fitted_lambda"
     ),
     # --- hpo -------------------------------------------------------------------------------------
-    "hpo.enabled=true": (
-        "tests/unit/test_worker.py::test_per_series_hpo_tunes_and_records_best_params"
-    ),
-    "hpo.engine=optuna": (
-        "gap: the only member of its Literal and the default, so every HPO test runs it without "
-        "naming it — and no shipped config enables HPO at all, which is why the whole block reads "
-        "untouched. It closes the day an HPO config is written, not before."
-    ),
-    "hpo.granularity=fleetwide": (
-        "tests/unit/test_config.py::test_hpo_defaults_are_off_and_fleetwide"
-    ),
     "hpo.granularity=per_series": (
         "tests/unit/test_worker.py::test_per_series_hpo_tunes_and_records_best_params"
     ),
@@ -348,9 +337,10 @@ def authored_surface(surface: dict[str, tuple[str, ...]]) -> dict[str, set[str]]
     def walk(obj: BaseModel, prefix: str, config: str) -> None:
         fields = type(obj).model_fields
         # A default inside a switched-off block was never exercised, whatever the object says it
-        # holds. Every config leaves `hpo.enabled` false, so `hpo.granularity` is `fleetwide` in all
-        # of them — and counting that as coverage would report the HPO surface as proven when no run
-        # has ever tuned anything. When the gate is off, only the gate itself is recorded.
+        # holds. A config that leaves `hpo.enabled` false still carries `hpo.granularity` at its
+        # `fleetwide` default — and counting that as coverage would report the HPO surface as proven
+        # by runs that never tuned anything. Only a config that switches the gate on can credit the
+        # fields behind it; when the gate is off, only the gate itself is recorded.
         gated_off = "enabled" in fields and not getattr(obj, "enabled", True)
         for name in fields:
             if gated_off and name != "enabled":
