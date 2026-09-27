@@ -50,8 +50,7 @@ Plain-language rationale for the choices that aren't obvious from the code alone
 ## Work items
 
 ### In progress
-- [ ] SDK runner refinement — tighten both the high-level `Forecaster` path and the lower-level
-      direct job runners (the effort this cleanup unblocks).
+- None — baseline complete.
 
 ### Outstanding / deferred
 - [ ] Trim the Vertex agent's subnet-scoped custom role down to its true floor — deferred until a
@@ -60,24 +59,70 @@ Plain-language rationale for the choices that aren't obvious from the code alone
       model fit (a Python UDF) is the bottleneck, not Spark I/O; worth a controlled measurement.
 
 ### Known limits
-- Live scale has been proven to the 1k–10k series range; larger runs are designed for but not yet
-  routinely exercised.
+- Live scale has been proven to 100k series across both Dataproc Spark and Ray on Vertex AI
+  (`scale-100k`, `scale-100k-ray`, and 100k GPU runs); see [`docs/validation.md`](./docs/validation.md)
+  and [`docs/quota_and_scale.md`](./docs/quota_and_scale.md).
 - The Ray engine materializes one driver-side pandas panel before the fan-out shards it (both
   readers do). Bounded on purpose — Ray is the GPU/modest-scale runtime here and Spark is the
-  100k-series one — but it is the ceiling that keeping the panel distributed as `ray.data` blocks
-  all the way into the fan-out would lift. Gated on a live Ray run at a scale where the driver
-  actually binds.
+  primary 100k-series CPU runtime — though 100k series has been proven on Ray as well; keeping the
+  panel distributed as `ray.data` blocks all the way into the fan-out would lift the driver memory
+  ceiling further.
 - Forward `features.exog` values are unknown offline, so the horizon's exog columns fall back to
-  the most recent observed rows. Everything else in the design matrix (holidays, Fourier phase, the
-  level-shift step, the first `L` steps of each `lag_L`) is computed exactly at the future dates —
-  see `features.build_future_features`. Supply real forward exog by extending the source table
-  past the cutoff.
-- Long Ray runs (beyond ~60 min) can outlive the submission bearer token; see
-  [`docs/troubleshooting.md`](./docs/troubleshooting.md).
+  the most recent observed rows, and each `features.exog_lags` column (`<col>_lag_<k>`) shifts the
+  combined history + forward-filled covariate series by `k` steps so the first `k` horizon steps
+  use real observed history. Everything else in the design matrix (holidays, Fourier phase, the
+  level-shift step) is computed exactly at the future dates — see `features.build_future_features`.
+  Supply real forward exog by extending the source table past the cutoff.
+- Long Ray runs (beyond ~60 min) can outlive the submission bearer token; the poll loop recovers
+  automatically by minting a fresh token and reconnecting (`ray_jobs._status_with_recovery`), proven
+  live via `SF_RAY_POLL_FAULT`. See [`docs/troubleshooting.md`](./docs/troubleshooting.md).
 - `neuralprophet` is incompatible with pandas 3.0 and ships as an optional extra that registers but
   skips when unavailable.
 
 ### Recently done
+- **Pre-commit consistency hook (`.githooks/pre-commit`, `make hooks`).** Runs the two fast
+  doc-to-code consistency tripwires (`test_validation_ledger.py` and `test_config_coverage.py`) in
+  under two seconds before each commit, unsetting `SF_*` so shell state cannot skew the result and
+  standing down cleanly if neither `.venv` nor `uv` is available.
+- **Covariate lags (`features.exog_lags`) replacing target lags (`features.lags`), and the HPO +
+  features comparative smoke campaign (`21`–`31`).** Smoke 29 exposed that `features.lags` reached
+  no model at all: `_lag_forecaster` stripped `lag_*` columns because the tree/ridge models own
+  recursive target lags internally (`LAGS`), while Prophet, SARIMAX, and UCM failed on the leading
+  `NaN`s left by `y.shift(k)`, and `build_future_features` would have flat-lined future target lags
+  across the horizon. `features.lags` was replaced with `features.exog_lags: dict[str, list[int]]`
+  (head-dropped rather than filled so the index stays contiguous, with `BaseModel.lags_covariates_internally`
+  and `_check_not_reserved` guarding against double-lagging or calendar-column collisions), while
+  `_REMOVED_DEFAULTS` and `_DEFAULT_ELIDED` in `registry/ids.py` kept 49 of 50 historical `run_id`
+  digests byte-identical. Alongside this, smokes `21` (all 18 models + 6 ensemble strategies live),
+  `22`–`25` (backtest schemes and short-series policies), `26`–`27` (fleetwide vs per-series HPO),
+  and `28`–`31` (features baseline, Fourier + level shift + covariate lags, Box-Cox positivity
+  partial, and exogenous covariates) all reached `CURRENT`, and the four `forecast_metadata`
+  achieved-geometry columns (`achieved_step`, `achieved_min_train`, `first_val_date`,
+  `last_val_date`) are now populated on both the Python and BigQuery-native paths (`_RESERVED_METADATA`
+  is empty).
+- **Config-surface coverage tripwire (`tests/unit/test_config_coverage.py`) and removal of inert
+  `EnsembleCompute` runtime fields.** Joins every enumerable value reachable from `RunConfig`
+  (`Literal` members, `bool` states, registered models, and panel metrics) against shipped configs
+  and `CURRENT` ledger rows, enforcing set equality with `UNPROVEN` (function-span-verified unit
+  test pointers, catalogue loops, or documented `reason:` / `gap:` classifications). Deleted the
+  three unread `compute.ensemble.{runtime,spark_mode,spark_cluster_name}` fields and pinned their
+  former defaults in `_REMOVED_DEFAULTS` so no `run_id` moved. All genuine config-coverage gaps are
+  now closed (`114` declared values: `84` proven live, `28` exercised offline, `0` genuine gaps,
+  `2` not work).
+- **Platform-aware attempt counter and staged-run lifecycle (`STAGED` header, `EMITTED` job rows).**
+  `plan_run` and `stage_run` now re-stamp emitted per-family launch commands with the next attempt
+  number from `run_jobs`; `stage_run` writes a `STAGED` run header (when no header exists yet) and
+  `EMITTED` job rows carrying probe handles so operator-launched or abandoned staged runs are
+  visible to `probes.reconcile` and `settle` (which reaps unlaunched `EMITTED` rows to
+  `FAILED` / `NEVER_LAUNCHED` once startup grace expires); and `--force` walks the attempt counter
+  past any job IDs the target platform already holds (`errors.JobIdTaken`).
+- **SDK runner refinement (`Forecaster`, `Registry`, and direct engine runners).** Completed the
+  high-level `Forecaster` lifecycle (`plan`, `feasibility`, `emit_airflow`, `run`, `status`, `wait`,
+  `results`, `dag`, `jobs`, `trace`, `monitor(probe=...)`, `review_run`, `probe`, `cancel`,
+  `settle`, `retry`, `from_run_id`), the `Registry` management class mirroring all eight operator
+  verbs (`init`, `doctor`, `close_runs`, `drop_run`, `sweep_orphans`, `reap_clusters`, `snapshot`,
+  `export`), and the lower-level direct worker/runner seams (`chunk_cells`, `make_chunk_runner`,
+  `make_group_runner`) so Spark and Ray engines share one cell-execution contract.
 - **Two promises the test suite could not keep on its own now have alarms on them.** The Ray poll's
   recovery from a dropped request or an expired token is covered by eight offline tests and has
   never executed live, because the condition cannot be scheduled — so `SF_RAY_POLL_FAULT` arms it:
