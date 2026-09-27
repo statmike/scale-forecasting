@@ -10,7 +10,7 @@
 # guarantees the committed file always equals the lock.
 EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra models --extra ray --format requirements-txt
 
-.PHONY: lock lock-check sync test docs composer-sync
+.PHONY: lock lock-check sync test hooks docs composer-sync
 
 ## lock: re-resolve uv.lock from pyproject.toml and regenerate docker/requirements.txt from it.
 ## Run this after editing dependencies in pyproject.toml, then commit both files.
@@ -55,6 +55,17 @@ test:
 	uv run ruff format --check src tests
 	uv run ruff check src tests
 	uv run pytest -m "not gcp and not spark and not ray" -q
+
+## hooks: enable the tracked git hooks in .githooks (one-time, per clone).
+##
+## Installs one pre-commit hook that runs the two *consistency* tripwires — the validation ledger
+## and the config-coverage map — in about two seconds. Both compare prose against code, so a
+## documentation-only edit can turn them red with no code change, which is precisely the case
+## `make test` tends to miss: the suite takes six minutes, so it gets run before the last edit
+## rather than after it. This is a narrow guard for that gap, not a second `make test`.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "git hooks enabled (.githooks). Bypass a single commit with: git commit --no-verify"
 
 ## format: apply the canonical layout in place (the fix for a `make test` format failure).
 format:

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Pre-commit: the two consistency tripwires, and nothing else.
+#
+# These guard a failure shape the full gate cannot, because the full gate takes six minutes and so
+# it gets run *before* the last edit rather than after it. Both of these tripwires compare prose
+# against code — the validation ledger against the architecture axes it claims results on, and the
+# config-coverage map against the declared surface — which means a documentation-only edit made
+# after a green gate can turn them red with no code change at all. That is not hypothetical: it is
+# how `main` went red on 2026-09-26, when a ledger row was marked NEVER_RUN while still carrying the
+# run_id of a run that had not happened.
+#
+# The design constraint is the one `make lock-check` learned the hard way, recorded in the Makefile:
+# a guard that is slow or flaky trains you to bypass it, and a bypassed guard is worse than none. So
+# this hook runs in under two seconds, runs only checks that cannot fail for environmental reasons,
+# and steps aside entirely rather than blocking when it cannot run properly.
+#
+# It is NOT a substitute for `make test`. It checks two files' worth of consistency, not the suite.
+#
+# Enable it once per clone:   make hooks
+# Bypass it for one commit:   git commit --no-verify
+
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root" || exit 0
+
+# Prefer the synced venv; fall back to `uv run` for a clone that has not run `make sync`. If neither
+# is available this is an environment the hook cannot judge, so it stands down with a note instead
+# of failing a commit for a reason that has nothing to do with the change.
+if [[ -x .venv/bin/python ]]; then
+  runner=(.venv/bin/python -m pytest)
+elif command -v uv >/dev/null 2>&1; then
+  runner=(uv run --frozen pytest)
+else
+  echo "pre-commit: no .venv and no uv — skipping the consistency tripwires." >&2
+  exit 0
+fi
+
+# Unset the live deployment identity. These tests are pure and offline, and they must return the
+# same answer in a shell that has sourced a deployment's environment as in one that has not —
+# otherwise the hook's verdict depends on which terminal you happen to be committing from.
+sf_unset=()
+while IFS='=' read -r name _; do
+  sf_unset+=(-u "$name")
+done < <(env | grep -E '^SF_[A-Z_]+=' || true)
+
+output="$(env "${sf_unset[@]}" "${runner[@]}" \
+  tests/unit/test_validation_ledger.py \
+  tests/unit/test_config_coverage.py \
+  -q --no-header -p no:cacheprovider 2>&1)"
+status=$?
+
+if [[ $status -ne 0 ]]; then
+  echo "$output" >&2
+  cat >&2 <<'EOF'
+
+pre-commit: a consistency tripwire failed — see above.
+
+  test_validation_ledger  — the ledger's rows against the architecture they claim to be proven on.
+                            A row cannot cite evidence it does not have, and a result cannot
+                            survive a change to the axes it was measured under.
+  test_config_coverage    — every declared config value against the configs and the ledger. A value
+                            that becomes proven, or stops being proven, needs its classification
+                            updated in the UNPROVEN map.
+
+Fix the row or the map and commit again. To commit anyway: git commit --no-verify
+EOF
+  exit 1
+fi
+
+exit 0
