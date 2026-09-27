@@ -205,10 +205,10 @@ UNPROVEN: dict[str, str] = {
         "this entry, before concluding the path is untested."
     ),
     # --- features ------------------------------------------------------------------------------
-    "features.fourier=true": "tests/unit/test_features.py::test_build_features_fourier_terms",
-    "features.level_shift=true": (
-        "tests/unit/test_features.py::test_build_features_level_shift_column_is_opt_in"
-    ),
+    # `fourier=true` and `level_shift=true` sat here until 2026-09-26, pointed at their offline
+    # tests, because the only config that set them was smoke 29 and smoke 29 could not finish: the
+    # `features.lags` it also carried killed half its cells. Removing that field let the arm run
+    # clean, which proved both knobs live in the same pass and emptied this section.
     # --- output ------------------------------------------------------------------------------
     "output.point_forecast=(unset)": (
         "reason: unreachable rather than unproven. The field is declared `… | None = None`, but "
