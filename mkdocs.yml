@@ -118,23 +118,41 @@ nav:
   - API Reference:
       - Overview: api/index.md
       - Forecaster (SDK): api/sdk.md
+      - Run inspection & review: api/review.md
+      - Model playground: api/playground.md
       - run (orchestration): api/main.md
       - Run DAG (families → jobs): api/dag.md
-      - run_cell (worker): api/worker.md
       - Router: api/router.md
+      - Launch plan & preflight: api/launch_plan.md
+      - Artifact staging: api/staging.md
       - Configuration: api/config.md
       - Settings: api/settings.md
       - Errors: api/errors.md
-      - Metrics: api/metrics.md
-      - BaseMetric: api/metrics_base_metric.md
-      - Backtest: api/backtest.md
-      - Calibration: api/calibration.md
+      - run_cell (worker): api/worker.md
       - Model factory: api/models.md
       - BaseModel: api/models_base_model.md
+      - Feature engineering: api/features.md
+      - Seasonality detection: api/seasonality.md
+      - Hyperparameter optimization: api/hpo.md
+      - Ensembler (blending math): api/ensembler.md
+      - Ensemble driver: api/ensemble_run.md
+      - Backtest: api/backtest.md
+      - Metrics: api/metrics.md
+      - BaseMetric: api/metrics_base_metric.md
+      - Calibration: api/calibration.md
       - Spark core: api/engines_spark_io.md
       - Ray core: api/engines_ray_io.md
+      - BigQuery-native engine: api/engines_bigquery_engine.md
+      - Compute profiling: api/profiling.md
+      - Resource planning: api/resources.md
+      - Quota preflight & advisor: api/quota.md
+      - Capacity fallback: api/capacity.md
       - Registry views: api/registry_views.md
       - Registry operations: api/registry_ops.md
+      - Runtime probes & reconciliation: api/probes.md
+      - Surgical run repair: api/retry_run.md
+      - Ray orphan reaper: api/ray_reaper.md
+      - Synthetic data generator: api/data_gen.md
   - System Validation:
       - System validation ledger: validation.md
       - Smoke testing guide: smoke_testing.md

@@ -586,15 +586,12 @@ def _inverse_error_weight_matrix(
     Weight ∝ ``1/mean(decision_metric)`` over that series' own ``forecast_metadata`` rows, through
     `inverse_error_weights` exactly as the pooled version did.
 
-    Per-series is what makes the strategy reproducible. The microbatch ensemble trigger hands
-    `combine_calculated` one ready-batch of series at a time while the barrier trigger hands it all
-    of them, so **any** weight pooled across series depends on how the run happened to batch, and
-    the same config on the same data then lands different forecasts. A run-wide
-    ``groupby("model_type").mean()`` did exactly that here until 2026-09-11: smokes 11 and 12, run
-    back to back on identical data, produced a different ``ensemble_inverse_error`` on every one of
-    2,800 rows. It also puts the future blend in step with `_inverse_error_blend`, the OOF-scored
-    counterpart, which has always been per-series — the two are meant to be the same weighting seen
-    from two sides. See `docs/validation.md`.
+    Per-series estimation makes ``inverse_error`` reproducible across ensemble triggers. The
+    microbatch ensemble trigger hands `combine_calculated` one ready-batch of series at a time while
+    the barrier trigger hands it all of them, so any weight pooled across series would depend on how
+    the run happened to batch. Estimating weights per series keeps the future blend invariant to
+    series partitioning and in step with `_inverse_error_blend`, the OOF-scored counterpart, which
+    is also computed per series. See `docs/validation.md`.
 
     A series with no metadata of its own falls back to **uniform**, degrading to ``mean``: the same
     NULL-tolerant behaviour as a missing metric frame, and partition-invariant for the same reason.

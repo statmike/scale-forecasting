@@ -1,25 +1,41 @@
 # API Reference
 
-This reference is generated directly from the source docstrings, so it always matches the code.
+This reference is generated directly from the source docstrings via `mkdocstrings`, so it always matches the code.
 
-`scale_forecasting` exposes three doors onto the same forecasting core, plus one for managing what
-those runs leave behind:
+```mermaid
+flowchart TD
+    subgraph Entry["Entrypoints & SDK"]
+        SDK["Forecaster & Registry (sdk)"]
+        REV["monitor_run & review_run (review)"]
+        PG["Single-Series Playground (playground)"]
+        MAIN["run & CLI (main)"]
+    end
+    subgraph Plan["Planning, Sizing & Preflight"]
+        CFG["RunConfig & Settings (config, settings)"]
+        DAG["DAG & Router (dag, router, launch_plan)"]
+        PROF["Profiling, Resources, Quota & Capacity"]
+    end
+    subgraph Core["Forecasting Core & Engines"]
+        WRK["run_cell (worker)"]
+        MOD["Models, Features, Seasonality & HPO"]
+        BT["Backtest, Metrics & Calibration"]
+        ENS["Ensembler & Ensemble Driver"]
+        ENG["Spark, Ray & BigQuery Engines"]
+    end
+    subgraph Ops["Registry, Probes & Repair"]
+        REG["Registry Views & Ops (registry.views, registry.ops)"]
+        PRB["Probes, Surgical Repair & Ray Reaper"]
+    end
+    Entry --> Plan --> Core --> Ops
+```
 
-- **The easy path** — [`Forecaster`](sdk.md): point it at a config, call `dry_run()` / `run()` /
-  `review()`.
-- **The orchestration entrypoint** — [`run`](main.md): the single function every runtime dispatches
-  through, used identically locally and in the cloud.
-- **The direct path** — the cell primitives ([`run_cell`](worker.md), and the group/chunk runners in
-  [Spark core](engines_spark_io.md) and [Ray core](engines_ray_io.md)) for embedding the model
-  machinery in your own Spark `applyInPandas` or Ray tasks.
-- **The manage path** — [`registry.ops`](registry_ops.md) (and the `Registry` SDK class on the
-  [same page as `Forecaster`](sdk.md)): inspect a registry, drop a run across every tier, sweep
-  orphaned artifacts, snapshot or export.
+`scale_forecasting` exposes three doors onto the same forecasting core, plus a full operational and registry management surface:
 
-Supporting surfaces: [configuration](config.md) and [settings](settings.md), the
-[error taxonomy](errors.md), the [model factory](models.md) and [`BaseModel`](models_base_model.md)
-contract, [metrics](metrics.md), [backtesting](backtest.md), the [router](router.md), and the
-analyst [registry views](registry_views.md).
+- **The easy path** — [`Forecaster`](sdk.md), [`review`](review.md), and [`playground`](playground.md): point at a config, call `dry_run()` / `run()` / `review()`, monitor live progress with `monitor_run()`, or inspect single-series fits in a notebook.
+- **The orchestration & planning path** — [`run`](main.md), [`dag`](dag.md), [`router`](router.md), [`launch_plan`](launch_plan.md), and [`staging`](staging.md): plan the family-to-job DAG, run quota preflight, stage artifacts to GCS, and launch across Local, Dataproc Serverless, Dataproc Cluster, Vertex AI Ray, and BigQuery.
+- **The direct path** — the cell primitives ([`run_cell`](worker.md) and the group/chunk runners in [Spark core](engines_spark_io.md), [Ray core](engines_ray_io.md), and [BigQuery-native engine](engines_bigquery_engine.md)) for embedding the model machinery in your own pipelines.
+- **The manage & repair path** — [`registry.ops`](registry_ops.md), [`registry.views`](registry_views.md), [`probes`](probes.md), [`retry_run`](retry_run.md), and [`ray_reaper`](ray_reaper.md): inspect registry health, reconcile live platform state, surgically repair errored cells, reap orphaned clusters, or snapshot/export runs.
 
-The package front door lazy-loads the heavy names via `__getattr__`, so `import scale_forecasting`
-stays fast; each page below documents the concrete module a name resolves to.
+Supporting surfaces: [configuration](config.md), [settings](settings.md), [errors](errors.md), the [model factory](models.md) and [`BaseModel`](models_base_model.md) contract, [features](features.md), [seasonality](seasonality.md), [HPO](hpo.md), [ensembler](ensembler.md) and [ensemble driver](ensemble_run.md), [metrics](metrics.md) and [`BaseMetric`](metrics_base_metric.md), [backtesting](backtest.md), [calibration](calibration.md), [compute profiling](profiling.md), [resource planning](resources.md), [quota preflight](quota.md), [capacity fallback](capacity.md), and the [synthetic data generator](data_gen.md).
+
+The package front door lazy-loads the heavy names via `__getattr__`, so `import scale_forecasting` stays fast; each page below documents the concrete module a name resolves to.

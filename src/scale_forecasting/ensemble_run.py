@@ -50,19 +50,15 @@ Three responsibilities, in order:
    land, the leaderboard shows the ensembles automatically — **no view change** beyond the
    ``ensemble_id`` group key.
 
-**Idempotency (append-only + dedupe-on-read).** Every ensemble row is now written through the
+**Idempotency (append-only + dedupe-on-read).** Every ensemble row is written through the
 Write API and is keyed in ``(run_id, ensemble_id, ts_id, model_type)``, so a re-run of the same
 ensemble config re-appends the same cells — correct-but-wasteful when the numbers repeat, and a
 genuine conflict when they don't (``xgb`` is a stochastic meta-learner, and a repair re-fits). Both
 cases resolve the same way: every ensemble row carries a ``created_at``, and each read dedupes to
 one row per cell by ``ORDER BY created_at DESC NULLS LAST`` — see `base_read_sql`, and
-`registry.rows.cell_dedup_key` for the same rule on the base tables. That sentence was aspirational
-until 2026-09-11: the OOF and metadata rows carried the stamp, the *prediction* rows did not, so the
-one table a reader takes the forecast from was the one table with no tiebreak. Every ensemble
-prediction row written before that date is NULL and loses to any later one, which is what
-``NULLS LAST`` is for. No pre-delete — a ``DELETE``
-matching rows still in the ~90-min Write API streaming buffer is rejected for the whole window
-(the constraint every cell writer already lives under).
+`registry.rows.cell_dedup_key` for the same rule on the base tables. No pre-delete is issued because
+a ``DELETE`` matching rows still in the ~90-min Write API streaming buffer is rejected for the whole
+window (the constraint every cell writer lives under).
 A *different* ensemble config keys distinctly (different ``ensemble_id``), so it never overwrites
 and never collides — both coexist.
 
@@ -375,28 +371,17 @@ def _ensemble_batch(
     series (microbatch) or all of them (barrier).
 
     **Identical logic is not identical numbers, and the difference is confined to the learned
-    strategies.** The calculated ones (``mean``, ``median``, ``inverse_error``) are per-series, so
+    strategies.** The calculated ones (``mean``, ``median``, ``inverse_error``) are per-series
+    (`ensembler._inverse_error_weight_matrix` estimates ``inverse_error`` weights per series), so
     partitioning the series changes nothing. The learned ones are not: `fit_learned` below trains on
     whatever OOF this call was handed, so microbatch fits ``nnls``/``ridge``/``xgb`` **once per
     ready-batch on that batch's series**, while barrier fits once over all of them. Different
-    training sample, different weights. Confirmed live on 2026-09-02 by running smokes 11 and 12
-    back to back on the same data: the three calculated strategies agreed to float noise and
-    ``ensemble_nnls`` differed in the fourth decimal (see `docs/validation.md`).
-
-    That first sentence was only two-thirds true until 2026-09-11, and re-running the same pair
-    caught it. ``mean`` and ``median`` were per-series and came back bit-identical, but
-    ``inverse_error``'s *future* blend took its weights from a run-wide
-    ``groupby("model_type").mean()`` over this call's metric rows — which microbatch filters to the
-    batch's series — so it moved on every one of 2,800 rows while its OOF-scored counterpart, which
-    really is per-series, matched exactly. The leaderboard therefore looked clean while the shipped
-    forecasts disagreed. `ensembler._inverse_error_weight_matrix` now estimates those weights per
-    series, and the claim above holds for all three.
+    training sample, different weights (see `docs/validation.md`).
 
     Neither answer is wrong, but the microbatch one depends on how series happened to batch, which
-    depends on job timing — so it is not reproducible the way the rest of a run is. Deciding whether
-    learned strategies should defer to a final global fit is a design question, deliberately left
-    open here rather than changed mid-campaign; this docstring's job is to stop the next reader
-    assuming the two triggers are interchangeable for stacking.
+    depends on job timing — so it is not reproducible the way the rest of a run is. This docstring
+    makes the distinction explicit so callers do not assume the two triggers are interchangeable for
+    stacking.
     """
 
     from google.cloud import bigquery

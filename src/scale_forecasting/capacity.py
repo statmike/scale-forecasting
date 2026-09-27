@@ -223,18 +223,13 @@ def classify(message: str, exc: BaseException | None = None) -> str:
        through to step 6 — every classification the text already makes is left exactly as it was.
     6. **Everything else is `TRANSIENT_CAPACITY`.**
 
-    Step 6 is the asymmetry, and it is deliberate. The classifier used to work the other way — hop
-    only on reasons we recognised — and that inverted default cost the feature three times in one
-    afternoon (2026-09-01), each to a different contentless string: "An internal error occurred on
-    your cluster", "Unexpected response.", and the plural quota message above. Each read as a
-    diagnosed config fault and was re-raised in the first region, so a config naming three regions
-    tried one. The costs are not symmetric: retrying a config fault wastes minutes and still ends in
-    an error that names every candidate tried, while refusing to retry a stock-out loses the
-    feature silently. So: give up only when the message names a cause that travels with the request.
-
-    Note this makes the **Dataproc** path more patient than it was. `compute_fallback` re-raised on
-    anything it did not recognise as capacity; it now hops and retries instead. That is a real
-    behaviour change, made on purpose, so both cluster paths answer to one rule.
+    Step 6 is the deliberate asymmetry: any unrecognised or contentless platform error (such as
+    ``"An internal error occurred on your cluster"`` or ``"Unexpected response."``) defaults to
+    `TRANSIENT_CAPACITY` so the multi-region fallback walks the remaining candidate regions rather
+    than aborting in the first region. The costs are not symmetric: retrying a config fault wastes
+    minutes and still ends in an error that names every candidate tried, while refusing to retry an
+    unrecognised stock-out loses the multi-region fallback silently. Give up immediately only when
+    the message names a cause that travels with the request.
     """
     low = message.lower()
     if exc is not None and type(exc).__name__ in _CAPACITY_EXCEPTION_NAMES:

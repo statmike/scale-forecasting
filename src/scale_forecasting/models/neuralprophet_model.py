@@ -116,14 +116,11 @@ class NeuralProphetModel(BaseModel):
     def device_used(self) -> str | None:
         """Where the fit ran — read off the trainer that ran it, not off the weights afterwards.
 
-        This used to read a parameter tensor from ``self._model.model``, on the reasoning that the
-        parameters are the receipt. They are, but only until the fit lets go of them: Lightning ends
-        every run by putting the module back on the CPU (``Strategy.teardown`` calls
-        ``self.lightning_module.cpu()``), so the tensor a caller sees afterwards is on the CPU no
-        matter where the arithmetic happened. On 2026-09-09 all three live services said ``"cpu"``
-        on the same day — Serverless L4, a Dataproc cluster T4 and Ray T4 — for cells that had
-        50–68 KB allocated on the card, and `device_audit` read that as MISSING_DEVICE: the verdict
-        meaning the accelerator was billed for nothing. It was the probe that was wrong.
+        Reading a parameter tensor from ``self._model.model`` after `fit()` returns ``"cpu"`` even
+        for a GPU fit because PyTorch Lightning ends every training run by moving the module back to
+        CPU (``Strategy.teardown`` calls ``self.lightning_module.cpu()``). Reading the post-fit
+        weights would therefore misclassify GPU cells as ``"cpu"`` and cause `device_audit` to
+        report ``MISSING_DEVICE``.
 
         ``trainer.strategy.root_device`` survives teardown and is not the request restated. It is
         what Lightning's accelerator connector *resolved* the request to against the hardware it

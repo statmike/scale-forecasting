@@ -162,9 +162,9 @@ def run(
         # timestamp committed hours ago that a plain SELECT against the same table time-travels to
         # fine (only CREATE MODEL is affected, and it accepts only a CURRENT_TIMESTAMP()-relative
         # expression, not a fixed snapshot instant; this holds for both native and BigLake Iceberg
-        # sources — see CONSIDERATIONS.md). So the native subset reads un-pinned (live), keeping its
-        # reads internally consistent (all un-pinned) rather than mixing pinned SELECTs with an
-        # un-pinnable CREATE MODEL. Safe because a run's source data is static for its duration.
+        # sources). So the native subset reads un-pinned (live), keeping its reads internally
+        # consistent (all un-pinned) rather than mixing pinned SELECTs with an un-pinnable CREATE
+        # MODEL. Safe because a run's source data is static for its duration.
         snapshot_millis = None
         series_ids = [
             str(r.ts_id)

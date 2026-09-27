@@ -104,18 +104,17 @@ def _serverless_gpu_properties(gpu_type: str) -> dict[str, str]:
     ``spark.task.resource.gpu.amount``) are omitted because Serverless owns them: it applies
     ``executor.resource.gpu.amount=1`` and ``task.resource.gpu.amount=1/spark.executor.cores`` as
     service defaults and rejects explicit values. GPU scheduling *is* therefore fractional here —
-    the per-task share is chosen indirectly, by choosing executor cores. See ``CONSIDERATIONS.md``
-    C2 for what that couples together.
+    the per-task share is chosen indirectly by choosing ``spark.executor.cores``, which couples
+    per-executor CPU concurrency and the per-task GPU fraction (`1 / spark.executor.cores`).
 
     **The RAPIDS pool is released, and it has to be.** Serverless GPU runtimes ship the RAPIDS
     accelerator switched on, and its default allocator reserves nearly the whole card for Spark SQL
     before a single fit starts — ``Initializing RMM ASYNC pool size = 21632.125 MB on gpuId 0``, out
     of an L4's ~22.5 GB. The fits do not run in that JVM. They run in the PySpark Python workers,
-    which then find a few hundred megabytes between them, and the ones that lose the race die with
-    ``CUDA error: out of memory`` while asking for a model that needs 64 KB. On 2026-09-09 that cost
-    smoke 03 thirty-seven of a hundred cells; the same run on a Dataproc cluster T4 and on Ray T4,
-    neither of which loads RAPIDS, lost none. ``pool=NONE`` drops the reservation and leaves RAPIDS
-    allocating on demand, so SQL still runs on the GPU and the fits can reach it too.
+    which would otherwise find only a few hundred megabytes between them and fail with
+    ``CUDA error: out of memory`` while asking for a model that needs 64 KB. Setting ``pool=NONE``
+    drops the reservation and leaves RAPIDS allocating on demand, so SQL still runs on the GPU and
+    the Python worker fits can reach it too.
 
     **Naming any ``spark.rapids.*`` property costs us the service's memory defaults**, which is why
     `build_batch` states ``spark.executor.memory`` right after calling this. Left alone, Serverless

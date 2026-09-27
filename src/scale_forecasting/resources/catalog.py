@@ -61,8 +61,7 @@ def device_floor_fraction(schedulable_cores: int, accelerators: int) -> float:
     invisible, because seven usable cores bind before ten cells do; on a sixteen-core node with
     the same single card the floor binds at ten and five cores sit idle, and `binding_axis`
     reports ``device`` — sending an operator to change a GPU setting when the real limit is a
-    number in this file. It has already cost one config a hand-pinned fraction to work around
-    (see the 2026-09-09 note in the validation ledger).
+    number in this file (see `docs/validation.md`).
 
     **What replaces it.** Cores are the density a node can genuinely sustain — one cell needs a
     core to run on whatever the card thinks — so the floor is never allowed to sit above the

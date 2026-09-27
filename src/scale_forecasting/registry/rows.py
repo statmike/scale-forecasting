@@ -211,13 +211,11 @@ def stamp_ensemble_prediction_rows(
     number, and nothing about which run asked for them. Everything the run contributes is stamped
     here, in one place both paths go through, rather than in each caller's loop.
 
-    That one place is the point. The two paths used to stamp their own columns inline in
-    `_ensemble_batch`, which is `@gcp`-only code no unit test reaches, and they disagreed: neither
-    set ``created_at``, so until 2026-09-11 every ensemble prediction row in the registry had a NULL
-    one. `forecast_predictions` is deduped newest-write-wins, so a second pass over a run — a
-    ``--force`` re-ensemble, a repair — left two rows per cell with nothing to order them by. The
-    companion `assemble_ensemble_oof_rows` had always stamped it, which is why only the forecast
-    table was affected. `test_rows.py` now pins that every column this function owns comes back set.
+    Stamping in one shared helper guarantees that both calculated and learned prediction rows always
+    carry a non-null ``created_at`` timestamp. Because `forecast_predictions` is deduplicated on
+    read using newest-write-wins (``ORDER BY created_at DESC NULLS LAST``), every re-run or repair
+    must stamp ``created_at`` consistently alongside `assemble_ensemble_oof_rows`. `test_rows.py`
+    pins that every column this function owns comes back set.
 
     ``compute_engine`` is ``"ensemble"`` for both strategy families: a blend runs wherever the
     ensemble node runs, not on the engine that fitted its members.
