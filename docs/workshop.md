@@ -15,6 +15,24 @@ Act 3 notebooks. No local machine or SDK install is assumed.
 > `07_scale_review` needs Act 1's runs to have data to show. The three acts run **in order**, and the
 > section numbers are strictly sequential (1 → 2 → 3).
 
+```mermaid
+flowchart LR
+    subgraph Act1["Act 1 · Populate Run History (Cloud Shell)"]
+        A1["explode_100k.json (Spark)"]
+        A2["ray_100k.json (Ray)"]
+        A3["all_families_10k.json (Ray ∥ BigQuery)"]
+    end
+    subgraph Act2["Act 2 · Pre-render Notebooks (Optional)"]
+        B1["notebook_acceptance --no-wait\n(Vertex NotebookExecutionJob)"]
+    end
+    subgraph Act3["Act 3 · Live Tour (Colab Enterprise)"]
+        C1["model_playground → 01..04 → 08 → 09"]
+        C2["07_scale_review\n(Cross-run 100k & family DAG review)"]
+        C1 --> C2
+    end
+    Act1 --> Act2 --> Act3
+```
+
 ---
 
 ## Who can run this — IAM roles
@@ -171,7 +189,7 @@ counts climb, the runs are healthy (not wedged):
 -- swap gcp-scale-forecasting for your project_id if you deployed elsewhere
 SELECT run_id, COUNT(*) AS cells_written, MAX(created_at) AS latest_write
 FROM `gcp-scale-forecasting.scale_forecasting.forecast_metadata`
-WHERE run_id LIKE '%100k%'
+WHERE run_id LIKE '%100k%' OR run_id LIKE 'all-families-10k%'
 GROUP BY run_id
 ORDER BY latest_write DESC;
 ```
@@ -212,7 +230,7 @@ LIMIT 25;
 ```
 
 You want three **`COMPLETED`** rows — one `explode-100k-…`, one `ray-100k-…`, one
-`all-families-100k-…`. (`COMPLETED` is the registry's word for a finished run. `SUCCEEDED` is the
+`all-families-10k-…`. (`COMPLETED` is the registry's word for a finished run. `SUCCEEDED` is the
 *platform's* word — what Dataproc and Ray call a finished job — and it never appears in this column;
 the registry's vocabulary is `COMPLETED` / `PARTIAL` / `FAILED` / `CANCELLED`, with `RUNNING` and
 `PENDING` as the non-terminal pair. `PARTIAL` means the run finished with some cells failed.)
@@ -223,7 +241,7 @@ Copy those three `run_id`s; Act 3's notebook 07 reads them. For the **per-family
 ```sql
 SELECT run_id, family, runtime, hardware, status, runtime_seconds
 FROM `gcp-scale-forecasting.scale_forecasting.v_run_jobs`
-WHERE run_id LIKE 'all-families-100k-%'
+WHERE run_id LIKE 'all-families-10k-%'
 ORDER BY runtime_seconds DESC;
 ```
 
@@ -235,7 +253,7 @@ ORDER BY runtime_seconds DESC;
 > on). Say this out loud before opening 07 and it's a feature, not a surprise.
 
 > **Runs that outlast Cloud Shell?** The full-suite run `configs/all_families_10k_full.json`
-> (100k × 7 models, backtest on, NeuralProphet on T4s) runs for **hours** — longer than Cloud Shell
+> (10k × 7 models, backtest on, NeuralProphet on T4s) runs for **hours** — longer than Cloud Shell
 > will hold the orchestrator that finalizes the run header. Drive it from a **persistent VM** instead:
 > ➡️ [operations.md §4 — Long runs on a persistent
 > VM](./operations.md#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell).
@@ -318,7 +336,7 @@ rendered outputs**. That menu is your tour surface tomorrow.
 > runtimes + the Dataproc batches + a live Ray cluster), just concurrent. Pre-workshop prep, not free
 > — but it's what pre-renders everything.
 
-> **Run this *after* Act 1's three 100k runs land.** `07_scale_review` reads those runs, so pre-render
+> **Run this *after* Act 1's three runs land.** `07_scale_review` reads those runs, so pre-render
 > it only once they're `COMPLETED` — otherwise its rendered output shows missing data. (`07` reads
 > its `RUN_IDS` from the shipped deterministic defaults, which match the unchanged configs — if you
 > overrode a config, edit `07`'s `RUN_IDS` cell before this step or run `07` live instead.)
@@ -358,7 +376,7 @@ Run them **in this order** — each builds on the story of the last:
 RUN_IDS = {
     "spark":        "explode-100k-…",       # ← paste your Act 1 run_ids
     "ray":          "ray-100k-…",           #    (same models as spark, Ray runtime)
-    "all-families": "all-families-100k-…",  #    (every family, one run_id)
+    "all-families": "all-families-10k-…",   #    (every family, one run_id)
 }
 # ========================================================================
 ```
@@ -379,13 +397,14 @@ runs — but paste yours to be sure.)
 
 ## Cost + timing at a glance
 
-- **Act 1 (three 100k runs):** the Spark run is a Dataproc Serverless batch (single-digit dollars,
+- **Act 1 (two 100k runs + the 10k family DAG):** the Spark run is a Dataproc Serverless batch (single-digit dollars,
   minutes); the Ray runs stand up and tear down an autoscaling cluster. Run once before the workshop and
   the results persist in the registry — Act 3 just reads them.
 - **Act 3 (notebooks):** the demo-scale notebooks (100 series or fewer) are cents. `07_scale_review`
   runs no compute — it only queries views.
-- **Reset when you're done:** the destructive teardown is documented in
-  [`docs/running_and_reviewing.md`](./running_and_reviewing.md#resetting-the-environment-destructive),
+- **Reset when you're done:** registry cleanup is documented in
+  [`docs/running_and_reviewing.md`](./running_and_reviewing.md#6-managing-the-registry) and
+  [`docs/operations.md`](./operations.md#2-clear-the-bigquery-registry),
   and `terraform destroy` removes the project's infrastructure.
 
 ## See also

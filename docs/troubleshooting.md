@@ -22,6 +22,15 @@ without writing — a preempted VM, a torn-down cluster, a driver OOM — leaves
 forever. That row is visually identical to a slow but healthy job. The **probe** exists to break
 that tie by asking the runtime itself.
 
+```mermaid
+flowchart TD
+    Watch["monitor_run(run_id)\nCheck quiet_seconds"] -->|"Suspiciously quiet"| Probe["main --probe / monitor(probe=True)\nQuery Dataproc · Vertex Ray · BigQuery"]
+    Probe -->|"RUNNING_CONFIRMED"| Wait["Healthy & Running\nKeep waiting (or --cancel --force)"]
+    Probe -->|"STALE_REGISTRY or\nLIKELY_COMPLETED"| SettleOK["Work Landed\nmain --settle --force → COMPLETED"]
+    Probe -->|"LOST or\nABANDONED_WAIT"| SettleFail["Job Gone / Walk Abandoned\nmain --settle --force → FAILED"]
+    SettleOK & SettleFail --> Close["All Job Rows Terminal\nregistry.ops close-runs --yes"]
+```
+
 ### Probe a run
 
 ```bash
@@ -277,10 +286,7 @@ cluster. This is a **live, non-terminal** state — the work has not started and
 - **`--cancel` cannot interrupt a walk.** The loop runs inside the submitting process, so there is
   no server-side thing to cancel: stop the launching process, or let the budget expire. The row
   itself is addressable — it carries a handle like any other — so cancel will try, and report that
-  it stopped nothing. That is honest rather than a failure. (This bullet used to say the row "has no
-  runtime job to stop" and that cancel reports "no handle recorded". Both were too absolute: cancel
-  joins rows to handles directly and never consulted the escalation filter, so a row whose job *was*
-  submitted before its launcher died has always been cancellable.)
+  it stopped nothing. That is honest rather than a failure.
 
 ### A job FAILED with `failure_reason = CAPACITY_EXHAUSTED`
 **Symptom:** a family went terminal without ever running.

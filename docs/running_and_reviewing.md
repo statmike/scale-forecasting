@@ -5,6 +5,15 @@ re-ensemble it — all from the config you wrote (see the
 [configuration reference](./configuration_reference.md)). No image rebuild is ever part of this loop;
 your `src/` ships at submit time (see [editing code without rebuilding](./editing_code_without_rebuilding.md)).
 
+```mermaid
+flowchart LR
+    S1["1. Preflight\n--dry-run / --feasibility"] --> S2["2. Submit\nmain.run / Forecaster.run"]
+    S2 --> S3["3. Watch & Probe\nmonitor_run / --probe"]
+    S3 --> S4["4. Review & Calibrate\nreview_run / calibration_report"]
+    S4 --> S5["5. Re-ensemble (Optional)\nensemble_run"]
+    S4 --> S6["6. Manage Registry\nregistry.ops"]
+```
+
 ## Prerequisites
 
 - A deployed environment (see [deploying on GCP](./deploying_on_gcp.md)) — or point at any project
@@ -483,8 +492,8 @@ python -m scale_forecasting.registry.ops close-runs --yes
 
 It reads the run's **config** as well as its job rows, and that matters more than it sounds. A
 family that was planned and never submitted leaves no row at all, so on the rows alone an abandoned
-run whose last family happened to finish looks like "every job `COMPLETED`" — which is how it used
-to close `COMPLETED` while claiming an ensemble that never ran. Comparing the rows against the plan
+run whose last family happened to finish looks like "every job `COMPLETED`" — even if the ensemble
+never ran. Comparing the rows against the plan
 closes that hole: a missing ensemble on an otherwise-complete run is `FAILED`, because the output
 you asked for does not exist, and a missing *base* family alongside completed ones is `PARTIAL`,
 because what did land is still usable. Those are the same answers the run's own finalizer would have

@@ -65,7 +65,11 @@ markdown_extensions:
   - admonition
   - attr_list
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.inlinehilite
   - pymdownx.highlight:
       anchor_linenums: true
@@ -84,8 +88,6 @@ nav:
   - Operate:
       - Running & reviewing: running_and_reviewing.md
       - Operations runbook: operations.md
-      - Smoke testing: smoke_testing.md
-      - Validation ledger: validation.md
   - Demo:
       - Workshop: workshop.md
       - Notebook tour:
@@ -133,4 +135,7 @@ nav:
       - Ray core: api/engines_ray_io.md
       - Registry views: api/registry_views.md
       - Registry operations: api/registry_ops.md
+  - System Validation:
+      - System validation ledger: validation.md
+      - Smoke testing guide: smoke_testing.md
   - Troubleshooting: troubleshooting.md

@@ -18,6 +18,16 @@ the Dataproc-cluster packed-venv — so the interpreter is byte-identical everyw
 (Colab and the Dataproc base runtimes provide their own 3.11 patch; parity is a minor-version property,
 so that's fine — the patch pin is about reproducibility where we build the environment ourselves.)
 
+```mermaid
+flowchart TD
+    Pin[".python-version (3.11.15)\npyproject.toml (>=3.11,<3.12)"]
+    Pin --> Kernel["Local uv Kernel &\nColab Enterprise sf-main (py311)"]
+    Pin --> Container["Custom Container (/opt/venv)\n& Packed Venv Archive (3.11.15)"]
+    Kernel <-->|"1. applyInPandas Pickle Parity"| Connect["Dataproc Spark Connect 2.3\n(Python 3.11 Workers)"]
+    Kernel <-->|"2. JobSubmissionClient Handshake\n(Ray 2.47 + Python 3.11)"| VertexRay["Vertex AI Ray Cluster\n(Python 3.11 / Ray 2.47.1)"]
+    Container <-->|"3. Driver ↔ Executor Parity"| Batch["Dataproc Serverless Batch\n& Dataproc GCE Cluster"]
+```
+
 ## The matrix
 
 | Surface | Where it runs | Runtime version | Base runtime Python | **Effective Python** | Spark / Ray | How Python is set |

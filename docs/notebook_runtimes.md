@@ -15,6 +15,17 @@ surface. The two notebooks that touch a live client↔cluster boundary (`04_ray_
 `01_spark_via_connect`) are where that pin earns its keep; the [per-notebook mapping](#per-notebook-mapping)
 below spells out each.
 
+```mermaid
+flowchart LR
+    subgraph Surfaces["Three Ways to Run the Notebooks (Python 3.11)"]
+        S1["1. One-Click Colab Enterprise\nsf-main Template (SF_* Env Baked In)"]
+        S2["2. Headless Acceptance Harness\nnotebook_acceptance (smoke / batch / full)"]
+        S3["3. Local Kernel\nuv sync + ADC + SF_* Env"]
+    end
+    S1 & S2 & S3 --> NB["8 Notebooks\nmodel_playground · 01..04 · 07..09"]
+    NB -->|"Orchestrate & Query"| Cloud["Dataproc · Vertex Ray · BigQuery"]
+```
+
 ## Running locally
 
 Every notebook except `model_playground` needs **ADC** and the `SF_*` identity. The `model_playground`

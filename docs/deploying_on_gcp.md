@@ -21,14 +21,20 @@ the module comment (next to the resource) wins.
 
 ## The shape: two stages
 
-```
-terraform/
-├── bootstrap/   # Stage 1 — run once. Creates the project (optional) + the state bucket.
-└── main/        # Stage 2 — everything else. State lives in the bucket stage 1 made.
-    ├── main.tf         # wires the modules together (read this top-to-bottom)
-    ├── variables.tf    # every input + its default (the toggles live here)
-    ├── outputs.tf      # the handful of values the app + operator consume after apply
-    └── modules/        # one capability per module (mirrors the Python one-file-one-capability rule)
+```mermaid
+flowchart LR
+    subgraph Stage1["Stage 1 · terraform/bootstrap/ (Local State, Run Once)"]
+        B1["GCP Project (optional)\n+ Billing Link"]
+        B2["GCS State Bucket\n<project_id>-tfstate"]
+        B1 --> B2
+    end
+    subgraph Stage2["Stage 2 · terraform/main/ (Remote State in GCS)"]
+        M_API["apis"] --> M_IAM["iam"] & M_STO["storage"] & M_BQ["bigquery"] & M_BUD["budget"] & M_NET["network"] & M_CON["container"]
+        M_IAM & M_STO & M_BQ & M_NET & M_CON --> M_SEED["seed (100k series)"]
+        M_IAM & M_STO & M_NET --> M_COLAB["colab (sf-main)"]
+        M_IAM & M_STO & M_NET --> M_COMP["composer (optional)"]
+    end
+    Stage1 --> Stage2
 ```
 
 **Why two stages?** Terraform needs somewhere to store its state. We want that somewhere to be a GCS
@@ -239,8 +245,8 @@ The `network` module looks large, but each resource earns its place:
   tenant project and peers it into this VPC; without PSA the cluster only gets a public dashboard
   endpoint whose origin is unreachable off-cluster.
 - **PSA-range ingress firewall** — the Ray dashboard's proxy→origin hop is sourced from the reserved
-  peering range, not the subnet CIDR, so it needs its own rule (this is what fixed the historical
-  `524` on the Ray Jobs handshake).
+  peering range, not the subnet CIDR, so it needs its own rule to permit the Ray Jobs submission
+  handshake.
 - **Cloud NAT** — outbound-only internet for a VPC-attached client with no external IP (many orgs deny
   external IPs org-wide), so it can `pip install` the Ray SDK. No inbound exposure.
 - **PSC-I network attachment** — the newer private path for Vertex Managed Ray; Vertex attaches an

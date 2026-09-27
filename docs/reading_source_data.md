@@ -10,6 +10,17 @@ For the config knobs mentioned here see [configuration_reference.md](./configura
 for where the *results* go see [output_schemas.md](./output_schemas.md); for the end-to-end flow see
 [architecture.md](./architecture.md).
 
+```mermaid
+flowchart LR
+    subgraph Source["BigQuery Source Table\n(source_series_iceberg or source_series_native)"]
+        Snap["Snapshot Pin\n(Header Time-Travel Instant)\n+ Column Projection + series_limit"]
+    end
+    Snap -->|"Storage Read API (Arrow)\nspark-bigquery + snapshotTimeMillis"| Spark["Spark Explode\n(spark_io.read_source_series)"]
+    Snap -->|"Storage Read API (Arrow)\ncreate_read_session + row_restriction"| RayDC["Ray driver_collect (default)\n(ray_io._read_driver_collect)"]
+    Snap -->|"Storage Read API (Arrow)\nray.data.read_bigquery"| RayData["Ray ray_data (opt-in)\n(ray_io._read_ray_data)"]
+    Snap -->|"BigQuery Query API\nFOR SYSTEM_TIME AS OF subquery"| BQ["BigQuery-Native SQL\n(bigquery_sql)"]
+```
+
 ---
 
 ## The four invariants (true for every reader)

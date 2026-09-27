@@ -29,31 +29,25 @@ then writes results to BigQuery via the Storage Write API. When every family job
 predictions, the `ensemble` node blends them. Three analyst views read the tables back. That's the
 whole system.
 
-```
-                         one JSON config
-                               │
-                        main.run(cfg)  ─────────  registry: one run_id, one header row
-                               │
-              dag.plan_dag(cfg): one job per family, all parallel
-                               │
-   ┌───────────┬───────────────┼───────────────┬───────────────┐
-statistical    ml         deep_learning       native      (each on its
-(spark|ray)  (spark|ray)   (spark|ray)       (BigQuery)    resolved runtime)
-   │           │               │                │
-   └─────── engine fans out cells ───────┐  bigquery_engine (BQML SQL)
-                                         │      │
-                         worker.run_cell ◄── THE unit of work
-                                         │      │
-                                         ▼      ▼
-                    registry.cells.write_cells (Storage Write API)
-       run_registry · run_jobs · forecast_metadata · forecast_predictions · backtest_oof
-                               │
-                    (all families joined & green)
-                               │
-                        ensemble node  ── ensemble_run  ── blends base predictions
-                               │
-     v_run_summary · v_run_jobs · v_model_leaderboard · v_backtest_coverage
-                     · v_model_leaderboard_comparable   (analyst views)
+```mermaid
+flowchart TD
+    Cfg["One JSON Config (RunConfig)"] --> Main["main.run(cfg)\nWrites run_registry header (RUNNING)"]
+    Main --> Plan["dag.plan_dag(cfg)\nGroups models into parallel FamilyJobs"]
+
+    Plan --> Stat["statistical\n(Spark or Ray)"]
+    Plan --> ML["ml\n(Spark or Ray)"]
+    Plan --> DL["deep_learning\n(Spark or Ray)"]
+    Plan --> Nat["native\n(BigQuery SQL)"]
+
+    Stat & ML & DL --> Engine["spark_explode / ray_engine\nFans out (ts_id, model) cells"]
+    Engine --> Cell["worker.run_cell()\nFit + Backtest + Predict"]
+    Nat --> BQEng["bigquery_engine\nBQML + AI.FORECAST"]
+
+    Cell & BQEng --> Write["registry.cells.write_cells()\nBigQuery Storage Write API"]
+    Write --> Tables[("5 Registry Tables\nrun_registry · run_jobs · forecast_metadata\nforecast_predictions · backtest_oof")]
+
+    Tables --> Ens["ensemble_run()\nBlends member families (barrier or microbatch)"]
+    Ens --> Views[("5 Semantic Views\nv_run_summary · v_run_jobs · v_model_leaderboard\nv_backtest_coverage · v_model_leaderboard_comparable")]
 ```
 
 ---
@@ -160,31 +154,14 @@ translators render it:
 | Dataproc cluster | `translate_cluster` | one executor per worker minus an ApplicationMaster reserve, `spark.task.cpus` as the density lever, a derived worker count clamped to a spend ceiling | **at create** |
 | Ray on Vertex | `ray_io.plan_pool` / `plan_cluster` | per-pool node counts and per-task `num_cpus` / `num_gpus` | pool **at create**, task resources **in-run** |
 
-**The "when it is fixed" column is the load-bearing one.** Two facts follow from it. First, Ray is
-the only runtime whose per-task shape is decided while the job is running, which is why it is the
-only one where measurement can currently feed back into packing — `engines/ray_engine` calls
-`profiling.source.resolve_profile` on the head node and repacks its pools from the result. Second, and more
-consequential, **there is nowhere in a Spark run to measure anything that could resize it.** The
-fleet is settled before our code reaches the cluster, and the submit host is kept deliberately lean
-(no model stack — model imports are lazy precisely so a Composer worker can run the submit path). So
-the Spark fleets are sized from arithmetic over the config, not from evidence.
+**How measurements feed back into fleet sizing.** Every execution cell automatically records its CPU seconds, process RSS high-water mark, peak GPU bytes, thread cap, and observation count (`n_obs`) into `forecast_metadata`. At submit time, `profiling.source.resolve_profile_source` resolves `compute.profile.source` (`"auto"` by default) through a four-step precedence chain:
 
-**Where the evidence is meant to come from.** The `profiling` package builds a `ComputeProfile` —
-measured
-wall time, CPU seconds, effective thread count, absolute process RSS high-water, and peak device
-bytes, aggregated across a stratified sample with an asymmetric margin (max for memory, median for
-time). Every translator already accepts one and reproduces the static arithmetic exactly when given
-`None`, which is the state Spark runs in today. The direction of travel is that a profile becomes an
-**artifact produced by one run and consumed by later ones** — run something small, and the large run
-draws its sizing from that run's measurements or from a baseline shipped with the product.
+1. **Named run (`<run_id>`)**: Harvests actual cell telemetry from a specific prior run in `forecast_metadata`.
+2. **Auto-discovered run (`"auto"`)**: Finds the best-matching recent run in `forecast_metadata` ranked by runtime comparability, scale proximity, and recency.
+3. **Shipped baseline (`"baseline"`)**: Uses the empirically harvested baseline constants in `profiling/baseline.py`.
+4. **Static fallback (`"none"`)**: Uses static model family resource estimates when `compute.profile.mode = "off"`.
 
-**What to reach for when a fleet shape is wrong.** `compute.profile.mode = "off"` disables the whole
-derived overlay and returns to platform defaults. Individual knobs (`ray_max_nodes`,
-`max_executors`, `bucket_target_cells`, per-family `hardware`) still override it. `max_executors` is
-the one to reach for when the fleet is not the wrong *shape* but the wrong *size for the project*:
-the arithmetic sizes to the fan-out, which has no idea what a regional quota will grant. See
-[`compute.profile`](./configuration_reference.md) for the fields, and the
-[validation ledger](./validation.md) for what has and has not been proven live.
+**What to reach for when you want explicit bounds.** Setting `compute.profile.mode = "off"` disables the derived overlay and returns to platform defaults. Individual overrides (`ray_max_nodes`, `max_executors`, `bucket_target_cells`, and per-family `hardware`) always take precedence. Use `max_executors` when your fan-out exceeds your project's regional vCPU quota ceiling. See [`compute.profile`](./configuration_reference.md) for every field and the [System Validation Ledger](./validation.md) for live benchmark records.
 
 ---
 
@@ -423,32 +400,32 @@ from its GCS URI, and dispatches to the named engine's `run()`. That's the whole
 
 ## The full call tree
 
-```
-CLI / notebook / Airflow / SDK
-  main.run(cfg)                                            main.py
-    dag.plan_dag → make_run_id (ids.py) + group_models_by_family + resolve_family_compute
-    lifecycle.run_header (RUNNING, one shared header)             registry/lifecycle.py (ddl.py, views.py)
-    ├─ [thread] per Python family — job_launch.launch_family_job → get_submitter(runtime).launch
-    │    ├─ SparkSubmitter → submit.submit_batch → spark_entry.main → spark_explode.run
-    │    │      spark_io: cross_join_models · add_bucket · make_group_runner
-    │    │      applyInPandas → spark_io.run_group → worker.run_cell → cells.write_cells
-    │    ├─ RaySubmitter → ray_submit.submit_ray → ray_entry.main → ray_engine.run
-    │    │      ray_io: split_gpu_cpu_models · plan_cluster · chunk_cells · make_chunk_runner
-    │    │      make_chunk_runner → spark_io.run_group → worker.run_cell → cells.write_cells
-    │    └─ injected Spark session → spark_explode.run   (in-process, e.g. NB01)
-    │        (each family opens its own run_jobs row via lifecycle.run_job)
-    ├─ [inline] native family — job_launch.launch_native_job → bigquery_engine.run  (BQML SQL)
-    └─ (all families join & green) ensemble node — job_launch.launch_ensemble_job → run_ensembles
-    hdr.finalize (combined status + wall-clock)            registry/lifecycle.py
+```mermaid
+flowchart LR
+    subgraph Entry["Entrypoints"]
+        Caller["CLI · Notebook · Airflow · SDK"] --> MainRun["main.run(cfg)"]
+        Play["playground.run_model()"]
+    end
 
-worker.run_cell  ── THE unit of work ──                     worker.py
-    ├─ features.fit_transform_lambda / build_features       features.py
-    ├─ hpo.tune_model            (per-series HPO)           hpo.py
-    ├─ backtest.backtest_cell → model.fit/predict + metrics.compute_metrics
-    ├─ models.get_model → BaseModel.fit / predict / serialize
-    └─ registry.ids.make_run_id / make_model_hash → CellResult
+    subgraph Orchestration["DAG Planning & Dispatch"]
+        MainRun --> PlanDag["dag.plan_dag() +\nlifecycle.run_header()"]
+        PlanDag --> FamLaunch["job_launch.launch_family_job()"]
+        PlanDag --> NatLaunch["job_launch.launch_native_job()"]
+        PlanDag --> EnsLaunch["job_launch.launch_ensemble_job()"]
+    end
 
-playground.run_model → worker.run_cell                      (local, no cluster, no registry)
+    subgraph Runtimes["Distributed Runtimes"]
+        FamLaunch --> SparkSub["SparkSubmitter\nsubmit_batch / submit_cluster_job\n-> spark_entry -> spark_explode.run"]
+        FamLaunch --> RaySub["RaySubmitter\nsubmit_ray\n-> ray_entry -> ray_engine.run"]
+        NatLaunch --> BQRun["bigquery_engine.run()\n(BQML + AI.FORECAST)"]
+        EnsLaunch --> EnsRun["ensemble.run_ensembles()"]
+    end
+
+    subgraph Worker["Shared Unit of Work"]
+        SparkSub & RaySub --> RunGroup["spark_io.run_group()"]
+        RunGroup & Play --> RunCell["worker.run_cell()\n1. features.build_features\n2. hpo.tune_model\n3. backtest.backtest_cell\n4. BaseModel.fit & predict"]
+        RunCell & BQRun & EnsRun --> WriteCells["registry.cells.write_cells()\n(Storage Write API)"]
+    end
 ```
 
 **The reuse seams to notice:** `spark_io.run_group`, `cells.write_cells`, and `aggregate_status` are

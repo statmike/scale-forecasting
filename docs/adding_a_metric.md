@@ -9,6 +9,15 @@ column with a real value on the next run.
 This mirrors [adding a model](./adding_a_model.md) deliberately: same factory pattern, same
 one-thing-one-file rule, same `register(...)` at the bottom of the file.
 
+```mermaid
+flowchart LR
+    M["1. Copy docs/metric_template.py\n→ metrics/my_metric.py"] --> Reg["2. Register in metrics/__init__.py\n+ append to METRIC_NAMES"]
+    Reg --> DDL["registry/ddl.py\nCREATE TABLE + ADD COLUMN IF NOT EXISTS"]
+    Reg --> Proto["registry/write_api.py\nStorage Write API Proto Field"]
+    Reg --> Score["metrics.compute_metrics\nSpark · Ray · BigQuery-native · Ensembles"]
+    Reg --> Rev["registry/reads.py & review.py\nmean_ / p10_ / p50_ / p90_"]
+```
+
 ## The 4-step checklist
 
 1. **Copy the template.** `docs/metric_template.py` →

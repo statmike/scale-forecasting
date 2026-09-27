@@ -20,6 +20,20 @@ import scale_forecasting as sf
 lazily, only when you first touch a name that runs models (`Forecaster`, `run`, `run_cell`, …).
 Touching `RunConfig`/`Settings` alone pays no model-import cost.
 
+```mermaid
+flowchart TD
+    subgraph Doors["Three Python Surfaces (`import scale_forecasting as sf`)"]
+        D1["1. Easy Path: `sf.Forecaster`\n.dry_run() · .feasibility() · .dag()\n.run() · .monitor() · .review_run()"]
+        D2["2. Direct Path: Embed in Spark / Ray\nsf.make_group_runner · sf.make_chunk_runner\nsf.chunk_cells · sf.run_group"]
+        D3["3. Manage Path: `sf.Registry`\n.doctor() · .close_runs() · .drop_run()\n.reap_clusters() · .snapshot() · .export()"]
+    end
+    D1 --> Main["main.run (Family DAG Orchestrator)"]
+    Main --> Cell["worker.run_cell (Single Series × Model)"]
+    D2 --> Cell
+    Cell --> BQ["BigQuery Registry & Views"]
+    D3 --> BQ
+```
+
 ---
 
 ## The easy path: `Forecaster`

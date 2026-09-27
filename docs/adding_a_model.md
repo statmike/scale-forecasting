@@ -5,6 +5,15 @@ call, plus **one import line** in `models/__init__.py`. Nothing else changes —
 worker, not the engines, not the registry. That is the whole point of the factory: the
 system discovers models by name at import time.
 
+```mermaid
+flowchart LR
+    T["1. Copy docs/model_template.py\n→ models/my_model.py"] --> I["2. Implement BaseModel\nfit(y, X) & predict(horizon, X, quantiles)"]
+    I --> R["3. Call register(MyModel)\n+ import in models/__init__.py"]
+    R --> W["worker.run_cell\n(Spark / Ray / Playground)"]
+    W --> C["calibration.apply_calibration\n(Point & Interval Calibration)"]
+    C --> BQ["Registry Tables & Leaderboard"]
+```
+
 ## The 4-step checklist
 
 1. **Copy the template.** `docs/model_template.py` → `src/scale_forecasting/models/my_model.py`.

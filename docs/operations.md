@@ -7,6 +7,15 @@ This doc is the **rework** path: you've already deployed, and now you need to **
 short, interactive tasks that fit a thin client. Long, multi-hour runs belong on a persistent VM
 instead ([§4 — Long runs on a persistent VM](#4-long-runs-on-a-persistent-vm-when-a-run-outlasts-cloud-shell)).
 
+```mermaid
+flowchart TD
+    Op["Already-Deployed Environment"] --> D0["§0 Check Cloud Shell Disk Hygiene (~5 GB)"]
+    D0 --> P1["§1 Infra / Template Change\nterraform init + plan + apply"]
+    D0 --> P2["§2 Clear Registry\n2a: TRUNCATE output tables\n2b: registry.ops drop-run\n2c: Full dataset teardown"]
+    D0 --> P3["§3 Short Re-run (<1h)\nCloud Shell + uv sync --extra submit"]
+    D0 --> P4["§4 Multi-Hour Run\nPersistent GCE VM via IAP + tmux"]
+```
+
 ---
 
 ## 0. Disk hygiene FIRST (Cloud Shell has ~5 GB of home)
@@ -389,7 +398,7 @@ line means):
 -- swap gcp-scale-forecasting for your project_id; the run_id is the config's deterministic digest
 SELECT run_id, COUNT(*) AS cells_written, MAX(created_at) AS latest_write
 FROM `gcp-scale-forecasting.scale_forecasting.forecast_metadata`
-WHERE run_id = 'all-methods-100k-full-036327523e0a'
+WHERE run_id LIKE 'all-families-10k-full-%'
 GROUP BY run_id;
 ```
 

@@ -30,6 +30,17 @@ built *from* that same image; the notebook bootstrap installs the *same* lock. T
 bump when a dependency changes (`pyproject.toml` → `make lock`), and it is content-addressed — the
 image and the archive both rebuild only when the locked deps change, never on a source edit.
 
+```mermaid
+flowchart LR
+    Lock["pyproject.toml +\n.python-version (3.11.15)\n↓\nuv.lock"] --> Req["docker/requirements.txt\n(Derived Export)"]
+    Lock --> Img["Shared Runtime Container\n(/opt/venv on debian:12-slim)"]
+    Img --> Sless["Dataproc Serverless\n& Spark Connect"]
+    Img -->|"tar /opt/venv"| Venv["Packed Venv Archive\n(gs://.../envs/<hash>.tar.gz)"]
+    Venv --> Cluster["Dataproc GCE Cluster\n(--archives=...#env)"]
+    Req --> RayEnv["Vertex AI Ray\n(runtime_env uv plugin)"]
+    Lock --> Colab["Colab Enterprise (sf-main)\n& Local uv sync --frozen"]
+```
+
 ## The matrix
 
 | Surface | Mechanism | What carries the deps | Set by |
@@ -261,10 +272,10 @@ it up through the `gpu_image_uri` Terraform output when one exists.
 version it was built from, and after that the image cannot create clusters at all — the failure is
 `Selected software image version … can no longer be used to create new clusters`, and it lands on
 whoever next asks for a GPU cluster, in a message about image versions rather than about anything
-they did. That is exactly how it failed on 2026-09-09. The init-action path now carries a pin of its
-own, so it is not quite expiry-free either — but the difference still matters: recovering from a
-retired pin is editing one constant, while recovering from a retired custom image is a rebuild of an
-artifact, and the pin is expected to come off as soon as the driver builds on the current line again.
+they did. The init-action path carries a sub-minor pin of its
+own, so it is not quite expiry-free either — but recovering from a
+retired pin is editing one constant, while recovering from a retired custom image requires rebuilding an
+image artifact.
 Take the optimisation if you create GPU clusters often enough for the boot-time install to matter, and
 expect to rebuild the image when the base version moves.
 

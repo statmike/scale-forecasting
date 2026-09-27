@@ -23,13 +23,27 @@ The schema below is rendered from a single source of truth,
 
 ## How the tiers link
 
-```
-run_registry            (1 row  per run)          ── the config + run-level telemetry
-   │  run_id
-   ├── run_jobs          (1 row  per run × family) ── per-family-job runtime/hardware + telemetry
-   ├── forecast_metadata (1 row  per run × series × model)  ── per-cell metrics + artifact link
-   ├── forecast_predictions (N rows per run × series × model) ── the forecast values (one per date)
-   └── backtest_oof      (rows   per run × series × model × fold) ── out-of-fold truth vs prediction
+```mermaid
+flowchart LR
+    subgraph Tables["5 Native Registry Tables (Append-Only via Storage Write API)"]
+        RR["run_registry\n(1 row per run_id)"]
+        RJ["run_jobs\n(1 row per run_id × family)"]
+        FM["forecast_metadata\n(1 row per run_id × ts_id × model_type)"]
+        FP["forecast_predictions\n(N rows per run_id × ts_id × model_type × forecast_date)"]
+        BO["backtest_oof\n(N rows per run_id × ts_id × model_type × fold_id × forecast_date)"]
+        RR -->|"run_id"| RJ & FM & FP & BO
+    end
+    subgraph Views["5 Curated Serving Views (Dedupe-on-Read)"]
+        VRS["v_run_summary"]
+        VRJ["v_run_jobs"]
+        VML["v_model_leaderboard"]
+        VBC["v_backtest_coverage"]
+        VMC["v_model_leaderboard_comparable"]
+    end
+    RR --> VRS
+    RJ --> VRJ
+    FM --> VML & VBC
+    BO --> VMC
 ```
 
 Everything joins on **`run_id`** (the config digest — see
@@ -239,17 +253,14 @@ On BigQuery-native rows all three columns hold the same number: `ML.FORECAST` re
 there is no second arm, and writing it three times keeps `y_true - yhat_raw` a valid residual on
 every engine so a cross-engine query needs no special case.
 
-### A series too short to score still has a forecast
+#### A series too short to score still has a forecast
 
-Backtesting scores a model; it does not produce the forecast. Those three columns exist because the
-two used to be welded together: a series shorter than `min_train + horizon + (n_folds−1)·step` raised,
-the cell caught it as an error, and a forecast that had not even been attempted was thrown away.
-Short history was the single largest error class in the registry, and none of it was a modelling
-failure.
+Backtesting scores a model; it does not produce the forecast. Those two steps are decoupled so a
+series shorter than `min_train + horizon + (n_folds−1)·step` never loses its forecast.
 
-Now the fold grid adapts to what the series supports — by default the oldest folds are dropped,
+The fold grid adapts to what the series supports — by default the oldest folds are dropped,
 survivors keeping their original `fold_id` — and the cell fits and forecasts either way. What the
-grid does instead of raising is `backtest.short_series`'s to decide; the outcome is recorded rather
+grid does when a series is short is `backtest.short_series`'s to decide; the outcome is recorded rather
 than inferred, because through the metric columns alone these are indistinguishable:
 
 | Situation | Metrics | `backtest_status` |
@@ -287,7 +298,7 @@ not a hyperparameter search. Everything that learns from the backtest learns fro
 scored. Only *fitting* is restricted.
 
 | Column | On which rows | Values |
-|--------|---------------|--------|
+|--------|---------------|-------|
 | `ensemble_scoring` | `ensemble_*` rows | `holdout`, `in_sample`, or NULL for `mean`/`median`, which fit nothing |
 | `hpo_scoring` | base-model rows whose params came from a search | `holdout`, `in_sample`, or NULL when no search ran |
 
@@ -305,9 +316,8 @@ reported the best case would be exactly the reassurance these columns exist to w
 
 ### Was the accelerator you paid for actually used?
 
-Those four columns exist because that question used to be unanswerable. Every GPU run in this
-project's history was, in substance, a CPU run: the card attached, the forecasts were correct, and
-nothing recorded that the arithmetic had happened somewhere else. `device_requested` is the intent,
+Four columns record device placement and utilisation so you never have to guess whether a GPU job
+actually used its card. `device_requested` is the intent,
 `device_available` is the environment, and `device_used` is the receipt — the three disagree exactly
 when something is wrong.
 
@@ -328,8 +338,7 @@ re-checked later rather than taken on trust.
 Two places read it back. `v_run_jobs.device_verdict` is the word as a column, so a fleet-wide "which
 jobs wasted their card" is one `WHERE` clause; and `review.monitor_run` carries it on each
 `FamilyProgress`, so `plot_progress` prints `gpu used` / `gpu idle` / `no gpu` at the end of that
-family's bar. A GPU family's bar is otherwise indistinguishable from a CPU family's, which is how
-the accelerator went unnoticed for twenty-one jobs in the first place.
+family's bar.
 
 ### What the cell paid for, in fits
 
@@ -361,10 +370,9 @@ paths actually work that way:
 | `expanding_frozen` (model cannot) | 4 + 1 | 4 — one low |
 
 So the difference between the plan and the column is not an error in either: it is what the scheme
-cost or saved, and a run that records both can be asked that question directly. A reader tempted to
-substitute `n_folds_achieved + 1` should note that it is correct only on the first row of that
-table — one A/B analysis in this repo's history did exactly that and quietly overstated every frozen
-arm.
+cost or saved, and a run that records both can be asked that question directly. Note that
+`n_folds_achieved + 1` is only equal to `n_fits` on the first row of that table; using it on a
+frozen scheme overstates the fit count.
 
 An error cell reports these too, with `0` meaning the cell died before fitting anything. A cell that
 burned forty fits and then failed is an expensive failure, and without the column it looks exactly
@@ -473,9 +481,8 @@ from, and `yhat_raw` / `yhat_adjusted` / the two bounds stay NULL, because a wei
 corrected predictions has no separate "uncorrected arm" to report.
 
 The reason this matters is comparability. `v_model_leaderboard_comparable` pools error over rows of
-*this* table, so before ensembles wrote here they were simply **absent** from that ranking — not
-ranked poorly, missing. Writing them here puts base models and ensembles on one fold, one pooling
-rule and one column.
+*this* table, so writing blended OOF rows here puts base models and ensembles on one fold, one
+pooling rule, and one column.
 
 Two consequences worth knowing. The reads that feed the ensembler filter to the run's base models
 (`model_type IN (…)`), so a re-ensemble or a microbatch drain never blends a previous consensus back

@@ -10,6 +10,19 @@ This is a deliberate design guarantee, not an accident, and it's guarded by a te
 (`tests/unit/test_code_delivery.py`) so it can't silently regress. Here's why it's true and how to
 work with it.
 
+```mermaid
+flowchart LR
+    subgraph Frozen["1. Frozen Dependency Layer (Built Once per Lock Change)"]
+        Lock["pyproject.toml + uv.lock"] --> Img["Shared Runtime Container\n(/opt/venv) + Packed Venv Archive"]
+    end
+    subgraph Live["2. Live Code Layer (Shipped on Every Submit)"]
+        Src["Local src/scale_forecasting/"] --> Del["code_delivery.py"]
+        Del -->|"python_file_uris (.zip)"| DP["Dataproc Serverless / Cluster"]
+        Del -->|"runtime_env.working_dir"| Ray["Ray on Vertex"]
+    end
+    Img --> DP & Ray
+```
+
 ## Why the image doesn't carry your code
 
 The shared runtime image (`docker/Dockerfile`) does exactly one thing: `pip install` the locked

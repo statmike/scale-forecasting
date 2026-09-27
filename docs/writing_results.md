@@ -7,6 +7,19 @@ over the BigQuery **Storage Write API**. For the *tables* themselves (every colu
 [output_schemas.md](./output_schemas.md); this is the reader's companion to
 [reading_source_data.md](./reading_source_data.md).
 
+```mermaid
+flowchart LR
+    subgraph Writers["Engine Workers & Drivers"]
+        W1["Spark Executor\n(make_group_runner)"]
+        W2["Ray Worker Task\n(make_chunk_runner)"]
+        W3["BigQuery-Native Driver\n(bigquery_engine)"]
+        W4["Ensembler\n(ensemble_run)"]
+    end
+    W1 & W2 & W3 & W4 -->|"Batch of CellResult"| Cells["registry.cells.write_cells\nProto-Encoded Default Stream"]
+    Cells -->|"Storage Write API\n(Append-Only + Backoff)"| Tables["BigQuery Registry Tables\nforecast_metadata · forecast_predictions · backtest_oof"]
+    Tables -->|"QUALIFY ROW_NUMBER() = 1\n(Dedupe-on-Read)"| Views["Analyst Views\nv_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage"]
+```
+
 ---
 
 ## The headline: one write path for both table formats

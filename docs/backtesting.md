@@ -93,14 +93,21 @@ The newest fold validates on the final `horizon` observations. Each earlier fold
 validation window back by `step`. With `n_folds: 3, horizon: 28, step: 28` on a 1,460-point daily
 series:
 
-```
-             fold 0            fold 1            fold 2 (holdout)
-             ├──────┤          ├──────┤          ├──────┤
- ...─────────────────────────────────────────────────────────────►
- 0                1376    1404    1404    1432  1432    1460
-       train ──────────►
-       train ────────────────────────────►
-       train ──────────────────────────────────────────►
+```mermaid
+flowchart LR
+    subgraph F0["Fold 0 (Inner Fold)"]
+        T0["Train: [0 .. 1376)"] --> G0["Gap (0)"] --> V0["Validate: [1376 .. 1404)\ncutoff_date = ds[1375]"]
+    end
+    subgraph F1["Fold 1 (Inner Fold)"]
+        T1["Train: [0 .. 1404)"] --> G1["Gap (0)"] --> V1["Validate: [1404 .. 1432)\ncutoff_date = ds[1403]"]
+    end
+    subgraph F2["Fold 2 (Holdout Fold — Fits Nothing)"]
+        T2["Train: [0 .. 1432)"] --> G2["Gap (0)"] --> V2["Validate: [1432 .. 1460)\ncutoff_date = ds[1431]"]
+    end
+    subgraph Ship["Final Shipped Forecast"]
+        TS["Train: Full History [0 .. 1460)"] --> VS["Forecast: Next 28 Steps"]
+    end
+    F0 --> F1 --> F2 --> Ship
 ```
 
 Training for fold *k* stops at `val_start − gap`, and the invariant that holds for every fold under
@@ -228,10 +235,8 @@ A panel of real series is ragged. Some of them will not hold the grid you asked 
 universally right answer to that, because every answer gives something up.
 
 **The one thing that never happens is losing the forecast.** A series too short to score is still
-fit and still forecast. This was not always true — a scoring shortfall used to raise, the blanket
-cell handler turned it into an error cell, and short history became the single largest error class
-in the registry. The fit itself was never in question. `make_folds` now clamps under every policy,
-including `error`.
+fit and still forecast. `make_folds` clamps under every policy (including `error` at cell level if
+preflight is bypassed) so a scoring shortfall never turns a valid forecast into an error cell.
 
 `backtest.short_series` is where you choose what to give up:
 
@@ -252,7 +257,7 @@ Four behaviours are worth knowing:
 - **`min_folds` judges the result, not the starting point.** A rescue policy gets to try first; if
   what it achieved is still below `min_folds`, the series is left unscored rather than ranked on
   evidence too thin to rank it. One fold of five is not a fifth of an answer. The default of `1` is
-  exactly the historical behaviour: score anything that supports at least one fold.
+  the baseline behaviour: score anything that supports at least one fold.
 - **A rescue is a rescue, not a rewrite.** `overlap` and `shrink_train` change nothing at all for a
   series that was long enough already, so a mixed panel still lays its long series out the way
   `adapt` would.
@@ -313,10 +318,9 @@ history and forecast the same date — which is what the cutoff says and the ord
 
 The same fact drives the scale-free metrics. MASE and RMSSE divide by the mean step of the
 **training** data, so which history goes into the denominator is not a detail; it *is* the number.
-`backtest_cell` has always handed each fold its own slice. The two paths that score from a separate
-history read — the BigQuery-native engine and the ensemble scorer — used to pass the whole series,
-including the very window being scored, which made a native model's MASE and a Python model's MASE
-answers to different questions. `backtest.training_window` is the one rule all of them now apply:
+Every scoring path — `backtest_cell`, the BigQuery-native engine, and the ensemble scorer — applies
+`backtest.training_window` so that a native model's MASE and a Python model's MASE are computed over
+the exact same historical slice:
 every observation at or before the cutoff, narrowed to the last `window` observations under
 `sliding`.
 

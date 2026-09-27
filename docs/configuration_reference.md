@@ -32,6 +32,18 @@ schema) surfaces as a single `ConfigError`.
 | `ensemble` | `EnsembleConfig` | `{}` | Consensus across base models. |
 | `compute` | `ComputeConfig` | `{}` | Runtime scale + cost guardrails. |
 
+```mermaid
+flowchart LR
+    RunCfg["RunConfig"] --> Data["data (DataConfig)\nsource_table · freq · horizon"]
+    RunCfg --> Models["models + model_params\n18 registered models across 4 families"]
+    RunCfg --> Feat["features (FeaturesConfig)\ntransform · holidays · fourier\nlevel_shift · exog · exog_lags"]
+    RunCfg --> BT["backtest (BacktestConfig)\nscheme · n_folds · gap\nshort_series · decision_metric"]
+    RunCfg --> Out["output (OutputConfig)\npoint_forecast: auto | median | mean | raw"]
+    RunCfg --> HPO["hpo (HpoConfig)\nOptuna: fleetwide | per_series"]
+    RunCfg --> Ens["ensemble (EnsembleConfig)\nmean · median · inverse_error\nnnls · ridge · xgb"]
+    RunCfg --> Comp["compute (ComputeConfig)\nfamilies · ensemble · capacity · profile"]
+```
+
 **Cross-field rules** (enforced after parsing):
 
 - Duplicate entries in `models` → error.
@@ -45,8 +57,7 @@ always runs in parallel in BigQuery, regardless of this choice):
 - `spark` (default) — Dataproc Serverless. The **100k CPU workhorse**; it fans out one task per
   `(series, model)` cell (series cross-joined with the family's models), so a family's job finishes in
   ~its slowest cell.
-- `ray` — Ray on Vertex AI. Its reason to exist is **fractional-GPU packing** for NeuralProphet (many
-  series share one T4); the Ray `compute` knobs apply.
+- `ray` — Ray on Vertex AI. Supports **fractional-GPU packing** and autoscaling worker pools across CPU and GPU families; the Ray `compute` knobs apply.
 
 A run resolves its models into **one job per family** (`statistical` / `ml` / `deep_learning`, plus
 `native` in BigQuery), all running in parallel under one `run_id`. Each Python family runs on
@@ -72,7 +83,7 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
 |-------|------|---------|---------|
 | `holidays` | `list[str]` | `[]` | Holiday country codes to add (e.g. `["US"]`). |
 | `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform, inverted on output. |
-| `exog` | `list[str]` | `[]` | Exogenous driver columns — a **started-but-unexampled** seam: consumed by `sarimax`/`ucm`/`prophet`/`lightgbm`/`xgboost`, but the shipped source is univariate (bring your own table with these columns to use it). |
+| `exog` | `list[str]` | `[]` | Exogenous driver columns projected from the source table (consumed by `sarimax`, `ucm`, `prophet`, `regression_lags`, `lightgbm`, and `xgboost`; e.g., `["is_holiday"]` in `31_features_exog.json`). |
 | `exog_lags` | `dict[str, list[int]]` | `{}` | Lagged copies of declared `exog` columns — `{"promo": [1, 7]}` adds `promo_lag_1` and `promo_lag_7`. Keys must appear in `exog`; lags must be positive and distinct. **There is no `lags` field for the target** — see "Why there is no target-lag knob" below. |
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
 | `level_shift` | `bool` | `false` | Detect one abrupt regime change and add it as a `level_shift` step dummy. |
@@ -105,7 +116,7 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
 - **`fourier`** — adds sine/cosine **yearly** seasonality terms (order 3 → 6 columns). Smooth periodic
   signal for the regression-based models.
 - **`exog`** — passes named driver columns straight from the source table through to the models that
-  accept exogenous regressors. See the univariate-shipped-data caveat above.
+  accept exogenous regressors.
 - **`level_shift`** — detects a single abrupt **regime change** in the series and adds one
   `level_shift` column: `0` before the changepoint, `1` from it onward, and `1` across the whole
   forecast horizon. It is a **step, not a spike** — that persistence is exactly what distinguishes a
@@ -132,12 +143,7 @@ things, and only one of them can be built in a config:
 - **A lag of a covariate** is honest, because a covariate's future is as knowable as the covariate
   itself. No model in the suite lags one internally, so that is the gap `exog_lags` fills.
 
-The field used to exist and was removed in favour of the split above. What it actually did, for the
-models that were not already stripping it out, was extend the history with a flat line at the last
-observation and read the lags off that: at a 28-step horizon, `lag_1` was one genuine observation
-followed by twenty-seven copies of the last data point. The model fitted a coefficient against real
-lagged history and then applied it to a straight line. Setting `lags` now fails at config load
-rather than being quietly ignored, so a config written against the old surface says so.
+Setting `lags` in `features` fails at config validation with a clear error message directing you to `exog_lags` for lagged covariates or `model_params.neuralprophet.n_lags` for autoregressive target lags.
 
 **Precedence, if the two ever meet.** The model wins. A model that lags its covariates internally
 sets `lags_covariates_internally` on its class and is handed the unlagged columns only, so a
@@ -267,10 +273,6 @@ All three `NULL` is the one case where a `NULL` metric panel is not a shortfall.
 reduced backtest and a full one look identical through the metric columns, and an unscored series
 looks exactly like a run with backtesting switched off.
 
-(Two earlier versions of this paragraph were wrong in opposite directions: one said a short series
-was "skipped for backtesting", which was never true; the correction said it "fails its cell", which
-was true at the time and is the behaviour this change removed.)
-
 Features are built once and a **fresh** model is fit per fold, so no state leaks across folds and
 `train_end + gap == val_start` always (no leakage; at the default `gap` of 0 the two are adjacent).
 
@@ -387,21 +389,11 @@ seam keeps its scheme and leaves the column NULL. On `expanding_stale` the flag 
 ignored: that scheme's primary arm already *is* the blind model, so the control arm would be the
 same model twice and the gap would be zero by construction.
 
-### The fields that arrived ahead of their code
+<a id="decision_metric"></a>
+### `decision_metric` — what folds are judged on
 
-`short_series`, `min_folds`, `min_train_floor`, `gap` and `window` — along with the frozen schemes
-and `model_params` — were all added to the schema in a single commit, before anything read them.
-That was deliberate. A new config field moves every `run_id` that has ever been recorded, so
-landing them together cost one identity break instead of seven.
-
-**All of them are honoured now**, and they are documented above alongside every other field; there
-is no longer an inert corner of this schema. What survives from that decision is the property that
-made it worth making: setting any one of them changes your `run_id`.
-`tests/unit/test_declared_ahead_fields.py` keeps watching for that, because a field that quietly
-left the digest would have to be paid for a second time to put it back.
-
-**`decision_metric` — what folds are judged on** (definitions in
-[`metrics/`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics); `err = yhat − y_true`). This single choice drives
+Definitions live in
+[`metrics/`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics) (`err = yhat − y_true`). This single choice drives
 fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold`.
 
 The fifteen below are what ships. **They are not a closed set**: the field accepts any metric the
@@ -515,14 +507,7 @@ squared-error metric the fleetwide rule picks `mean`, and `mean` scored **worse 
 correction at all** (30.54 against 30.05). A default that is beaten by doing nothing is not a
 default.
 
-**Why this field exists at all.** For a long time the project decided this by accident: ten of the
-sixteen models built their band from residual quantiles, the frame assembler took the 0.5 quantile
-as `yhat`, and the shipped forecast was silently the model's prediction plus its median in-sample
-residual — un-named, un-configurable, and applied to some models and not others, so the leaderboard
-was comparing corrected models against uncorrected ones. Measuring it on ten models found the
-correction was worth keeping (it moved fleet WAPE by 5.7%), so it stayed the default. This field is
-what turns it from an accident into a default: the alternative is now sayable, and
-`sf.calibration_report(run_id)` reports what the choice was worth on your data.
+**Why this field exists.** Residual calibration shifts a model's forecast by its median or mean residual (improving fleet WAPE by ~5.7% across biased series), while leaving unbiased series untouched under `auto`. `sf.calibration_report(run_id)` reports what the calibration choice contributed on your panel.
 
 ### Letting each series choose — `point_forecast: "auto"`
 
@@ -635,17 +620,7 @@ winner from those twenty is what every series in the run is fitted with.
 Tuned hyperparameters flow to the workers through the engine, **not** through the config — so HPO
 never shifts the config-derived `run_id`, keeping runs reproducible and idempotent.
 
-**A caveat worth knowing before you compare a tuned model to an untuned one.** HPO runs *by*
-backtesting: each trial runs the aligned backtest on the sampled series and is scored on
-`decision_metric`. The winning params are then handed to every cell, which backtests **again** — and
-*that* second backtest is what fills the leaderboard, `forecast_metadata`, and the `inverse_error`
-ensemble weights. Both passes use the same folds. So a tuned model's published metric is measured on
-the data its hyperparameters were selected on, which makes it optimistic; an untuned model's is not.
-Ranking tuned against untuned models on one leaderboard therefore tilts toward the tuned ones by an
-amount nothing currently reports. The fix — holding the most recent fold out of the search so the
-reported score is scored on a fold that fitted nothing — is planned and not yet shipped. Until then,
-treat a tuned model's leaderboard number as an upper bound, and prefer a like-for-like comparison
-(both tuned, or both not).
+**Held-out fold reservation during HPO.** When `backtest.n_folds >= 2`, the newest fold (`n_folds - 1`) is automatically reserved from the Optuna search objective (`hpo_scoring = "held_out"`), so the holdout fold in `v_model_leaderboard_comparable` evaluates tuned and untuned models on an untouched validation window. With `n_folds: 1`, there is no second fold to reserve and `hpo_scoring` records `"in_sample"`.
 
 ## `ensemble` — `EnsembleConfig`
 
@@ -863,10 +838,7 @@ cells = n_series × n_models
 ```
 
 and **folds are not in it** — a cell is one model fitted to one series, and a backtested cell is
-still one cell; it just does more fits inside itself. (This document used to write
-`n_series × n_models × n_folds`, which is why a two-fold dry run once reported three times the cells
-it would ever write a row for. `estimate_fanout` has not multiplied by folds for some time.) What
-folds do change is the *work* per cell:
+still one cell; it just does more fits inside itself. What folds do change is the *work* per cell:
 
 ```
 fits = cells × (n_folds + 1)
@@ -887,11 +859,11 @@ the machinery for replacing that guess with a measurement.
 Think of it as the general form of `gpu_calibration_samples` / `gpu_safety_margin` above, which
 already do exactly this for one axis (GPU bytes), one model, one runtime.
 
-#### What this actually does today — read this before setting anything
+#### How `compute.profile` works
 
-Two things are true at once, and conflating them will mislead you.
+Two things are true at once:
 
-**Fleet shaping is on, everywhere, and it does not need a measurement.** Every Spark job now carries
+**Fleet shaping is on, everywhere, and it does not need a measurement.** Every Spark job carries
 a derived properties overlay: executor cores, heap and memoryOverhead, the dynamic-allocation band,
 `spark.task.cpus` bounded by the accelerator, matching thread pins, and — on a Dataproc cluster — a
 worker count derived from the run's fan-out. That arithmetic runs from the config alone. Setting
@@ -938,7 +910,7 @@ so there is still exactly one switch that makes the whole feature inert.
 
 | `source` | Where the numbers come from | Provenance basis |
 |----------|-----------------------------|------------------|
-| `"auto"` | The newest completed run whose harvest matches this run's data signature; failing that, the shipped baseline; failing that, static config. Resolved **at plan time** and written into the staged config as a concrete `run_id`, so the run records what it actually sized from rather than a search that might resolve differently tomorrow. | `measured` / `reference` |
+| `"auto"` | The best-matched completed run whose harvest matches this run's runtime and data signature; failing that, the shipped baseline; failing that, static config. Resolved **at plan time** and written into the staged config as a concrete `run_id`, so the run records what it actually sized from rather than a search that might resolve differently tomorrow. | `measured` / `reference` |
 | `"<run_id>"` | That run's harvest, whatever its signature. Naming a run is a decision, so it is honoured — a drifted signature comes back as a warning, not a substitution. | `measured` / `reference` |
 | `"baseline"` | The shipped, versioned reference measurements — see below. Real numbers, taken on reference hardware and reference data, never on yours. | `reference` |
 | `"none"` | Nothing is consulted; size from declared config. | — |
@@ -989,19 +961,7 @@ sized for *typical* work (median). Sizing the fleet off the worst case over-prov
 sizing memory off the median OOM-kills it. Using one tail for both is the mistake the split exists
 to prevent.
 
-`compute.profile` is part of the `run_id` digest, like everything else under `compute`. It changes
-the resource shape rather than the forecasts, so that is a deliberate choice: the config is the
-experiment record, and a run whose fleet was sized differently is not the same run for performance
-purposes. One practical consequence: adding these fields moved every pre-existing `run_id`, so a
-config saved before the profiler existed no longer re-derives the id it originally produced — and
-adding `measure` and then `source` moved them again. Re-running an older config produces a new
-`run_id` and therefore a new run rather than a resumed one.
-
-**None of the derived fleet arithmetic has run on live infrastructure yet.** It is offline-proven
-self-consistent — the legal-value snapping, the AM reserve, the worker derivation all have unit
-tests — but Dataproc has never been asked to accept it. See
-[Validation ledger](./validation.md), where the Spark rows are currently `STALE` for exactly this
-reason.
+`compute.profile` (except `compute.profile.source`, which is resolved provenance) is part of the `run_id` digest, like everything else under `compute`. See [System Validation Ledger](./validation.md) for live runs across Spark, Dataproc clusters, and Vertex AI Ray using this sizing overlay.
 
 ### `compute.families` — per-family runtime & hardware
 
@@ -1013,10 +973,9 @@ runs in BigQuery).
 
 **This block is canonical; the flat `compute.use_gpu` / `compute.gpu_type` pair is legacy.** Both
 still work and neither is deprecated, but they are the coarse version of what `families` says
-precisely, and one sentence about `use_gpu` has been wrong in this document for a long time: it is
-**not** a Ray switch. `use_gpu` is read by `Config.resolve_family_compute`, the single resolver every
-runtime goes through, so it puts the deep-learning family on an accelerator on **Ray, Dataproc
-Serverless and a Dataproc cluster alike** — an L4 on Serverless, a T4 on the other two. It never
+precisely. `use_gpu` is read by `RunConfig.resolve_family_compute`, the single resolver every
+runtime goes through, so it puts the `deep_learning` family on an accelerator on **Ray, Dataproc
+Serverless, and a Dataproc cluster alike** — an L4 on Serverless, a T4 on the other two. It never
 touches any other family: `hardware` is `"cpu"` for `statistical` and `ml` no matter what the flag
 says.
 
@@ -1068,19 +1027,15 @@ NeuralProphet is the only model with a tensor library under it, and at its shipp
 (`n_lags` unset) the network is a few hundred trend and Fourier parameters. Measured across 31,356
 fits on live T4s: peak device memory 50–78 KB against a 17 GB card, and `cpu_seconds / fit_seconds`
 between 0.93 and 0.996. The card is attached, the tensors are on it, and it is doing essentially
-nothing — a CPU run being billed as a GPU run. There are two remedies and they are not equally
-proven: setting `hardware: "cpu"` costs nothing in accuracy and is what every green run in the
-ledger did, while turning on autoregression with `model_params.neuralprophet.n_lags` is what would
-actually make the device earn its cost but has no accuracy A/B and no live smoke behind it yet.
+nothing — a CPU run being billed as a GPU run. Setting `hardware: "cpu"` costs nothing in accuracy
+and runs faster at half the cost; turning on autoregression with `model_params.neuralprophet.n_lags`
+increases network complexity when deep autoregressive lags are needed.
 
 The same report fires in reverse: `use_gpu: true` with no deep-learning model selected means no job
 resolves to GPU hardware at all, so the flag does nothing except make the config read as a GPU run.
 You will see these lines on a dry run, on `--quota`, from the SDK's `.dag`, and in the submit log.
 
-**At runtime, `hardware` decides the device rather than suggesting it.** Every model used to hand
-its trainer `accelerator="auto"`, which can never fail — and that is what made "I paid for a card
-and got none" invisible, and what made `hardware: "cpu"` unenforceable on a Dataproc cluster whose
-executors expose a card to every family sharing them. A cell now selects its device outright, from
+**At runtime, `hardware` enforces the device contract.** A cell selects its device outright from
 two facts that have to agree: the job must have been *provisioned* onto GPU hardware, and this
 family must resolve to `hardware="gpu"` in your config.
 
@@ -1090,10 +1045,10 @@ it creates, as a `--provisioned-hardware gpu` driver argument plus the matching 
 `executorEnv` / Ray `runtime_env` entry so the executors and task workers hear it too. You will see
 it in the emitted `gcloud` command for a GPU batch; nothing else in the command changes. There is
 nothing to set: run locally, from the SDK, from a notebook, or on any CPU job and the argument is
-simply absent, which selects the old `auto` behaviour byte-for-byte.
+simply absent, which selects `auto` behaviour.
 
 Two consequences worth knowing. A family set to `hardware="gpu"` on a job that really was
-provisioned for GPUs, but whose worker cannot see a CUDA device, now **fails that cell immediately**
+provisioned for GPUs, but whose worker cannot see a CUDA device, **fails that cell immediately**
 with a message naming the family and the field to change, instead of quietly fitting on the CPU for
 the rest of the fleet-hour. And the driver-side fits — the sizing pre-pass (`compute.profile`) and
 every HPO trial — stay on `auto` deliberately, because they run on a Ray head node or a Spark
@@ -1104,7 +1059,7 @@ not one per run — a Dataproc cluster has exactly one worker machine type, so i
 GPU cluster and cannot be both. A run whose cluster families are all CPU gets one cluster named
 `sf-cluster-<run_id>`; a run mixing CPU and GPU families gets `sf-cluster-<run_id>-cpu` and
 `sf-cluster-<run_id>-gpu`, each sized only for the families that land on it. That is why a GPU
-`deep_learning` family no longer makes the rest of the run pay for accelerators it never uses.
+`deep_learning` family does not make the rest of the run pay for accelerators it never uses.
 
 Ray is deliberately different: a Vertex Ray cluster carries separate CPU and GPU worker *pools*, so
 a mixed run shares **one** Ray cluster. The asymmetry is the hardware, not an inconsistency.
@@ -1135,13 +1090,11 @@ bounds above reclaim the cluster once it finishes or goes quiet.
 A job that genuinely wedges is caught by a different mechanism, one that watches output instead of
 the clock: a job that has written no forecast rows after `SF_STALL_GRACE_S` (45 minutes by default,
 `0` to switch it off) is cancelled. A single written row is proof of life and stands the watch down
-for the rest of the run. Serverless batches have been under that watchdog since it was written; the
-cluster path joined them.
+for the rest of the run. Both Dataproc Serverless batches and Dataproc cluster jobs are guarded by
+this watchdog.
 
 Serverless has the same patience setting for the same reason, as `SF_BATCH_JOB_WAIT_S` (also 24
-hours, also overridable per submit with `--wait-timeout`). It was never as dangerous there — a wait
-expiring destroys nothing, because the batch runs on under its own ttl — but a healthy long batch
-would still lose its Dataproc telemetry stamp and report a failure to whatever launched it.
+hours, also overridable per submit with `--wait-timeout`).
 
 ```json
 "compute": {
@@ -1160,9 +1113,7 @@ three runtimes, one `run_id`. See [`configs/per_family_runtimes_demo.json`](http
 is the same four-family, three-runtime split with `"hardware": "cpu"` on the deep-learning family —
 the two files differ in that one word, so they read as a diff. The CPU one is the better starting
 point: on both accelerator A/B runs it finished *faster* than its GPU twin at identical accuracy and
-roughly half the cost. The GPU config is kept because the numbers quoted in
-[the validation ledger](./validation.md) were measured on it, not because the accelerator earned its
-place; see [what `hardware: "gpu"` actually buys you](./quota_and_scale.md#what-hardware-gpu-guarantees-and-what-it-does-not).
+roughly half the cost. See [what `hardware: "gpu"` actually buys you](./quota_and_scale.md#what-hardware-gpu-guarantees-and-what-it-does-not).
 
 ### `compute.ensemble` — when the consensus is computed
 
@@ -1176,15 +1127,7 @@ blending strategies to compute.
 | `mode` | `"barrier"` \| `"microbatch"` | `"barrier"` | — | Blend once after every family finishes, or drain series as they become ready. |
 | `microbatch_interval_s` | `float` | `60.0` | `> 0` | Seconds between readiness polls in `microbatch` mode. Inert in `barrier`. |
 
-**Those are the only two fields, and there is no choice of *where* the ensemble runs.** The node is
-hardcoded to BigQuery plus driver-side pandas — it reads predictions, blends them and writes rows,
-taking no Spark or Ray cluster of its own. This block used to declare `runtime`, `spark_mode` and
-`spark_cluster_name` alongside them, accepted by the loader and read by nothing; they were removed,
-so a config that still sets one now fails at load rather than quietly starting a differently-keyed
-run that behaves identically. **No `run_id` changed when they went.** Removing a defaulted field
-would normally re-key every config, since the digest covers defaults too, so the three keys stay
-pinned inside the digest at the values they used to carry — safe precisely because nothing read
-them, which means no id on record ever meant anything other than what it means now.
+**Those are the only two fields, and there is no choice of *where* the ensemble runs.** The node executes via BigQuery plus driver-side pandas — it reads predictions, blends them, and writes rows through the Storage Write API, requiring no separate Spark or Ray cluster of its own.
 
 **The two modes differ in when, not in what.** Both run on the driver, both write the same
 `ensemble_<strategy>` prediction and leaderboard rows, and both honour the rule that a series is

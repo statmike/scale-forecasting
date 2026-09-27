@@ -1,8 +1,17 @@
 # Documentation
 
-The one-screen map. Find your task, follow the pointer. These guides, the notebook tour, and the
-full **API reference** are also published as a searchable site — built from this repo on every push
-to `main`: **https://statmike.github.io/scale-forecasting/**.
+The one-screen map to `scale-forecasting`. Find your task below and follow the pointer. These guides,
+the notebook tour, and the full **API reference** are also published as a searchable site — built from
+this repo on every push to `main`: **https://statmike.github.io/scale-forecasting/**.
+
+```mermaid
+flowchart LR
+    Deploy["1. Deploy\nTerraform & GCP Setup"] --> Operate["2. Operate\nSubmit, Monitor, Review"]
+    Operate --> Demo["3. Demo\nWorkshop & Notebooks"]
+    Operate --> SDK["4. SDK & API\nForecaster, Registry, Direct"]
+    Operate --> Ref["5. Reference\nArchitecture, Config, Backtest, Quota"]
+    Ref --> Val["6. System Validation\nLive GCP Ledger & Smokes"]
+```
 
 ## Deploy
 Stand the platform up in a Google Cloud project.
@@ -16,8 +25,6 @@ Run forecasts, review results, and keep a deployment healthy.
   BigQuery), watch it land, review the leaderboard, re-ensemble. Home of the `SF_*` identity setup.
 - [operations.md](./operations.md) — rework/reset, disk hygiene, and long-running jobs on a
   persistent VM.
-- [smoke_testing.md](./smoke_testing.md) — the smoke-test library and driver: prove each
-  runtime/hardware/ensemble combination end to end on live GCP. Runbook + living results log.
 
 ## Demo
 Show the system end to end.
@@ -31,6 +38,8 @@ How it works and every knob.
   constraint.
 - [backtesting.md](./backtesting.md) — the method: how folds are laid out, why the newest fold fits
   nothing, what happens to short series, and what each of the four schemes actually measures.
+- [quota_and_scale.md](./quota_and_scale.md) — measured node throughput, vCPU and GPU quota planning,
+  and `--quota` preflight.
 - [reading_source_data.md](./reading_source_data.md) — how each runtime reads the source panel
   (Storage Read API + Arrow, snapshot pinning, the `read_max_streams` parallelism cap).
 - [writing_results.md](./writing_results.md) — the single Storage Write API path for both table
@@ -44,13 +53,15 @@ How it works and every knob.
   on the next run with no image rebuild.
 - [version_matrix.md](./version_matrix.md) — the Python/Spark/Ray version of every surface, and why
   the whole system is pinned to Python 3.11.
+- [runtime_dependencies.md](./runtime_dependencies.md) — package matrix across the shared container,
+  packed venv, and Colab templates.
 - [notebook_runtimes.md](./notebook_runtimes.md) — which Python version each notebook needs and how
   it behaves locally and on Colab.
 
 ## SDK
 Use it from Python.
-- [using_the_sdk.md](./using_the_sdk.md) — the `Forecaster` easy path, and how to drive Spark/Ray
-  directly (bypassing the SDK) while reusing the same model machinery.
+- [using_the_sdk.md](./using_the_sdk.md) — the `Forecaster` easy path, the `Registry` management
+  surface, and how to drive Spark/Ray directly while reusing the same model machinery.
 
 ## API Reference
 Every public module, class, and function — generated directly from the source docstrings, so it
@@ -58,6 +69,15 @@ always matches the code.
 - [API reference](https://statmike.github.io/scale-forecasting/api/) — browse the generated docs on
   the site. Start at the [overview](https://statmike.github.io/scale-forecasting/api/) (the three
   doors: the `Forecaster` easy path, the `run` orchestration entrypoint, and the direct cell path).
+
+## System Validation
+End-to-end platform verification across Dataproc Serverless, Dataproc GCE clusters, Vertex AI Ray,
+and BigQuery (distinct from forecast backtesting).
+- [validation.md](./validation.md) — **System Validation Ledger**: the CI-enforced matrix of
+  architecture axes, 31 smoke configs, 20 demonstration configs, 8 notebooks, and 18 capabilities
+  proven on live GCP.
+- [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 31-smoke suite
+  (`smokes.py`) to verify a deployment or infrastructure change.
 
 ## Troubleshooting
 - [troubleshooting.md](./troubleshooting.md) — known issues, each symptom → cause → fix.
