@@ -1,278 +1,219 @@
 # scale-forecasting
 
-**Massively-parallel time-series forecasting on Google Cloud — Spark, Ray, and BigQuery, one config away.**
+**Massively parallel time-series forecasting on Google Cloud — Spark, Ray, and BigQuery, one config away.**
 
-Forecast tens of thousands of time series in parallel, backtest and ensemble many
-methods, and capture every run's lineage in BigQuery — from a local notebook or from
-Airflow, with the *same* code. Deploy the whole thing into a fresh project with one
-`terraform apply`, complete with 100k example series to run against immediately.
-
-> **Status.** The local dev loop and the GCP Terraform deploy are both working end-to-end
-> (Spark, Ray, and BigQuery engines all run against a live deployment). Composer/Airflow
-> **scheduled** orchestration is **in development** — the Terraform provisions the environment,
-> but the run DAG it would host is not shipped yet; today runs are driven ad-hoc from a notebook,
-> CLI, or local script (the *same* `main.run` code a DAG will call). See the
-> [Architecture](#architecture) diagram for how a config flows through the runtimes to the registry.
->
-> 🛠️ **Developing this repo?** [`DEVELOPMENT.md`](./DEVELOPMENT.md) holds the decision log and the
-> outstanding/in-progress work items — a temporary working doc, removed before production.
+Forecast tens of thousands of time series in parallel, backtest and ensemble 18 statistical, machine-learning, deep-learning, and SQL-native models, and capture every run's lineage in BigQuery — from a local notebook, the Python SDK, the CLI, or Cloud Composer (Airflow), using the *same* code. Deploy the complete platform into a Google Cloud project with `terraform apply`, pre-seeded with 100,000 example series across both Apache Iceberg and native BigQuery tables.
 
 ---
 
-## Why it exists
+## Why It Exists
 
-Large-scale forecasting usually means a pile of bespoke cluster code that only its
-author understands. This project is the opposite bet: a small, readable codebase —
-**one capability per file** — that still scales to 100k+ series, so a data scientist
-can open any file, understand it in one read, and fork it to their needs.
+Large-scale forecasting often turns into a tangle of bespoke cluster scripts, fragile dependency builds, and disconnected evaluation queries. `scale-forecasting` takes the opposite approach: a clean, modular Python package — **one capability per file** — where a single JSON configuration defines the entire experiment and scales from a 3-series local smoke test to 100,000+ series in the cloud without changing a line of code.
 
-## What it does
+```mermaid
+flowchart LR
+    cfg["RunConfig (JSON)<br/>data · models · compute · backtest · ensemble"]
+    sdk["Launch Surface<br/>Python SDK · CLI · Notebook · Airflow DAG"]
+    dag["Family Execution DAG<br/>One parallel job per model family"]
+    
+    subgraph runtimes["Cloud Compute Runtimes"]
+        spark["Dataproc Spark<br/>Serverless or GCE Cluster<br/>(CPU & GPU)"]
+        ray["Ray on Vertex AI<br/>Autoscaling Pools<br/>(CPU & Fractional GPU)"]
+        bq["BigQuery ML<br/>SQL-Native Execution<br/>(ARIMA_PLUS · TimesFM)"]
+    end
 
-**Univariate time-series forecasting at scale** — fit many methods to tens of thousands of series in
-parallel, with backtesting, custom holidays, and ensembling built in. One JSON config describes the
-whole run.
+    ens["Ensemble Node<br/>Calculated & Learned Blending"]
+    reg[("BigQuery Run Registry<br/>Lineage · Metrics · Forecasts · Views")]
 
-- **One run, a job per model family.** A config's models are grouped into families
-  (statistical / ml / deep-learning / native) and each family runs as its **own parallel job** under
-  one `run_id`. Two **Python** runtimes — Dataproc Serverless (**Spark**) and **Ray** on Vertex AI —
-  run the identical per-series unit of work, chosen **per family**; **BigQuery** runs its SQL-only
-  native models **in parallel**, no Python compute. See [Methods](#methods) and
-  [The three runtimes](#the-three-runtimes).
-- **Ray packs fractional GPUs.** Ray's reason to exist here is **NeuralProphet on fractional GPUs** —
-  many series share one T4 (auto-profiled `gpu_fraction`), so a deep-learning model scales without a
-  GPU per series. See [The three runtimes](#the-three-runtimes).
-- **Backtesting + ensembling out of the box** — expanding/sliding folds with a full metric panel,
-  and both calculated and learned ensembles.
-- **Custom holidays and transforms** — add holiday country codes and a target transform (`log1p` /
-  `boxcox`) from config. A generic exogenous-regressor seam is **started but not shipped end-to-end**:
-  the `exog` config field and the model `X` frame are plumbed through and several models consume
-  them (`sarimax`, `ucm`, `prophet`, `lightgbm`, `xgboost`), but the shipped example series are
-  univariate — bring your own source table with driver columns to exercise it. Treat multivariate
-  as a supported-but-unexampled path, not a turnkey feature.
-- **BigQuery lineage** — every run's config, per-model metrics, forecasts, and artifact links are
-  captured in native BigQuery tables, written via the **Storage Write API** for high-speed updates
-  (config, telemetry, and quantiles as native `JSON` columns). Layout:
-  [output_schemas.md](./docs/output_schemas.md).
-- **Pick your input storage** — the example series ship in **both** managed-Iceberg and
-  native BigQuery, so you can benchmark the identical data on either format by name.
-- **Config-driven** — one JSON file describes the whole run; the same file runs locally
-  and under Composer. Every setting: [configuration_reference.md](./docs/configuration_reference.md).
+    cfg --> sdk --> dag
+    dag --> spark & ray & bq
+    spark & ray & bq --> ens --> reg
+```
 
-## Methods
+---
 
-One model per file (`src/scale_forecasting/models/`); each ends in `register(...)` so it shows up in
-`playground --list` automatically. Add your own with [`docs/adding_a_model.md`](./docs/adding_a_model.md).
+## Key Capabilities
 
-| Model | Runtime | Family | Notes |
-|-------|---------|--------|-------|
-| [`theta`](./src/scale_forecasting/models/theta.py) | Python | statistical | Simple, strong baseline. |
-| [`holtwinters`](./src/scale_forecasting/models/holtwinters.py) | Python | statistical | Holt-Winters exponential smoothing. |
-| [`sarimax`](./src/scale_forecasting/models/sarimax.py) | Python | statistical | Seasonal ARIMA; supports exog. |
-| [`ucm`](./src/scale_forecasting/models/ucm.py) | Python | statistical | Unobserved-components (structural) state-space. |
-| [`stl_bagging`](./src/scale_forecasting/models/stl_bagging.py) | Python | statistical | STL decomposition + bagged base forecasts. |
-| [`prophet`](./src/scale_forecasting/models/prophet_model.py) | Python | statistical | Additive trend/seasonality/holidays. |
-| [`neuralprophet`](./src/scale_forecasting/models/neuralprophet_model.py) | Python | deep learning | **The GPU model** — fractional-GPU packing on Ray. |
-| [`lightgbm`](./src/scale_forecasting/models/lightgbm_model.py) | Python | ML | Gradient boosting on lag/calendar features. |
-| [`xgboost`](./src/scale_forecasting/models/xgboost_model.py) | Python | ML | Gradient boosting on lag/calendar features. |
-| [`arima_plus`](./src/scale_forecasting/models/bigquery_native.py) | BigQuery | native | SQL-only `ARIMA_PLUS`; runs ∥ the Python runtime. |
-| [`timesfm`](./src/scale_forecasting/models/bigquery_native.py) | BigQuery | native | SQL-only foundation-model forecaster. |
+- **One config, one deterministic `run_id`, parallel per-family execution.** A run groups your selected models into up to four families (`statistical`, `ml`, `deep_learning`, and `native`) and launches each family as its own parallel job under a single content-addressed `run_id`. A run's wall-clock time is bounded by its slowest family, not the sum of all families.
+- **Three first-class runtimes, chosen per family:**
+  - **Dataproc Spark (Serverless or GCE Cluster):** The 100k-series CPU workhorse (with optional L4 GPU support). Cross-joins series with models so every `(series, model)` cell runs as an independent parallel task.
+  - **Ray on Vertex AI:** Designed for fractional-GPU packing and flexible worker pools. Multiple deep-learning fits share a single GPU via an automatically profiled `gpu_fraction`, scaling `neuralprophet` across a fleet without requiring a dedicated GPU per series.
+  - **BigQuery Native (BQML & AI.FORECAST):** Runs `arima_plus`, `arima_plus_xreg`, and `timesfm` directly inside BigQuery SQL in parallel with your Python families.
+- **One unit of work everywhere.** [`worker.run_cell(series, model, cfg)`](./src/scale_forecasting/worker.py) fits, backtests, calibrates intervals, and predicts a single `(series, model)` cell. The exact same function executes in your local terminal, inside a Spark Pandas UDF, and inside a Ray remote task.
+- **Rigorous rolling-origin backtesting and interval calibration.** Supports `expanding`, `sliding`, `expanding_frozen`, and `expanding_stale` cross-validation schemes, a 15-metric evaluation panel (point + prediction-interval accuracy), conformal residual interval calibration, and automatic per-series point-forecast arm selection (`raw`, `mean`, `median`, or `auto`).
+- **Rich feature engineering and hyperparameter optimization.** Add country holidays, Fourier seasonality terms, automatic level-shift step detection, target transforms (`log1p`, `boxcox`), exogenous covariates (`exog`), and covariate lags (`exog_lags`) directly from config. Tune model hyperparameters with Optuna either fleet-wide or per series.
+- **Calculated and learned ensembling.** Blend base forecasts using calculated rules (`mean`, `median`, `inverse_error`) or out-of-fold learned weights (`nnls`, `ridge`, `xgb`), either within a single run (`barrier` or `microbatch`) or across multiple historical runs.
+- **Zero-rebuild code delivery.** The container image bakes only locked third-party dependencies (`uv.lock` $\rightarrow$ `docker/requirements.txt`). Your `src/scale_forecasting` package is zipped and delivered at job submission time, so any new model, metric, or code edit takes effect on the very next run without rebuilding a container image.
+- **Complete BigQuery lineage and operator tooling.** Every run logs its verbatim config, per-job telemetry, per-series evaluation metrics, out-of-fold predictions, and final forecasts via the BigQuery Storage Write API, backed by pre-built SQL views and an 8-verb operator CLI/`Registry` SDK (`init`, `doctor`, `close-runs`, `drop-run`, `sweep-orphans`, `reap-clusters`, `snapshot`, `export`).
 
-Plus **ensembles** across the base models (calculated: `mean`/`median`/`inverse_error`; learned:
-`nnls`/`ridge`/`xgb`) — see [configuration_reference.md](./docs/configuration_reference.md#ensemble--ensembleconfig).
+---
 
-## Architecture
+## Forecasting Models & Ensembles
 
-A run is one validated JSON config. It selects the data, the model list, the per-family runtimes,
-backtest and ensemble settings — and is persisted verbatim into the run registry, so the config *is*
-the experiment record. `main.run` resolves it into an **execution DAG**: one job per model family, all
-in parallel under one `run_id`, plus a downstream ensemble node.
+Every model lives in its own file under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md) and registers itself with the model catalogue. Add your own in a single file following [`docs/adding_a_model.md`](./docs/adding_a_model.md).
+
+| Model | Family | Runtime | Highlights |
+| :--- | :--- | :--- | :--- |
+| [`naive_mean`](./src/scale_forecasting/models/naive_mean.py) | `statistical` | Python (Spark / Ray) | Historical mean baseline with analytical prediction intervals. |
+| [`naive_seasonal`](./src/scale_forecasting/models/naive_seasonal.py) | `statistical` | Python (Spark / Ray) | Repeats the last observed seasonal cycle. |
+| [`naive_drift`](./src/scale_forecasting/models/naive_drift.py) | `statistical` | Python (Spark / Ray) | Linear extrapolation between the first and last observations. |
+| [`naive_moving_average`](./src/scale_forecasting/models/naive_moving_average.py) | `statistical` | Python (Spark / Ray) | Trailing moving-average baseline (tunable window). |
+| [`theta`](./src/scale_forecasting/models/theta.py) | `statistical` | Python (Spark / Ray) | Assimakopoulos-Nikolopoulos Theta method (`statsmodels`). |
+| [`holtwinters`](./src/scale_forecasting/models/holtwinters.py) | `statistical` | Python (Spark / Ray) | Holt-Winters seasonal exponential smoothing. |
+| [`autoets`](./src/scale_forecasting/models/autoets.py) | `statistical` | Python (Spark / Ray) | State-space Exponential Smoothing (Error-Trend-Seasonal). |
+| [`croston`](./src/scale_forecasting/models/croston.py) | `statistical` | Python (Spark / Ray) | Croston / SBA / TSB intermittent-demand forecaster for sparse series. |
+| [`sarimax`](./src/scale_forecasting/models/sarimax.py) | `statistical` | Python (Spark / Ray) | Seasonal ARIMA with exogenous regressors (`exog`). |
+| [`ucm`](./src/scale_forecasting/models/ucm.py) | `statistical` | Python (Spark / Ray) | Unobserved Components (structural state-space) model; supports `exog`. |
+| [`stl_bagging`](./src/scale_forecasting/models/stl_bagging.py) | `statistical` | Python (Spark / Ray) | STL decomposition + block-bootstrapped bagged ETS forecasts. |
+| [`prophet`](./src/scale_forecasting/models/prophet_model.py) | `statistical` | Python (Spark / Ray) | Additive piecewise trend, multi-seasonality, and exogenous regressors. |
+| [`regression_lags`](./src/scale_forecasting/models/regression_lags.py) | `ml` | Python (Spark / Ray) | Ridge regression over autoregressive target lags, calendar features, and `exog`. |
+| [`lightgbm`](./src/scale_forecasting/models/lightgbm_model.py) | `ml` | Python (Spark / Ray) | Gradient boosted trees (`LightGBM`) with recursive multi-step prediction. |
+| [`xgboost`](./src/scale_forecasting/models/xgboost_model.py) | `ml` | Python (Spark / Ray) | Gradient boosted trees (`XGBoost`) on CPU or GPU (`device="cuda"`). |
+| [`neuralprophet`](./src/scale_forecasting/models/neuralprophet_model.py) | `deep_learning` | Python (Spark / Ray) | PyTorch AR-Net + trend/seasonality forecaster; fractional-GPU packing on Ray. |
+| [`arima_plus`](./src/scale_forecasting/models/bigquery_native.py) | `native` | BigQuery SQL | Managed `CREATE MODEL ... ARIMA_PLUS` in BigQuery ML. |
+| [`arima_plus_xreg`](./src/scale_forecasting/models/bigquery_native.py) | `native` | BigQuery SQL | Managed `ARIMA_PLUS_XREG` with exogenous covariates in BigQuery ML. |
+| [`timesfm`](./src/scale_forecasting/models/bigquery_native.py) | `native` | BigQuery SQL | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM`). |
+
+**Ensemble Strategies (`ensemble.strategies`):**
+- **Calculated (backtest-free or metric-weighted):** `mean`, `median`, `inverse_error`
+- **Learned (fitted per series on out-of-fold predictions):** `nnls` (non-negative least squares), `ridge` (L2-regularized linear blend), `xgb` (gradient-boosted meta-learner)
+
+---
+
+## Architecture Overview
+
+A run starts from one validated [`RunConfig`](./src/scale_forecasting/config.py). [`main.run`](./src/scale_forecasting/main.py) (or an emitted Cloud Composer DAG) resolves the config into an execution DAG: one node per model family plus a downstream ensemble node.
 
 ```mermaid
 flowchart TB
-    cfg["RunConfig (one JSON)<br/>data · models · per-family compute · backtest · ensemble"]
-    entry["main.run(cfg)<br/>plan_dag: group models by family → one job each"]
+    cfg["RunConfig (JSON)<br/>data · models · compute · backtest · features · hpo · ensemble"]
+    entry["Orchestrator: main.run(cfg) / Forecaster.run()<br/>plan_dag: resolve per-family runtime, hardware, and sizing"]
     cfg --> entry
 
-    subgraph py["Python families — each on its resolved runtime (Spark or Ray, per family)"]
+    subgraph py["Python Families (Spark or Ray selected per family)"]
         direction LR
-        spark["Spark job<br/>Dataproc Serverless<br/>one task per (series, model) cell<br/>(100k CPU workhorse)"]
-        ray["Ray job<br/>Ray on Vertex AI<br/>fractional-GPU packing (T4)<br/>CPU + GPU pools"]
+        spark["Dataproc Spark<br/>Serverless Batch or GCE Cluster<br/>Cross-join (series × model)"]
+        ray["Ray on Vertex AI<br/>Autoscaling CPU & GPU Worker Pools<br/>Fractional-GPU task packing"]
     end
 
-    bq["native family<br/>arima_plus · arima_plus_xreg · timesfm<br/>SQL only in BigQuery"]
+    bq["BigQuery Native Family<br/>arima_plus · arima_plus_xreg · timesfm<br/>Pure SQL in BigQuery"]
 
-    entry -->|"statistical / ml family"| spark
-    entry -->|"deep-learning family (or any family, per config)"| ray
-    entry -->|"native family, always parallel"| bq
+    entry -->|"statistical / ml / deep_learning"| spark
+    entry -->|"deep_learning / ml / statistical"| ray
+    entry -->|"native family (always parallel)"| bq
 
-    cell["worker.run_cell(series, model, cfg)<br/>the ONE unit of work — identical local / Spark / Ray"]
+    cell["worker.run_cell(series, model, cfg)<br/>Single unit of work — identical Local, Spark, and Ray"]
     spark --> cell
     ray --> cell
 
-    data[("Source series<br/>managed-Iceberg or native BigQuery<br/>read via Storage Read API")]
-    data -.->|reads| spark
-    data -.->|reads| ray
-    data -.->|reads| bq
+    data[("Source Panel<br/>source_series_iceberg or source_series_native<br/>BigQuery Storage Read API (Arrow)")]
+    data -.->|snapshot-pinned read| spark
+    data -.->|snapshot-pinned read| ray
+    data -.->|SQL read| bq
 
-    subgraph reg["Run registry — native-BigQuery tables (Storage Write API)"]
+    subgraph reg["BigQuery Run Registry (Storage Write API)"]
         direction LR
-        r0["run_registry<br/>config + telemetry"]
-        r5["run_jobs<br/>per-family-job trace"]
-        r2["forecast_metadata<br/>metrics + GCS artifact links"]
-        r3["forecast_predictions<br/>forecast values"]
-        r4["backtest_oof<br/>OOF rows for learned ensembling"]
+        r0["run_registry<br/>config · status · sizing"]
+        r1["run_jobs<br/>per-family job trace"]
+        r2["forecast_metadata<br/>15 metrics · best_params · artifact URI"]
+        r3["forecast_predictions<br/>horizon forecasts + intervals"]
+        r4["backtest_oof<br/>out-of-fold predictions"]
     end
 
-    ens["ensemble node<br/>blends every family's base forecasts<br/>(after all family jobs land)"]
-    cell -->|write_cells| reg
-    bq -->|ML.FORECAST| reg
+    ens["Ensemble Node<br/>mean · median · inverse_error · nnls · ridge · xgb"]
+    cell -->|streamed chunks| reg
+    bq -->|SQL insert| reg
     reg --> ens
     ens --> reg
-    art[("GCS artifacts<br/>fitted-model ObjectRefs")]
-    cell -.->|persist_models| art
-    art -.->|lineage| r2
+
+    art[("GCS Artifacts<br/>Serialized Models & Staged Configs")]
+    cell -.->|optional persist_models| art
+    art -.->|object_ref lineage| r2
 ```
 
-<a name="the-three-runtimes"></a>
+---
 
-- **The three runtimes, chosen per family.** Each Python model family runs on **Spark _or_ Ray**,
-  chosen per family (`compute.families.<family>.runtime`, defaulting to the run-level
-  `python_runtime`); the native family always runs in BigQuery. So one run can put its statistical
-  family on Spark, its deep-learning family on Ray, and its native family in BigQuery — all in
-  parallel under one `run_id`, and a run's wall-clock is the *slowest* family, not the sum.
-  - **Spark** (Dataproc Serverless) is the 100k CPU workhorse: it fans out **one task per
-    `(series, model)` cell** (series cross-joined with the family's models), so a job finishes in
-    ~its slowest cell. See [07](./notebooks/07_scale_review.ipynb) for the 100k scale review.
-  - **Ray** (on Vertex AI) is for **fractional-GPU packing**: NeuralProphet's per-series fit is small,
-    so many series share one T4 via an auto-profiled `gpu_fraction` — a deep-learning family at fleet
-    scale without a GPU per series. (For CPU-only work at 100k, Spark is the workhorse; Ray earns its
-    place on the GPU path.)
-  - **BigQuery** runs `arima_plus` / `arima_plus_xreg` / `timesfm` in SQL, in parallel, under the
-    same `run_id`.
-- **The one unit of work.** `worker.run_cell(series, model, cfg) -> CellResult` fits,
-  (optionally) backtests, and predicts one `(series, model)` cell. The *same* function
-  runs locally, inside a Spark Pandas UDF, and inside a Ray task. Engines differ only in
-  how they fan it out and collect results — that's what makes "same code everywhere" real.
-- **Ray vs Spark, for the PySpark crowd.** If you fan `(series, model)` work out today with
-  `applyInPandas` + pandas UDFs, Ray runs the **identical** `worker.run_cell` over the
-  **same** input table (Iceberg or native — read through the BigQuery Storage Read API), so
-  the storage format is transparent to engine code. You get Ray ∥ BigQuery under one `run_id`
-  with no Spark session to stand up or tune — and because the Ray ecosystem can also host
-  Spark workloads (via RayDP), a team can consolidate many frameworks on one cluster.
-  *(The Ray engine reads the source panel two ways, selected by `compute.ray_read_mode`: the
-  default `driver_collect` (BigQuery Storage Read API client) and the opt-in `ray_data`
-  (`ray.data.read_bigquery`) — both hit the same Storage Read API, so the storage format stays
-  transparent. Both readers materialize one driver-side panel before the fan-out shards it —
-  a bounded choice, because Ray is the GPU/modest-scale runtime here and Spark is the
-  100k-series one; keeping the panel distributed as `ray.data` blocks all the way into the
-  fan-out is the change that would lift that ceiling, and it is gated on a live Ray run at a
-  scale that makes the driver the bottleneck.)* Spark-on-Ray (RayDP) is **out of scope**, not
-  queued: this deploys Spark and Ray as first-class peer runtimes with their own submitters,
-  so hosting one inside the other adds a third path to maintain for a consolidation benefit a
-  team already gets by choosing a runtime per family — which the config does.
-- **Scale without a bottleneck.** Workers return data, not RPCs; results are written to
-  BigQuery in bulk (Storage Write API). Parallelism is bounded by compute, not a tracking
-  server's QPS.
-- **Lineage.** Native-BigQuery tables — `run_registry` (config) → `forecast_metadata` (metrics + GCS
-  artifact links) → `forecast_predictions` (values), plus `backtest_oof` for learned ensembling and
-  `run_jobs`, which records one row per family job (its runtime, hardware, and platform job id) so a
-  run's cross-system trace is queryable. These run-collection tables are always native (native `JSON`
-  columns, `WRITE_TRUNCATE` reseed) and are written via the **Storage Write API**; the *input* table
-  ships in both Iceberg and native so you can compare storage formats on the same run shape. Full
-  column-by-column layout: [output_schemas.md](./docs/output_schemas.md).
+## Quickstart (Local, Zero Cloud Setup)
 
-Read `src/scale_forecasting/config.py` (the run contract) and
-`src/scale_forecasting/worker.py` (the unit of work) to see the whole shape.
-
-## Quickstart
-
-No GCP needed — run a real model on sample data in under a minute.
+Run any Python model locally on synthetic data in under a minute — no GCP project or credentials required:
 
 ```bash
-uv sync                                            # install into a local venv
-uv run python -m scale_forecasting.playground --list           # see every model
-uv run python -m scale_forecasting.playground --model theta --backtest
+uv sync                                                                # create .venv from uv.lock
+uv run python -m scale_forecasting.playground --list                   # list all 18 models
+uv run python -m scale_forecasting.playground --model theta --backtest # fit, backtest, and print metrics
 ```
 
-That runs the **same** `worker.run_cell` the cluster runs, on a small generated
-panel, and prints the forecast horizon plus the backtest metric panel. For an
-interactive version — pick a model, plot the forecast and its interval — open
-[`notebooks/model_playground.ipynb`](./notebooks/model_playground.ipynb).
+This executes the exact same [`worker.run_cell`](./src/scale_forecasting/worker.py) function that runs on Dataproc and Vertex AI. For an interactive visual walkthrough, open [`notebooks/model_playground.ipynb`](./notebooks/model_playground.ipynb).
 
-**Add your own model** in one file: copy [`docs/model_template.py`](./docs/model_template.py)
-into `src/scale_forecasting/models/`, add one import line, and it shows up in the
-list above automatically. Full walkthrough: [`docs/adding_a_model.md`](./docs/adding_a_model.md).
+### Extending the Platform in One File
 
-**Add your own metric** the same way: copy [`docs/metric_template.py`](./docs/metric_template.py)
-into `src/scale_forecasting/metrics/`, add one import line and one entry to `METRIC_NAMES`. The
-`forecast_metadata` column, its `ADD COLUMN` migration, the write-path field spec and the
-leaderboard aggregate are all generated from that list, so nothing else changes. Full
-walkthrough: [`docs/adding_a_metric.md`](./docs/adding_a_metric.md).
+- **Add a model:** Copy [`docs/model_template.py`](./docs/model_template.py) into [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md), implement `fit` and `predict`, and add one import line. Walkthrough: [`docs/adding_a_model.md`](./docs/adding_a_model.md).
+- **Add a metric:** Copy [`docs/metric_template.py`](./docs/metric_template.py) into [`src/scale_forecasting/metrics/`](./src/scale_forecasting/metrics/README.md) and add its name to `METRIC_NAMES`. Its BigQuery column, `ADD COLUMN` migration, Storage Write API protobuf field, and leaderboard view update automatically. Walkthrough: [`docs/adding_a_metric.md`](./docs/adding_a_metric.md).
 
-**Demo notebooks** (run + review against a live deployment) live in [`notebooks/`](./notebooks):
-[`01_spark_via_connect`](./notebooks/01_spark_via_connect.ipynb) drives the Spark UDF fan-out over a
-Dataproc **Spark Connect** endpoint; [`02_bigquery_native`](./notebooks/02_bigquery_native.ipynb)
-runs the BigQuery-native models; [`03_combo_and_ensemble`](./notebooks/03_combo_and_ensemble.ipynb)
-runs Spark ∥ BigQuery under one `run_id` with ensembles, then reviews base + ensemble models side by
-side on `v_model_leaderboard`; [`04_ray_on_vertex`](./notebooks/04_ray_on_vertex.ipynb) runs the
-Python-runtime models on an autoscaling Ray-on-Vertex cluster ∥ the BigQuery natives (job submission
-works from any authenticated client — local or in-GCP — because the cluster is provisioned on a
-PSC-I network attachment with a dashboard-capable head node, wired by the Terraform network module).
+---
 
-Finally, [`07_scale_review`](./notebooks/07_scale_review.ipynb) runs nothing — point it at one
-`run_id` per approach (e.g. the `configs/*_100k.json` runs) and it renders the **cross-approach
-comparison**: wall-clock and provisioning overhead from `v_run_summary`, the per-family-job placement
-from `v_run_jobs`, and accuracy parity (same model, same answer across runtimes) from
-`v_model_leaderboard`.
+## Interactive Notebooks
 
-Every notebook has a one-click **Run in Colab Enterprise** header — the Terraform-deployed runtime
-templates carry the `SF_*` run identity in their env, so it's open → pick a runtime → **Run all**,
-no environment cell. The same notebooks run green headless via the acceptance harness
-(`pytest -m gcp tests/integration/test_notebook_acceptance.py`, or
-`python -m scale_forecasting.notebook_acceptance`), which the deploy and any notebook change are
-verified against. See [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md).
+The [`notebooks/`](./notebooks/README.md) directory walks through every execution pattern and includes one-click **Run in Colab Enterprise** links pre-wired to the Terraform-provisioned runtime template (`sf-main`):
+
+| Notebook | What It Demonstrates |
+| :--- | :--- |
+| [`model_playground.ipynb`](./notebooks/model_playground.ipynb) | Local interactive sandbox — fit, backtest, and plot any model on synthetic data with zero cloud setup. |
+| [`01_spark_via_connect.ipynb`](./notebooks/01_spark_via_connect.ipynb) | Interactive Spark execution over **Dataproc Spark Connect** plus a serverless batch comparison. |
+| [`02_bigquery_native.ipynb`](./notebooks/02_bigquery_native.ipynb) | SQL-only forecasting in BigQuery (`arima_plus` and `timesfm`) with zero Python cluster provisioning. |
+| [`03_combo_and_ensemble.ipynb`](./notebooks/03_combo_and_ensemble.ipynb) | Multi-engine execution (Spark $\parallel$ BigQuery) under one `run_id`, followed by within-run and cross-run ensembling. |
+| [`04_ray_on_vertex.ipynb`](./notebooks/04_ray_on_vertex.ipynb) | Autoscaling **Ray on Vertex AI** (including GPU-packed `neuralprophet`) running in parallel with BigQuery native models. |
+| [`07_scale_review.ipynb`](./notebooks/07_scale_review.ipynb) | **100k-series scale comparison** — wall-clock timing, cluster overhead, and numerical accuracy parity across engines. |
+| [`08_run_and_monitor.ipynb`](./notebooks/08_run_and_monitor.ipynb) | Launch a multi-engine run in the background and drive a live-refreshing progress dashboard with runtime probe escalation. |
+| [`09_review_run.ipynb`](./notebooks/09_review_run.ipynb) | Read-only post-run analysis of any `run_id`: model leaderboard, metric distributions, ensemble lift, and job timeline. |
+
+---
+
+## Repository Map
+
+Every directory includes a `README.md` with an overview and visual diagrams of its contents:
+
+| Directory | Purpose |
+| :--- | :--- |
+| [`docs/`](./docs/README.md) | User guides, architecture reference, operational runbooks, system validation ledger, and auto-generated API docs. |
+| [`configs/`](./configs/README.md) | Ready-to-run JSON configurations for demos, 10k/100k scale runs, A/B comparisons, and the [`configs/smokes/`](./configs/smokes/README.md) validation suite. |
+| [`notebooks/`](./notebooks/README.md) | Interactive Jupyter / Colab Enterprise notebooks covering every runtime, monitoring, and post-run review workflow. |
+| [`src/scale_forecasting/`](./src/scale_forecasting/README.md) | Core Python package (`Forecaster` SDK, `main.run` orchestrator, `worker.run_cell`, and specialized subpackages). |
+| [`docker/`](./docker/README.md) | Dependency-only container image (`Dockerfile`), Cloud Build definitions, Dataproc GPU image customization, and locked `requirements.txt`. |
+| [`terraform/`](./terraform/README.md) | Two-stage Terraform deployment (`bootstrap` and `main`) that provisions the GCP project, data lake, runtimes, and 100k-series seed. |
+| [`tests/`](./tests/README.md) | Offline unit/contract test suite (`tests/unit/`), live cloud integration tests (`tests/integration/`), and smoke test harness (`tests/smokes/`). |
+
+---
 
 ## Documentation
 
-Full map with one-line pointers: **[`docs/README.md`](./docs/README.md)**. The essentials:
+Full documentation map: **[`docs/README.md`](./docs/README.md)** (also published at **https://statmike.github.io/scale-forecasting/**).
 
-- **Read the codebase** → [`docs/architecture.md`](./docs/architecture.md) — the
-  module-calling-module call tree, from entrypoints to the one unit of work.
-- **Run and review** → [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md) — submit
-  (Spark / Ray / BigQuery), watch it land, review the leaderboard, re-ensemble.
-- **Use it from Python** → [`docs/using_the_sdk.md`](./docs/using_the_sdk.md) — the `Forecaster`
-  easy path and the direct Spark/Ray path.
-- **Every config knob** → [`docs/configuration_reference.md`](./docs/configuration_reference.md).
-- **Deploy** → [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) +
-  [`terraform/README.md`](./terraform/README.md).
-- **When something breaks** → [`docs/troubleshooting.md`](./docs/troubleshooting.md).
+- **Architecture & Call Tree:** [`docs/architecture.md`](./docs/architecture.md)
+- **Running, Monitoring & Reviewing:** [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md)
+- **Python SDK & Direct Runners:** [`docs/using_the_sdk.md`](./docs/using_the_sdk.md)
+- **Configuration Reference:** [`docs/configuration_reference.md`](./docs/configuration_reference.md)
+- **Backtesting & Calibration Methodology:** [`docs/backtesting.md`](./docs/backtesting.md)
+- **Quota, Sizing & 100k Scale Guide:** [`docs/quota_and_scale.md`](./docs/quota_and_scale.md)
+- **BigQuery Registry & Output Schemas:** [`docs/output_schemas.md`](./docs/output_schemas.md)
+- **Deploying on GCP:** [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) & [`terraform/README.md`](./terraform/README.md)
+- **Operations & Maintenance Runbook:** [`docs/operations.md`](./docs/operations.md)
+- **System Validation & Smoke Suite:** [`docs/validation.md`](./docs/validation.md) & [`docs/smoke_testing.md`](./docs/smoke_testing.md)
+- **Troubleshooting:** [`docs/troubleshooting.md`](./docs/troubleshooting.md)
 
-## Deploy on GCP
+---
 
-Deploy the whole platform into a Google Cloud project with Terraform, in **two stages** — *bootstrap*
-(the project + the Terraform state bucket), then *main* (everything else: dataset, buckets, service
-accounts, network, connection, budget). The first apply also builds the shared Spark/Ray runtime
-image and seeds **100,000 example series**, so a fresh deploy is a working solution-in-a-box you can
-forecast against immediately.
+## Deploy on Google Cloud
 
-- **Copy-paste runbook** — auth → clone → bootstrap → main → verify, plus the operator permissions
-  you need: [`terraform/README.md`](./terraform/README.md)
-- **Reviewer's guide** — what each module builds, which services it uses, why each IAM role is
-  granted and who uses it, and the greenfield-vs-brownfield toggles:
-  [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md)
-- **Demo it** — the guided workshop over a deployed platform:
-  [`docs/workshop.md`](./docs/workshop.md)
+Deploy the complete platform into a Google Cloud project with Terraform in two stages: **Stage 1 (`bootstrap`)** creates the project and Terraform state bucket; **Stage 2 (`main`)** provisions the APIs, service accounts, VPC subnet, GCS buckets, BigQuery dataset, BigLake connection, Artifact Registry image build, Colab Enterprise runtime template, and a one-time Dataproc batch that seeds **100,000 synthetic time series**.
 
-**Cost:** effectively free at rest — buckets, dataset, service accounts, and network plumbing cost
-nothing until compute runs. The 100k seed is a one-time **~$0.15 / ~8.5 min** batch (content-addressed,
-so it runs once; `run_seed = false` skips it, `seed_num_series = 100` smoke-tests first). **Composer**
-(the scheduled-DAG host, still in development) is the only real at-rest cost (~$300–400/mo) and is
-**off by default**.
+- **Step-by-step runbook:** [`terraform/README.md`](./terraform/README.md)
+- **Architecture & IAM reviewer's guide:** [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md)
+- **Guided demo workshop:** [`docs/workshop.md`](./docs/workshop.md)
 
-**Greenfield or brownfield.** Defaults create everything (the 5-minute path). For a locked-down org,
-flip `create_service_accounts` / `create_network` / `enable_apis` off and pass your existing SAs,
-subnet, and pre-enabled APIs in by variable — the modules then create nothing and thread your values
-through.
+**Cost & Brownfield Flexibility:** Storage, datasets, service accounts, and networking have near-zero idle cost. The initial image build and 100k-series data seed run once (~8.5 minutes, ~\$0.15). Cloud Composer 3 (`create_composer = false` by default) is optional and only provisioned when scheduled Airflow DAG hosting is desired. For existing enterprise environments, toggle `create_project`, `enable_apis`, `create_service_accounts`, or `create_network` off in `terraform.tfvars` to bring your own pre-provisioned resources.
+
+---
 
 ## License
 

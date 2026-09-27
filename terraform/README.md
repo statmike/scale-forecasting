@@ -1,9 +1,27 @@
-# Terraform — deploy scale-forecasting into a GCP project
+# Terraform — Deploy `scale-forecasting` into a GCP Project
 
-Two stages, run in order. **Stage 1 (bootstrap)** creates the project and the bucket that
-holds Terraform's own state. **Stage 2 (main)** creates everything else, storing its state
-in that bucket. This split resolves the chicken-and-egg problem (you can't keep state in a
-bucket that doesn't exist yet).
+Two stages, run in order. **Stage 1 (`bootstrap`)** creates the Google Cloud project and the GCS bucket that holds Terraform's remote state. **Stage 2 (`main`)** provisions the platform infrastructure, builds the runtime container image, seeds the 100,000-series example dataset, and fires a verification smoke forecast, storing its state in the bucket created by Stage 1.
+
+```mermaid
+flowchart LR
+    subgraph s1["Stage 1: terraform/bootstrap"]
+        proj["GCP Project<br/>+ Billing Link"]
+        tfstate[("GCS State Bucket<br/>&lt;project_id&gt;-tfstate")]
+        proj --> tfstate
+    end
+
+    subgraph s2["Stage 2: terraform/main"]
+        direction TB
+        found["Foundation<br/>apis · iam · network · budget"]
+        data["Storage & Data<br/>storage · bigquery"]
+        build["Runtime Build<br/>container (Cloud Build + packed-venv)"]
+        work["Validation & Interfaces<br/>seed (100k series) · smoke · colab · composer"]
+        found --> data & build
+        data & build --> work
+    end
+
+    s1 -->|"remote backend state"| s2
+```
 
 > **Cost:** the infrastructure is effectively free at rest — empty buckets, an empty dataset,
 > service accounts, network plumbing. Three things cost money:
@@ -295,17 +313,23 @@ in `terraform.tfvars` and pass existing resources by variable:
 | `run_seed` | `true` | (already **on**) turn **off** to skip the example dataset (bring your own source table) |
 | `create_project` (bootstrap) | `true` | your org pre-creates projects |
 
-## Modules (one capability each)
+## Modules (One Capability Each)
 
-`apis` · `iam` · `storage` · `bigquery` · `budget` · `composer` · `container` · `network` ·
-`seed` — mirroring the Python side's one-file-one-capability rule. Read each module's header
-comment for what and why. `container` owns the Artifact Registry repo for the shared Spark/Ray
-runtime image **and builds + pushes it on apply** (via `docker/cloudbuild.yaml`, `build_image`
-toggle), so one apply fills the repo the seed/engines pull from; `network` provides the VPC + subnet (Private
-Google Access) that serverless compute requires; `seed` submits the gated Dataproc Serverless
-batch that materializes the example dataset.
+[`terraform/main/modules/`](./main/modules/) mirrors the Python package's one-capability-per-module design:
 
-**Table schemas live in Python, not here.** The five registry/data tables are defined once in
-`src/scale_forecasting/registry/ddl.py` and created by `registry.tables.ensure_tables()` at run
-time. Terraform owns the *containers* (dataset, BigLake connection, bucket grants); the app
-owns the *tables* — so there's a single source of truth for the DDL.
+| Module | Purpose |
+| :--- | :--- |
+| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets). |
+| [`iam`](./main/modules/iam/main.tf) | Creates the two workload service accounts (`sf-runner` and `sf-compute`), custom least-privilege roles, and Google-managed service-agent bindings. |
+| [`network`](./main/modules/network/main.tf) | Provisions the VPC, regional subnet with Private Google Access, Cloud Router/NAT, internal firewall rules, Private Service Access peering, and PSC network attachment for Vertex Ray. |
+| [`storage`](./main/modules/storage/main.tf) | Creates the two GCS buckets (`<project>-warehouse` for Iceberg tables and model artifacts; `<project>-code` for staged configs, package zips, and packed-venv archives). |
+| [`bigquery`](./main/modules/bigquery/main.tf) | Creates the `scale_forecasting` BigQuery dataset and the Cloud Resource BigLake connection used by managed Apache Iceberg tables. |
+| [`container`](./main/modules/container/main.tf) | Creates the Artifact Registry repository and triggers `docker/cloudbuild.yaml` (and optionally `docker/cloudbuild-gpu-image.yaml`) when dependency inputs change. |
+| [`seed`](./main/modules/seed/main.tf) | Submits the content-addressed Dataproc Serverless Spark batch (`seed_entry.py`) that populates `source_series_iceberg` and `source_series_native`. |
+| [`smoke`](./main/modules/smoke/main.tf) | Submits a non-blocking end-to-end verification forecast (`smoke_entry.py`) running Spark and BigQuery ML in parallel against the freshly seeded data. |
+| [`colab`](./main/modules/colab/main.tf) | Creates the Colab Enterprise runtime template (`sf-main`, Python 3.11) pre-populated with all `SF_*` environment variables for one-click notebook execution. |
+| [`composer`](./main/modules/composer/main.tf) | Optional (`create_composer = false` by default): provisions a Cloud Composer 3 (Airflow) environment pre-wired with `SF_*` variables and submit-side PyPI packages. |
+| [`budget`](./main/modules/budget/main.tf) | Creates a Cloud Billing budget alert on the project (`monthly_budget_amount`). |
+
+**Table schemas live in Python, not Terraform.** The source and registry table schemas are defined in [`src/scale_forecasting/registry/ddl.py`](../src/scale_forecasting/registry/ddl.py) and created idempotently by `registry.tables.ensure_tables()` at run time. Terraform provisions the containers (dataset, BigLake connection, buckets, IAM); the Python package owns the table DDL.
+

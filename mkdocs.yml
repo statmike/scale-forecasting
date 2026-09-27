@@ -89,6 +89,7 @@ nav:
   - Demo:
       - Workshop: workshop.md
       - Notebook tour:
+          - notebooks/README.md
           - notebooks/01_spark_via_connect.ipynb
           - notebooks/02_bigquery_native.ipynb
           - notebooks/03_combo_and_ensemble.ipynb
