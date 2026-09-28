@@ -65,7 +65,7 @@ sf.plot_leaderboard(review)
 
 ---
 
-## Enterprise Customer Recipes (Where Do I Start?)
+## Recommended Recipes (Where Do I Start?)
 
 If you are evaluating `scale-forecasting` for production workloads, start with these curated recipes:
 

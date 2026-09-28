@@ -1,4 +1,4 @@
-# Enterprise Hands-On Workshop: Massively Parallel Forecasting on Google Cloud
+# Hands-On Workshop: Massively Parallel Forecasting on Google Cloud
 
 <p align="center">
   <b>A Guided Practitioner & Architecture Workshop for Forecasting 100,000+ Time Series</b><br>
@@ -15,8 +15,8 @@ flowchart TD
     end
 
     subgraph Batch["Phase 1 · Seed 100k Benchmark Runs (Cloud Shell / Background)"]
-        B1["Dataproc Spark 100k Run<br/>configs/explode_100k.json"]
-        B2["Vertex AI Ray 100k Run<br/>configs/ray_100k.json"]
+        B1["Managed Spark 100k Run<br/>configs/explode_100k.json"]
+        B2["Gemini Enterprise Ray 100k Run<br/>configs/ray_100k.json"]
         B3["Multi-Family Hybrid 10k Run<br/>configs/all_families_10k.json"]
     end
 
@@ -39,7 +39,7 @@ flowchart TD
 
 ## Workshop Overview & Objectives
 
-In this hands-on workshop, you will deploy and operate **`scale-forecasting`** — Google Cloud's blueprint for enterprise time-series forecasting across **BigQuery ML**, **Dataproc Spark**, and **Vertex AI Ray**.
+In this hands-on workshop, you will deploy and operate **`scale-forecasting`** — Google Cloud's blueprint for enterprise time-series forecasting across **BigQuery ML**, **Managed Service for Apache Spark (Dataproc)**, and **Gemini Enterprise (Managed Ray on Vertex AI)**.
 
 ### Key Learning Outcomes
 1. **Infrastructure as Code:** Deploy the complete data lakehouse and compute infrastructure using Terraform in under 15 minutes.
@@ -224,7 +224,7 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 
 ---
 
-### Lab 3: Distributed Execution with Dataproc Spark & Vertex Ray
+### Lab 3: Distributed Execution with Managed Spark & Gemini Enterprise Ray
 **Notebooks:** [`notebooks/01_spark_via_connect.ipynb`](notebooks/01_spark_via_connect.ipynb) & [`notebooks/04_ray_on_vertex.ipynb`](notebooks/04_ray_on_vertex.ipynb)  
 **Duration:** 30 minutes  
 **Goal:** Drive distributed cluster engines interactively and understand horizontal scaling.
@@ -232,7 +232,7 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 #### Key Highlights
 - **Spark Connect:** Open an interactive `DataprocSparkSession` from Colab Enterprise, partition series into groups, and execute `applyInPandas` pandas UDFs across remote executors.
 - **Serverless Batches:** Submit fire-and-forget Dataproc Serverless batches with dynamic core allocation.
-- **Vertex AI Ray:** Provision an autoscaling Ray cluster via Private Service Connect, pack deep learning fits (`NeuralProphet`) fractionally across NVIDIA T4 GPUs, and verify automatic cluster teardown upon job completion.
+- **Gemini Enterprise (Managed Ray):** Provision an autoscaling Ray cluster via Private Service Connect, pack deep learning fits (`NeuralProphet`) fractionally across NVIDIA T4 GPUs, and verify automatic cluster teardown upon job completion.
 
 ---
 

@@ -15,6 +15,7 @@
 <p align="center">
   <a href="#quickstart-local-in-5-minutes">⚡ 5-Minute Quickstart</a> •
   <a href="#why-scale-forecasting">💡 Why Scale Forecasting</a> •
+  <a href="#the-technology-stack">🛠️ The Stack</a> •
   <a href="#three-persona-journeys">👥 Persona Tracks</a> •
   <a href="#architecture-overview">🏛️ Architecture</a> •
   <a href="#interactive-notebook-suite">📓 Notebooks</a> •
@@ -38,10 +39,27 @@ Traditional forecasting workflows break down when scaled to hundreds of thousand
 | Challenge | Traditional Approach | The `scale-forecasting` Solution |
 | :--- | :--- | :--- |
 | **Library Fragmentation** | Separate, incompatible codebases for Statsmodels, Prophet, PyTorch, and SQL models. | **Unified Model Contract:** Single [`BaseModel`](./src/scale_forecasting/models/base_model.py) interface. 18 models run with identical inputs, outputs, and metrics. |
-| **Compute Scaling Limits** | Single-node memory exhaustion (OOMs); slow sequential loops. | **Hybrid Distributed Execution:** Automatic fan-out across Dataproc Spark (`applyInPandas`), Vertex AI Ray actor pools, and BigQuery ML. |
+| **Compute Scaling Limits** | Single-node memory exhaustion (OOMs); slow sequential loops. | **Hybrid Distributed Execution:** Automatic fan-out across Managed Service for Apache Spark (Dataproc Serverless), Gemini Enterprise (Managed Ray on Vertex AI), and BigQuery ML. |
 | **Infrastructure Lock-In** | Forced choice between pure Spark or pure SQL. | **Multi-Engine DAG:** Run Spark, Ray, and BigQuery ML *concurrently under one `run_id`*, bounded by the slowest family rather than their sum. |
 | **Uncertainty & Calibration** | Gaussian assumptions that fail on real-world skewed distributions. | **Conformal Residual Intervals:** Empirical, distribution-free prediction intervals calibrated against rolling backtest errors. |
 | **Operational Opacity** | Disconnected log files and missing evaluation tracking. | **Real-Time BigQuery Registry:** Streaming telemetry via the Storage Write API into 12 analytical SQL views and interactive dashboards. |
+
+---
+
+## The Technology Stack
+
+`scale-forecasting` integrates best-of-breed open-source forecasting algorithms with Google Cloud's data and AI services:
+
+| Component / Layer | Google Cloud Service & Architecture | Primary Role in Platform | Documentation |
+| :--- | :--- | :--- | :--- |
+| **Data Warehouse & Lakehouse** | **[BigQuery](https://cloud.google.com/bigquery/docs)** & **[BigLake Apache Iceberg](https://cloud.google.com/bigquery/docs/iceberg-tables)** | Stores input time series, acts as the central run registry (`run_registry`, `forecast_predictions`, `forecast_metadata`), and exposes 12 analytical SQL views. | [BigQuery Overview](https://cloud.google.com/bigquery/docs) |
+| **SQL-Native Machine Learning** | **[BigQuery ML](https://cloud.google.com/bigquery/docs/bqml-introduction)** | Executes `ARIMA_PLUS`, `ARIMA_PLUS_XREG`, and zero-shot foundation models via `AI.FORECAST` (`TimesFM`) directly in SQL. | [BigQuery ML Guide](https://cloud.google.com/bigquery/docs/bqml-introduction) |
+| **Distributed Big Data Engine** | **[Managed Service for Apache Spark (Dataproc)](https://cloud.google.com/dataproc/docs)** | Executes massively parallel cross-joins and pandas UDFs (`applyInPandas`) on Dataproc Serverless or GCE clusters. | [Dataproc Serverless Docs](https://cloud.google.com/dataproc-serverless/docs) |
+| **Distributed AI & Ray Compute** | **[Gemini Enterprise / Vertex AI (Managed Ray)](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview)** | Dynamic autoscaling Ray actor pools with fractional GPU packing (NVIDIA L4/T4) for deep learning models like `NeuralProphet`. | [Managed Ray on Vertex AI](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview) |
+| **Interactive Analytics** | **[Colab Enterprise](https://cloud.google.com/colab/docs/enterprise-overview)** | Hosted, collaborative Jupyter notebooks pre-wired to the deployment runtime template (`sf-main`) with zero client configuration. | [Colab Enterprise Overview](https://cloud.google.com/colab/docs/enterprise-overview) |
+| **Workflow Orchestration** | **[Cloud Composer 3 (Apache Airflow)](https://cloud.google.com/composer/docs)** | Automated end-to-end DAG scheduling, fan-out orchestration across engines, and SLA monitoring. | [Cloud Composer Docs](https://cloud.google.com/composer/docs) |
+| **Secure Networking** | **[Virtual Private Cloud (VPC)](https://cloud.google.com/vpc/docs)** & **[Private Service Connect (PSC-I)](https://cloud.google.com/vpc/docs/private-service-connect)** | Private worker subnet, Cloud NAT for outbound dependency resolution, and PSC interface attachments for secure Ray cluster access. | [Private Service Connect](https://cloud.google.com/vpc/docs/private-service-connect) |
+| **Infrastructure as Code** | **[Terraform (Google Provider)](https://registry.terraform.io/providers/hashicorp/google/latest/docs)** | 1-click automated deployment of all buckets, datasets, networking, service accounts, and seed datasets. | [Terraform Provider](https://registry.terraform.io/providers/hashicorp/google/latest/docs) |
 
 ---
 
@@ -285,7 +303,7 @@ For enterprise VPC integration, custom service accounts, and security controls, 
 
 ---
 
-## Hands-On Customer Workshop
+## Hands-On Workshop
 
 Planning to run a proof-of-concept, team hackathon, or training workshop?
 
@@ -297,7 +315,7 @@ Follow our step-by-step **[Hands-On Workshop Guide](./docs/workshop.md)**. It wa
 
 - **System Architecture & Design:** [`docs/architecture.md`](./docs/architecture.md)
 - **Comprehensive Configuration Reference:** [`docs/configuration_reference.md`](./docs/configuration_reference.md)
-- **Hands-On Customer Workshop:** [`docs/workshop.md`](./docs/workshop.md)
+- **Hands-On Workshop:** [`docs/workshop.md`](./docs/workshop.md)
 - **Python SDK & Developer Guide:** [`docs/using_the_sdk.md`](./docs/using_the_sdk.md)
 - **Running, Monitoring & Reviewing:** [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md)
 - **GCP Deployment & IAM Architecture:** [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) & [`terraform/README.md`](./terraform/README.md)
