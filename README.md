@@ -16,7 +16,8 @@
   <a href="#quickstart-local-in-5-minutes">⚡ 5-Minute Quickstart</a> •
   <a href="#why-scale-forecasting">💡 Why Scale Forecasting</a> •
   <a href="#the-technology-stack">🛠️ The Stack</a> •
-  <a href="#three-persona-journeys">👥 Persona Tracks</a> •
+  <a href="#how-runs-work-declarative-json-configurations">⚙️ Configurations</a> •
+  <a href="#extending-the-platform-custom-models--metrics-in-1-file">🔌 Extensibility</a> •
   <a href="#architecture-overview">🏛️ Architecture</a> •
   <a href="#interactive-notebook-suite">📓 Notebooks</a> •
   <a href="#deploy-on-google-cloud-in-15-minutes">☁️ Deploy on GCP</a>
@@ -109,26 +110,105 @@ Whether you are building models, architecting cloud platforms, or managing produ
 ```mermaid
 flowchart TD
     subgraph DataScientist["🧑‍🔬 Data Scientist & Forecaster"]
-        DS1["Interactive Sandbox<br/>notebooks/model_playground.ipynb"]
-        DS2["Custom Model & Metric Development<br/>docs/adding_a_model.md · docs/adding_a_metric.md"]
-        DS3["Hyperparameter Tuning & Ensembling<br/>Optuna HPO · Stacking (NNLS, Ridge, XGBoost)"]
-        DS1 --> DS2 --> DS3
+        direction LR
+        DS1["Interactive Sandbox<br/>notebooks/model_playground.ipynb"] --> DS2["Custom Models & Metrics<br/>docs/adding_a_model.md"] --> DS3["HPO & Stacking Ensembles<br/>Optuna · NNLS / XGBoost"]
     end
 
     subgraph Architect["🏛️ Enterprise Cloud & Data Architect"]
-        AR1["Storage & Lakehouse Strategy<br/>Native BigQuery vs BigLake Apache Iceberg on GCS"]
-        AR2["Multi-Engine Evaluation<br/>Dataproc Spark vs Vertex AI Ray vs BigQuery ML"]
-        AR3["Security & Private Networking<br/>Private Service Connect (PSC-I) · Least-Privilege IAM"]
-        AR1 --> AR2 --> AR3
+        direction LR
+        AR1["Storage Strategy<br/>BigQuery vs Iceberg on GCS"] --> AR2["Multi-Engine Placement<br/>Spark vs Ray vs BigQuery ML"] --> AR3["Private Networking & IAM<br/>PSC-I · Least-Privilege SAs"]
     end
 
     subgraph MLOps["⚙️ MLOps & Platform Engineer"]
-        OP1["1-Click Terraform Infrastructure<br/>terraform/README.md (Bootstrap + Main)"]
-        OP2["Scheduled Orchestration<br/>Managed Airflow (Cloud Composer 3) DAGs"]
-        OP3["Fleet Resilience & Quota Preflight<br/>Automatic Multi-Region Fallback · Ray Orphan Reaper"]
-        OP1 --> OP2 --> OP3
+        direction LR
+        OP1["1-Click Terraform<br/>terraform/README.md"] --> OP2["Scheduled Orchestration<br/>Managed Airflow (Composer 3)"] --> OP3["Fleet Resilience<br/>Multi-Region Fallback & Probes"]
     end
+
+    DataScientist --> Architect --> MLOps
 ```
+
+---
+
+## How Runs Work: Declarative JSON Configurations
+
+In `scale-forecasting`, **a single declarative JSON file defines the entire experiment**. The configuration specifies which data to read, which models to fit, how to route each model family across cloud engines, how to backtest and calibrate prediction intervals, and how to combine forecasts with stacked ensembles.
+
+Every configuration automatically receives a deterministic, content-addressed `<slug>-<12hex>` **`run_id`** calculated from its contents, guaranteeing complete provenance and idempotent re-runs.
+
+### Example Configuration: Hybrid Multi-Engine Forecasting
+
+Here is an example configuration ([`configs/ensemble_demo.json`](./configs/ensemble_demo.json)) that mixes statistical models on Spark with SQL models in BigQuery and trains a stacked ensemble:
+
+```json
+{
+  "run_name": "hybrid_stacked_ensemble",
+  "data": {
+    "table": "source_series_iceberg",
+    "limit_series": 100,
+    "horizon": 14
+  },
+  "models": [
+    "theta",
+    "holtwinters",
+    "xgboost",
+    "arima_plus"
+  ],
+  "compute": {
+    "families": {
+      "statistical": {"runtime": "spark"},
+      "ml": {"runtime": "spark"},
+      "native": {"runtime": "bigquery"}
+    }
+  },
+  "backtest": {
+    "scheme": "expanding",
+    "n_folds": 3,
+    "horizon": 14,
+    "decision_metric": "wape"
+  },
+  "ensemble": {
+    "strategies": ["mean", "inverse_error", "nnls", "xgb"]
+  }
+}
+```
+
+### What Each Section Controls
+- **`data`:** Target table (BigLake Iceberg or native BigQuery), series count limit, target column, date column, frequency, and forecast horizon.
+- **`models`:** List of model identifiers to run. Models are automatically grouped into execution families (`statistical`, `ml`, `deep_learning`, `native`).
+- **`compute`:** Runtime engine selection per family (`spark`, `ray`, `bigquery`), machine types, executor counts, and multi-region fallback options.
+- **`backtest`:** Cross-validation scheme (`expanding`, `sliding`), fold counts, evaluation metric selection, and conformal interval calibration.
+- **`features`:** Automated country holidays, Fourier seasonality terms, structural level-shift detection, and exogenous covariate lags.
+- **`hpo`:** Optuna hyperparameter optimization settings (trial counts, search spaces, and fleet-wide vs. per-series tuning).
+- **`ensemble`:** Blending strategies (`mean`, `median`, `inverse_error`, `nnls`, `ridge`, `xgb`) and execution trigger (`barrier` or `microbatch`).
+
+➡️ **Explore all configuration options in the [Configuration Reference Guide (`docs/configuration_reference.md`)](./docs/configuration_reference.md).**
+
+---
+
+## Extending the Platform: Custom Models & Metrics in 1 File
+
+`scale-forecasting` is built to be easily extended by data scientists and machine learning engineers without touching cluster infrastructure.
+
+> [!TIP]
+> **Zero Container Image Rebuilds:**
+> Third-party dependencies are pre-compiled into the container image (`docker/requirements.txt`). Your Python code in `src/scale_forecasting` is dynamically zipped and distributed at job submission time. Any code edit, new model, or new metric takes effect immediately on the very next run without rebuilding a Docker image!
+
+### 1. Adding a Custom Model in 1 File
+Every model implements the lightweight [`BaseModel`](./src/scale_forecasting/models/base_model.py) interface (`fit(series)` and `predict(steps, quantiles)`):
+1. Copy [`docs/model_template.py`](./docs/model_template.py) to `src/scale_forecasting/models/my_custom_model.py`.
+2. Implement your model's training and forecasting logic using any library (e.g. Scikit-learn, Statsforecast, PyTorch).
+3. Export the class in `src/scale_forecasting/models/__init__.py`.
+4. Your model is instantly available in the CLI, Python SDK, notebooks, and configuration files!
+
+➡️ **Step-by-step walkthrough: [Adding a Model Guide (`docs/adding_a_model.md`)](./docs/adding_a_model.md).**
+
+### 2. Adding a Custom Evaluation Metric in 1 File
+1. Copy [`docs/metric_template.py`](./docs/metric_template.py) to `src/scale_forecasting/metrics/my_custom_metric.py`.
+2. Implement the point or interval loss calculation (`compute(y_true, y_pred)`).
+3. Add the metric name to `METRIC_NAMES` in `src/scale_forecasting/metrics/__init__.py`.
+4. The BigQuery table schema, `ADD COLUMN` migration, Storage Write API protobuf field, and leaderboard views update automatically!
+
+➡️ **Step-by-step walkthrough: [Adding a Metric Guide (`docs/adding_a_metric.md`)](./docs/adding_a_metric.md).**
 
 ---
 
@@ -142,7 +222,7 @@ flowchart TB
     orch["Orchestrator: Forecaster.run() / main.run()<br/>plan_dag: resolves runtime, hardware & multi-region placement"]
     cfg --> orch
 
-    subgraph compute["Distributed Compute Engines (Run in Parallel)"]
+    subgraph compute["Distributed Compute Engines (Parallel Execution)"]
         spark["Dataproc Spark (Serverless or GCE Cluster)<br/>Cross-join (series × model) → applyInPandas Tasks<br/>Statistical & ML Families (CPU / L4 GPU)"]
         ray["Ray on Vertex AI (Autoscaling Worker Pools)<br/>Dynamic task chunks & fractional GPU packing<br/>Deep Learning & ML Families (CPU / T4 GPU)"]
         bq["BigQuery ML (Native SQL Execution)<br/>CREATE MODEL ... ARIMA_PLUS & AI.FORECAST (TimesFM)<br/>Native Family (Parallel BigQuery Queries)"]
@@ -162,11 +242,9 @@ flowchart TB
     source -.->|native SQL read| bq
 
     subgraph registry["BigQuery Run Registry (Storage Write API)"]
-        r_head["run_registry (lineage, config hash, status)"]
-        r_jobs["run_jobs (per-family platform execution trace)"]
-        r_meta["forecast_metadata (15 metrics, fit duration, best params)"]
-        r_pred["forecast_predictions (horizon forecasts + conformal intervals)"]
-        r_oof["backtest_oof (out-of-fold historical predictions)"]
+        direction TB
+        r_meta["forecast_metadata (15 metrics, fit duration, best params)<br/>forecast_predictions (horizon forecasts + conformal intervals)<br/>backtest_oof (out-of-fold historical predictions)"]
+        r_trace["run_registry (lineage, config hash, status)<br/>run_jobs (per-family platform execution trace)"]
     end
 
     unit -->|streamed Arrow batches| registry
@@ -219,21 +297,31 @@ Every model lives in its own self-contained file under [`src/scale_forecasting/m
 The [`notebooks/`](./notebooks/README.md) directory provides a structured learning curriculum with direct **Run in Colab Enterprise** integrations:
 
 ```mermaid
-flowchart LR
-    subgraph Track1["Track 1: Foundations"]
-        NB0["model_playground.ipynb<br/>Local modeling sandbox<br/>(Zero GCP setup)"]
+flowchart TD
+    subgraph Track1["Track 1: Foundations & Local Prototyping"]
+        NB0["model_playground.ipynb<br/>Single-series sandbox · 18 models · conformal intervals (Zero GCP Setup)"]
     end
+
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
-        NB1["01_spark_via_connect.ipynb<br/>Dataproc Spark Connect & Serverless"]
-        NB2["02_bigquery_native.ipynb<br/>Serverless BigQuery ML (Pure SQL)"]
-        NB3["03_combo_and_ensemble.ipynb<br/>Hybrid Spark ∥ BQ + Stacking Ensembles"]
-        NB4["04_ray_on_vertex.ipynb<br/>Autoscaling Ray on Vertex AI (CPU/GPU)"]
+        direction TB
+        subgraph Single["Single-Engine Execution"]
+            direction LR
+            NB1["01_spark_via_connect.ipynb<br/>Dataproc Spark Connect & Serverless"]
+            NB2["02_bigquery_native.ipynb<br/>Serverless BigQuery ML (Pure SQL)"]
+        end
+        subgraph Multi["Multi-Engine & GPU Scaling"]
+            direction LR
+            NB3["03_combo_and_ensemble.ipynb<br/>Hybrid Spark ∥ BQ + Stacking Ensembles"]
+            NB4["04_ray_on_vertex.ipynb<br/>Autoscaling Ray on Vertex AI (CPU/GPU)"]
+        end
+        Single --> Multi
     end
-    subgraph Track3["Track 3: Operations & Scale Benchmarking"]
-        NB8["08_run_and_monitor.ipynb<br/>Background Launch & Live Progress Bar"]
-        NB9["09_review_run.ipynb<br/>Post-Run Leaderboards & Ensemble Lift"]
-        NB7["07_scale_review.ipynb<br/>100k-Series Cross-Platform Benchmark"]
+
+    subgraph Track3["Track 3: Operations, Live Monitoring & Scale Benchmarking"]
+        direction LR
+        NB8["08_run_and_monitor.ipynb<br/>Background Launch & Live Progress Bar"] --> NB9["09_review_run.ipynb<br/>Post-Run Leaderboards & Ensemble Lift"] --> NB7["07_scale_review.ipynb<br/>100k Cross-Platform Benchmark"]
     end
+
     Track1 --> Track2 --> Track3
 ```
 
@@ -257,21 +345,29 @@ Deploy the entire platform into your Google Cloud project using Terraform.
 ### 1-Click Deployment Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Stage1["Stage 1 · terraform/bootstrap/"]
-        B1["GCP Project (Optional)<br/>+ Billing Link"]
-        B2["GCS Remote State Bucket<br/>&lt;project_id&gt;-tfstate"]
-        B1 --> B2
+flowchart TD
+    subgraph Stage1["Stage 1 · terraform/bootstrap/ (Local State, Run Once)"]
+        direction LR
+        B1["GCP Project (Optional)<br/>+ Billing Link"] --> B2["GCS Remote State Bucket<br/>&lt;project_id&gt;-tfstate"]
     end
-    subgraph Stage2["Stage 2 · terraform/main/"]
-        M1["APIs & IAM<br/>Least-privilege SAs"]
-        M2["Networking<br/>VPC · Subnet · PSC-I"]
-        M3["Storage & Lakehouse<br/>3 GCS Buckets · BigQuery Dataset · BigLake Connection"]
-        M4["Container Runtime<br/>Cloud Build · Artifact Registry"]
-        M5["Colab Enterprise<br/>sf-main Runtime Template"]
-        M6["100k Seed Dataset<br/>Dataproc Serverless Seed Batch"]
-        M1 & M2 & M3 & M4 & M5 --> M6
+
+    subgraph Stage2["Stage 2 · terraform/main/ (Remote Backend State)"]
+        direction TB
+        subgraph Found["Foundation & Lakehouse Storage"]
+            direction LR
+            M1["APIs & IAM<br/>Least-privilege SAs"]
+            M2["Networking<br/>VPC · Subnet · PSC-I"]
+            M3["Storage & BigQuery<br/>3 Buckets · Dataset · Iceberg"]
+        end
+        subgraph Runtimes["Interfaces & Seed Data"]
+            direction LR
+            M4["Container Runtime<br/>Cloud Build · Artifact Registry"]
+            M5["Colab Enterprise<br/>sf-main Runtime Template"]
+            M6["100k Seed Dataset<br/>Dataproc Serverless Seed Batch"]
+        end
+        Found --> Runtimes
     end
+
     Stage1 --> Stage2
 ```
 
