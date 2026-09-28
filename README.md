@@ -57,7 +57,7 @@ Traditional forecasting workflows break down when scaled to hundreds of thousand
 | **Distributed Big Data Engine** | **[Managed Service for Apache Spark (Dataproc)](https://cloud.google.com/dataproc/docs)** | Executes massively parallel cross-joins and pandas UDFs (`applyInPandas`) on Dataproc Serverless or GCE clusters. | [Dataproc Serverless Docs](https://cloud.google.com/dataproc-serverless/docs) |
 | **Distributed AI & Ray Compute** | **[Gemini Enterprise / Vertex AI (Managed Ray)](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview)** | Dynamic autoscaling Ray actor pools with fractional GPU packing (NVIDIA L4/T4) for deep learning models like `NeuralProphet`. | [Managed Ray on Vertex AI](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview) |
 | **Interactive Analytics** | **[Colab Enterprise](https://cloud.google.com/colab/docs/enterprise-overview)** | Hosted, collaborative Jupyter notebooks pre-wired to the deployment runtime template (`sf-main`) with zero client configuration. | [Colab Enterprise Overview](https://cloud.google.com/colab/docs/enterprise-overview) |
-| **Workflow Orchestration** | **[Cloud Composer 3 (Apache Airflow)](https://cloud.google.com/composer/docs)** | Automated end-to-end DAG scheduling, fan-out orchestration across engines, and SLA monitoring. | [Cloud Composer Docs](https://cloud.google.com/composer/docs) |
+| **Workflow Orchestration** | **[Managed Service for Apache Airflow (Cloud Composer)](https://cloud.google.com/composer/docs)** | Automated end-to-end DAG scheduling, fan-out orchestration across engines, and SLA monitoring. | [Managed Airflow Docs](https://cloud.google.com/composer/docs) |
 | **Secure Networking** | **[Virtual Private Cloud (VPC)](https://cloud.google.com/vpc/docs)** & **[Private Service Connect (PSC-I)](https://cloud.google.com/vpc/docs/private-service-connect)** | Private worker subnet, Cloud NAT for outbound dependency resolution, and PSC interface attachments for secure Ray cluster access. | [Private Service Connect](https://cloud.google.com/vpc/docs/private-service-connect) |
 | **Infrastructure as Code** | **[Terraform (Google Provider)](https://registry.terraform.io/providers/hashicorp/google/latest/docs)** | 1-click automated deployment of all buckets, datasets, networking, service accounts, and seed datasets. | [Terraform Provider](https://registry.terraform.io/providers/hashicorp/google/latest/docs) |
 
@@ -124,7 +124,7 @@ flowchart TD
 
     subgraph MLOps["⚙️ MLOps & Platform Engineer"]
         OP1["1-Click Terraform Infrastructure<br/>terraform/README.md (Bootstrap + Main)"]
-        OP2["Scheduled Orchestration<br/>Cloud Composer 3 / Airflow DAG Generation"]
+        OP2["Scheduled Orchestration<br/>Managed Airflow (Cloud Composer 3) DAGs"]
         OP3["Fleet Resilience & Quota Preflight<br/>Automatic Multi-Region Fallback · Ray Orphan Reaper"]
         OP1 --> OP2 --> OP3
     end
@@ -280,7 +280,7 @@ flowchart LR
 - **Free at Rest:** Empty GCS buckets, BigQuery datasets, service accounts, and VPC networks have **zero idle cost**.
 - **One-Time Provisioning:** The runtime container image build and 100,000-series data seed execute once during initial deployment (~8.5 minutes, **~\$0.15** total).
 - **Pay-as-You-Go Compute:** Dataproc Serverless batches and Vertex AI Ray clusters bill strictly for the duration of your forecast run.
-- **Optional Services:** Cloud Composer 3 is disabled by default (`create_composer = false`).
+- **Optional Services:** Managed Service for Apache Airflow (Cloud Composer 3) is disabled by default (`create_composer = false`).
 
 ### Quick Deployment Steps (from Cloud Shell)
 
