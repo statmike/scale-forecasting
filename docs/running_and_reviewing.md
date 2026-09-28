@@ -89,7 +89,7 @@ flowchart LR
   > `region`** — the deployment names everything by convention — so a Cloud Shell session with neither
   > the Terraform directory nor its state can still derive the full `SF_*` set (including the
   > batch-infra and Ray extras) from those two variables. The copy-paste convention block lives in the runbooks that need
-  > it offline: [workshop.md Act 1](./workshop.md#act-1--populate-the-run-history-at-100k-cloud-shell-before-the-workshop)
+  > it offline: [workshop.md Phase 1](./workshop.md#phase-1--seed-100k-benchmark-runs-background--optional)
   > (demo) and [operations.md §3](./operations.md#3-re-run-a-config-short-runs-only) (rework). Only
   > override defaults (dataset/bucket/connection/subnet names) break the convention — then read the
   > exact `terraform output` values instead.

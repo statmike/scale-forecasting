@@ -45,17 +45,37 @@ uv run python -m scale_forecasting.main --config configs/mixed_demo.json
 ### From Python (`Forecaster` SDK)
 
 ```python
-from scale_forecasting import Forecaster
+import scale_forecasting as sf
 
-fc = Forecaster.from_config_file("configs/ensemble_demo.json")
-print(fc.plan())          # Inspect the planned DAG and deterministic run_id
-run_id = fc.run()         # Launch and wait for completion
-print(fc.review_run())    # Inspect leaderboard, metric distributions, and ensemble lift
+# 1. Load from file
+fc = sf.Forecaster.from_file("configs/ensemble_demo.json")
+
+# 2. Inspect the planned execution DAG and deterministic run_id
+dry_run = fc.dry_run()
+print(f"Planned Run ID : {dry_run.run_id}")
+print(f"Total Fits     : {dry_run.fanout.n_series} series × {len(dry_run.python_models) + len(dry_run.bq_models)} models")
+
+# 3. Launch and wait for completion
+result = fc.run()
+
+# 4. Inspect leaderboard, metric distributions, and ensemble lift
+review = sf.review_run(result.run_id)
+sf.plot_leaderboard(review)
 ```
 
 ---
 
-## Shipped Configurations
+## Enterprise Customer Recipes (Where Do I Start?)
+
+If you are evaluating `scale-forecasting` for production workloads, start with these curated recipes:
+
+| Recipe | Config File | Scale | Runtimes | What It Proves |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Quickstart Evaluation** | [`configs/ensemble_demo.json`](./ensemble_demo.json) | 10 series | Spark $\parallel$ BigQuery ML | Fast multi-engine run testing Spark Python models, BigQuery SQL models, and stacked ensembling in under 2 minutes. |
+| **2. Multi-Family Hybrid** | [`configs/per_family_runtimes_demo.json`](./per_family_runtimes_demo.json) | 50 series | Spark + Ray GPU + BigQuery | Routes statistical models to Spark, deep learning to Ray GPU, and native models to BigQuery SQL under one `run_id`. |
+| **3. High-Throughput 100k Benchmark** | [`configs/explode_100k.json`](./explode_100k.json) | 100,000 series | Dataproc Spark Serverless | Full enterprise benchmark: 100,000 series across 4 models (400,000 cells) with dynamic executor autoscaling. |
+| **4. Cloud Engine Parity Benchmark** | [`configs/ray_100k.json`](./ray_100k.json) | 100,000 series | Ray on Vertex AI | Full 100,000-series Ray counterpart to `explode_100k.json` to benchmark wall-clock throughput and numerical parity. |
+| **5. Fractional GPU Deep Learning** | [`configs/ray_gpu_demo.json`](./ray_gpu_demo.json) | 6 series | Ray on Vertex AI (T4 GPU) | Proves fractional GPU packing (`gpu_fraction: "auto"`) for `NeuralProphet` without dedicated GPUs per series. |
 
 ### 1. Interactive & Demo Configs
 
