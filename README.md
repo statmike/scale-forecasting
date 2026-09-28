@@ -17,7 +17,8 @@
   <a href="#why-scale-forecasting">💡 Why Scale Forecasting</a> •
   <a href="#the-technology-stack">🛠️ The Stack</a> •
   <a href="#how-runs-work-declarative-json-configurations">⚙️ Configurations</a> •
-  <a href="#extending-the-platform-custom-models--metrics-in-1-file">🔌 Extensibility</a> •
+  <a href="#model--ensemble-catalog">📊 Models</a> •
+  <a href="#evaluation-metrics-catalog">📈 Metrics</a> •
   <a href="#architecture-overview">🏛️ Architecture</a> •
   <a href="#interactive-notebook-suite">📓 Notebooks</a> •
   <a href="#deploy-on-google-cloud-in-15-minutes">☁️ Deploy on GCP</a>
@@ -55,7 +56,7 @@ Traditional forecasting workflows break down when scaled to hundreds of thousand
 | :--- | :--- | :--- | :--- |
 | **Data Warehouse & Lakehouse** | **[BigQuery](https://cloud.google.com/bigquery/docs)** & **[BigLake Apache Iceberg](https://cloud.google.com/bigquery/docs/iceberg-tables)** | Stores input time series, acts as the central run registry (`run_registry`, `forecast_predictions`, `forecast_metadata`), and exposes 12 analytical SQL views. | [BigQuery Overview](https://cloud.google.com/bigquery/docs) |
 | **SQL-Native Machine Learning** | **[BigQuery ML](https://cloud.google.com/bigquery/docs/bqml-introduction)** | Executes `ARIMA_PLUS`, `ARIMA_PLUS_XREG`, and zero-shot foundation models via `AI.FORECAST` (`TimesFM`) directly in SQL. | [BigQuery ML Guide](https://cloud.google.com/bigquery/docs/bqml-introduction) |
-| **Distributed Big Data Engine** | **[Managed Service for Apache Spark (Dataproc)](https://cloud.google.com/dataproc/docs)** | Executes massively parallel cross-joins and pandas UDFs (`applyInPandas`) on Dataproc Serverless or GCE clusters. | [Dataproc Serverless Docs](https://cloud.google.com/dataproc-serverless/docs) |
+| **Distributed Big Data Engine** | **[Managed Service for Apache Spark (Dataproc)](https://cloud.google.com/dataproc/docs)** | Executes massively parallel cross-joins and pandas UDFs (`applyInPandas`) on Dataproc Serverless or managed Dataproc clusters (where worker VMs and autoscaling are fully managed by the service). | [Dataproc Serverless Docs](https://cloud.google.com/dataproc-serverless/docs) |
 | **Distributed AI & Ray Compute** | **[Gemini Enterprise / Vertex AI (Managed Ray)](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview)** | Dynamic autoscaling Ray actor pools with fractional GPU packing (NVIDIA L4/T4) for deep learning models like `NeuralProphet`. | [Managed Ray on Vertex AI](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview) |
 | **Interactive Analytics** | **[Colab Enterprise](https://cloud.google.com/colab/docs/enterprise-overview)** | Hosted, collaborative Jupyter notebooks pre-wired to the deployment runtime template (`sf-main`) with zero client configuration. | [Colab Enterprise Overview](https://cloud.google.com/colab/docs/enterprise-overview) |
 | **Workflow Orchestration** | **[Managed Service for Apache Airflow (Cloud Composer)](https://cloud.google.com/composer/docs)** | Automated end-to-end DAG scheduling, fan-out orchestration across engines, and SLA monitoring. | [Managed Airflow Docs](https://cloud.google.com/composer/docs) |
@@ -185,33 +186,6 @@ Here is an example configuration ([`configs/ensemble_demo.json`](./configs/ensem
 
 ---
 
-## Extending the Platform: Custom Models & Metrics in 1 File
-
-`scale-forecasting` is built to be easily extended by data scientists and machine learning engineers without touching cluster infrastructure.
-
-> [!TIP]
-> **Zero Container Image Rebuilds:**
-> Third-party dependencies are pre-compiled into the container image (`docker/requirements.txt`). Your Python code in `src/scale_forecasting` is dynamically zipped and distributed at job submission time. Any code edit, new model, or new metric takes effect immediately on the very next run without rebuilding a Docker image!
-
-### 1. Adding a Custom Model in 1 File
-Every model implements the lightweight [`BaseModel`](./src/scale_forecasting/models/base_model.py) interface (`fit(series)` and `predict(steps, quantiles)`):
-1. Copy [`docs/model_template.py`](./docs/model_template.py) to `src/scale_forecasting/models/my_custom_model.py`.
-2. Implement your model's training and forecasting logic using any library (e.g. Scikit-learn, Statsforecast, PyTorch).
-3. Export the class in `src/scale_forecasting/models/__init__.py`.
-4. Your model is instantly available in the CLI, Python SDK, notebooks, and configuration files!
-
-➡️ **Step-by-step walkthrough: [Adding a Model Guide (`docs/adding_a_model.md`)](./docs/adding_a_model.md).**
-
-### 2. Adding a Custom Evaluation Metric in 1 File
-1. Copy [`docs/metric_template.py`](./docs/metric_template.py) to `src/scale_forecasting/metrics/my_custom_metric.py`.
-2. Implement the point or interval loss calculation (`compute(y_true, y_pred)`).
-3. Add the metric name to `METRIC_NAMES` in `src/scale_forecasting/metrics/__init__.py`.
-4. The BigQuery table schema, `ADD COLUMN` migration, Storage Write API protobuf field, and leaderboard views update automatically!
-
-➡️ **Step-by-step walkthrough: [Adding a Metric Guide (`docs/adding_a_metric.md`)](./docs/adding_a_metric.md).**
-
----
-
 ## Architecture Overview
 
 A run begins with a declarative [`RunConfig`](./src/scale_forecasting/config.py). The orchestrator resolves the experiment into an execution DAG: each model family runs as an independent parallel job, streaming results into BigQuery.
@@ -289,6 +263,53 @@ Every model lives in its own self-contained file under [`src/scale_forecasting/m
 ### Ensembling Strategies (`ensemble.strategies`)
 - **Calculated (Fast, Backtest-Free):** `mean` (uniform average), `median` (robust consensus), `inverse_error` (weighted inversely by backtest validation loss).
 - **Learned (Stacking on Out-of-Fold Predictions):** `nnls` (non-negative constrained weights), `ridge` (L2-regularized linear blend), `xgb` (gradient-boosted meta-learner).
+
+### Adding a Custom Model in 1 File (Zero Image Rebuilds)
+
+The platform is designed for rapid extension by data scientists:
+- **Zero Container Image Rebuilds:** Third-party dependencies are pre-compiled into the container image (`docker/requirements.txt`). Your Python code in `src/scale_forecasting` is zipped and shipped dynamically at job submission time. Any code edit, new model, or new metric takes effect immediately on the very next run without rebuilding a Docker image!
+- **Lightweight Model Contract:** Implement [`BaseModel`](./src/scale_forecasting/models/base_model.py) with `fit(series)` and `predict(steps, quantiles)`.
+- **1-File Workflow:**
+  1. Copy [`docs/model_template.py`](./docs/model_template.py) to `src/scale_forecasting/models/my_custom_model.py`.
+  2. Implement your training and forecasting logic using any library (Scikit-learn, Statsforecast, PyTorch, etc.).
+  3. Export the class in `src/scale_forecasting/models/__init__.py`.
+  4. The model is instantly available in the CLI, Python SDK, interactive notebooks, and JSON configurations on the very next run!
+
+➡️ **Step-by-step walkthrough: [Adding a Model Guide (`docs/adding_a_model.md`)](./docs/adding_a_model.md).**
+
+---
+
+## Evaluation Metrics Catalog
+
+`scale-forecasting` scores models across a comprehensive 15-metric evaluation panel covering both point-forecast accuracy and prediction-interval quality. Every metric is computed per series per fold and stored in `forecast_metadata`:
+
+| Metric | Category | Methodology | Interpretation |
+| :--- | :--- | :--- | :--- |
+| **`wape`** | Point Accuracy | Weighted Absolute Percentage Error: $\frac{\sum |y - \hat{y}|}{\sum |y|}$ | Scale-independent; robust to zeros. Default decision metric. |
+| **`mae`** | Point Accuracy | Mean Absolute Error: $\frac{1}{H}\sum |y - \hat{y}|$ | Standard average error magnitude in target units. |
+| **`rmse`** | Point Accuracy | Root Mean Squared Error: $\sqrt{\frac{1}{H}\sum (y - \hat{y})^2}$ | Penalizes large outlier forecast errors heavily. |
+| **`mape`** | Point Accuracy | Mean Absolute Percentage Error | Percentage error; handles non-zero demand series. |
+| **`mase`** | Point Accuracy | Mean Absolute Scaled Error (scaled by naive in-sample diff) | Compares forecast accuracy relative to a naive random-walk baseline. |
+| **`mase_seasonal`** | Point Accuracy | Seasonal MASE (scaled by seasonal lag in-sample diff) | Relative accuracy against a seasonal naive baseline. |
+| **`bias`** | Point Accuracy | Mean Error: $\frac{1}{H}\sum (\hat{y} - y)$ | Directional over-forecasting ($>0$) or under-forecasting ($<0$). |
+| **`mse`** | Point Accuracy | Mean Squared Error: $\frac{1}{H}\sum (y - \hat{y})^2$ | Raw quadratic loss. |
+| **`rmsse`** | Point Accuracy | Root Mean Squared Scaled Error | Quadratic loss normalized by naive in-sample diff. |
+| **`pinball`** | Interval / Quantile | Pinball loss (quantile loss) across requested quantiles | Evaluates asymmetric quantile regression quality. |
+| **`coverage`** | Interval Quality | Empirical coverage: fraction of actuals inside $[y_{lower}, y_{upper}]$ | Target is $1 - \alpha$ (e.g. 80% or 95%). |
+| **`interval_score`** | Interval Quality | Winkler interval score (width + penalty for actuals outside bounds) | Balances narrowness against coverage violations. |
+| **`interval_width`** | Interval Quality | Average width: $\frac{1}{H}\sum (y_{upper} - y_{lower})$ | Narrower intervals indicate higher model confidence. |
+| **`conformal_coverage`** | Conformal Calibration | Coverage of calibrated conformal prediction intervals | Distribution-free, empirical coverage guarantee. |
+| **`conformal_interval_width`** | Conformal Calibration | Average width of calibrated conformal intervals | Measures uncertainty spread under conformal calibration. |
+
+### Adding a Custom Metric in 1 File
+
+Need a domain-specific loss function (such as asymmetric financial penalties or custom inventory holding costs)?
+1. Copy [`docs/metric_template.py`](./docs/metric_template.py) to `src/scale_forecasting/metrics/my_custom_metric.py`.
+2. Implement `compute(y_true, y_pred, ...)` using standard NumPy / pandas functions.
+3. Add the metric name to `METRIC_NAMES` in `src/scale_forecasting/metrics/__init__.py`.
+4. The platform automatically handles BigQuery schema migrations (`ADD COLUMN`), Storage Write API protobuf serialization, and analytical SQL view aggregations!
+
+➡️ **Step-by-step walkthrough: [Adding a Metric Guide (`docs/adding_a_metric.md`)](./docs/adding_a_metric.md).**
 
 ---
 
