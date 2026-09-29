@@ -1031,3 +1031,50 @@ def test_with_available_models_keeps_installed_and_drops_unavailable(
     cfg = RunConfig(**_minimal_dict(models=["naive_mean", "catboost"]))
     filtered = cfg.with_available_models()
     assert filtered.models == ["naive_mean"]
+
+
+def test_tiered_covariates_load_and_expose_derived_properties() -> None:
+    cfg = RunConfig(
+        **_minimal_dict(
+            features={
+                "static_covariates": ["region", "category"],
+                "future_covariates": ["promo_flag"],
+                "past_covariates": ["temperature"],
+                "exog": ["price_index"],
+                "exog_lags": {"temperature": [1, 7], "promo_flag": [1]},
+            }
+        )
+    )
+    assert cfg.features.dynamic_covariates == ["price_index", "promo_flag", "temperature"]
+    assert cfg.features.known_future_covariates == ["price_index", "promo_flag"]
+    assert cfg.features.all_covariates == [
+        "price_index",
+        "promo_flag",
+        "temperature",
+        "region",
+        "category",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("features", "expected"),
+    [
+        (
+            {"future_covariates": ["promo"], "past_covariates": ["promo"]},
+            "future_covariates and features.past_covariates overlap",
+        ),
+        (
+            {"static_covariates": ["region"], "future_covariates": ["region"]},
+            "static_covariates overlaps with dynamic covariates",
+        ),
+        (
+            {"static_covariates": ["region"], "exog_lags": {"region": [1]}},
+            "not in features.exog",
+        ),
+    ],
+)
+def test_tiered_covariate_overlaps_rejected_at_load(
+    features: dict[str, Any], expected: str
+) -> None:
+    with pytest.raises(ValidationError, match=expected):
+        RunConfig(**_minimal_dict(features=features))

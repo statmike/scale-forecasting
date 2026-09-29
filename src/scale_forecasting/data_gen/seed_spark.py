@@ -124,34 +124,57 @@ def _default_partitions(n_series: int) -> int:
     return max(1, min(512, -(-n_series // 2000)))
 
 
-def _to_source_rows(df: pd.DataFrame, holidays: tuple[str, ...]) -> pd.DataFrame:
+_COVARIATE_COLUMNS: tuple[str, ...] = (
+    "region",
+    "category",
+    "promo_flag",
+    "price_index",
+    "temperature",
+)
+
+
+def _to_source_rows(
+    df: pd.DataFrame,
+    holidays: tuple[str, ...],
+    *,
+    include_covariates: bool = False,
+) -> pd.DataFrame:
     """Reconcile one generator partition to the ``source_series`` schema (pure, no Spark).
 
-    The generator emits ``ts_id, archetype, ds(datetime64[ns]), y``; the table is
-    ``ts_id STRING, ds DATE, y FLOAT64, archetype STRING, is_holiday BOOL``. This casts ``ds`` to
-    python ``date``, derives ``is_holiday`` from the same calendar as the panel's holiday bump
-    (parity, via `is_holiday_flags`), and projects to the DDL column
-    order. The shipped example is univariate; the exog seam lives in the generator/config, not the
-    shipped source table. Pure → unit-tested offline against a tiny generator call.
+    The generator emits ``ts_id, archetype, ds(datetime64[ns]), y`` (plus optional hierarchy and
+    covariate columns); the default table is ``ts_id STRING, ds DATE, y FLOAT64, archetype STRING,
+    is_holiday BOOL``. This casts ``ds`` to python ``date``, derives ``is_holiday`` from the same
+    calendar as the panel's holiday bump (parity, via `is_holiday_flags`), and projects to the DDL
+    column order. Pass ``include_covariates=True`` to retain any hierarchy/covariate columns
+    present on ``df`` (`region, category, promo_flag, price_index, temperature`).
     """
     import pandas as pd
 
     from .generator import is_holiday_flags
 
+    extra_cols = [c for c in _COVARIATE_COLUMNS if include_covariates and c in df.columns]
+    cols_order = [*_SOURCE_COLUMNS, *extra_cols]
+
     if df.empty:
-        empty = {c: pd.Series(dtype="object") for c in _SOURCE_COLUMNS}
+        empty = {c: pd.Series(dtype="object") for c in cols_order}
         return pd.DataFrame(empty)
 
-    out = pd.DataFrame(
-        {
-            "ts_id": df["ts_id"].astype("string"),
-            "ds": pd.to_datetime(df["ds"]).dt.date,
-            "y": df["y"].astype("float64"),
-            "archetype": df["archetype"].astype("string"),
-            "is_holiday": pd.Series(is_holiday_flags(df["ds"], holidays), dtype="boolean"),
-        }
-    )
-    return out[list(_SOURCE_COLUMNS)]
+    data: dict[str, object] = {
+        "ts_id": df["ts_id"].astype("string"),
+        "ds": pd.to_datetime(df["ds"]).dt.date,
+        "y": df["y"].astype("float64"),
+        "archetype": df["archetype"].astype("string"),
+        "is_holiday": pd.Series(is_holiday_flags(df["ds"], holidays), dtype="boolean"),
+    }
+    for c in extra_cols:
+        if c in ("region", "category"):
+            data[c] = df[c].astype("string")
+        elif c == "promo_flag":
+            data[c] = df[c].astype("int64")
+        else:
+            data[c] = df[c].astype("float64")
+    out = pd.DataFrame(data)
+    return out[cols_order]
 
 
 def _source_series_schema() -> object:

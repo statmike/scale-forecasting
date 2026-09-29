@@ -457,12 +457,17 @@ def _snapshot_millis(cfg: RunConfig, settings: Settings) -> int | None:
 
 
 def _needed_columns(cfg: RunConfig) -> list[str]:
-    """Project the read to only what a cell needs — ts_id, date, target, and configured exog.
+    """Project the read to only what a cell needs — ts_id, date, target, and configured covariates.
 
     Trims the ``ts_id × model`` cross-join's shuffle to the essential columns (explode duplicates
     each series once per model, so narrow rows matter). Order-preserving + de-duplicated.
     """
-    wanted = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col, *cfg.features.exog]
+    wanted = [
+        cfg.data.ts_id_col,
+        cfg.data.date_col,
+        cfg.data.target_col,
+        *cfg.features.all_covariates,
+    ]
     seen: set[str] = set()
     out: list[str] = []
     for col in wanted:

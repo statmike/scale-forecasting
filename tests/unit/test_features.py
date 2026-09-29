@@ -419,3 +419,56 @@ def test_build_future_features_handles_history_shorter_than_the_horizon() -> Non
     future = build_future_features(y, X, cfg)
     assert future is not None
     assert len(future) == 10, "length follows the horizon, never the history"
+
+
+def test_extract_static_covariates_validates_constancy() -> None:
+    from scale_forecasting.features import extract_static_covariates
+
+    s = _series(6)
+    s["region"] = "NA"
+    s["category"] = "enterprise"
+    cfg = _cfg(features={"static_covariates": ["region", "category"]})
+    static = extract_static_covariates(s, cfg)
+    assert static == {"region": "NA", "category": "enterprise"}
+
+    # Static covariates do not pollute the local single-series X matrix with constant columns.
+    y, X = build_features(s, cfg)
+    assert X is None
+
+    # A time-varying value in a static covariate column is rejected.
+    s_bad = s.copy()
+    s_bad.loc[3, "region"] = "EMEA"
+    with pytest.raises(ConfigError, match="must be constant within a series"):
+        extract_static_covariates(s_bad, cfg)
+
+
+def test_future_vs_past_covariates_lookahead_isolation() -> None:
+    s = _series(20)
+    s["promo_flag"] = np.zeros(20)
+    s["temperature"] = np.arange(10.0, 30.0)
+    cfg = _future_cfg(
+        {
+            "future_covariates": ["promo_flag"],
+            "past_covariates": ["temperature"],
+            "exog_lags": {"temperature": [2]},
+        },
+        horizon=4,
+    )
+    y, X = build_features(s, cfg)
+    assert X is not None
+    assert list(X.columns) == ["promo_flag", "temperature", "temperature_lag_2"]
+
+    # Suppose we have a future_covariates_df where promo_flag=1.0 and temperature=999.0 (a future
+    # validation window): future_covariates reads 1.0, while past_covariates ignores 999.0!
+    future_window = pd.DataFrame(
+        {"promo_flag": [1.0, 1.0, 0.0, 1.0], "temperature": [999.0, 999.0, 999.0, 999.0]}
+    )
+    future = build_future_features(y, X, cfg, future_covariates_df=future_window)
+    assert future is not None
+    assert future["promo_flag"].tolist() == [1.0, 1.0, 0.0, 1.0]
+    assert (future["temperature"] < 100.0).all()
+    assert (future["temperature_lag_2"] < 100.0).all()
+    # And the first 2 steps of temperature_lag_2 read the last 2 real historical temperatures:
+    assert future["temperature_lag_2"].to_numpy()[:2] == pytest.approx(
+        X["temperature"].to_numpy()[-2:]
+    )

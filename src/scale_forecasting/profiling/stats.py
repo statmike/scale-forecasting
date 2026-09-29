@@ -103,9 +103,10 @@ def series_stats(panel: pd.DataFrame, cfg: RunConfig) -> list[SeriesStats]:
         if col not in panel.columns:
             raise DataError(f"missing column '{col}'; panel has {have}")
 
-    # Feature-matrix width is the count of declared exog columns *present*: ``build_features``
-    # builds one column per declared exog, and a declared-but-absent one contributes nothing.
-    n_exog = sum(1 for col in cfg.features.exog if col in panel.columns)
+    # Feature-matrix width is the count of declared dynamic covariate columns *present*:
+    # ``build_features`` builds one column per declared dynamic covariate, and a declared-but-absent
+    # one contributes nothing.
+    n_exog = sum(1 for col in cfg.features.dynamic_covariates if col in panel.columns)
 
     target = pd.to_numeric(panel[d.target_col], errors="coerce").astype("float64")
     frame = pd.DataFrame(

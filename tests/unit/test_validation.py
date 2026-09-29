@@ -71,6 +71,56 @@ def test_exog_column_validated_when_declared() -> None:
     validate_panel(_panel(with_exog=True), cfg)
 
 
+def test_three_tier_covariates_validated_when_declared() -> None:
+    df = _panel(with_exog=True)
+    df["promo_flag"] = 0.0
+    df["region"] = df["ts_id"].map({"s_000": "AMER", "s_001": "EMEA"})
+    cfg = RunConfig(
+        run_name="t",
+        data={"source_table": "t", "horizon": 7},
+        models=["sarimax"],
+        features={
+            "future_covariates": ["promo_flag"],
+            "past_covariates": ["price_index"],
+            "static_covariates": ["region"],
+        },
+    )
+    validate_panel(df, cfg)
+
+
+def test_non_constant_static_covariate_raises() -> None:
+    df = _panel(with_exog=False)
+    df["region"] = "AMER"
+    df.loc[df["ts_id"] == "s_001", "region"] = ["AMER"] * 30 + ["EMEA"] * 30
+    cfg = RunConfig(
+        run_name="t",
+        data={"source_table": "t", "horizon": 7},
+        models=["theta"],
+        features={"static_covariates": ["region"]},
+    )
+    with pytest.raises(
+        DataError,
+        match="series 's_001': static covariate 'region' must be constant within a series",
+    ):
+        validate_panel(df, cfg)
+
+
+def test_null_static_covariate_raises() -> None:
+    df = _panel(with_exog=False)
+    df["region"] = "AMER"
+    df.loc[0, "region"] = None
+    cfg = RunConfig(
+        run_name="t",
+        data={"source_table": "t", "horizon": 7},
+        models=["theta"],
+        features={"static_covariates": ["region"]},
+    )
+    with pytest.raises(
+        DataError, match="static covariate column 'region' has missing \\(null\\) values"
+    ):
+        validate_panel(df, cfg)
+
+
 # --- structural failures -------------------------------------------------------
 
 

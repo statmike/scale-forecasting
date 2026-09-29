@@ -626,8 +626,46 @@ def _cut(X: pd.DataFrame | None, start: int, end: int) -> pd.DataFrame | None:
     return None if X is None else X.iloc[start:end]
 
 
+def _cut_forecast(
+    X: pd.DataFrame | None,
+    start: int,
+    end: int,
+    y: pd.Series | None = None,
+    cfg: RunConfig | None = None,
+) -> pd.DataFrame | None:
+    """Slice ``X[start:end]`` for forecast validation without leaking ``past_covariates``.
+
+    When all declared covariates are known in advance (`exog` / `future_covariates`), the raw slice
+    ``X[start:end]`` is exact. When ``past_covariates`` are configured, values after the forecast
+    origin ``start`` have not been observed yet; building the span via `build_future_features`
+    anchored at ``start`` preserves true future values for `future_covariates` / `exog` / calendar
+    terms while restricting `past_covariates` (and their lags) to history up to ``start``.
+    """
+    if X is None:
+        return None
+    if cfg is None or y is None or not cfg.features.past_covariates:
+        return X.iloc[start:end]
+    from .features import build_future_features
+
+    span = end - start
+    if span <= 0:
+        return X.iloc[start:end]
+    return build_future_features(
+        y.iloc[:start],
+        X.iloc[:start],
+        cfg,
+        horizon=span,
+        future_covariates_df=X.iloc[start:end],
+    )
+
+
 def _forecast_validation(
-    est: BaseModel, X: pd.DataFrame | None, fold: Fold, gap: int
+    est: BaseModel,
+    X: pd.DataFrame | None,
+    fold: Fold,
+    gap: int,
+    y: pd.Series | None = None,
+    cfg: RunConfig | None = None,
 ) -> pd.DataFrame:
     """One model, already fitted to ``fold.train_end``, forecasting this fold's validation window.
 
@@ -641,7 +679,7 @@ def _forecast_validation(
     embargo steps have to be produced to get past them. The cost is ``gap`` extra steps of a
     forecast, and at the default ``gap`` of 0 there is no slice at all.
     """
-    frame = est.predict(gap + fold.val_size, _cut(X, fold.train_end, fold.val_end))
+    frame = est.predict(gap + fold.val_size, _cut_forecast(X, fold.train_end, fold.val_end, y, cfg))
     return frame.iloc[gap:] if gap else frame
 
 
@@ -672,14 +710,21 @@ def _fit_predict(
     fold: Fold,
     gap: int,
     tally: FitTally | None = None,
+    cfg: RunConfig | None = None,
 ) -> pd.DataFrame:
     """A fresh model fit on this fold's training window and asked for its validation window."""
     est = _fit_one(model_factory(), y, X, fold, tally)
-    return _forecast_validation(est, X, fold, gap)
+    return _forecast_validation(est, X, fold, gap, y, cfg)
 
 
 def _predict_blind(
-    model: BaseModel, X: pd.DataFrame | None, base: Fold, fold: Fold, gap: int
+    model: BaseModel,
+    X: pd.DataFrame | None,
+    base: Fold,
+    fold: Fold,
+    gap: int,
+    y: pd.Series | None = None,
+    cfg: RunConfig | None = None,
 ) -> pd.DataFrame:
     """Push one already-fitted model's forecast origin out to ``fold`` and forecast from there.
 
@@ -688,10 +733,16 @@ def _predict_blind(
     `BaseModel.advance_origin` sets an absolute offset, so the same instance can be reused across
     every fold in ascending order without the offsets compounding.
     """
-    model.advance_origin(
-        fold.train_end - base.train_end, X_gap=_cut(X, base.train_end, fold.train_end)
-    )
-    return _forecast_validation(model, X, fold, gap)
+    offset = fold.train_end - base.train_end
+    if cfg is not None and y is not None and cfg.features.past_covariates and X is not None:
+        full_span = _cut_forecast(X, base.train_end, fold.val_end, y, cfg)
+        x_gap = full_span.iloc[:offset] if full_span is not None else None
+        x_val = full_span.iloc[offset:] if full_span is not None else None
+        model.advance_origin(offset, X_gap=x_gap)
+        frame = model.predict(gap + fold.val_size, x_val)
+        return frame.iloc[gap:] if gap else frame
+    model.advance_origin(offset, X_gap=_cut(X, base.train_end, fold.train_end))
+    return _forecast_validation(model, X, fold, gap, y, cfg)
 
 
 def _walk_folds(
@@ -724,7 +775,7 @@ def _walk_folds(
     """
     scheme, gap = cfg.backtest.scheme, cfg.backtest.gap
     if scheme in ("expanding", "sliding"):
-        primaries = [_fit_predict(model_factory, y, X, f, gap, tally) for f in folds]
+        primaries = [_fit_predict(model_factory, y, X, f, gap, tally, cfg) for f in folds]
         if not cfg.backtest.control_arm:
             return [(p, None) for p in primaries], "per_fold"
         # The control arm on a refit scheme: one extra fit for the whole cell, on the oldest fold's
@@ -738,7 +789,7 @@ def _walk_folds(
         if not control.supports_extrapolate:
             return [(p, None) for p in primaries], "per_fold"
         _fit_one(control, y, X, base, tally)
-        blind = [_predict_blind(control, X, base, f, gap) for f in folds]
+        blind = [_predict_blind(control, X, base, f, gap, y, cfg) for f in folds]
         return list(zip(primaries, blind, strict=True)), "per_fold"
 
     base = folds[0]
@@ -748,7 +799,7 @@ def _walk_folds(
         # paid for. No model in this tree lands here — all sixteen opt in — but an out-of-tree model
         # inherits the ``False`` default, and it has to degrade to a refit rather than raise.
         return [
-            (_fit_predict(model_factory, y, X, f, gap, tally), None) for f in folds
+            (_fit_predict(model_factory, y, X, f, gap, tally, cfg), None) for f in folds
         ], "unsupported"
     _fit_one(blind, y, X, base, tally)
 
@@ -756,7 +807,9 @@ def _walk_folds(
         # The primary arm *is* the blind arm here, so there is no second arm and ``yhat_stale``
         # stays NULL. That is the whole point of the scheme: one identical question, asked of all
         # sixteen models, with nothing varying between them but the model.
-        return [(_predict_blind(blind, X, base, f, gap), None) for f in folds], "extrapolate"
+        return [
+            (_predict_blind(blind, X, base, f, gap, y, cfg), None) for f in folds
+        ], "extrapolate"
 
     if not blind.supports_recondition:
         # `expanding_frozen` on a model that cannot absorb an observation. It refits per fold and
@@ -764,8 +817,8 @@ def _walk_folds(
         # arm still runs and the staleness diagnostic is still available for this model.
         arms = [
             (
-                _fit_predict(model_factory, y, X, f, gap, tally),
-                _predict_blind(blind, X, base, f, gap),
+                _fit_predict(model_factory, y, X, f, gap, tally, cfg),
+                _predict_blind(blind, X, base, f, gap, y, cfg),
             )
             for f in folds
         ]
@@ -785,11 +838,11 @@ def _walk_folds(
             except Exception:  # noqa: BLE001 - see the docstring: fall back, never fail the cell
                 mode = "unsupported"
         primary = (
-            _forecast_validation(frozen, X, fold, gap)
+            _forecast_validation(frozen, X, fold, gap, y, cfg)
             if mode == "recondition"
-            else _fit_predict(model_factory, y, X, fold, gap, tally)
+            else _fit_predict(model_factory, y, X, fold, gap, tally, cfg)
         )
-        arms.append((primary, _predict_blind(blind, X, base, fold, gap)))
+        arms.append((primary, _predict_blind(blind, X, base, fold, gap, y, cfg)))
     return arms, mode
 
 

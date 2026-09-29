@@ -138,8 +138,13 @@ _REMOVED_DEFAULTS: dict[tuple[str, ...], dict[str, object]] = {
 #
 # 2026-09-26 — ``features.exog_lags``. Empty means no covariate lags are built, which is what
 # every run before it did, having had no way to ask for any.
+# 2026-09-29 — ``features.{static,future,past}_covariates``. Empty lists mean no tiered covariates
+# are declared beyond ``features.exog``, reproducing the exact pre-existing behaviour.
 _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("features", "exog_lags"): {},
+    ("features", "static_covariates"): [],
+    ("features", "future_covariates"): [],
+    ("features", "past_covariates"): [],
 }
 
 

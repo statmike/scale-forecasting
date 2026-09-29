@@ -174,6 +174,19 @@ def test_an_explicitly_empty_exog_lags_is_the_same_run_as_an_absent_one() -> Non
     assert make_run_id(_cfg(features={"exog_lags": {}})) == make_run_id(_cfg())
 
 
+@pytest.mark.parametrize(
+    "tier",
+    ["static_covariates", "future_covariates", "past_covariates"],
+)
+def test_tiered_covariates_elided_at_default_and_move_run_id_when_set(tier: str) -> None:
+    base = _cfg()
+    assert tier not in json.loads(_canonical_config(base))["features"]
+    assert make_run_id(_cfg(features={tier: []})) == make_run_id(base)
+    with_tier = _cfg(features={tier: ["col_a"]})
+    assert make_run_id(with_tier) != make_run_id(base)
+    assert json.loads(_canonical_config(with_tier))["features"][tier] == ["col_a"]
+
+
 # --- model_hash ----------------------------------------------------------------
 
 

@@ -213,6 +213,37 @@ def level_shift_step(y: pd.Series) -> np.ndarray:
 # --- feature frames --------------------------------------------------------------
 
 
+def extract_static_covariates(series: pd.DataFrame, cfg: RunConfig) -> dict[str, object]:
+    """Validate and extract series-constant static covariates for one ``ts_id`` (pure).
+
+    Static covariates (``features.static_covariates``, e.g. ``region``, ``category``, ``archetype``)
+    carry series-level metadata for global/hybrid models and hierarchical grouping. Because they are
+    constant within a single series (and may be categorical strings), they are deliberately omitted
+    from the single-series local design matrix ``X`` — where a constant column is collinear with the
+    model intercept — and surfaced here as a clean ``{col: value}`` mapping.
+    """
+    static_cols = cfg.features.static_covariates
+    if not static_cols:
+        return {}
+    if series.empty:
+        raise ConfigError("cannot extract static covariates from an empty series")
+    out: dict[str, object] = {}
+    for name in static_cols:
+        if name not in series.columns:
+            raise ConfigError(f"static covariate column '{name}' not found in series")
+        col = series[name]
+        if col.isna().any():
+            raise ConfigError(f"static covariate column '{name}' has missing (null) values")
+        if col.nunique(dropna=False) > 1:
+            raise ConfigError(
+                f"static covariate column '{name}' must be constant within a series; "
+                f"got multiple values: {col.unique().tolist()[:5]}"
+            )
+        val = col.iloc[0]
+        out[name] = val.item() if hasattr(val, "item") else val
+    return out
+
+
 def build_features(
     series: pd.DataFrame,
     cfg: RunConfig,
@@ -221,10 +252,11 @@ def build_features(
 ) -> tuple[pd.Series, pd.DataFrame | None]:
     """Build ``(y, X)`` fit inputs for one series.
 
-    ``series`` is one ts_id's rows with the configured date/target (and optional exog)
+    ``series`` is one ts_id's rows with the configured date/target (and optional covariates)
     columns. ``y`` is returned indexed by ds, sorted, with the transform applied. ``X``
-    carries any configured exog, an ``is_holiday`` flag, Fourier terms, and lagged
-    covariates — aligned to ``y`` — or None when nothing is configured.
+    carries any configured dynamic covariates (``exog``, ``future_covariates``,
+    ``past_covariates``), an ``is_holiday`` flag, Fourier terms, and lagged covariates —
+    aligned to ``y`` — or None when nothing is configured.
 
     ``lam`` is the fitted Box-Cox λ (from `fit_transform_lambda`), threaded in so the
     forward transform matches the inverse a model applies at predict; ``None`` (the default)
@@ -243,6 +275,8 @@ def build_features(
             f"series missing required columns '{d.date_col}'/'{d.target_col}'; "
             f"has {list(series.columns)}"
         )
+    if f.static_covariates:
+        extract_static_covariates(series, cfg)
 
     frame = series.copy()
     frame[d.date_col] = pd.to_datetime(frame[d.date_col]).astype("datetime64[ns]")
@@ -255,8 +289,9 @@ def build_features(
 
     cols: dict[str, np.ndarray] = {}
 
-    # Exogenous regressors passed straight through (must exist in the series).
-    for name in f.exog:
+    # Dynamic exogenous regressors passed straight through (`exog` + `future_covariates` +
+    # `past_covariates`, must exist in the series).
+    for name in f.dynamic_covariates:
         if name not in frame:
             raise ConfigError(f"exog column '{name}' not found in series")
         cols[name] = frame[name].astype(float).to_numpy()
@@ -275,8 +310,8 @@ def build_features(
     if f.level_shift:
         cols["level_shift"] = level_shift_step(y)
 
-    # Lagged covariates. Only ever built from a declared exog column — `FeaturesConfig` has
-    # already rejected a name that is not in `exog`, so the lookup below cannot miss.
+    # Lagged covariates. Only ever built from a declared dynamic covariate column — `FeaturesConfig`
+    # has already rejected a name that is not in `dynamic_covariates`, so the lookup cannot miss.
     for name, lags in exog_lags.items():
         for lag in lags:
             cols[f"{name}_lag_{lag}"] = frame[name].astype(float).shift(lag).to_numpy()
@@ -300,7 +335,12 @@ def build_features(
 
 
 def build_future_features(
-    y: pd.Series, X: pd.DataFrame | None, cfg: RunConfig
+    y: pd.Series,
+    X: pd.DataFrame | None,
+    cfg: RunConfig,
+    *,
+    horizon: int | None = None,
+    future_covariates_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame | None:
     """The design frame for the forecast horizon, indexed by the *future* dates.
 
@@ -316,22 +356,24 @@ def build_future_features(
       functions of the date, so these are *exact*, not estimated.
     - ``level_shift`` — 1.0 throughout: a detected regime change is still in force over the
       horizon. (0.0 throughout when none was detected, matching the historical column.)
+    - ``future_covariates`` (and ``exog`` when ``future_covariates_df`` is provided) — read
+      directly from ``future_covariates_df`` when supplied (e.g. known future rows or a
+      backtest validation window); otherwise falls back to the recency stand-in.
+    - ``past_covariates`` — strictly observed in history and unknown over the forecast
+      horizon. Even when ``future_covariates_df`` is supplied (as in a backtest fold),
+      ``past_covariates`` never read future rows; they use only historical observations up
+      to the cutoff, preventing lookahead leakage.
     - ``<name>_lag_<k>`` — the configured ``features.exog_lags``, read off the covariate's own
       past-and-future run. For step ``i < k`` that is a genuine observation; from ``i >= k``
-      it is whatever the covariate itself resolves to at step ``i - k``, by the rule in the
-      next bullet. **A lagged covariate is exactly as knowable as the covariate it lags** —
-      it inherits its source's honesty rather than inventing its own, which is the whole
-      reason lagging a covariate is sound where lagging the target is not.
-    - anything else — user-supplied ``features.exog``, which is genuinely unknown until the
-      real future arrives. Falls back to the **most recent** ``horizon`` observed rows, so an
-      exog-driven forecast stays indicative-only but at least reflects the current regime.
-      Supply real forward exog by extending the source table past the cutoff.
+      it is whatever the covariate itself resolves to at step ``i - k``. **A lagged covariate
+      is exactly as knowable as the covariate it lags** — it inherits its source's honesty
+      rather than inventing its own.
     """
     if X is None:
         return None
     d, f = cfg.data, cfg.features
-    horizon = d.horizon
-    future = pd.date_range(start=y.index[-1], periods=horizon + 1, freq=d.freq)[1:].as_unit("ns")
+    h = horizon if horizon is not None else d.horizon
+    future = pd.date_range(start=y.index[-1], periods=h + 1, freq=d.freq)[1:].as_unit("ns")
 
     known: dict[str, np.ndarray] = {}
     if f.holidays:
@@ -340,35 +382,39 @@ def build_future_features(
         known["is_holiday"] = np.isin(future.to_numpy(), list(holiday_days)).astype(float)
     if f.fourier:
         known.update(_fourier_terms(future, d.freq, order=3))
-    if f.level_shift:
-        known["level_shift"] = np.full(horizon, float(X["level_shift"].to_numpy()[-1]))
+    if f.level_shift and "level_shift" in X.columns:
+        known["level_shift"] = np.full(h, float(X["level_shift"].to_numpy()[-1]))
 
-    # Recency stand-in for the columns we cannot know: the last `horizon` observed rows.
+    if future_covariates_df is not None and len(future_covariates_df) >= h:
+        for name in f.known_future_covariates:
+            if name in future_covariates_df.columns:
+                known[name] = future_covariates_df[name].to_numpy(dtype=float)[:h]
+
+    # Recency stand-in for the columns we cannot know: the last `h` observed rows.
     # Clipped, so a history shorter than the horizon repeats its earliest row instead of
     # returning a frame that silently disagrees in length with the future index.
-    tail_rows = np.clip(np.arange(len(X) - horizon, len(X)), 0, len(X) - 1)
+    tail_rows = np.clip(np.arange(len(X) - h, len(X)), 0, len(X) - 1)
     tail = X.iloc[tail_rows]
 
     if f.exog_lags:
         # Each lagged covariate is read off its source column's own timeline, history followed
         # by whatever that source resolves to over the horizon — a real forward covariate when
-        # the table extends past the cutoff, otherwise the same recency stand-in the unlagged
+        # known in advance (`known[name]`), otherwise the same recency stand-in the unlagged
         # column gets just above. Nothing is invented here that the covariate did not already
-        # carry, which is the difference between this and the target lags that used to live
-        # here: those had to fill the horizon with a flat line because no one knows the future
-        # target, and a coefficient fitted on real history was then applied to that flat line.
+        # carry.
         #
         # Which lags to build is read off ``X`` rather than off the config, so that a model
         # that owns its covariate lags (`lags_covariates_internally`, which made `build_features`
         # skip them) gets a horizon frame shaped like the one it was fitted on. Same reason the
         # column *order* comes from ``X`` below: parity by construction, not by convention.
-        steps = np.arange(len(X), len(X) + horizon)
+        steps = np.arange(len(X), len(X) + h)
         for name, lags in f.exog_lags.items():
             wanted = [lag for lag in lags if f"{name}_lag_{lag}" in X.columns]
             if not wanted:
                 continue
             column = X[name].to_numpy(dtype=float)
-            source = np.concatenate([column, column[tail_rows]])
+            forward = known[name] if name in known else column[tail_rows]
+            source = np.concatenate([column, forward])
             for lag in wanted:
                 known[f"{name}_lag_{lag}"] = source[np.clip(steps - lag, 0, len(source) - 1)]
 

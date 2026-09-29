@@ -94,15 +94,22 @@ def sample_data(
     history: int = 730,
     freq: str = "D",
     with_exog: bool = False,
+    with_hierarchy: bool = False,
     seed: int = _SAMPLE_SEED,
 ) -> pd.DataFrame:
     """A small deterministic sample panel from the real generator.
 
     Same code path as the shipped 100k dataset, so what you see locally is what runs at
-    scale. Columns: ``ts_id, archetype, ds, y`` (+ ``price_index`` when ``with_exog``).
+    scale. Columns: ``ts_id, archetype, ds, y`` (+ ``region, category`` when ``with_hierarchy``
+    or ``with_exog``, and ``promo_flag, price_index, temperature`` when ``with_exog``).
     Defaults to 3 series × 2 years daily — enough to show trend + seasonality + intervals.
     """
-    cfg = GenConfig(history=history, freq=freq, with_exog=with_exog)
+    cfg = GenConfig(
+        history=history,
+        freq=freq,
+        with_exog=with_exog,
+        with_hierarchy=with_hierarchy,
+    )
     return generate_panel(n_series, cfg, seed)
 
 
@@ -113,15 +120,25 @@ def build_config(
     horizon: int = 28,
     backtest: bool = False,
     with_exog: bool = False,
+    static_covariates: list[str] | None = None,
+    future_covariates: list[str] | None = None,
+    past_covariates: list[str] | None = None,
 ) -> RunConfig:
     """A minimal `RunConfig` for running ``model`` on `sample_data`.
 
     Wires the generator's column names (``ts_id``/``ds``/``y``, and ``price_index`` as the
-    exog role) so the config matches the sample panel out of the box. ``backtest`` turns on
-    a small 3-fold CV so the metric panel is populated (otherwise metrics are NaN by design
-    — full-fit runs don't score themselves).
+    exog role when ``with_exog=True``) so the config matches the sample panel out of the box.
+    ``backtest`` turns on a small 3-fold CV so the metric panel is populated (otherwise metrics
+    are NaN by design — full-fit runs don't score themselves).
     """
     exog = ["price_index"] if with_exog else []
+    features_cfg: dict[str, Any] = {"exog": exog}
+    if static_covariates:
+        features_cfg["static_covariates"] = list(static_covariates)
+    if future_covariates:
+        features_cfg["future_covariates"] = list(future_covariates)
+    if past_covariates:
+        features_cfg["past_covariates"] = list(past_covariates)
     backtest_cfg: dict[str, Any] = (
         {"enabled": True, "n_folds": 3, "horizon": horizon, "step": horizon}
         if backtest
@@ -133,7 +150,7 @@ def build_config(
         "run_name": f"playground-{model}",
         "data": {"source_table": "playground", "freq": freq, "horizon": horizon},
         "models": [model],
-        "features": {"exog": exog},
+        "features": features_cfg,
         "backtest": backtest_cfg,
     }
     return RunConfig.model_validate(raw)

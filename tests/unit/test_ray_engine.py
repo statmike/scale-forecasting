@@ -874,7 +874,7 @@ def test_run_honors_executed_subset(
         models: list[str] | None = None,
         params_by_model: dict[str, Any] | None = None,
     ) -> Any:
-        captured["models"] = models
+        captured.setdefault("models", []).extend(models or [])
 
         def _run(chunk: pd.DataFrame) -> pd.DataFrame:
             rows = [

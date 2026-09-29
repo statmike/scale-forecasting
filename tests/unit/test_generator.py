@@ -71,8 +71,21 @@ def test_every_archetype_appears() -> None:
 def test_exog_column_emitted_when_requested() -> None:
     cfg = _cfg(with_exog=True)
     df = generate_panel(5, cfg, SEED)
-    assert "price_index" in df.columns
-    assert df["price_index"].notna().all()
+    for col in ("region", "category", "promo_flag", "price_index", "temperature"):
+        assert col in df.columns
+        assert df[col].notna().all()
+    assert set(df["promo_flag"].unique()) <= {0, 1}
+
+
+def test_hierarchy_columns_emitted_without_exog() -> None:
+    cfg = _cfg(with_hierarchy=True)
+    df = generate_panel(12, cfg, SEED)
+    assert list(df.columns) == ["ts_id", "archetype", "region", "category", "ds", "y"]
+    assert set(df["region"].unique()) == {"NA", "EMEA", "APAC", "LATAM"}
+    assert set(df["category"].unique()) == {"enterprise", "SMB", "consumer"}
+    # Univariate target `y` is untouched when only hierarchy attributes are requested.
+    univariate = generate_panel(12, _cfg(with_hierarchy=False), SEED)
+    pd.testing.assert_series_equal(df["y"], univariate["y"])
 
 
 # --- frequency generality ------------------------------------------------------

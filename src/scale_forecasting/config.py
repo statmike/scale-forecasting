@@ -196,24 +196,61 @@ class FeaturesConfig(BaseModel):
     holidays: list[str] = Field(default_factory=list)
     transform: Literal["none", "log1p", "boxcox"] = "none"
     exog: list[str] = Field(default_factory=list)
+    static_covariates: list[str] = Field(default_factory=list)
+    future_covariates: list[str] = Field(default_factory=list)
+    past_covariates: list[str] = Field(default_factory=list)
     exog_lags: dict[str, list[int]] = Field(default_factory=dict)
     fourier: bool = False
     level_shift: bool = False
 
+    @property
+    def dynamic_covariates(self) -> list[str]:
+        """Time-varying numeric covariates (`exog` + `future_covariates` + `past_covariates`),
+        order-preserving and deduplicated."""
+        return list(dict.fromkeys([*self.exog, *self.future_covariates, *self.past_covariates]))
+
+    @property
+    def known_future_covariates(self) -> list[str]:
+        """Time-varying covariates known across the forecast horizon (`exog` + `future_covariates`),
+        order-preserving and deduplicated."""
+        return list(dict.fromkeys([*self.exog, *self.future_covariates]))
+
+    @property
+    def all_covariates(self) -> list[str]:
+        """Every declared covariate column (`dynamic_covariates` + `static_covariates`),
+        order-preserving and deduplicated."""
+        return list(dict.fromkeys([*self.dynamic_covariates, *self.static_covariates]))
+
     @model_validator(mode="after")
     def _check_exog_lags(self) -> FeaturesConfig:
-        """Reject a bad ``exog_lags`` at load, not at the first cell.
+        """Reject a bad covariate declaration or ``exog_lags`` at load, not at the first cell.
 
-        Every failure here is one a reader can fix by looking at their own config: a column
-        that was never declared, a lag that cannot be built, or a generated name that would
-        quietly overwrite a column they asked for. Raising at load turns all three into one
-        message before a single worker starts.
+        Every failure here is one a reader can fix by looking at their own config: overlapping
+        covariate tiers, a column that was never declared, a lag that cannot be built, or a
+        generated name that would quietly overwrite a column they asked for. Raising at load turns
+        all of them into one message before a single worker starts.
         """
-        declared = set(self.exog)
+        future_set = set(self.future_covariates)
+        past_set = set(self.past_covariates)
+        if overlap_fp := sorted(future_set & past_set):
+            raise ValueError(
+                f"features.future_covariates and features.past_covariates overlap on "
+                f"{overlap_fp} — a covariate is either known in the future or observed only in "
+                f"history, not both"
+            )
+        declared = set(self.dynamic_covariates)
+        static_set = set(self.static_covariates)
+        if overlap_sd := sorted(static_set & declared):
+            raise ValueError(
+                f"features.static_covariates overlaps with dynamic covariates on {overlap_sd} — "
+                f"a series-constant attribute cannot also be declared as a time-varying covariate"
+            )
+        all_declared = declared | static_set
         for name, lags in self.exog_lags.items():
             if name not in declared:
                 raise ValueError(
-                    f"features.exog_lags names '{name}', which is not in features.exog "
+                    f"features.exog_lags names '{name}', which is not in features.exog / "
+                    f"future_covariates / past_covariates "
                     f"{sorted(declared)} — a lag can only be built from a declared covariate"
                 )
             if not lags:
@@ -226,7 +263,7 @@ class FeaturesConfig(BaseModel):
                         f"features.exog_lags['{name}'] must be positive, got {lag} — "
                         f"a zero lag is the column itself and a negative one reads the future"
                     )
-                if (built := f"{name}_lag_{lag}") in declared:
+                if (built := f"{name}_lag_{lag}") in all_declared:
                     raise ValueError(
                         f"features.exog_lags would build '{built}', which is already a "
                         f"declared exog column; rename one of them"

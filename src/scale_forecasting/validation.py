@@ -85,24 +85,29 @@ def validate_panel(
         raise DataError(f"unsupported freq '{d.freq}'; supported: {', '.join(SUPPORTED_FREQS)}")
 
     # 3. Declared columns present. ----------------------------------------------
-    required = [d.ts_id_col, d.date_col, d.target_col, *cfg.features.exog]
+    required = [d.ts_id_col, d.date_col, d.target_col, *cfg.features.all_covariates]
     have = list(df.columns)
     for col in required:
         if col not in df.columns:
             raise DataError(f"missing column '{col}'; panel has {have}")
 
-    # 4. Timestamp parses, target (and exog) numeric. ---------------------------
+    # 4. Timestamp parses, target (and dynamic exog) numeric; static covariates non-null. ----
     ds = _parse_dates(df[d.date_col], d.date_col)
     _require_numeric(df[d.target_col], d.target_col)
-    for col in cfg.features.exog:
+    for col in cfg.features.dynamic_covariates:
         _require_numeric(df[col], col)
+    for col in cfg.features.static_covariates:
+        if df[col].isna().any():
+            raise DataError(f"static covariate column '{col}' has missing (null) values")
 
-    # 5. Per-series: duplicates, spacing, history. ------------------------------
+    # 5. Per-series: duplicates, spacing, history, static constancy. ------------
     need, reason = _required_min_history(cfg)
     if min_history is not None:
         need, reason = min_history, f"caller-requested min_history={min_history}"
 
     work = pd.DataFrame({"ts_id": df[d.ts_id_col].to_numpy(), "ds": ds.to_numpy()})
+    for col in cfg.features.static_covariates:
+        work[col] = df[col].to_numpy()
     shortest = None
     # Group order follows first appearance so the "first offender" is stable/reproducible.
     for ts_id, group in work.groupby("ts_id", sort=False):
@@ -112,6 +117,12 @@ def validate_panel(
             raise DataError(
                 f"series '{ts_id}' has only {len(dates)} observations, needs >= {need} ({reason})"
             )
+        for col in cfg.features.static_covariates:
+            if group[col].nunique(dropna=False) > 1:
+                raise DataError(
+                    f"series '{ts_id}': static covariate '{col}' must be constant within a series, "
+                    f"got {group[col].unique().tolist()[:5]}"
+                )
         shortest = len(dates) if shortest is None else min(shortest, len(dates))
 
     return ValidationReport(

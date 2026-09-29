@@ -48,7 +48,14 @@ class GenConfig:
     freq: str = "D"
     start: str = "2021-01-01"
     holidays: tuple[str, ...] = ("US",)
-    with_exog: bool = False  # emit a driver column + let y respond to it (xreg paths)
+    with_exog: bool = False  # emit covariate drivers + hierarchy attributes
+    with_hierarchy: bool = False  # emit static hierarchy attributes (region, category)
+
+
+# Static hierarchy dimensions assigned deterministically from series index `i`.
+# 4 regions × 3 categories = 12 bottom-level cells before series-id disaggregation.
+REGIONS: tuple[str, ...] = ("NA", "EMEA", "APAC", "LATAM")
+CATEGORIES: tuple[str, ...] = ("enterprise", "SMB", "consumer")
 
 
 # --- archetypes ----------------------------------------------------------------
@@ -247,14 +254,34 @@ def _one_series(
     innovations = rng.normal(0.0, sigma, size=n)
     noise = lfilter([1.0], [1.0, -rho], innovations)
 
-    # Optional exogenous driver: a smooth ~quarterly index the target partially follows
-    # (xreg paths). Quarter = year_period / 4, so it scales with frequency.
+    # Optional exogenous drivers (`with_exog=True`):
+    # 1. `price_index`: smooth ~quarterly index drawn from primary `rng` (preserving legacy order)
+    # 2. `promo_flag`: deterministic known-in-advance promotional calendar (0/1)
+    # 3. `temperature`: historical weather driver (annual cycle + AR(1) noise from a sub-seed so the
+    #    primary `rng` draws for level shifts / spikes / intermittency below stay untouched).
     exog: np.ndarray | None = None
+    promo_flag: np.ndarray | None = None
+    temperature: np.ndarray | None = None
     exog_effect = np.zeros(n)
     if cfg.with_exog:
         driver_period = year_period / 4.0
         exog = 100.0 + 20.0 * np.sin(2 * np.pi * pos / driver_period + _uniform(rng, (0.0, 6.28)))
         exog_effect = base * _uniform(rng, (0.05, 0.2)) * (exog - 100.0) / 20.0
+
+        promo_cycle = max(int(round(short_period * 4)), 14)
+        promo_window = max(1, min(3, promo_cycle // 10))
+        promo_flag = (((pos.astype(int) + i * 7) % promo_cycle) < promo_window).astype(np.int64)
+        promo_lift = base * 0.08 * promo_flag.astype(float)
+
+        cov_rng = np.random.default_rng([seed, i, 1])
+        temp_phase = _uniform(cov_rng, (0.0, 6.28))
+        temp_clean = 18.0 + 12.0 * np.sin(
+            2 * np.pi * pos / year_period - np.pi / 2 + temp_phase * 0.1
+        )
+        temp_noise = lfilter([1.0], [1.0, -0.7], cov_rng.normal(0.0, 2.0, size=n))
+        temperature = temp_clean + temp_noise
+        temp_effect = base * 0.03 * (temperature - 18.0) / 12.0
+        exog_effect = exog_effect + promo_lift + temp_effect
 
     y = base + trend + weekly + yearly + holiday + noise + exog_effect
 
@@ -276,8 +303,15 @@ def _one_series(
     y = np.clip(y, 0.0, None).round(3)
 
     out: dict[str, np.ndarray | str] = {"archetype": arch.name, "y": y}
+    if cfg.with_hierarchy or cfg.with_exog:
+        out["region"] = REGIONS[i % len(REGIONS)]
+        out["category"] = CATEGORIES[(i // len(REGIONS)) % len(CATEGORIES)]
+    if promo_flag is not None:
+        out["promo_flag"] = promo_flag
     if exog is not None:
         out["price_index"] = exog.round(3)
+    if temperature is not None:
+        out["temperature"] = temperature.round(3)
     return out
 
 
@@ -289,8 +323,9 @@ def generate_partition(id_range: Iterable[int], cfg: GenConfig, seed: int) -> pd
 
     ``id_range`` is any iterable of integer series indices (a partition of the full range in
     the Spark seed job). Returns a frame with columns ``ts_id, archetype, ds, y`` (plus
-    ``price_index`` when ``cfg.with_exog``), sorted by ``ts_id`` then ``ds``. Pure and
-    deterministic: identical output for identical ``(id, cfg, seed)``.
+    ``region, category`` when ``cfg.with_hierarchy`` or ``cfg.with_exog``, and
+    ``promo_flag, price_index, temperature`` when ``cfg.with_exog``), sorted by ``ts_id``
+    then ``ds``. Pure and deterministic: identical output for identical ``(id, cfg, seed)``.
     """
     index, pos = _time_axis(cfg)
     holiday_mask = _holiday_mask(index, cfg.holidays)
@@ -302,15 +337,24 @@ def generate_partition(id_range: Iterable[int], cfg: GenConfig, seed: int) -> pd
         cols: dict[str, object] = {
             "ts_id": f"s_{i:06d}",
             "archetype": comp["archetype"],
-            "ds": ds,
-            "y": comp["y"],
         }
-        if "price_index" in comp:
-            cols["price_index"] = comp["price_index"]
+        if "region" in comp:
+            cols["region"] = comp["region"]
+            cols["category"] = comp["category"]
+        cols["ds"] = ds
+        cols["y"] = comp["y"]
+        for cov in ("promo_flag", "price_index", "temperature"):
+            if cov in comp:
+                cols[cov] = comp[cov]
         frames.append(pd.DataFrame(cols))
 
     if not frames:
-        base_cols = ["ts_id", "archetype", "ds", "y"] + (["price_index"] if cfg.with_exog else [])
+        base_cols = ["ts_id", "archetype"]
+        if cfg.with_hierarchy or cfg.with_exog:
+            base_cols.extend(["region", "category"])
+        base_cols.extend(["ds", "y"])
+        if cfg.with_exog:
+            base_cols.extend(["promo_flag", "price_index", "temperature"])
         return pd.DataFrame({c: pd.Series(dtype="object") for c in base_cols})
     return pd.concat(frames, ignore_index=True)
 
