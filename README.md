@@ -347,7 +347,7 @@ The platform is designed for rapid extension by data scientists:
 | **`pinball`** | Interval (Quantile) | `lower` | Mean pinball loss at $q_{0.10}$ and $q_{0.90}$ | Evaluates quantile regression sharpness and calibration. |
 | **`interval_score`** | Interval (Proper) | `lower` | Winkler score ($\alpha = 0.20$) | Proper scoring rule balancing interval sharpness against coverage misses. |
 | **`interval_width`** | Interval (`80%` PI) | `lower` | $\frac{1}{H}\sum (\hat{y}_{\text{upper}} - \hat{y}_{\text{lower}})$ | Average prediction interval width in target units. |
-| **`msis`** | Interval (Scaled) | `lower` | $\text{interval\_score} / \text{MAE}_{\text{naive-}m}$ | M4 competition Mean Scaled Interval Score across series of varying scales. |
+| **`msis`** | Interval (Scaled) | `lower` | $\text{IS}_\alpha / \text{MAE}_{\text{naive-}m}$ | M4 competition Mean Scaled Interval Score (scaled `interval_score`). |
 
 ### Adding a Custom Metric in 1 File
 
