@@ -76,7 +76,7 @@ def test_full_config_round_trips_from_design_example() -> None:
         ({"data": {"source_table": "t", "series_limit": 0}}, "series_limit"),  # non-positive limit
         ({"python_runtime": "dask"}, "python_runtime"),  # unknown runtime
         ({"models": ["a", "a"]}, "duplicate"),  # duplicate models
-        ({"backtest": {"decision_metric": "r2"}}, "decision_metric"),  # unknown metric
+        ({"backtest": {"decision_metric": "not_a_metric"}}, "decision_metric"),  # unknown metric
         ({"features": {"transform": "sqrt"}}, "transform"),  # unknown transform
         ({"unknown_key": 1}, "unknown_key"),  # extra key forbidden
     ],
@@ -1012,3 +1012,22 @@ def test_target_lags_are_not_a_config_field_at_all() -> None:
 def test_a_well_formed_exog_lags_loads() -> None:
     cfg = RunConfig(**_minimal_dict(features={"exog": ["promo"], "exog_lags": {"promo": [1, 7]}}))
     assert cfg.features.exog_lags == {"promo": [1, 7]}
+
+
+@pytest.mark.parametrize("metric", ["ope", "rmsle", "msse", "msis", "r2", "cv"])
+def test_expanded_metrics_are_valid_decision_metrics(metric: str) -> None:
+    cfg = RunConfig(**_minimal_dict(backtest={"enabled": True, "decision_metric": metric}))
+    assert cfg.backtest.decision_metric == metric
+
+
+def test_with_available_models_keeps_installed_and_drops_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting import models as models_pkg
+
+    catboost_cls = models_pkg.get_model("catboost")
+    monkeypatch.setattr(catboost_cls, "is_available", classmethod(lambda cls: False))
+
+    cfg = RunConfig(**_minimal_dict(models=["naive_mean", "catboost"]))
+    filtered = cfg.with_available_models()
+    assert filtered.models == ["naive_mean"]

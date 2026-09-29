@@ -73,6 +73,7 @@ def run(
     force: bool = False,
     n_series: int | None = None,
     max_executors: int | None = None,
+    ignore_unavailable_models: bool = False,
 ) -> str:
     """Execute one run as a DAG: every model family in parallel under one run_id; return that id.
 
@@ -135,6 +136,8 @@ def run(
     # The series-limit override is applied first so it flows into the run_id and every family — a
     # different scale is a distinct, independently-queryable run.
     cfg = cfg.with_series_limit(n_series)
+    if ignore_unavailable_models:
+        cfg = cfg.with_available_models()
 
     # Ahead of the dry-run branch on purpose: a config a model cannot honour, or a plan that would
     # buy a device nothing routes to, is exactly what a dry run exists to catch. The checks need the
@@ -620,6 +623,12 @@ def _main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="acknowledge re-running an already-run config (shapes the exists-vs-new guidance)",
     )
+    p.add_argument(
+        "--ignore-unavailable-models",
+        action="store_true",
+        help="filter the config's models list to those whose optional Python packages are "
+        "installed in the current environment",
+    )
     ns = p.parse_args(argv)
 
     if ns.run_id:
@@ -633,6 +642,8 @@ def _main(argv: list[str] | None = None) -> None:
         cfg = config_for_run(ns.run_id)
     else:
         cfg = load_config_uri(ns.config or ns.config_uri)
+    if ns.ignore_unavailable_models:
+        cfg = cfg.with_available_models()
     if ns.emit_airflow or ns.emit_out:
         out = _emit_airflow(
             cfg, ns.config or ns.config_uri, out_path=ns.emit_out, with_retry=ns.with_retry

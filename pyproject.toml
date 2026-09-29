@@ -20,7 +20,8 @@ dependencies = [
     # Series.view API that pandas 3.0 removed, so it can't fit under 3.x. Our own code uses no
     # pandas-3-only idioms, so 2.2.x is a clean floor↔ceiling for the whole product.
     "pandas>=2.2,<3",
-    "numpy>=1.26",
+    # numpy is capped <2 because neuralprophet references np.NaN, which NumPy 2.0 removed.
+    "numpy>=1.26,<2",
     "pyarrow>=16.0",
     "statsmodels>=0.14",
     "scipy>=1.11",
@@ -94,10 +95,29 @@ submit = [
     "google-cloud-aiplatform>=1.60",
     "immutabledict>=4.0",
 ]
-# Boosted-tree and deep-learning models (optional — heavier installs).
-models = [
+# Granular model extras for environment agility — install individual model libraries
+# when enterprise environments restrict specific packages, or install `models` for the full suite.
+models-stats = [
+    "statsforecast>=2.0",
+]
+models-trees = [
     "xgboost>=2.0",
     "lightgbm>=4.3",
+    "catboost>=1.2",
+]
+models-prophet = [
+    "prophet>=1.1.5",
+]
+models-dl = [
+    "neuralprophet>=0.9",
+    "torch>=2.13,<2.14",
+]
+# Full optional model suite (statistical + boosted-tree + Prophet + deep-learning).
+models = [
+    "statsforecast>=2.0",
+    "xgboost>=2.0",
+    "lightgbm>=4.3",
+    "catboost>=1.2",
     "prophet>=1.1.5",
     "neuralprophet>=0.9",
     # torch is transitive via neuralprophet, but we pin it explicitly to bind the CUDA build below.
@@ -139,6 +159,12 @@ docs = [
 # (local dev) there is no CUDA wheel, so we fall back to the default PyPI build (CPU/MPS), keeping
 # `uv sync` working everywhere. The [ray]/@gpu path is Linux-only by construction, so this is the
 # only place the GPU build is needed.
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin'",
+]
+
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
@@ -178,9 +204,11 @@ no_implicit_optional = true
 [[tool.mypy.overrides]]
 module = [
     "statsmodels.*",
+    "statsforecast.*",
     "scipy.*",
     "xgboost.*",
     "lightgbm.*",
+    "catboost.*",
     "prophet.*",
     "neuralprophet.*",
     "sklearn.*",

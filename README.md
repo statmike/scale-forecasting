@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>Enterprise-Grade, Massively Parallel Time-Series Forecasting on Google Cloud</b><br>
-  <i>One declarative JSON configuration. 18 models. Hybrid distributed execution across BigQuery ML, Managed Service for Apache Spark (Dataproc), and Gemini Enterprise (Managed Ray on Vertex AI).</i>
+  <i>One declarative JSON configuration. 26 models. 21 evaluation metrics. Hybrid distributed execution across BigQuery ML, Managed Service for Apache Spark (Dataproc), and Gemini Enterprise (Managed Ray on Vertex AI).</i>
 </p>
 
 <p align="center">
@@ -32,7 +32,7 @@
 
 ## What Is `scale-forecasting`?
 
-`scale-forecasting` brings the modeling flexibility of modern time-series ecosystems (Prophet, Statsmodels, LightGBM, XGBoost, NeuralProphet) to **enterprise Google Cloud scale**. It allows data science and engineering teams to forecast **100,000+ time series** concurrently, perform rigorous rolling-origin backtesting, stack models into learned ensembles, and capture complete experiment lineage in BigQuery — all orchestrated from a single JSON configuration.
+`scale-forecasting` brings the modeling flexibility of modern time-series ecosystems (Statsmodels, StatsForecast, Prophet, LightGBM, XGBoost, CatBoost, Scikit-learn, SciPy, NeuralProphet) to **enterprise Google Cloud scale**. It allows data science and engineering teams to forecast **100,000+ time series** concurrently, perform rigorous rolling-origin backtesting across 21 evaluation metrics, stack models into learned ensembles, and capture complete experiment lineage in BigQuery — all orchestrated from a single JSON configuration.
 
 The entire platform deploys with 1-click Terraform, pre-seeded with a 100,000-series dataset across both native BigQuery and BigLake Apache Iceberg tables on Google Cloud Storage.
 
@@ -44,11 +44,11 @@ Traditional forecasting workflows break down when scaled to hundreds of thousand
 
 | Challenge | Traditional Approach | The `scale-forecasting` Solution | Deep Dive |
 | :--- | :--- | :--- | :--- |
-| **Library Fragmentation** | Separate, incompatible codebases for Statsmodels, Prophet, PyTorch, and SQL models. | **Unified Model Contract:** Single [`BaseModel`](./src/scale_forecasting/models/base_model.py) interface. 18 models run with identical inputs, outputs, and metrics. | [`docs/adding_a_model.md`](./docs/adding_a_model.md) |
+| **Library Fragmentation** | Separate, incompatible codebases for Statsmodels, StatsForecast, Prophet, PyTorch, and SQL models. | **Unified Model Contract:** Single [`BaseModel`](./src/scale_forecasting/models/base_model.py) interface. 26 models run with identical inputs, outputs, and metrics. | [`docs/models_reference.md`](./docs/models_reference.md) |
 | **Compute Scaling Limits** | Single-node memory exhaustion (OOMs); slow sequential loops. | **Hybrid Distributed Execution:** Automatic fan-out across Managed Service for Apache Spark (Dataproc Serverless), Gemini Enterprise (Managed Ray on Vertex AI), and BigQuery ML. | [`docs/quota_and_scale.md`](./docs/quota_and_scale.md) |
 | **Infrastructure Lock-In** | Forced choice between pure Spark or pure SQL. | **Multi-Engine DAG:** Run Spark, Ray, and BigQuery ML *concurrently under one `run_id`*, bounded by the slowest family rather than their sum. | [`docs/architecture.md`](./docs/architecture.md) |
 | **Uncertainty & Calibration** | Gaussian assumptions that fail on real-world skewed distributions. | **Conformal Residual Intervals:** Empirical, distribution-free prediction intervals calibrated against rolling backtest errors. | [`docs/backtesting.md`](./docs/backtesting.md) |
-| **Operational Opacity** | Disconnected log files and missing evaluation tracking. | **Real-Time BigQuery Registry:** Streaming telemetry via the Storage Write API into 12 analytical SQL views and interactive dashboards. | [`docs/output_schemas.md`](./docs/output_schemas.md) |
+| **Operational Opacity** | Disconnected log files and missing evaluation tracking. | **Real-Time BigQuery Registry:** Streaming telemetry via the Storage Write API into analytical SQL views and interactive dashboards. | [`docs/output_schemas.md`](./docs/output_schemas.md) |
 | **Brittle Failures** | One failed series fails the entire distributed job. | **Surgical Cell Repair & Probes:** Re-runs only failed cells without recomputing successful ones; reconciles platform state automatically. | [`docs/operations.md`](./docs/operations.md) |
 
 ---
@@ -230,7 +230,7 @@ flowchart TB
 
     subgraph registry["BigQuery Run Registry (Storage Write API)"]
         direction TB
-        r_meta["forecast_metadata (15 metrics, fit duration, best params)<br/>forecast_predictions (horizon forecasts + conformal intervals)<br/>backtest_oof (out-of-fold historical predictions)"]
+        r_meta["forecast_metadata (21 metrics, fit duration, best params)<br/>forecast_predictions (horizon forecasts + conformal intervals)<br/>backtest_oof (out-of-fold historical predictions)"]
         r_trace["run_registry (lineage, config hash, status)<br/>run_jobs (per-family platform execution trace)"]
     end
 
@@ -241,7 +241,7 @@ flowchart TB
     registry --> ens
     ens --> registry
 
-    views["12 Analytical SQL Views<br/>v_model_leaderboard · v_forecast_results · v_run_summary · v_run_jobs"]
+    views["Analytical SQL Views<br/>v_model_leaderboard · v_forecast_results · v_run_summary · v_run_jobs"]
     registry --> views
 ```
 
@@ -269,76 +269,95 @@ flowchart TB
 
 ## Model & Ensemble Catalog
 
-Every model lives in its own self-contained file under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md).
+Every model lives in its own self-contained file under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md) and imports directly from its upstream origin package.
 
-| Model | Family | Runtime Engine | Capabilities & Methodology |
-| :--- | :--- | :--- | :--- |
-| **`naive_mean`** | `statistical` | Spark / Ray | Historical mean baseline with analytical Gaussian intervals. |
-| **`naive_seasonal`** | `statistical` | Spark / Ray | Repeats historical seasonal cycles (weekly/monthly/annual). |
-| **`naive_drift`** | `statistical` | Spark / Ray | Linear drift extrapolation between first and last observations. |
-| **`naive_moving_average`** | `statistical` | Spark / Ray | Trailing moving average with tunable window lengths. |
-| **`theta`** | `statistical` | Spark / Ray | Assimakopoulos-Nikolopoulos decomposition method (`statsmodels`). |
-| **`holtwinters`** | `statistical` | Spark / Ray | Additive and multiplicative Holt-Winters seasonal exponential smoothing. |
-| **`autoets`** | `statistical` | Spark / Ray | Automated Error-Trend-Seasonal state-space model. |
-| **`croston`** | `statistical` | Spark / Ray | Intermittent-demand forecaster (Croston / SBA / TSB) for sparse data. |
-| **`sarimax`** | `statistical` | Spark / Ray | Seasonal ARIMA with exogenous calendar & economic covariates. |
-| **`ucm`** | `statistical` | Spark / Ray | Unobserved Components state-space model with cycle/trend decomposition. |
-| **`stl_bagging`** | `statistical` | Spark / Ray | STL decomposition with block-bootstrapped bagged ETS ensembles. |
-| **`prophet`** | `statistical` | Spark / Ray | Piecewise trend, multi-period Fourier seasonality, and holiday events. |
-| **`regression_lags`** | `ml` | Spark / Ray | Regularized Ridge regression with autoregressive target and covariate lags. |
-| **`lightgbm`** | `ml` | Spark / Ray | Gradient boosted decision trees (`LightGBM`) with recursive multi-step forecasting. |
-| **`xgboost`** | `ml` | Spark / Ray | Gradient boosted decision trees (`XGBoost`) on CPU or GPU (`device="cuda"`). |
-| **`neuralprophet`** | `deep_learning` | Spark / Ray | PyTorch AR-Net; supports fractional GPU allocation on Ray worker pools. |
-| **`arima_plus`** | `native` | BigQuery ML | Pure BigQuery SQL: automated pipeline with anomaly detection & holiday modeling. |
-| **`arima_plus_xreg`** | `native` | BigQuery ML | BigQuery ML ARIMA with user-supplied exogenous feature tables. |
-| **`timesfm`** | `native` | BigQuery ML | Zero-shot foundation model forecasting via BigQuery `AI.FORECAST`. |
+| Model | Family | Runtime Engine | Upstream Package | Capabilities & Methodology |
+| :--- | :--- | :--- | :--- | :--- |
+| **`naive_mean`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Historical mean baseline with empirical residual intervals. |
+| **`naive_seasonal`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Repeats historical seasonal cycles (weekly/monthly/annual). |
+| **`naive_drift`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Linear drift extrapolation between first and last observations. |
+| **`naive_moving_average`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Trailing moving average with tunable window lengths. |
+| **`croston`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Intermittent-demand forecaster (`classic`, `sba`, `tsb`) for sparse data. |
+| **`fft`** | `statistical` | Spark / Ray | [`scipy`](https://scipy.org/) | Discrete Fourier Transform spectral extrapolation with polynomial detrending. |
+| **`theta`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Assimakopoulos-Nikolopoulos Theta decomposition (`ThetaModel`). |
+| **`auto_theta`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Automated Theta selection across Standard, Optimized (`OTM`), and Dynamic (`DSTM`, `DOTM`) variants. |
+| **`holtwinters`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Additive Holt-Winters seasonal exponential smoothing with damped trend option. |
+| **`autoets`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Automated Error-Trend-Seasonal state-space model (`ETSModel`) with analytical intervals. |
+| **`auto_ces`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Automated Complex Exponential Smoothing (`AutoCES`) across `"N"`, `"S"`, `"P"`, and `"F"` seasonality. |
+| **`tbats`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Trigonometric seasonality, Box-Cox transform, ARMA errors, Trend, and Seasonal components (`AutoTBATS`). |
+| **`stl_bagging`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Bergmeir-Hyndman-Benítez STL decomposition with block-bootstrapped bagged ETS ensembles. |
+| **`auto_arima`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Hyndman-Khandakar automatic stepwise AICc seasonal ARIMA (`AutoARIMA`) with exogenous covariates. |
+| **`sarimax`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Seasonal ARIMA (`SARIMAX`) with exogenous calendar & economic covariates. |
+| **`ucm`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Structural Unobserved Components state-space model (`UnobservedComponents`) with exogenous covariates. |
+| **`kalman`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Linear Gaussian state-space Kalman filter (`UnobservedComponents`) with seasonal harmonics and AR($p$) state. |
+| **`prophet`** | `statistical` | Spark / Ray | [`prophet`](https://facebook.github.io/prophet/) | Piecewise trend, multi-period Fourier seasonality, holidays, and exogenous covariates. |
+| **`regression_lags`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | L2-regularized `Ridge` regression with recursive target lags, calendar features, and `exog`. |
+| **`random_forest`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | Bagged decision tree ensemble (`RandomForestRegressor`) with recursive multi-step forecasting. |
+| **`lightgbm`** | `ml` | Spark / Ray | [`lightgbm`](https://lightgbm.readthedocs.io/) | Gradient-boosted decision trees (`LGBMRegressor`) with recursive multi-step forecasting. |
+| **`xgboost`** | `ml` | Spark / Ray | [`xgboost`](https://xgboost.readthedocs.io/) | Histogram gradient-boosted trees (`XGBRegressor`) on CPU or GPU (`device="cuda"`). |
+| **`catboost`** | `ml` | Spark / Ray | [`catboost`](https://catboost.ai/) | Oblivious (symmetric) gradient-boosted trees (`CatBoostRegressor`) with recursive multi-step forecasting. |
+| **`neuralprophet`** | `deep_learning` | Spark / Ray | [`neuralprophet`](https://neuralprophet.com/) | PyTorch AR-Net with quantile heads; supports fractional GPU packing on Ray worker pools. |
+| **`arima_plus`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Pure BigQuery SQL: automated `ARIMA_PLUS` pipeline (auto-switches to `ARIMA_PLUS_XREG` when exogenous features are configured). |
+| **`timesfm`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`). |
+
+### Environment Agility: Omitting Optional Model Packages
+
+All third-party model libraries are imported **lazily inside `fit()`**. If your enterprise environment restricts or omits specific packages (such as `catboost` or `neuralprophet`), the platform still imports cleanly and runs every other model:
+- **Granular Installation Extras:** Install everything with `scale-forecasting[models]`, or choose individual family subsets (`scale-forecasting[models-stats]`, `models-trees`, `models-prophet`, `models-dl`).
+- **Automatic Filtering:** Inspect installed models via `uv run python -m scale_forecasting.playground --list` or `sf.list_models(available_only=True)`, and pass `--ignore-unavailable-models` to `scale_forecasting.main` to skip any un-installed models in a shared configuration automatically.
 
 ### Adding a Custom Model in 1 File (Zero Image Rebuilds)
 
 The platform is designed for rapid extension by data scientists:
 - **Zero Container Image Rebuilds:** Third-party dependencies are pre-compiled into the container image (`docker/requirements.txt`). Your Python code in `src/scale_forecasting` is zipped and shipped dynamically at job submission time. Any code edit, new model, or new metric takes effect immediately on the very next run without rebuilding a Docker image!
-- **Lightweight Model Contract:** Implement [`BaseModel`](./src/scale_forecasting/models/base_model.py) with `fit(series)` and `predict(steps, quantiles)`.
+- **Lightweight Model Contract:** Implement [`BaseModel`](./src/scale_forecasting/models/base_model.py) with `fit(y, X)` and `predict(horizon, X, quantiles)`.
 - **1-File Workflow:**
   1. Copy [`docs/model_template.py`](./docs/model_template.py) to `src/scale_forecasting/models/my_custom_model.py`.
-  2. Implement your training and forecasting logic using any library (Scikit-learn, Statsforecast, PyTorch, etc.).
+  2. Implement your training and forecasting logic using any library (Scikit-learn, StatsForecast, PyTorch, etc.).
   3. Export the class in `src/scale_forecasting/models/__init__.py`.
   4. The model is instantly available in the CLI, Python SDK, interactive notebooks, and JSON configurations on the very next run!
 
-➡️ **Step-by-step walkthrough: [Adding a Model Guide (`docs/adding_a_model.md`)](./docs/adding_a_model.md).**
+➡️ **Full model & hyperparameter guide: [Models & Ensembles Reference (`docs/models_reference.md`)](./docs/models_reference.md) • Custom models: [Adding a Model Guide (`docs/adding_a_model.md`)](./docs/adding_a_model.md).**
 
 ---
 
 ## Evaluation Metrics Catalog
 
-`scale-forecasting` scores models across a comprehensive 15-metric evaluation panel covering both point-forecast accuracy and prediction-interval quality. Every metric is computed per series per fold and stored in `forecast_metadata`:
+`scale-forecasting` scores models across a comprehensive **21-metric evaluation panel** covering both point-forecast accuracy and prediction-interval quality. Every metric is computed per series per fold in Python (`metrics.compute_metrics`) across all four model families and stored in `forecast_metadata`:
 
-| Metric | Category | Methodology | Interpretation |
-| :--- | :--- | :--- | :--- |
-| **`wape`** | Point Accuracy | Weighted Absolute Percentage Error: $\frac{\sum \|y - \hat{y}\|}{\sum \|y\|}$ | Scale-independent; robust to zeros. Default decision metric. |
-| **`mae`** | Point Accuracy | Mean Absolute Error: $\frac{1}{H}\sum \|y - \hat{y}\|$ | Standard average error magnitude in target units. |
-| **`rmse`** | Point Accuracy | Root Mean Squared Error: $\sqrt{\frac{1}{H}\sum (y - \hat{y})^2}$ | Penalizes large outlier forecast errors heavily. |
-| **`mape`** | Point Accuracy | Mean Absolute Percentage Error | Percentage error; handles non-zero demand series. |
-| **`mase`** | Point Accuracy | Mean Absolute Scaled Error (scaled by naive in-sample diff) | Compares forecast accuracy relative to a naive random-walk baseline. |
-| **`mase_seasonal`** | Point Accuracy | Seasonal MASE (scaled by seasonal lag in-sample diff) | Relative accuracy against a seasonal naive baseline. |
-| **`bias`** | Point Accuracy | Mean Error: $\frac{1}{H}\sum (\hat{y} - y)$ | Directional over-forecasting ($>0$) or under-forecasting ($<0$). |
-| **`mse`** | Point Accuracy | Mean Squared Error: $\frac{1}{H}\sum (y - \hat{y})^2$ | Raw quadratic loss. |
-| **`rmsse`** | Point Accuracy | Root Mean Squared Scaled Error | Quadratic loss normalized by naive in-sample diff. |
-| **`pinball`** | Interval / Quantile | Pinball loss (quantile loss) across requested quantiles | Evaluates asymmetric quantile regression quality. |
-| **`coverage`** | Interval Quality | Empirical coverage: fraction of actuals inside $[y_{lower}, y_{upper}]$ | Target is $1 - \alpha$ (e.g. 80% or 95%). |
-| **`interval_score`** | Interval Quality | Winkler interval score (width + penalty for actuals outside bounds) | Balances narrowness against coverage violations. |
-| **`interval_width`** | Interval Quality | Average width: $\frac{1}{H}\sum (y_{upper} - y_{lower})$ | Narrower intervals indicate higher model confidence. |
-| **`conformal_coverage`** | Conformal Calibration | Coverage of calibrated conformal prediction intervals | Distribution-free, empirical coverage guarantee. |
-| **`conformal_interval_width`** | Conformal Calibration | Average width of calibrated conformal intervals | Measures uncertainty spread under conformal calibration. |
+| Metric | Category | `direction` | Methodology & Formula | Interpretation |
+| :--- | :--- | :---: | :--- | :--- |
+| **`wape`** | Relative / % | `lower` | $\sum \|y - \hat{y}\| / \sum \|y\|$ | Scale-independent; safe when individual steps are zero. Default `decision_metric`. |
+| **`smape`** | Relative / % | `lower` | $\frac{1}{H}\sum \frac{2\|y - \hat{y}\|}{\|y\| + \|\hat{y}\|}$ | Symmetric percentage error bounded in $[0, 2]$. |
+| **`mape`** | Relative / % | `lower` | $\frac{1}{H}\sum \|(y - \hat{y}) / y\|$ | Standard percentage error (`NaN` if any $y_t = 0$). |
+| **`maape`** | Relative / % | `lower` | $\frac{1}{H}\sum \arctan(\|y - \hat{y}\| / \|y\|)$ | Arctangent percentage error bounded in $[0, \pi/2]$; finite even when $y_t = 0$. |
+| **`ope`** | Relative / % | `lower` | $\|\sum y - \sum \hat{y}\| / \|\sum y\|$ | Overall Percentage Error across cumulative horizon volume. |
+| **`mae`** | Scale-Dependent | `lower` | $\frac{1}{H}\sum \|y - \hat{y}\|$ | Standard average error magnitude in target units. |
+| **`rmse`** | Scale-Dependent | `lower` | $\sqrt{\frac{1}{H}\sum (y - \hat{y})^2}$ | Root Mean Squared Error; penalizes large outlier errors heavily. |
+| **`mse`** | Scale-Dependent | `lower` | $\frac{1}{H}\sum (y - \hat{y})^2$ | Raw quadratic loss. |
+| **`rmsle`** | Log-Scale | `lower` | $\sqrt{\frac{1}{H}\sum (\ln(1+y) - \ln(1+\hat{y}))^2}$ | Root Mean Squared Logarithmic Error; penalizes relative log ratios. |
+| **`bias`** | Signed Diagnostic | `zero` | $\frac{1}{H}\sum (\hat{y} - y)$ | Directional over-forecasting ($>0$) or under-forecasting ($<0$). |
+| **`mase`** | Scaled (`m=1`) | `lower` | $\text{MAE} / \text{MAE}_{\text{naive-1}}$ | Compares accuracy against an in-sample one-step random walk ($<1$ beats naive). |
+| **`mase_seasonal`** | Scaled (`m=P`) | `lower` | $\text{MAE} / \text{MAE}_{\text{naive-}m}$ | Compares accuracy against an in-sample seasonal naive baseline ($m$ from `data.freq`). |
+| **`rmsse`** | Scaled (`m=1`) | `lower` | $\text{RMSE} / \text{RMSE}_{\text{naive-1}}$ | M5 competition Root Mean Squared Scaled Error. |
+| **`msse`** | Scaled (`m=1`) | `lower` | $\text{MSE} / \text{MSE}_{\text{naive-1}}$ | Mean Squared Scaled Error ($\text{RMSSE}^2$). |
+| **`r2`** | Goodness-of-Fit | `higher` | $1 - \sum(y - \hat{y})^2 / \sum(y - \bar{y})^2$ | Coefficient of determination ($1.0$ is perfect; $<0$ is worse than predicting $\bar{y}$). |
+| **`cv`** | Dispersion | `lower` | $\text{RMSE} / \bar{y}$ | Coefficient of Variation of RMSE normalized by evaluation window mean. |
+| **`coverage`** | Interval (`80%` PI) | `higher` | Fraction of $y_t \in [\hat{y}_{\text{lower}}, \hat{y}_{\text{upper}}]$ | Empirical coverage against the nominal $(0.1, 0.9)$ quantile band. |
+| **`pinball`** | Interval (Quantile) | `lower` | Mean pinball loss at $q_{0.10}$ and $q_{0.90}$ | Evaluates quantile regression sharpness and calibration. |
+| **`interval_score`** | Interval (Proper) | `lower` | Winkler score ($\alpha = 0.20$) | Proper scoring rule balancing interval sharpness against coverage misses. |
+| **`interval_width`** | Interval (`80%` PI) | `lower` | $\frac{1}{H}\sum (\hat{y}_{\text{upper}} - \hat{y}_{\text{lower}})$ | Average prediction interval width in target units. |
+| **`msis`** | Interval (Scaled) | `lower` | $\text{interval\_score} / \text{MAE}_{\text{naive-}m}$ | M4 competition Mean Scaled Interval Score across series of varying scales. |
 
 ### Adding a Custom Metric in 1 File
 
 Need a domain-specific loss function (such as asymmetric financial penalties or custom inventory holding costs)?
 1. Copy [`docs/metric_template.py`](./docs/metric_template.py) to `src/scale_forecasting/metrics/my_custom_metric.py`.
-2. Implement `compute(y_true, y_pred, ...)` using standard NumPy / pandas functions.
+2. Implement `compute(ctx)` using standard NumPy / SciPy operations.
 3. Add the metric name to `METRIC_NAMES` in `src/scale_forecasting/metrics/__init__.py`.
-4. The platform automatically handles BigQuery schema migrations (`ADD COLUMN`), Storage Write API protobuf serialization, and analytical SQL view aggregations!
+4. The platform automatically handles BigQuery schema migrations (`ADD COLUMN IF NOT EXISTS`), Storage Write API protobuf serialization, and analytical SQL view aggregations!
 
-➡️ **Step-by-step walkthrough: [Adding a Metric Guide (`docs/adding_a_metric.md`)](./docs/adding_a_metric.md).**
+➡️ **Full mathematical & calibration guide: [Evaluation Metrics Reference (`docs/metrics_reference.md`)](./docs/metrics_reference.md) • Custom metrics: [Adding a Metric Guide (`docs/adding_a_metric.md`)](./docs/adding_a_metric.md).**
 
 ---
 
@@ -389,12 +408,12 @@ flowchart TD
 
     subgraph Tables["3. BigQuery Storage Tables (scale_forecasting dataset)"]
         direction LR
-        T1[("forecast_metadata<br/>15 metrics · best_params")]
+        T1[("forecast_metadata<br/>21 metrics · best_params")]
         T2[("forecast_predictions<br/>horizon forecasts + conformal intervals")]
         T3[("backtest_oof<br/>historical OOF actuals")]
     end
 
-    subgraph Views["4. Unified Analytical SQL Views (12 Views)"]
+    subgraph Views["4. Unified Analytical SQL Views"]
         direction LR
         V1["v_model_leaderboard<br/>Best-First Rankings"]
         V2["v_forecast_results<br/>Point + Conformal Bands"]
@@ -476,7 +495,7 @@ The [`notebooks/`](./notebooks/README.md) directory provides a structured learni
 ```mermaid
 flowchart TD
     subgraph Track1["Track 1: Foundations & Local Prototyping"]
-        NB0["model_playground.ipynb<br/>Single-series sandbox · 18 models · conformal intervals (Zero GCP Setup)"]
+        NB0["model_playground.ipynb<br/>Single-series sandbox · 24 Python models · conformal intervals (Zero GCP Setup)"]
     end
 
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
@@ -504,7 +523,7 @@ flowchart TD
 
 | Notebook | Focus Area | Runtime Environment | What You Will Learn |
 | :--- | :--- | :--- | :--- |
-| [`model_playground.ipynb`](./notebooks/model_playground.ipynb) | Foundations | Local Python (In-Memory) | Fit, score, and plot any of the 16 Python models on synthetic data with zero cloud credentials. |
+| [`model_playground.ipynb`](./notebooks/model_playground.ipynb) | Foundations | Local Python (In-Memory) | Fit, score, and plot any of the 24 Python models on synthetic data with zero cloud credentials. |
 | [`01_spark_via_connect.ipynb`](./notebooks/01_spark_via_connect.ipynb) | Distributed Spark | Dataproc Spark Connect / Batch | Drive distributed Spark fan-out interactively, compare with serverless batch execution, and inspect write speed. |
 | [`02_bigquery_native.ipynb`](./notebooks/02_bigquery_native.ipynb) | Cloud SQL | BigQuery ML (`ARIMA_PLUS`, `TimesFM`) | Execute SQL-native forecasting over native and Iceberg tables without provisioning any compute clusters. |
 | [`03_combo_and_ensemble.ipynb`](./notebooks/03_combo_and_ensemble.ipynb) | Multi-Engine Hybrid | Spark Serverless $\parallel$ BigQuery ML | Run Spark and BigQuery concurrently under one `run_id`, blend models with stacking ensembles, and evaluate lift. |
@@ -587,6 +606,8 @@ Follow our step-by-step **[Hands-On Workshop Guide](./docs/workshop.md)**. It wa
 
 - **System Architecture & Design:** [`docs/architecture.md`](./docs/architecture.md)
 - **Comprehensive Configuration Reference:** [`docs/configuration_reference.md`](./docs/configuration_reference.md)
+- **Models & Ensembles Reference:** [`docs/models_reference.md`](./docs/models_reference.md)
+- **Evaluation Metrics Reference:** [`docs/metrics_reference.md`](./docs/metrics_reference.md)
 - **Hands-On Workshop:** [`docs/workshop.md`](./docs/workshop.md)
 - **Python SDK & Developer Guide:** [`docs/using_the_sdk.md`](./docs/using_the_sdk.md)
 - **Running, Monitoring & Reviewing:** [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md)

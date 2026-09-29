@@ -148,6 +148,38 @@ class BaseModel(ABC):
     # rather than a silent substitution of a weaker estimand.
     supports_recondition: ClassVar[bool] = False
     supports_extrapolate: ClassVar[bool] = False
+    # --- upstream package provenance & optional-package availability ---
+    # Every model declares the upstream package it is implemented with and its verified homepage
+    # URL. Models backed by optional libraries outside core `dependencies` also set
+    # `optional_import` (the top-level import module name) and `optional_extra` (the granular
+    # pyproject.toml extra that installs it), so environments that restrict or omit specific
+    # packages can discover and run all installed models without import errors.
+    package: ClassVar[str] = "numpy"
+    package_url: ClassVar[str] = "https://numpy.org/"
+    optional_import: ClassVar[str | None] = None
+    optional_extra: ClassVar[str | None] = None
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Whether this model's upstream Python package is installed in the current environment."""
+        if cls.optional_import is None:
+            return True
+        import importlib.util
+
+        return importlib.util.find_spec(cls.optional_import) is not None
+
+    @classmethod
+    def require_available(cls) -> None:
+        """Raise an actionable `ModelError` if this model's optional package is not installed."""
+        if cls.is_available():
+            return
+        extra_hint = f"scale-forecasting[{cls.optional_extra}] or " if cls.optional_extra else ""
+        raise ModelError(
+            f"Model '{cls.name}' requires optional package '{cls.package}' "
+            f"(import '{cls.optional_import}'), which is not installed in this environment. "
+            f"Install it with `pip install {extra_hint}scale-forecasting[models]` "
+            f"or omit '{cls.name}' from the run's models list."
+        )
 
     def __init__(self, params: dict[str, Any], ctx: ModelContext) -> None:
         self.params = dict(params)

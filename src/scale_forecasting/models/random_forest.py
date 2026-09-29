@@ -1,9 +1,9 @@
-"""LightGBM regressor on lag/calendar features.
+"""Random Forest regressor on lag/calendar features (scikit-learn).
 
-One model, one file. Runtime python, ml family. LightGBM is an optional
-dependency, imported lazily in ``fit`` so the model registers without it. Shares the
-recursive multi-step forecasting + design matrix with XGBoost via ``_lag_forecaster``;
-residual-quantile intervals.
+One model, one file. Runtime python, ml family. Fits an ensemble of bagged
+decision trees via ``sklearn.ensemble.RandomForestRegressor`` on the shared
+``_lag_forecaster`` design matrix. Because ``scikit-learn`` is in core
+dependencies, ``random_forest`` is always available without optional extras.
 """
 
 from __future__ import annotations
@@ -22,41 +22,36 @@ if TYPE_CHECKING:
     import optuna
 
 
-class LightgbmModel(BaseModel):
-    """Gradient-boosted trees (LightGBM) on lag + calendar features."""
+class RandomForestModel(BaseModel):
+    """Bagged decision-tree ensemble (RandomForestRegressor) on lag + calendar features."""
 
-    name = "lightgbm"
+    name = "random_forest"
     runtime = "python"
     family = "ml"
     supports_exog = True
     supports_native_intervals = False
-    # Same seam as `xgboost`: the trees are the estimate, the lag buffer is not.
     supports_recondition = True
     supports_extrapolate = True
-    package = "lightgbm"
-    package_url = "https://lightgbm.readthedocs.io/"
-    optional_import = "lightgbm"
-    optional_extra = "models-trees"
+    package = "scikit-learn"
+    package_url = "https://scikit-learn.org/"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
-        try:
-            from lightgbm import LGBMRegressor
-        except ImportError as e:  # pragma: no cover - exercised only without the extra
-            raise ModelError("lightgbm not installed; install the 'models' extra") from e
+        from sklearn.ensemble import RandomForestRegressor
+
         if len(y) <= max(lf.LAGS):
-            raise ModelError(f"lightgbm requires more than {max(lf.LAGS)} observations")
+            raise ModelError(f"random_forest requires more than {max(lf.LAGS)} observations")
 
         design, y_aligned, self._features = lf.build_design(y, X)
         self._history = y.astype(float)
         self._last_date = y.index[-1]
-        self._model = LGBMRegressor(
-            n_estimators=int(self.params.get("n_estimators", 300)),
-            max_depth=int(self.params.get("max_depth", -1)),
-            learning_rate=float(self.params.get("learning_rate", 0.05)),
-            subsample=0.9,
+        max_depth_raw = self.params.get("max_depth", 10)
+        max_depth = int(max_depth_raw) if max_depth_raw is not None else None
+        self._model = RandomForestRegressor(
+            n_estimators=int(self.params.get("n_estimators", 200)),
+            max_depth=max_depth,
+            min_samples_leaf=int(self.params.get("min_samples_leaf", 2)),
             random_state=self.ctx.seed,
             n_jobs=1,
-            verbose=-1,
         )
         self._model.fit(design.to_numpy(), y_aligned.to_numpy())
         fitted = self._model.predict(design.to_numpy())
@@ -68,8 +63,6 @@ class LightgbmModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        # Rolled from the fit's last observation across any skipped span, then tailed — see the
-        # note in `xgboost`; the three lag models share this recursion.
         full_index = self._future_index(self._last_date, self._forecast_steps(horizon))
         mean = lf.recursive_predict(
             self._model, self._history, full_index, self._features, self._forecast_exog(X)
@@ -87,10 +80,10 @@ class LightgbmModel(BaseModel):
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
         return {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 600),
-            "max_depth": trial.suggest_int("max_depth", 3, 12),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 100, 400),
+            "max_depth": trial.suggest_int("max_depth", 4, 16),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 5),
         }
 
 
-register(LightgbmModel)
+register(RandomForestModel)

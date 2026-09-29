@@ -41,6 +41,8 @@ class _BigQueryNativeModel(BaseModel):
     runtime = "bigquery"
     family = "native"
     supports_native_intervals = True  # ML.FORECAST returns prediction-interval bounds
+    package = "bigquery-ml"
+    package_url = "https://cloud.google.com/bigquery/docs/bqml-introduction"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         raise BigQueryNativeExecutionError(_EXECUTED_IN_BIGQUERY)

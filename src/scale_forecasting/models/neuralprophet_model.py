@@ -58,6 +58,10 @@ class NeuralProphetModel(BaseModel):
     # staleness one. Under autoregression (`n_lags > 0`) the reach is bounded by `n_forecasts`: the
     # span it must cover is the horizon *plus* the skipped gap, and `_read_steps` says so if short.
     supports_extrapolate = True
+    package = "neuralprophet"
+    package_url = "https://neuralprophet.com/"
+    optional_import = "neuralprophet"
+    optional_extra = "models-dl"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:

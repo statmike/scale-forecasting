@@ -90,7 +90,7 @@ and three separate places consume that loss: `inverse_error` ensemble weighting,
 objective, and `prune_threshold`. Three answers, not two:
 
 - `"lower"` — an error. Smaller is better, zero is perfect. Most of the panel.
-- `"higher"` — a fraction of successes. Larger is better, one is perfect. Only `coverage`.
+- `"higher"` — a fraction of successes or variance explained. Larger is better, one is perfect (`coverage` and `r2`).
 - `"zero"` — a signed quantity where **either** sign is a fault. Only `bias`.
 
 Declaring `"lower"` on a higher-is-better metric doesn't fail; it silently inverts every one of
@@ -101,11 +101,11 @@ error is minimised by the **mean** of the predictive distribution; every absolut
 every proper interval score, is minimised by the **median**. That pairing is a theorem, not a
 preference, so the framework uses it: `config.corrected_arm_for` reads this flag, and under
 `output.point_forecast="auto"` it decides which corrected arm a series weighs its raw forecast
-against — and is the fleetwide fallback for a series with no folds to measure with. Of the fifteen
-shipped metrics, four set it: `rmse`, `mse`, `rmsse`, and `bias` (that last one for a different
-reason that lands in the same place — adding the mean residual drives mean error to zero by
-construction). Leave it `False` unless your metric squares the error; getting it wrong ships a
-point forecast your own leaderboard punishes.
+against — and is the fleetwide fallback for a series with no folds to measure with. Of the twenty-one
+shipped metrics, seven set it: `rmse`, `mse`, `rmsse`, `msse`, `r2`, `cv`, and `bias` (that last one
+for a different reason that lands in the same place — adding the mean residual drives mean error to
+zero by construction). Leave it `False` unless your metric squares the error; getting it wrong ships
+a point forecast your own leaderboard punishes.
 
 **`compute(ctx)` sees `ctx` and nothing else.** `MetricContext` carries `y_true` and `yhat`
 (equal-length float arrays, never empty), the precomputed `err = yhat − y_true` and `abs_err`,

@@ -351,3 +351,55 @@ def test_empty_raises() -> None:
 def test_accepts_numpy_arrays() -> None:
     m = compute_metrics(np.array(_YT), np.array(_YH))
     assert m["mae"] == pytest.approx(2.75)
+
+
+# --- Pillar 2 expanded metrics (ope, rmsle, msse, msis, r2, cv) -----------------
+
+
+def test_ope_and_zero_sum_nan() -> None:
+    # _YT sum = 100, _YH sum = 99 -> |99 - 100| / 100 = 0.01
+    assert _m()["ope"] == pytest.approx(0.01)
+    assert math.isnan(compute_metrics([5.0, -5.0], [4.0, -3.0])["ope"])
+
+
+def test_rmsle_and_negative_nan() -> None:
+    expected = math.sqrt(float(np.mean((np.log1p(_YT) - np.log1p(_YH)) ** 2)))
+    assert _m()["rmsle"] == pytest.approx(expected)
+    assert math.isnan(compute_metrics([-1.0, 10.0], [1.0, 10.0])["rmsle"])
+    assert math.isnan(compute_metrics([1.0, 10.0], [-1.0, 10.0])["rmsle"])
+
+
+def test_msse_is_rmsse_squared() -> None:
+    m = _m()
+    assert m["msse"] == pytest.approx(m["rmsse"] ** 2)
+    assert math.isnan(compute_metrics(_YT, _YH)["msse"])
+
+
+def test_msis_scales_interval_score_by_seasonal_naive() -> None:
+    m = compute_metrics(
+        _YT,
+        _YH,
+        y_train=_YTRAIN,
+        lower=[9, 17, 28, 34],
+        upper=[13, 23, 35, 45],
+        seasonal_period=2,
+    )
+    # _YTRAIN has constant step 2 -> m=2 seasonal naive MAE = 4.0
+    assert m["msis"] == pytest.approx(m["interval_score"] / 4.0)
+    assert math.isnan(_m()["msis"])  # _m() passes no seasonal_period
+
+
+def test_r2_and_short_or_flat_nan() -> None:
+    # _YT = [10, 20, 30, 40], mean = 25, ss_tot = 225 + 25 + 25 + 225 = 500
+    # sq_err sum = 4 + 4 + 9 + 16 = 33 -> r2 = 1 - 33/500 = 0.934
+    assert _m()["r2"] == pytest.approx(1.0 - 33.0 / 500.0)
+    assert compute_metrics(_YT, _YT)["r2"] == pytest.approx(1.0)
+    assert math.isnan(compute_metrics([10.0], [10.0])["r2"])
+    assert math.isnan(compute_metrics([5.0, 5.0, 5.0], [4.0, 5.0, 6.0])["r2"])
+    assert loss_of("r2", 0.934) == pytest.approx(0.066)
+
+
+def test_cv_and_zero_mean_nan() -> None:
+    # rmse = sqrt(8.25), mean(_YT) = 25.0
+    assert _m()["cv"] == pytest.approx(math.sqrt(8.25) / 25.0)
+    assert math.isnan(compute_metrics([5.0, -5.0], [4.0, -3.0])["cv"])

@@ -1,7 +1,11 @@
-"""SARIMAX — seasonal ARIMA with exogenous regressors (statsmodels).
+"""Kalman — state-space linear Kalman filter with harmonic seasonality (statsmodels).
 
-One model, one file. Runtime python, statistical family. Supports exog
-and emits native prediction intervals (Gaussian, from the forecast standard error).
+One model, one file. Runtime python, statistical family. Fits a linear Gaussian
+state-space model with local linear trend, trigonometric Fourier seasonal states,
+and autoregressive state dynamics of order ``dim_x``, estimated by maximum
+likelihood and filtered via exact Kalman recursions. Supports exogenous
+covariates, native Gaussian prediction intervals, and zero-refit state
+reconditioning (``append(refit=False)``).
 """
 
 from __future__ import annotations
@@ -20,40 +24,43 @@ if TYPE_CHECKING:
     import optuna
 
 
-class Sarimax(BaseModel):
-    """Seasonal ARIMA with optional exogenous regressors."""
+class KalmanForecaster(BaseModel):
+    """State-space linear Kalman filter forecaster (statsmodels)."""
 
-    name = "sarimax"
+    name = "kalman"
     runtime = "python"
     family = "statistical"
     supports_exog = True
     supports_native_intervals = True
-    # A state-space model: `append(refit=False)` runs the Kalman filter over the new observations
-    # with the estimated parameters held fixed, which is precisely the re-condition contract.
+    # `append(refit=False)` advances the Kalman state filter over new observations while holding
+    # the state transition and covariance matrices fixed.
     supports_recondition = True
     supports_extrapolate = True
     package = "statsmodels"
     package_url = "https://www.statsmodels.org/"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
-        # Lazy import: keep the model stack off the module top (lean launch point).
-        from statsmodels.tsa.statespace.sarimax import SARIMAX
+        from statsmodels.tsa.statespace.structural import UnobservedComponents
 
-        if len(y) < 3:
-            raise ModelError("sarimax requires at least 3 observations")
+        if len(y) < 4:
+            raise ModelError("kalman requires at least 4 observations")
         period = seasonal_period(self.ctx.freq)
-        order = tuple(self.params.get("order", (1, 1, 1)))
-        seasonal = len(y) >= 2 * period
-        default_seasonal = (0, 1, 1, period) if seasonal else (0, 0, 0, 0)
-        seasonal_order = tuple(self.params.get("seasonal_order", default_seasonal))
+        dim_x = int(self.params.get("dim_x", 1))
+        harmonics_req = int(self.params.get("harmonics", min(3, max(1, period // 2))))
+        has_seasonal = period > 1 and len(y) >= 2 * period
+        freq_seasonal = (
+            [{"period": period, "harmonics": min(harmonics_req, period // 2)}]
+            if has_seasonal
+            else None
+        )
+
         self._last_date = y.index[-1]
-        self._fitted = SARIMAX(
+        self._fitted = UnobservedComponents(
             y.astype(float),
             exog=X,
-            order=order,
-            seasonal_order=seasonal_order,
-            enforce_stationarity=False,
-            enforce_invertibility=False,
+            level="local linear trend",
+            freq_seasonal=freq_seasonal,
+            autoregressive=max(0, dim_x),
         ).fit(disp=False)
 
     def predict(
@@ -62,13 +69,12 @@ class Sarimax(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
-        from scipy.stats import norm  # lazy: keep scipy off the module top (lean launch point)
+        from scipy.stats import norm
 
-        # Forecast across the skipped span too when the origin has been advanced, then keep the
-        # tail: statsmodels counts steps from the fit, so the gap has to be walked, not jumped.
         fc = self._fitted.get_forecast(self._forecast_steps(horizon), exog=self._forecast_exog(X))
         mean = np.asarray(fc.predicted_mean, dtype=float)[-horizon:]
         sigma = np.asarray(fc.se_mean, dtype=float)[-horizon:]
+        sigma = np.where(np.isfinite(sigma) & (sigma >= 0.0), sigma, 0.0)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._forecast_index(horizon)
@@ -81,12 +87,9 @@ class Sarimax(BaseModel):
     @classmethod
     def search_space(cls, trial: optuna.Trial) -> dict[str, Any]:
         return {
-            "order": (
-                trial.suggest_int("p", 0, 3),
-                trial.suggest_int("d", 0, 2),
-                trial.suggest_int("q", 0, 3),
-            )
+            "dim_x": trial.suggest_int("dim_x", 0, 3),
+            "harmonics": trial.suggest_int("harmonics", 1, 4),
         }
 
 
-register(Sarimax)
+register(KalmanForecaster)

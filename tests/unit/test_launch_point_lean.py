@@ -23,7 +23,18 @@ import sys
 # Top-level distribution names no launch-point import may pull. These are the model
 # implementations' deps — present in this all-extras test env, so a regression (an import hoisted
 # back to a model's module top) lands them in ``sys.modules`` and trips this test.
-_MODEL_STACK = ("statsmodels", "scipy", "xgboost", "lightgbm", "neuralprophet", "prophet", "torch")
+_MODEL_STACK = (
+    "statsmodels",
+    "statsforecast",
+    "scipy",
+    "sklearn",
+    "xgboost",
+    "lightgbm",
+    "catboost",
+    "neuralprophet",
+    "prophet",
+    "torch",
+)
 
 
 def test_worker_import_path_does_not_pull_the_model_stack() -> None:

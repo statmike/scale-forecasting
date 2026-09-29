@@ -36,6 +36,10 @@ How it works and every knob.
   codebase.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
+- [models_reference.md](./models_reference.md) — all 26 built-in models, 6 ensemble strategies,
+  upstream package provenance, hyperparameter search spaces, and optional dependency extras.
+- [metrics_reference.md](./metrics_reference.md) — all 21 evaluation metrics, mathematical
+  definitions, direction/calibration flags, and edge-case rules.
 - [backtesting.md](./backtesting.md) — the method: how folds are laid out, why the newest fold fits
   nothing, what happens to short series, and what each of the four schemes actually measures.
 - [quota_and_scale.md](./quota_and_scale.md) — measured node throughput, vCPU and GPU quota planning,

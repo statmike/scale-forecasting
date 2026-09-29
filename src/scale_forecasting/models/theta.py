@@ -36,6 +36,8 @@ class ThetaModel(BaseModel):
     # Extrapolate only. `ThetaModelResults` exposes no way to absorb an observation: the theta
     # decomposition and the SES level are both properties of the fitted sample.
     supports_extrapolate = True
+    package = "statsmodels"
+    package_url = "https://www.statsmodels.org/"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).

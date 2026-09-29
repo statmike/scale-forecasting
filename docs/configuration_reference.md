@@ -23,7 +23,7 @@ schema) surfaces as a single `ConfigError`.
 | `run_name` | `str` | *required* | Human name for the run. |
 | `data` | `DataConfig` | *required* | Where the series come from and their shape. |
 | `python_runtime` | `"spark"` \| `"ray"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
-| `models` | `list[str]` | *required* (≥1) | Model names to run (see `playground --list`). |
+| `models` | `list[str]` | *required* (≥1) | Model names to run (see [models_reference.md](./models_reference.md) or `playground --list`). |
 | `model_params` | `dict[str, dict[str, …]]` | `{}` | Per-model hyperparameters, keyed by model name — see below. |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
 | `backtest` | `BacktestConfig` | `{}` | Time-series cross-validation. |
@@ -35,7 +35,7 @@ schema) surfaces as a single `ConfigError`.
 ```mermaid
 flowchart LR
     RunCfg["RunConfig"] --> Data["data (DataConfig)\nsource_table · freq · horizon"]
-    RunCfg --> Models["models + model_params\n18 registered models across 4 families"]
+    RunCfg --> Models["models + model_params\n26 registered models across 4 families"]
     RunCfg --> Feat["features (FeaturesConfig)\ntransform · holidays · fourier\nlevel_shift · exog · exog_lags"]
     RunCfg --> BT["backtest (BacktestConfig)\nscheme · n_folds · gap\nshort_series · decision_metric"]
     RunCfg --> Out["output (OutputConfig)\npoint_forecast: auto | median | mean | raw"]
@@ -396,8 +396,9 @@ Definitions live in
 [`metrics/`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics) (`err = yhat − y_true`). This single choice drives
 fold selection, HPO's objective, `inverse_error` weighting, and `prune_threshold`.
 
-The fifteen below are what ships. **They are not a closed set**: the field accepts any metric the
-metric registry knows, and a deployment adds one by dropping a file into
+The twenty-one below are what ships (full mathematical definitions in
+[metrics_reference.md](./metrics_reference.md)). **They are not a closed set**: the field accepts
+any metric the metric registry knows, and a deployment adds one by dropping a file into
 `src/scale_forecasting/metrics/` — see [adding_a_metric.md](./adding_a_metric.md). An unregistered
 name fails validation with the registered ones listed.
 
@@ -418,16 +419,22 @@ name fails validation with the registered ones listed.
 | `maape` | mean(arctan(\|err\| / \|y_true\|)) | `mape` that survives zeros — a zero actual contributes π/2 instead of NaN-ing the window. Range [0, π/2]. |
 | `interval_score` | mean Winkler score at α = 0.2 | **Needs prediction intervals**; width plus a penalty for each miss. Lower is better. |
 | `interval_width` | mean(upper − lower) | **Needs prediction intervals**; sharpness only, in the units of the series. |
+| `ope` | \|Σy_true − Σyhat\| / \|Σy_true\| | Overall percentage error on cumulative horizon volume. |
+| `rmsle` | √mean((ln(1+y_true) − ln(1+yhat))²) | Root mean squared logarithmic error. **NaN if any actual or forecast < 0.** |
+| `msse` | mse / mse(naïve-1-step) | Mean squared scaled error (`rmsse²`); **needs training history**. |
+| `msis` | interval_score / mae(seasonal naïve) | M4 competition Mean Scaled Interval Score; **needs prediction intervals and training history**. |
+| `r2` | 1 − Σerr² / Σ(y_true − ȳ)² | Coefficient of determination (higher is better; 1.0 is perfect). |
+| `cv` | rmse / ȳ | Coefficient of variation of RMSE normalized by evaluation window mean. |
 
 Pick `wape` (default) or `smape` for a robust scale-independent choice; `maape` instead of `mape`
-on intermittent-demand series that hit zero; `mase`/`rmsse` to beat a naïve baseline, or
+on intermittent-demand series that hit zero; `mase`/`rmsse`/`msse` to beat a naïve baseline, or
 `mase_seasonal` when the series is strongly seasonal and the one-step naïve is too easy to beat.
-The four interval metrics — `coverage`, `pinball`, `interval_score`, `interval_width` — only mean
-something when you care about the prediction bands, and ensemble OOF has no intervals, so all four
-read NaN for ensembles.
+The five interval metrics — `coverage`, `pinball`, `interval_score`, `interval_width`, `msis` — only
+mean something when you care about the prediction bands, and ensemble OOF has no intervals, so all
+five read NaN for ensembles.
 
-**What "needs training history" means for `mase`, `rmsse` and `mase_seasonal`.** All three divide
-the error by the average step of a naïve forecast over the training data, so which history goes in
+**What "needs training history" means for `mase`, `rmsse`, `msse`, `mase_seasonal`, and `msis`.** All
+five divide the error by the average step of a naïve forecast over the training data, so which history goes in
 decides the number. Every engine uses the same rule: **the fold's own training window** — the
 observations at or before that fold's `cutoff_date`, and under `backtest.scheme: sliding` only the
 last `window` (default `min_train`) of them. The window the fold is *scored* on is never in its own denominator, so a
@@ -438,17 +445,17 @@ has a different training window, the per-fold `mase` values a run rolls up are e
 differently — that is what makes them honest, and it is why `mase` across runs with different fold
 geometry is not a like-for-like comparison.
 
-**On the two interval scores:** `coverage` and `interval_width` are each half of the story and
+**On the interval scores:** `coverage` and `interval_width` are each half of the story and
 each trivially gamed — an infinitely wide band covers everything, a zero-width one is maximally
-sharp. `interval_score` is the one number that combines them, which is why it is the sensible
-`decision_metric` if intervals are what you are ranking on. The other two are worth reading
-alongside it because they say *how* a model got its score. Whichever you pick, read it next to
-`forecast_metadata.interval_source`: a model that computed its own interval and one whose band was
-manufactured from its residuals are not scored on the same thing (see
-[output_schemas.md](./output_schemas.md)).
+sharp. `interval_score` (or `msis` when comparing across series of different scales) is the number
+that combines them, which is why it is the sensible `decision_metric` if intervals are what you are
+ranking on. The other two are worth reading alongside it because they say *how* a model got its
+score. Whichever you pick, read it next to `forecast_metadata.interval_source`: a model that
+computed its own interval and one whose band was manufactured from its residuals are not scored on
+the same thing (see [output_schemas.md](./output_schemas.md)).
 
-**Which direction is better is not the same answer for every metric.** Thirteen of the fifteen are
-errors, so smaller is better. `coverage` is a hit rate, so larger is better. `bias` is signed, so
+**Which direction is better is not the same answer for every metric.** Eighteen of the twenty-one are
+errors, so smaller is better. `coverage` and `r2` are higher-is-better (`1.0` is ideal). `bias` is signed, so
 what you want is *near zero* — a large negative bias is exactly as wrong as a large positive one.
 
 Three places in the system have to rank things by the chosen metric — the HPO objective, the

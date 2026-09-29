@@ -1,0 +1,229 @@
+# Models & ensembles reference
+
+`scale-forecasting` ships **26 built-in forecasting models** (24 Python models and 2 BigQuery-native SQL models) alongside **6 ensemble blending and stacking strategies**. Every model implements the [`BaseModel`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/base_model.py) contract in its own module under [`src/scale_forecasting/models/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/models) and registers itself at import time.
+
+When a run is submitted, the orchestrator groups the requested models by **`family`** (`statistical`, `ml`, `deep_learning`, and `native`) and routes each family to its designated compute runtime in parallel.
+
+```mermaid
+flowchart TD
+    Base["BaseModel Contract (models/base_model.py)<br/>fit(y, X) · predict(horizon, X, quantiles)<br/>search_space(trial) · recondition(y, X) · advance_origin(n_steps)"]
+
+    subgraph Stat["Family: statistical (18 Python Models — Spark / Ray)"]
+        direction TB
+        S1["Baselines, Spectral & Intermittent<br/>naive_mean · naive_seasonal · naive_drift<br/>naive_moving_average · croston · fft"]
+        S2["Exponential Smoothing & Decomposition<br/>theta · auto_theta · holtwinters · autoets<br/>auto_ces · tbats · stl_bagging"]
+        S3["ARIMA, State-Space & Additive<br/>auto_arima · sarimax · ucm · kalman · prophet"]
+    end
+
+    subgraph ML["Family: ml (5 Python Models via _lag_forecaster.py — Spark / Ray)"]
+        M1["Recursive Target Lags + Calendar & Exog Features<br/>regression_lags · random_forest · lightgbm · xgboost · catboost"]
+    end
+
+    subgraph DL["Family: deep_learning (1 Python Model — Spark / Ray CPU or GPU)"]
+        D1["PyTorch AR-Net & Quantile Regression<br/>neuralprophet"]
+    end
+
+    subgraph Nat["Family: native (2 BigQuery SQL Models — BigQuery ML)"]
+        N1["Serverless SQL Execution<br/>arima_plus (ARIMA_PLUS / ARIMA_PLUS_XREG) · timesfm (AI.FORECAST)"]
+    end
+
+    Ens["Ensemble Engine (Driver Pandas + Storage Write API)<br/>Calculated: mean · median · inverse_error<br/>Learned Stacking: nnls · ridge · xgb"]
+
+    Base --> Stat & ML & DL & Nat
+    Stat & ML & DL & Nat --> Ens
+```
+
+---
+
+## Complete model catalog
+
+Every model declares its upstream open-source package (`package` and `package_url` on [`BaseModel`](./api/models_base_model.md)), execution family, supported covariate and interval capabilities, and whether it supports fast state updates without re-estimation (`expanding_frozen` backtesting via `supports_recondition`).
+
+| Model | Family | Runtime | Upstream Package | Accepts `exog` | Native Intervals | Frozen Origin (`recondition`) | Methodology & Summary |
+| :--- | :--- | :--- | :--- | :---: | :---: | :---: | :--- |
+| **`naive_mean`** | `statistical` | Python | [`numpy`](https://numpy.org/) | No | No | No | Constant forecast equal to the training sample mean with empirical residual intervals. |
+| **`naive_seasonal`** | `statistical` | Python | [`numpy`](https://numpy.org/) | No | No | Yes | Repeats the final observed seasonal cycle (`m` derived from `data.freq`). |
+| **`naive_drift`** | `statistical` | Python | [`numpy`](https://numpy.org/) | No | No | Yes | Linear trend extrapolation between the first and last training observations. |
+| **`naive_moving_average`** | `statistical` | Python | [`numpy`](https://numpy.org/) | No | No | Yes | Flat forecast equal to the mean of the trailing `window` observations. |
+| **`croston`** | `statistical` | Python | [`numpy`](https://numpy.org/) | No | No | Yes | Intermittent-demand decomposition (`classic`, `sba`, or `tsb` variant) for zero-heavy series. |
+| **`fft`** | `statistical` | Python | [`scipy`](https://scipy.org/) | No | No | No | Discrete Fourier Transform spectral extrapolation with polynomial trend detrending (`scipy.fft.rfft`). |
+| **`theta`** | `statistical` | Python | [`statsmodels`](https://www.statsmodels.org/) | No | Yes | No | Assimakopoulos-Nikolopoulos Theta decomposition (`statsmodels.tsa.forecasting.theta.ThetaModel`). |
+| **`auto_theta`** | `statistical` | Python | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | No | Yes | No | Automated Theta selection across Standard, Optimized (`OTM`), Dynamic (`DSTM`, `DOTM`) variants (`AutoTheta`). |
+| **`holtwinters`** | `statistical` | Python | [`statsmodels`](https://www.statsmodels.org/) | No | No | Yes | Additive Holt-Winters seasonal exponential smoothing (`ExponentialSmoothing`). |
+| **`autoets`** | `statistical` | Python | [`statsmodels`](https://www.statsmodels.org/) | No | Yes | Yes | State-space Error-Trend-Seasonal model (`ETSModel`) with analytical prediction intervals. |
+| **`auto_ces`** | `statistical` | Python | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | No | Yes | No | Automated Complex Exponential Smoothing (`AutoCES`) across `"N"`, `"S"`, `"P"`, and `"F"` seasonality. |
+| **`tbats`** | `statistical` | Python | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | No | Yes | No | Trigonometric seasonality, Box-Cox transform, ARMA errors, Trend, and Seasonal components (`AutoTBATS`). |
+| **`stl_bagging`** | `statistical` | Python | [`statsmodels`](https://www.statsmodels.org/) | No | Yes | No | Bergmeir-Hyndman-Benítez STL decomposition with moving-block-bootstrapped ETS ensembles. |
+| **`auto_arima`** | `statistical` | Python | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | Yes | No | Hyndman-Khandakar stepwise AICc seasonal ARIMA order search (`AutoARIMA`) with exogenous regressors. |
+| **`sarimax`** | `statistical` | Python | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes | Yes | Seasonal ARIMA with exogenous regressors (`SARIMAX`) and analytical state-space intervals. |
+| **`ucm`** | `statistical` | Python | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes | Yes | Structural Unobserved Components state-space model (`UnobservedComponents`) with local linear trend. |
+| **`kalman`** | `statistical` | Python | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes | Yes | Linear Gaussian state-space Kalman filter (`UnobservedComponents`) with trigonometric seasonal harmonics. |
+| **`prophet`** | `statistical` | Python | [`prophet`](https://facebook.github.io/prophet/) | Yes | Yes | No | Piecewise linear/logistic trend, multi-period Fourier seasonality, holidays, and exogenous regressors. |
+| **`regression_lags`** | `ml` | Python | [`scikit-learn`](https://scikit-learn.org/) | Yes | No | Yes | L2-regularized `Ridge` regression over recursive target lags (`1, 2, 3, 7, 14, 28`), calendar features, and `exog`. |
+| **`random_forest`** | `ml` | Python | [`scikit-learn`](https://scikit-learn.org/) | Yes | No | Yes | Bagged decision tree ensemble (`RandomForestRegressor`) over recursive target lags, calendar features, and `exog`. |
+| **`lightgbm`** | `ml` | Python | [`lightgbm`](https://lightgbm.readthedocs.io/) | Yes | No | Yes | Gradient-boosted decision trees (`LGBMRegressor`) over recursive target lags, calendar features, and `exog`. |
+| **`xgboost`** | `ml` | Python | [`xgboost`](https://xgboost.readthedocs.io/) | Yes | No | Yes | Histogram-based gradient-boosted trees (`XGBRegressor`) over recursive target lags, calendar features, and `exog`. |
+| **`catboost`** | `ml` | Python | [`catboost`](https://catboost.ai/) | Yes | No | Yes | Symmetric (oblivious) gradient-boosted trees (`CatBoostRegressor`) over recursive target lags, calendar, and `exog`. |
+| **`neuralprophet`** | `deep_learning` | Python | [`neuralprophet`](https://neuralprophet.com/) | No | Yes | No | PyTorch AR-Net with trend, Fourier seasonality, and native quantile regression Heads (`0.1, 0.5, 0.9`). |
+| **`arima_plus`** | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | Yes | No | BigQuery ML `ARIMA_PLUS` (automatically switches to `ARIMA_PLUS_XREG` when `features` covariates are active). |
+| **`timesfm`** | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | No | Yes | No | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`). |
+
+---
+
+## Model families & hyperparameter reference
+
+Per-model hyperparameters can be authored statically under `model_params.<model_name>` in the run configuration or tuned automatically with Optuna when `hpo.enabled: true`.
+
+### 1. Statistical family (`statistical`)
+
+Models in the `statistical` family fit per-series time-series equations on CPU workers (Spark or Ray).
+
+#### Baselines, intermittent demand & spectral models
+
+| Model | Upstream Package | Authored `model_params` & Defaults | Optuna `search_space` | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `naive_mean` | [`numpy`](https://numpy.org/) | — | — | Predicts the arithmetic mean of training observations. |
+| `naive_seasonal` | [`numpy`](https://numpy.org/) | — | — | Tiles the last $m$ observations forward ($m = 7$ daily, $52$ weekly, $12$ monthly, $24$ hourly). |
+| `naive_drift` | [`numpy`](https://numpy.org/) | — | — | Extrapolates the average step change $(y_T - y_1) / (T - 1)$. |
+| `naive_moving_average` | [`numpy`](https://numpy.org/) | `window: 7` (`int >= 1`) | `window` $\in [2, 56]$ | Predicts the trailing `window`-step mean; clamps to series length on short series. |
+| `croston` | [`numpy`](https://numpy.org/) | `alpha: 0.1`, `variant: "sba"` (`"classic"` \| `"sba"` \| `"tsb"`), `beta: 0.1` | `alpha` $\in [0.02, 0.5]$, `variant` $\in \{\text{classic}, \text{sba}, \text{tsb}\}$, `beta` $\in [0.02, 0.5]$ | Decomposes intermittent demand into non-zero demand size and inter-arrival interval (Syntetos-Boylan or Teunter-Syntetos-Babai). |
+| `fft` | [`scipy`](https://scipy.org/) | `K: 10` (top frequencies), `trend_poly_degree: 1` (`0..3`) | `K` $\in [2, 30]$, `trend_poly_degree` $\in [0, 2]$ | Detrends with a polynomial of degree `trend_poly_degree`, filters to the `K` highest-amplitude `rfft` harmonics, and projects forward analytically. |
+
+#### Exponential smoothing, Theta & decomposition models
+
+| Model | Upstream Package | Authored `model_params` & Defaults | Optuna `search_space` | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `theta` | [`statsmodels`](https://www.statsmodels.org/) | `theta: 2.0` (`float > 1.0`) | `theta` $\in [1.1, 4.0]$ | Deseasonalizes when the series spans at least $2m$ observations and passes an ACF seasonal test. |
+| `auto_theta` | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | `decomposition_type: "additive"` (`"additive"` \| `"multiplicative"`), `model: None` (`"STM"` \| `"OTM"` \| `"DSTM"` \| `"DOTM"`) | `decomposition_type` $\in \{\text{additive}, \text{multiplicative}\}$ | Evaluates standard, optimized, and dynamic Theta specifications via `statsforecast.models.AutoTheta`. |
+| `holtwinters` | [`statsmodels`](https://www.statsmodels.org/) | `damped_trend: False` | `damped_trend` $\in \{\text{True}, \text{False}\}$ | Fits additive trend and seasonality; falls back to trend-only if the series has fewer than $2m$ observations. |
+| `autoets` | [`statsmodels`](https://www.statsmodels.org/) | `damped_trend: True` | `damped_trend` $\in \{\text{True}, \text{False}\}$ | State-space `ETSModel` with L-BFGS maximum likelihood estimation and analytical state-space intervals. |
+| `auto_ces` | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | `model: "Z"` (`"Z"` \| `"N"` \| `"S"` \| `"P"` \| `"F"`) | `model` $\in \{\text{Z}, \text{N}, \text{S}, \text{P}\}$ | Complex Exponential Smoothing (`statsforecast.models.AutoCES`); `"Z"` selects information-criterion optimal seasonality. |
+| `tbats` | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | `use_boxcox: None`, `use_trend: None`, `use_damped_trend: None`, `use_arma_errors: True` | `use_trend` $\in \{\text{True}, \text{False}, \text{None}\}$, `use_damped_trend` $\in \{\text{True}, \text{False}, \text{None}\}$, `use_arma_errors` $\in \{\text{True}, \text{False}\}$ | Trigonometric seasonal representation (`AutoTBATS`) capable of modeling complex and non-integer seasonal cycles. |
+| `stl_bagging` | [`statsmodels`](https://www.statsmodels.org/) | `n_bags: 10`, `block_size: None` (defaults to $2m$) | `n_bags` $\in [5, 20]$ | Decomposes series via `STL`, applies moving-block bootstrap to the remainder, fits an `ETSModel` per bag, and takes empirical quantiles across the bag ensemble. |
+
+#### ARIMA, state-space & structural additive models
+
+| Model | Upstream Package | Authored `model_params` & Defaults | Optuna `search_space` | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `auto_arima` | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | `max_p: 3`, `max_q: 3`, `max_P: 1`, `max_Q: 1`, `max_d: 2`, `max_D: 1`, `stepwise: True`, `seasonal: True` | `max_p` $\in [1, 5]$, `max_q` $\in [1, 5]$, `seasonal` $\in \{\text{True}, \text{False}\}$ | Hyndman-Khandakar automatic seasonal ARIMA order selection (`AutoARIMA`) with native exogenous regressor support. |
+| `sarimax` | [`statsmodels`](https://www.statsmodels.org/) | `order: (1, 1, 1)` | `p` $\in [0, 2]$, `d` $\in [0, 1]$, `q` $\in [0, 2]$ | Fixed-order `SARIMAX` with seasonal order $(1, 0, 1, m)$ when length $\ge 3m$, plus exogenous regressors. |
+| `ucm` | [`statsmodels`](https://www.statsmodels.org/) | `level: "local linear trend"`, `freq_seasonal_harmonics: 2` | `level` $\in \{\text{local level}, \text{local linear trend}, \text{smooth trend}\}$, `freq_seasonal_harmonics` $\in [1, 4]$ | Structural state-space decomposition (`UnobservedComponents`) with frequency-domain seasonal harmonics and `exog`. |
+| `kalman` | [`statsmodels`](https://www.statsmodels.org/) | `level: "local linear trend"`, `harmonics: 3`, `autoregressive: 0` (`0..3`) | `level` $\in \{\text{local level}, \text{local linear trend}, \text{random walk with drift}\}$, `harmonics` $\in [1, 5]$, `autoregressive` $\in [0, 2]$ | State-space Kalman filter (`UnobservedComponents`) combining stochastic state transitions, seasonal harmonics, optional AR($p$) innovations, and `exog`. |
+| `prophet` | [`prophet`](https://facebook.github.io/prophet/) | `changepoint_prior_scale: 0.05`, `seasonality_prior_scale: 10.0`, `seasonality_mode: "additive"` | `changepoint_prior_scale` $\in [10^{-3}, 0.5]$, `seasonality_prior_scale` $\in [0.01, 10.0]$, `seasonality_mode` $\in \{\text{additive}, \text{multiplicative}\}$ | Piecewise trend + Fourier seasonality + exogenous covariates via `cmdstanpy` L-BFGS optimization. |
+
+---
+
+### 2. Tabular machine learning family (`ml`)
+
+All five models in the `ml` family share the autoregressive lag engine in [`_lag_forecaster.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/_lag_forecaster.py):
+
+- **Feature matrix construction:** Automatically constructs target lags `(1, 2, 3, 7, 14, 28)` (dropping any lag $\ge \lfloor T/2 \rfloor$ on short series), four deterministic calendar features (`dow`, `dom`, `month`, `doy`), and any configured `features` columns (`holidays`, `fourier`, `level_shift`, `exog`, `exog_lags`).
+- **Recursive multi-step roll-forward:** At prediction time, each step $h \in \{1, \dots, H\}$ predicts $\hat{y}_{T+h}$ and appends it to the target history buffer so subsequent steps read honest recursive lags.
+- **Fast state updates (`expanding_frozen`):** Appends newly observed actuals to the lag history buffer without re-fitting tree or regression weights (`supports_recondition = True`).
+
+| Model | Upstream Package | Authored `model_params` & Defaults | Optuna `search_space` | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `regression_lags` | [`scikit-learn`](https://scikit-learn.org/) | `alpha: 1.0` | `alpha` $\in [10^{-2}, 10^{2}]$ (log scale) | L2-regularized `Ridge` linear regressor over the lag + calendar + `exog` design matrix. |
+| `random_forest` | [`scikit-learn`](https://scikit-learn.org/) | `n_estimators: 100`, `max_depth: 10`, `min_samples_leaf: 2`, `max_features: 1.0` | `n_estimators` $\in [50, 250]$, `max_depth` $\in [4, 16]$, `min_samples_leaf` $\in [1, 10]$, `max_features` $\in \{1.0, \text{sqrt}\}$ | Bootstrap-aggregated `RandomForestRegressor` (`n_jobs=1` per worker to prevent executor oversubscription). |
+| `lightgbm` | [`lightgbm`](https://lightgbm.readthedocs.io/) | `n_estimators: 200`, `learning_rate: 0.05`, `num_leaves: 31` | `n_estimators` $\in [50, 400]$, `learning_rate` $\in [0.01, 0.2]$, `num_leaves` $\in [15, 63]$ | Leaf-wise `LGBMRegressor` (`n_jobs=1` per worker). |
+| `xgboost` | [`xgboost`](https://xgboost.readthedocs.io/) | `n_estimators: 200`, `max_depth: 4`, `learning_rate: 0.05`, `subsample: 0.8` | `n_estimators` $\in [50, 400]$, `max_depth` $\in [3, 8]$, `learning_rate` $\in [0.01, 0.2]`, `subsample` $\in [0.6, 1.0]$ | Histogram-based `XGBRegressor` (`tree_method="hist"`). Supports optional CUDA placement, though CPU is recommended for per-series tabular fits (`gpu_usefulness = "suboptimal"`). |
+| `catboost` | [`catboost`](https://catboost.ai/) | `iterations: 200`, `depth: 6`, `learning_rate: 0.05`, `l2_leaf_reg: 3.0` | `iterations` $\in [50, 400]$, `depth` $\in [4, 8]$, `learning_rate` $\in [0.01, 0.2]`, `l2_leaf_reg` $\in [1.0, 10.0]$ | Oblivious (symmetric) decision trees via `CatBoostRegressor` (`thread_count=1`, `allow_writing_files=False`). |
+
+---
+
+### 3. Deep learning family (`deep_learning`)
+
+| Model | Upstream Package | Authored `model_params` & Defaults | Optuna `search_space` | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `neuralprophet` | [`neuralprophet`](https://neuralprophet.com/) | `epochs: 40`, `learning_rate: None` (auto), `n_changepoints: 5`, `n_lags: 0`, `n_forecasts: 1` | `epochs` $\in [20, 80]$, `learning_rate` $\in [10^{-3}, 10^{-1}]$, `n_changepoints` $\in [2, 15]$ | PyTorch AR-Net + piecewise trend + Fourier seasonality with native quantile heads (`[0.1, 0.5, 0.9]`). When `n_lags > 0`, `n_forecasts` must be $\ge$ the run's longest horizon (`max(data.horizon, backtest.gap + backtest.horizon)`). |
+
+---
+
+### 4. BigQuery-native SQL family (`native`)
+
+Models in the `native` family execute directly inside BigQuery via [`engines/bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) in parallel with any Spark or Ray families. Once each fold's SQL query completes, out-of-fold predictions are scored through the exact same Python [`metrics.compute_metrics`](./metrics_reference.md) pipeline as the Python models.
+
+| Model | Upstream Package | Underlying BigQuery SQL Construct | Exogenous Support | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `arima_plus` | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | `CREATE MODEL ... OPTIONS(model_type='ARIMA_PLUS')` + `ML.FORECAST` | Yes (`ARIMA_PLUS_XREG`) | Automated seasonal ARIMA pipeline with holiday effects, spike/dip cleanup, and step-change adjustment. Automatically switches to `ARIMA_PLUS_XREG` when `features` covariates (`holidays`, `fourier`, `level_shift`, `exog`, `exog_lags`) are configured. |
+| `timesfm` | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | `AI.FORECAST(..., model => 'TimesFM 2.0')` | No | Zero-shot foundation-model forecasting in SQL with no `CREATE MODEL` training step. |
+
+---
+
+## Ensemble blending & stacking strategies
+
+When `ensemble.enabled: true`, the driver combines base-model forecasts into one or more `ensemble_<strategy>` pseudo-models and writes them to `forecast_predictions`, `backtest_oof`, and `forecast_metadata` alongside the base models:
+
+| Strategy | Type | Requires Backtest | Upstream Package | Methodology |
+| :--- | :--- | :---: | :--- | :--- |
+| **`mean`** | Calculated | No | [`numpy`](https://numpy.org/) | Unweighted arithmetic average across all available base models per `(ts_id, forecast_date)`. |
+| **`median`** | Calculated | No | [`numpy`](https://numpy.org/) | Row-wise median across base models; robust to single-model divergence. |
+| **`inverse_error`** | Calculated | Recommended | [`numpy`](https://numpy.org/) | Weighted average with weights $w_m \propto 1 / \text{loss}_m$ under `backtest.decision_metric`, normalized to sum to $1$. |
+| **`nnls`** | Learned Stacking | Yes | [`scipy`](https://scipy.org/) | Non-Negative Least Squares (`scipy.optimize.nnls`) fit on out-of-fold predictions (`w_m >= 0`, normalized to sum to $1$). |
+| **`ridge`** | Learned Stacking | Yes | [`numpy`](https://numpy.org/) | Closed-form L2-regularized linear meta-learner ($\alpha = 1.0$) fit on the out-of-fold matrix; allows negative corrective weights. |
+| **`xgb`** | Learned Stacking | Yes | [`xgboost`](https://xgboost.readthedocs.io/) | Non-linear gradient-boosted tree meta-learner (`XGBRegressor`) trained on out-of-fold predictions. |
+
+---
+
+## Environment agility & optional package management
+
+All third-party model libraries are imported **lazily inside `fit()`** rather than at module import time. This design ensures that:
+
+1. **Every model registers unconditionally** in `scale_forecasting.models` with zero heavy imports at startup.
+2. **Restricted or air-gapped environments** that omit specific packages (for example, omitting `catboost` or `neuralprophet`) can still import `scale_forecasting` and run every other model whose upstream package is installed.
+
+### Granular installation extras
+
+In addition to `scale-forecasting[models]` (which installs all model families), `pyproject.toml` provides family-scoped extras so you can install only the packages approved for your environment:
+
+| Extra | Installed Upstream Packages | Models Enabled |
+| :--- | :--- | :--- |
+| *(Core dependencies)* | `numpy`, `scipy`, `pandas` | `naive_mean`, `naive_seasonal`, `naive_drift`, `naive_moving_average`, `croston`, `fft`, `arima_plus`, `timesfm` |
+| `scale-forecasting[models-stats]` | `statsmodels>=0.14`, `statsforecast>=2.0` | Adds `theta`, `auto_theta`, `holtwinters`, `autoets`, `auto_ces`, `tbats`, `stl_bagging`, `auto_arima`, `sarimax`, `ucm`, `kalman` |
+| `scale-forecasting[models-trees]` | `scikit-learn>=1.4`, `lightgbm>=4.3`, `xgboost>=2.0`, `catboost>=1.2` | Adds `regression_lags`, `random_forest`, `lightgbm`, `xgboost`, `catboost` |
+| `scale-forecasting[models-prophet]` | `prophet>=1.1.5` | Adds `prophet` |
+| `scale-forecasting[models-dl]` | `torch>=2.2`, `neuralprophet>=0.8` | Adds `neuralprophet` |
+| `scale-forecasting[models]` | All of the above | All 26 built-in models |
+
+### Inspecting and filtering available models
+
+You can inspect package availability from the CLI or Python SDK, and optionally skip unavailable models when running a shared configuration in a restricted environment:
+
+```bash
+# List all registered models alongside their upstream package and installation status
+uv run python -m scale_forecasting.playground --list
+
+# Run a shared config while automatically skipping any models whose optional package is not installed
+uv run python -m scale_forecasting.main --config configs/ensemble_demo.json --ignore-unavailable-models
+```
+
+From Python:
+
+```python
+from scale_forecasting.models import filter_available_models, get_model, list_models
+from scale_forecasting.playground import model_catalog
+
+# Return only models whose upstream package is importable in the current Python environment
+installed = list_models(available_only=True)
+
+# Inspect the full model catalog DataFrame (includes package, package_url, and available columns)
+df_catalog = model_catalog()
+
+# Check a single model class directly
+cls = get_model("catboost")
+print(cls.package, cls.package_url, cls.is_available())
+```
+
+---
+
+## Adding a custom model
+
+Adding a new model requires **one file** in `src/scale_forecasting/models/` and **one import line** in `src/scale_forecasting/models/__init__.py`:
+
+1. Copy [`docs/model_template.py`](https://github.com/statmike/scale-forecasting/blob/main/docs/model_template.py) to `src/scale_forecasting/models/my_model.py`.
+2. Set `name`, `family`, `package`, `package_url`, and implement `fit(y, X)` and `predict(horizon, X, quantiles)`.
+3. End the file with `register(MyModel)` and import `my_model` in `src/scale_forecasting/models/__init__.py`.
+
+Because `src/scale_forecasting` is zipped and shipped dynamically on every job submission, your custom model runs on Dataproc Serverless, Dataproc clusters, and Vertex AI Ray immediately with **zero container image rebuilds**.
+
+See **[Adding a model (`docs/adding_a_model.md`)](./adding_a_model.md)** for the full contract and step-by-step walkthrough.

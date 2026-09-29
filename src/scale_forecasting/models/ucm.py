@@ -34,6 +34,8 @@ class Ucm(BaseModel):
     # already-estimated structural components without touching them.
     supports_recondition = True
     supports_extrapolate = True
+    package = "statsmodels"
+    package_url = "https://www.statsmodels.org/"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).

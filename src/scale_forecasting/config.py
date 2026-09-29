@@ -1362,6 +1362,24 @@ class RunConfig(BaseModel):
             update={"data": self.data.model_copy(update={"series_limit": n_series})}
         )
 
+    def with_available_models(self) -> RunConfig:
+        """Return a copy with ``models`` filtered to those whose upstream packages are installed.
+
+        Raises `ConfigError` if none of the requested models have their required packages
+        installed in the current environment.
+        """
+        from .models import filter_available_models
+
+        kept = filter_available_models(self.models)
+        if not kept:
+            raise ConfigError(
+                f"none of the configured models ({list(self.models)}) have their required "
+                f"packages installed in this environment"
+            )
+        if list(kept) == list(self.models):
+            return self
+        return self.model_copy(update={"models": kept})
+
 
 # --- workload estimate ---------------------------------------------------------
 

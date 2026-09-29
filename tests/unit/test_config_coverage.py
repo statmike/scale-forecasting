@@ -109,6 +109,10 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
     ),
+    "backtest.decision_metric=cv": (
+        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
+        "(over METRIC_NAMES)"
+    ),
     "backtest.decision_metric=interval_score": (
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
@@ -133,7 +137,27 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
     ),
+    "backtest.decision_metric=msis": (
+        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
+        "(over METRIC_NAMES)"
+    ),
+    "backtest.decision_metric=msse": (
+        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
+        "(over METRIC_NAMES)"
+    ),
+    "backtest.decision_metric=ope": (
+        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
+        "(over METRIC_NAMES)"
+    ),
     "backtest.decision_metric=pinball": (
+        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
+        "(over METRIC_NAMES)"
+    ),
+    "backtest.decision_metric=r2": (
+        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
+        "(over METRIC_NAMES)"
+    ),
+    "backtest.decision_metric=rmsle": (
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
     ),
@@ -203,6 +227,31 @@ UNPROVEN: dict[str, str] = {
         "container-image deployment therefore exercises it without any config naming it, and this "
         "join — which reads configs — is structurally blind to that. Read the ledger's prose, not "
         "this entry, before concluding the path is untested."
+    ),
+    # --- models --------------------------------------------------------------------------------
+    "models=auto_arima": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=auto_ces": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=auto_theta": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=catboost": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=fft": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=kalman": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=random_forest": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=tbats": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
     ),
     # --- features ------------------------------------------------------------------------------
     # `fourier=true` and `level_shift=true` sat here until 2026-09-26, pointed at their offline

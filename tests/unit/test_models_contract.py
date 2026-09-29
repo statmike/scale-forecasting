@@ -24,8 +24,13 @@ HORIZON = 14
 
 # Optional third-party dep required by each model (None = core-only).
 _MODEL_DEP: dict[str, str] = {
+    "auto_arima": "statsforecast",
+    "auto_ces": "statsforecast",
+    "auto_theta": "statsforecast",
+    "tbats": "statsforecast",
     "xgboost": "xgboost",
     "lightgbm": "lightgbm",
+    "catboost": "catboost",
     "prophet": "prophet",
     "neuralprophet": "neuralprophet",
 }

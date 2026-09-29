@@ -447,6 +447,8 @@ def _cell_complaints(
     expected: dict[str, Any],
     newly_scored: frozenset[str] = frozenset(),
     columns_added: frozenset[str] = frozenset(),
+    models_added: frozenset[str] = frozenset(),
+    metrics_added: frozenset[str] = frozenset(),
     compare_values: bool = True,
 ) -> list[str]:
     """Every way the cells in `current` differ from `expected`, as sentences. Empty means same.
@@ -469,16 +471,17 @@ def _cell_complaints(
     moves the numbers. Both are here rather than at the call site so the two panel tests keep
     disagreeing in exactly one place, which is the whole point of sharing this function.
     """
-    if sorted(current) != sorted(expected):
+    expected_models = set(expected) | models_added
+    if set(current) != expected_models:
         return [
             "the model registry and the panel disagree: "
-            f"{sorted(set(current) - set(expected))} added, "
-            f"{sorted(set(expected) - set(current))} missing. A new model needs a regenerated "
+            f"{sorted(set(current) - expected_models)} added, "
+            f"{sorted(expected_models - set(current))} missing. A new model needs a regenerated "
             "snapshot; a removed one needs a deliberate edit."
         ]
 
     out: list[str] = []
-    for model in sorted(current):
+    for model in sorted(expected):
         got, want = current[model], expected[model]
         unstable = model in _UNSTABLE_FIT
         metric_rtol = _UNSTABLE_FIT_RTOL_METRIC if unstable else _RTOL
@@ -489,7 +492,7 @@ def _cell_complaints(
             out.append(f"{model}: prediction columns {want['columns']} -> {got['columns']}")
         if got["n_oof_rows"] != want["n_oof_rows"]:
             out.append(f"{model}: out-of-fold rows {want['n_oof_rows']} -> {got['n_oof_rows']}")
-        if sorted(got["metrics"]) != sorted(want["metrics"]):
+        if set(got["metrics"]) != set(want["metrics"]) | metrics_added:
             out.append(f"{model}: metric set changed")
             continue
         for key in sorted(want["metrics"]):
@@ -523,6 +526,21 @@ def _cell_complaints(
     return out
 
 
+_MODELS_ADDED_POST_BREAK = frozenset(
+    {
+        "auto_arima",
+        "auto_ces",
+        "auto_theta",
+        "catboost",
+        "fft",
+        "kalman",
+        "random_forest",
+        "tbats",
+    }
+)
+_METRICS_ADDED_POST_BREAK = frozenset({"ope", "rmsle", "msse", "msis", "r2", "cv"})
+
+
 def test_golden_cell_output_is_unchanged(
     current_panel: dict[str, Any], snapshot_panel: dict[str, Any]
 ) -> None:
@@ -548,6 +566,8 @@ def test_golden_cell_output_is_unchanged(
         snapshot_panel["cells"],
         newly_scored=_SCORED_AT_2_3,
         columns_added=_COLUMNS_ADDED_AT_2_5 if _MOVED_AT_2_5 else frozenset(),
+        models_added=_MODELS_ADDED_POST_BREAK,
+        metrics_added=_METRICS_ADDED_POST_BREAK,
         compare_values=not _MOVED_AT_2_5,
     )
     assert not complaints, "output moved across the digest break:\n" + "\n".join(complaints)

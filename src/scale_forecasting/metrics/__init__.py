@@ -32,6 +32,12 @@ Definitions (n = horizon, e = yhat - y_true):
 - maape = mean(arctan(|e| / |y_true|))  — defined at y_true == 0, unlike MAPE
 - interval_score  = mean Winkler score of [lower, upper] at α = 0.2  (needs intervals)
 - interval_width  = mean(upper - lower)  (needs intervals)
+- ope   = |sum(yhat) - sum(y_true)| / |sum(y_true)|  (NaN if sum(y_true) == 0)
+- rmsle = sqrt(mean((log1p(y_true) - log1p(yhat))²)) (NaN if any y_true < 0 or yhat < 0)
+- msse  = mse / mean(diff(y_train)²)  (needs y_train)
+- msis  = interval_score / mae_naive_seasonal  (needs intervals, y_train, seasonal_period)
+- r2    = 1 - sum(e²) / sum((y_true - mean(y_true))²)  (higher is better; 1.0 is ideal)
+- cv    = rmse / |mean(y_true)|  (NaN if mean(y_true) == 0)
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from ..errors import ConfigError
 from . import (  # noqa: E402,F401
     bias,
     coverage,
+    cv,
     interval_score,
     interval_width,
     maape,
@@ -55,8 +62,13 @@ from . import (  # noqa: E402,F401
     mase,
     mase_seasonal,
     mse,
+    msis,
+    msse,
+    ope,
     pinball,
+    r2,
     rmse,
+    rmsle,
     rmsse,
     smape,
     wape,
@@ -108,6 +120,12 @@ METRIC_NAMES: tuple[str, ...] = (
     "maape",
     "interval_score",
     "interval_width",
+    "ope",
+    "rmsle",
+    "msse",
+    "msis",
+    "r2",
+    "cv",
 )
 
 # A registered metric missing from the panel order would never be computed and would have no
@@ -156,8 +174,8 @@ def loss_of(metric: str, value: float) -> float:
     The conversions:
 
     * ``lower`` → the value itself.
-    * ``higher`` → ``1 - value``. Coverage is the only such metric and it is a fraction, so the
-      shortfall from perfect coverage is the natural loss. Returning ``-value`` would rank
+    * ``higher`` → ``1 - value``. Both ``coverage`` and ``r2`` are bounded above by ``1.0``, so the
+      shortfall from perfection is a non-negative loss. Returning ``-value`` would rank
       identically but be *negative*, and a negative loss cannot be inverted into a weight.
     * ``zero`` → ``abs(value)``. A bias of −0.1 is better than one of +0.4, and both are worse
       than 0.

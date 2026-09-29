@@ -37,6 +37,8 @@ class StlBagging(BaseModel):
     # remainder is drawn from that sample's residuals; neither can take in a new observation without
     # being recomputed, which is a refit by any honest reading.
     supports_extrapolate = True
+    package = "statsmodels"
+    package_url = "https://www.statsmodels.org/"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).

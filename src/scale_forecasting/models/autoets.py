@@ -40,6 +40,8 @@ class AutoETS(BaseModel):
     # exactly the staleness question, so it participates in `expanding_stale` and declines
     # `expanding_frozen`.
     supports_extrapolate = True
+    package = "statsmodels"
+    package_url = "https://www.statsmodels.org/"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         # Lazy import: keep the model stack off the module top (lean launch point).

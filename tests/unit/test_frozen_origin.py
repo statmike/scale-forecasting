@@ -36,8 +36,13 @@ SPAN = OFFSET + HORIZON
 
 # Optional third-party dep required by each model (None = core-only).
 _MODEL_DEP: dict[str, str] = {
+    "auto_arima": "statsforecast",
+    "auto_ces": "statsforecast",
+    "auto_theta": "statsforecast",
+    "tbats": "statsforecast",
     "xgboost": "xgboost",
     "lightgbm": "lightgbm",
+    "catboost": "catboost",
     "prophet": "prophet",
     "neuralprophet": "neuralprophet",
 }
@@ -48,11 +53,14 @@ _MODEL_DEP: dict[str, str] = {
 _PARAMS: dict[str, dict[str, Any]] = {"neuralprophet": {"epochs": 2}}
 
 # Models whose point forecast provably *must* move when the history steps up by a constant, because
-# nothing in them is estimated (or, for the two state-space models, because the Kalman filter
+# nothing in them is estimated (or, for the state-space / smoothing models, because the filter
 # carries the level). The tree models are excluded on purpose: a tree cannot extrapolate past its
 # training range, so a large upward shift saturates it at its top leaf and the direction of the
 # change is not something the seam can promise.
 _LEVEL_SHIFT_RAISES_THE_FORECAST = {
+    "auto_ces",
+    "auto_theta",
+    "kalman",
     "sarimax",
     "ucm",
     "croston",
@@ -251,12 +259,18 @@ def test_the_re_condition_tier_is_the_one_the_plan_names() -> None:
     """
     tier = sorted(n for n in _python_models() if get_model(n).supports_recondition)
     assert tier == [
+        "auto_arima",
+        "auto_ces",
+        "auto_theta",
+        "catboost",
         "croston",
+        "kalman",
         "lightgbm",
         "naive_drift",
         "naive_mean",
         "naive_moving_average",
         "naive_seasonal",
+        "random_forest",
         "regression_lags",
         "sarimax",
         "ucm",

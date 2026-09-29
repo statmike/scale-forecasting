@@ -47,6 +47,10 @@ class ProphetModel(BaseModel):
     # but there is no way to hand the fitted curve a new observation short of `Prophet.fit` again,
     # which is a refit. It therefore answers the staleness question and declines the frozen one.
     supports_extrapolate = True
+    package = "prophet"
+    package_url = "https://facebook.github.io/prophet/"
+    optional_import = "prophet"
+    optional_extra = "models-prophet"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:

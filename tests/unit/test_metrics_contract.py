@@ -153,13 +153,13 @@ def test_the_metric_declares_which_point_forecast_its_loss_rewards(metric_name: 
 def test_the_squared_error_metrics_are_the_ones_that_declare_the_mean() -> None:
     """The shipped panel's answer, pinned — so a new metric's flag is a decision, not a drift.
 
-    These four are exactly the panel members whose loss is quadratic in the error (`bias` lands
+    These are the panel members whose loss is quadratic in the error (`bias` lands
     here for a different reason: adding the mean residual drives mean error to zero). A metric
-    added later is free to join them, but one of these fifteen changing its mind is a behaviour
+    added later is free to join them, but one of these changing its mind is a behaviour
     change to every `point_forecast="auto"` cell with no folds to measure, and should be seen.
     """
     declared = {name for name in METRIC_NAMES if get_metric(name).mean_optimal}
-    assert declared == {"rmse", "mse", "rmsse", "bias"}
+    assert declared == {"rmse", "mse", "rmsse", "bias", "msse", "r2", "cv"}
 
 
 def test_a_name_no_metric_claims_falls_back_to_the_median() -> None:

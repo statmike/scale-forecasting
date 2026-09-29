@@ -31,13 +31,15 @@ from .worker import CellResult, run_cell
 _SAMPLE_SEED = 20260726
 
 
-def available_models(*, include_bigquery: bool = False) -> list[str]:
+def available_models(*, include_bigquery: bool = False, installed_only: bool = False) -> list[str]:
     """Registered model names, sorted (the factory is the source of truth).
 
     BigQuery-native models run as SQL in BigQuery, not in a local cell, so they're
-    excluded by default — the playground runs the Python models offline.
+    excluded by default — the playground runs the Python models offline. Pass
+    ``installed_only=True`` to filter out models whose optional Python package is
+    not installed in the current environment.
     """
-    names = list_models()
+    names = list_models(available_only=installed_only)
     if include_bigquery:
         return names
     return [n for n in names if get_model(n).runtime != "bigquery"]
@@ -56,8 +58,8 @@ def model_catalog() -> pd.DataFrame:
     - **BigQuery-native** models run only as SQL in ``bigquery`` (``engines/bigquery_engine``);
       they can't run in a local/Spark/Ray Python cell (their in-process fit/predict raise).
 
-    Columns: ``model, family, runtime, local, spark, ray, gpu, bigquery, exog``. Booleans, so
-    ``df`` renders as a tidy capability matrix in the notebook.
+    Columns: ``model, family, runtime, package, package_url, available, local, spark, ray, gpu,
+    bigquery, exog``.
     """
     rows: list[dict[str, Any]] = []
     for name in list_models():
@@ -68,6 +70,9 @@ def model_catalog() -> pd.DataFrame:
                 "model": name,
                 "family": cls.family,
                 "runtime": cls.runtime,
+                "package": cls.package,
+                "package_url": cls.package_url,
+                "available": cls.is_available(),
                 "local": is_python,
                 "spark": is_python,
                 "ray": is_python,

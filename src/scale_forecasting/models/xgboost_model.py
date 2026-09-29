@@ -37,6 +37,10 @@ class XgboostModel(BaseModel):
     # the model forecasts off its own predictions the way it would if nobody refreshed it.
     supports_recondition = True
     supports_extrapolate = True
+    package = "xgboost"
+    package_url = "https://xgboost.readthedocs.io/"
+    optional_import = "xgboost"
+    optional_extra = "models-trees"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         try:
