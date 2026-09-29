@@ -343,11 +343,11 @@ The platform is designed for rapid extension by data scientists:
 | **`msse`** | Scaled (`m=1`) | `lower` | $\text{MSE} / \text{MSE}_{\text{naive-1}}$ | Mean Squared Scaled Error ($\text{RMSSE}^2$). |
 | **`r2`** | Goodness-of-Fit | `higher` | $1 - \sum(y - \hat{y})^2 / \sum(y - \bar{y})^2$ | Coefficient of determination ($1.0$ is perfect; $<0$ is worse than predicting $\bar{y}$). |
 | **`cv`** | Dispersion | `lower` | $\text{RMSE} / \bar{y}$ | Coefficient of Variation of RMSE normalized by evaluation window mean. |
-| **`coverage`** | Interval (`80%` PI) | `higher` | Fraction of $y_t \in [\hat{y}_{\text{lower}}, \hat{y}_{\text{upper}}]$ | Empirical coverage against the nominal $(0.1, 0.9)$ quantile band. |
+| **`coverage`** | Interval (`80%` PI) | `higher` | Fraction of $y_t \in [\hat{y}^{\text{lower}}, \hat{y}^{\text{upper}}]$ | Empirical coverage against the nominal $(0.1, 0.9)$ quantile band. |
 | **`pinball`** | Interval (Quantile) | `lower` | Mean pinball loss at $q_{0.10}$ and $q_{0.90}$ | Evaluates quantile regression sharpness and calibration. |
 | **`interval_score`** | Interval (Proper) | `lower` | Winkler score ($\alpha = 0.20$) | Proper scoring rule balancing interval sharpness against coverage misses. |
-| **`interval_width`** | Interval (`80%` PI) | `lower` | $\frac{1}{H}\sum (\hat{y}_{\text{upper}} - \hat{y}_{\text{lower}})$ | Average prediction interval width in target units. |
-| **`msis`** | Interval (Scaled) | `lower` | $\text{IS}_\alpha / \text{MAE}_{\text{naive-}m}$ | M4 competition Mean Scaled Interval Score (scaled `interval_score`). |
+| **`interval_width`** | Interval (`80%` PI) | `lower` | $\frac{1}{H}\sum (\hat{y}^{\text{upper}} - \hat{y}^{\text{lower}})$ | Average prediction interval width in target units. |
+| **`msis`** | Interval (Scaled) | `lower` | $\text{Winkler} / \text{seasonal naive MAE}$ | M4 competition Mean Scaled Interval Score (scaled `interval_score`). |
 
 ### Adding a Custom Metric in 1 File
 

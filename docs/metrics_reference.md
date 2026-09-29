@@ -46,11 +46,11 @@ Every metric in `METRIC_NAMES` is computed on each backtest fold and averaged ac
 | **`msse`** | Scaled (`m=1`) | `lower` | `True` | Yes | No | $\text{MSE} / \frac{1}{T-1}\sum_{t=2}^T (y_t^{\text{train}} - y_{t-1}^{\text{train}})^2$. Mean Squared Scaled Error ($\text{RMSSE}^2$). |
 | **`r2`** | Goodness-of-Fit | `higher` | `True` | No | No | $1 - \sum (y_t - \hat{y}_t)^2 / \sum (y_t - \bar{y})^2$. Coefficient of determination ($1.0$ is perfect; $< 0$ is worse than predicting $\bar{y}$). |
 | **`cv`** | Dispersion | `lower` | `True` | No | No | $\text{RMSE} / \bar{y}$. Coefficient of Variation of RMSE normalized by the evaluation window mean. |
-| **`coverage`** | Interval (`80%` PI) | `higher` | `False` | No | Yes | $\frac{1}{H}\sum \mathbb{I}(\hat{y}_{\text{lower}} \le y_t \le \hat{y}_{\text{upper}})$. Empirical coverage fraction against the $(0.1, 0.9)$ band. |
-| **`pinball`** | Interval (Quantile) | `lower` | `False` | No | Yes | Mean quantile pinball loss averaged across the $q_{0.10}$ and $q_{0.90}$ bounds ($\frac{\alpha}{2} \times \text{IS}_\alpha$). |
+| **`coverage`** | Interval (`80%` PI) | `higher` | `False` | No | Yes | Fraction of $y_t \in [\hat{y}^{\text{lower}}, \hat{y}^{\text{upper}}]$. Empirical coverage fraction against the $(0.1, 0.9)$ band. |
+| **`pinball`** | Interval (Quantile) | `lower` | `False` | No | Yes | Mean quantile pinball loss averaged across the $q_{0.10}$ and $q_{0.90}$ bounds ($\frac{\alpha}{2} \times \text{Winkler}$). |
 | **`interval_score`** | Interval (Proper) | `lower` | `False` | No | Yes | Winkler / Gneiting-Raftery score ($\alpha = 0.20$): width plus $\frac{2}{\alpha}$ penalty for out-of-band actuals. |
-| **`interval_width`** | Interval (`80%` PI) | `lower` | `False` | No | Yes | $\frac{1}{H}\sum (\hat{y}_{\text{upper}} - \hat{y}_{\text{lower}})$. Sharpness of the prediction interval in target units. |
-| **`msis`** | Interval (Scaled) | `lower` | `False` | Yes | Yes | $\text{IS}_\alpha / \frac{1}{T-m}\sum \|y_t^{\text{train}} - y_{t-m}^{\text{train}}\|$. M4 competition Mean Scaled Interval Score. |
+| **`interval_width`** | Interval (`80%` PI) | `lower` | `False` | No | Yes | $\frac{1}{H}\sum (\hat{y}^{\text{upper}} - \hat{y}^{\text{lower}})$. Sharpness of the prediction interval in target units. |
+| **`msis`** | Interval (Scaled) | `lower` | `False` | Yes | Yes | $\text{Winkler} / \text{seasonal naive MAE}$. M4 competition Mean Scaled Interval Score. |
 
 ---
 
