@@ -171,17 +171,19 @@ Here is an example configuration ([`configs/ensemble_demo.json`](./configs/ensem
 
 ```mermaid
 flowchart TD
-    cfg["RunConfig (JSON File or Python Dict)"]
+    cfg["RunConfig (JSON Configuration or Python Dict)"]
 
     subgraph Entrypoints["Five Execution Pathways"]
-        E1["1. Python SDK (Forecaster)<br/>Interactive notebooks, pipelines, and scripts<br/>forecaster.run() · forecaster.monitor()"]
-        E2["2. Command-Line Interface (CLI)<br/>Direct terminal launch & automation scripts<br/>python -m scale_forecasting.main --config ..."]
-        E3["3. Staged Plan & Native Platform Commands<br/>Uploads artifacts and emits copy-pasteable gcloud / bq commands<br/>python -m scale_forecasting.launch_plan --stage"]
-        E4["4. Managed Airflow DAG Generation<br/>Generates production Python Airflow DAG for Cloud Composer 3<br/>python -m scale_forecasting.launch_plan --emit-airflow"]
-        E5["5. Direct Cluster Embedding<br/>Embed cell runners into existing PySpark or Ray jobs<br/>make_group_runner · make_chunk_runner"]
+        direction TB
+        E1["1. Python SDK (Forecaster)"]
+        E2["2. Command-Line Interface (CLI)"]
+        E3["3. Staged Plan & Emitted Native Commands"]
+        E4["4. Managed Airflow (Cloud Composer 3) DAG Generation"]
+        E5["5. Direct Cluster Engine Embedding"]
+        E1 --> E2 --> E3 --> E4 --> E5
     end
 
-    cfg --> E1 & E2 & E3 & E4 & E5
+    cfg --> Entrypoints
 ```
 
 1. **Python SDK (`Forecaster`):** Thin, high-level facade for interactive notebooks (Colab Enterprise) and custom Python applications. Handles dry runs, feasibility checks, live progress monitoring, and post-run evaluation.
@@ -243,12 +245,25 @@ flowchart TB
     registry --> views
 ```
 
-### Automatic Sizing & Resilience
-- **Empirical Cost Profiling:** The platform measures empirical CPU time and memory usage from prior runs to dynamically size Dataproc executors and Ray worker pools.
-- **Fractional GPU Packing:** Ray actor pools automatically share NVIDIA L4/T4 cards across multiple `neuralprophet` fits using an empirical `gpu_fraction` (~0.125), maximizing GPU saturation.
-- **Quota Preflight & Multi-Region Fallback:** Pre-flight reads regional quota meters (Compute Engine vCPUs, Vertex AI GPUs); if capacity is constrained, the walk automatically hops across candidate regions (`us-central1` $\rightarrow$ `us-east4` $\rightarrow$ `us-west1`) without aborting.
+### Automated Sizing & Fleet Resource Planning: How It Estimates Your Clusters
 
-➡️ **Detailed architecture and DAG dispatch: [System Architecture Guide (`docs/architecture.md`)](./docs/architecture.md).**
+`scale-forecasting` includes an automated resource planning engine ([`scale_forecasting.resources`](./docs/api/resources.md)) that analyzes workload requirements and dynamically sizes distributed compute before launching:
+
+- **Estimating Dataproc Spark Executors:**
+  - Evaluates total fan-out ($N_{\text{series}} \times M_{\text{models}}$) and empirical per-cell memory footprints.
+  - Automatically derives optimal `initialExecutors` and `maxExecutors` (e.g. ramping from baseline up to 20+ executors for 100k series).
+  - Derives `spark.executor.cores` and `spark.executor.memory` alongside `spark.executor.memoryOverhead` to avoid Spark executor Out-Of-Memory (OOM) failures while preventing over-provisioning.
+  - On GPU runs (Dataproc Serverless L4), dynamically derives fractional GPU shares (`1 / spark.executor.cores`) and automatically releases the RAPIDS SQL memory pool (`pool=NONE`) so PySpark Python worker fits have full access to GPU memory.
+- **Estimating Gemini Enterprise (Managed Ray) Worker Pools:**
+  - Automatically sizes Ray worker pools: derives `min_nodes` and `max_nodes` based on total task fan-out and per-node packing limits.
+  - Derives node packaging density: clamps maximum per-task memory ask to 85% of schedulable node RAM (`_MAX_SLOT_MEMORY_FRACTION`), preventing tasks from starvation against Ray's internal plasma object store.
+  - Calibrates fractional GPU packing (`gpu_fraction`): dynamically calculates how many concurrent deep learning fits (`neuralprophet`) can fit onto an NVIDIA L4 or T4 card (~0.125 share per fit), ensuring high GPU saturation without thrashing.
+- **Offline Sizing & Feasibility Checks Ahead of Time:**
+  - **Dry Run Estimation (`--dry-run`):** Run `uv run python -m scale_forecasting.main --config <file> --dry-run` or `forecaster.dry_run()` to preview the planned execution DAG, deterministic `run_id`, series count, and estimated fit fan-out without touching any cloud resources or incurring costs.
+  - **Feasibility & Quota Analysis (`--feasibility`):** Run with `--feasibility` or `forecaster.feasibility()` to query the live BigQuery source panel: computes exact series lengths, cost multipliers, fold-coverage histograms, and verifies that series meet minimum training thresholds.
+  - **Quota Preflight & Resilience:** Pre-flight checks regional Compute Engine vCPU and Vertex AI GPU quota limits; if capacity is constrained, the multi-region fallback automatically hops across candidate regions (`us-central1` $\rightarrow$ `us-east4` $\rightarrow$ `us-west1`) without failing the run.
+
+➡️ **Detailed sizing arithmetic and 100k scale benchmarks: [Quota, Sizing & Scale Guide (`docs/quota_and_scale.md`)](./docs/quota_and_scale.md).**
 
 ---
 
@@ -359,33 +374,34 @@ Ensembles are keyed by `ensemble_id = make_ensemble_id(cfg.ensemble)` in BigQuer
 The platform uses Google Cloud's **BigQuery Storage Write API** to stream real-time telemetry from thousands of remote executors directly into BigQuery.
 
 ```mermaid
-flowchart LR
-    subgraph Workers["Distributed Workers (Spark / Ray / SQL)"]
-        W1["Task 1 · Cell (s1, m1)"]
-        W2["Task 2 · Cell (s2, m2)"]
-        WN["Task N · Cell (sN, mN)"]
+flowchart TD
+    subgraph Workers["1. Distributed Workers (Spark · Ray · BigQuery ML)"]
+        direction LR
+        W1["Spark applyInPandas Tasks"]
+        W2["Ray Remote Tasks"]
+        W3["BigQuery ML Queries"]
     end
 
-    subgraph WriteAPI["BigQuery Storage Write API (Arrow Batches)"]
-        Stream["High-Throughput Streaming Ingestion<br/>Append-Only · Zero DML Locking"]
+    subgraph Ingest["2. High-Throughput Streaming Ingestion"]
+        direction LR
+        Stream["BigQuery Storage Write API (Arrow Batches)<br/>Append-Only Streaming · Dedupe-on-Read · Zero Table Locking"]
     end
 
-    subgraph Tables["BigQuery Tables (scale_forecasting dataset)"]
-        T1[("forecast_metadata")]
-        T2[("forecast_predictions")]
-        T3[("backtest_oof")]
-        T4[("run_registry")]
-        T5[("run_jobs")]
+    subgraph Tables["3. BigQuery Storage Tables (scale_forecasting dataset)"]
+        direction LR
+        T1[("forecast_metadata<br/>15 metrics · best_params")]
+        T2[("forecast_predictions<br/>horizon forecasts + conformal intervals")]
+        T3[("backtest_oof<br/>historical OOF actuals")]
     end
 
-    subgraph Views["12 Analytical SQL Views"]
-        V1["v_model_leaderboard<br/>(Best-First Rankings)"]
-        V2["v_forecast_results<br/>(Point + Conformal Bands)"]
-        V3["v_run_summary<br/>(Wall-Clock, DCU, Cost)"]
-        V4["v_run_jobs<br/>(Execution Trace per Family)"]
+    subgraph Views["4. Unified Analytical SQL Views (12 Views)"]
+        direction LR
+        V1["v_model_leaderboard<br/>Best-First Rankings"]
+        V2["v_forecast_results<br/>Point + Conformal Bands"]
+        V3["v_run_summary<br/>Duration, Cost & Sizing"]
     end
 
-    Workers --> Stream --> Tables --> Views
+    Workers --> Ingest --> Tables --> Views
 ```
 
 ### Live Progress Monitoring & Probe Escalation
