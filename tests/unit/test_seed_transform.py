@@ -133,7 +133,32 @@ def test_parse_args_leaves_env_untouched_when_no_infra_args(
 ) -> None:
     # Local runs pass no --sf-* and must not clobber an ambient SF_PROJECT_ID.
     monkeypatch.setenv("SF_PROJECT_ID", "ambient-proj")
-    _parse_args(["--n-series", "5"])
+    args = _parse_args(["--n-series", "5"])
     import os
 
     assert os.environ["SF_PROJECT_ID"] == "ambient-proj"
+    assert args.include_covariates is False
+
+
+def test_source_rows_include_covariates_when_requested() -> None:
+    cfg = _cfg(with_exog=True, with_covariates=True)
+    frame = generate_partition([0, 1], cfg, SEED)
+    rows = _to_source_rows(frame, cfg.holidays, include_covariates=True)
+    assert list(rows.columns) == [
+        *_SOURCE_COLUMNS,
+        "region",
+        "category",
+        "promo_flag",
+        "price_index",
+        "temperature",
+    ]
+    assert rows["region"].dtype == "string"
+    assert rows["category"].dtype == "string"
+    assert rows["promo_flag"].dtype == "int64"
+    assert rows["price_index"].dtype == "float64"
+    assert rows["temperature"].dtype == "float64"
+
+
+def test_parse_args_include_covariates_flag() -> None:
+    args = _parse_args(["--n-series", "5", "--include-covariates"])
+    assert args.include_covariates is True

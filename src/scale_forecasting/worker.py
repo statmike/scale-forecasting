@@ -30,6 +30,7 @@ from .errors import ConfigError, get_logger
 from .features import (
     build_features,
     build_future_features,
+    extract_static_covariates,
     fit_transform_lambda,
     holiday_frame,
 )
@@ -277,6 +278,7 @@ def _model_context(
     transform_lambda: float | None = None,
     *,
     family: str | None = None,
+    static_covariates: dict[str, Any] | None = None,
 ) -> ModelContext:
     """Build the per-cell `ModelContext` from the run config.
 
@@ -302,6 +304,8 @@ def _model_context(
         transform=cfg.features.transform,
         transform_lambda=transform_lambda,
         device=_resolve_device(cfg, family),
+        past_covariates=tuple(cfg.features.past_covariates),
+        static_covariates=static_covariates,
     )
 
 
@@ -584,7 +588,13 @@ def run_cell(
         # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
         # predict (the whole point of carrying it on the cell).
         lam = fit_transform_lambda(_target(series, cfg), cfg.features.transform)
-        ctx = _model_context(cfg, transform_lambda=lam, family=model_cls.family)
+        static_covs = extract_static_covariates(series, cfg) or None
+        ctx = _model_context(
+            cfg,
+            transform_lambda=lam,
+            family=model_cls.family,
+            static_covariates=static_covs,
+        )
         _require_device(ctx.device, model_cls.family, engine)
         resolved = _resolve_params(series, model_name, cfg, ctx, params, hpo_fits)
 
@@ -762,6 +772,337 @@ def run_cell(
         )
     except Exception as e:  # any failure → error cell, batch survives
         return _error(e, engine)
+
+
+def is_panel_model(model_name: str, cfg: RunConfig, params: dict[str, Any] | None = None) -> bool:
+    """Whether ``model_name`` is configured for panel training (`global` or `hybrid`)."""
+    authored = dict(cfg.model_params.get(model_name, {}))
+    if params is not None:
+        authored.update(params)
+    return str(authored.get("training_mode", "local")) in ("global", "hybrid")
+
+
+def run_panel(
+    panel: pd.DataFrame,
+    model_name: str,
+    cfg: RunConfig,
+    params: dict[str, Any] | None = None,
+) -> list[CellResult]:
+    """Fit + (optional panel backtest) + predict ONE global/hybrid model across a panel.
+
+    Returns one `CellResult` per distinct ``ts_id`` in ``panel``, preserving the exact per-series
+    schema and lineage contract (`forecasts`, `backtest_oof`, `forecast_metadata`) as `run_cell`.
+    Never raises out of `run_panel` — an unhandled failure produces `status="error"` cells.
+    """
+    from .backtest import OOF_COLUMNS, make_folds
+    from .metrics import compute_metrics
+    from .seasonality import seasonal_period
+
+    id_col = cfg.data.ts_id_col
+    date_col = cfg.data.date_col
+    target_col = cfg.data.target_col
+    run_id = make_run_id(cfg)
+    cell_started_at = datetime.now(UTC)
+    worker_id = _worker_id()
+    available, device_name = visible_device()
+    series_frames: dict[str, pd.DataFrame] = {}
+    for raw_uid, sub in panel.groupby(id_col, sort=True):
+        series_frames[str(raw_uid)] = sub.sort_values(date_col).reset_index(drop=True)
+    uids = sorted(series_frames.keys())
+    if not uids:
+        return []
+
+    def _panel_errors(exc: BaseException, engine: str, n_fits: int = 0) -> list[CellResult]:
+        ended = datetime.now(UTC)
+        return [
+            CellResult(
+                run_id=run_id,
+                ts_id=uid,
+                model_type=model_name,
+                compute_engine=engine,
+                model_hash=make_model_hash(run_id, uid, model_name, cfg),
+                status="error",
+                error=repr(exc),
+                error_class=classify_error(exc),
+                predictions=_empty_predictions(),
+                oof=None,
+                metrics={name: float("nan") for name in METRIC_NAMES},
+                worker_id=worker_id,
+                cell_started_at=cell_started_at,
+                cell_ended_at=ended,
+                device_available=available,
+                device_name=device_name,
+                n_fits=n_fits,
+                train_rows_total=0,
+                n_hpo_fits=0,
+            )
+            for uid in uids
+        ]
+
+    try:
+        model_cls = get_model(model_name)
+    except Exception as e:  # noqa: BLE001
+        return _panel_errors(e, cfg.python_runtime)
+
+    engine = _compute_engine(model_cls, cfg)
+    measuring = cfg.compute.profile.records_measurements
+    intraop_threads = _intraop_threads() if measuring else None
+    cpu_started = time.process_time()
+    started = time.perf_counter()
+    n_fits = 0
+    train_rows_total = 0
+
+    try:
+        ctx = _model_context(cfg, family=model_cls.family)
+        _require_device(ctx.device, model_cls.family, engine)
+        authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
+        resolved = {**authored, **params} if params is not None else authored
+
+        lams: dict[str, float | None] = {
+            uid: fit_transform_lambda(_target(series_frames[uid], cfg), cfg.features.transform)
+            for uid in uids
+        }
+        static_map: dict[str, dict[str, Any]] = {}
+        for uid in uids:
+            sc = extract_static_covariates(series_frames[uid], cfg)
+            if sc:
+                static_map[uid] = sc
+
+        # Optional panel-wide backtest across folds.
+        oof_by_uid: dict[str, pd.DataFrame | None] = dict.fromkeys(uids, None)
+        metrics_by_uid: dict[str, dict[str, float]] = {
+            uid: {name: float("nan") for name in METRIC_NAMES} for uid in uids
+        }
+        bt_status_by_uid: dict[str, str | None] = dict.fromkeys(uids, None)
+        bt_note_by_uid: dict[str, str | None] = dict.fromkeys(uids, None)
+        n_folds_by_uid: dict[str, int | None] = dict.fromkeys(uids, None)
+        bt_refit_by_uid: dict[str, str | None] = dict.fromkeys(uids, None)
+        ach_step_by_uid: dict[str, int | None] = dict.fromkeys(uids, None)
+        ach_min_by_uid: dict[str, int | None] = dict.fromkeys(uids, None)
+        first_val_by_uid: dict[str, date | None] = dict.fromkeys(uids, None)
+        last_val_by_uid: dict[str, date | None] = dict.fromkeys(uids, None)
+
+        if cfg.backtest.enabled:
+            try:
+                folds_by_uid = {uid: make_folds(len(series_frames[uid]), cfg) for uid in uids}
+                max_folds = max((len(fl) for fl in folds_by_uid.values()), default=0)
+                oof_chunks_by_uid: dict[str, list[pd.DataFrame]] = {u: [] for u in uids}
+                fmetrics_by_uid: dict[str, list[dict[str, float]]] = {u: [] for u in uids}
+                m_period = seasonal_period(cfg.data.freq)
+                gap = cfg.backtest.gap
+                bt_h = cfg.backtest.horizon
+
+                for fold_idx in range(max_folds):
+                    active_uids = [u for u in uids if fold_idx < len(folds_by_uid[u])]
+                    if not active_uids:
+                        continue
+                    fold_series_map: dict[str, tuple[pd.Series, pd.DataFrame | None]] = {}
+                    fold_futr_map: dict[str, pd.DataFrame | None] = {}
+                    fold_lams: dict[str, float | None] = {}
+                    for uid in active_uids:
+                        fold = folds_by_uid[uid][fold_idx]
+                        sub = series_frames[uid]
+                        train_slice = sub.iloc[: fold.train_end]
+                        val_future = sub.iloc[fold.train_end : fold.val_end]
+                        if cfg.features.past_covariates:
+                            val_future = val_future.drop(
+                                columns=[
+                                    c
+                                    for c in cfg.features.past_covariates
+                                    if c in val_future.columns
+                                ]
+                            )
+                        y_tr, X_tr = build_features(
+                            train_slice, cfg, lams[uid], model_cls.lags_covariates_internally
+                        )
+                        fold_series_map[uid] = (y_tr, X_tr)
+                        fold_futr_map[uid] = build_future_features(
+                            y_tr, X_tr, cfg, horizon=gap + bt_h, future_covariates_df=val_future
+                        )
+                        fold_lams[uid] = lams[uid]
+                        train_rows_total += len(y_tr)
+
+                    fold_model = model_cls(resolved, ctx)
+                    fold_model.fit_panel(
+                        fold_series_map, static_map=static_map if static_map else None
+                    )
+                    n_fits += 1
+                    preds_map = fold_model.predict_panel(
+                        gap + bt_h,
+                        fold_futr_map,
+                        transform_lambdas=fold_lams,
+                    )
+                    for uid in active_uids:
+                        fold = folds_by_uid[uid][fold_idx]
+                        sub = series_frames[uid]
+                        train_slice = sub.iloc[: fold.train_end]
+                        val_slice = sub.iloc[fold.val_start : fold.val_end]
+                        pred = preds_map[uid].iloc[gap:].reset_index(drop=True)
+                        y_train_raw = train_slice[target_col].to_numpy(dtype=float)
+                        y_val = val_slice[target_col].to_numpy(dtype=float)
+                        yhat_raw = pred["yhat_raw"].to_numpy(dtype=float)
+                        yhat_adjusted = pred["yhat"].to_numpy(dtype=float)
+                        yhat = yhat_raw if cfg.output.point_forecast == "raw" else yhat_adjusted
+                        lower = pred["yhat_lower"].to_numpy(dtype=float)
+                        upper = pred["yhat_upper"].to_numpy(dtype=float)
+                        fmetrics_by_uid[uid].append(
+                            compute_metrics(
+                                y_val,
+                                yhat,
+                                y_train=y_train_raw,
+                                lower=lower,
+                                upper=upper,
+                                seasonal_period=m_period,
+                            )
+                        )
+                        cutoff = pd.Timestamp(train_slice[date_col].iloc[-1]).normalize()
+                        oof_chunks_by_uid[uid].append(
+                            pd.DataFrame(
+                                {
+                                    "ds": pd.to_datetime(val_slice[date_col]).to_numpy(),
+                                    "fold_id": fold.fold_id,
+                                    "y_true": y_val,
+                                    "yhat": yhat,
+                                    "yhat_raw": yhat_raw,
+                                    "yhat_adjusted": yhat_adjusted,
+                                    "yhat_lower": lower,
+                                    "yhat_upper": upper,
+                                    "cutoff_date": cutoff,
+                                    "horizon_step": np.arange(1, len(y_val) + 1),
+                                    "yhat_stale": np.full(len(y_val), np.nan),
+                                },
+                                columns=list(OOF_COLUMNS),
+                            )
+                        )
+
+                for uid in uids:
+                    sub = series_frames[uid]
+                    flist = folds_by_uid[uid]
+                    n_ach = len(fmetrics_by_uid[uid])
+                    n_folds_by_uid[uid] = n_ach
+                    metrics_by_uid[uid] = _rollup_metrics(fmetrics_by_uid[uid])
+                    bt_status_by_uid[uid], bt_note_by_uid[uid] = _backtest_outcome(n_ach, cfg, sub)
+                    if n_ach > 0:
+                        oof_by_uid[uid] = pd.concat(oof_chunks_by_uid[uid], ignore_index=True)
+                        bt_refit_by_uid[uid] = "per_fold"
+                        geom = resolve_geometry(len(sub), cfg)
+                        ach_step_by_uid[uid] = geom.step
+                        ach_min_by_uid[uid] = geom.min_train
+                        first_val_by_uid[uid] = pd.Timestamp(
+                            sub[date_col].iloc[flist[0].val_start]
+                        ).date()
+                        last_val_by_uid[uid] = pd.Timestamp(
+                            sub[date_col].iloc[flist[-1].val_end - 1]
+                        ).date()
+            except Exception as e:  # noqa: BLE001
+                _log.warning("panel backtest failed for %s: %r", model_name, e)
+                for uid in uids:
+                    bt_status_by_uid[uid] = "failed"
+                    n_folds_by_uid[uid] = 0
+                    bt_note_by_uid[uid] = repr(e)
+
+        # Final fit across the full panel.
+        full_series_map: dict[str, tuple[pd.Series, pd.DataFrame | None]] = {}
+        full_futr_map: dict[str, pd.DataFrame | None] = {}
+        for uid in uids:
+            sub = series_frames[uid]
+            y_full, X_full = build_features(
+                sub, cfg, lams[uid], model_cls.lags_covariates_internally
+            )
+            full_series_map[uid] = (y_full, X_full)
+            full_futr_map[uid] = build_future_features(y_full, X_full, cfg)
+            train_rows_total += len(y_full)
+
+        model = model_cls(resolved, ctx)
+        model.fit_panel(full_series_map, static_map=static_map if static_map else None)
+        n_fits += 1
+        raw_preds_map = model.predict_panel(
+            cfg.data.horizon,
+            full_futr_map,
+            transform_lambdas=lams,
+        )
+
+        total_fit_seconds = time.perf_counter() - started
+        total_cpu_seconds = time.process_time() - cpu_started
+        per_series_fit_s = total_fit_seconds / max(1, len(uids))
+        per_series_cpu_s = total_cpu_seconds / max(1, len(uids))
+        rss_bytes = _process_rss_bytes() if measuring else None
+        peak_gpu = _peak_gpu_bytes()
+        dev_used = model.device_used()
+        best_params = model.get_params()
+
+        metric = cfg.backtest.decision_metric
+        corrected = corrected_arm_for(metric)
+        ended_at = datetime.now(UTC)
+
+        results: list[CellResult] = []
+        for idx, uid in enumerate(uids):
+            oof = oof_by_uid[uid]
+            arm, arm_decision = cfg.output.point_forecast or "median", "configured"
+            if arm == "auto":
+                arm, arm_decision = select_arm(oof, metric, corrected)
+            cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
+            predictions, interval_calibration = apply_calibration(raw_preds_map[uid], cal, arm)
+            arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}
+
+            artifact_bytes: bytes | None = None
+            if cfg.compute.persist_models and idx == 0:
+                try:
+                    artifact_bytes = model.serialize()
+                except Exception as e:  # noqa: BLE001
+                    _log.warning("serialize failed for %s/%s: %r", uid, model_name, e)
+
+            results.append(
+                CellResult(
+                    run_id=run_id,
+                    ts_id=uid,
+                    model_type=model_name,
+                    compute_engine=engine,
+                    model_hash=make_model_hash(run_id, uid, model_name, cfg),
+                    status="ok",
+                    error=None,
+                    predictions=predictions,
+                    oof=oof,
+                    metrics=metrics_by_uid[uid],
+                    best_params=best_params,
+                    fit_seconds=per_series_fit_s,
+                    worker_id=worker_id,
+                    cell_started_at=cell_started_at,
+                    cell_ended_at=ended_at,
+                    artifact_bytes=artifact_bytes,
+                    cpu_seconds=per_series_cpu_s if measuring else None,
+                    process_rss_bytes=rss_bytes,
+                    peak_gpu_bytes=peak_gpu,
+                    intraop_threads=intraop_threads,
+                    n_obs=len(series_frames[uid]) if measuring else None,
+                    device_requested=ctx.device,
+                    device_available=available,
+                    device_used=dev_used,
+                    device_name=device_name,
+                    backtest_status=bt_status_by_uid[uid],
+                    n_folds_achieved=n_folds_by_uid[uid],
+                    backtest_note=bt_note_by_uid[uid],
+                    backtest_refit=bt_refit_by_uid[uid],
+                    staleness_gap=None,
+                    achieved_step=ach_step_by_uid[uid],
+                    achieved_min_train=ach_min_by_uid[uid],
+                    first_val_date=first_val_by_uid[uid],
+                    last_val_date=last_val_by_uid[uid],
+                    interval_source="native" if model_cls.supports_native_intervals else "residual",
+                    point_forecast_source=arm,
+                    point_forecast_decision=arm_decision,
+                    interval_calibration=interval_calibration,
+                    point_forecast_margin=arm_comparison.get("margin"),
+                    hpo_scoring=hpo_scoring_basis(len(series_frames[uid]), cfg, params),
+                    diagnostics=_collect_diagnostics(model, uid, model_name),
+                    n_fits=n_fits if idx == 0 else 0,
+                    train_rows_total=train_rows_total if idx == 0 else 0,
+                    n_hpo_fits=0,
+                )
+            )
+        return results
+    except Exception as e:  # noqa: BLE001
+        return _panel_errors(e, engine, n_fits=n_fits)
 
 
 # --- why a cell failed ------------------------------------------------------------------------

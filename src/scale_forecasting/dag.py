@@ -218,7 +218,28 @@ def check_model_params(cfg: RunConfig) -> None:
         )
     for name in cfg.models:
         authored = dict(cfg.model_params.get(name, {}))
-        get_model(name).validate_params(authored, max_horizon=cfg.max_horizon)
+        model_cls = get_model(name)
+        model_cls.validate_params(authored, max_horizon=cfg.max_horizon)
+        mode = str(authored.get("training_mode", "local"))
+        if mode in ("global", "hybrid"):
+            if mode == "global" and not model_cls.supports_global:
+                raise ConfigError(
+                    f"model_params.{name}.training_mode='global' is not supported by '{name}'; "
+                    "only local per-series training is supported."
+                )
+            if mode == "hybrid" and not model_cls.supports_hybrid:
+                raise ConfigError(
+                    f"model_params.{name}.training_mode='hybrid' is not supported by '{name}'."
+                )
+            family_compute = cfg.resolve_family_compute(model_cls.family)
+            if family_compute.runtime == "spark":
+                raise ConfigError(
+                    f"model_params.{name} sets training_mode={mode!r}, which trains a single "
+                    f"shared network across the full panel and requires a Ray runtime "
+                    f"(set python_runtime='ray' or "
+                    f"compute.families.{model_cls.family}.runtime='ray'), "
+                    f"or set training_mode='local' for per-series Spark execution."
+                )
 
 
 def check_hardware_coherence(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> None:

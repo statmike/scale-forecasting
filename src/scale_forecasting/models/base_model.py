@@ -87,6 +87,11 @@ class ModelContext:
     # A context field, not a config field: `ModelContext` is not in `cfg.model_dump`, so no run_id
     # moves.
     device: Literal["auto", "cpu", "gpu"] = "auto"
+    # Which columns in X are observed-only historical covariates (`features.past_covariates`),
+    # and the per-series static attribute map (`features.static_covariates`). Both default to
+    # empty/None so existing callers constructing ModelContext(freq, horizon) are unchanged.
+    past_covariates: tuple[str, ...] = ()
+    static_covariates: dict[str, Any] | None = None
 
 
 # The factory registry: name → concrete model class. Populated by register() at import.
@@ -118,6 +123,12 @@ class BaseModel(ABC):
     family: ClassVar[Family]
     supports_exog: ClassVar[bool] = False
     supports_native_intervals: ClassVar[bool] = False
+    # Can this model train a single shared network across a multi-series panel
+    # (`training_mode="global"`) or a shared-plus-series-specific architecture
+    # (`training_mode="hybrid"`)? Every model still supports per-series `training_mode="local"`
+    # (the default) via `fit(y, X)` / `predict(horizon, X)`.
+    supports_global: ClassVar[bool] = False
+    supports_hybrid: ClassVar[bool] = False
     # Does this model build its *own* lags of the covariates it is given? If so, the driver hands
     # it the unlagged columns only and withholds anything `features.exog_lags` built, so a
     # covariate is never lagged twice — once by the config and once by the model.
@@ -206,6 +217,24 @@ class BaseModel(ABC):
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
         """Return the canonical prediction frame in original units."""
+
+    def fit_panel(
+        self,
+        series_map: Mapping[str, tuple[pd.Series, pd.DataFrame | None]],
+        static_map: Mapping[str, dict[str, Any]] | None = None,
+    ) -> None:
+        """Fit a single global or hybrid model across a panel of ``{ts_id: (y, X)}``."""
+        raise ModelError(f"{type(self).name} does not support panel-wide fit")
+
+    def predict_panel(
+        self,
+        horizon: int,
+        future_exog_map: Mapping[str, pd.DataFrame | None] | None = None,
+        quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
+        transform_lambdas: Mapping[str, float | None] | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Return ``{ts_id: canonical_prediction_frame}`` in original units for a fitted panel."""
+        raise ModelError(f"{type(self).name} does not support panel-wide predict")
 
     # --- frozen backtesting: moving the forecast origin without refitting ------------
 

@@ -110,6 +110,7 @@ models-prophet = [
 ]
 models-dl = [
     "neuralprophet>=0.9",
+    "neuralforecast>=1.7",
     "torch>=2.13,<2.14",
 ]
 # Full optional model suite (statistical + boosted-tree + Prophet + deep-learning).
@@ -120,6 +121,7 @@ models = [
     "catboost>=1.2",
     "prophet>=1.1.5",
     "neuralprophet>=0.9",
+    "neuralforecast>=1.7",
     # torch is transitive via neuralprophet, but we pin it explicitly to bind the CUDA build below.
     # NeuralProphet is the only GPU model, and it runs on Ray-on-Vertex T4s whose host driver
     # (535.x) caps at CUDA 12.2. The default PyPI torch wheel is a CUDA-13 build that refuses to
@@ -211,6 +213,7 @@ module = [
     "catboost.*",
     "prophet.*",
     "neuralprophet.*",
+    "neuralforecast.*",
     "sklearn.*",
 ]
 ignore_missing_imports = true

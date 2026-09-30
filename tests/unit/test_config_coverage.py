@@ -247,10 +247,22 @@ UNPROVEN: dict[str, str] = {
     "models=kalman": (
         "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
     ),
+    "models=patchtst": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
     "models=random_forest": (
         "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
     ),
     "models=tbats": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=tft": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=tide": (
+        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
+    ),
+    "models=tsmixer": (
         "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
     ),
     # --- features ------------------------------------------------------------------------------

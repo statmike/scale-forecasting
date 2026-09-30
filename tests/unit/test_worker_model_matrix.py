@@ -46,10 +46,19 @@ _CREATED = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 # Optional third-party dep required by each model (None = core-only). Same map as the model
 # contract test: a model whose optional extra is absent registers and skips rather than failing.
 _MODEL_DEP: dict[str, str] = {
+    "auto_arima": "statsforecast",
+    "auto_ces": "statsforecast",
+    "auto_theta": "statsforecast",
+    "tbats": "statsforecast",
     "xgboost": "xgboost",
     "lightgbm": "lightgbm",
+    "catboost": "catboost",
     "prophet": "prophet",
     "neuralprophet": "neuralprophet",
+    "patchtst": "neuralforecast",
+    "tft": "neuralforecast",
+    "tide": "neuralforecast",
+    "tsmixer": "neuralforecast",
 }
 
 # The metrics a well-behaved model on a well-behaved series has no excuse for. The other twelve are
@@ -78,11 +87,21 @@ def _series(n: int = 400) -> pd.DataFrame:
     return pd.DataFrame({"ts_id": "series-a", "ds": idx, "y": trend + weekly + noise})
 
 
+_PARAMS: dict[str, dict[str, int]] = {
+    "neuralprophet": {"epochs": 5},
+    "patchtst": {"max_steps": 5},
+    "tft": {"max_steps": 5},
+    "tide": {"max_steps": 5},
+    "tsmixer": {"max_steps": 5},
+}
+
+
 def _cfg(model_name: str) -> RunConfig:
     return RunConfig(
         run_name="worker model matrix",
         data={"source_table": "t", "freq": "D", "horizon": HORIZON},
         models=[model_name],
+        model_params={model_name: _PARAMS[model_name]} if model_name in _PARAMS else {},
         backtest={
             "enabled": True,
             "n_folds": 3,

@@ -364,7 +364,7 @@ def run_group(
     """
     import pandas as pd
 
-    from ..worker import run_cell
+    from ..worker import is_panel_model, run_cell, run_panel
 
     id_col = cfg.data.ts_id_col
     helper_cols = [c for c in (_MODEL_COL, _BUCKET_COL) if c in pdf.columns]
@@ -373,16 +373,31 @@ def run_group(
 
     results: list[CellResult] = []
     if _MODEL_COL in pdf.columns:
-        # tagged frame: the cross-join tagged each row with its model; one cell per (ts_id, model).
-        for (_ts_id, model_name), sub in pdf.groupby([id_col, _MODEL_COL], sort=False):
-            series = sub.drop(columns=helper_cols)
-            results.append(run_cell(series, str(model_name), cfg, by_model.get(str(model_name))))
+        # tagged frame: group by model first so panel models (`global`/`hybrid`) see the full
+        # panel while local models run per `(ts_id, model)` cell.
+        for raw_model, model_sub in pdf.groupby(_MODEL_COL, sort=False):
+            mname = str(raw_model)
+            if is_panel_model(mname, cfg, by_model.get(mname)):
+                clean_panel = model_sub.drop(columns=helper_cols)
+                results.extend(run_panel(clean_panel, mname, cfg, by_model.get(mname)))
+            else:
+                for _ts_id, sub in model_sub.groupby(id_col, sort=False):
+                    series = sub.drop(columns=helper_cols)
+                    results.append(run_cell(series, mname, cfg, by_model.get(mname)))
     else:
-        # untagged frame: one group per series, every executed model run for it in a loop.
-        for _ts_id, sub in pdf.groupby(id_col, sort=False):
-            series = sub.drop(columns=helper_cols)
-            for model_name in executed:
-                results.append(run_cell(series, model_name, cfg, by_model.get(model_name)))
+        # untagged frame: run any panel models (`global`/`hybrid`) across the whole group first,
+        # then run local models per series.
+        panel_models = [m for m in executed if is_panel_model(m, cfg, by_model.get(m))]
+        local_models = [m for m in executed if m not in panel_models]
+        if panel_models and not pdf.empty:
+            clean_panel = pdf.drop(columns=helper_cols)
+            for model_name in panel_models:
+                results.extend(run_panel(clean_panel, model_name, cfg, by_model.get(model_name)))
+        if local_models:
+            for _ts_id, sub in pdf.groupby(id_col, sort=False):
+                series = sub.drop(columns=helper_cols)
+                for model_name in local_models:
+                    results.append(run_cell(series, model_name, cfg, by_model.get(model_name)))
 
     status = pd.DataFrame(
         {

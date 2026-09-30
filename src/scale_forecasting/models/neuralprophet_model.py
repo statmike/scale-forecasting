@@ -51,7 +51,9 @@ class NeuralProphetModel(BaseModel):
     family = "deep_learning"
     supports_exog = False
     supports_native_intervals = True
-    # The only model here with a tensor library under it, and so the only one a device can serve.
+    supports_global = True
+    supports_hybrid = True
+    # One of the models here with a tensor library under it, and so one a device can serve.
     gpu_capable = True
     # Extrapolate only. The network's weights are the estimate and there is no partial-fit seam that
     # absorbs an observation without training, so it declines the frozen scheme and answers the
@@ -116,6 +118,91 @@ class NeuralProphetModel(BaseModel):
         qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
         ds = self._forecast_index(horizon)
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+
+    def fit_panel(
+        self,
+        series_map: Mapping[str, tuple[pd.Series, pd.DataFrame | None]],
+        static_map: Mapping[str, dict[str, Any]] | None = None,
+    ) -> None:
+        """Fit one global or hybrid NeuralProphet network across all series in ``series_map``."""
+        try:
+            from neuralprophet import NeuralProphet, set_log_level, set_random_seed
+        except ImportError as e:  # pragma: no cover - exercised only without the extra
+            raise ModelError("neuralprophet not installed; install the 'models' extra") from e
+        if not series_map:
+            raise ModelError("neuralprophet.fit_panel requires a non-empty series_map")
+        set_log_level("ERROR")
+        set_random_seed(self.ctx.seed)
+
+        uids = sorted(series_map.keys())
+        frames: list[pd.DataFrame] = []
+        self._panel_last_dates: dict[str, pd.Timestamp] = {}
+        for uid in uids:
+            y, _ = series_map[uid]
+            if len(y) < 2:
+                raise ModelError("neuralprophet requires at least 2 observations per series")
+            self._panel_last_dates[uid] = pd.Timestamp(y.index[-1])
+            frames.append(
+                pd.DataFrame(
+                    {
+                        "ID": uid,
+                        "ds": pd.DatetimeIndex(y.index),
+                        "y": y.astype(float).to_numpy(),
+                    }
+                )
+            )
+        self._panel_train = pd.concat(frames, ignore_index=True)
+
+        mode = str(self.params.get("training_mode", "global"))
+        default_trend = "local" if mode == "hybrid" else "global"
+        default_season = "global"
+        trend_gl = str(self.params.get("trend_global_local", default_trend))
+        season_gl = str(self.params.get("season_global_local", default_season))
+
+        model = NeuralProphet(
+            quantiles=list(_BAND),
+            epochs=int(self.params.get("epochs", 50)),
+            learning_rate=float(self.params.get("learning_rate", 0.01)),
+            n_lags=int(self.params.get("n_lags", 0)),
+            n_forecasts=int(self.params.get("n_forecasts", 1)),
+            batch_size=self._optional_int("batch_size"),
+            trend_global_local=trend_gl,
+            season_global_local=season_gl,
+            trainer_config=self._trainer_config(),
+        )
+        model.fit(self._panel_train, freq=self.ctx.freq, progress=None)
+        self._model = model
+
+    def predict_panel(
+        self,
+        horizon: int,
+        future_exog_map: Mapping[str, pd.DataFrame | None] | None = None,
+        quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
+        transform_lambdas: Mapping[str, float | None] | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Predict ``horizon`` steps for every series in the fitted global/hybrid panel."""
+        from scipy.stats import norm
+
+        future = self._model.make_future_dataframe(self._panel_train, periods=horizon)
+        fc = self._model.predict(future)
+        z = norm.ppf(_BAND[1])
+        t = self.ctx.transform
+        out: dict[str, pd.DataFrame] = {}
+        for uid, last_date in self._panel_last_dates.items():
+            ufc = fc[fc["ID"] == uid]
+            mean, lo, hi = (
+                a[-horizon:] for a in self._read_steps(ufc, horizon, last_date=last_date)
+            )
+            sigma = (hi - lo) / (2.0 * z)
+            lam = (
+                transform_lambdas.get(uid, self.ctx.transform_lambda)
+                if transform_lambdas is not None
+                else self.ctx.transform_lambda
+            )
+            qmap = {q: invert_transform(mean + norm.ppf(q) * sigma, t, lam) for q in quantiles}
+            ds = self._future_index(last_date, horizon)
+            out[uid] = self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+        return out
 
     def device_used(self) -> str | None:
         """Where the fit ran — read off the trainer that ran it, not off the weights afterwards.
@@ -182,7 +269,7 @@ class NeuralProphetModel(BaseModel):
         return None if value is None else int(value)
 
     def _read_steps(
-        self, fc: pd.DataFrame, steps: int
+        self, fc: pd.DataFrame, steps: int, *, last_date: pd.Timestamp | None = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Pull the mean and the band for steps 1..``steps`` out of a forecast frame.
 
@@ -204,7 +291,8 @@ class NeuralProphetModel(BaseModel):
         ``n_lags + n_forecasts`` rows whatever ``periods`` it was asked for: at ``n_forecasts=7``
         with ``horizon=3``, the tail of the frame is steps 5-7, not steps 1-3.
         """
-        future = fc[fc["ds"] > self._last_date]
+        anchor = self._last_date if last_date is None else last_date
+        future = fc[fc["ds"] > anchor]
         heads = self._n_heads(fc)
         available = len(future) if heads <= 1 else min(heads, len(future))
         if available < steps:
@@ -249,26 +337,26 @@ class NeuralProphetModel(BaseModel):
 
     @classmethod
     def gpu_useful(cls, params: Mapping[str, Any]) -> bool:
-        """A device earns its cost here only under autoregression — ``n_lags > 0``.
+        """A device earns its cost here under autoregression (``n_lags > 0``) or panel mode.
 
         Without it the network is a few hundred trend and Fourier parameters and the Lightning
         loop, the dataloader and pandas dwarf the kernels; that is the shape Phase 0 measured at
-        50–78 KB of device memory and 95% CPU-bound. AR-Net is what makes the model big enough for
-        the card to matter. ``n_forecasts`` alone does not qualify: extra heads without lags are
-        extra output units on the same tiny network.
+        50–78 KB of device memory and 95% CPU-bound. AR-Net or global/hybrid panel training makes
+        the workload large enough for the card to matter. ``n_forecasts`` alone does not qualify:
+        extra heads without lags are extra output units on the same tiny network.
         """
-        return int(params.get("n_lags", 0) or 0) > 0
+        mode = str(params.get("training_mode", "local"))
+        return int(params.get("n_lags", 0) or 0) > 0 or mode in ("global", "hybrid")
 
     @classmethod
     def validate_params(cls, params: dict[str, Any], *, max_horizon: int) -> None:
-        """Autoregression needs one direct head per step of the horizon.
-
-        With ``n_lags > 0`` NeuralProphet builds ``n_forecasts`` direct heads and forecasts exactly
-        that far — it does **not** recurse to fill a longer request. Measured: ``n_lags=7`` with
-        the default ``n_forecasts=1``, asked for seven periods, returns one value. Left unchecked
-        the horizon comes back short (or, with the diagonal output shape, mostly NaN) after the
-        fleet has already been paid for, which is why this is refused at plan time.
-        """
+        """Validate ``training_mode`` and autoregression direct-head reach."""
+        mode = params.get("training_mode", "local")
+        if mode not in ("local", "global", "hybrid"):
+            raise ConfigError(
+                f"model_params.neuralprophet.training_mode={mode!r} is invalid; "
+                "supported modes: ['local', 'global', 'hybrid']."
+            )
         n_lags = int(params.get("n_lags", 0) or 0)
         if n_lags <= 0:
             return

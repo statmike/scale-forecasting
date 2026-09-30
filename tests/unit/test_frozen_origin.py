@@ -45,12 +45,22 @@ _MODEL_DEP: dict[str, str] = {
     "catboost": "catboost",
     "prophet": "prophet",
     "neuralprophet": "neuralprophet",
+    "patchtst": "neuralforecast",
+    "tft": "neuralforecast",
+    "tide": "neuralforecast",
+    "tsmixer": "neuralforecast",
 }
 
 # Cheap-but-equivalent params: this file asserts *where* a forecast is anchored, never how good it
 # is, so a two-epoch network exercises the same code path as a fifty-epoch one in a fraction of the
 # time.
-_PARAMS: dict[str, dict[str, Any]] = {"neuralprophet": {"epochs": 2}}
+_PARAMS: dict[str, dict[str, Any]] = {
+    "neuralprophet": {"epochs": 2},
+    "patchtst": {"max_steps": 5},
+    "tft": {"max_steps": 5},
+    "tide": {"max_steps": 5},
+    "tsmixer": {"max_steps": 5},
+}
 
 # Models whose point forecast provably *must* move when the history steps up by a constant, because
 # nothing in them is estimated (or, for the state-space / smoothing models, because the filter
@@ -270,9 +280,13 @@ def test_the_re_condition_tier_is_the_one_the_plan_names() -> None:
         "naive_mean",
         "naive_moving_average",
         "naive_seasonal",
+        "patchtst",
         "random_forest",
         "regression_lags",
         "sarimax",
+        "tft",
+        "tide",
+        "tsmixer",
         "ucm",
         "xgboost",
     ]

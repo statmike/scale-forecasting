@@ -74,6 +74,7 @@ class SeedArgs:
     write_method: str  # "direct" | "indirect"
     num_partitions: int  # Spark parallelism for generation
     variant: str  # "iceberg" | "native" | "both"
+    include_covariates: bool = False
 
 
 def _parse_args(argv: list[str] | None) -> SeedArgs:
@@ -91,6 +92,12 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
     p.add_argument("--num-partitions", type=int, default=0)
     # Which storage format(s) of the example input to seed (both share one generated panel).
     p.add_argument("--variant", type=str, choices=("iceberg", "native", "both"), default="both")
+    p.add_argument(
+        "--include-covariates",
+        action="store_true",
+        default=False,
+        help="Include hierarchy (region, category) and three-tier covariate columns.",
+    )
     # Infra identity delivered as args (not env): Dataproc Serverless allowlists Spark property
     # prefixes and rejects driver-env, so the batch passes SF_* here and main() exports them to
     # os.environ before Settings.resolve() — keeping env-based resolution the single seam. The
@@ -111,6 +118,7 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
         write_method=ns.write_method,
         num_partitions=num_partitions,
         variant=ns.variant,
+        include_covariates=bool(ns.include_covariates),
     )
 
 
@@ -177,7 +185,7 @@ def _to_source_rows(
     return out[cols_order]
 
 
-def _source_series_schema() -> object:
+def _source_series_schema(*, include_covariates: bool = False) -> object:
     """Explicit Spark ``StructType`` matching the ``source_series`` DDL (STRING/DATE/DOUBLE/BOOL).
 
     Declared explicitly (not inferred) so a type never collapses on an all-NULL partition and so
@@ -187,20 +195,30 @@ def _source_series_schema() -> object:
         BooleanType,
         DateType,
         DoubleType,
+        LongType,
         StringType,
         StructField,
         StructType,
     )
 
-    return StructType(
-        [
-            StructField("ts_id", StringType(), False),
-            StructField("ds", DateType(), False),
-            StructField("y", DoubleType(), True),
-            StructField("archetype", StringType(), True),
-            StructField("is_holiday", BooleanType(), True),
-        ]
-    )
+    fields = [
+        StructField("ts_id", StringType(), False),
+        StructField("ds", DateType(), False),
+        StructField("y", DoubleType(), True),
+        StructField("archetype", StringType(), True),
+        StructField("is_holiday", BooleanType(), True),
+    ]
+    if include_covariates:
+        fields.extend(
+            [
+                StructField("region", StringType(), True),
+                StructField("category", StringType(), True),
+                StructField("promo_flag", LongType(), True),
+                StructField("price_index", DoubleType(), True),
+                StructField("temperature", DoubleType(), True),
+            ]
+        )
+    return StructType(fields)
 
 
 def _clear_existing(settings: Settings, table_name: str, *, iceberg: bool) -> None:
@@ -285,14 +303,16 @@ def main(argv: list[str] | None = None) -> None:
     for name, iceberg in targets:
         _clear_existing(settings, name, iceberg=iceberg)
 
-    # The shipped example is univariate: with_exog stays at its GenConfig default (False), so the
-    # generator emits no price_index and _to_source_rows projects the univariate schema. The exog
-    # seam remains available for custom source tables (see registry/ddl.py + features.exog).
+    # The shipped example is univariate by default: with_exog/with_covariates stay False unless
+    # --include-covariates is passed.
+    include_covs = args.include_covariates
     gen_cfg = GenConfig(
         history=args.history,
         freq=args.freq,
         start=args.start,
         holidays=args.holidays,
+        with_exog=include_covs,
+        with_covariates=include_covs,
     )
     # Bind loop-invariants into locals so the executor closure captures values, not `args`.
     holidays = args.holidays
@@ -304,7 +324,7 @@ def main(argv: list[str] | None = None) -> None:
         if not id_list:
             return iter(())
         frame = generate_partition(id_list, gen_cfg, master_seed)
-        rows = _to_source_rows(frame, holidays)
+        rows = _to_source_rows(frame, holidays, include_covariates=include_covs)
         # pd.NA → None so Spark writes SQL NULL for any missing cell.
         # (pandas-stubs<3 has no .where(cond, None) overload though it's valid at runtime.)
         records = (
@@ -320,7 +340,9 @@ def main(argv: list[str] | None = None) -> None:
             range(args.n_series), numSlices=args.num_partitions
         )
         row_rdd = ids_rdd.mapPartitions(partition_to_rows)
-        sdf = spark.createDataFrame(row_rdd, schema=_source_series_schema())
+        sdf = spark.createDataFrame(
+            row_rdd, schema=_source_series_schema(include_covariates=include_covs)
+        )
         # Generate once, write to each target format. cache() so the second write reuses the same
         # rows instead of recomputing the panel (and so the two variants are provably identical).
         if len(targets) > 1:

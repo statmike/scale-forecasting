@@ -243,12 +243,13 @@ _UNSTABLE_FIT_RTOL_FORECAST = 5e-4
 _UNSTABLE_FIT_RTOL_METRIC = 1e-2
 _UNSTABLE_FIT_RTOL_BIAS = 4e-2
 
-# `neuralprophet` is excluded from the numeric panel for two independent reasons, and both would
-# have to stop being true to include it: it costs ~51 s for this one series (85% of the panel's
-# whole runtime, for one of sixteen models), and it is an optional extra that a plain `uv sync`
-# does not install, so the snapshot would be unbuildable on a normal checkout. Its fold geometry
-# is still covered — that half is pure arithmetic and does not depend on the model.
-_TOO_SLOW = {"neuralprophet"}
+# Deep learning models (`models-dl` optional extra) are excluded from the numeric panel for two
+# independent reasons, and both would have to stop being true to include them: they require PyTorch
+# training across 3 backtest folds + final fit on a 365-row series, and they live in an optional
+# extra (`models-dl`) that a plain `uv sync` does not install, so the snapshot would be unbuildable
+# on a normal checkout. Their fold geometry is still covered — that half is pure arithmetic and does
+# not depend on the model.
+_TOO_SLOW = {"neuralprophet", "patchtst", "tft", "tide", "tsmixer"}
 
 
 def _shipped_configs() -> list[tuple[str, RunConfig]]:

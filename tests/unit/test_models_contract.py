@@ -33,6 +33,10 @@ _MODEL_DEP: dict[str, str] = {
     "catboost": "catboost",
     "prophet": "prophet",
     "neuralprophet": "neuralprophet",
+    "patchtst": "neuralforecast",
+    "tft": "neuralforecast",
+    "tide": "neuralforecast",
+    "tsmixer": "neuralforecast",
 }
 
 

@@ -63,7 +63,9 @@ comm==0.2.3 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_
 contourpy==1.3.3 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via matplotlib
 coreforecast==0.0.18 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
-    # via statsforecast
+    # via
+    #   neuralforecast
+    #   statsforecast
 cryptography==49.0.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via google-auth
 cuda-bindings==12.9.7 ; platform_machine == 'x86_64' and sys_platform == 'linux'
@@ -100,7 +102,9 @@ frozenlist==1.8.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') o
     #   aiosignal
 fsspec==2026.6.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via
+    #   neuralforecast
     #   pytorch-lightning
+    #   ray
     #   torch
     #   triad
 fugue==0.9.7 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
@@ -266,6 +270,8 @@ nest-asyncio2==1.7.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux'
     # via ipykernel
 networkx==3.6.1 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via torch
+neuralforecast==3.2.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
+    # via scale-forecasting
 neuralprophet==0.9.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via scale-forecasting
 numpy==1.26.4 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
@@ -278,11 +284,13 @@ numpy==1.26.4 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sy
     #   db-dtypes
     #   lightgbm
     #   matplotlib
+    #   neuralforecast
     #   neuralprophet
     #   optuna
     #   pandas
     #   patsy
     #   prophet
+    #   pyarrow
     #   scale-forecasting
     #   scikit-learn
     #   scipy
@@ -290,6 +298,7 @@ numpy==1.26.4 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sy
     #   statsforecast
     #   statsmodels
     #   tensorboard
+    #   tensorboardx
     #   torchmetrics
     #   triad
     #   utilsforecast
@@ -355,7 +364,9 @@ opentelemetry-sdk==1.44.0 ; (platform_machine == 'x86_64' and sys_platform == 'l
 opentelemetry-semantic-conventions==0.65b0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via opentelemetry-sdk
 optuna==4.9.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
-    # via scale-forecasting
+    # via
+    #   neuralforecast
+    #   scale-forecasting
 packaging==26.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via
     #   captum
@@ -371,6 +382,7 @@ packaging==26.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or 
     #   ray
     #   statsmodels
     #   tensorboard
+    #   tensorboardx
     #   torchmetrics
     #   utilsforecast
 pandas==2.3.3 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
@@ -379,8 +391,10 @@ pandas==2.3.3 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sy
     #   cmdstanpy
     #   db-dtypes
     #   fugue
+    #   neuralforecast
     #   neuralprophet
     #   prophet
+    #   ray
     #   scale-forecasting
     #   statsforecast
     #   statsmodels
@@ -437,6 +451,7 @@ protobuf==6.33.6 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or
     #   ray
     #   scale-forecasting
     #   tensorboard
+    #   tensorboardx
 psutil==7.2.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via
     #   ipykernel
@@ -447,9 +462,16 @@ pure-eval==0.2.3 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or
     # via stack-data
 py-spy==0.4.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via ray
-pyarrow==25.0.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
+pyarrow==17.0.0 ; platform_machine == 'x86_64' and sys_platform == 'darwin'
     # via
     #   db-dtypes
+    #   ray
+    #   scale-forecasting
+    #   triad
+pyarrow==25.0.0 ; (platform_machine != 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+    # via
+    #   db-dtypes
+    #   ray
     #   scale-forecasting
     #   triad
 pyasn1==0.6.4 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
@@ -481,8 +503,10 @@ python-dateutil==2.9.0.post0 ; (platform_machine == 'x86_64' and sys_platform ==
     #   pandas
 python-discovery==1.5.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via virtualenv
-pytorch-lightning==2.6.5 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
-    # via neuralprophet
+pytorch-lightning==2.5.6 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
+    # via
+    #   neuralforecast
+    #   neuralprophet
 pytz==2026.3.post1 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via pandas
 pyyaml==6.0.3 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
@@ -495,7 +519,9 @@ pyzmq==27.1.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sy
     #   ipykernel
     #   jupyter-client
 ray==2.47.1 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
-    # via scale-forecasting
+    # via
+    #   neuralforecast
+    #   scale-forecasting
 referencing==0.37.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via
     #   jsonschema
@@ -518,6 +544,7 @@ scipy==1.17.1 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sy
     # via
     #   catboost
     #   lightgbm
+    #   neuralforecast
     #   scale-forecasting
     #   scikit-learn
     #   statsforecast
@@ -559,6 +586,8 @@ tensorboard==2.21.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via neuralprophet
 tensorboard-data-server==0.7.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via tensorboard
+tensorboardx==2.6.5 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
+    # via ray
 threadpoolctl==3.6.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via
     #   scale-forecasting
@@ -567,6 +596,7 @@ threadpoolctl==3.6.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux'
 torch==2.13.0 ; sys_platform == 'darwin'
     # via
     #   captum
+    #   neuralforecast
     #   neuralprophet
     #   pytorch-lightning
     #   scale-forecasting
@@ -574,6 +604,7 @@ torch==2.13.0 ; sys_platform == 'darwin'
 torch==2.13.0+cu126 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   captum
+    #   neuralforecast
     #   neuralprophet
     #   pytorch-lightning
     #   scale-forecasting
@@ -586,6 +617,7 @@ tornado==6.5.8 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or s
     # via
     #   ipykernel
     #   jupyter-client
+    #   neuralforecast
 tqdm==4.69.1 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via
     #   captum
@@ -637,7 +669,9 @@ tzdata==2026.3 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or s
 urllib3==2.7.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via requests
 utilsforecast==0.2.16 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
-    # via statsforecast
+    # via
+    #   neuralforecast
+    #   statsforecast
 virtualenv==21.7.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via ray
 wcwidth==0.8.2 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'

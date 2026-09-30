@@ -803,8 +803,28 @@ def chunk_cells(
     """
     import pandas as pd
 
+    from ..worker import is_panel_model
+
     if source.empty or not models:
         return []
+
+    panel_models = [m for m in models if is_panel_model(m, cfg)]
+    local_models = [m for m in models if m not in panel_models]
+    if panel_models:
+        panel_chunks = [
+            source.assign(**{_MODEL_COL: model}).reset_index(drop=True) for model in panel_models
+        ]
+        if not local_models:
+            return panel_chunks
+        local_raw = chunk_cells(source, cfg, local_models, n_chunks)
+        local_chunks: list[pd.DataFrame] = []
+        for ch in local_raw:
+            if _MODEL_COL in ch.columns:
+                local_chunks.append(ch)
+            else:
+                for model in local_models:
+                    local_chunks.append(ch.assign(**{_MODEL_COL: model}).reset_index(drop=True))
+        return panel_chunks + local_chunks
 
     id_col = cfg.data.ts_id_col
     n_chunks = max(1, min(n_chunks, _MAX_CHUNKS))
