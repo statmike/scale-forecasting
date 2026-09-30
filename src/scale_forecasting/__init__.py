@@ -89,6 +89,14 @@ _LAZY: dict[str, tuple[str, str]] = {
     "get_model": (".models", "get_model"),
     "list_models": (".models", "list_models"),
     "split_by_runtime": (".router", "split_by_runtime"),
+    # Hierarchical aggregation + coherent reconciliation.
+    "HierarchySpec": (".reconciliation", "HierarchySpec"),
+    "build_hierarchy": (".reconciliation", "build_hierarchy"),
+    "reconcile_matrix": (".reconciliation", "reconcile_matrix"),
+    "reconcile_forecasts": (".reconciliation", "reconcile_forecasts"),
+    "reconcile_oof": (".reconciliation", "reconcile_oof"),
+    "reconcile_cells": (".reconciliation", "reconcile_cells"),
+    "verify_coherence": (".reconciliation", "verify_coherence"),
 }
 
 __all__ = [
@@ -122,6 +130,15 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     )
     from .main import run  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
+    from .reconciliation import (  # noqa: F401
+        HierarchySpec,
+        build_hierarchy,
+        reconcile_cells,
+        reconcile_forecasts,
+        reconcile_matrix,
+        reconcile_oof,
+        verify_coherence,
+    )
     from .review import (  # noqa: F401
         CalibrationReport,
         RunProgress,

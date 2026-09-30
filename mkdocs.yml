@@ -138,6 +138,7 @@ nav:
       - Hyperparameter optimization: api/hpo.md
       - Ensembler (blending math): api/ensembler.md
       - Ensemble driver: api/ensemble_run.md
+      - Hierarchical reconciliation: api/reconciliation.md
       - Backtest: api/backtest.md
       - Metrics: api/metrics.md
       - BaseMetric: api/metrics_base_metric.md

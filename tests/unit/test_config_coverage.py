@@ -77,7 +77,7 @@ from pydantic import BaseModel
 # here would be a second thing to drift.
 from test_validation_ledger import _NOT_A_RUN_CONFIG, _table_rows  # noqa: PLC2701
 
-from scale_forecasting.config import RunConfig
+from scale_forecasting.config import RECONCILIATION_METHODS, RunConfig
 from scale_forecasting.metrics import METRIC_NAMES
 from scale_forecasting.models import list_models
 
@@ -91,6 +91,7 @@ _TESTS = _REPO_ROOT / "tests"
 _CATALOGUES: dict[str, tuple[str, ...]] = {
     "METRIC_NAMES": tuple(METRIC_NAMES),
     "MODEL_NAMES": tuple(sorted(list_models())),
+    "RECONCILIATION_METHODS": tuple(RECONCILIATION_METHODS),
 }
 
 
@@ -227,6 +228,46 @@ UNPROVEN: dict[str, str] = {
         "container-image deployment therefore exercises it without any config naming it, and this "
         "join — which reads configs — is structurally blind to that. Read the ledger's prose, not "
         "this entry, before concluding the path is untested."
+    ),
+    # --- hierarchy -----------------------------------------------------------------------------
+    "hierarchy.enabled=true": (
+        "tests/unit/test_reconciliation.py::"
+        "test_hierarchy_config_elided_at_default_and_moves_run_id_when_enabled"
+    ),
+    "hierarchy.reconciliation_methods=bottom_up": (
+        "tests/unit/test_reconciliation.py::"
+        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
+        "(over RECONCILIATION_METHODS)"
+    ),
+    "hierarchy.reconciliation_methods=middle_out": (
+        "tests/unit/test_reconciliation.py::"
+        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
+        "(over RECONCILIATION_METHODS)"
+    ),
+    "hierarchy.reconciliation_methods=mint_shrink": (
+        "tests/unit/test_reconciliation.py::"
+        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
+        "(over RECONCILIATION_METHODS)"
+    ),
+    "hierarchy.reconciliation_methods=ols": (
+        "tests/unit/test_reconciliation.py::"
+        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
+        "(over RECONCILIATION_METHODS)"
+    ),
+    "hierarchy.reconciliation_methods=top_down": (
+        "tests/unit/test_reconciliation.py::"
+        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
+        "(over RECONCILIATION_METHODS)"
+    ),
+    "hierarchy.reconciliation_methods=wls_struct": (
+        "tests/unit/test_reconciliation.py::"
+        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
+        "(over RECONCILIATION_METHODS)"
+    ),
+    "hierarchy.reconciliation_methods=wls_var": (
+        "tests/unit/test_reconciliation.py::"
+        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
+        "(over RECONCILIATION_METHODS)"
     ),
     # --- models --------------------------------------------------------------------------------
     "models=auto_arima": (

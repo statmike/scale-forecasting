@@ -69,8 +69,11 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
     """The columns whose hash defines a bucket — the engine's unit of independence.
 
     ``[ts_id, model_type]`` — a whole cell per bucket, so cells spread across tasks and a slow cell
-    can't block fast ones. See the module docstring for why this is the crux of the scaling story.
+    can't block fast ones. When ``cfg.hierarchy.enabled`` is True, returns ``[_MODEL_COL]`` so each
+    model's full hierarchy lands in one bucket for coherent aggregation and reconciliation.
     """
+    if cfg.hierarchy.enabled:
+        return [_MODEL_COL]
     return [cfg.data.ts_id_col, _MODEL_COL]
 
 
@@ -371,33 +374,61 @@ def run_group(
     executed = models if models is not None else cfg.models
     by_model = params_by_model or {}
 
+    hier_cols = (
+        {col for level in cfg.hierarchy.levels for col in level} if cfg.hierarchy.enabled else set()
+    )
+    can_reconcile = (
+        cfg.hierarchy.enabled
+        and not pdf.empty
+        and bool(hier_cols)
+        and hier_cols.issubset(pdf.columns)
+    )
+
     results: list[CellResult] = []
     if _MODEL_COL in pdf.columns:
-        # tagged frame: group by model first so panel models (`global`/`hybrid`) see the full
-        # panel while local models run per `(ts_id, model)` cell.
+        # tagged frame: group by model first so panel models (`global`/`hybrid`) and hierarchical
+        # runs see the full panel while local non-hierarchical models run per `(ts_id, model)` cell.
         for raw_model, model_sub in pdf.groupby(_MODEL_COL, sort=False):
             mname = str(raw_model)
+            clean_panel = model_sub.drop(columns=helper_cols)
+            spec = None
+            if can_reconcile:
+                from ..reconciliation import build_hierarchy, reconcile_cells
+
+                clean_panel, spec = build_hierarchy(clean_panel, cfg)
+
+            model_results: list[CellResult] = []
             if is_panel_model(mname, cfg, by_model.get(mname)):
-                clean_panel = model_sub.drop(columns=helper_cols)
-                results.extend(run_panel(clean_panel, mname, cfg, by_model.get(mname)))
+                model_results.extend(run_panel(clean_panel, mname, cfg, by_model.get(mname)))
             else:
-                for _ts_id, sub in model_sub.groupby(id_col, sort=False):
-                    series = sub.drop(columns=helper_cols)
-                    results.append(run_cell(series, mname, cfg, by_model.get(mname)))
+                for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
+                    model_results.append(run_cell(sub, mname, cfg, by_model.get(mname)))
+
+            results.extend(model_results)
+            if spec is not None:
+                results.extend(reconcile_cells(model_results, cfg, spec, history_df=clean_panel))
     else:
         # untagged frame: run any panel models (`global`/`hybrid`) across the whole group first,
         # then run local models per series.
+        clean_panel = pdf.drop(columns=helper_cols) if not pdf.empty else pdf
+        spec = None
+        if can_reconcile:
+            from ..reconciliation import build_hierarchy, reconcile_cells
+
+            clean_panel, spec = build_hierarchy(clean_panel, cfg)
+
         panel_models = [m for m in executed if is_panel_model(m, cfg, by_model.get(m))]
         local_models = [m for m in executed if m not in panel_models]
-        if panel_models and not pdf.empty:
-            clean_panel = pdf.drop(columns=helper_cols)
+        if panel_models and not clean_panel.empty:
             for model_name in panel_models:
                 results.extend(run_panel(clean_panel, model_name, cfg, by_model.get(model_name)))
-        if local_models:
-            for _ts_id, sub in pdf.groupby(id_col, sort=False):
-                series = sub.drop(columns=helper_cols)
+        if local_models and not clean_panel.empty:
+            for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
                 for model_name in local_models:
-                    results.append(run_cell(series, model_name, cfg, by_model.get(model_name)))
+                    results.append(run_cell(sub, model_name, cfg, by_model.get(model_name)))
+
+        if spec is not None:
+            results.extend(reconcile_cells(results, cfg, spec, history_df=clean_panel))
 
     status = pd.DataFrame(
         {
@@ -477,11 +508,15 @@ def _needed_columns(cfg: RunConfig) -> list[str]:
     Trims the ``ts_id × model`` cross-join's shuffle to the essential columns (explode duplicates
     each series once per model, so narrow rows matter). Order-preserving + de-duplicated.
     """
+    hierarchy_cols = (
+        [col for level in cfg.hierarchy.levels for col in level] if cfg.hierarchy.enabled else []
+    )
     wanted = [
         cfg.data.ts_id_col,
         cfg.data.date_col,
         cfg.data.target_col,
         *cfg.features.all_covariates,
+        *hierarchy_cols,
     ]
     seen: set[str] = set()
     out: list[str] = []

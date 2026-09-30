@@ -30,17 +30,19 @@ schema) surfaces as a single `ConfigError`.
 | `output` | `OutputConfig` | `{}` | What the shipped `yhat` means — see below. |
 | `hpo` | `HpoConfig` | `{}` | Hyperparameter optimization. |
 | `ensemble` | `EnsembleConfig` | `{}` | Consensus across base models. |
+| `hierarchy` | `HierarchyConfig` | `{}` | Hierarchical aggregation & coherent forecast reconciliation (Hyndman FPP3). |
 | `compute` | `ComputeConfig` | `{}` | Runtime scale + cost guardrails. |
 
 ```mermaid
 flowchart LR
     RunCfg["RunConfig"] --> Data["data (DataConfig)\nsource_table · freq · horizon"]
-    RunCfg --> Models["models + model_params\n26 registered models across 4 families"]
-    RunCfg --> Feat["features (FeaturesConfig)\ntransform · holidays · fourier\nlevel_shift · exog · exog_lags"]
+    RunCfg --> Models["models + model_params\n30 registered models across 4 families"]
+    RunCfg --> Feat["features (FeaturesConfig)\ntransform · holidays · fourier\nlevel_shift · static/future/past covariates"]
     RunCfg --> BT["backtest (BacktestConfig)\nscheme · n_folds · gap\nshort_series · decision_metric"]
     RunCfg --> Out["output (OutputConfig)\npoint_forecast: auto | median | mean | raw"]
     RunCfg --> HPO["hpo (HpoConfig)\nOptuna: fleetwide | per_series"]
     RunCfg --> Ens["ensemble (EnsembleConfig)\nmean · median · inverse_error\nnnls · ridge · xgb"]
+    RunCfg --> Hier["hierarchy (HierarchyConfig)\nlevels · reconciliation_methods\nbottom_up · top_down · mint_shrink"]
     RunCfg --> Comp["compute (ComputeConfig)\nfamilies · ensemble · capacity · profile"]
 ```
 
@@ -83,8 +85,11 @@ can put its statistical family on Spark and its deep-learning family on Ray. See
 |-------|------|---------|---------|
 | `holidays` | `list[str]` | `[]` | Holiday country codes to add (e.g. `["US"]`). |
 | `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform, inverted on output. |
-| `exog` | `list[str]` | `[]` | Exogenous driver columns projected from the source table (consumed by `sarimax`, `ucm`, `prophet`, `regression_lags`, `lightgbm`, and `xgboost`; e.g., `["is_holiday"]` in `31_features_exog.json`). |
-| `exog_lags` | `dict[str, list[int]]` | `{}` | Lagged copies of declared `exog` columns — `{"promo": [1, 7]}` adds `promo_lag_1` and `promo_lag_7`. Keys must appear in `exog`; lags must be positive and distinct. **There is no `lags` field for the target** — see "Why there is no target-lag knob" below. |
+| `exog` | `list[str]` | `[]` | Legacy alias for `future_covariates` (known future exogenous columns projected from the source table). |
+| `static_covariates` | `list[str]` | `[]` | Time-invariant series attributes (`stat_exog_list`, e.g. `["region_id", "category_id", "base_price"]`) consumed by global panel models (`tide`, `tft`, `tsmixer`, `regression_lags`, `random_forest`, `lightgbm`, `xgboost`, `catboost`). |
+| `future_covariates` | `list[str]` | `[]` | Known-future time-varying regressors (`futr_exog_list`, e.g. `["promo_flag", "price_index", "is_holiday"]`) consumed by covariate-aware statistical, ML, and deep-learning models. |
+| `past_covariates` | `list[str]` | `[]` | Historical-only observed regressors (`hist_exog_list`, e.g. `["temp_anomaly", "foot_traffic_index"]`). Strictly masked beyond the forecast origin (`cutoff_date`) during rolling-origin backtesting to prevent lookahead leakage; consumed natively by `tide`, `tft`, `tsmixer`, and `neuralprophet` (`n_lags >= 1`), or via `exog_lags` for lag >= `horizon`. |
+| `exog_lags` | `dict[str, list[int]]` | `{}` | Lagged copies of declared `exog` / `future_covariates` / `past_covariates` columns — `{"promo": [1, 7]}` adds `promo_lag_1` and `promo_lag_7`. Keys must appear in `exog`, `future_covariates`, or `past_covariates`; lags must be positive and distinct. **There is no `lags` field for the target** — see "Why there is no target-lag knob" below. |
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
 | `level_shift` | `bool` | `false` | Detect one abrupt regime change and add it as a `level_shift` step dummy. |
 
@@ -671,6 +676,32 @@ whichever metric you chose: a threshold of `0.3` on `wape` drops models above 0.
 `0.3` on `coverage` drops models that cover less than 70% of actuals. A model with no scored rows at
 all is kept — absence of evidence is not evidence of a bad model, and pruning on it would silently
 empty the blend on a run where the metric frame came back short.
+
+## `hierarchy` — `HierarchyConfig`
+
+Off by default (`{"enabled": false}`, elided from the `run_id` digest when left at its defaults).
+Turn it on to build bottom-up aggregated series across any hierarchy or grouped specification and
+produce **coherent reconciled forecasts** ($\tilde{\mathbf{y}}_h = \mathbf{S}\mathbf{G}\hat{\mathbf{y}}_h$)
+following Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd ed., Ch. 11).
+
+| Field | Type | Default | Constraint | Purpose |
+|-------|------|---------|-----------|---------|
+| `enabled` | `bool` | `false` | — | Enable hierarchical aggregation and post-forecast reconciliation. |
+| `levels` | `list[list[str]]` | `[]` | non-empty when `enabled=true` | Grouping paths defining upper-level nodes (e.g. `[["region_id"], ["region_id", "category_id"]]`). An empty inner list `[]` (automatically included) represents the top-level `"Total"` node. Supports both strict nested hierarchies and crossed/grouped structures (`[["region_id"], ["category_id"]]`). |
+| `reconciliation_methods` | `list[ReconciliationMethod]` | `["bottom_up", "mint_shrink"]` | non-empty when `enabled=true` | Reconciliation operators applied to base forecasts. Each method emits reconciled cells named `<base_model>__rec_<method>` alongside the untouched base cells. |
+| `middle_level` | `list[str]` \| `null` | `null` | must appear in `levels` when `"middle_out"` is selected | Grouping path serving as the anchor level for `"middle_out"` reconciliation. |
+
+**Supported `reconciliation_methods`** ([`reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/reconciliation.py)):
+
+| Method | Kind | Mapping Matrix $\mathbf{G}$ | Description |
+|--------|------|-----------------------------|-------------|
+| `bottom_up` | Single-level | $[\mathbf{0}_{m \times n_a} \mid \mathbf{I}_m]$ | Sums bottom-level forecasts directly up the summing matrix $\mathbf{S}$. Preserves bottom-level dynamics with zero information loss. |
+| `top_down` | Single-level | $[\mathbf{p} \mid \mathbf{0}_{m \times (n-1)}]$ | Disaggregates the top-level (`Total`) forecast using historical average proportions $p_i = \bar{y}_i / \bar{y}_{\text{Total}}$. |
+| `middle_out` | Single-level | Anchored at `middle_level` | Aggregates upwards from `middle_level` via `bottom_up` and disaggregates downwards to bottom nodes using historical proportions within each middle-level parent. |
+| `ols` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \mathbf{S})^{-1} \mathbf{S}^\top$ | Ordinary Least Squares reconciliation ($\mathbf{W}_h = \mathbf{I}_n$). |
+| `wls_struct` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \mathbf{W}_{\text{struct}}^{-1} \mathbf{S})^{-1} \mathbf{S}^\top \mathbf{W}_{\text{struct}}^{-1}$ | Structural Weighted Least Squares ($\mathbf{W}_{\text{struct}} = \operatorname{diag}(\mathbf{S}\mathbf{1}_m)$); requires no historical residuals. |
+| `wls_var` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \mathbf{W}_{\text{var}}^{-1} \mathbf{S})^{-1} \mathbf{S}^\top \mathbf{W}_{\text{var}}^{-1}$ | Variance-weighted Least Squares using diagonal in-sample / out-of-fold 1-step residual variances. |
+| `mint_shrink` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \hat{\mathbf{W}}_{\text{shr}}^{-1} \mathbf{S})^{-1} \mathbf{S}^\top \hat{\mathbf{W}}_{\text{shr}}^{-1}$ | Minimum Trace with analytical **Schäfer-Strimmer shrinkage** of the residual covariance toward its diagonal variance target, ensuring positive-definiteness even when $n_{\text{nodes}} \gg T$. |
 
 ## `compute` — `ComputeConfig`
 

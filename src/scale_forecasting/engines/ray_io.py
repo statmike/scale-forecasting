@@ -808,6 +808,9 @@ def chunk_cells(
     if source.empty or not models:
         return []
 
+    if cfg.hierarchy.enabled:
+        return [source.assign(**{_MODEL_COL: model}).reset_index(drop=True) for model in models]
+
     panel_models = [m for m in models if is_panel_model(m, cfg)]
     local_models = [m for m in models if m not in panel_models]
     if panel_models:

@@ -485,6 +485,95 @@ class EnsembleConfig(BaseModel):
         return data
 
 
+ReconciliationMethod = Literal[
+    "bottom_up",
+    "top_down",
+    "middle_out",
+    "ols",
+    "wls_struct",
+    "wls_var",
+    "mint_shrink",
+]
+RECONCILIATION_METHODS = frozenset(
+    {
+        "bottom_up",
+        "top_down",
+        "middle_out",
+        "ols",
+        "wls_struct",
+        "wls_var",
+        "mint_shrink",
+    }
+)
+
+
+class HierarchyConfig(BaseModel):
+    """Hierarchical and grouped time-series aggregation and coherent forecast reconciliation.
+
+    Off by default (``enabled: false``). When enabled, ``levels`` defines the cross-sectional
+    aggregation hierarchy from top to bottom (for example ``[["region"], ["region", "category"]]``),
+    with the total aggregate (``"__total__"``) prepended automatically and the bottom-level series
+    (``data.ts_id_col``) at the leaves.
+
+    Implements the Hyndman & Athanasopoulos (FPP3 Ch. 11) reconciliation projection
+    ``y_tilde = S @ G @ y_hat`` across seven methods:
+
+    * ``bottom_up`` — sum bottom-level forecasts upward via the summing matrix ``S``.
+    * ``top_down`` — disaggregate the top-level forecast downward by average historical proportions
+      (FPP3 §11.2).
+    * ``middle_out`` — anchor on ``middle_level`` (sum upward above it, disaggregate downward below
+      it by historical proportions within each middle-level node).
+    * ``ols`` — ordinary least squares MinT reconciliation (``W_h = I``).
+    * ``wls_struct`` — structural scaling WLS (``W_h = diag(S @ 1)``), requiring only the hierarchy
+      structure ``S``.
+    * ``wls_var`` — variance scaling WLS (``W_h = diag(W_hat_1)``) weighted by inverse residual
+      variances.
+    * ``mint_shrink`` — Wickramasuriya et al. (2019) Minimum Trace with Schäfer-Strimmer shrinkage
+      covariance of residuals, positive-definite even when ``n_series >> T_obs``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    levels: list[list[str]] = Field(default_factory=list)
+    reconciliation_methods: list[ReconciliationMethod] = [
+        "bottom_up",
+        "wls_struct",
+        "mint_shrink",
+    ]
+    middle_level: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _check_hierarchy(self) -> HierarchyConfig:
+        if len(set(self.reconciliation_methods)) != len(self.reconciliation_methods):
+            raise ValueError(
+                f"hierarchy.reconciliation_methods contains duplicates: "
+                f"{self.reconciliation_methods}"
+            )
+        for idx, level in enumerate(self.levels):
+            if not level:
+                raise ValueError(f"hierarchy.levels[{idx}] is empty; each level must name columns")
+            if len(set(level)) != len(level):
+                raise ValueError(f"hierarchy.levels[{idx}] repeats a column: {level}")
+        if self.middle_level is not None and self.levels and self.middle_level not in self.levels:
+            raise ValueError(
+                f"hierarchy.middle_level {self.middle_level} must be one of hierarchy.levels "
+                f"{self.levels}"
+            )
+        if self.enabled:
+            if not self.levels:
+                raise ValueError(
+                    "hierarchy.enabled=true requires at least one aggregation level in "
+                    "hierarchy.levels (e.g. [['region'], ['region', 'category']])"
+                )
+            if not self.reconciliation_methods:
+                raise ValueError(
+                    "hierarchy.enabled=true requires at least one method in "
+                    "hierarchy.reconciliation_methods"
+                )
+        return self
+
+
 class FamilyCompute(BaseModel):
     """A sparse per-family compute override, layered over the flat `ComputeConfig` defaults.
 
@@ -1064,6 +1153,7 @@ class RunConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     hpo: HpoConfig = Field(default_factory=HpoConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
+    hierarchy: HierarchyConfig = Field(default_factory=HierarchyConfig)
     compute: ComputeConfig = Field(default_factory=ComputeConfig)
     # Per-model hyperparameters, keyed by model name: {"neuralprophet": {"n_lags": 28}}. The
     # declared home for *every* per-model knob, which is what keeps the next identity break small —
