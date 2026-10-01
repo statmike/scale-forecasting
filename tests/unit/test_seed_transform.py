@@ -160,5 +160,25 @@ def test_source_rows_include_covariates_when_requested() -> None:
 
 
 def test_parse_args_include_covariates_flag() -> None:
-    args = _parse_args(["--n-series", "5", "--include-covariates"])
+    args = _parse_args(["--n-series", "5", "--include-covariates", "--driver-load"])
     assert args.include_covariates is True
+    assert args.driver_load is True
+
+
+def test_variant_tables_switches_to_covariate_tables() -> None:
+    from scale_forecasting.data_gen.seed_spark import _variant_tables
+
+    assert _variant_tables("both", include_covariates=False) == (
+        ("source_series_iceberg", True),
+        ("source_series_native", False),
+    )
+    assert _variant_tables("both", include_covariates=True) == (
+        ("source_series_covariates_iceberg", True),
+        ("source_series_covariates_native", False),
+    )
+    assert _variant_tables("iceberg", include_covariates=True) == (
+        ("source_series_covariates_iceberg", True),
+    )
+    assert _variant_tables("native", include_covariates=True) == (
+        ("source_series_covariates_native", False),
+    )

@@ -14,6 +14,7 @@
 
 <p align="center">
   <a href="#quickstart-local-in-5-minutes">⚡ Quickstart</a> •
+  <a href="#packaged-synthetic-data-generation--scale-seeding">🧬 Synthetic Data</a> •
   <a href="#why-scale-forecasting">💡 Why Scale Forecasting</a> •
   <a href="#the-technology-stack">🛠️ The Stack</a> •
   <a href="#how-runs-work-declarative-json-configurations">⚙️ Configurations</a> •
@@ -109,6 +110,68 @@ result = forecaster.run()
 review = sf.review_run(result.run_id)
 sf.plot_leaderboard(review)
 ```
+
+---
+
+## Packaged Synthetic Data Generation & Scale Seeding
+
+To make benchmarking, smoke testing, and model development reproducible without external data dependencies, `scale-forecasting` includes **one unified, deterministic synthetic data generator** ([`scale_forecasting.data_gen`](./src/scale_forecasting/data_gen/README.md)) with **dual capability**: it generates clean **univariate** panels by default and seamlessly expands to **three-tier covariates + hierarchical dimensions** when requested.
+
+### Approach & Methodology: Five Archetypes That Stress-Test Every Capability
+
+Every series $i$ (`s_000000` $\dots$ `s_099999`) is synthesized from interpretable components — `baseline + linear drift + sub-annual & annual harmonics + country holiday bumps + AR(1) colored noise (+ optional exogenous drivers)` — and assigned deterministically (`i % 5`) to one of five archetypes so different model families excel on different slices of the fleet:
+
+| Archetype | Signal Profile | What It Stress-Tests Across the Platform |
+| :--- | :--- | :--- |
+| **`smooth_seasonal`** | High weekly & annual amplitude, low AR(1) noise ($\rho \in [0.1, 0.4]$). | Harmonic & state-space models (`theta`, `auto_theta`, `holtwinters`, `autoets`, `auto_ces`, `tbats`, `fft`). |
+| **`intermittent`** | Low baseline with **60% zero-inflation** (`zero_inflation=0.6`). | Intermittent forecasters (`croston`), zero-safe metrics (`wape`, `maape`, `mase`, `rmsse`), and Box-Cox positivity guards. |
+| **`trending`** | Strong drift (`+60%` to `+180%`) and **15% structural level-shift probability**. | Trend extrapolators (`naive_drift`, `kalman`, `ucm`) and structural regime indicators (`features.level_shift`). |
+| **`promo_spiky`** | Seasonal baseline punctuated by **2.5×–6.0× promotional spikes** and holiday lifts. | Gradient-boosted trees (`xgboost`, `lightgbm`, `catboost`, `random_forest`) and exogenous regressors (`sarimax`, `prophet`, `arima_plus`). |
+| **`noisy`** | High AR(1) persistence ($\rho \in [0.5, 0.85]$) and wide innovation variance. | Global & hybrid deep learning (`tide`, `tft`, `tsmixer`, `patchtst`, `neuralprophet`), conformal interval calibration, and stacked ensembles (`nnls`, `ridge`, `xgb`). |
+
+### One Generator, Dual Capability (Univariate Default + 3-Tier Covariates & Hierarchy)
+
+- **Univariate Mode (`with_exog=False, with_hierarchy=False` — Default):**
+  Produces the 5-column panel (`ts_id, ds, y, archetype, is_holiday`) stored in `source_series_iceberg` and `source_series_native`.
+- **Multivariate + Hierarchy Mode (`with_exog=True, with_hierarchy=True` / `--include-covariates`):**
+  Uses the **exact same generator** (drawing weather noise from an isolated child RNG stream `[master_seed, i, 1]` so baseline draws never shift) to emit a 10-column panel stored in `source_series_covariates_iceberg` and `source_series_covariates_native`:
+  - **Static covariates & 3-level hierarchy (`static_covariates` / `hierarchy.levels`):** `region` (`NA`, `EMEA`, `APAC`, `LATAM`) and `category` (`enterprise`, `SMB`, `consumer`) $\rightarrow$ `1` total node + `4` regions + `12` `region × category` nodes + $N$ bottom series.
+  - **Known-future covariates (`future_covariates`):** `is_holiday` (country calendar), `promo_flag` (deterministic 0/1 promotional calendar), and `price_index` (smooth quarterly price index).
+  - **Historical-only covariates (`past_covariates`):** `temperature` (annual cycle + AR(1) weather innovations, tested with lookahead-safe `exog_lags`).
+
+### Partition-Invariant Scale: 3 Series in Memory $\rightarrow$ 100,000+ Series on Spark
+
+Each series is seeded exclusively by `(master_seed, series_index)` via `np.random.default_rng([master_seed, i])`. This guarantees the **partition-union invariant**:
+- Generating series `s_000007` alone in a unit test produces the **exact same floating-point values** as generating it across 512 Spark executor partitions in a 100,000-series Dataproc Serverless job.
+- Setting `data.series_limit: 100` on a 100,000-series BigQuery table reads the exact same 100 series as `generate_panel(100, ...)`.
+- Both **Native BigQuery** and **BigLake Apache Iceberg** tables are populated from a single cached Spark DataFrame pass, guaranteeing byte-identical data across storage formats.
+
+### How to Generate & Seed Data
+
+```python
+from scale_forecasting import playground
+from scale_forecasting.data_gen.generator import GenConfig, generate_panel
+
+# 1. Local in-memory sample (univariate or with 3-tier covariates + hierarchy)
+df_uni = playground.sample_data(n_series=3, history=730)
+df_cov = playground.sample_data(n_series=12, history=730, with_exog=True, with_hierarchy=True)
+
+# 2. Direct generator API (any series count, frequency 'D'/'W'/'MS'/'h', or country calendar)
+cfg = GenConfig(history=1460, freq="D", holidays=("US",), with_exog=True, with_hierarchy=True)
+panel = generate_panel(100, cfg, seed=20260726)
+```
+
+```bash
+# 3. Fast driver-side seed to BigQuery & Iceberg (e.g. 100-series covariate + hierarchy smoke tables)
+uv run python -m scale_forecasting.data_gen.seed_spark \
+  --n-series 100 --include-covariates --driver-load
+
+# 4. Distributed PySpark seed (e.g. 100,000 series across Dataproc Serverless executors)
+uv run python -m scale_forecasting.data_gen.seed_spark \
+  --n-series 100000 --variant both
+```
+
+➡️ **Full generator architecture and seeding guide: [`src/scale_forecasting/data_gen/README.md`](./src/scale_forecasting/data_gen/README.md) • API Reference: [`docs/api/data_gen.md`](./docs/api/data_gen.md).**
 
 ---
 
@@ -616,6 +679,7 @@ Follow our step-by-step **[Hands-On Workshop Guide](./docs/workshop.md)**. It wa
 - **Comprehensive Configuration Reference:** [`docs/configuration_reference.md`](./docs/configuration_reference.md)
 - **Models & Ensembles Reference:** [`docs/models_reference.md`](./docs/models_reference.md)
 - **Evaluation Metrics Reference:** [`docs/metrics_reference.md`](./docs/metrics_reference.md)
+- **Synthetic Data Generation & Seeding:** [`src/scale_forecasting/data_gen/README.md`](./src/scale_forecasting/data_gen/README.md) & [`docs/api/data_gen.md`](./docs/api/data_gen.md)
 - **Hands-On Workshop:** [`docs/workshop.md`](./docs/workshop.md)
 - **Python SDK & Developer Guide:** [`docs/using_the_sdk.md`](./docs/using_the_sdk.md)
 - **Running, Monitoring & Reviewing:** [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md)

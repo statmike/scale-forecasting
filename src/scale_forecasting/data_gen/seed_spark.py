@@ -75,6 +75,7 @@ class SeedArgs:
     num_partitions: int  # Spark parallelism for generation
     variant: str  # "iceberg" | "native" | "both"
     include_covariates: bool = False
+    driver_load: bool = False
 
 
 def _parse_args(argv: list[str] | None) -> SeedArgs:
@@ -98,6 +99,12 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
         default=False,
         help="Include hierarchy (region, category) and three-tier covariate columns.",
     )
+    p.add_argument(
+        "--driver-load",
+        action="store_true",
+        default=False,
+        help="Generate in-process and load via BigQuery Load API instead of PySpark.",
+    )
     # Infra identity delivered as args (not env): Dataproc Serverless allowlists Spark property
     # prefixes and rejects driver-env, so the batch passes SF_* here and main() exports them to
     # os.environ before Settings.resolve() — keeping env-based resolution the single seam. The
@@ -119,6 +126,7 @@ def _parse_args(argv: list[str] | None) -> SeedArgs:
         num_partitions=num_partitions,
         variant=ns.variant,
         include_covariates=bool(ns.include_covariates),
+        driver_load=bool(ns.driver_load),
     )
 
 
@@ -244,17 +252,73 @@ def _clear_existing(settings: Settings, table_name: str, *, iceberg: bool) -> No
         raise RegistryError(f"seed clear of {table} failed: {exc}") from exc
 
 
-def _variant_tables(variant: str) -> tuple[tuple[str, bool], ...]:
-    """Resolve ``--variant`` to the ``(table_name, iceberg)`` pairs to seed."""
+SOURCE_COVARIATES_ICEBERG = "source_series_covariates_iceberg"
+SOURCE_COVARIATES_NATIVE = "source_series_covariates_native"
+
+
+def _variant_tables(
+    variant: str,
+    *,
+    include_covariates: bool = False,
+) -> tuple[tuple[str, bool], ...]:
+    """Resolve ``--variant`` (and ``--include-covariates``) to ``(table_name, iceberg)`` pairs."""
     from ..registry.ddl import SOURCE_TABLE_ICEBERG, SOURCE_TABLE_NATIVE
 
-    iceberg = (SOURCE_TABLE_ICEBERG, True)
-    native = (SOURCE_TABLE_NATIVE, False)
+    if include_covariates:
+        iceberg = (SOURCE_COVARIATES_ICEBERG, True)
+        native = (SOURCE_COVARIATES_NATIVE, False)
+    else:
+        iceberg = (SOURCE_TABLE_ICEBERG, True)
+        native = (SOURCE_TABLE_NATIVE, False)
     return {
         "iceberg": (iceberg,),
         "native": (native,),
         "both": (iceberg, native),
     }[variant]
+
+
+def _ensure_covariate_tables(
+    settings: Settings,
+    targets: tuple[tuple[str, bool], ...],
+) -> None:
+    """Create the 10-column covariate + hierarchy source tables if they do not yet exist."""
+    from google.cloud import bigquery
+
+    dataset = f"{settings.project_id}.{settings.dataset_id}"
+    body = """\
+CREATE TABLE IF NOT EXISTS `{dataset}.{table}` (
+  ts_id        STRING NOT NULL,
+  ds           DATE NOT NULL,
+  y            FLOAT64,
+  archetype    STRING,
+  is_holiday   BOOL,
+  region       STRING,
+  category     STRING,
+  promo_flag   INT64,
+  price_index  FLOAT64,
+  temperature  FLOAT64
+)
+"""
+    client = bigquery.Client(project=settings.project_id)
+    for table_name, is_iceberg in targets:
+        if is_iceberg:
+            storage_uri = f"{settings.warehouse_uri.rstrip('/')}/{table_name}"
+            stmt = (
+                body.format(dataset=dataset, table=table_name)
+                + "CLUSTER BY ts_id\n"
+                + f"WITH CONNECTION `{settings.connection}`\n"
+                + "OPTIONS (\n"
+                + "  file_format = 'PARQUET',\n"
+                + "  table_format = 'ICEBERG',\n"
+                + f"  storage_uri = '{storage_uri}'\n"
+                + ");"
+            )
+        else:
+            stmt = (
+                body.format(dataset=dataset, table=table_name)
+                + "PARTITION BY ds\nCLUSTER BY ts_id;"
+            )
+        client.query(stmt).result()
 
 
 def _write_variant(sdf: object, settings: Settings, table_name: str, write_method: str) -> None:
@@ -273,39 +337,76 @@ def _write_variant(sdf: object, settings: Settings, table_name: str, write_metho
     writer.mode("append").save()
 
 
+def _driver_load_variants(
+    rows_df: pd.DataFrame,
+    settings: Settings,
+    targets: tuple[tuple[str, bool], ...],
+    *,
+    include_covariates: bool,
+) -> None:
+    """Load an in-memory pandas DataFrame directly into the target BigQuery / Iceberg table(s)."""
+    from google.cloud import bigquery
+
+    schema = [
+        bigquery.SchemaField("ts_id", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("ds", "DATE", mode="REQUIRED"),
+        bigquery.SchemaField("y", "FLOAT64"),
+        bigquery.SchemaField("archetype", "STRING"),
+        bigquery.SchemaField("is_holiday", "BOOL"),
+    ]
+    if include_covariates:
+        schema.extend(
+            [
+                bigquery.SchemaField("region", "STRING"),
+                bigquery.SchemaField("category", "STRING"),
+                bigquery.SchemaField("promo_flag", "INT64"),
+                bigquery.SchemaField("price_index", "FLOAT64"),
+                bigquery.SchemaField("temperature", "FLOAT64"),
+            ]
+        )
+    client = bigquery.Client(project=settings.project_id)
+    job_cfg = bigquery.LoadJobConfig(
+        schema=schema,
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+    )
+    for name, _iceberg in targets:
+        table_ref = settings.table_ref(name)
+        client.load_table_from_dataframe(rows_df, table_ref, job_config=job_cfg).result()
+        _log.info("driver-load complete: wrote %d rows to %s", len(rows_df), name)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the seed job: generate ``n_series`` series and write the source table variant(s).
 
-    Entrypoint for the Dataproc Serverless PySpark batch (invoked via ``seed_entry.py``). Both
-    source variants (when ``--variant both``) are seeded from a single generated panel so the
-    series are byte-identical across storage formats.
+    Entrypoint for the Dataproc Serverless PySpark batch (invoked via ``seed_entry.py``) or
+    local driver-side seeding (``--driver-load``). Both source variants (when ``--variant both``)
+    are seeded from one generated panel so the series are byte-identical across storage formats.
     """
-    from pyspark.sql import SparkSession
-
     from ..registry.tables import ensure_tables
     from ..settings import Settings
-    from .generator import GenConfig, generate_partition
+    from .generator import GenConfig, generate_panel, generate_partition
 
     args = _parse_args(argv)
     settings = Settings.resolve()
-    targets = _variant_tables(args.variant)
+    include_covs = args.include_covariates
+    targets = _variant_tables(args.variant, include_covariates=include_covs)
     _log.info(
-        "seed start: n_series=%d partitions=%d write_method=%s variant=%s -> %s",
+        "seed start: n_series=%d partitions=%d write_method=%s variant=%s covariates=%s -> %s",
         args.n_series,
         args.num_partitions,
         args.write_method,
         args.variant,
+        include_covs,
         ", ".join(settings.table_ref(name) for name, _ in targets),
     )
 
     # Driver-side: guarantee the tables exist, then clear each target for a clean re-seed.
     ensure_tables(settings=settings)
+    if include_covs:
+        _ensure_covariate_tables(settings, targets)
     for name, iceberg in targets:
         _clear_existing(settings, name, iceberg=iceberg)
 
-    # The shipped example is univariate by default: with_exog/with_hierarchy stay False unless
-    # --include-covariates is passed.
-    include_covs = args.include_covariates
     gen_cfg = GenConfig(
         history=args.history,
         freq=args.freq,
@@ -314,6 +415,14 @@ def main(argv: list[str] | None = None) -> None:
         with_exog=include_covs,
         with_hierarchy=include_covs,
     )
+    if args.driver_load:
+        raw_df = generate_panel(args.n_series, gen_cfg, args.master_seed)
+        rows_df = _to_source_rows(raw_df, args.holidays, include_covariates=include_covs)
+        _driver_load_variants(rows_df, settings, targets, include_covariates=include_covs)
+        return
+
+    from pyspark.sql import SparkSession
+
     # Bind loop-invariants into locals so the executor closure captures values, not `args`.
     holidays = args.holidays
     master_seed = args.master_seed

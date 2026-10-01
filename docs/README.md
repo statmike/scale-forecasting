@@ -36,7 +36,7 @@ How it works and every knob.
   codebase.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
-- [models_reference.md](./models_reference.md) — all 26 built-in models, 6 ensemble strategies,
+- [models_reference.md](./models_reference.md) — all 30 built-in models, 6 ensemble strategies,
   upstream package provenance, hyperparameter search spaces, and optional dependency extras.
 - [metrics_reference.md](./metrics_reference.md) — all 21 evaluation metrics, mathematical
   definitions, direction/calibration flags, and edge-case rules.
@@ -78,10 +78,10 @@ always matches the code.
 End-to-end platform verification across Dataproc Serverless, Dataproc GCE clusters, Vertex AI Ray,
 and BigQuery (distinct from forecast backtesting).
 - [validation.md](./validation.md) — **System Validation Ledger**: the CI-enforced matrix of
-  architecture axes, 31 smoke configs, 20 demonstration configs, 8 notebooks, and 18 capabilities
+  architecture axes, 37 smoke configs, 19 demonstration configs, 8 notebooks, and 18 capabilities
   proven on live GCP.
-- [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 31-smoke suite
-  (`smokes.py`) to verify a deployment or infrastructure change.
+- [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 37-smoke suite
+  (`smoke_harness.py`) to verify a deployment or infrastructure change.
 
 ## Troubleshooting
 - [troubleshooting.md](./troubleshooting.md) — known issues, each symptom → cause → fix.
