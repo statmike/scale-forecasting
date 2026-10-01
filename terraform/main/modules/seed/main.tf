@@ -99,9 +99,9 @@ variable "variant" {
 }
 
 variable "include_covariates" {
-  description = "Seed the 10-column hierarchy + three-tier covariate tables (source_series_covariates_*). Default false seeds the 5-column baseline tables."
+  description = "Seed the 10-column hierarchy + three-tier covariate tables (source_series_covariates_*) and backfill empty baseline tables (source_series_*). Default true."
   type        = bool
-  default     = false
+  default     = true
 }
 
 # --- infra the batch runs against (from other modules' outputs) ---

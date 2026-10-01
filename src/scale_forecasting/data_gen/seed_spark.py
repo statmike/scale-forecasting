@@ -375,6 +375,34 @@ def _driver_load_variants(
         _log.info("driver-load complete: wrote %d rows to %s", len(rows_df), name)
 
 
+def _empty_baseline_targets(
+    settings: Settings,
+    variant: str,
+) -> tuple[tuple[str, bool], ...]:
+    """Return baseline ``source_series_*`` tables for ``variant`` that currently have 0 rows.
+
+    When ``--include-covariates`` is the default on a fresh ``terraform apply``, the primary
+    targets are ``source_series_covariates_*`` (10 columns). Also backfilling any empty baseline
+    ``source_series_*`` tables (5 columns, projected from the same cached panel) ensures that
+    ``module.smoke``, notebooks, and univariate configs targeting ``source_series_native`` /
+    ``source_series_iceberg`` work out of the box without overwriting already-seeded baseline
+    tables on an existing deployment.
+    """
+    from google.cloud import bigquery
+
+    client = bigquery.Client(project=settings.project_id)
+    empty: list[tuple[str, bool]] = []
+    for name, is_iceberg in _variant_tables(variant, include_covariates=False):
+        table_ref = settings.table_ref(name)
+        try:
+            rows = list(client.query(f"SELECT 1 FROM `{table_ref}` LIMIT 1").result())
+            if not rows:
+                empty.append((name, is_iceberg))
+        except Exception:  # noqa: BLE001 - skip backfill safely if check fails
+            continue
+    return tuple(empty)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the seed job: generate ``n_series`` series and write the source table variant(s).
 
@@ -402,8 +430,10 @@ def main(argv: list[str] | None = None) -> None:
 
     # Driver-side: guarantee the tables exist, then clear each target for a clean re-seed.
     ensure_tables(settings=settings)
+    baseline_backfill: tuple[tuple[str, bool], ...] = ()
     if include_covs:
         _ensure_covariate_tables(settings, targets)
+        baseline_backfill = _empty_baseline_targets(settings, args.variant)
     for name, iceberg in targets:
         _clear_existing(settings, name, iceberg=iceberg)
 
@@ -419,6 +449,9 @@ def main(argv: list[str] | None = None) -> None:
         raw_df = generate_panel(args.n_series, gen_cfg, args.master_seed)
         rows_df = _to_source_rows(raw_df, args.holidays, include_covariates=include_covs)
         _driver_load_variants(rows_df, settings, targets, include_covariates=include_covs)
+        if baseline_backfill:
+            base_df = rows_df[list(_SOURCE_COLUMNS)]
+            _driver_load_variants(base_df, settings, baseline_backfill, include_covariates=False)
         return
 
     from pyspark.sql import SparkSession
@@ -454,11 +487,16 @@ def main(argv: list[str] | None = None) -> None:
         )
         # Generate once, write to each target format. cache() so the second write reuses the same
         # rows instead of recomputing the panel (and so the two variants are provably identical).
-        if len(targets) > 1:
+        if len(targets) + len(baseline_backfill) > 1:
             sdf = sdf.cache()
         for name, _iceberg in targets:
             _write_variant(sdf, settings, name, args.write_method)
             _log.info("seed complete: wrote %d series to %s", args.n_series, name)
+        if baseline_backfill:
+            base_sdf = sdf.select(*_SOURCE_COLUMNS)
+            for name, _iceberg in baseline_backfill:
+                _write_variant(base_sdf, settings, name, args.write_method)
+                _log.info("seed baseline backfill: wrote %d series to %s", args.n_series, name)
     finally:
         spark.stop()
 

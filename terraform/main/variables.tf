@@ -171,9 +171,9 @@ variable "seed_variant" {
 }
 
 variable "seed_include_covariates" {
-  description = "When true, pass --include-covariates to seed_spark so it populates the 10-column hierarchy + 3-tier covariate tables (source_series_covariates_iceberg and/or source_series_covariates_native). Default false seeds the 5-column baseline tables."
+  description = "When true (default), pass --include-covariates to seed_spark so it populates the 10-column hierarchy + 3-tier covariate tables (source_series_covariates_*) and backfills empty 5-column baseline tables (source_series_*)."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "seed_image_tag" {
