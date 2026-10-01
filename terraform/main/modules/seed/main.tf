@@ -98,6 +98,12 @@ variable "variant" {
   }
 }
 
+variable "include_covariates" {
+  description = "Seed the 10-column hierarchy + three-tier covariate tables (source_series_covariates_*). Default false seeds the 5-column baseline tables."
+  type        = bool
+  default     = false
+}
+
 # --- infra the batch runs against (from other modules' outputs) ---
 variable "code_bucket" {
   description = "Bucket the launcher (seed_entry.py) is uploaded to and loaded from."
@@ -181,7 +187,8 @@ locals {
   # version — a seed-code change yields a NEW immutable batch that runs the new code (batches are
   # never updated in place). "sf-seed-full-100000-1a2b3c4d" = 28 chars < 63.
   delivery_hash = var.create ? substr(data.archive_file.package[0].output_md5, 0, 8) : ""
-  batch_id      = "sf-seed-${var.run_label}-${var.num_series}-${local.seed_hash}"
+  cov_suffix    = var.include_covariates ? "-cov" : ""
+  batch_id      = "sf-seed-${var.run_label}${local.cov_suffix}-${var.num_series}-${local.seed_hash}"
 
   # The infra identity is passed as JOB ARGS, not Spark env properties. Dataproc Serverless
   # allowlists Spark property prefixes and rejects driver-env (spark.kubernetes.driverEnv.* →
@@ -249,12 +256,16 @@ resource "google_dataproc_batch" "seed" {
     # The package zip: put on sys.path so seed_entry.py's `import scale_forecasting` resolves to
     # this apply's code, not anything in the image.
     python_file_uris = ["gs://${var.code_bucket}/${google_storage_bucket_object.package[0].name}"]
-    args = concat([
-      "--n-series", tostring(var.num_series),
-      "--master-seed", tostring(var.master_seed),
-      "--write-method", var.write_method,
-      "--variant", var.variant,
-    ], local.infra_args)
+    args = concat(
+      [
+        "--n-series", tostring(var.num_series),
+        "--master-seed", tostring(var.master_seed),
+        "--write-method", var.write_method,
+        "--variant", var.variant,
+      ],
+      var.include_covariates ? ["--include-covariates"] : [],
+      local.infra_args,
+    )
   }
 
   # The provider's default create-wait is 10m; a large batch (100k took ~11m wall) blows past it and

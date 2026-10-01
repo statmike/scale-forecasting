@@ -127,11 +127,12 @@ module "seed" {
   project_id = var.project_id
   region     = var.region
 
-  num_series   = var.seed_num_series
-  master_seed  = var.seed_master_seed
-  write_method = var.seed_write_method
-  run_label    = var.seed_run_label
-  variant      = var.seed_variant
+  num_series         = var.seed_num_series
+  master_seed        = var.seed_master_seed
+  write_method       = var.seed_write_method
+  run_label          = var.seed_run_label
+  variant            = var.seed_variant
+  include_covariates = var.seed_include_covariates
 
   code_bucket             = module.storage.code_bucket
   container_image         = "${module.container.image_repo_path}:${var.seed_image_tag}"

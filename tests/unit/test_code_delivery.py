@@ -229,6 +229,16 @@ def test_seed_module_zips_src_and_ships_via_python_file_uris() -> None:
     assert "python_file_uris" in text  # delivered to the batch at runtime
 
 
+def test_seed_module_wires_optional_include_covariates() -> None:
+    seed_tf = _tf("seed")
+    main_tf = (_REPO_ROOT / "terraform" / "main" / "main.tf").read_text()
+    vars_tf = (_REPO_ROOT / "terraform" / "main" / "variables.tf").read_text()
+    assert 'variable "include_covariates"' in seed_tf
+    assert "--include-covariates" in seed_tf
+    assert 'variable "seed_include_covariates"' in vars_tf
+    assert "include_covariates = var.seed_include_covariates" in main_tf
+
+
 def test_smoke_module_zips_src_and_ships_via_py_files() -> None:
     text = _tf("smoke")
     assert 'data "archive_file" "package"' in text

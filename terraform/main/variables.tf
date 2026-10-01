@@ -170,6 +170,12 @@ variable "seed_variant" {
   default     = "both"
 }
 
+variable "seed_include_covariates" {
+  description = "When true, pass --include-covariates to seed_spark so it populates the 10-column hierarchy + 3-tier covariate tables (source_series_covariates_iceberg and/or source_series_covariates_native). Default false seeds the 5-column baseline tables."
+  type        = bool
+  default     = false
+}
+
 variable "seed_image_tag" {
   description = "Tag of the runtime image the seed batch runs (built by docker/cloudbuild.yaml)."
   type        = string
