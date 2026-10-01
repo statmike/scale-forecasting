@@ -682,7 +682,7 @@ empty the blend on a run where the metric frame came back short.
 
 Off by default (`{"enabled": false}`, elided from the `run_id` digest when left at its defaults).
 Turn it on to build bottom-up aggregated series across any hierarchy or grouped specification and
-produce **coherent reconciled forecasts** ($\tilde{\mathbf{y}}_h = \mathbf{S}\mathbf{G}\hat{\mathbf{y}}_h$)
+produce **coherent reconciled forecasts** ($\tilde{y_h} = S G \hat{y_h}$)
 following Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd ed., Ch. 11).
 
 | Field | Type | Default | Constraint | Purpose |
@@ -694,15 +694,15 @@ following Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd 
 
 **Supported `reconciliation_methods`** ([`reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/reconciliation.py)):
 
-| Method | Kind | Mapping Matrix $\mathbf{G}$ | Description |
+| Method | Kind | Mapping Matrix $G$ | Description |
 |--------|------|-----------------------------|-------------|
-| `bottom_up` | Single-level | $[\mathbf{0}_{m \times n_a} \mid \mathbf{I}_m]$ | Sums bottom-level forecasts directly up the summing matrix $\mathbf{S}$. Preserves bottom-level dynamics with zero information loss. |
-| `top_down` | Single-level | $[\mathbf{p} \mid \mathbf{0}_{m \times (n-1)}]$ | Disaggregates the top-level (`Total`) forecast using historical average proportions $p_i = \bar{y}_i / \bar{y}_{\text{Total}}$. |
+| `bottom_up` | Single-level | $[0 \mid I_{n_b}]$ | Sums bottom-level forecasts directly up the summing matrix $S$. Preserves bottom-level dynamics with zero information loss. |
+| `top_down` | Single-level | $[p \mid 0]$ | Disaggregates the top-level (`Total`) forecast using historical average proportions $p_i = \bar{y_i} / \bar{y_{\text{Total}}}$. |
 | `middle_out` | Single-level | Anchored at `middle_level` | Aggregates upwards from `middle_level` via `bottom_up` and disaggregates downwards to bottom nodes using historical proportions within each middle-level parent. |
-| `ols` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \mathbf{S})^{-1} \mathbf{S}^\top$ | Ordinary Least Squares reconciliation ($\mathbf{W}_h = \mathbf{I}_n$). |
-| `wls_struct` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \mathbf{W}_{\text{struct}}^{-1} \mathbf{S})^{-1} \mathbf{S}^\top \mathbf{W}_{\text{struct}}^{-1}$ | Structural Weighted Least Squares ($\mathbf{W}_{\text{struct}} = \operatorname{diag}(\mathbf{S}\mathbf{1}_m)$); requires no historical residuals. |
-| `wls_var` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \mathbf{W}_{\text{var}}^{-1} \mathbf{S})^{-1} \mathbf{S}^\top \mathbf{W}_{\text{var}}^{-1}$ | Variance-weighted Least Squares using diagonal in-sample / out-of-fold 1-step residual variances. |
-| `mint_shrink` | Optimal ($\text{MinT}$) | $(\mathbf{S}^\top \hat{\mathbf{W}}_{\text{shr}}^{-1} \mathbf{S})^{-1} \mathbf{S}^\top \hat{\mathbf{W}}_{\text{shr}}^{-1}$ | Minimum Trace with analytical **Schäfer-Strimmer shrinkage** of the residual covariance toward its diagonal variance target, ensuring positive-definiteness even when $n_{\text{nodes}} \gg T$. |
+| `ols` | Optimal ($\text{MinT}$) | $(S^\top S)^{-1} S^\top$ | Ordinary Least Squares reconciliation ($W_h = I_n$). |
+| `wls_struct` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{struct}}^{-1} S)^{-1} S^\top W_{\text{struct}}^{-1}$ | Structural Weighted Least Squares ($W_{\text{struct}} = \operatorname{diag}(S \mathbf{1})$); requires no historical residuals. |
+| `wls_var` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{var}}^{-1} S)^{-1} S^\top W_{\text{var}}^{-1}$ | Variance-weighted Least Squares using diagonal in-sample / out-of-fold 1-step residual variances. |
+| `mint_shrink` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{shr}}^{-1} S)^{-1} S^\top W_{\text{shr}}^{-1}$ | Minimum Trace with analytical **Schäfer-Strimmer shrinkage** of the residual covariance toward its diagonal variance target, ensuring positive-definiteness even when $n_{\text{nodes}} \gg T$. |
 
 ## `compute` — `ComputeConfig`
 
