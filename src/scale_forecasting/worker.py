@@ -30,6 +30,7 @@ from .errors import ConfigError, get_logger
 from .features import (
     build_features,
     build_future_features,
+    effective_config_for_model,
     extract_static_covariates,
     fit_transform_lambda,
     holiday_frame,
@@ -584,19 +585,20 @@ def run_cell(
     cpu_started = time.process_time()
     started = time.perf_counter()
     try:
+        model_cfg = effective_config_for_model(cfg, model_cls)
         # Fit the transform's stateful λ once per cell (None for none/log1p), on the raw target.
         # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
         # predict (the whole point of carrying it on the cell).
-        lam = fit_transform_lambda(_target(series, cfg), cfg.features.transform)
-        static_covs = extract_static_covariates(series, cfg) or None
+        lam = fit_transform_lambda(_target(series, model_cfg), model_cfg.features.transform)
+        static_covs = extract_static_covariates(series, model_cfg) or None
         ctx = _model_context(
-            cfg,
+            model_cfg,
             transform_lambda=lam,
             family=model_cls.family,
             static_covariates=static_covs,
         )
         _require_device(ctx.device, model_cls.family, engine)
-        resolved = _resolve_params(series, model_name, cfg, ctx, params, hpo_fits)
+        resolved = _resolve_params(series, model_name, model_cfg, ctx, params, hpo_fits)
 
         # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.
         #
@@ -622,19 +624,21 @@ def run_cell(
         achieved_min_train: int | None = None
         first_val_date: date | None = None
         last_val_date: date | None = None
-        if cfg.backtest.enabled:
+        if model_cfg.backtest.enabled:
             try:
                 oof, fold_metrics, bt = backtest_cell(
                     series,
                     lambda: model_cls(resolved, ctx),
-                    cfg,
+                    model_cfg,
                     lam,
                     fits,
                     model_cls.lags_covariates_internally,
                 )
                 metrics = _rollup_metrics(fold_metrics)
                 n_folds_achieved = len(fold_metrics)
-                backtest_status, backtest_note = _backtest_outcome(n_folds_achieved, cfg, series)
+                backtest_status, backtest_note = _backtest_outcome(
+                    n_folds_achieved, model_cfg, series
+                )
                 backtest_refit, staleness_gap = bt.refit_mode, bt.staleness_gap
                 achieved_step, achieved_min_train = bt.achieved_step, bt.achieved_min_train
                 first_val_date, last_val_date = bt.first_val_date, bt.last_val_date
@@ -652,7 +656,7 @@ def run_cell(
                 first_val_date, last_val_date = None, None
 
         # Final fit on the full history, then forecast the horizon.
-        y, X = build_features(series, cfg, lam, model_cls.lags_covariates_internally)
+        y, X = build_features(series, model_cfg, lam, model_cls.lags_covariates_internally)
         model = model_cls(resolved, ctx)
         model.fit(y, X)
         fits.record(len(y))
@@ -661,8 +665,8 @@ def run_cell(
         # level-shift step is carried forward, lagged covariates are read off their own source
         # column, and only user-supplied exog falls back to a recency stand-in because it is
         # genuinely unknown.
-        future_exog = build_future_features(y, X, cfg)
-        predictions = model.predict(cfg.data.horizon, future_exog)
+        future_exog = build_future_features(y, X, model_cfg)
+        predictions = model.predict(model_cfg.data.horizon, future_exog)
 
         # Recalibrate the forward forecast against held-out error.
         #
@@ -853,18 +857,21 @@ def run_panel(
     train_rows_total = 0
 
     try:
-        ctx = _model_context(cfg, family=model_cls.family)
+        model_cfg = effective_config_for_model(cfg, model_cls)
+        ctx = _model_context(model_cfg, family=model_cls.family)
         _require_device(ctx.device, model_cls.family, engine)
-        authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
+        authored: dict[str, Any] = dict(model_cfg.model_params.get(model_name, {}))
         resolved = {**authored, **params} if params is not None else authored
 
         lams: dict[str, float | None] = {
-            uid: fit_transform_lambda(_target(series_frames[uid], cfg), cfg.features.transform)
+            uid: fit_transform_lambda(
+                _target(series_frames[uid], model_cfg), model_cfg.features.transform
+            )
             for uid in uids
         }
         static_map: dict[str, dict[str, Any]] = {}
         for uid in uids:
-            sc = extract_static_covariates(series_frames[uid], cfg)
+            sc = extract_static_covariates(series_frames[uid], model_cfg)
             if sc:
                 static_map[uid] = sc
 
@@ -882,15 +889,15 @@ def run_panel(
         first_val_by_uid: dict[str, date | None] = dict.fromkeys(uids, None)
         last_val_by_uid: dict[str, date | None] = dict.fromkeys(uids, None)
 
-        if cfg.backtest.enabled:
+        if model_cfg.backtest.enabled:
             try:
-                folds_by_uid = {uid: make_folds(len(series_frames[uid]), cfg) for uid in uids}
+                folds_by_uid = {uid: make_folds(len(series_frames[uid]), model_cfg) for uid in uids}
                 max_folds = max((len(fl) for fl in folds_by_uid.values()), default=0)
                 oof_chunks_by_uid: dict[str, list[pd.DataFrame]] = {u: [] for u in uids}
                 fmetrics_by_uid: dict[str, list[dict[str, float]]] = {u: [] for u in uids}
-                m_period = seasonal_period(cfg.data.freq)
-                gap = cfg.backtest.gap
-                bt_h = cfg.backtest.horizon
+                m_period = seasonal_period(model_cfg.data.freq)
+                gap = model_cfg.backtest.gap
+                bt_h = model_cfg.backtest.horizon
 
                 for fold_idx in range(max_folds):
                     active_uids = [u for u in uids if fold_idx < len(folds_by_uid[u])]
@@ -904,20 +911,24 @@ def run_panel(
                         sub = series_frames[uid]
                         train_slice = sub.iloc[: fold.train_end]
                         val_future = sub.iloc[fold.train_end : fold.val_end]
-                        if cfg.features.past_covariates:
+                        if model_cfg.features.past_covariates:
                             val_future = val_future.drop(
                                 columns=[
                                     c
-                                    for c in cfg.features.past_covariates
+                                    for c in model_cfg.features.past_covariates
                                     if c in val_future.columns
                                 ]
                             )
                         y_tr, X_tr = build_features(
-                            train_slice, cfg, lams[uid], model_cls.lags_covariates_internally
+                            train_slice, model_cfg, lams[uid], model_cls.lags_covariates_internally
                         )
                         fold_series_map[uid] = (y_tr, X_tr)
                         fold_futr_map[uid] = build_future_features(
-                            y_tr, X_tr, cfg, horizon=gap + bt_h, future_covariates_df=val_future
+                            y_tr,
+                            X_tr,
+                            model_cfg,
+                            horizon=gap + bt_h,
+                            future_covariates_df=val_future,
                         )
                         fold_lams[uid] = lams[uid]
                         train_rows_total += len(y_tr)
@@ -942,7 +953,9 @@ def run_panel(
                         y_val = val_slice[target_col].to_numpy(dtype=float)
                         yhat_raw = pred["yhat_raw"].to_numpy(dtype=float)
                         yhat_adjusted = pred["yhat"].to_numpy(dtype=float)
-                        yhat = yhat_raw if cfg.output.point_forecast == "raw" else yhat_adjusted
+                        yhat = (
+                            yhat_raw if model_cfg.output.point_forecast == "raw" else yhat_adjusted
+                        )
                         lower = pred["yhat_lower"].to_numpy(dtype=float)
                         upper = pred["yhat_upper"].to_numpy(dtype=float)
                         fmetrics_by_uid[uid].append(
@@ -981,11 +994,13 @@ def run_panel(
                     n_ach = len(fmetrics_by_uid[uid])
                     n_folds_by_uid[uid] = n_ach
                     metrics_by_uid[uid] = _rollup_metrics(fmetrics_by_uid[uid])
-                    bt_status_by_uid[uid], bt_note_by_uid[uid] = _backtest_outcome(n_ach, cfg, sub)
+                    bt_status_by_uid[uid], bt_note_by_uid[uid] = _backtest_outcome(
+                        n_ach, model_cfg, sub
+                    )
                     if n_ach > 0:
                         oof_by_uid[uid] = pd.concat(oof_chunks_by_uid[uid], ignore_index=True)
                         bt_refit_by_uid[uid] = "per_fold"
-                        geom = resolve_geometry(len(sub), cfg)
+                        geom = resolve_geometry(len(sub), model_cfg)
                         ach_step_by_uid[uid] = geom.step
                         ach_min_by_uid[uid] = geom.min_train
                         first_val_by_uid[uid] = pd.Timestamp(
@@ -1007,17 +1022,17 @@ def run_panel(
         for uid in uids:
             sub = series_frames[uid]
             y_full, X_full = build_features(
-                sub, cfg, lams[uid], model_cls.lags_covariates_internally
+                sub, model_cfg, lams[uid], model_cls.lags_covariates_internally
             )
             full_series_map[uid] = (y_full, X_full)
-            full_futr_map[uid] = build_future_features(y_full, X_full, cfg)
+            full_futr_map[uid] = build_future_features(y_full, X_full, model_cfg)
             train_rows_total += len(y_full)
 
         model = model_cls(resolved, ctx)
         model.fit_panel(full_series_map, static_map=static_map if static_map else None)
         n_fits += 1
         raw_preds_map = model.predict_panel(
-            cfg.data.horizon,
+            model_cfg.data.horizon,
             full_futr_map,
             transform_lambdas=lams,
         )

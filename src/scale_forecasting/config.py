@@ -200,6 +200,7 @@ class FeaturesConfig(BaseModel):
     future_covariates: list[str] = Field(default_factory=list)
     past_covariates: list[str] = Field(default_factory=list)
     exog_lags: dict[str, list[int]] = Field(default_factory=dict)
+    on_unsupported_covariates: Literal["fallback", "error"] = "fallback"
     fourier: bool = False
     level_shift: bool = False
 

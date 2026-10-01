@@ -59,7 +59,8 @@ def model_catalog() -> pd.DataFrame:
       they can't run in a local/Spark/Ray Python cell (their in-process fit/predict raise).
 
     Columns: ``model, family, runtime, package, package_url, available, local, spark, ray, gpu,
-    bigquery, exog``.
+    bigquery, exog, future_covariates, past_covariates, static_covariates, global_mode,
+    hybrid_mode``.
     """
     rows: list[dict[str, Any]] = []
     for name in list_models():
@@ -81,6 +82,11 @@ def model_catalog() -> pd.DataFrame:
                 "gpu": cls.gpu_capable,
                 "bigquery": cls.runtime == "bigquery",
                 "exog": cls.supports_exog,
+                "future_covariates": cls.supports_future_covariates,
+                "past_covariates": cls.supports_past_covariates,
+                "static_covariates": cls.supports_static_covariates,
+                "global_mode": cls.supports_global,
+                "hybrid_mode": cls.supports_hybrid,
             }
         )
     # runtime then family then name → Python models first, native last; stable and readable.

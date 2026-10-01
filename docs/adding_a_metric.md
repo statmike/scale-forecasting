@@ -37,7 +37,7 @@ Then try it immediately, offline:
 ```python
 from scale_forecasting.metrics import compute_metrics, list_metrics
 
-list_metrics()                                     # "my_metric" now appears
+list_metrics()  # "my_metric" now appears
 compute_metrics([10.0, 12.0, 11.0], [9.0, 13.0, 11.5])["my_metric"]
 ```
 

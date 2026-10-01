@@ -35,7 +35,7 @@ Public surface: ``build_features``, ``build_future_features``, ``holiday_frame``
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -242,6 +242,51 @@ def extract_static_covariates(series: pd.DataFrame, cfg: RunConfig) -> dict[str,
         val = col.iloc[0]
         out[name] = val.item() if hasattr(val, "item") else val
     return out
+
+
+def effective_config_for_model(cfg: RunConfig, model_cls: type[Any]) -> RunConfig:
+    """Return a `RunConfig` narrowed to the covariate tiers ``model_cls`` actually supports (pure).
+
+    Used inside the worker and HPO so that in a multi-model benchmark under
+    ``on_unsupported_covariates="fallback"`` (the default), a univariate model or a model that
+    supports only dynamic covariates never has its target truncated by ``exog_lags`` of an
+    unsupported covariate tier or receives columns it cannot consume. The run identity (`run_id`
+    and `model_hash`) is always computed from the original ``cfg`` before calling this helper.
+
+    When ``on_unsupported_covariates="error"`` and ``model_cls`` lacks support for any configured
+    tier, raises `ConfigError` naming the model and the unsupported tier(s).
+    """
+    f = cfg.features
+    unsupported = model_cls.unsupported_covariate_tiers(f)
+    if not unsupported:
+        return cfg
+    if f.on_unsupported_covariates == "error":
+        raise ConfigError(
+            f"model '{model_cls.name}' does not support configured covariate tier(s) "
+            f"{list(unsupported)} (supports_future_covariates="
+            f"{model_cls.supports_future_covariates}, "
+            f"supports_past_covariates={model_cls.supports_past_covariates}, "
+            f"supports_static_covariates={model_cls.supports_static_covariates}). "
+            f"Remove '{model_cls.name}' or the unsupported covariate tier(s), or set "
+            f"features.on_unsupported_covariates='fallback' to let '{model_cls.name}' fall back "
+            f"to the tiers it supports."
+        )
+    new_exog = list(f.exog) if model_cls.supports_future_covariates else []
+    new_future = list(f.future_covariates) if model_cls.supports_future_covariates else []
+    new_past = list(f.past_covariates) if model_cls.supports_past_covariates else []
+    new_static = list(f.static_covariates) if model_cls.supports_static_covariates else []
+    kept_dynamic = set(new_exog) | set(new_future) | set(new_past)
+    new_lags = {k: list(v) for k, v in f.exog_lags.items() if k in kept_dynamic}
+    new_features = f.model_copy(
+        update={
+            "exog": new_exog,
+            "future_covariates": new_future,
+            "past_covariates": new_past,
+            "static_covariates": new_static,
+            "exog_lags": new_lags,
+        }
+    )
+    return cfg.model_copy(update={"features": new_features})
 
 
 def build_features(

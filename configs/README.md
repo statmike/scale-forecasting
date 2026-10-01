@@ -53,7 +53,9 @@ fc = sf.Forecaster.from_file("configs/ensemble_demo.json")
 # 2. Inspect the planned execution DAG and deterministic run_id
 dry_run = fc.dry_run()
 print(f"Planned Run ID : {dry_run.run_id}")
-print(f"Total Fits     : {dry_run.fanout.n_series} series × {len(dry_run.python_models) + len(dry_run.bq_models)} models")
+print(
+    f"Total Fits     : {dry_run.fanout.n_series} series × {len(dry_run.python_models) + len(dry_run.bq_models)} models"
+)
 
 # 3. Launch and wait for completion
 result = fc.run()

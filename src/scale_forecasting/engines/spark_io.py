@@ -678,7 +678,7 @@ def add_bucket(
 
     key = [F.col(c) for c in bucket_key_cols(cfg)]
     flat = F.pmod(F.hash(*key), F.lit(n_buckets))
-    if not allocation:
+    if not allocation or cfg.hierarchy.enabled:
         return df.withColumn(_BUCKET_COL, flat)
 
     series_hash = F.hash(F.col(cfg.data.ts_id_col))

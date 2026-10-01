@@ -98,7 +98,9 @@ forecaster = sf.Forecaster.from_file("configs/quickstart_100.json")
 # 2. Preflight validation & cost sizing (offline, zero GCP calls)
 dry_run = forecaster.dry_run()
 print(f"Planned Run ID : {dry_run.run_id}")
-print(f"Total Fits     : {dry_run.fanout.n_series} series × {len(dry_run.python_models) + len(dry_run.bq_models)} models")
+print(
+    f"Total Fits     : {dry_run.fanout.n_series} series × {len(dry_run.python_models) + len(dry_run.bq_models)} models"
+)
 
 # 3. Execute locally or across Google Cloud (Spark, Ray, BigQuery ML)
 result = forecaster.run()

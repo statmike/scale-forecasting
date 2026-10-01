@@ -591,3 +591,14 @@ def test_snapshot_clause_threads_through_setup_and_fold_builders() -> None:
     fold = build_fold_create_statements(cfg, "arima_plus", _DS, 0, 28, snapshot_millis=_SNAP_MS)
     assert any("FOR SYSTEM_TIME AS OF" in s for s in setup)
     assert any(f"`{_SRC}{_SNAP}" in s for s in fold)
+
+
+def test_history_query_includes_hierarchy_levels_when_enabled() -> None:
+    cfg = RunConfig(
+        run_name="hier hist test",
+        data={"source_table": "source_series_iceberg", "series_limit": 10},
+        models=["theta"],
+        hierarchy={"enabled": True, "levels": [["region"], ["region", "category"]]},
+    )
+    sql = build_history_query(cfg, _DS)
+    assert "SELECT ts_id AS ts_id, ds AS ds, y AS y, category, region" in sql

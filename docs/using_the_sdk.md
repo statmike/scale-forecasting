@@ -46,16 +46,16 @@ forecaster = sf.Forecaster.from_file("configs/explode_demo.json")
 
 # See what it would do — no GCP calls, no compute launched.
 plan = forecaster.dry_run()
-print(plan.run_id)          # deterministic config hash — the id the real run lands under
-print(plan.fanout)          # series × models = cells (folds happen inside a cell)
-print(plan.workload)        # the same counts plus the fit-cost half, when it can be known
-print(plan.python_models)   # models routed to the Spark/Ray runtime
-print(plan.bq_models)       # models routed to BigQuery-native
+print(plan.run_id)  # deterministic config hash — the id the real run lands under
+print(plan.fanout)  # series × models = cells (folds happen inside a cell)
+print(plan.workload)  # the same counts plus the fit-cost half, when it can be known
+print(plan.python_models)  # models routed to the Spark/Ray runtime
+print(plan.bq_models)  # models routed to BigQuery-native
 
 # Run it. Spark/Ray and BigQuery-native run in parallel under one run_id.
 result = forecaster.run()
 print(result.run_id, result.dataset_ref)
-print(result.views)         # the five registry views — query any of them by run_id
+print(result.views)  # the five registry views — query any of them by run_id
 ```
 
 `Forecaster` construction:
@@ -106,7 +106,7 @@ By default the run resolves its project/dataset from the `SF_*` environment vari
 explicit identity instead (e.g. from Terraform outputs), inject `Settings`:
 
 ```python
-settings = sf.Settings.from_terraform_outputs(tf_outputs)   # or sf.Settings.resolve()
+settings = sf.Settings.from_terraform_outputs(tf_outputs)  # or sf.Settings.resolve()
 forecaster = sf.Forecaster.from_file("configs/explode_demo.json", settings=settings)
 result = forecaster.run()
 ```
@@ -125,7 +125,7 @@ for node in forecaster.dag():
     print(node.job_key, node.family, node.runtime, node.hardware, "→ deps:", node.depends_on)
 
 # Live — after (or during) a run, the per-family cross-system trace from v_run_jobs.
-for job in forecaster.jobs():        # defaults to this config's run_id
+for job in forecaster.jobs():  # defaults to this config's run_id
     print(job.family, job.runtime, job.status, job.system_job_id, job.runtime_seconds)
 ```
 
@@ -148,14 +148,14 @@ clean up run X":
 ```python
 from scale_forecasting import Registry
 
-reg = Registry()                          # or Forecaster.from_file(...).registry()
-print(reg.doctor())                       # row counts, runs stuck RUNNING, orphaned artifacts
+reg = Registry()  # or Forecaster.from_file(...).registry()
+print(reg.doctor())  # row counts, runs stuck RUNNING, orphaned artifacts
 
-reg.close_runs()                          # PREVIEW — stuck RUNNING headers and what they'd close to
-reg.close_runs(yes=True)                  # writes header statuses only; deletes nothing
+reg.close_runs()  # PREVIEW — stuck RUNNING headers and what they'd close to
+reg.close_runs(yes=True)  # writes header statuses only; deletes nothing
 
-reg.drop_run("abc123")                    # PREVIEW — prints the blast radius, deletes nothing
-reg.drop_run("abc123", yes=True)          # artifacts, then BQML models, then rows
+reg.drop_run("abc123")  # PREVIEW — prints the blast radius, deletes nothing
+reg.drop_run("abc123", yes=True)  # artifacts, then BQML models, then rows
 
 reg.snapshot("before_migration", expiration_days=7)
 reg.export("gs://my-bucket/registry-dump", fmt="JSON")
@@ -217,12 +217,10 @@ settings = sf.Settings.resolve()
 
 # Read your source into a Spark DataFrame with columns [ts_id, ds, y], add a bucket column, then:
 runner = sf.make_group_runner(cfg, settings, models=cfg.models)
-status = (
-    df.groupBy("bucket")
-      .applyInPandas(runner, schema="ts_id string, model_type string, status string, "
-                                    "fit_seconds double")
+status = df.groupBy("bucket").applyInPandas(
+    runner, schema="ts_id string, model_type string, status string, fit_seconds double"
 )
-status.show()   # one row per cell: ts_id, model_type, status, fit_seconds
+status.show()  # one row per cell: ts_id, model_type, status, fit_seconds
 ```
 
 Prefer to control the write yourself? Call the pure core and the writer separately:
@@ -230,10 +228,11 @@ Prefer to control the write yourself? Call the pure core and the writer separate
 ```python
 from scale_forecasting.registry.cells import write_cells
 
+
 def my_runner(pdf):
     results, status = sf.run_group(pdf, cfg, models=cfg.models)
     if results:
-        write_cells(results, settings=settings)   # append-only + dedupe-on-read; safe per-partition
+        write_cells(results, settings=settings)  # append-only + dedupe-on-read; safe per-partition
     return status
 ```
 

@@ -518,8 +518,16 @@ def build_history_query(
     sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
     clause = f"\nWHERE {sfilter}" if sfilter else ""
     snap = _snapshot_clause(snapshot_millis)
+    extra_cols = ""
+    if cfg.hierarchy.enabled:
+        hier_cols = sorted(
+            {col for level in cfg.hierarchy.levels for col in level}
+            - {idc, datec, targetc, "ts_id", "ds", "y"}
+        )
+        if hier_cols:
+            extra_cols = ", " + ", ".join(hier_cols)
     return (
-        f"SELECT {idc} AS ts_id, {datec} AS ds, {targetc} AS y\n"
+        f"SELECT {idc} AS ts_id, {datec} AS ds, {targetc} AS y{extra_cols}\n"
         f"FROM `{source}`{snap}{clause}\n"
         f"ORDER BY ts_id, ds;"
     )

@@ -122,6 +122,9 @@ class BaseModel(ABC):
     runtime: ClassVar[Runtime]
     family: ClassVar[Family]
     supports_exog: ClassVar[bool] = False
+    supports_future_covariates: ClassVar[bool] = False
+    supports_past_covariates: ClassVar[bool] = False
+    supports_static_covariates: ClassVar[bool] = False
     supports_native_intervals: ClassVar[bool] = False
     # Can this model train a single shared network across a multi-series panel
     # (`training_mode="global"`) or a shared-plus-series-specific architecture
@@ -169,6 +172,25 @@ class BaseModel(ABC):
     package_url: ClassVar[str] = "https://numpy.org/"
     optional_import: ClassVar[str | None] = None
     optional_extra: ClassVar[str | None] = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "supports_future_covariates" not in cls.__dict__:
+            cls.supports_future_covariates = bool(cls.supports_exog)
+        if "supports_past_covariates" not in cls.__dict__:
+            cls.supports_past_covariates = bool(cls.supports_exog)
+
+    @classmethod
+    def unsupported_covariate_tiers(cls, features: Any) -> tuple[str, ...]:
+        """Which covariate tiers configured in ``features`` this model does not support."""
+        unsupported: list[str] = []
+        if (features.future_covariates or features.exog) and not cls.supports_future_covariates:
+            unsupported.append("future_covariates")
+        if features.past_covariates and not cls.supports_past_covariates:
+            unsupported.append("past_covariates")
+        if features.static_covariates and not cls.supports_static_covariates:
+            unsupported.append("static_covariates")
+        return tuple(unsupported)
 
     @classmethod
     def is_available(cls) -> bool:

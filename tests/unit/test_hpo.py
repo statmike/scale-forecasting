@@ -265,3 +265,49 @@ def test_the_run_level_hpo_claim_names_the_three_cases() -> None:
     assert hpo_scoring_claim(_cfg()) == "holdout"
     one = _cfg(backtest={"enabled": True, "n_folds": 1, "horizon": 7, "step": 7, "min_train": 60})
     assert hpo_scoring_claim(one) == "in_sample"
+
+
+def test_score_params_uses_fit_panel_for_global_training_mode() -> None:
+    from scale_forecasting.hpo import _score_params
+    from scale_forecasting.models.tide import TiDEModel
+
+    cfg = _cfg(
+        models=["tide"],
+        model_params={"tide": {"training_mode": "global", "max_steps": 2}},
+        backtest={"enabled": True, "n_folds": 2, "horizon": 7, "step": 7, "min_train": 60},
+    )
+    panel_calls: list[int] = []
+
+    def _fake_fit_panel(self, panel, static_map=None):  # type: ignore[no-untyped-def]
+        panel_calls.append(len(panel))
+        return self
+
+    def _fake_predict_panel(
+        self, horizon, X_future_map=None, quantiles=(0.1, 0.5, 0.9), transform_lambdas=None
+    ):  # type: ignore[no-untyped-def]
+        return {
+            uid: pd.DataFrame(
+                {
+                    "step": np.arange(1, horizon + 1),
+                    "yhat": np.full(horizon, 50.0),
+                    "yhat_raw": np.full(horizon, 50.0),
+                    "yhat_lower": np.full(horizon, 45.0),
+                    "yhat_upper": np.full(horizon, 55.0),
+                }
+            )
+            for uid in ("s0", "s1")
+        }
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(TiDEModel, "fit_panel", _fake_fit_panel)
+        mp.setattr(TiDEModel, "predict_panel", _fake_predict_panel)
+        score = _score_params(
+            "tide",
+            {"training_mode": "global", "max_steps": 2},
+            [_series("s0"), _series("s1")],
+            cfg,
+            _context(cfg),
+        )
+
+    assert panel_calls == [2, 2]  # 2 folds, each fitting across the 2-series panel
+    assert np.isfinite(score)

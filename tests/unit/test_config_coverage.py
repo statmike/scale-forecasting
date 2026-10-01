@@ -218,6 +218,10 @@ UNPROVEN: dict[str, str] = {
     # tests, because the only config that set them was smoke 29 and smoke 29 could not finish: the
     # `features.lags` it also carried killed half its cells. Removing that field let the arm run
     # clean, which proved both knobs live in the same pass and emptied this section.
+    "features.on_unsupported_covariates=error": (
+        "tests/unit/test_features.py::"
+        "test_on_unsupported_covariates_error_refuses_in_preflight_and_effective_config"
+    ),
     # --- output ------------------------------------------------------------------------------
     "output.point_forecast=(unset)": (
         "reason: unreachable rather than unproven. The field is declared `… | None = None`, but "

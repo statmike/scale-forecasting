@@ -82,6 +82,148 @@ def _minimize_scalar(metric: str, value: float) -> float:
     return loss_of(metric, value)
 
 
+def _score_panel_params(
+    model_cls: type[BaseModel],
+    params: dict[str, Any],
+    sample: list[pd.DataFrame],
+    cfg: RunConfig,
+    ctx: ModelContext,
+    tally: FitTally | None = None,
+) -> float:
+    """Score one trial of a ``global`` or ``hybrid`` model across ``sample`` via ``fit_panel``."""
+    from .backtest import holdout_fold_id, make_folds
+    from .features import (
+        build_features,
+        build_future_features,
+        extract_static_covariates,
+        fit_transform_lambda,
+    )
+    from .metrics import compute_metrics
+    from .seasonality import seasonal_period
+
+    if not sample:
+        return float("inf")
+    id_col = cfg.data.ts_id_col
+    date_col = cfg.data.date_col
+    target_col = cfg.data.target_col
+    metric = cfg.backtest.decision_metric
+    panel_ctx = replace(
+        ctx,
+        device="auto",
+        past_covariates=tuple(cfg.features.past_covariates),
+    )
+
+    series_frames: dict[str, pd.DataFrame] = {}
+    for idx, s in enumerate(sample):
+        if s.empty:
+            continue
+        uid = str(s[id_col].iloc[0]) if id_col in s.columns else f"s_{idx:04d}"
+        series_frames[uid] = s.sort_values(date_col).reset_index(drop=True)
+    uids = sorted(series_frames.keys())
+    if not uids:
+        return float("inf")
+
+    try:
+        lams = {
+            uid: fit_transform_lambda(
+                series_frames[uid][target_col].astype(float), cfg.features.transform
+            )
+            for uid in uids
+        }
+        static_map: dict[str, dict[str, Any]] = {}
+        for uid in uids:
+            sc = extract_static_covariates(series_frames[uid], cfg)
+            if sc:
+                static_map[uid] = sc
+
+        folds_by_uid = {uid: make_folds(len(series_frames[uid]), cfg) for uid in uids}
+        max_folds = max((len(fl) for fl in folds_by_uid.values()), default=0)
+        if max_folds == 0:
+            return float("inf")
+
+        m_period = seasonal_period(cfg.data.freq)
+        gap = cfg.backtest.gap
+        bt_h = cfg.backtest.horizon
+        fmetrics_by_uid: dict[str, list[dict[str, float]]] = {u: [] for u in uids}
+
+        for fold_idx in range(max_folds):
+            active_uids = [u for u in uids if fold_idx < len(folds_by_uid[u])]
+            if not active_uids:
+                continue
+            fold_series_map: dict[str, tuple[pd.Series, pd.DataFrame | None]] = {}
+            fold_futr_map: dict[str, pd.DataFrame | None] = {}
+            fold_lams: dict[str, float | None] = {}
+            fold_rows = 0
+            for uid in active_uids:
+                fold = folds_by_uid[uid][fold_idx]
+                sub = series_frames[uid]
+                train_slice = sub.iloc[: fold.train_end]
+                val_future = sub.iloc[fold.train_end : fold.val_end]
+                if cfg.features.past_covariates:
+                    val_future = val_future.drop(
+                        columns=[c for c in cfg.features.past_covariates if c in val_future.columns]
+                    )
+                y_tr, X_tr = build_features(
+                    train_slice, cfg, lams[uid], model_cls.lags_covariates_internally
+                )
+                fold_series_map[uid] = (y_tr, X_tr)
+                fold_futr_map[uid] = build_future_features(
+                    y_tr, X_tr, cfg, horizon=gap + bt_h, future_covariates_df=val_future
+                )
+                fold_lams[uid] = lams[uid]
+                fold_rows += len(y_tr)
+
+            fold_model = model_cls(params, panel_ctx)
+            fold_model.fit_panel(fold_series_map, static_map=static_map if static_map else None)
+            if tally is not None:
+                tally.record(fold_rows)
+            preds_map = fold_model.predict_panel(
+                gap + bt_h, fold_futr_map, transform_lambdas=fold_lams
+            )
+            for uid in active_uids:
+                fold = folds_by_uid[uid][fold_idx]
+                sub = series_frames[uid]
+                train_slice = sub.iloc[: fold.train_end]
+                val_slice = sub.iloc[fold.val_start : fold.val_end]
+                pred = preds_map[uid].iloc[gap:].reset_index(drop=True)
+                y_train_raw = train_slice[target_col].to_numpy(dtype=float)
+                y_val = val_slice[target_col].to_numpy(dtype=float)
+                yhat = (
+                    pred["yhat_raw"].to_numpy(dtype=float)
+                    if cfg.output.point_forecast == "raw"
+                    else pred["yhat"].to_numpy(dtype=float)
+                )
+                lower = pred["yhat_lower"].to_numpy(dtype=float)
+                upper = pred["yhat_upper"].to_numpy(dtype=float)
+                fm = compute_metrics(
+                    y_val,
+                    yhat,
+                    y_train=y_train_raw,
+                    lower=lower,
+                    upper=upper,
+                    seasonal_period=m_period,
+                )
+                fm["fold_id"] = float(fold.fold_id)
+                fmetrics_by_uid[uid].append(fm)
+    except Exception as e:  # noqa: BLE001
+        _log.debug("hpo: panel trial failed for %s: %r", model_cls.name, e)
+        return float("inf")
+
+    per_series: list[float] = []
+    holdout = holdout_fold_id(cfg)
+    for uid in uids:
+        fold_metrics = fmetrics_by_uid[uid]
+        inner = [fm for fm in fold_metrics if fm.get("fold_id") != holdout]
+        scored = inner or fold_metrics
+        vals = [fm.get(metric, float("nan")) for fm in scored]
+        finite = [v for v in vals if v == v]
+        if finite:
+            per_series.append(float(np.mean(finite)))
+    if not per_series:
+        return float("inf")
+    return _minimize_scalar(metric, float(np.mean(per_series)))
+
+
 def _score_params(
     model_name: str,
     params: dict[str, Any],
@@ -110,35 +252,55 @@ def _score_params(
     from functools import partial
 
     from .backtest import backtest_cell, holdout_fold_id
-    from .features import fit_transform_lambda
+    from .features import (
+        effective_config_for_model,
+        extract_static_covariates,
+        fit_transform_lambda,
+    )
 
     model_cls = get_model(model_name)
-    metric = cfg.backtest.decision_metric
+    model_cfg = effective_config_for_model(cfg, model_cls)
+    if str(params.get("training_mode", "local")) in ("global", "hybrid"):
+        return _score_panel_params(model_cls, params, sample, model_cfg, ctx, tally)
+
+    metric = model_cfg.backtest.decision_metric
     per_series: list[float] = []
     for series in sample:
         try:
             # Box-Cox λ is per-series: fit it on this series and hand the same λ to both the
             # forward features and the folds' inverse (mirrors run_cell). None for none/log1p.
-            target = series[cfg.data.target_col].astype(float)
-            lam = fit_transform_lambda(target, cfg.features.transform)
+            target = series[model_cfg.data.target_col].astype(float)
+            lam = fit_transform_lambda(target, model_cfg.features.transform)
+            static_covs = extract_static_covariates(series, model_cfg) or None
             # device="auto" is forced, not inherited. A trial may run on the driver — the Ray head
             # node, a Spark driver, an Airflow worker — none of which has an accelerator, and
             # Lightning raises rather than degrading when asked for one that is not there. Auto
             # still uses a device where one exists, so a per-series study on a GPU worker is
             # unaffected; what it gives up is forcing a search OFF a visible card, which is a
             # property of the published fit and not of the search. See `hardware.driver_fit_scope`.
-            series_ctx = replace(ctx, transform_lambda=lam, device="auto")
+            series_ctx = replace(
+                ctx,
+                transform_lambda=lam,
+                device="auto",
+                past_covariates=tuple(model_cfg.features.past_covariates),
+                static_covariates=static_covs,
+            )
             # partial binds this iteration's series_ctx (no loop-var capture; mypy-typed).
             # The search scores the primary arm only. Its job is to rank parameter sets under the
             # run's own scheme, and the control arm answers a question about refit cadence that no
             # choice of hyperparameter changes.
             _, fold_metrics, _ = backtest_cell(
-                series, partial(model_cls, params, series_ctx), cfg, lam, tally
+                series,
+                partial(model_cls, params, series_ctx),
+                model_cfg,
+                lam,
+                tally,
+                *((True,) if model_cls.lags_covariates_internally else ()),
             )
         except Exception as e:  # noqa: BLE001 - a bad series must not sink the whole trial
             _log.debug("hpo: skipping a series for %s: %r", model_name, e)
             continue
-        inner = [fm for fm in fold_metrics if fm.get("fold_id") != holdout_fold_id(cfg)]
+        inner = [fm for fm in fold_metrics if fm.get("fold_id") != holdout_fold_id(model_cfg)]
         # Only this series falls back, not the trial: one short series must not put the whole
         # search back on the fold everything else is reserving.
         scored = inner or fold_metrics

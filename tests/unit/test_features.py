@@ -472,3 +472,165 @@ def test_future_vs_past_covariates_lookahead_isolation() -> None:
     assert future["temperature_lag_2"].to_numpy()[:2] == pytest.approx(
         X["temperature"].to_numpy()[-2:]
     )
+
+
+def test_every_model_declares_explicit_three_tier_covariate_support() -> None:
+    from scale_forecasting.models import get_model, list_models
+    from scale_forecasting.playground import model_catalog
+
+    catalog = model_catalog().set_index("model")
+    assert len(catalog) == 30
+
+    static_models = {"tide", "tft", "tsmixer"}
+    for name in list_models():
+        cls = get_model(name)
+        assert isinstance(cls.supports_future_covariates, bool)
+        assert isinstance(cls.supports_past_covariates, bool)
+        assert isinstance(cls.supports_static_covariates, bool)
+        assert cls.supports_future_covariates == cls.supports_exog
+        assert cls.supports_past_covariates == cls.supports_exog
+        assert cls.supports_static_covariates == (name in static_models)
+
+        row = catalog.loc[name]
+        assert bool(row["future_covariates"]) == cls.supports_future_covariates
+        assert bool(row["past_covariates"]) == cls.supports_past_covariates
+        assert bool(row["static_covariates"]) == cls.supports_static_covariates
+
+
+def test_on_unsupported_covariates_fallback_strips_tiers_without_dropping_lags() -> None:
+    from scale_forecasting.dag import covariate_support_report, preflight
+    from scale_forecasting.features import effective_config_for_model
+    from scale_forecasting.models import get_model
+    from scale_forecasting.registry.ids import make_run_id
+    from scale_forecasting.worker import run_cell
+
+    base_cfg = RunConfig(
+        run_name="cov policy test",
+        data={"source_table": "src", "horizon": 4},
+        models=["theta", "xgboost", "tide"],
+        features={
+            "future_covariates": ["promo_flag"],
+            "past_covariates": ["temperature"],
+            "static_covariates": ["base_price"],
+            "exog_lags": {"promo_flag": [3], "temperature": [2]},
+            "holidays": ["US"],
+            "fourier": True,
+            "level_shift": True,
+        },
+    )
+    # Default "fallback" elides cleanly so existing run_id digests are unchanged.
+    explicit_fallback = RunConfig(
+        run_name="cov policy test",
+        data={"source_table": "src", "horizon": 4},
+        models=["theta", "xgboost", "tide"],
+        features={
+            **base_cfg.features.model_dump(),
+            "on_unsupported_covariates": "fallback",
+        },
+    )
+    assert make_run_id(base_cfg) == make_run_id(explicit_fallback)
+
+    # Report identifies univariate fallback on theta and partial tier fallback on xgboost.
+    notes = covariate_support_report(base_cfg)
+    assert len(notes) == 2
+    assert "theta" in notes[0] and "fall back to univariate" in notes[0]
+    assert "xgboost" in notes[1] and "static_covariates" in notes[1]
+    assert preflight(base_cfg) is not None
+
+    # theta (univariate) strips dynamic/static covariate columns and exog_lags so y keeps all rows.
+    theta_cfg = effective_config_for_model(base_cfg, get_model("theta"))
+    assert theta_cfg.features.future_covariates == []
+    assert theta_cfg.features.past_covariates == []
+    assert theta_cfg.features.static_covariates == []
+    assert theta_cfg.features.exog_lags == {}
+
+    # xgboost keeps future & past covariates and their lags, but drops static_covariates.
+    xgb_cfg = effective_config_for_model(base_cfg, get_model("xgboost"))
+    assert xgb_cfg.features.future_covariates == ["promo_flag"]
+    assert xgb_cfg.features.past_covariates == ["temperature"]
+    assert xgb_cfg.features.static_covariates == []
+    assert xgb_cfg.features.exog_lags == {"promo_flag": [3], "temperature": [2]}
+
+    # tide supports all three tiers, so its config is returned untouched.
+    tide_cfg = effective_config_for_model(base_cfg, get_model("tide"))
+    assert tide_cfg is base_cfg
+
+    # Running theta via run_cell on a series with promo_flag/temperature/base_price succeeds
+    # and does not drop the first 3 observations onto exog_lags.
+    s = _series(40)
+    s["base_price"] = 19.99
+    res = run_cell(
+        s,
+        "theta",
+        RunConfig(
+            run_name="theta fallback cell",
+            data={"source_table": "src", "horizon": 4},
+            models=["theta"],
+            features=base_cfg.features.model_dump(),
+        ),
+    )
+    assert res.status == "ok"
+    assert len(res.predictions) == 4
+
+
+def test_on_unsupported_covariates_error_refuses_in_preflight_and_effective_config() -> None:
+    from scale_forecasting.dag import check_covariate_support, preflight
+    from scale_forecasting.features import effective_config_for_model
+    from scale_forecasting.models import get_model
+
+    # Supported model with on_unsupported_covariates="error" passes preflight cleanly.
+    valid_strict = RunConfig(
+        run_name="strict valid",
+        data={"source_table": "src", "horizon": 4},
+        models=["tide", "tft"],
+        features={
+            "future_covariates": ["promo_flag"],
+            "past_covariates": ["temperature"],
+            "static_covariates": ["base_price"],
+            "on_unsupported_covariates": "error",
+        },
+    )
+    check_covariate_support(valid_strict)
+    assert effective_config_for_model(valid_strict, get_model("tide")) is valid_strict
+
+    # Univariate or partially-supported model with "error" raises ConfigError.
+    invalid_strict = RunConfig(
+        run_name="strict invalid",
+        data={"source_table": "src", "horizon": 4},
+        models=["theta", "xgboost"],
+        features={
+            "future_covariates": ["promo_flag"],
+            "static_covariates": ["base_price"],
+            "on_unsupported_covariates": "error",
+        },
+    )
+    with pytest.raises(ConfigError, match="features.on_unsupported_covariates='error'"):
+        preflight(invalid_strict)
+    with pytest.raises(ConfigError, match="does not support configured covariate tier"):
+        effective_config_for_model(invalid_strict, get_model("xgboost"))
+
+
+def test_preflight_rejects_hierarchy_with_native_and_per_series_hpo_with_global_models() -> None:
+    from scale_forecasting.dag import check_model_params
+
+    hier_native = RunConfig(
+        run_name="hier native",
+        data={"source_table": "src", "horizon": 4},
+        models=["theta", "arima_plus"],
+        hierarchy={"enabled": True, "levels": [["region"]]},
+    )
+    with pytest.raises(
+        ConfigError, match="hierarchy.enabled=True is not supported with BigQuery-native"
+    ):
+        check_model_params(hier_native)
+
+    per_series_global = RunConfig(
+        run_name="hpo global",
+        data={"source_table": "src", "horizon": 4},
+        models=["tide"],
+        model_params={"tide": {"training_mode": "global"}},
+        backtest={"enabled": True, "n_folds": 2, "horizon": 4, "step": 4, "min_train": 20},
+        hpo={"enabled": True, "granularity": "per_series", "n_trials": 2},
+    )
+    with pytest.raises(ConfigError, match="cannot be combined with hpo.granularity='per_series'"):
+        check_model_params(per_series_global)

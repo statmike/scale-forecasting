@@ -518,6 +518,19 @@ def _ensemble_batch(
     # because the scale denominator is the *fold's* training window, not the whole series — see
     # `backtest.training_window`. `build_history_query` orders by ts_id, ds, so groups are sorted.
     history = _query(build_history_query(cfg, dataset)).to_dataframe()
+    if cfg.hierarchy.enabled and not history.empty:
+        hier_cols = {col for level in cfg.hierarchy.levels for col in level}
+        if hier_cols and hier_cols.issubset(history.columns):
+            from .reconciliation import build_hierarchy
+
+            hist_cfg = cfg.model_copy(
+                update={
+                    "data": cfg.data.model_copy(
+                        update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
+                    )
+                }
+            )
+            history, _ = build_hierarchy(history, hist_cfg)
     hist_by_id = {
         tid: (pd.to_datetime(g["ds"]).to_numpy(), g["y"].to_numpy())
         for tid, g in history.groupby("ts_id")

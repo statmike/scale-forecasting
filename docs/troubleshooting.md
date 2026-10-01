@@ -39,8 +39,8 @@ python -m scale_forecasting.main --config CONFIG --probe --job ml   # one family
 ```
 
 ```python
-Forecaster(cfg).probe()                    # the same report
-Forecaster(cfg).monitor(probe=True)        # progress bars *with* the reconciliation attached
+Forecaster(cfg).probe()  # the same report
+Forecaster(cfg).monitor(probe=True)  # progress bars *with* the reconciliation attached
 ```
 
 The probe reads the registry, then escalates every **non-terminal** family to its own runtime
@@ -110,8 +110,8 @@ python -m scale_forecasting.main --config CONFIG --settle --force \
 ```
 
 ```python
-Forecaster(cfg).settle()                                    # preview
-Forecaster(cfg).settle(yes=True, reason="…")                # execute
+Forecaster(cfg).settle()  # preview
+Forecaster(cfg).settle(yes=True, reason="…")  # execute
 ```
 
 Six readings settle; everything else is refused:
@@ -176,8 +176,8 @@ python -m scale_forecasting.main --config CONFIG --cancel --force \
 ```
 
 ```python
-Forecaster(cfg).cancel()                                    # preview
-Forecaster(cfg).cancel(confirm=True, reason="…")            # execute
+Forecaster(cfg).cancel()  # preview
+Forecaster(cfg).cancel(confirm=True, reason="…")  # execute
 ```
 
 **Preview is the default.** Without `--force` / `confirm=True`, cancel probes, prints the full blast

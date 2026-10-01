@@ -369,8 +369,10 @@ def _measure_np_peak_bytes(
 
         from ..worker import run_cell
 
+        gpu_models, _ = split_gpu_cpu_models(cfg, cfg.models, use_gpu=True)
+        probe_model = gpu_models[0] if gpu_models else "neuralprophet"
         torch.cuda.reset_peak_memory_stats()
-        run_cell(series, "neuralprophet", cfg)
+        run_cell(series, probe_model, cfg)
         return int(torch.cuda.max_memory_allocated()) or None
     except Exception:  # noqa: BLE001 - calibration is best-effort; fall back to nominal
         return None

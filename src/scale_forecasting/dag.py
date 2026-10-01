@@ -216,6 +216,14 @@ def check_model_params(cfg: RunConfig) -> None:
             "they will have no effect.",
             unselected,
         )
+    if cfg.hierarchy.enabled:
+        native_models = [m for m in cfg.models if get_model(m).runtime == "bigquery"]
+        if native_models:
+            raise ConfigError(
+                f"hierarchy.enabled=True is not supported with BigQuery-native models "
+                f"{native_models}; hierarchical bottom-up aggregation and MinT/OLS/WLS "
+                f"reconciliation execute on Python runtimes (Spark or Ray)."
+            )
     for name in cfg.models:
         authored = dict(cfg.model_params.get(name, {}))
         model_cls = get_model(name)
@@ -231,6 +239,13 @@ def check_model_params(cfg: RunConfig) -> None:
                 raise ConfigError(
                     f"model_params.{name}.training_mode='hybrid' is not supported by '{name}'."
                 )
+            if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
+                raise ConfigError(
+                    f"model_params.{name} sets training_mode={mode!r}, which fits a single shared "
+                    f"network across the panel and cannot be combined with "
+                    f"hpo.granularity='per_series'. Set hpo.granularity='fleetwide' or "
+                    f"training_mode='local'."
+                )
             family_compute = cfg.resolve_family_compute(model_cls.family)
             if family_compute.runtime == "spark":
                 raise ConfigError(
@@ -240,6 +255,53 @@ def check_model_params(cfg: RunConfig) -> None:
                     f"compute.families.{model_cls.family}.runtime='ray'), "
                     f"or set training_mode='local' for per-series Spark execution."
                 )
+
+
+def covariate_support_report(cfg: RunConfig) -> list[str]:
+    """Report any selected models that do not support configured covariate tiers (pure)."""
+    f = cfg.features
+    lines: list[str] = []
+    for name in cfg.models:
+        cls = get_model(name)
+        unsupported = cls.unsupported_covariate_tiers(f)
+        if not unsupported:
+            continue
+        supported = [
+            tier
+            for tier, ok in (
+                ("future_covariates", cls.supports_future_covariates),
+                ("past_covariates", cls.supports_past_covariates),
+                ("static_covariates", cls.supports_static_covariates),
+            )
+            if ok
+        ]
+        target_desc = f"its supported tiers {supported}" if supported else "univariate forecasting"
+        lines.append(
+            f"model '{name}' does not support configured covariate tier(s) {list(unsupported)} "
+            f"and will fall back to {target_desc} "
+            f"(set features.on_unsupported_covariates='error' to refuse instead)."
+        )
+    return lines
+
+
+def check_covariate_support(cfg: RunConfig) -> None:
+    """Enforce ``features.on_unsupported_covariates`` across ``cfg.models`` (pure)."""
+    f = cfg.features
+    if f.on_unsupported_covariates != "error":
+        return
+    offenders: list[str] = []
+    for name in cfg.models:
+        cls = get_model(name)
+        unsupported = cls.unsupported_covariate_tiers(f)
+        if unsupported:
+            offenders.append(f"{name} (unsupported: {', '.join(unsupported)})")
+    if offenders:
+        raise ConfigError(
+            f"features.on_unsupported_covariates='error': selected model(s) do not support all "
+            f"configured covariate tiers: {'; '.join(offenders)}. Remove the unsupported model(s) "
+            f"or covariate tier(s), or set features.on_unsupported_covariates='fallback' to let "
+            f"those models fall back to the tiers they support."
+        )
 
 
 def check_hardware_coherence(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> None:
@@ -416,9 +478,10 @@ def preflight(cfg: RunConfig) -> RunDag:
     """Everything a run is refused or warned about before it provisions anything. Returns the DAG.
 
     One call so the spend paths cannot drift apart on which checks they run: an authored
-    ``model_params`` block no model can honour (`check_model_params`), a plan that would buy a
-    device nothing routes to (`check_hardware_coherence`), and — logged, never fatal — a device that
-    will be billed and barely used (`gpu_usefulness_report`).
+    ``model_params`` block no model can honour (`check_model_params`), unsupported covariate tiers
+    (`check_covariate_support` / `covariate_support_report`), a plan that would buy a device nothing
+    routes to (`check_hardware_coherence`), and — logged, never fatal — a device that will be billed
+    and barely used (`gpu_usefulness_report`).
 
     Separate from `plan_dag` on purpose. Planning is pure inspection and must stay total: the SDK's
     ``dag``, a notebook, and several hundred tests call it and none of them are spending anything.
@@ -426,6 +489,9 @@ def preflight(cfg: RunConfig) -> RunDag:
     `launch_plan.stage_run` and `airflow_tasks.begin_run` perform it.
     """
     check_model_params(cfg)
+    check_covariate_support(cfg)
+    for line in covariate_support_report(cfg):
+        _log.warning("%s", line)
     run_dag = plan_dag(cfg)
     check_hardware_coherence(cfg, run_dag.jobs)
     for line in gpu_usefulness_report(cfg, run_dag.jobs):

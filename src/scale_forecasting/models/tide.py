@@ -22,6 +22,7 @@ class TiDEModel(NeuralForecastBaseModel):
 
     name = "tide"
     supports_exog = True
+    supports_static_covariates = True
     _nf_model_name = "TiDE"
 
     def _arch_kwargs(self, *, n_series: int) -> dict[str, Any]:

@@ -23,6 +23,7 @@ class TFTModel(NeuralForecastBaseModel):
 
     name = "tft"
     supports_exog = True
+    supports_static_covariates = True
     _nf_model_name = "TFT"
 
     def _arch_kwargs(self, *, n_series: int) -> dict[str, Any]:

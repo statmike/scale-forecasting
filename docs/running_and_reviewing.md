@@ -455,7 +455,7 @@ python -m scale_forecasting.registry.ops drop-run RUN_ID --yes
 ```python
 from scale_forecasting import Registry
 
-reg = Registry()                 # or Forecaster(...).registry()
+reg = Registry()  # or Forecaster(...).registry()
 print(reg.doctor())
 reg.drop_run("abc123", yes=True)
 ```

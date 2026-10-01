@@ -145,6 +145,7 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("features", "static_covariates"): [],
     ("features", "future_covariates"): [],
     ("features", "past_covariates"): [],
+    ("features", "on_unsupported_covariates"): "fallback",
     ("hierarchy",): {
         "enabled": False,
         "levels": [],
