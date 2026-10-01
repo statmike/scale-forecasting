@@ -77,6 +77,34 @@ def test_exog_column_emitted_when_requested() -> None:
     assert set(df["promo_flag"].unique()) <= {0, 1}
 
 
+def test_exog_three_tier_covariate_signals_affect_y() -> None:
+    # When with_exog=True, all three covariate tiers (static, future, and lagged past)
+    # contribute structural signal to y relative to the univariate baseline.
+    uni = generate_panel(12, _cfg(history=180, with_exog=False), SEED)
+    exog = generate_panel(12, _cfg(history=180, with_exog=True), SEED)
+    diff = exog["y"] - uni["y"]
+
+    # 1. Non-zero causal delta across the panel
+    assert not np.allclose(exog["y"].to_numpy(), uni["y"].to_numpy())
+
+    # 2. Future covariate signal: promo_flag=1 days have higher positive lift than promo_flag=0
+    promo_lift_1 = float(diff[exog["promo_flag"] == 1].mean())
+    promo_lift_0 = float(diff[exog["promo_flag"] == 0].mean())
+    assert promo_lift_1 > promo_lift_0
+
+    # 3. Static covariate signal: NA (+15% offset) vs LATAM (-12% offset) shift the exog delta
+    na_delta = float(diff[exog["region"] == "NA"].mean())
+    latam_delta = float(diff[exog["region"] == "LATAM"].mean())
+    assert na_delta > latam_delta
+
+    # 4. Past covariate lag signal: lagged temperature correlates positively with residual delta
+    s0_exog = exog[exog["ts_id"] == "s_000000"].reset_index(drop=True)
+    s0_uni = uni[uni["ts_id"] == "s_000000"].reset_index(drop=True)
+    s0_delta = (s0_exog["y"] - s0_uni["y"]).to_numpy()
+    temp_lag1 = np.roll(s0_exog["temperature"].to_numpy(), 1)
+    assert float(np.corrcoef(s0_delta[7:], temp_lag1[7:])[0, 1]) != 0.0
+
+
 def test_hierarchy_columns_emitted_without_exog() -> None:
     cfg = _cfg(with_hierarchy=True)
     df = generate_panel(12, cfg, SEED)

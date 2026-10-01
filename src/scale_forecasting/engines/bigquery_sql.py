@@ -182,7 +182,10 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
     freq, _ = _freq(cfg)
     horizon = trained_horizon(cfg, fold=fold)
     if model_name not in _MODEL_TYPE:  # timesfm — serverless AI.FORECAST, no OPTIONS clause
-        return {
+        from ..models.bigquery_native import resolve_timesfm_params
+
+        tf_model, tf_ctx = resolve_timesfm_params(cfg.model_params.get("timesfm", {}))
+        tf_opts: dict[str, Any] = {
             "model_type": "TimesFM (AI.FORECAST)",
             "id_cols": [cfg.data.ts_id_col],
             "timestamp_col": cfg.data.date_col,
@@ -190,6 +193,11 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
             "horizon": horizon,
             "confidence_level": _CONFIDENCE_LEVEL,
         }
+        if tf_model is not None:
+            tf_opts["model"] = tf_model
+        if tf_ctx is not None:
+            tf_opts["context_window"] = tf_ctx
+        return tf_opts
     opts: dict[str, Any] = {
         "model_type": _MODEL_TYPE[model_name],
         "time_series_id_col": cfg.data.ts_id_col,
@@ -355,6 +363,8 @@ def _forecast_source(
     h = horizon if horizon is not None else trained_horizon(cfg, fold=back_steps is not None)
 
     if model_name == "timesfm":
+        from ..models.bigquery_native import resolve_timesfm_params
+
         where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
         sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
         if sfilter:
@@ -362,6 +372,12 @@ def _forecast_source(
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         snap = _snapshot_clause(snapshot_millis)
         inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap}{clause}"
+        tf_model, tf_ctx = resolve_timesfm_params(cfg.model_params.get("timesfm", {}))
+        extra = ""
+        if tf_model is not None:
+            extra += f",\n    model => '{tf_model}'"
+        if tf_ctx is not None:
+            extra += f",\n    context_window => {tf_ctx}"
         return (
             "AI.FORECAST(\n"
             f"    ({inner}),\n"
@@ -369,7 +385,7 @@ def _forecast_source(
             f"    timestamp_col => '{datec}',\n"
             f"    id_cols => ['{idc}'],\n"
             f"    horizon => {h},\n"
-            f"    confidence_level => {_CONFIDENCE_LEVEL})"
+            f"    confidence_level => {_CONFIDENCE_LEVEL}{extra})"
         )
 
     ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)

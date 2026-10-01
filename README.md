@@ -134,10 +134,10 @@ Every series $i$ (`s_000000` $\dots$ `s_099999`) is synthesized from interpretab
 - **Univariate Mode (`with_exog=False, with_hierarchy=False` — Default):**
   Produces the 5-column panel (`ts_id, ds, y, archetype, is_holiday`) stored in `source_series_iceberg` and `source_series_native`.
 - **Multivariate + Hierarchy Mode (`with_exog=True, with_hierarchy=True` / `--include-covariates`):**
-  Uses the **exact same generator** (drawing weather noise from an isolated child RNG stream `[master_seed, i, 1]` so baseline draws never shift) to emit a 10-column panel stored in `source_series_covariates_iceberg` and `source_series_covariates_native`:
-  - **Static covariates & 3-level hierarchy (`static_covariates` / `hierarchy.levels`):** `region` (`NA`, `EMEA`, `APAC`, `LATAM`) and `category` (`enterprise`, `SMB`, `consumer`) $\rightarrow$ `1` total node + `4` regions + `12` `region × category` nodes + $N$ bottom series.
-  - **Known-future covariates (`future_covariates`):** `is_holiday` (country calendar), `promo_flag` (deterministic 0/1 promotional calendar), and `price_index` (smooth quarterly price index).
-  - **Historical-only covariates (`past_covariates`):** `temperature` (annual cycle + AR(1) weather innovations, tested with lookahead-safe `exog_lags`).
+  Uses the **exact same generator** (drawing weather noise from an isolated child RNG stream `[master_seed, i, 1]` so baseline draws never shift) to emit a 10-column panel stored in `source_series_covariates_iceberg` and `source_series_covariates_native` where **all three covariate tiers inject realistic causal signal into `y`**:
+  - **Static covariates & 3-level hierarchy (`static_covariates` / `hierarchy.levels`):** `region` (`NA`, `EMEA`, `APAC`, `LATAM`) and `category` (`enterprise`, `SMB`, `consumer`) $\rightarrow$ `1` total node + `4` regions + `12` `region × category` nodes + $N$ bottom series. Injects region-specific baseline level & seasonal modulation plus category-specific trend drift and promotional elasticity (`consumer` responds $4\times$ stronger to promotions than `enterprise`).
+  - **Known-future covariates (`future_covariates`):** `is_holiday` (country calendar bumps), `promo_flag` (deterministic 0/1 promotional calendar lifts), and `price_index` (smooth quarterly price index with elasticity response).
+  - **Historical-only covariates (`past_covariates`):** `temperature` (annual cycle + AR(1) weather innovations) with contemporaneous + lag-1 + lag-season carry-over into `y` so lookahead-safe `exog_lags` carry genuine predictive signal into the forecast horizon.
 
 ### Partition-Invariant Scale: 3 Series in Memory $\rightarrow$ 100,000+ Series on Spark
 
@@ -336,40 +336,40 @@ flowchart TB
 
 ## Model & Ensemble Catalog
 
-Every model lives in its own self-contained file under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md) and imports directly from its upstream origin package.
+Every model lives in its own self-contained file under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md) and imports directly from its upstream origin package. **All 30 models support univariate forecasting (`Yes`)**; when covariates are configured in a mixed-model run, models that do not support a requested covariate tier automatically fall back to their supported feature subset (`features.covariate_policy: "fallback"` by default, or fail fast under `"strict"`).
 
-| Model | Family | Runtime Engine | Upstream Package | Capabilities & Methodology |
-| :--- | :--- | :--- | :--- | :--- |
-| **`naive_mean`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Historical mean baseline with empirical residual intervals. |
-| **`naive_seasonal`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Repeats historical seasonal cycles (weekly/monthly/annual). |
-| **`naive_drift`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Linear drift extrapolation between first and last observations. |
-| **`naive_moving_average`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Trailing moving average with tunable window lengths. |
-| **`croston`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Intermittent-demand forecaster (`classic`, `sba`, `tsb`) for sparse data. |
-| **`fft`** | `statistical` | Spark / Ray | [`scipy`](https://scipy.org/) | Discrete Fourier Transform spectral extrapolation with polynomial detrending. |
-| **`theta`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Assimakopoulos-Nikolopoulos Theta decomposition (`ThetaModel`). |
-| **`auto_theta`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Automated Theta selection across Standard, Optimized (`OTM`), and Dynamic (`DSTM`, `DOTM`) variants. |
-| **`holtwinters`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Additive Holt-Winters seasonal exponential smoothing with damped trend option. |
-| **`autoets`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Automated Error-Trend-Seasonal state-space model (`ETSModel`) with analytical intervals. |
-| **`auto_ces`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Automated Complex Exponential Smoothing (`AutoCES`) across `"N"`, `"S"`, `"P"`, and `"F"` seasonality. |
-| **`tbats`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Trigonometric seasonality, Box-Cox transform, ARMA errors, Trend, and Seasonal components (`AutoTBATS`). |
-| **`stl_bagging`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Bergmeir-Hyndman-Benítez STL decomposition with block-bootstrapped bagged ETS ensembles. |
-| **`auto_arima`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Hyndman-Khandakar automatic stepwise AICc seasonal ARIMA (`AutoARIMA`) with exogenous covariates. |
-| **`sarimax`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Seasonal ARIMA (`SARIMAX`) with exogenous calendar & economic covariates. |
-| **`ucm`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Structural Unobserved Components state-space model (`UnobservedComponents`) with exogenous covariates. |
-| **`kalman`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Linear Gaussian state-space Kalman filter (`UnobservedComponents`) with seasonal harmonics and AR($p$) state. |
-| **`prophet`** | `statistical` | Spark / Ray | [`prophet`](https://facebook.github.io/prophet/) | Piecewise trend, multi-period Fourier seasonality, holidays, and exogenous covariates. |
-| **`regression_lags`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | L2-regularized `Ridge` regression (`local` or `global` panel) with recursive target lags, calendar features, and `exog`. |
-| **`random_forest`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | Bagged decision tree ensemble (`RandomForestRegressor`, `local` or `global` panel) with recursive multi-step forecasting. |
-| **`lightgbm`** | `ml` | Spark / Ray | [`lightgbm`](https://lightgbm.readthedocs.io/) | Gradient-boosted decision trees (`LGBMRegressor`, `local` or `global` panel) with recursive multi-step forecasting. |
-| **`xgboost`** | `ml` | Spark / Ray | [`xgboost`](https://xgboost.readthedocs.io/) | Histogram gradient-boosted trees (`XGBRegressor`, `local` or `global` panel) on CPU or GPU (`device="cuda"`). |
-| **`catboost`** | `ml` | Spark / Ray | [`catboost`](https://catboost.ai/) | Oblivious (symmetric) gradient-boosted trees (`CatBoostRegressor`, `local` or `global` panel) with recursive multi-step forecasting. |
-| **`neuralprophet`** | `deep_learning` | Spark / Ray | [`neuralprophet`](https://neuralprophet.com/) | PyTorch AR-Net (`local`, `global`, or `hybrid` local-global mode) with quantile heads and future/lagged covariates. |
-| **`tide`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Google Research Time-series Dense Encoder (`TiDE`, `local` or `global`) with static, future, and past covariates. |
-| **`tft`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Google Research Temporal Fusion Transformer (`TFT`, `local` or `global`) with variable selection and multi-head attention. |
-| **`tsmixer`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Google Research All-MLP time- and feature-mixing architecture (`TSMixerx`, `local` or `global`) with three-tier covariates. |
-| **`patchtst`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Subseries-patched channel-independent Transformer (`PatchTST`, `local` or `global`) with MultiQuantile loss. |
-| **`arima_plus`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Pure BigQuery SQL: automated `ARIMA_PLUS` pipeline (auto-switches to `ARIMA_PLUS_XREG` when exogenous features are configured). |
-| **`timesfm`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`). |
+| Model | Family | Runtime | Upstream Package | Univariate | Covariates (`Future` / `Past` / `Static`) | Training Modes | Reconciliation | Capabilities & Methodology |
+| :--- | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **`naive_mean`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Historical mean baseline with empirical residual intervals. |
+| **`naive_seasonal`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Repeats historical seasonal cycles (weekly/monthly/annual). |
+| **`naive_drift`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Linear drift extrapolation between first and last observations. |
+| **`naive_moving_average`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Trailing moving average with tunable window lengths. |
+| **`croston`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Intermittent-demand forecaster (`classic`, `sba`, `tsb`) for sparse data. |
+| **`fft`** | `statistical` | Spark / Ray | [`scipy`](https://scipy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Discrete Fourier Transform spectral extrapolation with polynomial detrending. |
+| **`theta`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Assimakopoulos-Nikolopoulos Theta decomposition (`ThetaModel`). |
+| **`auto_theta`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Theta selection across Standard, Optimized (`OTM`), and Dynamic (`DSTM`, `DOTM`) variants. |
+| **`holtwinters`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Additive Holt-Winters seasonal exponential smoothing with damped trend option. |
+| **`autoets`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Error-Trend-Seasonal state-space model (`ETSModel`) with analytical intervals. |
+| **`auto_ces`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Complex Exponential Smoothing (`AutoCES`) across `"N"`, `"S"`, `"P"`, and `"F"` seasonality. |
+| **`tbats`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Trigonometric seasonality, Box-Cox transform, ARMA errors, Trend, and Seasonal components (`AutoTBATS`). |
+| **`stl_bagging`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Bergmeir-Hyndman-Benítez STL decomposition with block-bootstrapped bagged ETS ensembles. |
+| **`auto_arima`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Hyndman-Khandakar automatic stepwise AICc seasonal ARIMA (`AutoARIMA`) with exogenous covariates. |
+| **`sarimax`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Seasonal ARIMA (`SARIMAX`) with exogenous calendar & economic covariates. |
+| **`ucm`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Structural Unobserved Components state-space model (`UnobservedComponents`) with exogenous covariates. |
+| **`kalman`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Linear Gaussian state-space Kalman filter (`UnobservedComponents`) with seasonal harmonics and AR($p$) state. |
+| **`prophet`** | `statistical` | Spark / Ray | [`prophet`](https://facebook.github.io/prophet/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Piecewise trend, multi-period Fourier seasonality, holidays, and exogenous covariates. |
+| **`regression_lags`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | L2-regularized `Ridge` regression with recursive target lags, calendar features, and `exog`. |
+| **`random_forest`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Bagged decision tree ensemble (`RandomForestRegressor`) with recursive multi-step forecasting. |
+| **`lightgbm`** | `ml` | Spark / Ray | [`lightgbm`](https://lightgbm.readthedocs.io/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Gradient-boosted decision trees (`LGBMRegressor`) with recursive multi-step forecasting. |
+| **`xgboost`** | `ml` | Spark / Ray | [`xgboost`](https://xgboost.readthedocs.io/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Histogram gradient-boosted trees (`XGBRegressor`) on CPU or GPU (`device="cuda"`). |
+| **`catboost`** | `ml` | Spark / Ray | [`catboost`](https://catboost.ai/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Oblivious (symmetric) gradient-boosted trees (`CatBoostRegressor`) with recursive multi-step forecasting. |
+| **`neuralprophet`** | `deep_learning` | Spark / Ray | [`neuralprophet`](https://neuralprophet.com/) | Yes | No / No / No | `local`, `global`, `hybrid` | All 7 FPP3 + Global Panel | PyTorch AR-Net (`local`, `global`, or `hybrid` local-trend + global-seasonality mode) with quantile heads. |
+| **`tide`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research Time-series Dense Encoder (`TiDE`) with static, future, and past covariates. |
+| **`tft`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research Temporal Fusion Transformer (`TFT`) with variable selection and multi-head attention. |
+| **`tsmixer`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research All-MLP time- and feature-mixing architecture (`TSMixerx`) with three-tier covariates. |
+| **`patchtst`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | No / No / No | `local`, `global` | All 7 FPP3 + Global Panel | Subseries-patched channel-independent Transformer (`PatchTST`) with MultiQuantile loss. |
+| **`arima_plus`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `local` | N/A (SQL) | Pure BigQuery SQL: automated `ARIMA_PLUS` pipeline with custom country holiday CTEs. |
+| **`timesfm`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `global` (zero-shot) | N/A (SQL) | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` default, or `TimesFM 3.0` + configurable `context_window`). |
 
 ### Environment Agility: Omitting Optional Model Packages
 
@@ -392,33 +392,55 @@ The platform is designed for rapid extension by data scientists:
 
 ---
 
+## Hierarchical Forecasting & Coherent Reconciliation
+
+When `hierarchy.enabled: true`, the platform constructs a multi-level aggregation tree from `hierarchy.levels` (e.g. `[["region"], ["region", "category"]]` $\rightarrow$ `"__total__"` root + `region=NA` + `region=NA/category=SMB` + bottom `ts_id` leaves), fits models across all nodes, and reconciles base forecasts $\hat{\boldsymbol{y}}_h$ into strictly coherent forecasts $\tilde{\boldsymbol{y}}_h = \boldsymbol{S}\boldsymbol{G}\hat{\boldsymbol{y}}_h$ ([`reconciliation.py`](./src/scale_forecasting/reconciliation.py)) following [Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd ed., Ch. 11)](https://otexts.com/fpp3/hierarchical.html) and [Wickramasuriya et al. (2019) *MinT*](https://doi.org/10.1080/01621459.2018.1448825):
+
+| Method (`hierarchy.reconciliation`) | Matrix Projection $\boldsymbol{G}$ / Covariance $\boldsymbol{W}_h$ | How It Works |
+| :--- | :--- | :--- |
+| **`mint_shrink`** *(default)* | $\boldsymbol{W}_h = \lambda_D \widehat{\boldsymbol{W}}_{1,D} + (1-\lambda_D)\widehat{\boldsymbol{W}}_1$ | Minimum Trace optimal reconciliation with analytical [Schäfer-Strimmer (2005)](https://doi.org/10.2202/1544-6115.1175) shrinkage covariance of OOF residuals; positive-definite even when $n_{\text{series}} \gg T_{\text{obs}}$. |
+| **`wls_var`** | $\boldsymbol{W}_h = \text{diag}(\widehat{\boldsymbol{W}}_1)$ | Weighted least squares scaled by per-node OOF residual error variance. |
+| **`wls_struct`** | $\boldsymbol{W}_h = \text{diag}(\boldsymbol{S}\boldsymbol{1}_{n_b})$ | Structural scaling weighted by the number of bottom series summed into each node (requires no residuals). |
+| **`ols`** | $\boldsymbol{W}_h = \boldsymbol{I}_n$ | Ordinary least squares geometric projection $\boldsymbol{G} = (\boldsymbol{S}^\top\boldsymbol{S})^{-1}\boldsymbol{S}^\top$. |
+| **`bottom_up`** | $\boldsymbol{G} = [\boldsymbol{0} \mid \boldsymbol{I}_{n_b}]$ | Preserves bottom-level forecasts verbatim and sums upward through $\boldsymbol{S}$. |
+| **`top_down`** | $\boldsymbol{G} = [\boldsymbol{p} \mid \boldsymbol{0}]$ | Disaggregates `"__total__"` downward by historical average proportions $p_j = \frac{1}{T}\sum_t y_{j,t} / y_{\text{Total},t}$. |
+| **`middle_out`** | Anchor at `hierarchy.middle_level` | Preserves base forecasts at `middle_level`, sums upward to higher levels, and disaggregates downward by historical proportions. |
+
+- **Post-Hoc Matrix Math vs. Global Panel Models:** All 28 Python models support all 7 post-hoc reconciliation methods. When a `deep_learning` model runs in **`global`** or **`hybrid`** mode (`tide`, `tft`, `tsmixer`, `patchtst`, `neuralprophet`), a single shared network is trained jointly across all bottom and upper-level series (and their `static_covariates`), learning cross-level dynamics implicitly during training — and then applies $\tilde{\boldsymbol{y}}_h = \boldsymbol{S}\boldsymbol{G}\hat{\boldsymbol{y}}_h$ post-hoc so point forecasts and prediction intervals satisfy exact mathematical additivity ($\boldsymbol{y}_{\text{upper}} = \sum \boldsymbol{y}_{\text{bottom}}$).
+
+➡️ **Full mathematical formulation and configuration reference: [Models & Ensembles Reference (`docs/models_reference.md#hierarchical-forecasting-coherent-reconciliation`)](./docs/models_reference.md#hierarchical-forecasting-coherent-reconciliation).**
+
+---
+
 ## Evaluation Metrics Catalog
 
-`scale-forecasting` scores models across a comprehensive **21-metric evaluation panel** covering both point-forecast accuracy and prediction-interval quality. Every metric is computed per series per fold in Python (`metrics.compute_metrics`) across all four model families and stored in `forecast_metadata`:
+`scale-forecasting` scores models across a comprehensive **21-metric evaluation panel** covering both point-forecast accuracy and prediction-interval quality. Every metric is **100% model- and runtime-agnostic** — computed per series per fold in Python (`metrics.compute_metrics`) from `(y_true, yhat, y_train, yhat_lower, yhat_upper)` across all four model families, reconciled hierarchy nodes, and ensembles, and stored in `forecast_metadata`:
 
-| Metric | Category | `direction` | Methodology & Formula | Interpretation |
-| :--- | :--- | :---: | :--- | :--- |
-| **`wape`** | Relative / % | `lower` | $\sum \|y - \hat{y}\| / \sum \|y\|$ | Scale-independent; safe when individual steps are zero. Default `decision_metric`. |
-| **`smape`** | Relative / % | `lower` | $\frac{1}{H}\sum \frac{2\|y - \hat{y}\|}{\|y\| + \|\hat{y}\|}$ | Symmetric percentage error bounded in $[0, 2]$. |
-| **`mape`** | Relative / % | `lower` | $\frac{1}{H}\sum \|(y - \hat{y}) / y\|$ | Standard percentage error (`NaN` if any $y_t = 0$). |
-| **`maape`** | Relative / % | `lower` | $\frac{1}{H}\sum \arctan(\|y - \hat{y}\| / \|y\|)$ | Arctangent percentage error bounded in $[0, \pi/2]$; finite even when $y_t = 0$. |
-| **`ope`** | Relative / % | `lower` | $\|\sum y - \sum \hat{y}\| / \|\sum y\|$ | Overall Percentage Error across cumulative horizon volume. |
-| **`mae`** | Scale-Dependent | `lower` | $\frac{1}{H}\sum \|y - \hat{y}\|$ | Standard average error magnitude in target units. |
-| **`rmse`** | Scale-Dependent | `lower` | $\sqrt{\frac{1}{H}\sum (y - \hat{y})^2}$ | Root Mean Squared Error; penalizes large outlier errors heavily. |
-| **`mse`** | Scale-Dependent | `lower` | $\frac{1}{H}\sum (y - \hat{y})^2$ | Raw quadratic loss. |
-| **`rmsle`** | Log-Scale | `lower` | $\sqrt{\frac{1}{H}\sum (\ln(1+y) - \ln(1+\hat{y}))^2}$ | Root Mean Squared Logarithmic Error; penalizes relative log ratios. |
-| **`bias`** | Signed Diagnostic | `zero` | $\frac{1}{H}\sum (\hat{y} - y)$ | Directional over-forecasting ($>0$) or under-forecasting ($<0$). |
-| **`mase`** | Scaled (`m=1`) | `lower` | $\text{MAE} / \text{MAE}_{\text{naive-1}}$ | Compares accuracy against an in-sample one-step random walk ($<1$ beats naive). |
-| **`mase_seasonal`** | Scaled (`m=P`) | `lower` | $\text{MAE} / \text{MAE}_{\text{naive-}m}$ | Compares accuracy against an in-sample seasonal naive baseline ($m$ from `data.freq`). |
-| **`rmsse`** | Scaled (`m=1`) | `lower` | $\text{RMSE} / \text{RMSE}_{\text{naive-1}}$ | M5 competition Root Mean Squared Scaled Error. |
-| **`msse`** | Scaled (`m=1`) | `lower` | $\text{MSE} / \text{MSE}_{\text{naive-1}}$ | Mean Squared Scaled Error ($\text{RMSSE}^2$). |
-| **`r2`** | Goodness-of-Fit | `higher` | $1 - \sum(y - \hat{y})^2 / \sum(y - \bar{y})^2$ | Coefficient of determination ($1.0$ is perfect; $<0$ is worse than predicting $\bar{y}$). |
-| **`cv`** | Dispersion | `lower` | $\text{RMSE} / \bar{y}$ | Coefficient of Variation of RMSE normalized by evaluation window mean. |
-| **`coverage`** | Interval (`80%` PI) | `higher` | Fraction of $y_t \in [\hat{y}^{\text{lower}}, \hat{y}^{\text{upper}}]$ | Empirical coverage against the nominal $(0.1, 0.9)$ quantile band. |
-| **`pinball`** | Interval (Quantile) | `lower` | Mean pinball loss at $q_{0.10}$ and $q_{0.90}$ | Evaluates quantile regression sharpness and calibration. |
-| **`interval_score`** | Interval (Proper) | `lower` | Winkler score ($\alpha = 0.20$) | Proper scoring rule balancing interval sharpness against coverage misses. |
-| **`interval_width`** | Interval (`80%` PI) | `lower` | $\frac{1}{H}\sum (\hat{y}^{\text{upper}} - \hat{y}^{\text{lower}})$ | Average prediction interval width in target units. |
-| **`msis`** | Interval (Scaled) | `lower` | $\text{Winkler} / \text{seasonal naive MAE}$ | M4 competition Mean Scaled Interval Score (scaled `interval_score`). |
+| Metric | Category | `direction` | Inputs Required | Methodology & Formula | Interpretation |
+| :--- | :--- | :---: | :---: | :--- | :--- |
+| **`wape`** | Relative / % | `lower` | Point (`y_true, yhat`) | $\sum \|y - \hat{y}\| / \sum \|y\|$ | Scale-independent; safe when individual steps are zero. Default `decision_metric` & hierarchy volume metric. |
+| **`smape`** | Relative / % | `lower` | Point (`y_true, yhat`) | $\frac{1}{H}\sum \frac{2\|y - \hat{y}\|}{\|y\| + \|\hat{y}\|}$ | Symmetric percentage error bounded in $[0, 2]$. |
+| **`mape`** | Relative / % | `lower` | Point (`y_true, yhat`) | $\frac{1}{H}\sum \|(y - \hat{y}) / y\|$ | Standard percentage error (`NaN` if any $y_t = 0$). |
+| **`maape`** | Relative / % | `lower` | Point (`y_true, yhat`) | $\frac{1}{H}\sum \arctan(\|y - \hat{y}\| / \|y\|)$ | Arctangent percentage error bounded in $[0, \pi/2]$; finite even when $y_t = 0$. |
+| **`ope`** | Relative / % | `lower` | Point (`y_true, yhat`) | $\|\sum y - \sum \hat{y}\| / \|\sum y\|$ | Overall Percentage Error across cumulative horizon volume. |
+| **`mae`** | Scale-Dependent | `lower` | Point (`y_true, yhat`) | $\frac{1}{H}\sum \|y - \hat{y}\|$ | Standard average error magnitude in target units. |
+| **`rmse`** | Scale-Dependent | `lower` | Point (`y_true, yhat`) | $\sqrt{\frac{1}{H}\sum (y - \hat{y})^2}$ | Root Mean Squared Error; penalizes large outlier errors heavily. |
+| **`mse`** | Scale-Dependent | `lower` | Point (`y_true, yhat`) | $\frac{1}{H}\sum (y - \hat{y})^2$ | Raw quadratic loss. |
+| **`rmsle`** | Log-Scale | `lower` | Point (`y_true, yhat`) | $\sqrt{\frac{1}{H}\sum (\ln(1+y) - \ln(1+\hat{y}))^2}$ | Root Mean Squared Logarithmic Error; penalizes relative log ratios. |
+| **`bias`** | Signed Diagnostic | `zero` | Point (`y_true, yhat`) | $\frac{1}{H}\sum (\hat{y} - y)$ | Directional over-forecasting ($>0$) or under-forecasting ($<0$). |
+| **`mase`** | Scaled (`m=1`) | `lower` | Point + `y_train` | $\text{MAE} / \text{MAE}_{\text{naive-1}}$ | Compares accuracy against an in-sample one-step random walk ($<1$ beats naive). |
+| **`mase_seasonal`** | Scaled (`m=P`) | `lower` | Point + `y_train` | $\text{MAE} / \text{MAE}_{\text{naive-}m}$ | Compares accuracy against an in-sample seasonal naive baseline ($m$ from `data.freq`). |
+| **`rmsse`** | Scaled (`m=1`) | `lower` | Point + `y_train` | $\text{RMSE} / \text{RMSE}_{\text{naive-1}}$ | M5 competition Root Mean Squared Scaled Error (ideal across multi-level hierarchies). |
+| **`msse`** | Scaled (`m=1`) | `lower` | Point + `y_train` | $\text{MSE} / \text{MSE}_{\text{naive-1}}$ | Mean Squared Scaled Error ($\text{RMSSE}^2$). |
+| **`r2`** | Goodness-of-Fit | `higher` | Point (`y_true, yhat`) | $1 - \sum(y - \hat{y})^2 / \sum(y - \bar{y})^2$ | Coefficient of determination ($1.0$ is perfect; $<0$ is worse than predicting $\bar{y}$). |
+| **`cv`** | Dispersion | `lower` | Point (`y_true, yhat`) | $\text{RMSE} / \bar{y}$ | Coefficient of Variation of RMSE normalized by evaluation window mean. |
+| **`coverage`** | Interval (`80%` PI) | `higher` | Intervals (`lower, upper`) | Fraction of $y_t \in [\hat{y}^{\text{lower}}, \hat{y}^{\text{upper}}]$ | Empirical coverage against the nominal $(0.1, 0.9)$ quantile band. |
+| **`pinball`** | Interval (Quantile) | `lower` | Intervals (`lower, upper`) | Mean pinball loss at $q_{0.10}$ and $q_{0.90}$ | Evaluates quantile regression sharpness and calibration. |
+| **`interval_score`** | Interval (Proper) | `lower` | Intervals (`lower, upper`) | Winkler score ($\alpha = 0.20$) | Proper scoring rule balancing interval sharpness against coverage misses. |
+| **`interval_width`** | Interval (`80%` PI) | `lower` | Intervals (`lower, upper`) | $\frac{1}{H}\sum (\hat{y}^{\text{upper}} - \hat{y}^{\text{lower}})$ | Average prediction interval width in target units. |
+| **`msis`** | Interval (Scaled) | `lower` | `y_train` + Intervals | $\text{Winkler} / \text{seasonal naive MAE}$ | M4 competition Mean Scaled Interval Score (scaled `interval_score`). |
+
+- **Model & Reconciliation Behaviour:** All 30 models emit `y_train` and 80% prediction intervals, so all 21 metrics populate for every model. Ensemble rows blend point forecasts only (`coverage`, `pinball`, `interval_score`, `interval_width`, `msis` are `NaN` on ensembles). When **hierarchical reconciliation** is enabled (`hierarchy.enabled: true`), all 21 metrics are recomputed on the post-reconciliation forecasts across every bottom and upper-level node (`__total__`, `region=NA`, etc.) using each node's bottom-up aggregated training history `y_train` (so scale-free metrics like `mase`, `rmsse`, and `msis` compare upper-level aggregates and bottom-level series on a level playing field).
 
 ### Adding a Custom Metric in 1 File
 

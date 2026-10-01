@@ -159,6 +159,15 @@ Each metric class declares two behavioral flags that integrate it with HPO, ense
 
 ---
 
+## Model independence & hierarchical reconciliation scoring
+
+- **Zero model dependency:** Every metric is a pure function of `MetricContext(y_true, yhat, y_train, lower, upper, seasonal_period)` and never reads model-internal diagnostics. All 30 models (`statistical`, `ml`, `deep_learning`, and `native`) supply `y_train` and 80% prediction intervals (`(0.10, 0.90)` quantiles), so all 21 metrics populate for every model regardless of runtime or `training_mode` (`local`, `global`, `hybrid`). Ensemble rows combine point forecasts only, so the 5 interval metrics (`coverage`, `pinball`, `interval_score`, `interval_width`, `msis`) evaluate to `NaN` on ensembles.
+- **Scoring reconciled hierarchies (`hierarchy.enabled: true`):**
+  - After [`reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/reconciliation.py) projects base forecasts onto the coherent subspace ($\tilde{\boldsymbol{y}}_h = \boldsymbol{S}\boldsymbol{G}\hat{\boldsymbol{y}}_h$), `reconcile_run_results` re-runs `metrics.compute_metrics` on every node in the hierarchy (`"__total__"`, intermediate rollups such as `"region=NA"`, and bottom `ts_id` leaves) using the reconciled point forecasts and reconciled interval bounds (`yhat_lower`, `yhat_upper`).
+  - Because `build_hierarchical_panel` sums historical actuals bottom-up for every upper-level node, each aggregate node carries its own true historical `y_train` into `MetricContext`. Training-scaled metrics (`mase`, `mase_seasonal`, `rmsse`, `msse`, `msis`) and volume-weighted relative metrics (`wape`, `ope`) are therefore scale-free and directly comparable across root, regional, category, and leaf levels.
+
+---
+
 ## Adding a custom metric
 
 Adding a new metric requires **one file** in `src/scale_forecasting/metrics/` and **one entry in `METRIC_NAMES`** in `src/scale_forecasting/metrics/__init__.py`:
@@ -170,3 +179,4 @@ Adding a new metric requires **one file** in `src/scale_forecasting/metrics/` an
 The BigQuery table column (`forecast_metadata.my_metric`), `ADD COLUMN IF NOT EXISTS` migration for existing deployments, Storage Write API protobuf descriptor, and `review_run` summary projections (`mean_my_metric`, `p10_`, `p50_`, `p90_`) are all generated automatically from `METRIC_NAMES`.
 
 See **[Adding a metric (`docs/adding_a_metric.md`)](./adding_a_metric.md)** for the full contract and step-by-step walkthrough.
+

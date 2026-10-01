@@ -602,3 +602,72 @@ def test_history_query_includes_hierarchy_levels_when_enabled() -> None:
     )
     sql = build_history_query(cfg, _DS)
     assert "SELECT ts_id AS ts_id, ds AS ds, y AS y, category, region" in sql
+
+
+def test_timesfm_version_and_context_window_sql_and_options() -> None:
+    from scale_forecasting.dag import check_model_params
+    from scale_forecasting.errors import ConfigError
+
+    # Default un-authored: omits `model =>` and `context_window =>` so snapshots stay byte-identical
+    default_cfg = _cfg(["timesfm"])
+    default_sql = build_forecast_insert_sql(default_cfg, "timesfm", _DS)
+    assert "model =>" not in default_sql
+    assert "context_window =>" not in default_sql
+    assert "model" not in bqml_options(default_cfg, "timesfm")
+
+    # Explicit TimesFM 3.0 shorthand + context_window
+    cfg_30 = RunConfig(
+        run_name="timesfm 3.0 test",
+        data={"source_table": "source_series_native", "series_limit": 10},
+        models=["timesfm"],
+        model_params={"timesfm": {"version": "3.0", "context_window": 512}},
+    )
+    check_model_params(cfg_30)
+    sql_30 = build_forecast_insert_sql(cfg_30, "timesfm", _DS)
+    assert "model => 'TimesFM 3.0'" in sql_30
+    assert "context_window => 512" in sql_30
+    opts_30 = bqml_options(cfg_30, "timesfm")
+    assert opts_30["model"] == "TimesFM 3.0"
+    assert opts_30["context_window"] == 512
+
+    # Explicit TimesFM 2.0 full name
+    cfg_20 = RunConfig(
+        run_name="timesfm 2.0 test",
+        data={"source_table": "source_series_native", "series_limit": 10},
+        models=["timesfm"],
+        model_params={"timesfm": {"model": "TimesFM 2.0", "context_window": 1024}},
+    )
+    check_model_params(cfg_20)
+    sql_20 = build_forecast_insert_sql(cfg_20, "timesfm", _DS)
+    assert "model => 'TimesFM 2.0'" in sql_20
+    assert "context_window => 1024" in sql_20
+
+    # Invalid version rejected at plan time
+    bad_ver = RunConfig(
+        run_name="bad ver",
+        data={"source_table": "source_series_native"},
+        models=["timesfm"],
+        model_params={"timesfm": {"version": "9.9"}},
+    )
+    with pytest.raises(ConfigError, match="supported versions"):
+        check_model_params(bad_ver)
+
+    # Invalid context_window for TimesFM 3.0 (> 2048 or not a multiple of 32)
+    bad_ctx_30 = RunConfig(
+        run_name="bad ctx 3.0",
+        data={"source_table": "source_series_native"},
+        models=["timesfm"],
+        model_params={"timesfm": {"version": "3.0", "context_window": 4096}},
+    )
+    with pytest.raises(ConfigError, match="multiple of 32 between 64 and 2048"):
+        check_model_params(bad_ctx_30)
+
+    # Horizon > 1024 rejected for TimesFM 3.0
+    bad_hor_30 = RunConfig(
+        run_name="bad hor 3.0",
+        data={"source_table": "source_series_native", "horizon": 1500},
+        models=["timesfm"],
+        model_params={"timesfm": {"version": "TimesFM 3.0"}},
+    )
+    with pytest.raises(ConfigError, match="maximum horizon of 1024"):
+        check_model_params(bad_hor_30)

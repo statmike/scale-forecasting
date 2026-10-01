@@ -49,10 +49,10 @@ flowchart LR
 
 3. **Dual Capability: Univariate Default + Three-Tier Covariates & Hierarchy:**
    - **Univariate mode (`with_exog=False, with_hierarchy=False` — default):** Emits 5 columns (`ts_id, ds, y, archetype, is_holiday`).
-   - **Multivariate + Hierarchy mode (`with_exog=True, with_hierarchy=True` / `--include-covariates`):** Emits 10 columns covering all three covariate tiers and a 3-level hierarchy (`__total__` $\rightarrow$ 4 `region`s $\rightarrow$ 12 `region × category` cells $\rightarrow$ bottom `ts_id`):
-     - **Static covariates & hierarchy levels:** `region` (`NA`, `EMEA`, `APAC`, `LATAM`) and `category` (`enterprise`, `SMB`, `consumer`).
-     - **Known-future covariates (`future_covariates`):** `is_holiday` (country calendar), `promo_flag` (deterministic 0/1 promotional calendar), and `price_index` (smooth quarterly cycle).
-     - **Historical-only covariates (`past_covariates`):** `temperature` (annual cycle + AR(1) weather noise, requiring `exog_lags` at forecast time).
+   - **Multivariate + Hierarchy mode (`with_exog=True, with_hierarchy=True` / `--include-covariates`):** Emits 10 columns covering all three covariate tiers and a 3-level hierarchy (`__total__` $\rightarrow$ 4 `region`s $\rightarrow$ 12 `region × category` cells $\rightarrow$ bottom `ts_id`), where **every tier injects realistic causal signal into `y`**:
+     - **Static covariates & hierarchy levels (`static_covariates`):** `region` (`NA`, `EMEA`, `APAC`, `LATAM`) and `category` (`enterprise`, `SMB`, `consumer`) — drives region-specific baseline level & seasonal modulation plus category-specific trend drift and promotional elasticity (`consumer` responds $4\times$ stronger to promotions than `enterprise`).
+     - **Known-future covariates (`future_covariates`):** `is_holiday` (country calendar bumps), `promo_flag` (deterministic 0/1 promotional calendar lifts), and `price_index` (smooth quarterly cycle with elasticity response).
+     - **Historical-only covariates (`past_covariates`):** `temperature` (annual cycle + AR(1) weather noise) — injects contemporaneous + lag-1 + lag-season carry-over into `y` so lookahead-safe `exog_lags` carry genuine predictive signal into the forecast horizon.
 
 ---
 
