@@ -2,14 +2,14 @@
 
 A **smoke test** is a small, end-to-end live run (20–100 time series) that verifies a specific runtime, hardware, backtesting, HPO, feature-engineering, or ensembling combination against live Google Cloud infrastructure.
 
-- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (35 JSON configs)
+- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (37 JSON configs)
 - **Direct Smoke Harness**: [`tests/smokes/smoke_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/smoke_harness.py)
 - **Composer / Airflow Harness**: [`tests/smokes/airflow_smoke.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/airflow_smoke.py)
 - **Live Results Record**: [System Validation Ledger](validation.md)
 
 ```mermaid
 flowchart LR
-    Cfg["configs/smokes/*.json\n(35 Smoke Configs)"] --> Dry["1. Plan\nplan_run()"]
+    Cfg["configs/smokes/*.json\n(37 Smoke Configs)"] --> Dry["1. Plan\nplan_run()"]
     Dry --> Stage["2. Stage\nstage_run() -> GCS"]
     Stage --> Run["3. Execute\nmain.run() or Composer DAG"]
     Run --> Verify["4. Verify\nv_run_summary, v_run_jobs,\nv_model_leaderboard, cells"]
@@ -19,7 +19,7 @@ flowchart LR
 
 ---
 
-## Smoke Suite Overview (`01`–`35`)
+## Smoke Suite Overview (`01`–`37`)
 
 Configs are ordered from fastest/cheapest to most comprehensive:
 
@@ -60,6 +60,8 @@ Configs are ordered from fastest/cheapest to most comprehensive:
 | `33` | `33_expanded_stats_ml.json` | **Expanded statistical & ML models:** `auto_arima`, `auto_ces`, `auto_theta`, `tbats`, `fft`, `kalman`, `random_forest`, `catboost` (`msse`) |
 | `34` | `34_global_hybrid_dl.json` | **Global & hybrid deep learning:** `tide`, `tft`, `tsmixer`, `patchtst` (global) and `neuralprophet` (hybrid) on Vertex AI Ray (`interval_score`) |
 | `35` | `35_hierarchy_reconciliation.json` | **Hierarchical forecast reconciliation:** 3-level hierarchy across all 7 FPP3 reconciliation methods (`msis`) |
+| `36` | `36_covariate_fallback_multi_runtime.json` | **Multi-runtime covariate fallback + HPO + ensemble:** 3-tier covariates across Spark, Ray (`global` DL), and BigQuery ML with `on_unsupported_covariates="fallback"`, `fleetwide` HPO, and ensembling |
+| `37` | `37_hierarchy_covariates_ensemble.json` | **Hierarchy + covariates + ensemble:** 3-level hierarchical reconciliation combined with 3-tier covariates, univariate fallback, and post-hoc ensembling across all hierarchy nodes |
 
 ---
 
@@ -72,7 +74,7 @@ Smoke `14` proves the full architectural topology (four model families + ensembl
 Every series in the seeded benchmark panel has 1,460 daily observations. Smokes `22`–`25` request 6 folds of 28 days with `min_train_size: 1300` (which requires 1,468 observations for non-overlapping folds), intentionally triggering each short-series policy:
 
 - **`22` (`overlap`)**: Compresses the step between fold cutoffs from 28 to 26 days to reach all 6 folds (`backtest_status='reduced'`), and enables `control_arm: true` to populate `yhat_stale`.
-- **`23` (`shrink_train`)**: Reduces `min_train_size` from 1,300 to 1,292 (above `min_train_floor: 1000`) to reach all 6 folds, and tests `expanding_frozen` (`recondition` where supported by Darts, automatic refit fallback with `backtest_refit='unsupported'` where not).
+- **`23` (`shrink_train`)**: Reduces `min_train_size` from 1,300 to 1,292 (above `min_train_floor: 1000`) to reach all 6 folds, and tests `expanding_frozen` (`recondition` where supported by the model, automatic refit fallback with `backtest_refit='unsupported'` where not).
 - **`24` (`adapt`)**: Keeps the step and minimum training window intact and scores 5 of 6 folds (`backtest_status='reduced'`).
 - **`25` (`skip`)**: Leaves short series unscored (`backtest_status='unscored'`, `n_folds_achieved=0`) while still generating all 28-step horizon forecasts.
 
@@ -101,13 +103,15 @@ SF_RAY_POLL_FAULT=transport,auth .venv/bin/python tests/smokes/smoke_harness.py 
 
 The first poll of each Ray job injects a simulated transport (`503`) and/or auth (`401`) error, logs the injection and reconnect at `WARNING` level, mints a fresh token, and completes the run normally.
 
-### Covariates, Global/Hybrid DL, and Hierarchical Reconciliation (`32`–`35`)
-Smokes `32`–`35` exercise the Phase B expansion against the 100-series covariate + hierarchy benchmark tables (`source_series_covariates_iceberg` and `source_series_covariates_native`):
+### Covariates, Global/Hybrid DL, and Hierarchical Reconciliation (`32`–`37`)
+Smokes `32`–`37` exercise the Phase B expansion and cross-feature interactions against the 100-series covariate + hierarchy benchmark tables (`source_series_covariates_iceberg` and `source_series_covariates_native`):
 
-- **`32` (`32_covariates_three_tier.json`)**: Exercises `static_covariates` (`region`, `category`, `store_size`), `future_covariates` (`is_holiday`, `promo_depth`), and lookahead-safe lagged `past_covariates` (`foot_traffic` lagged `[1, 7]`) across 8 statistical and ML models (`decision_metric="rmsse"`).
+- **`32` (`32_covariates_three_tier.json`)**: Exercises `static_covariates` (`region`, `category`), `future_covariates` (`is_holiday`, `promo_flag`, `price_index`), and lookahead-safe lagged `past_covariates` (`temperature` lagged `[7, 14]`) across 8 statistical and ML models (`decision_metric="rmsse"`).
 - **`33` (`33_expanded_stats_ml.json`)**: Exercises all 6 new statistical models (`auto_arima`, `auto_ces`, `auto_theta`, `tbats`, `fft`, `kalman`) and 2 new ML models (`random_forest`, `catboost`) across 25 series on `source_series_covariates_native` (`decision_metric="msse"`).
 - **`34` (`34_global_hybrid_dl.json`)**: Exercises multi-series panel training across all 4 `neuralforecast` global models (`tide`, `tft`, `tsmixer`, `patchtst`) and `neuralprophet` (`training_mode="hybrid"`) with three-tier covariates on Vertex AI Ray (`decision_metric="interval_score"`).
-- **`35` (`35_hierarchy_reconciliation.json`)**: Aggregates 50 bottom series into a 57-node hierarchy (`__total__` → `region` → `region/category` → bottom) and reconciles base forecasts and prediction intervals across all 7 FPP3 methods (`bottom_up`, `top_down`, `middle_out`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`) (`decision_metric="msis"`).
+- **`35` (`35_hierarchy_reconciliation.json`)**: Aggregates 40 bottom series into a 57-node hierarchy (`__total__` → `region` → `region/category` → bottom) and reconciles base forecasts and prediction intervals across all 7 FPP3 methods (`bottom_up`, `top_down`, `middle_out`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`) (`decision_metric="msis"`).
+- **`36` (`36_covariate_fallback_multi_runtime.json`)**: Exercises `on_unsupported_covariates="fallback"` across all 4 model families and all 3 runtimes (`theta`, `sarimax`, `xgboost`, `catboost` on Dataproc Serverless Spark; `tide` and `patchtst` in `global` mode on Vertex AI Ray CPU; `arima_plus` and `timesfm` on BigQuery ML), combined with `fleetwide` HPO and `ensemble` (`mean`, `inverse_error`, `nnls`).
+- **`37` (`37_hierarchy_covariates_ensemble.json`)**: Combines 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), 3-tier covariates (`static_covariates: ["region", "category"]`, `future_covariates`, `past_covariates`, `exog_lags`), univariate fallback (`theta` alongside `sarimax`, `xgboost`, `lightgbm`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`) scoring finite `mase` and `rmsse` across all bottom and aggregated hierarchy nodes.
 
 ---
 

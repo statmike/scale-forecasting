@@ -1,0 +1,66 @@
+{
+  "run_name": "smoke_37_hierarchy_covariates_ensemble",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_covariates_iceberg",
+    "horizon": 28,
+    "series_limit": 24
+  },
+  "models": [
+    "theta",
+    "sarimax",
+    "xgboost",
+    "lightgbm"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 2,
+    "step": 28,
+    "decision_metric": "rmsse"
+  },
+  "features": {
+    "static_covariates": [
+      "region",
+      "category"
+    ],
+    "future_covariates": [
+      "is_holiday",
+      "promo_flag",
+      "price_index"
+    ],
+    "past_covariates": [
+      "temperature"
+    ],
+    "exog_lags": {
+      "promo_flag": [1, 7],
+      "temperature": [7, 14]
+    },
+    "on_unsupported_covariates": "fallback"
+  },
+  "hierarchy": {
+    "enabled": true,
+    "levels": [
+      ["region"],
+      ["region", "category"]
+    ],
+    "reconciliation_methods": [
+      "bottom_up",
+      "wls_struct",
+      "mint_shrink"
+    ]
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": [
+      "mean",
+      "inverse_error",
+      "nnls"
+    ]
+  },
+  "compute": {
+    "ensemble": {
+      "mode": "barrier"
+    }
+  }
+}

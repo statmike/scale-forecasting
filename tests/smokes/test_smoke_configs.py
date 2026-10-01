@@ -291,3 +291,28 @@ def test_hierarchy_reconciliation_smoke_covers_all_seven_methods() -> None:
     assert cfg.hierarchy.levels == [["region"], ["region", "category"]]
     assert cfg.hierarchy.middle_level == ["region"]
     assert set(cfg.hierarchy.reconciliation_methods) == RECONCILIATION_METHODS
+
+
+def test_covariate_fallback_multi_runtime_smoke_spans_all_runtimes_and_tiers() -> None:
+    """Smoke 36 combines 3-tier covariates, fallback across runtimes, HPO, and ensembling."""
+    from scale_forecasting.dag import covariate_support_report
+
+    cfg = load_config(str(_SMOKE_DIR / "36_covariate_fallback_multi_runtime.json"))
+    dag = plan_dag(cfg)
+    assert set(dag.families) == {"statistical", "ml", "deep_learning", "native"}
+    assert dag.ensemble_enabled is True
+    assert cfg.hpo.enabled is True and cfg.hpo.granularity == "fleetwide"
+    assert cfg.features.on_unsupported_covariates == "fallback"
+    report = covariate_support_report(cfg)
+    assert any("theta" in line for line in report)
+    assert any("patchtst" in line for line in report)
+    assert any("arima_plus" in line for line in report)
+
+
+def test_hierarchy_covariates_ensemble_smoke_combines_hierarchy_covariates_and_ensemble() -> None:
+    """Smoke 37 combines hierarchy reconciliation, 3-tier covariates, fallback, and ensembling."""
+    cfg = load_config(str(_SMOKE_DIR / "37_hierarchy_covariates_ensemble.json"))
+    assert cfg.hierarchy.enabled is True
+    assert cfg.ensemble.enabled is True
+    assert cfg.features.static_covariates == ["region", "category"]
+    assert "theta" in cfg.models and "xgboost" in cfg.models

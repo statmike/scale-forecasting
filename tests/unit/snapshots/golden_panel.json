@@ -2029,6 +2029,38 @@
         1432,
         1460
       ]
+    ],
+    "configs/smokes/36_covariate_fallback_multi_runtime.json": [
+      [
+        0,
+        0,
+        1404,
+        1404,
+        1432
+      ],
+      [
+        1,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
+    "configs/smokes/37_hierarchy_covariates_ensemble.json": [
+      [
+        0,
+        0,
+        1404,
+        1404,
+        1432
+      ],
+      [
+        1,
+        0,
+        1432,
+        1432,
+        1460
+      ]
     ]
   }
 }

@@ -175,10 +175,16 @@ def build_hierarchy(
     def _aggregate_group(group_df: pd.DataFrame, node_id: str) -> pd.DataFrame:
         grouped = group_df.groupby(date_col, as_index=False, sort=True)
         agg_spec: dict[str, str] = {target_col: "sum"}
+        non_num_vals: dict[str, object] = {}
         for cov in cov_cols:
             if pd.api.types.is_numeric_dtype(group_df[cov]):
                 agg_spec[cov] = "mean"
+            else:
+                uniq = group_df[cov].dropna().unique()
+                non_num_vals[cov] = uniq[0] if len(uniq) == 1 else TOTAL_NODE_ID
         out = grouped.agg(agg_spec)
+        for cov, val in non_num_vals.items():
+            out[cov] = val
         out[id_col] = node_id
         return out[[id_col, date_col, target_col, *[c for c in cov_cols if c in out.columns]]]
 

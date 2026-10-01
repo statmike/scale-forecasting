@@ -367,3 +367,36 @@ def test_run_group_and_engine_wiring_with_hierarchy_reconciliation() -> None:
         for c in m_cells:
             assert np.isfinite(c.metrics["wape"])
             assert np.isfinite(c.metrics["mase"])
+
+
+def test_build_hierarchy_preserves_categorical_static_covariates() -> None:
+    """build_hierarchy must populate non-numeric static covariates on upper hierarchy nodes."""
+    from scale_forecasting.features import extract_static_covariates
+
+    df = _hierarchy_panel(n_series=24, n_days=60)
+    cfg = _cfg(
+        features={
+            "static_covariates": ["region", "category"],
+            "future_covariates": ["promo_flag", "price_index"],
+        }
+    )
+    full_df, spec = build_hierarchy(df, cfg)
+    assert not full_df[["region", "category"]].isna().any().any()
+    total_rows = full_df[full_df["ts_id"] == TOTAL_NODE_ID]
+    assert (total_rows["region"] == TOTAL_NODE_ID).all()
+    assert (total_rows["category"] == TOTAL_NODE_ID).all()
+
+    r_node = next(n for n in spec.node_ids if n.startswith("region=") and "/" not in n)
+    r_val = r_node.split("=", 1)[1]
+    r_rows = full_df[full_df["ts_id"] == r_node]
+    assert (r_rows["region"] == r_val).all()
+    assert (r_rows["category"] == TOTAL_NODE_ID).all()
+
+    from scale_forecasting.features import build_features
+
+    for _, series_df in full_df.groupby("ts_id"):
+        smap = extract_static_covariates(series_df, cfg)
+        assert set(smap.keys()) == {"region", "category"}
+        y, X = build_features(series_df, cfg)
+        assert len(y) == 60
+        assert X is not None
