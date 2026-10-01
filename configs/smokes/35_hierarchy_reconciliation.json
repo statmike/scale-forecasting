@@ -1,0 +1,39 @@
+{
+  "run_name": "smoke_35_hierarchy_reconciliation",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_covariates_iceberg",
+    "horizon": 28,
+    "series_limit": 40
+  },
+  "models": [
+    "theta",
+    "holtwinters",
+    "regression_lags",
+    "lightgbm"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 2,
+    "step": 28,
+    "decision_metric": "msis"
+  },
+  "hierarchy": {
+    "enabled": true,
+    "levels": [
+      ["region"],
+      ["region", "category"]
+    ],
+    "reconciliation_methods": [
+      "bottom_up",
+      "top_down",
+      "middle_out",
+      "ols",
+      "wls_struct",
+      "wls_var",
+      "mint_shrink"
+    ],
+    "middle_level": ["region"]
+  }
+}

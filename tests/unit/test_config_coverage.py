@@ -114,10 +114,6 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
     ),
-    "backtest.decision_metric=interval_score": (
-        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
-        "(over METRIC_NAMES)"
-    ),
     "backtest.decision_metric=interval_width": (
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
@@ -138,14 +134,6 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
     ),
-    "backtest.decision_metric=msis": (
-        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
-        "(over METRIC_NAMES)"
-    ),
-    "backtest.decision_metric=msse": (
-        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
-        "(over METRIC_NAMES)"
-    ),
     "backtest.decision_metric=ope": (
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
@@ -159,10 +147,6 @@ UNPROVEN: dict[str, str] = {
         "(over METRIC_NAMES)"
     ),
     "backtest.decision_metric=rmsle": (
-        "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
-        "(over METRIC_NAMES)"
-    ),
-    "backtest.decision_metric=rmsse": (
         "tests/unit/test_metrics.py::test_config_accepts_every_panel_metric_and_no_other "
         "(over METRIC_NAMES)"
     ),
@@ -228,83 +212,6 @@ UNPROVEN: dict[str, str] = {
         "container-image deployment therefore exercises it without any config naming it, and this "
         "join — which reads configs — is structurally blind to that. Read the ledger's prose, not "
         "this entry, before concluding the path is untested."
-    ),
-    # --- hierarchy -----------------------------------------------------------------------------
-    "hierarchy.enabled=true": (
-        "tests/unit/test_reconciliation.py::"
-        "test_hierarchy_config_elided_at_default_and_moves_run_id_when_enabled"
-    ),
-    "hierarchy.reconciliation_methods=bottom_up": (
-        "tests/unit/test_reconciliation.py::"
-        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
-        "(over RECONCILIATION_METHODS)"
-    ),
-    "hierarchy.reconciliation_methods=middle_out": (
-        "tests/unit/test_reconciliation.py::"
-        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
-        "(over RECONCILIATION_METHODS)"
-    ),
-    "hierarchy.reconciliation_methods=mint_shrink": (
-        "tests/unit/test_reconciliation.py::"
-        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
-        "(over RECONCILIATION_METHODS)"
-    ),
-    "hierarchy.reconciliation_methods=ols": (
-        "tests/unit/test_reconciliation.py::"
-        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
-        "(over RECONCILIATION_METHODS)"
-    ),
-    "hierarchy.reconciliation_methods=top_down": (
-        "tests/unit/test_reconciliation.py::"
-        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
-        "(over RECONCILIATION_METHODS)"
-    ),
-    "hierarchy.reconciliation_methods=wls_struct": (
-        "tests/unit/test_reconciliation.py::"
-        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
-        "(over RECONCILIATION_METHODS)"
-    ),
-    "hierarchy.reconciliation_methods=wls_var": (
-        "tests/unit/test_reconciliation.py::"
-        "test_all_seven_reconciliation_methods_produce_coherent_forecasts_and_intervals "
-        "(over RECONCILIATION_METHODS)"
-    ),
-    # --- models --------------------------------------------------------------------------------
-    "models=auto_arima": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=auto_ces": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=auto_theta": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=catboost": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=fft": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=kalman": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=patchtst": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=random_forest": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=tbats": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=tft": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=tide": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
-    ),
-    "models=tsmixer": (
-        "tests/unit/test_factory.py::test_config_accepts_every_registered_model (over MODEL_NAMES)"
     ),
     # --- features ------------------------------------------------------------------------------
     # `fourier=true` and `level_shift=true` sat here until 2026-09-26, pointed at their offline

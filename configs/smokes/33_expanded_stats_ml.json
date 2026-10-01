@@ -1,0 +1,26 @@
+{
+  "run_name": "smoke_33_expanded_stats_ml",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_covariates_native",
+    "horizon": 28,
+    "series_limit": 25
+  },
+  "models": [
+    "auto_arima",
+    "auto_ces",
+    "auto_theta",
+    "tbats",
+    "fft",
+    "kalman",
+    "random_forest",
+    "catboost"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 2,
+    "step": 28,
+    "decision_metric": "msse"
+  }
+}

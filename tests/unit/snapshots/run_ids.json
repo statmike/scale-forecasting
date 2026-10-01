@@ -48,5 +48,9 @@
   "configs/smokes/28_features_off.json": "smoke-28-features-off-f9298e722d7a",
   "configs/smokes/29_features_on.json": "smoke-29-features-on-e4ad80d90817",
   "configs/smokes/30_features_boxcox.json": "smoke-30-features-boxcox-96c5368ce4ca",
-  "configs/smokes/31_features_exog.json": "smoke-31-features-exog-8bc96fed0e7a"
+  "configs/smokes/31_features_exog.json": "smoke-31-features-exog-8bc96fed0e7a",
+  "configs/smokes/32_covariates_three_tier.json": "smoke-32-covariates-three-tier-77d614b503d1",
+  "configs/smokes/33_expanded_stats_ml.json": "smoke-33-expanded-stats-ml-dfb077c0de90",
+  "configs/smokes/34_global_hybrid_dl.json": "smoke-34-global-hybrid-dl-83e2e83c34a3",
+  "configs/smokes/35_hierarchy_reconciliation.json": "smoke-35-hierarchy-reconciliation-80a8810304fc"
 }

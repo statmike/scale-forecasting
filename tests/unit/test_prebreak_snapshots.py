@@ -170,6 +170,13 @@ _POST_BREAK = {
     "configs/smokes/29_features_on.json",
     "configs/smokes/30_features_boxcox.json",
     "configs/smokes/31_features_exog.json",
+    # The Phase B expansion quartet (three-tier covariates, expanded statistical/ML catalogue,
+    # global/hybrid deep learning on Ray, and FPP3 hierarchical reconciliation), written
+    # 2026-09-30 — post-break, exercising capabilities added after the digest break.
+    "configs/smokes/32_covariates_three_tier.json",
+    "configs/smokes/33_expanded_stats_ml.json",
+    "configs/smokes/34_global_hybrid_dl.json",
+    "configs/smokes/35_hierarchy_reconciliation.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

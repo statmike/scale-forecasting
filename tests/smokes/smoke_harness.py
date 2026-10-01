@@ -114,12 +114,16 @@ def verify_run_jobs(job_rows: list[dict[str, Any]], cfg: RunConfig) -> list[str]
 
 
 def verify_leaderboard(board_rows: list[dict[str, Any]], cfg: RunConfig) -> list[str]:
-    """Check the ``v_model_leaderboard`` rows cover every configured model (+ ensembles when on).
+    """Check the ``v_model_leaderboard`` rows cover every configured model (+ ensembles/reconciled).
 
     Returns a list of problems (empty=OK). Learned ensemble strategies are only present when
     backtest is enabled (they need the OOF); calculated strategies always land when the ensemble is
-    enabled, so the check only requires that *some* ``ensemble_*`` pseudo-model scored.
+    enabled, so the check only requires that *some* ``ensemble_*`` pseudo-model scored. When
+    hierarchical reconciliation is enabled, every ``<python_model>_<method>`` combination must
+    also appear on the leaderboard.
     """
+    from scale_forecasting.router import split_by_runtime
+
     problems: list[str] = []
     present = {str(r["model_type"]) for r in board_rows}
     for model in cfg.models:
@@ -128,6 +132,15 @@ def verify_leaderboard(board_rows: list[dict[str, Any]], cfg: RunConfig) -> list
     if cfg.ensemble.enabled:
         if not any(m.startswith("ensemble_") for m in present):
             problems.append("ensemble enabled but no ensemble_* pseudo-model scored")
+    if cfg.hierarchy.enabled:
+        python_models, _ = split_by_runtime(cfg)
+        for model in python_models:
+            for method in cfg.hierarchy.reconciliation_methods:
+                rec_model = f"{model}_{method}"
+                if rec_model not in present:
+                    problems.append(
+                        f"reconciled model {rec_model!r} did not score onto the leaderboard"
+                    )
     return problems
 
 
@@ -136,10 +149,12 @@ def verify_predictions(pred_counts: dict[str, int], cfg: RunConfig) -> list[str]
 
     The leaderboard is built from ``forecast_metadata``, so a model whose cells **all failed** still
     shows there with ``n_cells`` set — but writes zero rows to ``forecast_predictions``. This is the
-    guard that turns that silent failure into a FAIL: each configured model must have a non-zero
-    prediction count (``pred_counts`` is ``model_type -> row count`` from
-    `reads.read_prediction_counts`).
+    guard that turns that silent failure into a FAIL: each configured model (and each reconciled
+    ``<model>_<method>`` variant when hierarchy is enabled) must have a non-zero prediction
+    count (``pred_counts`` is ``model_type -> row count`` from `reads.read_prediction_counts`).
     """
+    from scale_forecasting.router import split_by_runtime
+
     problems: list[str] = []
     for model in cfg.models:
         if pred_counts.get(model, 0) <= 0:
@@ -147,6 +162,16 @@ def verify_predictions(pred_counts: dict[str, int], cfg: RunConfig) -> list[str]
                 f"model {model!r} produced no forecast rows (fits failed? metadata without "
                 "predictions) — its cells did not land in forecast_predictions"
             )
+    if cfg.hierarchy.enabled:
+        python_models, _ = split_by_runtime(cfg)
+        for model in python_models:
+            for method in cfg.hierarchy.reconciliation_methods:
+                rec_model = f"{model}_{method}"
+                if pred_counts.get(rec_model, 0) <= 0:
+                    problems.append(
+                        f"reconciled model {rec_model!r} produced no forecast rows — its cells "
+                        "did not land in forecast_predictions"
+                    )
     return problems
 
 

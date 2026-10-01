@@ -2,14 +2,14 @@
 
 A **smoke test** is a small, end-to-end live run (20–100 time series) that verifies a specific runtime, hardware, backtesting, HPO, feature-engineering, or ensembling combination against live Google Cloud infrastructure.
 
-- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (31 JSON configs)
+- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (35 JSON configs)
 - **Direct Smoke Harness**: [`tests/smokes/smoke_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/smoke_harness.py)
 - **Composer / Airflow Harness**: [`tests/smokes/airflow_smoke.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/airflow_smoke.py)
 - **Live Results Record**: [System Validation Ledger](validation.md)
 
 ```mermaid
 flowchart LR
-    Cfg["configs/smokes/*.json\n(31 Smoke Configs)"] --> Dry["1. Plan\nplan_run()"]
+    Cfg["configs/smokes/*.json\n(35 Smoke Configs)"] --> Dry["1. Plan\nplan_run()"]
     Dry --> Stage["2. Stage\nstage_run() -> GCS"]
     Stage --> Run["3. Execute\nmain.run() or Composer DAG"]
     Run --> Verify["4. Verify\nv_run_summary, v_run_jobs,\nv_model_leaderboard, cells"]
@@ -19,7 +19,7 @@ flowchart LR
 
 ---
 
-## Smoke Suite Overview (`01`–`31`)
+## Smoke Suite Overview (`01`–`35`)
 
 Configs are ordered from fastest/cheapest to most comprehensive:
 
@@ -56,6 +56,10 @@ Configs are ordered from fastest/cheapest to most comprehensive:
 | `29` | `29_features_on.json` | **Feature engineering (1/3):** `fourier`, `level_shift`, `exog_lags`, and `exog: ["is_holiday"]` |
 | `30` | `30_features_boxcox.json` | **Feature engineering (2/3):** `transform: "boxcox"` (positive series succeed, non-positive guarded) |
 | `31` | `31_features_exog.json` | **Feature engineering (3/3):** `features.exog` (`["is_holiday"]`) projected and extended over horizon |
+| `32` | `32_covariates_three_tier.json` | **Three-tier covariates:** `static_covariates`, `future_covariates`, and lagged `past_covariates` (`rmsse`) |
+| `33` | `33_expanded_stats_ml.json` | **Expanded statistical & ML models:** `auto_arima`, `auto_ces`, `auto_theta`, `tbats`, `fft`, `kalman`, `random_forest`, `catboost` (`msse`) |
+| `34` | `34_global_hybrid_dl.json` | **Global & hybrid deep learning:** `tide`, `tft`, `tsmixer`, `patchtst` (global) and `neuralprophet` (hybrid) on Vertex AI Ray (`interval_score`) |
+| `35` | `35_hierarchy_reconciliation.json` | **Hierarchical forecast reconciliation:** 3-level hierarchy across all 7 FPP3 reconciliation methods (`msis`) |
 
 ---
 
@@ -97,6 +101,14 @@ SF_RAY_POLL_FAULT=transport,auth .venv/bin/python tests/smokes/smoke_harness.py 
 
 The first poll of each Ray job injects a simulated transport (`503`) and/or auth (`401`) error, logs the injection and reconnect at `WARNING` level, mints a fresh token, and completes the run normally.
 
+### Covariates, Global/Hybrid DL, and Hierarchical Reconciliation (`32`–`35`)
+Smokes `32`–`35` exercise the Phase B expansion against the 100-series covariate + hierarchy benchmark tables (`source_series_covariates_iceberg` and `source_series_covariates_native`):
+
+- **`32` (`32_covariates_three_tier.json`)**: Exercises `static_covariates` (`region`, `category`, `store_size`), `future_covariates` (`is_holiday`, `promo_depth`), and lookahead-safe lagged `past_covariates` (`foot_traffic` lagged `[1, 7]`) across 8 statistical and ML models (`decision_metric="rmsse"`).
+- **`33` (`33_expanded_stats_ml.json`)**: Exercises all 6 new statistical models (`auto_arima`, `auto_ces`, `auto_theta`, `tbats`, `fft`, `kalman`) and 2 new ML models (`random_forest`, `catboost`) across 25 series on `source_series_covariates_native` (`decision_metric="msse"`).
+- **`34` (`34_global_hybrid_dl.json`)**: Exercises multi-series panel training across all 4 `neuralforecast` global models (`tide`, `tft`, `tsmixer`, `patchtst`) and `neuralprophet` (`training_mode="hybrid"`) with three-tier covariates on Vertex AI Ray (`decision_metric="interval_score"`).
+- **`35` (`35_hierarchy_reconciliation.json`)**: Aggregates 50 bottom series into a 57-node hierarchy (`__total__` → `region` → `region/category` → bottom) and reconciles base forecasts and prediction intervals across all 7 FPP3 methods (`bottom_up`, `top_down`, `middle_out`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`) (`decision_metric="msis"`).
+
 ---
 
 ## Prerequisites
@@ -123,7 +135,7 @@ export SF_REGION=us-central1
 ```
 
 Additional requirements by smoke category:
-- **Source Tables**: Both `source_series_iceberg` and `source_series_native` must exist in your BigQuery dataset (created automatically during deployment and seeding).
+- **Source Tables**: `source_series_iceberg` and `source_series_native` (plus `source_series_covariates_iceberg` and `source_series_covariates_native` for Smokes `32`–`35`) must exist in your BigQuery dataset.
 - **GPU Smokes (`03`, `06`, `08`, `09`, `10`, `14`, `15`, `16`)**: Requires regional GPU quota (`NVIDIA L4` for Dataproc Serverless; `NVIDIA T4` for Dataproc Standard Cluster and Vertex AI Ray).
 - **Cluster Reuse Smoke (`05`)**: Requires a standing Dataproc cluster named `sf-smoke-cluster`.
 
@@ -190,7 +202,7 @@ SELECT * FROM `PROJECT.DATASET.v_model_leaderboard` WHERE run_id = 'RUN_ID' ORDE
 
 The smoke configuration library and harness logic are continuously verified in the offline test suite (`make test`):
 
-- [`tests/smokes/test_smoke_configs.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_smoke_configs.py) — Validates that all 31 smoke configs parse, validate, and plan cleanly across every runtime, hardware, and ensemble combination.
+- [`tests/smokes/test_smoke_configs.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_smoke_configs.py) — Validates that all 35 smoke configs parse, validate, and plan cleanly across every runtime, hardware, and ensemble combination.
 - [`tests/smokes/test_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_harness.py) — Unit-tests the harness verification and reverse-trace logic against fixture rows.
 - [`tests/smokes/test_airflow_smoke.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_airflow_smoke.py) — Unit-tests the Composer command builders and DAG ID derivation.
 - [`tests/unit/test_airflow_dagbag.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_airflow_dagbag.py) — Loads emitted DAGs through a real `airflow.models.DagBag` in CI (`@airflow` marker).

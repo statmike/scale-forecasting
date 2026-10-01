@@ -1,0 +1,76 @@
+{
+  "run_name": "smoke_34_global_hybrid_dl",
+  "python_runtime": "ray",
+  "data": {
+    "source_table": "source_series_covariates_iceberg",
+    "horizon": 28,
+    "series_limit": 20
+  },
+  "models": [
+    "tide",
+    "tft",
+    "tsmixer",
+    "patchtst",
+    "neuralprophet"
+  ],
+  "model_params": {
+    "tide": {
+      "training_mode": "global",
+      "max_steps": 25,
+      "input_size": 28
+    },
+    "tft": {
+      "training_mode": "global",
+      "max_steps": 25,
+      "input_size": 28
+    },
+    "tsmixer": {
+      "training_mode": "global",
+      "max_steps": 25,
+      "input_size": 28
+    },
+    "patchtst": {
+      "training_mode": "global",
+      "max_steps": 25,
+      "input_size": 28
+    },
+    "neuralprophet": {
+      "training_mode": "hybrid",
+      "epochs": 10
+    }
+  },
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 1,
+    "step": 28,
+    "decision_metric": "interval_score"
+  },
+  "features": {
+    "static_covariates": [
+      "region",
+      "category"
+    ],
+    "future_covariates": [
+      "is_holiday",
+      "promo_flag",
+      "price_index"
+    ],
+    "past_covariates": [
+      "temperature"
+    ]
+  },
+  "compute": {
+    "use_gpu": false,
+    "families": {
+      "deep_learning": {
+        "hardware": "cpu"
+      }
+    },
+    "ray_regions": [
+      "us-central1",
+      "us-east1",
+      "us-west1"
+    ]
+  }
+}

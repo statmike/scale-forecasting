@@ -249,3 +249,45 @@ def test_the_exog_arm_leaves_holidays_unset() -> None:
         "31_features_exog.json sets holidays as well as exog; the generated `is_holiday` column "
         "would overwrite the one read from the source table and the arm would prove nothing"
     )
+
+
+def test_covariate_smokes_cover_both_iceberg_and_native_tables() -> None:
+    """The covariate/hierarchy source tables ship in both Iceberg and native BigQuery formats."""
+    tables = {load_config(str(p)).data.source_table for p in _CONFIGS}
+    assert "source_series_covariates_iceberg" in tables
+    assert "source_series_covariates_native" in tables
+
+
+def test_three_tier_covariate_smoke_declares_all_three_tiers_and_lags() -> None:
+    """Smoke 32 must exercise static, future, and past covariates plus lagged exog together."""
+    cfg = load_config(str(_SMOKE_DIR / "32_covariates_three_tier.json"))
+    assert cfg.features.static_covariates == ["region", "category"]
+    assert set(cfg.features.future_covariates) >= {"promo_flag", "price_index"}
+    assert cfg.features.past_covariates == ["temperature"]
+    assert set(cfg.features.exog_lags) == {"promo_flag", "temperature"}
+
+
+def test_global_hybrid_dl_smoke_exercises_panel_modes_on_ray() -> None:
+    """Smoke 34 must exercise global NeuralForecast and hybrid NeuralProphet on Ray."""
+    from scale_forecasting.worker import is_panel_model
+
+    cfg = load_config(str(_SMOKE_DIR / "34_global_hybrid_dl.json"))
+    assert cfg.python_runtime == "ray"
+    for m in ("tide", "tft", "tsmixer", "patchtst"):
+        assert m in cfg.models
+        assert cfg.model_params[m]["training_mode"] == "global"
+        assert is_panel_model(m, cfg)
+    assert "neuralprophet" in cfg.models
+    assert cfg.model_params["neuralprophet"]["training_mode"] == "hybrid"
+    assert is_panel_model("neuralprophet", cfg)
+
+
+def test_hierarchy_reconciliation_smoke_covers_all_seven_methods() -> None:
+    """Smoke 35 must exercise multi-level hierarchical aggregation and all 7 FPP3 methods."""
+    from scale_forecasting.config import RECONCILIATION_METHODS
+
+    cfg = load_config(str(_SMOKE_DIR / "35_hierarchy_reconciliation.json"))
+    assert cfg.hierarchy.enabled is True
+    assert cfg.hierarchy.levels == [["region"], ["region", "category"]]
+    assert cfg.hierarchy.middle_level == ["region"]
+    assert set(cfg.hierarchy.reconciliation_methods) == RECONCILIATION_METHODS

@@ -1972,6 +1972,63 @@
         1432,
         1460
       ]
+    ],
+    "configs/smokes/32_covariates_three_tier.json": [
+      [
+        0,
+        0,
+        1404,
+        1404,
+        1432
+      ],
+      [
+        1,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
+    "configs/smokes/33_expanded_stats_ml.json": [
+      [
+        0,
+        0,
+        1404,
+        1404,
+        1432
+      ],
+      [
+        1,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
+    "configs/smokes/34_global_hybrid_dl.json": [
+      [
+        0,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
+    "configs/smokes/35_hierarchy_reconciliation.json": [
+      [
+        0,
+        0,
+        1404,
+        1404,
+        1432
+      ],
+      [
+        1,
+        0,
+        1432,
+        1432,
+        1460
+      ]
     ]
   }
 }

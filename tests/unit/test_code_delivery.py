@@ -205,12 +205,14 @@ def test_ray_runtime_env_ships_src_and_uv_deps() -> None:
     # 404-ing the whole job at env setup. --no-cache is re-listed (it replaces the plugin default).
     opts = uv["uv_pip_install_options"]
     assert "--no-cache" in opts
+    assert "--no-deps" in opts
     assert "https://download.pytorch.org/whl/cu126" in opts
     i = opts.index("--extra-index-url")
     assert opts[i + 1] == "https://download.pytorch.org/whl/cu126"
     assert "--index-strategy" in opts and "unsafe-best-match" in opts
-    # uv_check runs `uv pip check` after install so dependency drift fails loudly at env setup.
-    assert uv["uv_check"] is True
+    # uv_check is False because uv pip check ignores --system-site-packages and would falsely flag
+    # cluster-provided packages (ray) required by neuralforecast when installed with --no-deps.
+    assert uv["uv_check"] is False
 
 
 # --- the Terraform submit paths zip src/ and deliver it at runtime -------------

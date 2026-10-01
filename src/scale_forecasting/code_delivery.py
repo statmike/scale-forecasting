@@ -161,14 +161,19 @@ def build_runtime_env(*, provisioned_hardware: str | None = None) -> dict[str, A
             # unsafe-best-match are needed for the ``+cu126`` torch build.
             "uv_pip_install_options": [
                 "--no-cache",
+                "--no-deps",
                 "--extra-index-url",
                 _TORCH_CUDA_INDEX,
                 "--index-strategy",
                 "unsafe-best-match",
             ],
-            # Run ``uv pip check`` after install so dependency drift fails loudly at env setup
-            # rather than as a confusing runtime import error — the byte-alignment guarantee.
-            "uv_check": True,
+            # ``docker/requirements.txt`` is already the complete transitive closure from
+            # ``uv export``, minus ``_CLUSTER_PROVIDED`` (``ray``, inherited via
+            # ``--system-site-packages``). ``--no-deps`` prevents ``uv pip install`` from
+            # re-resolving ``ray[tune]`` (required by ``neuralforecast``) from PyPI and overwriting
+            # the cluster's pinned ``ray``; ``uv_check`` is disabled because ``uv pip check``
+            # ignores ``--system-site-packages`` and would falsely report ``ray`` missing.
+            "uv_check": False,
         },
     }
 

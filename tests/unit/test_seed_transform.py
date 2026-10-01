@@ -141,7 +141,7 @@ def test_parse_args_leaves_env_untouched_when_no_infra_args(
 
 
 def test_source_rows_include_covariates_when_requested() -> None:
-    cfg = _cfg(with_exog=True, with_covariates=True)
+    cfg = _cfg(with_exog=True, with_hierarchy=True)
     frame = generate_partition([0, 1], cfg, SEED)
     rows = _to_source_rows(frame, cfg.holidays, include_covariates=True)
     assert list(rows.columns) == [

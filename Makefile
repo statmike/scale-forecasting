@@ -8,6 +8,7 @@
 # The exact export that produces docker/requirements.txt. Must stay identical here, in the file's
 # header comment, and in the CI drift check (.github/workflows/ci.yml) — that three-way match is what
 # guarantees the committed file always equals the lock.
+export UV_NO_CONFIG := 1
 EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra models --extra ray --format requirements-txt
 
 .PHONY: lock lock-check sync test hooks docs composer-sync

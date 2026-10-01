@@ -103,6 +103,26 @@ def test_verify_leaderboard_accepts_ensemble_rows_when_enabled() -> None:
     assert h.verify_leaderboard(board, cfg) == []
 
 
+def test_verify_leaderboard_requires_reconciled_models_when_hierarchy_enabled() -> None:
+    cfg = _cfg(
+        models=["theta"],
+        hierarchy={
+            "enabled": True,
+            "levels": [["region"]],
+            "reconciliation_methods": ["bottom_up", "wls_struct"],
+        },
+    )
+    board_missing = [
+        {"model_type": "theta", "n_cells": 105},
+        {"model_type": "theta_bottom_up", "n_cells": 105},
+    ]
+    problems = h.verify_leaderboard(board_missing, cfg)
+    assert any("theta_wls_struct" in p for p in problems)
+
+    board_ok = [*board_missing, {"model_type": "theta_wls_struct", "n_cells": 105}]
+    assert h.verify_leaderboard(board_ok, cfg) == []
+
+
 # --- verify_predictions --------------------------------------------------------
 
 
@@ -125,6 +145,23 @@ def test_verify_predictions_flags_model_missing_entirely() -> None:
     counts = {"arima_plus": 2800}  # theta absent from forecast_predictions entirely
     problems = h.verify_predictions(counts, cfg)
     assert any("theta" in p for p in problems)
+
+
+def test_verify_predictions_requires_reconciled_models_when_hierarchy_enabled() -> None:
+    cfg = _cfg(
+        models=["theta"],
+        hierarchy={
+            "enabled": True,
+            "levels": [["region"]],
+            "reconciliation_methods": ["bottom_up", "ols"],
+        },
+    )
+    counts_missing = {"theta": 735, "theta_bottom_up": 735}
+    problems = h.verify_predictions(counts_missing, cfg)
+    assert any("theta_ols" in p for p in problems)
+
+    counts_ok = {**counts_missing, "theta_ols": 735}
+    assert h.verify_predictions(counts_ok, cfg) == []
 
 
 # --- verify_cells --------------------------------------------------------------

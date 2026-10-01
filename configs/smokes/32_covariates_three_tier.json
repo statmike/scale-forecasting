@@ -1,0 +1,44 @@
+{
+  "run_name": "smoke_32_covariates_three_tier",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_covariates_iceberg",
+    "horizon": 28,
+    "series_limit": 50
+  },
+  "models": [
+    "prophet",
+    "sarimax",
+    "ucm",
+    "regression_lags",
+    "random_forest",
+    "lightgbm",
+    "xgboost",
+    "catboost"
+  ],
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 2,
+    "step": 28,
+    "decision_metric": "rmsse"
+  },
+  "features": {
+    "static_covariates": [
+      "region",
+      "category"
+    ],
+    "future_covariates": [
+      "is_holiday",
+      "promo_flag",
+      "price_index"
+    ],
+    "past_covariates": [
+      "temperature"
+    ],
+    "exog_lags": {
+      "promo_flag": [1, 7],
+      "temperature": [7, 14]
+    }
+  }
+}

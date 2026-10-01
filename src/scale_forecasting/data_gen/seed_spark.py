@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> None:
     for name, iceberg in targets:
         _clear_existing(settings, name, iceberg=iceberg)
 
-    # The shipped example is univariate by default: with_exog/with_covariates stay False unless
+    # The shipped example is univariate by default: with_exog/with_hierarchy stay False unless
     # --include-covariates is passed.
     include_covs = args.include_covariates
     gen_cfg = GenConfig(
@@ -312,7 +312,7 @@ def main(argv: list[str] | None = None) -> None:
         start=args.start,
         holidays=args.holidays,
         with_exog=include_covs,
-        with_covariates=include_covs,
+        with_hierarchy=include_covs,
     )
     # Bind loop-invariants into locals so the executor closure captures values, not `args`.
     holidays = args.holidays
