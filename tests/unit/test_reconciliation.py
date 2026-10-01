@@ -400,3 +400,86 @@ def test_build_hierarchy_preserves_categorical_static_covariates() -> None:
         y, X = build_features(series_df, cfg)
         assert len(y) == 60
         assert X is not None
+
+
+def test_multi_family_covariates_and_all_21_metrics_across_reconciled_hierarchy() -> None:
+    """End-to-end verification of mixed univariate + covariate models across all 7 reconciliation
+    methods and all 21 evaluation metrics on a cross-classified hierarchy.
+    """
+    from scale_forecasting.metrics import METRIC_NAMES
+
+    panel = _hierarchy_panel(n_series=12, n_days=120)
+    all_methods = [
+        "bottom_up",
+        "top_down",
+        "middle_out",
+        "ols",
+        "wls_struct",
+        "wls_var",
+        "mint_shrink",
+    ]
+    cfg = _cfg(
+        models=["theta", "regression_lags"],
+        features={
+            "static_covariates": ["region", "category"],
+            "future_covariates": ["promo_flag", "price_index"],
+            "past_covariates": ["temperature"],
+            "exog_lags": {"temperature": [1, 7]},
+            "on_unsupported_covariates": "fallback",
+        },
+        backtest={
+            "enabled": True,
+            "n_folds": 2,
+            "horizon": 7,
+            "step": 7,
+            "min_train": 60,
+        },
+        hierarchy={
+            "enabled": True,
+            "levels": [["region"], ["category"], ["region", "category"]],
+            "reconciliation_methods": all_methods,
+            "middle_level": ["region"],
+        },
+    )
+    _, spec = build_hierarchy(panel, cfg)
+    # 1 total + 4 regions + 3 categories + 12 region*category + 12 bottom = 32 nodes
+    assert spec.n_nodes == 1 + 4 + 3 + 12 + 12
+
+    for base_model in ("theta", "regression_lags"):
+        sub_cfg = cfg.model_copy(update={"models": [base_model]})
+        results, status = run_group(panel.assign(_sf_model=base_model), sub_cfg)
+        assert (status["status"] == "ok").all()
+        expected_variants = {base_model, *(f"{base_model}_{m}" for m in all_methods)}
+        assert set(status["model_type"].unique()) == expected_variants
+        assert len(results) == spec.n_nodes * len(expected_variants)
+
+        for method in all_methods:
+            rec_name = f"{base_model}_{method}"
+            m_cells = [r for r in results if r.model_type == rec_name]
+            assert len(m_cells) == spec.n_nodes
+            pred_df = pd.concat(
+                [c.predictions.assign(ts_id=c.ts_id, model_type=c.model_type) for c in m_cells],
+                ignore_index=True,
+            )
+            assert (
+                verify_coherence(pred_df, spec, value_col="yhat", date_col="ds", atol=1e-8) <= 1e-8
+            )
+            oof_df = pd.concat(
+                [
+                    c.oof.assign(ts_id=c.ts_id, model_type=c.model_type)
+                    for c in m_cells
+                    if c.oof is not None
+                ],
+                ignore_index=True,
+            )
+            for _cutoff, grp in oof_df.groupby("cutoff_date"):
+                assert (
+                    verify_coherence(grp, spec, value_col="yhat", date_col="ds", atol=1e-8) <= 1e-8
+                )
+            # Check that all 21 metrics (including scaled & interval metrics) populate on __total__
+            total_cell = next(c for c in m_cells if c.ts_id == TOTAL_NODE_ID)
+            for metric_name in METRIC_NAMES:
+                assert metric_name in total_cell.metrics
+                assert np.isfinite(total_cell.metrics[metric_name]), (
+                    f"{rec_name} metric {metric_name} was not finite on __total__"
+                )
