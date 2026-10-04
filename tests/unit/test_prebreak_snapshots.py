@@ -179,6 +179,8 @@ _POST_BREAK = {
     "configs/smokes/35_hierarchy_reconciliation.json",
     "configs/smokes/36_covariate_fallback_multi_runtime.json",
     "configs/smokes/37_hierarchy_covariates_ensemble.json",
+    "configs/smokes/38_vertex_custom_job.json",
+    "configs/smokes/39_gce_single_vm.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

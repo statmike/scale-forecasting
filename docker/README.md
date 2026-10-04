@@ -3,7 +3,7 @@
 `scale-forecasting` enforces a strict architectural separation between **dependencies** and **application code**:
 
 - **Dependencies change slowly** and are locked once in [`uv.lock`](../uv.lock), exported to [`requirements.txt`](./requirements.txt), and baked into the runtime container and packed virtualenv archive.
-- **Application code (`src/scale_forecasting/`) changes frequently** and is **never** baked into the container image (`uv sync --frozen --no-install-project`). Instead, it is zipped and delivered at job-submission time (`python_file_uris` on Spark, `runtime_env.working_dir` on Ray).
+- **Application code (`src/scale_forecasting/`) changes frequently** and is **never** baked into the container image (`uv sync --frozen --no-install-project`). Instead, it is zipped and delivered at job-submission time (`python_file_uris` on Spark, `runtime_env.working_dir` on Ray, `SF_CODE_ZIP_URI` on Vertex AI `CustomJob` and GCE Single-VM).
 
 Because of this design, you can edit a model, add a metric, or adjust orchestration logic and immediately submit a new cloud run **without rebuilding a container image**. This invariant is enforced in CI by [`tests/unit/test_code_delivery.py`](../tests/unit/test_code_delivery.py).
 
@@ -20,6 +20,7 @@ flowchart LR
 
     subgraph surfaces["Cloud Compute Surfaces"]
         sls["Dataproc Serverless<br/>Mounts spark-runtime container"]
+        vtx["Vertex CustomJob & GCE Single-VM<br/>Runs spark-runtime container"]
         cls["Dataproc GCE Cluster<br/>Unpacks env.tar.gz via init action"]
         ray["Ray on Vertex AI<br/>Stock Vertex image + uv runtime_env"]
     end
@@ -28,7 +29,7 @@ flowchart LR
     lock --> cb
     cb -->|"step 1: docker build"| img
     cb -->|"step 2–3: tar & upload /opt/venv"| venv
-    img --> sls
+    img --> sls & vtx
     venv --> cls
     req -->|"code_delivery.build_runtime_env()"| ray
 ```
@@ -39,7 +40,7 @@ flowchart LR
 
 | File | Purpose |
 | :--- | :--- |
-| [`Dockerfile`](./Dockerfile) | Builds the Dataproc Serverless custom container (`debian:12-slim` + `uv`-managed Python `3.11.15` + locked `core`, `models`, and `ray` dependencies in a self-contained, relocatable `/opt/venv`). Configures `procps`, `tini`, `libjemalloc2`, `libgomp1`, NVIDIA driver paths (`/usr/local/nvidia`), and UID/GID `1099` (`spark`). |
+| [`Dockerfile`](./Dockerfile) | Builds the shared Dataproc Serverless, Vertex AI `CustomJob`, and GCE Single-VM runtime container (`debian:12-slim` + `uv`-managed Python `3.11.15` + locked `core`, `models`, and `ray` dependencies in a self-contained, relocatable `/opt/venv`). Configures `procps`, `tini`, `libjemalloc2`, `libgomp1`, NVIDIA driver paths (`/usr/local/nvidia`), and UID/GID `1099` (`spark`). |
 | [`cloudbuild.yaml`](./cloudbuild.yaml) | Three-step Cloud Build pipeline triggered automatically by Terraform (`module.container`): (1) builds and pushes the `Dockerfile` image to Artifact Registry, (2) tars the self-contained `/opt/venv` tree, and (3) uploads `gs://<code-bucket>/envs/<hash>.tar.gz` for Dataproc GCE clusters. |
 | [`requirements.txt`](./requirements.txt) | Derived, human-readable export of `uv.lock` (`make lock`). Consumed at runtime by `code_delivery.build_runtime_env()` to install the exact locked dependency set into Ray-on-Vertex jobs via Ray's `uv` runtime plugin, and by the Colab Enterprise notebook bootstrap cells. |
 | [`cloudbuild-gpu-image.yaml`](./cloudbuild-gpu-image.yaml) | Optional Cloud Build pipeline that uses `GoogleCloudDataproc/custom-images` to pre-bake the NVIDIA kernel driver onto a Dataproc `2.2-debian12` GCE VM image (`sf-dataproc-gpu-<hash>`), avoiding per-cluster driver compilation when launching GPU Dataproc clusters. |

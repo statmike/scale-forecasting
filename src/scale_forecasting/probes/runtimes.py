@@ -91,6 +91,21 @@ _RAY_JOB_STATES = {
     "STOPPED": NATIVE_FAILED,
 }
 
+# Vertex AI ``CustomJob`` ``JobState``.
+_VERTEX_CUSTOM_JOB_STATES = {
+    "JOB_STATE_QUEUED": NATIVE_RUNNING,
+    "JOB_STATE_PENDING": NATIVE_RUNNING,
+    "JOB_STATE_RUNNING": NATIVE_RUNNING,
+    "JOB_STATE_CANCELLING": NATIVE_RUNNING,
+    "JOB_STATE_PAUSED": NATIVE_RUNNING,
+    "JOB_STATE_UPDATING": NATIVE_RUNNING,
+    "JOB_STATE_SUCCEEDED": NATIVE_SUCCEEDED,
+    "JOB_STATE_FAILED": NATIVE_FAILED,
+    "JOB_STATE_CANCELLED": NATIVE_FAILED,
+    "JOB_STATE_EXPIRED": NATIVE_FAILED,
+    "JOB_STATE_PARTIALLY_SUCCEEDED": NATIVE_FAILED,
+}
+
 
 def _short_detail(exc: Exception) -> str:
     """A concise, scannable degrade reason — the exception type + its first message line,
@@ -104,9 +119,10 @@ def _cancel_failure(exc: Exception) -> CancelResult:
 
     A `PermissionDenied` (or any error whose message names a missing permission) is the common
     enterprise case — a read-only *probe-reader* principal trying to *cancel* without the
-    *job-canceller* role (§9 of the design). We translate it to an actionable one-liner rather than
-    surfacing a raw stack trace; every other error degrades to a `_short_detail` summary. Either way
-    ``stopped=already_gone=False`` so the caller does not finalize the registry to CANCELLED."""
+    *job-canceller* role (§9 of the runtime-probe design). We translate it to an actionable
+    one-liner rather than surfacing a raw stack trace; every other error degrades to a
+    `_short_detail` summary. Either way ``stopped=already_gone=False`` so the caller does not
+    finalize the registry to CANCELLED."""
     from google.api_core.exceptions import Forbidden, PermissionDenied
 
     if isinstance(exc, PermissionDenied | Forbidden):
@@ -114,7 +130,8 @@ def _cancel_failure(exc: Exception) -> CancelResult:
             stopped=False,
             already_gone=False,
             detail="permission denied — cancel needs the job-canceller role "
-            "(dataproc.batches.delete / dataproc.jobs.cancel / bigquery.jobs.update / Ray stop)",
+            "(dataproc.batches.delete / dataproc.jobs.cancel / aiplatform.customJobs.cancel "
+            "/ bigquery.jobs.update / Ray stop)",
         )
     return CancelResult(stopped=False, already_gone=False, detail=_short_detail(exc))
 
@@ -461,11 +478,221 @@ def _rollup_bigquery_states(jobs: list[Any]) -> str:
     return NATIVE_FAILED if any_failed else NATIVE_SUCCEEDED
 
 
+class VertexProbe:
+    """Probe a Vertex AI ``CustomJob`` via ``JobServiceClient``.
+
+    Before stamp-back (or during ``_attempt_free_of_taken_ids``), ``handle.native_id`` is the
+    deterministic ``display_name`` (``sf-r-...``); after stamp-back, ``handle.native_id`` (and
+    ``handle.resource_name``) is the server-assigned ``projects/.../locations/.../customJobs/...``
+    resource name. ``_resolve_custom_job`` handles both: a full resource name is fetched directly
+    via ``get_custom_job``, while a ``display_name`` is resolved via ``list_custom_jobs``.
+    """
+
+    name = "vertex"
+
+    @staticmethod
+    def _resolve_custom_job(client: Any, handle: ProbeHandle, settings: Settings) -> Any:
+        from google.api_core.exceptions import NotFound
+
+        target = handle.resource_name or handle.native_id
+        if not target:
+            raise NotFound("vertex custom job id not yet assigned")
+        if target.startswith("projects/"):
+            return client.get_custom_job(name=target, timeout=_PROBE_TIMEOUT_S)
+        region = handle.region or settings.region
+        parent = f"projects/{settings.project_id}/locations/{region}"
+        matches = list(
+            client.list_custom_jobs(
+                request={"parent": parent, "filter": f'display_name="{target}"'},
+                timeout=_PROBE_TIMEOUT_S,
+            )
+        )
+        if not matches:
+            raise NotFound("vertex custom job not found")
+        return matches[0]
+
+    def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
+        try:
+            from google.api_core.exceptions import NotFound
+
+            from ..vertex_submit import _job_client
+
+            region = handle.region or settings.region
+            client = _job_client(region)
+            try:
+                job = self._resolve_custom_job(client, handle, settings)
+            except NotFound:
+                return ProbeResult(
+                    NATIVE_NOT_FOUND, exists=False, detail="vertex custom job not found"
+                )
+            state = getattr(job, "state", None)
+            state_name = getattr(state, "name", str(state))
+            native = _VERTEX_CUSTOM_JOB_STATES.get(state_name, NATIVE_UNKNOWN)
+            error = getattr(job, "error", None)
+            detail = getattr(error, "message", "") or "" if error else ""
+            return ProbeResult(native, exists=True, detail=detail)
+        except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
+            return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
+
+    def cancel(self, handle: ProbeHandle, *, settings: Settings) -> CancelResult:
+        try:
+            from google.api_core.exceptions import NotFound
+
+            from ..vertex_submit import _job_client
+
+            region = handle.region or settings.region
+            client = _job_client(region)
+            try:
+                job = self._resolve_custom_job(client, handle, settings)
+            except NotFound:
+                return CancelResult(
+                    stopped=False, already_gone=True, detail="vertex custom job already gone"
+                )
+            state_name = getattr(getattr(job, "state", None), "name", "")
+            if _VERTEX_CUSTOM_JOB_STATES.get(state_name, NATIVE_UNKNOWN) in _BATCH_TERMINAL:
+                return CancelResult(
+                    stopped=False,
+                    already_gone=True,
+                    detail=f"vertex custom job already {state_name.lower()}",
+                )
+            try:
+                client.cancel_custom_job(name=job.name, timeout=_PROBE_TIMEOUT_S)
+            except NotFound:
+                return CancelResult(
+                    stopped=False, already_gone=True, detail="vertex custom job already gone"
+                )
+            return CancelResult(
+                stopped=True, already_gone=False, detail="vertex custom job cancel issued"
+            )
+        except Exception as exc:  # noqa: BLE001 - cancel is advisory: report failure, never raise
+            return _cancel_failure(exc)
+
+
+_GCE_RUNNING_STATES = frozenset({"PROVISIONING", "STAGING", "RUNNING", "REPAIRING"})
+_GCE_TERMINAL_STATES = frozenset({"STOPPING", "STOPPED", "SUSPENDING", "SUSPENDED", "TERMINATED"})
+
+
+class GceProbe:
+    """Probe a Compute Engine single-VM job via its GCS status marker and GCE instance state.
+
+    Because GCE VMs self-delete on container exit (`trap cleanup EXIT`), a completed GCE job's
+    authoritative terminal state lives in its GCS status marker
+    (`gs://<code_bucket>/runs/gce-status/<instance_name>.json`), while a running or provisioning VM
+    is visible via ``instances.get``.
+    """
+
+    name = "gce"
+
+    @staticmethod
+    def _resolve_zone_and_name(handle: ProbeHandle, settings: Settings) -> tuple[str, str]:
+        resource = handle.resource_name or ""
+        if "/zones/" in resource and "/instances/" in resource:
+            parts = resource.split("/")
+            zone_idx = parts.index("zones") + 1
+            inst_idx = parts.index("instances") + 1
+            if zone_idx < len(parts) and inst_idx < len(parts):
+                return parts[zone_idx], parts[inst_idx]
+        region_or_zone = handle.region or settings.region
+        zone = region_or_zone if region_or_zone.count("-") >= 2 else f"{region_or_zone}-a"
+        return zone, handle.native_id
+
+    @staticmethod
+    def _resolve_status_bucket(settings: Settings) -> str:
+        try:
+            from ..batch_infra import BatchInfra
+
+            return BatchInfra.resolve().code_bucket
+        except Exception:  # noqa: BLE001
+            w = getattr(settings, "warehouse_uri", "") or ""
+            if w.startswith("gs://"):
+                return w.removeprefix("gs://").split("/", 1)[0]
+            return ""
+
+    def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
+        if not handle.native_id:
+            return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="gce instance id not set")
+        try:
+            from ..gce_submit import get_instance, read_status_marker
+
+            status_bucket = self._resolve_status_bucket(settings)
+            marker = (
+                read_status_marker(status_bucket, handle.native_id, project_id=settings.project_id)
+                if status_bucket
+                else None
+            )
+            if marker is not None:
+                m_state = str(marker.get("status") or marker.get("state") or "").upper()
+                exit_code = marker.get("exit_code")
+                if m_state == "SUCCEEDED":
+                    return ProbeResult(
+                        NATIVE_SUCCEEDED,
+                        exists=True,
+                        detail="gce container exited 0",
+                        telemetry=marker,
+                    )
+                if m_state == "FAILED":
+                    return ProbeResult(
+                        NATIVE_FAILED,
+                        exists=True,
+                        detail=f"gce container exited {exit_code}",
+                        telemetry=marker,
+                    )
+
+            zone, instance_name = self._resolve_zone_and_name(handle, settings)
+            inst = get_instance(settings.project_id, zone, instance_name, timeout=_PROBE_TIMEOUT_S)
+            if inst is None:
+                if marker is not None:
+                    # Marker said RUNNING/BOOTING, but the VM is now gone without writing SUCCEEDED
+                    # (e.g. preempted, OOM-killed, or TTL-deleted).
+                    return ProbeResult(
+                        NATIVE_FAILED,
+                        exists=True,
+                        detail="gce instance terminated before writing terminal marker",
+                        telemetry=marker,
+                    )
+                return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="gce instance not found")
+
+            status = str(inst.get("status") or "").upper()
+            if status in _GCE_RUNNING_STATES:
+                return ProbeResult(NATIVE_RUNNING, exists=True, detail=f"gce status={status}")
+            if status in _GCE_TERMINAL_STATES:
+                return ProbeResult(
+                    NATIVE_FAILED,
+                    exists=True,
+                    detail=f"gce instance {status.lower()} without success marker",
+                )
+            return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=f"gce status={status}")
+        except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
+            return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
+
+    def cancel(self, handle: ProbeHandle, *, settings: Settings) -> CancelResult:
+        if not handle.native_id:
+            return CancelResult(stopped=False, already_gone=False, detail="gce instance id not set")
+        try:
+            from ..gce_submit import delete_instance
+
+            zone, instance_name = self._resolve_zone_and_name(handle, settings)
+            deleted = delete_instance(
+                settings.project_id, zone, instance_name, timeout=_PROBE_TIMEOUT_S
+            )
+            if not deleted:
+                return CancelResult(
+                    stopped=False, already_gone=True, detail="gce instance already gone"
+                )
+            return CancelResult(
+                stopped=True, already_gone=False, detail="gce instance deletion issued"
+            )
+        except Exception as exc:  # noqa: BLE001 - cancel is advisory: report failure, never raise
+            return _cancel_failure(exc)
+
+
 # Registered by ``runtime`` (a `ProbeHandle.runtime`). A new probe = one class + one entry here,
 # mirroring `submitters._SUBMITTERS`.
 _PROBES: dict[str, RuntimeProbe] = {
     SparkProbe.name: SparkProbe(),
     RayProbe.name: RayProbe(),
+    VertexProbe.name: VertexProbe(),
+    GceProbe.name: GceProbe(),
     BigQueryProbe.name: BigQueryProbe(),
 }
 

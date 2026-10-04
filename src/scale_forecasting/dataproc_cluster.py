@@ -83,8 +83,18 @@ _DEFAULT_WORKER_MACHINE = f"{_AUTO_MACHINE_FAMILY}-standard-{_WORKER_CORES}"
 # GPU worker machine + Vertex/Compute accelerator enum per short gpu_type. A T4 is an add-on card on
 # an n1 worker; an L4 is bundled into a g2 machine. (Both still declare an AcceleratorConfig so
 # Dataproc exposes the device to Spark.)
-_GPU_WORKER_MACHINE = {"T4": "n1-standard-8", "L4": "g2-standard-8"}
-_GPU_ACCELERATOR_TYPE = {"T4": "nvidia-tesla-t4", "L4": "nvidia-l4"}
+_GPU_WORKER_MACHINE = {
+    "T4": "n1-standard-8",
+    "L4": "g2-standard-8",
+    "A100": "a2-highgpu-1g",
+    "A100_80GB": "a2-ultragpu-1g",
+}
+_GPU_ACCELERATOR_TYPE = {
+    "T4": "nvidia-tesla-t4",
+    "L4": "nvidia-l4",
+    "A100": "nvidia-tesla-a100",
+    "A100_80GB": "nvidia-a100-80gb",
+}
 
 # The stock Dataproc GPU-driver install action — installs the NVIDIA driver on each node at create,
 # so the executor's Python worker can use the GPU for the torch fit inside the pandas UDF.

@@ -145,6 +145,9 @@ nav:
       - Calibration: api/calibration.md
       - Spark core: api/engines_spark_io.md
       - Ray core: api/engines_ray_io.md
+      - Vertex AI CustomJob engine: api/engines_vertex_engine.md
+      - Vertex AI CustomJob submitter: api/vertex_submit.md
+      - Compute Engine Single-VM submitter: api/gce_submit.md
       - BigQuery-native engine: api/engines_bigquery_engine.md
       - Compute profiling: api/profiling.md
       - Resource planning: api/resources.md

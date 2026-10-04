@@ -676,15 +676,26 @@ def add_bucket(
     """
     from pyspark.sql import functions as F
 
+    from ..worker import is_panel_model
+
     key = [F.col(c) for c in bucket_key_cols(cfg)]
     flat = F.pmod(F.hash(*key), F.lit(n_buckets))
+    panel_models = [m for m in cfg.models if is_panel_model(m, cfg)]
+    if panel_models and not cfg.hierarchy.enabled:
+        panel_flat = F.pmod(F.hash(F.col(_MODEL_COL)), F.lit(n_buckets))
+        flat = F.when(F.col(_MODEL_COL).isin(panel_models), panel_flat).otherwise(flat)
     if not allocation or cfg.hierarchy.enabled:
         return df.withColumn(_BUCKET_COL, flat)
 
+    panel_set = set(panel_models)
     series_hash = F.hash(F.col(cfg.data.ts_id_col))
     bucket = None
     for name, (offset, width) in allocation.items():
-        sliced = F.lit(offset) + F.pmod(series_hash, F.lit(width))
+        sliced = (
+            F.lit(offset)
+            if name in panel_set
+            else F.lit(offset) + F.pmod(series_hash, F.lit(width))
+        )
         condition = F.col(_MODEL_COL) == F.lit(name)
         bucket = F.when(condition, sliced) if bucket is None else bucket.when(condition, sliced)
     return df.withColumn(_BUCKET_COL, bucket.otherwise(flat))

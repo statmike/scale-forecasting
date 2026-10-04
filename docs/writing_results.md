@@ -12,12 +12,13 @@ flowchart LR
     subgraph Writers["Engine Workers & Drivers"]
         W1["Spark Executor\n(make_group_runner)"]
         W2["Ray Worker Task\n(make_chunk_runner)"]
+        W5["Vertex / GCE Worker\n(vertex_engine)"]
         W3["BigQuery-Native Driver\n(bigquery_engine)"]
         W4["Ensembler\n(ensemble_run)"]
     end
-    W1 & W2 & W3 & W4 -->|"Batch of CellResult"| Cells["registry.cells.write_cells\nProto-Encoded Default Stream"]
+    W1 & W2 & W5 & W3 & W4 -->|"Batch of CellResult"| Cells["registry.cells.write_cells\nProto-Encoded Default Stream"]
     Cells -->|"Storage Write API\n(Append-Only + Backoff)"| Tables["BigQuery Registry Tables\nforecast_metadata · forecast_predictions · backtest_oof"]
-    Tables -->|"QUALIFY ROW_NUMBER() = 1\n(Dedupe-on-Read)"| Views["Analyst Views\nv_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage"]
+    Tables -->|"QUALIFY ROW_NUMBER() = 1\n(Dedupe-on-Read)"| Views["5 Analyst Views\nv_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage · v_run_summary · v_run_jobs"]
 ```
 
 ---
@@ -38,20 +39,20 @@ same Storage Write API path would write it unchanged.)
 
 ## How results are written
 
-Every engine — Spark, Ray, and the BigQuery-native family — funnels its results through the **same**
+Every engine — Spark, Ray, Vertex `CustomJob`, GCE Single-VM, and the BigQuery-native family — funnels its results through the **same**
 writer, `registry.cells.write_cells`:
 
 - **Workers return data, not RPCs.** A cell returns a `CellResult`; the engine hands a batch of them
   to `write_cells`, which proto-encodes the rows and appends them via the Storage Write API's default
   stream. Throughput is bounded by **compute** (how many workers are running), not by a tracking
   server's request rate.
-- **Executor-side, in bulk, once per partition.** The Spark group-runner and the Ray chunk-runner
-  both call `write_cells` from the **worker**, streaming each bucket/chunk's rows directly to BigQuery.
+- **Executor-side, in bulk, once per partition.** The Spark group-runner, Ray chunk-runner, and Vertex/GCE worker runner
+  all call `write_cells` from the **worker**, streaming each bucket/chunk's rows directly to BigQuery.
   Results never round-trip through the driver, so the write scales with the fan-out.
 - **Streaming, not row inserts, not load jobs.** The default-stream Storage Write API is a
   high-throughput streaming append — not `INSERT` statements (which don't scale to millions of rows)
   and not per-write load jobs (which are quota-limited per table per day).
-- **The BigQuery-native family reuses the same encoder.** `arima_plus`/`arima_plus_xreg`/`timesfm`
+- **The BigQuery-native family reuses the same encoder.** `arima_plus` (`ARIMA_PLUS` / `ARIMA_PLUS_XREG`) and `timesfm`
   compute inside BigQuery, but their metrics and predictions are written through the *same*
   `write_cells` proto path as the Python cells — one write path across all runtimes.
 

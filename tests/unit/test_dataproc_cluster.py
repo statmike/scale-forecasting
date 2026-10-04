@@ -440,7 +440,7 @@ def test_gpu_worker_defaults_to_t4() -> None:
 
 def test_gpu_worker_unknown_type_raises() -> None:
     with pytest.raises(ConfigError, match="unsupported gpu_type"):
-        dataproc_cluster._gpu_worker("A100")
+        dataproc_cluster._gpu_worker("H100")
 
 
 # --- worker_machine_type / cluster_sizing ---------------------------------------
@@ -451,8 +451,10 @@ def test_the_worker_machine_is_read_from_one_place_by_both_readers() -> None:
     assert dataproc_cluster.worker_machine_type("cpu") == "n1-standard-8"
     assert dataproc_cluster.worker_machine_type("gpu") == "n1-standard-8"  # a T4 rides an n1
     assert dataproc_cluster.worker_machine_type("gpu", "L4") == "g2-standard-8"
+    assert dataproc_cluster.worker_machine_type("gpu", "A100") == "a2-highgpu-1g"
+    assert dataproc_cluster.worker_machine_type("gpu", "A100_80GB") == "a2-ultragpu-1g"
     with pytest.raises(ConfigError, match="unsupported gpu_type"):
-        dataproc_cluster.worker_machine_type("gpu", "A100")
+        dataproc_cluster.worker_machine_type("gpu", "H100")
 
 
 def test_machine_family_selects_the_cpu_worker_and_master_family() -> None:

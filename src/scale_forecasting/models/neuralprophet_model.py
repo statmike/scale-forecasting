@@ -32,6 +32,7 @@ import pandas as pd
 
 from ..errors import ConfigError, ModelError
 from ..features import invert_transform
+from ._neuralforecast_base import _ensure_mpl_dir
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
 if TYPE_CHECKING:
@@ -66,6 +67,7 @@ class NeuralProphetModel(BaseModel):
     optional_extra = "models-dl"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
+        _ensure_mpl_dir()
         try:
             from neuralprophet import NeuralProphet, set_log_level, set_random_seed
         except ImportError as e:  # pragma: no cover - exercised only without the extra
@@ -92,9 +94,10 @@ class NeuralProphetModel(BaseModel):
             n_lags=int(self.params.get("n_lags", 0)),
             n_forecasts=int(self.params.get("n_forecasts", 1)),
             batch_size=self._optional_int("batch_size"),
+            collect_metrics=False,
             trainer_config=self._trainer_config(),
         )
-        model.fit(self._train, freq=self.ctx.freq, progress=None)
+        model.fit(self._train, freq=self.ctx.freq, progress=None, minimal=True)
         self._model = model
 
     def predict(
@@ -125,6 +128,7 @@ class NeuralProphetModel(BaseModel):
         static_map: Mapping[str, dict[str, Any]] | None = None,
     ) -> None:
         """Fit one global or hybrid NeuralProphet network across all series in ``series_map``."""
+        _ensure_mpl_dir()
         try:
             from neuralprophet import NeuralProphet, set_log_level, set_random_seed
         except ImportError as e:  # pragma: no cover - exercised only without the extra
@@ -168,9 +172,10 @@ class NeuralProphetModel(BaseModel):
             batch_size=self._optional_int("batch_size"),
             trend_global_local=trend_gl,
             season_global_local=season_gl,
+            collect_metrics=False,
             trainer_config=self._trainer_config(),
         )
-        model.fit(self._panel_train, freq=self.ctx.freq, progress=None)
+        model.fit(self._panel_train, freq=self.ctx.freq, progress=None, minimal=True)
         self._model = model
 
     def predict_panel(

@@ -222,7 +222,7 @@ def check_model_params(cfg: RunConfig) -> None:
             raise ConfigError(
                 f"hierarchy.enabled=True is not supported with BigQuery-native models "
                 f"{native_models}; hierarchical bottom-up aggregation and MinT/OLS/WLS "
-                f"reconciliation execute on Python runtimes (Spark or Ray)."
+                f"reconciliation execute on Python runtimes (Spark, Ray, or Vertex)."
             )
     for name in cfg.models:
         authored = dict(cfg.model_params.get(name, {}))
@@ -250,9 +250,9 @@ def check_model_params(cfg: RunConfig) -> None:
             if family_compute.runtime == "spark":
                 raise ConfigError(
                     f"model_params.{name} sets training_mode={mode!r}, which trains a single "
-                    f"shared network across the full panel and requires a Ray runtime "
-                    f"(set python_runtime='ray' or "
-                    f"compute.families.{model_cls.family}.runtime='ray'), "
+                    f"shared network across the full panel and requires a Ray or Vertex runtime "
+                    f"(set python_runtime='ray' or 'vertex', or "
+                    f"compute.families.{model_cls.family}.runtime='ray' or 'vertex'), "
                     f"or set training_mode='local' for per-series Spark execution."
                 )
 

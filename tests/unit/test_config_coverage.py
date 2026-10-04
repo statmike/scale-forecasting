@@ -166,12 +166,24 @@ UNPROVEN: dict[str, str] = {
     # The ensemble node's `runtime`/`spark_mode`/`spark_cluster_name` used to sit here as gaps. They
     # were read by nothing — the node is hard-wired to the driver — so they were deleted from
     # `EnsembleCompute` rather than exempted. A value that no longer exists needs no entry.
+    "compute.families.gpu_type=A100": (
+        "tests/unit/test_vertex_runtime.py::test_gpu_machine_type_resolution_and_validation"
+    ),
+    "compute.families.gpu_type=A100_80GB": (
+        "tests/unit/test_vertex_runtime.py::test_gpu_machine_type_resolution_and_validation"
+    ),
     "compute.families.runtime=spark": (
         "tests/unit/test_airflow_emit.py::test_two_cluster_spark_families_emit_a_shared_dataproc_bracket"
     ),
     "compute.families.spark_mode=serverless": (
         "tests/unit/test_config_families.py::"
         "test_spark_mode_serverless_written_out_resolves_the_same_but_is_a_different_run"
+    ),
+    "compute.gpu_type=A100": (
+        "tests/unit/test_vertex_runtime.py::test_gpu_machine_type_resolution_and_validation"
+    ),
+    "compute.gpu_type=A100_80GB": (
+        "tests/unit/test_vertex_runtime.py::test_gpu_machine_type_resolution_and_validation"
     ),
     "compute.machine_family=c2": (
         "tests/unit/test_dataproc_cluster.py::test_machine_family_selects_the_cpu_worker_and_master_family"

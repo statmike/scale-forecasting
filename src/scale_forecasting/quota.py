@@ -136,6 +136,7 @@ _GPU_METRIC_SUFFIX: dict[str, str] = {
     "P100": "nvidia_p100_gpus",
     "P4": "nvidia_p4_gpus",
     "A100": "nvidia_a100_gpus",
+    "A100_80GB": "nvidia_a100_80gb_gpus",
     "H100": "nvidia_h100_gpus",
 }
 
@@ -1181,6 +1182,144 @@ def clamp_worker_count(worker_count: int, preflight: QuotaPreflight) -> int:
     return max(1, min(worker_count, outcome.max_units))
 
 
+# --- Vertex AI CustomJob: assembling the ask, and applying the answer ---------------------------
+
+
+def vertex_demands(plan: Any, region: str) -> list[QuotaDemand]:
+    """The meters a Vertex AI ``CustomJob`` of this shape will draw on, in one region (pure).
+
+    Draws on the same Vertex custom-model-training meters as Ray on Vertex (`vertex_gpu_metric` and
+    `vertex_cpu_metric`), but with ``fixed=0`` because a ``CustomJob`` has **zero head-node tax**:
+    every replica in ``worker_pool_specs`` is an active training worker.
+    """
+    demands: list[QuotaDemand] = []
+    workers = max(1, int(plan.worker_count))
+
+    gpu_type = gpu_type_from_accelerator(plan.accelerator_type)
+    if plan.accelerator_count > 0 and gpu_type:
+        metric = vertex_gpu_metric(gpu_type)
+        if metric is not None:
+            demands.append(
+                QuotaDemand(
+                    metric=metric,
+                    region=region,
+                    pool="gpu",
+                    per_unit=plan.accelerator_count,
+                    min_units=1,
+                    max_units=workers,
+                )
+            )
+
+    demands.append(
+        QuotaDemand(
+            metric=vertex_cpu_metric(plan.machine_type),
+            region=region,
+            pool="worker",
+            per_unit=machine_cores(plan.machine_type),
+            min_units=1,
+            max_units=workers,
+            fixed=0,
+        )
+    )
+    return demands
+
+
+def preflight_vertex(
+    plan: Any,
+    regions: list[str],
+    project_id: str,
+    *,
+    fetch: Any = None,
+) -> dict[str, QuotaPreflight]:
+    """Read each candidate region's Vertex training meters and judge ``plan`` against them."""
+    demands_by_region = {region: vertex_demands(plan, region) for region in regions}
+    metrics = {d.metric.metric: d.metric for ds in demands_by_region.values() for d in ds}
+    readings = read_limits(project_id, list(metrics.values()), regions, fetch=fetch)
+
+    result: dict[str, QuotaPreflight] = {}
+    for region, demands in demands_by_region.items():
+        outcomes = [
+            reconcile(
+                demand,
+                readings.get(
+                    (demand.metric.metric, region),
+                    QuotaReading(demand.metric, region, None, "not read"),
+                ),
+            )
+            for demand in demands
+        ]
+        result[region] = QuotaPreflight(region=region, outcomes=tuple(outcomes))
+    return result
+
+
+# --- Compute Engine single VM: assembling the ask, and applying the answer ---------------------
+
+
+def gce_demands(plan: Any, region: str) -> list[QuotaDemand]:
+    """The meters a Compute Engine single-VM job of this shape will draw on, in one region (pure).
+
+    Draws on Compute Engine meters (`compute_gpu_metric` and `compute_cpu_metric`) with ``fixed=0``
+    and ``min_units=max_units=1``: a single VM has zero head/master node tax and requires 1 unit.
+    """
+    demands: list[QuotaDemand] = []
+
+    gpu_type = plan.gpu_type or gpu_type_from_accelerator(getattr(plan, "accelerator_type", ""))
+    if plan.accelerator_count > 0 and gpu_type:
+        metric = compute_gpu_metric(gpu_type)
+        if metric is not None:
+            demands.append(
+                QuotaDemand(
+                    metric=metric,
+                    region=region,
+                    pool="gpu",
+                    per_unit=plan.accelerator_count,
+                    min_units=1,
+                    max_units=1,
+                )
+            )
+
+    demands.append(
+        QuotaDemand(
+            metric=compute_cpu_metric(),
+            region=region,
+            pool="worker",
+            per_unit=machine_cores(plan.machine_type),
+            min_units=1,
+            max_units=1,
+            fixed=0,
+        )
+    )
+    return demands
+
+
+def preflight_gce(
+    plan: Any,
+    regions: list[str],
+    project_id: str,
+    *,
+    fetch: Any = None,
+) -> dict[str, QuotaPreflight]:
+    """Read each candidate region's Compute Engine meters and judge ``plan`` against them."""
+    demands_by_region = {region: gce_demands(plan, region) for region in regions}
+    metrics = {d.metric.metric: d.metric for ds in demands_by_region.values() for d in ds}
+    readings = read_limits(project_id, list(metrics.values()), regions, fetch=fetch)
+
+    result: dict[str, QuotaPreflight] = {}
+    for region, demands in demands_by_region.items():
+        outcomes = [
+            reconcile(
+                demand,
+                readings.get(
+                    (demand.metric.metric, region),
+                    QuotaReading(demand.metric, region, None, "not read"),
+                ),
+            )
+            for demand in demands
+        ]
+        result[region] = QuotaPreflight(region=region, outcomes=tuple(outcomes))
+    return result
+
+
 # --- regional prerequisites: things that must exist here, quota aside ---------------------------
 
 _ATTACHMENT_REGION_RE = re.compile(r"/regions/([^/]+)/networkAttachments/")
@@ -1242,6 +1381,9 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
     allowances. Three shapes come back:
 
     * **Ray** — the Vertex pools, their ceilings, and what a raise would buy in wall clock.
+    * **Vertex CustomJob** — the Vertex training-CPU and GPU meters with zero head-node tax.
+    * **Compute Engine single VM** — the Compute Engine device and vCPU meters with zero
+      head-node tax.
     * **Spark on an ephemeral cluster** — the Compute Engine device and vCPU meters, and the worker
       count the region will actually grant.
     * **Spark on Serverless, BigQuery, and a reused cluster** — named, not metered. A reused cluster
@@ -1281,6 +1423,10 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
     for node in dag_nodes(run_dag):
         if node.runtime == "ray":
             lines.extend(_report_ray_node(cfg, node, run_id, regions, settings, profile))
+        elif node.runtime == "vertex":
+            lines.extend(_report_vertex_node(cfg, node, run_id, regions, settings, profile))
+        elif node.runtime == "gce":
+            lines.extend(_report_gce_node(cfg, node, run_id, settings, profile))
         elif node.runtime == "spark" and node.spark_mode == "cluster" and node.family not in reused:
             lines.extend(_report_cluster_node(cfg, node, settings, profile))
         else:
@@ -1296,6 +1442,73 @@ def _placement(node: Any, reused: bool = False) -> str:
     if reused:
         return f"{node.runtime}/cluster (reused)"
     return f"{node.runtime}/{node.spark_mode}" if node.spark_mode else node.runtime
+
+
+def _report_vertex_node(
+    cfg: Any, node: Any, run_id: str, regions: list[str], settings: Any, profile: Any = None
+) -> list[str]:
+    """One Vertex AI ``CustomJob`` family's block: its worker pool, judged per region."""
+    from .vertex_submit import plan_vertex_job
+
+    fc = cfg.resolve_family_compute(node.family)
+    plan = plan_vertex_job(
+        cfg,
+        list(node.models),
+        run_id=run_id,
+        hardware=fc.hardware,
+        gpu_type=fc.gpu_type,
+        machine_type=fc.machine_type,
+        worker_count=fc.workers,
+        profile=profile,
+    )
+    preflights = preflight_vertex(plan, regions, settings.project_id)
+    lines = [
+        f"  {node.family} on vertex/{plan.hardware}: "
+        f"{plan.worker_count} x {plan.machine_type} (0 head-node tax)"
+    ]
+    for region in regions:
+        pf = preflights.get(region)
+        if pf is None:
+            continue
+        lines.extend(_render_region(region, pf))
+        granted = clamp_worker_count(plan.worker_count, pf)
+        if granted < plan.worker_count:
+            lines.append(
+                f"      the CustomJob would be submitted with {granted} worker(s), "
+                f"not {plan.worker_count}"
+            )
+    return lines
+
+
+def _report_gce_node(
+    cfg: Any, node: Any, run_id: str, settings: Any, profile: Any = None
+) -> list[str]:
+    """One Compute Engine single-VM family's block: its VM, judged per candidate region."""
+    from .batch_infra import BatchInfra
+    from .compute_fallback import resolve_candidates
+    from .gce_submit import plan_gce_job
+
+    fc = cfg.resolve_family_compute(node.family)
+    plan = plan_gce_job(
+        cfg,
+        list(node.models),
+        run_id=run_id,
+        hardware=fc.hardware,
+        gpu_type=fc.gpu_type,
+        machine_type=fc.machine_type,
+        profile=profile,
+        settings=settings,
+    )
+    candidates = resolve_candidates(settings=settings, infra=BatchInfra.resolve())
+    regions = list(dict.fromkeys(c.region for c in candidates))
+    preflights = preflight_gce(plan, regions, settings.project_id)
+    lines = [f"  {node.family} on gce/{plan.hardware}: 1 x {plan.machine_type} (0 head-node tax)"]
+    for region in regions:
+        pf = preflights.get(region)
+        if pf is None:
+            continue
+        lines.extend(_render_region(region, pf))
+    return lines
 
 
 def _report_ray_node(

@@ -215,6 +215,36 @@ def test_ray_runtime_env_ships_src_and_uv_deps() -> None:
     assert uv["uv_check"] is False
 
 
+def test_vertex_custom_job_ships_the_package_via_package_uri_and_bootstrap() -> None:
+    from scale_forecasting.config import RunConfig
+    from scale_forecasting.vertex_submit import (
+        VERTEX_BOOTSTRAP_CODE,
+        build_custom_job_spec_dict,
+        plan_vertex_job,
+    )
+
+    cfg = RunConfig(
+        run_name="test-vertex",
+        data={"source_table": "p.d.t"},
+        python_runtime="vertex",
+        models=["tide"],
+    )
+    plan = plan_vertex_job(
+        cfg,
+        ["tide"],
+        run_id="r-20261002-12345678",
+        image_uri="us-docker.pkg.dev/p/repo/runtime:latest",
+        package_uri="gs://code-bkt/runs/pkg-1234.zip",
+        config_uri="gs://code-bkt/runs/run-abc.json",
+    )
+    spec = build_custom_job_spec_dict(plan, driver_args=["--config-uri", plan.config_uri])
+    for pool in spec["job_spec"]["worker_pool_specs"]:
+        cspec = pool["container_spec"]
+        assert "scale" not in cspec["image_uri"].rsplit("/", 1)[-1]
+        assert cspec["command"] == ["/opt/venv/bin/python", "-c", VERTEX_BOOTSTRAP_CODE]
+        assert cspec["args"][:2] == ["--package-uri", "gs://code-bkt/runs/pkg-1234.zip"]
+
+
 # --- the Terraform submit paths zip src/ and deliver it at runtime -------------
 
 

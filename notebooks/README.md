@@ -8,7 +8,7 @@
 ```mermaid
 flowchart TD
     subgraph Track1["Track 1: Foundations & Local Prototyping"]
-        NB0["model_playground.ipynb<br/>Single-series sandbox · 18 models · conformal intervals<br/>(Zero Google Cloud setup)"]
+        NB0["model_playground.ipynb<br/>Single-series sandbox · 28 Python models · conformal intervals<br/>(Zero Google Cloud setup)"]
     end
 
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
@@ -39,7 +39,7 @@ The eight notebooks are organized into three sequential learning tracks:
 ### Track 1: Foundations & Local Prototyping
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`model_playground.ipynb`](./model_playground.ipynb) | Local Python (Offline) | Experiment with any of the 18 time-series models on synthetic multi-archetype series. Perform 3-fold rolling-origin backtesting, calibrate conformal prediction intervals, and run multi-model bake-offs with zero GCP credentials. |
+| [`model_playground.ipynb`](./model_playground.ipynb) | Local Python (Offline) | Experiment with any of the 28 Python time-series models on synthetic multi-archetype series. Perform 3-fold rolling-origin backtesting, calibrate conformal prediction intervals, and run multi-model bake-offs with zero GCP credentials. |
 
 ---
 

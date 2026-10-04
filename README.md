@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>Enterprise-Grade, Massively Parallel Time-Series Forecasting on Google Cloud</b><br>
-  <i>One declarative JSON configuration. 30 models. 21 evaluation metrics. Hybrid distributed execution across BigQuery ML, Managed Service for Apache Spark (Dataproc), and Gemini Enterprise (Managed Ray on Vertex AI).</i>
+  <i>One declarative JSON configuration. 30 models. 21 evaluation metrics. Hybrid distributed execution across BigQuery ML, Managed Service for Apache Spark (Dataproc), Vertex AI CustomJob (Single-VM & Worker Pools), Compute Engine (Direct Single-VM), and Gemini Enterprise (Managed Ray on Vertex AI).</i>
 </p>
 
 <p align="center">
@@ -46,8 +46,8 @@ Traditional forecasting workflows break down when scaled to hundreds of thousand
 | Challenge | Traditional Approach | The `scale-forecasting` Solution | Deep Dive |
 | :--- | :--- | :--- | :--- |
 | **Library Fragmentation** | Separate, incompatible codebases for Statsmodels, StatsForecast, Prophet, PyTorch, and SQL models. | **Unified Model Contract:** Single [`BaseModel`](./src/scale_forecasting/models/base_model.py) interface. 30 models (`local`, `global`, and `hybrid`) run with identical inputs, outputs, and metrics. | [`docs/models_reference.md`](./docs/models_reference.md) |
-| **Compute Scaling Limits** | Single-node memory exhaustion (OOMs); slow sequential loops. | **Hybrid Distributed Execution:** Automatic fan-out across Managed Service for Apache Spark (Dataproc Serverless), Gemini Enterprise (Managed Ray on Vertex AI), and BigQuery ML. | [`docs/quota_and_scale.md`](./docs/quota_and_scale.md) |
-| **Infrastructure Lock-In** | Forced choice between pure Spark or pure SQL. | **Multi-Engine DAG:** Run Spark, Ray, and BigQuery ML *concurrently under one `run_id`*, bounded by the slowest family rather than their sum. | [`docs/architecture.md`](./docs/architecture.md) |
+| **Compute Scaling Limits** | Single-node memory exhaustion (OOMs); slow sequential loops. | **Hybrid Distributed Execution:** Automatic fan-out across Managed Service for Apache Spark (Dataproc Serverless), Vertex AI CustomJob, Compute Engine (`gce`), Gemini Enterprise (Managed Ray on Vertex AI), and BigQuery ML. | [`docs/quota_and_scale.md`](./docs/quota_and_scale.md) |
+| **Infrastructure Lock-In** | Forced choice between pure Spark or pure SQL. | **Multi-Engine DAG:** Run Spark, Ray, Vertex AI CustomJob, Compute Engine, and BigQuery ML *concurrently under one `run_id`*, bounded by the slowest family rather than their sum. | [`docs/architecture.md`](./docs/architecture.md) |
 | **Uncertainty & Calibration** | Gaussian assumptions that fail on real-world skewed distributions. | **Conformal Residual Intervals:** Empirical, distribution-free prediction intervals calibrated against rolling backtest errors. | [`docs/backtesting.md`](./docs/backtesting.md) |
 | **Hierarchical Incoherence** | Bottom-level and upper-level forecasts do not add up across regions or categories. | **Coherent Forecast Reconciliation:** Built-in Hyndman FPP3 reconciliation (`bottom_up`, `top_down`, `middle_out`, `ols`, `wls_struct`, `wls_var`, `mint_shrink` with Schäfer-Strimmer shrinkage). | [`docs/api/reconciliation.md`](./docs/api/reconciliation.md) |
 | **Operational Opacity** | Disconnected log files and missing evaluation tracking. | **Real-Time BigQuery Registry:** Streaming telemetry via the Storage Write API into analytical SQL views and interactive dashboards. | [`docs/output_schemas.md`](./docs/output_schemas.md) |
@@ -61,10 +61,11 @@ Traditional forecasting workflows break down when scaled to hundreds of thousand
 
 | Component / Layer | Google Cloud Service & Architecture | Primary Role in Platform | Documentation |
 | :--- | :--- | :--- | :--- |
-| **Data Warehouse & Lakehouse** | **[BigQuery](https://cloud.google.com/bigquery/docs)** & **[BigLake Apache Iceberg](https://cloud.google.com/bigquery/docs/iceberg-tables)** | Stores input time series, acts as the central run registry (`run_registry`, `forecast_predictions`, `forecast_metadata`), and exposes 12 analytical SQL views. | [BigQuery Overview](https://cloud.google.com/bigquery/docs) |
+| **Data Warehouse & Lakehouse** | **[BigQuery](https://cloud.google.com/bigquery/docs)** & **[BigLake Apache Iceberg](https://cloud.google.com/bigquery/docs/iceberg-tables)** | Stores input time series, acts as the central run registry (`run_registry`, `forecast_predictions`, `forecast_metadata`), and exposes 5 analytical SQL views. | [BigQuery Overview](https://cloud.google.com/bigquery/docs) |
 | **SQL-Native Machine Learning** | **[BigQuery ML](https://cloud.google.com/bigquery/docs/bqml-introduction)** | Executes `ARIMA_PLUS`, `ARIMA_PLUS_XREG`, and zero-shot foundation models via `AI.FORECAST` (`TimesFM`) directly in SQL. | [BigQuery ML Guide](https://cloud.google.com/bigquery/docs/bqml-introduction) |
 | **Distributed Big Data Engine** | **[Managed Service for Apache Spark (Dataproc)](https://cloud.google.com/dataproc/docs)** | Executes massively parallel cross-joins and pandas UDFs (`applyInPandas`) on Dataproc Serverless or managed Dataproc clusters (where worker VMs and autoscaling are fully managed by the service). | [Dataproc Serverless Docs](https://cloud.google.com/dataproc-serverless/docs) |
-| **Distributed AI & Ray Compute** | **[Gemini Enterprise / Vertex AI (Managed Ray)](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview)** | Dynamic autoscaling Ray actor pools with fractional GPU packing (NVIDIA L4/T4) for deep learning models (`NeuralProphet`, `TiDE`, `TFT`, `TSMixer`, `PatchTST`). | [Managed Ray on Vertex AI](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview) |
+| **Serverless Single-VM & Worker-Pool Compute** | **[Vertex AI Custom Training (`CustomJob`)](https://cloud.google.com/vertex-ai/docs/training/overview)** & **[Compute Engine (`gce`)](https://cloud.google.com/compute/docs)** | Serverless single-VM (`workers=1` or `runtime="gce"`, zero Ray head-node tax) and multi-VM worker pool (`workers>1` + dedicated per-model VMs for `deep_learning` / global models) execution across all Python families (`CPU`, `T4`, `L4`, `A100`, or `A100_80GB` GPU). | [Vertex AI Custom Training](https://cloud.google.com/vertex-ai/docs/training/overview) |
+| **Distributed AI & Ray Compute** | **[Gemini Enterprise / Vertex AI (Managed Ray)](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview)** | Dynamic autoscaling Ray actor pools with fractional GPU packing (NVIDIA `T4`, `L4`, `A100`, `A100_80GB`) for deep learning models (`NeuralProphet`, `TiDE`, `TFT`, `TSMixer`, `PatchTST`). | [Managed Ray on Vertex AI](https://cloud.google.com/vertex-ai/docs/open-source/ray/overview) |
 | **Interactive Analytics** | **[Colab Enterprise](https://cloud.google.com/colab/docs/enterprise-overview)** | Hosted, collaborative Jupyter notebooks pre-wired to the deployment runtime template (`sf-main`) with zero client configuration. | [Colab Enterprise Overview](https://cloud.google.com/colab/docs/enterprise-overview) |
 | **Workflow Orchestration** | **[Managed Service for Apache Airflow (Cloud Composer)](https://cloud.google.com/composer/docs)** | Automated end-to-end DAG scheduling, fan-out orchestration across engines, and SLA monitoring. | [Managed Airflow Docs](https://cloud.google.com/composer/docs) |
 | **Secure Networking** | **[Virtual Private Cloud (VPC)](https://cloud.google.com/vpc/docs)** & **[Private Service Connect (PSC-I)](https://cloud.google.com/vpc/docs/private-service-connect)** | Private worker subnet, Cloud NAT for outbound dependency resolution, and PSC interface attachments for secure Ray cluster access. | [Private Service Connect](https://cloud.google.com/vpc/docs/private-service-connect) |
@@ -94,7 +95,7 @@ The high-level [`Forecaster`](./docs/using_the_sdk.md) SDK unifies validation, e
 import scale_forecasting as sf
 
 # 1. Initialize from a declarative config file or dictionary
-forecaster = sf.Forecaster.from_file("configs/quickstart_100.json")
+forecaster = sf.Forecaster.from_file("configs/ensemble_demo.json")
 
 # 2. Preflight validation & cost sizing (offline, zero GCP calls)
 dry_run = forecaster.dry_run()
@@ -189,8 +190,8 @@ Here is an example configuration ([`configs/ensemble_demo.json`](./configs/ensem
 {
   "run_name": "hybrid_stacked_ensemble",
   "data": {
-    "table": "source_series_iceberg",
-    "limit_series": 100,
+    "source_table": "source_series_iceberg",
+    "series_limit": 100,
     "horizon": 14
   },
   "models": [
@@ -202,17 +203,17 @@ Here is an example configuration ([`configs/ensemble_demo.json`](./configs/ensem
   "compute": {
     "families": {
       "statistical": {"runtime": "spark"},
-      "ml": {"runtime": "spark"},
-      "native": {"runtime": "bigquery"}
+      "ml": {"runtime": "spark"}
     }
   },
   "backtest": {
+    "enabled": true,
     "scheme": "expanding",
     "n_folds": 3,
-    "horizon": 14,
     "decision_metric": "wape"
   },
   "ensemble": {
+    "enabled": true,
     "strategies": ["mean", "inverse_error", "nnls", "xgb"]
   }
 }
@@ -221,7 +222,7 @@ Here is an example configuration ([`configs/ensemble_demo.json`](./configs/ensem
 ### What Each Section Controls
 - **`data`:** Target table (BigLake Iceberg or native BigQuery), series count limit, target column, date column, frequency, and forecast horizon.
 - **`models`:** List of model identifiers to run. Models are automatically grouped into execution families (`statistical`, `ml`, `deep_learning`, `native`).
-- **`compute`:** Runtime engine selection per family (`spark`, `ray`, `bigquery`), machine types, executor counts, and multi-region fallback options.
+- **`compute`:** Runtime engine selection per family (`spark`, `ray`, `vertex`, `gce`, `bigquery`), machine types, executor/worker counts, and multi-region fallback options.
 - **`backtest`:** Cross-validation scheme (`expanding`, `sliding`), fold counts, evaluation metric selection, and conformal interval calibration.
 - **`features`:** Automated country holidays, Fourier seasonality terms, structural level-shift detection, three-tier covariates (`static_covariates`, `future_covariates`, `past_covariates`), and exogenous covariate lags.
 - **`hpo`:** Optuna hyperparameter optimization settings (trial counts, search spaces, and fleet-wide vs. per-series tuning).
@@ -258,8 +259,8 @@ flowchart TD
    ```bash
    uv run python -m scale_forecasting.main --config configs/ensemble_demo.json
    ```
-3. **Staged Plan & Emitted Native Commands (`launch_plan.stage_run`):** Stages application code (`src/`) and configuration to Cloud Storage, files an `EMITTED` registry tracking row, and **prints native copy-pasteable platform CLI commands** (`gcloud dataproc batches submit`, `bq query`, `ray job submit`). Enables zero-dependency launches from bare shells.
-4. **Automated Apache Airflow DAG Generation (`--emit-airflow`):** Compiles your JSON config into a production-ready, self-contained Python Apache Airflow DAG file with parallel operators for Dataproc, Ray, and BigQuery ML, ready to drop into Cloud Composer 3.
+3. **Staged Plan & Emitted Native Commands (`launch_plan.stage_run`):** Stages application code (`src/`) and configuration to Cloud Storage, files an `EMITTED` registry tracking row, and **prints native copy-pasteable platform CLI commands** (`gcloud dataproc batches submit`, `gcloud ai custom-jobs create`, `gcloud compute instances create`, `bq query`, `ray job submit`). Enables zero-dependency launches from bare shells.
+4. **Automated Apache Airflow DAG Generation (`--emit-airflow`):** Compiles your JSON config into a production-ready, self-contained Python Apache Airflow DAG file with parallel operators for Dataproc, Vertex AI CustomJob, Ray, and BigQuery ML, ready to drop into Cloud Composer 3.
 5. **Direct Cluster Embedding:** Already running a PySpark or Ray cluster? Embed the exact same model machinery directly into your existing pipelines using `make_group_runner` (for Spark `applyInPandas`) or `make_chunk_runner` (for Ray actor pools).
 
 ➡️ **Learn more about execution surfaces: [Using the SDK (`docs/using_the_sdk.md`)](./docs/using_the_sdk.md) and [Running & Reviewing (`docs/running_and_reviewing.md`)](./docs/running_and_reviewing.md).**
@@ -277,21 +278,25 @@ flowchart TB
     cfg --> orch
 
     subgraph compute["Distributed Compute Engines (Parallel Execution)"]
-        spark["Dataproc Spark (Serverless or Managed Clusters)<br/>Cross-join (series × model) → applyInPandas Tasks<br/>Statistical & ML Families (CPU / L4 GPU)"]
-        ray["Gemini Enterprise (Managed Ray on Vertex AI)<br/>Dynamic task chunks & fractional GPU packing<br/>Deep Learning & ML Families (CPU / T4 GPU)"]
+        spark["Dataproc Spark (Serverless or Managed Clusters)<br/>Cross-join (series × model) → applyInPandas Tasks<br/>Statistical & ML Families (CPU / L4 or T4 GPU)"]
+        vertex["Vertex AI CustomJob & Compute Engine (GCE)<br/>Zero Head-Node Tax · Dedicated Per-Model VMs & Worker Pools<br/>All Python Families (CPU / T4, L4, A100, A100_80GB GPU)"]
+        ray["Gemini Enterprise (Managed Ray on Vertex AI)<br/>Dynamic task chunks & fractional GPU packing<br/>Deep Learning & ML Families (CPU / T4, L4, A100, A100_80GB GPU)"]
         bq["BigQuery ML (Native SQL Execution)<br/>CREATE MODEL ... ARIMA_PLUS & AI.FORECAST (TimesFM)<br/>Native Family (Parallel BigQuery Queries)"]
     end
 
     orch -->|"statistical / ml"| spark
+    orch -->|"deep_learning / ml / statistical"| vertex
     orch -->|"deep_learning / ml"| ray
     orch -->|"native"| bq
 
-    unit["worker.run_cell(series, model, cfg)<br/>Identical unit of work: Local Python · Spark Pandas UDF · Ray Task"]
+    unit["worker.run_cell(series, model, cfg) & worker.run_panel_model()<br/>Identical unit of work: Local Python · Spark · Vertex CustomJob · GCE · Ray"]
     spark --> unit
+    vertex --> unit
     ray --> unit
 
     source[("Enterprise Source Panel<br/>source_series_iceberg or source_series_native<br/>BigQuery Storage Read API (Arrow)")]
     source -.->|snapshot-pinned read| spark
+    source -.->|snapshot-pinned read| vertex
     source -.->|snapshot-pinned read| ray
     source -.->|native SQL read| bq
 
@@ -308,7 +313,7 @@ flowchart TB
     registry --> ens
     ens --> registry
 
-    views["Analytical SQL Views<br/>v_model_leaderboard · v_forecast_results · v_run_summary · v_run_jobs"]
+    views["5 Analytical SQL Views<br/>v_model_leaderboard · v_model_leaderboard_comparable<br/>v_run_summary · v_run_jobs · v_backtest_coverage"]
     registry --> views
 ```
 
@@ -321,6 +326,10 @@ flowchart TB
   - Automatically derives optimal `initialExecutors` and `maxExecutors` (e.g. ramping from baseline up to 20+ executors for 100k series).
   - Derives `spark.executor.cores` and `spark.executor.memory` alongside `spark.executor.memoryOverhead` to avoid Spark executor Out-Of-Memory (OOM) failures while preventing over-provisioning.
   - On GPU runs (Dataproc Serverless L4), dynamically derives fractional GPU shares (`1 / spark.executor.cores`) and automatically releases the RAPIDS SQL memory pool (`pool=NONE`) so PySpark Python worker fits have full access to GPU memory.
+- **Estimating Vertex AI CustomJob & Compute Engine (GCE) Worker Pools:**
+  - **Dedicated Per-Model VMs for Global & Deep Learning Models:** Automatically assigns 1 dedicated VM per model in `worker_pool_specs` (`effective_worker_count = max(requested_workers, len(models))`) when multiple `deep_learning` or global/hybrid models run in one job, eliminating cross-model GPU/RAM contention while avoiding Ray head-node overhead.
+  - **Shared `ThreadPoolExecutor`, Contiguous Storage Read Pushdown & LPT Ordering (`statistical` / `ml`):** Derives `UnitShape` (`n2-standard-8`, `g2-standard-*`, `n1-standard-*`, `a2-*`) and `ResourceSlot` from `ComputeProfile` priors or preflight calibration to bound `ThreadPoolExecutor(max_workers=slots_per_unit)` and intra-op thread env vars (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`). Pushes a contiguous `[ts_lo, ts_hi]` Storage Read API filter down to each worker (`hierarchy.enabled=False`), dispatches cells in **Longest-Processing-Time-First (LPT)** order by `BASELINE_PROFILES` p90 wall-time to prevent tail stragglers, and coordinates multi-worker completion via a GCS barrier (`SF_VERTEX_JOB_ID`).
+  - **Triple-Redundant Zero-Orphan GCE Lifecycle (`runtime="gce"`):** Enforces GCE hypervisor `maxRunDuration` with `instanceTerminationAction="DELETE"`, guest COS startup script `trap cleanup EXIT` self-deletion via the GCE REST API + `shutdown -h now`, and client-side `try ... finally` deletion.
 - **Estimating Gemini Enterprise (Managed Ray) Worker Pools:**
   - Automatically sizes Ray worker pools: derives `min_nodes` and `max_nodes` based on total task fan-out and per-node packing limits.
   - Derives node packaging density: clamps maximum per-task memory ask to 85% of schedulable node RAM (`_MAX_SLOT_MEMORY_FRACTION`), preventing tasks from starvation against Ray's internal plasma object store.
@@ -336,39 +345,39 @@ flowchart TB
 
 ## Model & Ensemble Catalog
 
-Every model lives in its own self-contained file under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md) and imports directly from its upstream origin package. **All 30 models support univariate forecasting (`Yes`)**; when covariates are configured in a mixed-model run, models that do not support a requested covariate tier automatically fall back to their supported feature subset (`features.covariate_policy: "fallback"` by default, or fail fast under `"strict"`).
+Every model lives in its own self-contained file under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/README.md) and imports directly from its upstream origin package. **All 30 models support univariate forecasting (`Yes`)**; when covariates are configured in a mixed-model run, models that do not support a requested covariate tier automatically fall back to their supported feature subset (`features.on_unsupported_covariates: "fallback"` by default, or fail fast under `"error"`).
 
 | Model | Family | Runtime | Upstream Package | Univariate | Covariates (`Future` / `Past` / `Static`) | Training Modes | Reconciliation | Capabilities & Methodology |
 | :--- | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **`naive_mean`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Historical mean baseline with empirical residual intervals. |
-| **`naive_seasonal`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Repeats historical seasonal cycles (weekly/monthly/annual). |
-| **`naive_drift`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Linear drift extrapolation between first and last observations. |
-| **`naive_moving_average`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Trailing moving average with tunable window lengths. |
-| **`croston`** | `statistical` | Spark / Ray | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Intermittent-demand forecaster (`classic`, `sba`, `tsb`) for sparse data. |
-| **`fft`** | `statistical` | Spark / Ray | [`scipy`](https://scipy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Discrete Fourier Transform spectral extrapolation with polynomial detrending. |
-| **`theta`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Assimakopoulos-Nikolopoulos Theta decomposition (`ThetaModel`). |
-| **`auto_theta`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Theta selection across Standard, Optimized (`OTM`), and Dynamic (`DSTM`, `DOTM`) variants. |
-| **`holtwinters`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Additive Holt-Winters seasonal exponential smoothing with damped trend option. |
-| **`autoets`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Error-Trend-Seasonal state-space model (`ETSModel`) with analytical intervals. |
-| **`auto_ces`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Complex Exponential Smoothing (`AutoCES`) across `"N"`, `"S"`, `"P"`, and `"F"` seasonality. |
-| **`tbats`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Trigonometric seasonality, Box-Cox transform, ARMA errors, Trend, and Seasonal components (`AutoTBATS`). |
-| **`stl_bagging`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Bergmeir-Hyndman-Benítez STL decomposition with block-bootstrapped bagged ETS ensembles. |
-| **`auto_arima`** | `statistical` | Spark / Ray | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Hyndman-Khandakar automatic stepwise AICc seasonal ARIMA (`AutoARIMA`) with exogenous covariates. |
-| **`sarimax`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Seasonal ARIMA (`SARIMAX`) with exogenous calendar & economic covariates. |
-| **`ucm`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Structural Unobserved Components state-space model (`UnobservedComponents`) with exogenous covariates. |
-| **`kalman`** | `statistical` | Spark / Ray | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Linear Gaussian state-space Kalman filter (`UnobservedComponents`) with seasonal harmonics and AR($p$) state. |
-| **`prophet`** | `statistical` | Spark / Ray | [`prophet`](https://facebook.github.io/prophet/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Piecewise trend, multi-period Fourier seasonality, holidays, and exogenous covariates. |
-| **`regression_lags`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | L2-regularized `Ridge` regression with recursive target lags, calendar features, and `exog`. |
-| **`random_forest`** | `ml` | Spark / Ray | [`scikit-learn`](https://scikit-learn.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Bagged decision tree ensemble (`RandomForestRegressor`) with recursive multi-step forecasting. |
-| **`lightgbm`** | `ml` | Spark / Ray | [`lightgbm`](https://lightgbm.readthedocs.io/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Gradient-boosted decision trees (`LGBMRegressor`) with recursive multi-step forecasting. |
-| **`xgboost`** | `ml` | Spark / Ray | [`xgboost`](https://xgboost.readthedocs.io/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Histogram gradient-boosted trees (`XGBRegressor`) on CPU or GPU (`device="cuda"`). |
-| **`catboost`** | `ml` | Spark / Ray | [`catboost`](https://catboost.ai/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Oblivious (symmetric) gradient-boosted trees (`CatBoostRegressor`) with recursive multi-step forecasting. |
-| **`neuralprophet`** | `deep_learning` | Spark / Ray | [`neuralprophet`](https://neuralprophet.com/) | Yes | No / No / No | `local`, `global`, `hybrid` | All 7 FPP3 + Global Panel | PyTorch AR-Net (`local`, `global`, or `hybrid` local-trend + global-seasonality mode) with quantile heads. |
-| **`tide`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research Time-series Dense Encoder (`TiDE`) with static, future, and past covariates. |
-| **`tft`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research Temporal Fusion Transformer (`TFT`) with variable selection and multi-head attention. |
-| **`tsmixer`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research All-MLP time- and feature-mixing architecture (`TSMixerx`) with three-tier covariates. |
-| **`patchtst`** | `deep_learning` | Spark / Ray | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | No / No / No | `local`, `global` | All 7 FPP3 + Global Panel | Subseries-patched channel-independent Transformer (`PatchTST`) with MultiQuantile loss. |
-| **`arima_plus`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `local` | N/A (SQL) | Pure BigQuery SQL: automated `ARIMA_PLUS` pipeline with custom country holiday CTEs. |
+| **`naive_mean`** | `statistical` | Spark / Ray / Vertex / GCE | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Historical mean baseline with empirical residual intervals. |
+| **`naive_seasonal`** | `statistical` | Spark / Ray / Vertex / GCE | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Repeats historical seasonal cycles (weekly/monthly/annual). |
+| **`naive_drift`** | `statistical` | Spark / Ray / Vertex / GCE | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Linear drift extrapolation between first and last observations. |
+| **`naive_moving_average`** | `statistical` | Spark / Ray / Vertex / GCE | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Trailing moving average with tunable window lengths. |
+| **`croston`** | `statistical` | Spark / Ray / Vertex / GCE | [`numpy`](https://numpy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Intermittent-demand forecaster (`classic`, `sba`, `tsb`) for sparse data. |
+| **`fft`** | `statistical` | Spark / Ray / Vertex / GCE | [`scipy`](https://scipy.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Discrete Fourier Transform spectral extrapolation with polynomial detrending. |
+| **`theta`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Assimakopoulos-Nikolopoulos Theta decomposition (`ThetaModel`). |
+| **`auto_theta`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Theta selection across Standard, Optimized (`OTM`), and Dynamic (`DSTM`, `DOTM`) variants. |
+| **`holtwinters`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Additive Holt-Winters seasonal exponential smoothing with damped trend option. |
+| **`autoets`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Error-Trend-Seasonal state-space model (`ETSModel`) with analytical intervals. |
+| **`auto_ces`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Automated Complex Exponential Smoothing (`AutoCES`) across `"N"`, `"S"`, `"P"`, and `"F"` seasonality. |
+| **`tbats`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | No / No / No | `local` | All 7 FPP3 | Trigonometric seasonality, Box-Cox transform, ARMA errors, Trend, and Seasonal components (`AutoTBATS`). |
+| **`stl_bagging`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsmodels`](https://www.statsmodels.org/) | Yes | No / No / No | `local` | All 7 FPP3 | Bergmeir-Hyndman-Benítez STL decomposition with block-bootstrapped bagged ETS ensembles. |
+| **`auto_arima`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsforecast`](https://nixtlaverse.nixtla.io/statsforecast/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Hyndman-Khandakar automatic stepwise AICc seasonal ARIMA (`AutoARIMA`) with exogenous covariates. |
+| **`sarimax`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Seasonal ARIMA (`SARIMAX`) with exogenous calendar & economic covariates. |
+| **`ucm`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Structural Unobserved Components state-space model (`UnobservedComponents`) with exogenous covariates. |
+| **`kalman`** | `statistical` | Spark / Ray / Vertex / GCE | [`statsmodels`](https://www.statsmodels.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Linear Gaussian state-space Kalman filter (`UnobservedComponents`) with seasonal harmonics and AR($p$) state. |
+| **`prophet`** | `statistical` | Spark / Ray / Vertex / GCE | [`prophet`](https://facebook.github.io/prophet/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Piecewise trend, multi-period Fourier seasonality, holidays, and exogenous covariates. |
+| **`regression_lags`** | `ml` | Spark / Ray / Vertex / GCE | [`scikit-learn`](https://scikit-learn.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | L2-regularized `Ridge` regression with recursive target lags, calendar features, and `exog`. |
+| **`random_forest`** | `ml` | Spark / Ray / Vertex / GCE | [`scikit-learn`](https://scikit-learn.org/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Bagged decision tree ensemble (`RandomForestRegressor`) with recursive multi-step forecasting. |
+| **`lightgbm`** | `ml` | Spark / Ray / Vertex / GCE | [`lightgbm`](https://lightgbm.readthedocs.io/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Gradient-boosted decision trees (`LGBMRegressor`) with recursive multi-step forecasting. |
+| **`xgboost`** | `ml` | Spark / Ray / Vertex / GCE | [`xgboost`](https://xgboost.readthedocs.io/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Histogram gradient-boosted trees (`XGBRegressor`) on CPU or GPU (`device="cuda"`). |
+| **`catboost`** | `ml` | Spark / Ray / Vertex / GCE | [`catboost`](https://catboost.ai/) | Yes | Yes / Yes / No | `local` | All 7 FPP3 | Oblivious (symmetric) gradient-boosted trees (`CatBoostRegressor`) with recursive multi-step forecasting. |
+| **`neuralprophet`** | `deep_learning` | Spark / Ray / Vertex / GCE | [`neuralprophet`](https://neuralprophet.com/) | Yes | No / No / No | `local`, `global`, `hybrid` | All 7 FPP3 + Global Panel | PyTorch AR-Net (`local`, `global`, or `hybrid` local-trend + global-seasonality mode) with quantile heads. |
+| **`tide`** | `deep_learning` | Spark / Ray / Vertex / GCE | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research Time-series Dense Encoder (`TiDE`) with static, future, and past covariates. |
+| **`tft`** | `deep_learning` | Spark / Ray / Vertex / GCE | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research Temporal Fusion Transformer (`TFT`) with variable selection and multi-head attention. |
+| **`tsmixer`** | `deep_learning` | Spark / Ray / Vertex / GCE | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research All-MLP time- and feature-mixing architecture (`TSMixerx`) with three-tier covariates. |
+| **`patchtst`** | `deep_learning` | Spark / Ray / Vertex / GCE | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | No / No / No | `local`, `global` | All 7 FPP3 + Global Panel | Subseries-patched channel-independent Transformer (`PatchTST`) with MultiQuantile loss. |
+| **`arima_plus`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `local` | N/A (SQL) | Pure BigQuery SQL: automated `ARIMA_PLUS` / `ARIMA_PLUS_XREG` pipeline with custom country holiday CTEs. |
 | **`timesfm`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `global` (zero-shot) | N/A (SQL) | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` default, or `TimesFM 3.0` + configurable `context_window`). |
 
 ### Environment Agility: Omitting Optional Model Packages
@@ -396,13 +405,13 @@ The platform is designed for rapid extension by data scientists:
 
 When `hierarchy.enabled: true`, the platform constructs a multi-level aggregation tree from `hierarchy.levels` (e.g. `[["region"], ["region", "category"]]` $\rightarrow$ `"__total__"` root + `region=NA` + `region=NA/category=SMB` + bottom `ts_id` leaves), fits models across all nodes, and reconciles base forecasts $\hat{y_h}$ into strictly coherent forecasts $\tilde{y_h} = S G \hat{y_h}$ ([`reconciliation.py`](./src/scale_forecasting/reconciliation.py)) following [Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd ed., Ch. 11)](https://otexts.com/fpp3/hierarchical.html) and [Wickramasuriya et al. (2019) *MinT*](https://doi.org/10.1080/01621459.2018.1448825):
 
-| Method (`hierarchy.reconciliation`) | Matrix Projection $G$ / Covariance $W_h$ | How It Works |
+| Method (`hierarchy.reconciliation_methods`) | Matrix Projection $G$ / Covariance $W_h$ | How It Works |
 | :--- | :--- | :--- |
 | **`mint_shrink`** *(default)* | $W_h = \lambda_D W_{1,D} + (1 - \lambda_D) W_1$ | Minimum Trace optimal reconciliation with analytical [Schäfer-Strimmer (2005)](https://doi.org/10.2202/1544-6115.1175) shrinkage covariance of OOF residuals; positive-definite even when $n_{\text{series}} \gg T_{\text{obs}}$. |
 | **`wls_var`** | $W_h = \text{diag}(W_1)$ | Weighted least squares scaled by per-node OOF residual error variance. |
-| **`wls_struct`** | $W_h = \text{diag}(S \mathbf{1})$ | Structural scaling weighted by the number of bottom series summed into each node (requires no residuals). |
+| **`wls_struct`** *(default)* | $W_h = \text{diag}(S \mathbf{1})$ | Structural scaling weighted by the number of bottom series summed into each node (requires no residuals). |
 | **`ols`** | $W_h = I_n$ | Ordinary least squares geometric projection $G = (S^\top S)^{-1} S^\top$. |
-| **`bottom_up`** | $G = [0 \mid I_{n_b}]$ | Preserves bottom-level forecasts verbatim and sums upward through $S$. |
+| **`bottom_up`** *(default)* | $G = [0 \mid I_{n_b}]$ | Preserves bottom-level forecasts verbatim and sums upward through $S$. |
 | **`top_down`** | $G = [p \mid 0]$ | Disaggregates `"__total__"` downward by historical average proportions $p_j = \frac{1}{T}\sum_t y_{j,t} / y_{\text{Total},t}$. |
 | **`middle_out`** | Anchor at `hierarchy.middle_level` | Preserves base forecasts at `middle_level`, sums upward to higher levels, and disaggregates downward by historical proportions. |
 
@@ -472,7 +481,7 @@ Combining individual forecasts consistently beats even the best single model. `s
 Ensembles are keyed by `ensemble_id = make_ensemble_id(cfg.ensemble)` in BigQuery, making ensembling **independent of model fitting**:
 - **Post-Run Re-Ensembling:** Test new ensemble strategies on an already-completed run without re-fitting base models:
   ```bash
-  uv run python -m scale_forecasting.ensemble_run --run-id <run_id> --config configs/new_ensemble.json
+  uv run python -m scale_forecasting.ensemble_run --run-id <run_id> --config configs/ensemble_demo.json
   ```
 - **Multiple Coexisting Ensembles:** Multiple ensemble configurations can run against the same base models; each receives a distinct `ensemble_id` and appears side-by-side in `v_model_leaderboard`.
 - **Ensemble Lift:** The platform computes `ensemble_lift` (percentage error reduction over the best single base model), allowing you to verify whether combining models improved performance.
@@ -487,11 +496,12 @@ The platform uses Google Cloud's **BigQuery Storage Write API** to stream real-t
 
 ```mermaid
 flowchart TD
-    subgraph Workers["1. Distributed Workers (Spark · Ray · BigQuery ML)"]
+    subgraph Workers["1. Distributed Workers (Spark · Ray · Vertex CustomJob · GCE · BigQuery ML)"]
         direction LR
         W1["Spark applyInPandas Tasks"]
         W2["Ray Remote Tasks"]
-        W3["BigQuery ML Queries"]
+        W3["Vertex CustomJob & GCE Workers"]
+        W4["BigQuery ML Queries"]
     end
 
     subgraph Ingest["2. High-Throughput Streaming Ingestion"]
@@ -509,8 +519,8 @@ flowchart TD
     subgraph Views["4. Unified Analytical SQL Views"]
         direction LR
         V1["v_model_leaderboard<br/>Best-First Rankings"]
-        V2["v_forecast_results<br/>Point + Conformal Bands"]
-        V3["v_run_summary<br/>Duration, Cost & Sizing"]
+        V2["v_model_leaderboard_comparable<br/>Holdout Pooled Rankings"]
+        V3["v_run_summary & v_run_jobs<br/>Duration, Cost & Sizing"]
     end
 
     Workers --> Ingest --> Tables --> Views
@@ -519,15 +529,15 @@ flowchart TD
 ### Live Progress Monitoring & Probe Escalation
 While a 100k run is executing, [`Forecaster.monitor()`](./docs/using_the_sdk.md) renders a real-time, in-place progress bar tracking cell accumulation:
 - **Low-Overhead Heartbeat:** Standard polling queries BigQuery metadata counts with zero load on compute clusters.
-- **Automated Probe Escalation:** If an engine produces no writes for >300 seconds, the monitor automatically queries platform APIs (Dataproc Batch API, Vertex Ray dashboard) to verify executor health and diagnose potential issues.
+- **Automated Probe Escalation:** If an engine produces no writes for >300 seconds, the monitor automatically queries platform APIs (Dataproc Batch API, Vertex Ray dashboard, Vertex CustomJob, GCE Instance API) to verify executor health and diagnose potential issues.
 
-### 12 Analytical SQL Views
+### 5 Analytical SQL Views
 Data analysts and business stakeholders query clean SQL views without knowing which compute engine generated the forecast:
-- `v_model_leaderboard`: Ranks every base model and ensemble by validation metric.
-- `v_forecast_results`: Unrolls future point predictions and conformal confidence intervals.
+- `v_model_leaderboard`: Ranks every base model and ensemble across all 21 evaluation metrics.
+- `v_model_leaderboard_comparable`: Holdout-fold pooled error ranking so models are compared on identical series and fold windows.
+- `v_backtest_coverage`: Achieved fold counts and backtest coverage status (`full`, `reduced`, `unscored`, `failed`) per model.
 - `v_run_summary`: Roll-up of run status, duration, compute efficiency, and total fits.
 - `v_run_jobs`: Execution breakdown per family (runtime, hardware, machine type, platform job ID).
-- `v_residual_distribution`: Per-series error distribution quantiles (`p10`/`p50`/`p90`).
 
 ➡️ **Full schema reference and query cookbook: [Output Schemas & Views Guide (`docs/output_schemas.md`)](./docs/output_schemas.md).**
 
@@ -568,7 +578,7 @@ flowchart TD
 
     subgraph Architect["🏛️ Enterprise Cloud & Data Architect"]
         direction LR
-        AR1["Storage Strategy<br/>BigQuery vs Iceberg on GCS"] --> AR2["Multi-Engine Placement<br/>Spark vs Ray vs BigQuery ML"] --> AR3["Private Networking & IAM<br/>PSC-I · Least-Privilege SAs"]
+        AR1["Storage Strategy<br/>BigQuery vs Iceberg on GCS"] --> AR2["Multi-Engine Placement<br/>Spark vs Ray vs Vertex vs GCE vs BQ"] --> AR3["Private Networking & IAM<br/>PSC-I · Least-Privilege SAs"]
     end
 
     subgraph MLOps["⚙️ MLOps & Platform Engineer"]
@@ -588,7 +598,7 @@ The [`notebooks/`](./notebooks/README.md) directory provides a structured learni
 ```mermaid
 flowchart TD
     subgraph Track1["Track 1: Foundations & Local Prototyping"]
-        NB0["model_playground.ipynb<br/>Single-series sandbox · 24 Python models · conformal intervals (Zero GCP Setup)"]
+        NB0["model_playground.ipynb<br/>Single-series sandbox · 28 Python models · conformal intervals (Zero GCP Setup)"]
     end
 
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
@@ -616,7 +626,7 @@ flowchart TD
 
 | Notebook | Focus Area | Runtime Environment | What You Will Learn |
 | :--- | :--- | :--- | :--- |
-| [`model_playground.ipynb`](./notebooks/model_playground.ipynb) | Foundations | Local Python (In-Memory) | Fit, score, and plot any of the 24 Python models on synthetic data with zero cloud credentials. |
+| [`model_playground.ipynb`](./notebooks/model_playground.ipynb) | Foundations | Local Python (In-Memory) | Fit, score, and plot any of the 28 Python models on synthetic data with zero cloud credentials. |
 | [`01_spark_via_connect.ipynb`](./notebooks/01_spark_via_connect.ipynb) | Distributed Spark | Dataproc Spark Connect / Batch | Drive distributed Spark fan-out interactively, compare with serverless batch execution, and inspect write speed. |
 | [`02_bigquery_native.ipynb`](./notebooks/02_bigquery_native.ipynb) | Cloud SQL | BigQuery ML (`ARIMA_PLUS`, `TimesFM`) | Execute SQL-native forecasting over native and Iceberg tables without provisioning any compute clusters. |
 | [`03_combo_and_ensemble.ipynb`](./notebooks/03_combo_and_ensemble.ipynb) | Multi-Engine Hybrid | Spark Serverless $\parallel$ BigQuery ML | Run Spark and BigQuery concurrently under one `run_id`, blend models with stacking ensembles, and evaluate lift. |
@@ -646,7 +656,7 @@ flowchart TD
             direction LR
             M1["APIs & IAM<br/>Least-privilege SAs"]
             M2["Networking<br/>VPC · Subnet · PSC-I"]
-            M3["Storage & BigQuery<br/>3 Buckets · Dataset · Iceberg"]
+            M3["Storage & BigQuery<br/>2 Buckets · Dataset · Iceberg"]
         end
         subgraph Runtimes["Interfaces & Seed Data"]
             direction LR

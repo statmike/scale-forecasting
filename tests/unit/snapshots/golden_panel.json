@@ -2061,6 +2061,24 @@
         1432,
         1460
       ]
+    ],
+    "configs/smokes/38_vertex_custom_job.json": [
+      [
+        0,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
+    "configs/smokes/39_gce_single_vm.json": [
+      [
+        0,
+        0,
+        1432,
+        1432,
+        1460
+      ]
     ]
   }
 }

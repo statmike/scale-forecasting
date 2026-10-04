@@ -47,6 +47,7 @@ done < <(env | grep -E '^SF_[A-Z_]+=' || true)
 output="$(env "${sf_unset[@]}" "${runner[@]}" \
   tests/unit/test_validation_ledger.py \
   tests/unit/test_config_coverage.py \
+  tests/unit/test_docs_integrity.py \
   -q --no-header -p no:cacheprovider 2>&1)"
 status=$?
 
@@ -62,8 +63,11 @@ pre-commit: a consistency tripwire failed — see above.
   test_config_coverage    — every declared config value against the configs and the ledger. A value
                             that becomes proven, or stops being proven, needs its classification
                             updated in the UNPROVEN map.
+  test_docs_integrity     — all Markdown tables, Mermaid diagrams, embedded RunConfig JSON blocks,
+                            relative links, CLI module invocations, and canonical model/metric/view
+                            counts across all .md files.
 
-Fix the row or the map and commit again. To commit anyway: git commit --no-verify
+Fix the row, map, or documentation and commit again. To commit anyway: git commit --no-verify
 EOF
   exit 1
 fi

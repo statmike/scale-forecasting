@@ -129,6 +129,17 @@ class SparkSubmitter:
                 cfg, models=models, manage_header=manage_header, settings=settings, spark=spark
             )
             return None  # in-process: nothing submitted, no platform id
+        eff_max_executors = max_executors
+        if eff_max_executors is None and models:
+            from .models import get_model
+
+            family = get_model(models[0]).family
+            if family != "native":
+                fc = cfg.resolve_family_compute(family)
+                eff_max_executors = fc.max_workers or fc.workers
+        if eff_max_executors is None:
+            eff_max_executors = cfg.compute.max_workers or cfg.compute.max_executors
+
         if spark_mode == "cluster":
             # A Dataproc cluster job (the T4 Spark path; ephemeral unless a cluster is named).
             # ``job_id`` names the job on the wire, so the id that comes back is normally the
@@ -152,7 +163,7 @@ class SparkSubmitter:
                 # ceiling, billed per executor-second), on a cluster it caps *workers* (billed VMs
                 # create→delete). Same intent — "don't fan out past this" — so the same knob feeds
                 # both rather than a second flag that means the same thing.
-                max_workers=max_executors,
+                max_workers=eff_max_executors,
             )
             return ProbeHandle("spark", native_id=real_id, region=region, spark_mode="cluster")
         from .submit import submit_batch
@@ -163,7 +174,7 @@ class SparkSubmitter:
             manage_header=manage_header,
             settings=settings,
             wait=wait,
-            max_executors=max_executors,
+            max_executors=eff_max_executors,
             batch_id=system_job_id,
             hardware=hardware,
             gpu_type=gpu_type,
@@ -224,10 +235,117 @@ class RaySubmitter:
         return ProbeHandle("ray", native_id=job_id, region=region, resource_name=resource_name)
 
 
+class VertexSubmitter:
+    """Vertex AI ``CustomJob``: single-VM default or multi-worker pool (no head-node tax)."""
+
+    name = "vertex"
+
+    def launch(
+        self,
+        cfg: RunConfig,
+        *,
+        models: list[str],
+        manage_header: bool,
+        settings: Settings,
+        spark: object | None = None,
+        wait: bool = True,
+        max_executors: int | None = None,
+        system_job_id: str | None = None,
+        hardware: str = "cpu",
+        gpu_type: str | None = None,
+        spark_mode: str | None = None,
+        spark_cluster_name: str | None = None,
+        spark_cluster_region: str | None = None,
+        ray_cluster_name: str | None = None,
+        ray_cluster_region: str | None = None,
+    ) -> ProbeHandle | None:
+        from .models import get_model
+        from .vertex_submit import submit_vertex
+
+        machine_type: str | None = None
+        worker_count: int | None = None
+        accelerator_count: int | None = None
+        if models:
+            family = get_model(models[0]).family
+            if family != "native":
+                fc = cfg.resolve_family_compute(family)
+                machine_type = fc.machine_type
+                worker_count = fc.workers
+                accelerator_count = fc.accelerator_count or None
+
+        _, _, handle = submit_vertex(
+            cfg,
+            settings=settings,
+            wait=wait,
+            models=models,
+            job_id=system_job_id,
+            manage_header=manage_header,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            machine_type=machine_type,
+            worker_count=worker_count,
+            accelerator_count=accelerator_count,
+        )
+        return handle
+
+
+class GceSubmitter:
+    """Compute Engine single-VM runtime (`runtime="gce"`, zero-orphan TTL + self-deleting VM)."""
+
+    name = "gce"
+
+    def launch(
+        self,
+        cfg: RunConfig,
+        *,
+        models: list[str],
+        manage_header: bool,
+        settings: Settings,
+        spark: object | None = None,
+        wait: bool = True,
+        max_executors: int | None = None,
+        system_job_id: str | None = None,
+        hardware: str = "cpu",
+        gpu_type: str | None = None,
+        spark_mode: str | None = None,
+        spark_cluster_name: str | None = None,
+        spark_cluster_region: str | None = None,
+        ray_cluster_name: str | None = None,
+        ray_cluster_region: str | None = None,
+    ) -> ProbeHandle | None:
+        from .gce_submit import submit_gce
+        from .models import get_model
+
+        machine_type: str | None = None
+        accelerator_count: int | None = None
+        if models:
+            family = get_model(models[0]).family
+            if family != "native":
+                fc = cfg.resolve_family_compute(family)
+                machine_type = fc.machine_type
+                accelerator_count = fc.accelerator_count or None
+
+        _, _, handle = submit_gce(
+            cfg,
+            settings=settings,
+            wait=wait,
+            models=models,
+            instance_name=system_job_id,
+            manage_header=manage_header,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            machine_type=machine_type,
+            accelerator_count=accelerator_count,
+        )
+        return handle
+
+
 # Registered by cfg.python_runtime. A new runtime = one class + one entry here.
 _SUBMITTERS: dict[str, RuntimeSubmitter] = {
     SparkSubmitter.name: SparkSubmitter(),
     RaySubmitter.name: RaySubmitter(),
+    VertexSubmitter.name: VertexSubmitter(),
+    GceSubmitter.name: GceSubmitter(),
 }
 
 

@@ -56,8 +56,8 @@ lightning_logs/
 # lightning_logs/, so the directory rule above never catches it.
 .lr_find_*.ckpt
 
-# Local-only working files — never tracked. CLAUDE.md stays on disk so it auto-loads for
-# AI/dev contributors; NOTES.md is a scratch build log.
+# Local-only working files — never tracked (AGENTS.md at repo root is tracked).
+.claude/
 CLAUDE.md
 NOTES.md
 

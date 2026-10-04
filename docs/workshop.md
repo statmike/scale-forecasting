@@ -39,14 +39,14 @@ flowchart TD
 
 ## Workshop Overview & Objectives
 
-In this hands-on workshop, you will deploy and operate **`scale-forecasting`** — Google Cloud's blueprint for enterprise time-series forecasting across **BigQuery ML**, **Managed Service for Apache Spark (Dataproc)**, and **Gemini Enterprise (Managed Ray on Vertex AI)**.
+In this hands-on workshop, you will deploy and operate **`scale-forecasting`** — Google Cloud's blueprint for enterprise time-series forecasting across **BigQuery ML**, **Managed Service for Apache Spark (Dataproc)**, **Gemini Enterprise (Managed Ray on Vertex AI)**, **Vertex AI `CustomJob`**, and **Compute Engine (`gce`) Single-VM**.
 
 ### Key Learning Outcomes
 1. **Infrastructure as Code:** Deploy the complete data lakehouse and compute infrastructure using Terraform in under 15 minutes.
-2. **Unified Modeling Contract:** Train, backtest, and evaluate 18 statistical, machine learning, and deep learning models with zero code changes.
-3. **Multi-Engine Hybrid Execution:** Run Spark, Ray, and BigQuery ML concurrently under a single declarative configuration and deterministic `run_id`.
+2. **Unified Modeling Contract:** Train, backtest, and evaluate 30 statistical, machine learning, deep learning, and BigQuery SQL models with zero code changes.
+3. **Multi-Engine Hybrid Execution:** Run Spark, Ray, Vertex `CustomJob`, GCE Single-VM, and BigQuery ML concurrently under a single declarative configuration and deterministic `run_id`.
 4. **Stacked Ensembling:** Train meta-learners (Non-Negative Least Squares, Ridge, XGBoost) over out-of-fold predictions to outperform any single model.
-5. **Operational Observability:** Stream real-time cell telemetry into BigQuery via the Storage Write API, track live progress bars, and inspect 12 analytical SQL views.
+5. **Operational Observability:** Stream real-time cell telemetry into BigQuery via the Storage Write API, track live progress bars, and inspect 5 analytical SQL views.
 6. **Enterprise Scale & Parity:** Benchmark 100,000 time series across distributed engines and verify cross-platform numerical parity.
 
 ---
@@ -54,7 +54,7 @@ In this hands-on workshop, you will deploy and operate **`scale-forecasting`** �
 ## Target Audience & Prerequisites
 
 - **Lead Data Scientists & Quantitative Researchers:** Interested in scaling models from single-series prototypes to hundreds of thousands of series without writing distributed infrastructure code.
-- **Enterprise Cloud & Data Architects:** Evaluating hybrid execution patterns (BigQuery vs Dataproc vs Ray on Vertex AI) and Lakehouse storage (BigLake Apache Iceberg on GCS).
+- **Enterprise Cloud & Data Architects:** Evaluating hybrid execution patterns (BigQuery vs Dataproc vs Ray on Vertex AI vs Vertex `CustomJob` vs GCE Single-VM) and Lakehouse storage (BigLake Apache Iceberg on GCS).
 - **ML Platform & MLOps Engineers:** Seeking automated DAG orchestration, quota preflight validation, and unified lineage tracking.
 
 ### Prerequisites
@@ -103,8 +103,8 @@ terraform init && terraform apply -auto-approve
 
 > [!NOTE]
 > **What Terraform Provisions Automatically:**
-> - **Lakehouse Storage:** 3 GCS buckets (`warehouse`, `artifacts`, `code`), BigQuery dataset (`scale_forecasting`), and BigLake Iceberg connection.
-> - **Container Runtime:** Artifact Registry Docker repository and automated Cloud Build run for the shared Spark/Ray container image.
+> - **Lakehouse Storage:** 2 GCS buckets (`warehouse`, `code`), BigQuery dataset (`scale_forecasting`), and BigLake Iceberg connection.
+> - **Container Runtime:** Artifact Registry Docker repository and automated Cloud Build run for the shared Spark/Vertex/GCE/Ray container image.
 > - **Secure Networking:** Dedicated VPC subnet, Cloud NAT, and Private Service Connect (PSC-I) for Ray on Vertex AI.
 > - **Interactive Runtimes:** Colab Enterprise **`sf-main`** Python 3.11 runtime template pre-configured with all required environment variables.
 > - **100k Seed Dataset:** Dataproc Serverless batch generating 100,000 synthetic time series into both native BigQuery and BigLake Iceberg tables.
@@ -142,7 +142,7 @@ Verify that all deployed services, BigQuery datasets, and network endpoints are 
 ```bash
 # In Cloud Shell:
 uv sync
-uv run python -m scale_forecasting.sdk.Registry.doctor
+uv run python -m scale_forecasting.registry.ops doctor
 ```
 
 You should see all checks marked `OK` (BigQuery dataset reachable, BigLake connection valid, GCS code bucket writable, Colab template provisioned).
@@ -204,7 +204,7 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 **Goal:** Explore the modeling contract, backtesting, and conformal interval calibration with zero cloud compute costs.
 
 #### Key Highlights
-- Inspect the 18 available time-series models across statistical, ML, and deep learning families.
+- Inspect the 28 available Python time-series models across statistical, ML, and deep learning families.
 - Generate synthetic multi-archetype series (trending, seasonal, intermittent, promo-spiky).
 - Run [`worker.run_cell`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/worker.py) locally to fit a model, run 3-fold rolling-origin backtesting, and generate empirical conformal prediction bands.
 - Run a multi-model bake-off on a single series and visualize point forecasts and confidence bounds.
@@ -219,7 +219,7 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 #### Key Highlights
 - Train `ARIMA_PLUS` across multiple series using native BigQuery ML pipelines.
 - Generate foundation model zero-shot forecasts via BigQuery `AI.FORECAST` (`TimesFM`).
-- Query the resulting `v_model_leaderboard` and `v_forecast_results` views in BigQuery.
+- Query the resulting `v_model_leaderboard` and `v_model_leaderboard_comparable` views (and `forecast_predictions` table) in BigQuery.
 - Understand how SQL-native models integrate into the same unified metadata schema as Python models.
 
 ---

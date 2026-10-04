@@ -1,0 +1,147 @@
+# `AGENTS.md` — Engineering Charter, Style Guide & Verification Gates
+
+This file is the authoritative engineering charter and review checklist for AI coding agents and human contributors working in `scale-forecasting`. It is automatically loaded from the repository root at the start of every session.
+
+---
+
+## 1. Public-Repository Hygiene & Zero-Leakage Charter
+
+`scale-forecasting` (`github.com/statmike/scale-forecasting`) is a **public, generic, reusable enterprise forecasting platform** for Google Cloud.
+
+1. **Zero Customer or Proprietary Leakage:** Never include customer names, engagement identifiers, internal corporate hostnames, or third-party vendor migration notes in code, comments, commit messages, configs, or documentation.
+2. **Sanitized Identity in Validation Records:** In [`docs/validation.md`](./docs/validation.md) and commit messages, never record personal or corporate user email addresses; always use the literal placeholder `<the launching user email>` when illustrating populated `user_id` lineage fields.
+3. **No Secret or Credential Artifacts:** Never commit service account keys (`*.json.key`, `service-account*.json`), `.env` files, or `.tfvars` files. All Google Cloud execution authenticates via Application Default Credentials (ADC) locally and least-privilege attached service accounts in cloud runtimes.
+
+---
+
+## 2. Core Architectural Invariants
+
+```mermaid
+flowchart LR
+    subgraph Pure["Pure Offline Layer (Zero GCP Imports)"]
+        direction TB
+        P1["config.py · registry/ids.py"]
+        P2["models/* (30 Models · BaseModel)"]
+        P3["metrics/* (21 Metrics · BaseMetric)"]
+        P4["features.py · backtest.py · calibration.py"]
+        P5["reconciliation.py · ensembler.py · hpo.py"]
+        P6["worker.py (run_cell · run_panel_model)"]
+        P7["profiling/* · resources/*"]
+    end
+
+    subgraph Cloud["Thin Cloud Engine & Registry Wrappers"]
+        direction TB
+        C1["engines/spark_engine.py (Serverless · Cluster · Connect)"]
+        C2["engines/ray_engine.py (Vertex AI Ray)"]
+        C3["engines/vertex_engine.py (Vertex CustomJob · GCE Single-VM)"]
+        C4["engines/bigquery_engine.py (ARIMA_PLUS · AI.FORECAST)"]
+        C5["registry/bq.py · storage.py · ops.py"]
+    end
+
+    subgraph Tripwires["Automated Pre-Commit & CI Tripwires"]
+        direction TB
+        T1["test_validation_ledger.py"]
+        T2["test_config_coverage.py"]
+        T3["test_docs_integrity.py"]
+        T4["test_api_docs_coverage.py"]
+    end
+
+    Pure -->|"Shared execution contract"| Cloud
+    Pure & Cloud -->|"Enforced by"| Tripwires
+```
+
+1. **Declarative Config-Driven Execution (`config.py`):**
+   - Behavior changes come from [`RunConfig`](./src/scale_forecasting/config.py) JSON/dict declarations, never environment-specific code forks.
+   - The same orchestration code ([`main.run`](./src/scale_forecasting/main.py)) executes identically across all 5 launch surfaces: Local CLI, Python SDK (`Forecaster`), Interactive Notebooks, Cloud Composer 3 DAGs, and Headless Cloud Batch containers.
+2. **Deterministic Content-Addressed `run_id` (`registry/ids.py`):**
+   - `run_id` is `<slug>-<12hex>` computed strictly from semantic `RunConfig` inputs (`_RUN_ID_EXCLUDED` strips operational plumbing such as `compute.project_id`, `compute.region`, `compute.machine_type`, `compute.workers`, and `compute.families.*.machine_type` / `workers` when `"auto"` or default).
+   - Never alter `run_id` hashing behavior without verifying [`tests/unit/test_ids.py`](./tests/unit/test_ids.py) and [`tests/unit/test_prebreak_snapshots.py`](./tests/unit/test_prebreak_snapshots.py).
+3. **One-File Plugin Contracts (`models/` and `metrics/`):**
+   - Every model lives in its own module under [`src/scale_forecasting/models/`](./src/scale_forecasting/models/) inheriting from [`BaseModel`](./src/scale_forecasting/models/base_model.py), declares its upstream `package`, `package_url`, `family`, covariate support flags (`supports_future_covariates`, `supports_past_covariates`, `supports_static_covariates`), `supported_training_modes`, and `gpu_usefulness`, and wraps optional third-party imports gracefully.
+   - Every metric lives in its own module under [`src/scale_forecasting/metrics/`](./src/scale_forecasting/metrics/) inheriting from [`BaseMetric`](./src/scale_forecasting/metrics/base_metric.py).
+4. **Zero-Idle Per-Family Compute & Scaling:**
+   - The DAG router ([`dag.py`](./src/scale_forecasting/dag.py)) dispatches **1 independent job per active model family in parallel** (`statistical`, `ml`, `deep_learning`, `native`) so fast CPU families tear down immediately without waiting for slow GPU trainers.
+   - Compute configuration uses the unified vocabulary across `compute` and `compute.families.<family>`: `runtime` (`"spark"` | `"ray"` | `"vertex"` | `"gce"`), `machine_type` (`"auto"` or explicit GCE shape validated against `gpu_type` and `accelerator_count` in [`resources/catalog.py`](./src/scale_forecasting/resources/catalog.py)), `workers` (`1` default on CPU; auto-expands `1 -> len(models)` for multi-model `deep_learning` on `vertex`; must be `1` on single-VM `gce`), `use_gpu` / `hardware`, `gpu_type` (`"T4"`, `"L4"`, `"A100"`, `"A100_80GB"`), and `accelerator_count`.
+   - Multi-VM local sharding (`workers > 1` on `vertex`) pushes each worker's contiguous `[start_id, end_id]` boundary directly into BigQuery Storage Read API `row_restriction` ([`build_worker_series_range`](./src/scale_forecasting/engines/vertex_engine.py)) and schedules chunks longest-first (`order_chunks_lpt`).
+   - GCE Single-VM (`runtime = "gce"`) enforces triple-redundant zero-orphan cleanup (`scheduling.maxRunDuration` + `instanceTerminationAction="DELETE"`, guest COS `trap cleanup EXIT` REST API self-delete + `shutdown -h now`, and launcher `try ... finally` deletion).
+
+---
+
+## 3. Canonical Inventories & Mandatory Co-Update Matrix
+
+Whenever you add or modify a model, metric, compute runtime, `RunConfig` field, BigQuery table/view, or smoke configuration, **you must update the corresponding documentation and tripwire files in the same work unit before declaring the task complete**:
+
+| System Surface | Canonical Source of Truth | Current Count / Set | Files That MUST Be Updated Together |
+| :--- | :--- | :--- | :--- |
+| **Forecasting Models** | [`models/__init__.py`](./src/scale_forecasting/models/__init__.py) (`list_models()`) | **30 models** (`28` Python + `2` BQ SQL: `18` `statistical`, `5` `ml`, `5` `deep_learning`, `2` `native`) | [`README.md`](./README.md), [`docs/models_reference.md`](./docs/models_reference.md), [`docs/adding_a_model.md`](./docs/adding_a_model.md), [`src/scale_forecasting/README.md`](./src/scale_forecasting/README.md), [`src/scale_forecasting/models/README.md`](./src/scale_forecasting/models/README.md), [`notebooks/README.md`](./notebooks/README.md), [`tests/README.md`](./tests/README.md), [`docs/workshop.md`](./docs/workshop.md) |
+| **Evaluation Metrics** | [`metrics/__init__.py`](./src/scale_forecasting/metrics/__init__.py) (`METRIC_NAMES`) | **21 metrics** (`16` point + `5` interval) | [`README.md`](./README.md), [`docs/metrics_reference.md`](./docs/metrics_reference.md), [`docs/adding_a_metric.md`](./docs/adding_a_metric.md), [`src/scale_forecasting/README.md`](./src/scale_forecasting/README.md), [`src/scale_forecasting/metrics/README.md`](./src/scale_forecasting/metrics/README.md), [`src/scale_forecasting/engines/README.md`](./src/scale_forecasting/engines/README.md), [`src/scale_forecasting/registry/README.md`](./src/scale_forecasting/registry/README.md), [`tests/README.md`](./tests/README.md) |
+| **Compute Runtimes & Hardware** | [`config.py`](./src/scale_forecasting/config.py) & [`resources/catalog.py`](./src/scale_forecasting/resources/catalog.py) | **5 runtimes** (`spark`, `ray`, `vertex`, `gce`, `bigquery`) · **4 GPU types** (`T4`, `L4`, `A100`, `A100_80GB`) | [`README.md`](./README.md), [`docs/configuration_reference.md`](./docs/configuration_reference.md), [`docs/architecture.md`](./docs/architecture.md), [`docs/quota_and_scale.md`](./docs/quota_and_scale.md), [`src/scale_forecasting/engines/README.md`](./src/scale_forecasting/engines/README.md), [`src/scale_forecasting/resources/README.md`](./src/scale_forecasting/resources/README.md), [`src/scale_forecasting/probes/README.md`](./src/scale_forecasting/probes/README.md), [`tests/unit/test_config_coverage.py`](./tests/unit/test_config_coverage.py) |
+| **Registry Tables & Views** | [`registry/ddl.py`](./src/scale_forecasting/registry/ddl.py) & [`registry/views.py`](./src/scale_forecasting/registry/views.py) | **4 source tables** · **5 registry tables** · **5 analytical SQL views** (`v_model_leaderboard`, `v_model_leaderboard_comparable`, `v_backtest_coverage`, `v_run_summary`, `v_run_jobs`) | [`README.md`](./README.md), [`docs/output_schemas.md`](./docs/output_schemas.md), [`docs/writing_results.md`](./docs/writing_results.md), [`docs/reading_source_data.md`](./docs/reading_source_data.md), [`src/scale_forecasting/registry/README.md`](./src/scale_forecasting/registry/README.md), [`docs/workshop.md`](./docs/workshop.md) |
+| **Smoke & Demo Configs** | [`configs/smokes/*.json`](./configs/smokes/) & [`configs/*.json`](./configs/) | **39 smoke configs** (`01`–`39`) · **19 root demo configs** | [`configs/smokes/README.md`](./configs/smokes/README.md), [`configs/README.md`](./configs/README.md), [`docs/smoke_testing.md`](./docs/smoke_testing.md), [`docs/validation.md`](./docs/validation.md), [`tests/README.md`](./tests/README.md), [`tests/smokes/test_smoke_configs.py`](./tests/smokes/test_smoke_configs.py) |
+| **Public Python Modules** | [`src/scale_forecasting/**/*.py`](./src/scale_forecasting/) | All non-private modules | [`docs/api/*.md`](./docs/api/index.md), [`mkdocs.yml`](./mkdocs.yml) (enforced by [`tests/unit/test_api_docs_coverage.py`](./tests/unit/test_api_docs_coverage.py)) |
+
+---
+
+## 4. Writing Style, Markdown Tables & Mermaid Rendering Rules
+
+All documentation across `README.md`, `docs/*.md`, and directory `README.md` files must meet publication-grade readability and rendering standards:
+
+### 4.1. Prose & Code Examples
+1. **High-Signal, Direct Technical Prose:** Lead with what a component does, why it exists, and how to use it. Avoid filler or vague claims.
+2. **Directory `README.md` Architecture Maps:** Every directory (`src/scale_forecasting/**`, `configs/**`, `notebooks/`, `tests/`, `docker/`, `terraform/**`) maintains a `README.md` containing a visual Mermaid flow diagram and a table mapping every file in that directory to its responsibility.
+3. **Executable JSON & CLI Snippets:**
+   - Every full `RunConfig` JSON example in `README.md` and `docs/*.md` must pass `RunConfig.model_validate()` without validation errors or dropped-strategy warnings (e.g., if `ensemble.strategies` includes learned stackers `nnls`, `ridge`, or `xgb`, the snippet must also include `"backtest": {"enabled": true, ...}`).
+   - Every `python -m scale_forecasting.<module>` CLI command and `configs/<name>.json` path in documentation must reference a real module and file on disk.
+4. **Symlink-Aware Links in `notebooks/README.md`:**
+   - Because `docs/notebooks` is a symlink to `../notebooks` for MkDocs rendering, links from `notebooks/README.md` to pages in `docs/` must use `../<page>.md` (e.g., `../notebook_runtimes.md`) so `mkdocs build --strict` resolves them cleanly.
+
+### 4.2. Mermaid Diagram Standards
+1. **Supported Diagram Types Only:** Use `flowchart TD`, `flowchart LR`, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, or `erDiagram`.
+2. **Mandatory Quoting of Special Characters:** Always wrap node and `subgraph` labels in double quotes (`id["Label (Extra Info)"]` or `subgraph ID["Subgraph Title (Detail)"]`) whenever the label contains parentheses `()`, brackets `[]`, braces `{}`, colons `:`, semicolons `;`, ampersands `&`, mathematical symbols, or `<br/>` line breaks.
+3. **Balanced Subgraphs:** Every `subgraph` declaration must have a matching `end` keyword on its own line.
+4. **No Raw HTML Tags Beyond `<br/>`:** Use `<br/>` for line breaks inside quoted Mermaid node labels; avoid arbitrary HTML tags or unquoted markdown formatting inside nodes.
+
+### 4.3. Markdown Table & LaTeX Math Standards
+1. **Strict Column Count Parity:** Every row in a Markdown table (header, alignment separator `| :--- |`, and all body rows) must have the exact same number of unescaped pipe delimiters (`|`).
+2. **Escaped Pipes Inside Cells:** Any literal pipe inside a table cell (such as union types `"spark" \| "ray"` or absolute value bars) must be escaped as `\|`.
+3. **LaTeX / Dollar-Sign Hygiene:** Inline math uses `$...$` and display math uses `$$...$$`. Always escape literal currency dollar signs as `\$` (or wrap shell variables like `$PROJECT_ID` and prices in backticks) so two `$` characters in the same paragraph never corrupt prose into math mode.
+
+---
+
+## 5. Automated Review & Verification Protocol ("Definition of Done")
+
+Never declare a feature, bugfix, documentation update, or phase complete until **all applicable verification gates below have been executed and shown passing**. During review rounds, agents should run these commands directly before signing off.
+
+### Gate 1: Fast Consistency & Documentation Tripwires (< 3 seconds, runs in `.githooks/pre-commit`)
+Run this after *any* code, config, or documentation edit:
+```bash
+.venv/bin/pytest \
+  tests/unit/test_validation_ledger.py \
+  tests/unit/test_config_coverage.py \
+  tests/unit/test_docs_integrity.py \
+  tests/unit/test_api_docs_coverage.py \
+  tests/smokes/test_smoke_configs.py -q
+```
+- **`test_validation_ledger.py`:** Verifies every smoke config (`01`–`39`), root demo config (`19`), and notebook (`8`) has a valid row in `docs/validation.md` whose architecture axes match current code.
+- **`test_config_coverage.py`:** Verifies all 153 reachable `Literal` and `bool` values on `RunConfig` are proven live or exercised offline.
+- **`test_docs_integrity.py`:** Audits all 82+ `.md` files for valid `RunConfig` JSON examples, valid relative links and config paths, valid `python -m` module references, balanced Markdown table columns, valid Mermaid syntax, absence of deprecated parameter names, and dynamic model/metric/view/smoke count parity.
+- **`test_api_docs_coverage.py`:** Verifies every public Python module has a corresponding `docs/api/*.md` page and `mkdocs.yml` nav entry.
+
+### Gate 2: Formatting, Linting & Strict MkDocs Site Build
+```bash
+.venv/bin/ruff format --check src/ tests/
+.venv/bin/ruff check src/ tests/
+.venv/bin/mkdocs build --strict
+```
+
+### Gate 3: Offline Unit & Contract Test Suite
+```bash
+.venv/bin/pytest tests/unit/ -q
+```
+
+### Gate 4: Live Cloud & BigQuery Output Verification (When Touching Runtimes, Engines, or Smokes)
+When validating a runtime or smoke configuration on Google Cloud:
+1. Confirm the run reaches `status = 'SUCCESS'` in `run_registry` with `n_failed = 0`.
+2. Query BigQuery directly (`run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`, and `v_model_leaderboard`) to verify that every expected `(ts_id, model_type)` cell produced non-null forecasts, finite evaluation metrics, and populated `$.sizing` / `$.sizing_executed` telemetry.
+3. Verify zero orphaned cloud compute resources remain after run completion (`gcloud compute instances list`, `gcloud dataproc batches list`, `gcloud ai custom-jobs list`).
+4. Record the live `run_id`, date, and architecture axes in [`docs/validation.md`](./docs/validation.md) and re-run Gate 1.

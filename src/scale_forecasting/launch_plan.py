@@ -154,16 +154,24 @@ def _check_idempotency(run_id: str, settings: Settings) -> Idempotency:
     return Idempotency(checked=True, exists=status is not None, prior_status=status)
 
 
+def _needs_batch_infra(cfg: RunConfig) -> bool:
+    """Does any family in ``cfg`` run on Spark, Vertex CustomJob, or GCE (needing `BatchInfra`)?"""
+    if cfg.python_runtime in ("spark", "vertex", "gce"):
+        return True
+    return any(fc.runtime in ("spark", "vertex", "gce") for fc in cfg.compute.families.values())
+
+
 def _resolve_infra(cfg: RunConfig, infra: object | None) -> object:
     """The runtime's infra identity: the injected ``infra``, else resolved from the ``SF_*`` env.
 
-    Spark resolves a `BatchInfra`, Ray a `RayInfra`; both carry the ``code_bucket`` the config
-    stages to. Raises `ConfigError` (from ``resolve``) when the env is unset — plan emission is
-    best-effort, so `plan_run` catches that and returns a plan without commands.
+    Spark, Vertex, and GCE resolve a `BatchInfra`, pure Ray resolves a `RayInfra`; both carry the
+    ``code_bucket`` the config stages to. Raises `ConfigError` (from ``resolve``) when the env is
+    unset — plan emission is best-effort, so `plan_run` catches that and returns a plan without
+    commands.
     """
     if infra is not None:
         return infra
-    if cfg.python_runtime == "ray":
+    if not _needs_batch_infra(cfg):
         from .ray_infra import RayInfra
 
         return RayInfra.resolve()
@@ -177,14 +185,14 @@ def _template_uris(
 ) -> tuple[str, str | None, str | None]:
     """The ``gs://`` URIs a run's artifacts *will* land at (pure — mirrors the staging scheme).
 
-    Returns ``(config_uri, package_uri, launcher_uri)``. The config URI always exists; the Spark
-    package/launcher URIs are set only for a Spark run with Python models (Ray delivers code via its
-    ``runtime_env`` working dir, not a staged zip). The package name carries the code hash from
-    `code_delivery.build_package_zip` — a deterministic local build, no network — so the template is
-    byte-faithful to what `staging.stage_code` would upload.
+    Returns ``(config_uri, package_uri, launcher_uri)``. The config URI always exists; the
+    package/launcher URIs are set whenever a Spark, Vertex CustomJob, or GCE family has Python
+    models (Ray delivers code via its ``runtime_env`` working dir, not a staged zip). The package
+    name carries the code hash from `code_delivery.build_package_zip` — a deterministic local build,
+    no network — so the template is byte-faithful to what `staging.stage_code` would upload.
     """
     config_uri = f"gs://{code_bucket}/runs/{plan.run_id}.json"
-    if cfg.python_runtime == "ray" or not plan.python_models:
+    if not _needs_batch_infra(cfg) or not plan.python_models:
         return config_uri, None, None
     from .code_delivery import build_package_zip
 
@@ -209,67 +217,122 @@ def _assemble_commands(
 
     Always emits ``"main"`` — ``python -m scale_forecasting.main --config-uri …``, the orchestrator
     that reproduces the *full* run (both engines under one run_id). When there are Python-runtime
-    models it adds the per-runtime tier: ``"ray"`` (universal only) or one ``"spark:<family>"``
-    entry per Serverless family (native ``gcloud`` + universal).
-
-    **The Spark tier is keyed by family because the run is.** A Serverless executor's shape is
-    fixed at batch creation and each family resolves its own hardware, so one command cannot
-    describe a run whose statistical family is on CPU and whose deep-learning family holds a GPU.
-    Emitting one per family is what makes the printed command reproduce the batch `run` submits:
-    same ``--batch`` id (`registry.ids.dataproc_job_id` over the family's planned ``job_key``),
-    same ``--models`` subset, same sizing overlay derived at that family's hardware, and
-    ``--provisioned-hardware gpu`` where the family bought a device.
-
-    Each command stands alone — ``manage_header=True``, so copy-pasting one reproduces that
-    family's batch under its own header rather than needing the orchestrator to own one.
-
-    **Cluster-mode families get no command, deliberately.** `build_spark_commands` renders
-    ``gcloud dataproc batches submit``, which is the Serverless form; a cluster family's job goes
-    to ``gcloud dataproc jobs submit`` against a cluster the run *creates*, so there is no
-    standalone line to copy. Emitting the Serverless form for it would print a command that runs
-    and runs the wrong thing.
+    models it adds the per-runtime tier: ``"ray"`` (universal only), ``"spark:<family>"`` per
+    Serverless family, ``"vertex:<family>"`` per Vertex CustomJob family, and/or
+    ``"gce:<family>"`` per Compute Engine single-VM family.
     """
-    from .commands import build_main_command, build_ray_commands, build_spark_commands
+    from .commands import (
+        build_gce_commands,
+        build_main_command,
+        build_ray_commands,
+        build_spark_commands,
+        build_vertex_commands,
+    )
 
     commands: dict[str, LaunchCommands] = {"main": build_main_command(config_uri)}
     if not plan.python_models:
         return commands
-    if cfg.python_runtime == "ray":
+    has_ray = cfg.python_runtime == "ray" or any(n.runtime == "ray" for n in nodes)
+    if has_ray:
         commands["ray"] = build_ray_commands(
             config_uri=config_uri, cluster_name=cfg.compute.ray_cluster_name
         )
+    if not any(n.runtime in ("spark", "vertex", "gce") for n in nodes):
         return commands
 
     from .batch_infra import BatchInfra
+    from .gce_submit import plan_gce_job
     from .profiling.source import profile_for_run
-    from .registry.ids import dataproc_job_id
+    from .registry.ids import dataproc_job_id, gce_instance_id, vertex_job_id
     from .submit import sizing_properties
+    from .vertex_submit import plan_vertex_job
 
-    assert isinstance(infra, BatchInfra)  # spark runtime → BatchInfra (resolved above)
-    profile = profile_for_run(cfg, settings=settings)
+    assert isinstance(infra, BatchInfra)
+    profile = None
+    if any(n.runtime == "spark" and n.spark_mode != "cluster" for n in nodes):
+        profile = profile_for_run(cfg, settings=settings)
     for node in nodes:
-        if node.runtime != "spark" or node.spark_mode == "cluster":
-            continue
         models = list(node.models)
         hardware = node.hardware or "cpu"
-        commands[f"spark:{node.family}"] = build_spark_commands(
-            settings=settings,
-            infra=infra,
-            batch_id=dataproc_job_id(node.job_key),
-            package_uri=package_uri or "",
-            launcher_uri=launcher_uri or "",
-            config_uri=config_uri,
-            models=models,
-            manage_header=True,
-            # The emitted gcloud command has to carry the sizing overlay the SDK path applies, or
-            # copy-pasting it would submit a differently-shaped batch than `run` would. The overlay
-            # is hardware-dependent, which is the whole reason this is resolved per family.
-            properties=sizing_properties(
-                cfg, models, hardware=hardware, gpu_type=node.gpu_type, profile=profile
-            ),
-            provisioned_hardware=hardware,
-            gpu_type=node.gpu_type,
-        )
+        if node.runtime == "spark" and node.spark_mode != "cluster":
+            commands[f"spark:{node.family}"] = build_spark_commands(
+                settings=settings,
+                infra=infra,
+                batch_id=dataproc_job_id(node.job_key),
+                package_uri=package_uri or "",
+                launcher_uri=launcher_uri or "",
+                config_uri=config_uri,
+                models=models,
+                manage_header=True,
+                properties=sizing_properties(
+                    cfg, models, hardware=hardware, gpu_type=node.gpu_type, profile=profile
+                ),
+                provisioned_hardware=hardware,
+                gpu_type=node.gpu_type,
+            )
+        elif node.runtime == "vertex":
+            fc = cfg.resolve_family_compute(node.family)
+            vplan = plan_vertex_job(
+                cfg,
+                models,
+                run_id=plan.run_id,
+                job_id=vertex_job_id(node.job_key),
+                hardware=hardware,
+                gpu_type=node.gpu_type,
+                machine_type=fc.machine_type,
+                worker_count=fc.workers,
+                accelerator_count=fc.accelerator_count or None,
+                image_uri=infra.container_image or "",
+                package_uri=package_uri or "",
+                config_uri=config_uri,
+                service_account=infra.compute_sa,
+            )
+            commands[f"vertex:{node.family}"] = build_vertex_commands(
+                config_uri=config_uri,
+                package_uri=package_uri,
+                settings=settings,
+                infra=infra,
+                display_name=vplan.display_name,
+                models=models,
+                job_id=vplan.display_name,
+                hardware=vplan.hardware,
+                gpu_type=vplan.gpu_type,
+                machine_type=vplan.machine_type,
+                worker_count=vplan.worker_count,
+                accelerator_type=vplan.accelerator_type,
+                accelerator_count=vplan.accelerator_count,
+            )
+        elif node.runtime == "gce":
+            fc = cfg.resolve_family_compute(node.family)
+            gplan = plan_gce_job(
+                cfg,
+                models,
+                run_id=plan.run_id,
+                instance_name=gce_instance_id(node.job_key),
+                hardware=hardware,
+                gpu_type=node.gpu_type,
+                machine_type=fc.machine_type,
+                accelerator_count=fc.accelerator_count or None,
+                image_uri=infra.container_image or "",
+                package_uri=package_uri or "",
+                config_uri=config_uri,
+                service_account=infra.compute_sa,
+                subnetwork_uri=infra.subnetwork_uri,
+                ttl_seconds=infra.ttl_seconds,
+                settings=settings,
+                infra=infra,
+            )
+            commands[f"gce:{node.family}"] = build_gce_commands(
+                config_uri=config_uri,
+                package_uri=package_uri,
+                settings=settings,
+                infra=infra,
+                instance_name=gplan.instance_name,
+                models=models,
+                hardware=gplan.hardware,
+                gpu_type=gplan.gpu_type,
+                machine_type=gplan.machine_type,
+            )
     return commands
 
 
@@ -891,11 +954,11 @@ def stage_run(
     config_uri = stage_config(cfg, plan.run_id, code_bucket)
     package_uri: str | None = None
     launcher_uri: str | None = None
-    if cfg.python_runtime != "ray" and plan.python_models:
+    if _needs_batch_infra(cfg) and plan.python_models:
         from .batch_infra import BatchInfra
         from .staging import stage_code
 
-        assert isinstance(resolved_infra, BatchInfra)  # spark runtime → BatchInfra
+        assert isinstance(resolved_infra, BatchInfra)  # spark / vertex runtime → BatchInfra
         package_uri, launcher_uri = stage_code(resolved_infra.code_bucket)
 
     commands = _assemble_commands(

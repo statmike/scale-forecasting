@@ -310,7 +310,13 @@ def test_a_nonsensical_policy_is_rejected_at_construction(kwargs: dict[str, floa
 
 
 def test_shipped_policies_cover_every_service_with_a_candidate_walk() -> None:
-    assert set(cap.DEFAULT_POLICIES) == {"ray", "dataproc_cluster", "dataproc_serverless"}
+    assert set(cap.DEFAULT_POLICIES) == {
+        "ray",
+        "vertex",
+        "gce",
+        "dataproc_cluster",
+        "dataproc_serverless",
+    }
     assert cap.UNMANAGED_SERVICES == frozenset({"bigquery"})
     assert not set(cap.DEFAULT_POLICIES) & cap.UNMANAGED_SERVICES
 

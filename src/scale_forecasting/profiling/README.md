@@ -17,8 +17,8 @@ flowchart LR
     stats["stats.py + numeric.py<br/>Aggregate p50 / p90 wall time,<br/>peak RSS delta, CPU ratio & VRAM"]
 
     subgraph consumers["Downstream Consumers"]
-        cost["cost.py<br/>Cost-weighted cell bucketing<br/>(equalizes runtime across Spark/Ray tasks)"]
-        res["resources/<br/>TaskSlot & fleet sizing<br/>for Spark & Ray"]
+        cost["cost.py<br/>Cost-weighted cell bucketing & LPT ordering<br/>(equalizes runtime across Spark/Ray/Vertex/GCE)"]
+        res["resources/<br/>TaskSlot & fleet sizing<br/>for Spark, Ray, Vertex & GCE"]
     end
 
     mode --> sources --> stats --> consumers

@@ -21,12 +21,12 @@ For the *what/why* of each config knob see
 A run is **one JSON config**. [`main.run(cfg)`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py) computes a
 deterministic `run_id`, then resolves the config into an **execution DAG**: one **job per model
 family** present in the config — `statistical`, `ml`, `deep_learning`, `native` — plus a downstream
-`ensemble` node. Each Python family runs on **its own resolved runtime** (Spark *xor* Ray, chosen
+`ensemble` node. Each Python family runs on **its own resolved runtime** (Spark *xor* Ray *xor* Vertex AI `CustomJob` *xor* Compute Engine `gce`, chosen
 *per family*); the `native` family runs as SQL in BigQuery. All the family jobs launch **in parallel
 under one run header**, so a run's wall-clock is the *slowest* family, not the sum. Whichever runtime
 a family lands on, it fans out that family's cells and calls the **same** `worker.run_cell` for each,
 then writes results to BigQuery via the Storage Write API. When every family job has landed its base
-predictions, the `ensemble` node blends them. Three analyst views read the tables back. That's the
+predictions, the `ensemble` node blends them. Five analyst views read the tables back. That's the
 whole system.
 
 ```mermaid
@@ -34,12 +34,12 @@ flowchart TD
     Cfg["One JSON Config (RunConfig)"] --> Main["main.run(cfg)\nWrites run_registry header (RUNNING)"]
     Main --> Plan["dag.plan_dag(cfg)\nGroups models into parallel FamilyJobs"]
 
-    Plan --> Stat["statistical\n(Spark or Ray)"]
-    Plan --> ML["ml\n(Spark or Ray)"]
-    Plan --> DL["deep_learning\n(Spark or Ray)"]
+    Plan --> Stat["statistical\n(Spark · Ray · Vertex · GCE)"]
+    Plan --> ML["ml\n(Spark · Ray · Vertex · GCE)"]
+    Plan --> DL["deep_learning\n(Spark · Ray · Vertex · GCE)"]
     Plan --> Nat["native\n(BigQuery SQL)"]
 
-    Stat & ML & DL --> Engine["spark_explode / ray_engine\nFans out (ts_id, model) cells"]
+    Stat & ML & DL --> Engine["spark_explode / ray_engine / vertex_engine\nFans out (ts_id, model) cells & global panels"]
     Engine --> Cell["worker.run_cell()\nFit + Backtest + Predict"]
     Nat --> BQEng["bigquery_engine\nBQML + AI.FORECAST"]
 
@@ -74,6 +74,8 @@ There are three ways a run begins, all converging on the same engines.
 | `ray_jobs` | [`ray_jobs.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ray_jobs.py) | The Ray Jobs client — connect through the managed dashboard proxy past its warm-up race, submit the driver, poll to terminal, and fetch a failed job's log tail. Owns the 60-minute-bearer-token refresh that lets a long GPU run poll to completion. Used by `ray_submit` and by `probes.runtimes` mid-flight. |
 | `ray_telemetry` | [`ray_telemetry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ray_telemetry.py) | Flatten a Ray run's pool plan and cluster into the header's `job_telemetry` JSON, and merge it on. The Ray sibling of `batch_telemetry` and `cluster_telemetry`. |
 | `ray_submit` | [`ray_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ray_submit.py) | Submit-side launcher for a **Ray** family — the *ordering* of the five steps and nothing else: size the cluster, stage the config, provision (or target) it, submit the Ray job, poll and stamp. Each step's machinery is one of the four modules above. |
+| `vertex_submit` | [`vertex_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/vertex_submit.py) | Submit-side launcher for a **Vertex AI `CustomJob`** family (`runtime="vertex"`): zip `src/`, upload `scale_forecasting.zip` + `vertex_entry.py` + `config.json` to GCS, build `worker_pool_specs` (1 dedicated VM per model for `deep_learning` / global models, or `workers` VMs for local `statistical` / `ml` families), submit with regional quota/capacity fallback, poll to terminal state, and merge `$.sizing` / `$.sizing_executed` telemetry onto the run header. |
+| `gce_submit` | [`gce_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/gce_submit.py) | Submit-side launcher for a **Compute Engine Single-VM** family (`runtime="gce"`): stages `scale_forecasting.zip` + `vertex_entry.py` + `config.json` to GCS, provisions a single Container-Optimized OS (`cos-stable`) VM with triple-redundant zero-orphan lifecycle guarantees (`maxRunDuration` + `instanceTerminationAction="DELETE"`, guest `trap cleanup EXIT` REST self-delete + `shutdown -h now`, and client `try ... finally` `delete_instance`), polls GCS status markers and instance state, and merges sizing telemetry onto the run header. |
 | `playground` | [`playground.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/playground.py) | Local single-cell path — one `run_cell` on the driver, no cluster, no registry. The fastest way to see a model run. |
 
 `main.run` orchestrates the DAG ([`main.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py)):
@@ -94,7 +96,7 @@ There are three ways a run begins, all converging on the same engines.
 
 Each Python family's runtime dispatch lives in `launch_family_job`
 ([`job_launch.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/job_launch.py)): it looks up the family's **resolved**
-runtime (`job.compute.runtime` — Spark *xor* Ray, chosen per family) and calls
+runtime (`job.compute.runtime` — Spark *xor* Ray *xor* Vertex *xor* GCE, chosen per family) and calls
 `get_submitter(runtime).launch(...)` (Layer 1½). An injected Spark session (e.g. notebook 01's Spark
 Connect) makes a Spark family run **in-process** against that session instead of a remote batch,
 using the identical engine code.
@@ -103,8 +105,8 @@ using the identical engine code.
 
 [`submitters.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/submitters.py) captures "how do I launch a Python family on
 its runtime" as a `RuntimeSubmitter` protocol with one implementation per runtime — `SparkSubmitter`
-(→ `submit.submit_batch`, a Dataproc batch) and `RaySubmitter` (→ `ray_submit.submit_ray`, a Vertex
-Ray job). `get_submitter(runtime)` returns the right one, so `launch_family_job` is a single dispatch
+(→ `submit.submit_batch`, a Dataproc batch), `RaySubmitter` (→ `ray_submit.submit_ray`, a Vertex
+Ray job), `VertexSubmitter` (→ `vertex_submit.submit_vertex_job`, a Vertex AI `CustomJob`), and `GceSubmitter` (→ `gce_submit.submit_gce_job`, a single-VM Compute Engine instance). `get_submitter(runtime)` returns the right one, so `launch_family_job` is a single dispatch
 line — the family doesn't know how its runtime is provisioned.
 
 ---
@@ -138,14 +140,14 @@ plain Python-vs-native split is all that's needed.
 ## Layer 2½ — compute sizing (how big a fleet, and why)
 
 Layer 2 decides *which* jobs run. This decides **how big each one is** — and it is the one concern
-that cuts across both halves of the stack, because the same arithmetic has to come out as three
+that cuts across both halves of the stack, because the same arithmetic has to come out as four
 different vocabularies: Spark properties on Dataproc Serverless, Spark properties plus a worker count
-on a Dataproc cluster, and `@ray.remote` resource requests on Vertex.
+on a Dataproc cluster, `@ray.remote` resource requests on Vertex Ray, and VM worker-pool / thread-pool shapes on Vertex `CustomJob` and Compute Engine (`gce`).
 
-**One model, three translations.**
+**One model, four translations.**
 The [`resources`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/resources)
 package holds the shared model: a `ResourceSlot` (what one unit of work needs) and a `UnitShape`
-(what one billable unit provides), turned into a fleet by dividing cells by slots. Three pure
+(what one billable unit provides), turned into a fleet by dividing cells by slots. Four pure
 translators render it:
 
 | Service | Translator | What it emits | When it is fixed |
@@ -153,6 +155,7 @@ translators render it:
 | Dataproc Serverless | `translate_serverless` | `spark.executor.cores` / `memoryOverhead`, the `dynamicAllocation` min/initial/max band, `executorAllocationRatio`, thread pins — all snapped to Serverless's legal value tables | **at submit** |
 | Dataproc cluster | `translate_cluster` | one executor per worker minus an ApplicationMaster reserve, `spark.task.cpus` as the density lever, a derived worker count clamped to a spend ceiling | **at create** |
 | Ray on Vertex | `ray_io.plan_pool` / `plan_cluster` | per-pool node counts and per-task `num_cpus` / `num_gpus` | pool **at create**, task resources **in-run** |
+| Vertex `CustomJob` & GCE | `vertex_engine.plan_vertex_pool` | `UnitShape` (`n2-standard-8`, `g2-standard-*`, `n1-standard-*`, `a2-*`), `effective_worker_count` (dedicated per-model VMs for `deep_learning` / global models), `slots_per_unit` (`ThreadPoolExecutor` cap), and `intraop_env_vars` | worker pool **at submit**, thread slots **in-run** |
 
 **How measurements feed back into fleet sizing.** Every execution cell automatically records its CPU seconds, process RSS high-water mark, peak GPU bytes, thread cap, and observation count (`n_obs`) into `forecast_metadata`. At submit time, `profiling.source.resolve_profile_source` resolves `compute.profile.source` (`"auto"` by default) through a four-step precedence chain:
 
@@ -161,7 +164,7 @@ translators render it:
 3. **Shipped baseline (`"baseline"`)**: Uses the empirically harvested baseline constants in `profiling/baseline.py`.
 4. **Static fallback (`"none"`)**: Uses static model family resource estimates when `compute.profile.mode = "off"`.
 
-**What to reach for when you want explicit bounds.** Setting `compute.profile.mode = "off"` disables the derived overlay and returns to platform defaults. Individual overrides (`ray_max_nodes`, `max_executors`, `bucket_target_cells`, and per-family `hardware`) always take precedence. Use `max_executors` when your fan-out exceeds your project's regional vCPU quota ceiling. See [`compute.profile`](./configuration_reference.md) for every field and the [System Validation Ledger](./validation.md) for live benchmark records.
+**What to reach for when you want explicit bounds.** Setting `compute.profile.mode = "off"` disables the derived overlay and returns to platform defaults. Individual overrides (`max_workers`, `ray_max_nodes`, `max_executors`, `bucket_target_cells`, and per-family `hardware`) always take precedence. Use `max_workers` (or `max_executors`) when your fan-out exceeds your project's regional vCPU quota ceiling. See [`compute.profile`](./configuration_reference.md) for every field and the [System Validation Ledger](./validation.md) for live benchmark records.
 
 ---
 
@@ -195,12 +198,12 @@ bucket) and then `cells.write_cells` to persist them.
 `spark_explode`, and it **re-exports** `spark_io.run_group` and `aggregate_status` verbatim
 ([`ray_io.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/ray_io.py)) — the cell logic is identical; only the
 fan-out mechanism differs. `run()` reads the panel to the driver → splits models into a **GPU pool**
-(NeuralProphet) and a **CPU pool** (everything else) → calibrates the T4 `gpu_fraction` → chunks
+(the `deep_learning` family: `neuralprophet`, `tide`, `tft`, `tsmixer`, `patchtst`) and a **CPU pool** (everything else) → calibrates the GPU `gpu_fraction` → chunks
 cells → fans one `@ray.remote` task per chunk (`num_gpus=fraction` for GPU cells, `num_cpus=1`
 otherwise) → `ray.get` → aggregate → update header. Each worker pool **autoscales** by default
 between an independent `[min, max]` ([`ray_io.plan_cluster`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/ray_io.py)
 resolves the bounds; `ray_submit` attaches a Vertex `AutoscalingSpec` per pool) — so the CPU pool
-grows to work through the queue and the expensive T4 pool shrinks when idle. Determinism is preserved
+grows to work through the queue and the expensive GPU pool shrinks when idle. Determinism is preserved
 a level up: the *initial* size is a pure function of the fan-out (clamped into the bounds) and the
 whole spec is hashed into `run_id` and stamped to telemetry. `ray_autoscale=false` restores the
 fixed-size path.
@@ -209,10 +212,20 @@ When more than one family resolves to Ray in the same run, the orchestrator prov
 Ray cluster** for the launch block (`shared_clusters.shared_ray_cluster`) and each Ray family submits its job
 to it, instead of each family self-provisioning.
 
+### Vertex AI CustomJob & Compute Engine (GCE) — the single-VM & worker-pool path
+
+[`vertex_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/vertex_engine.py) executes any Python model family (`statistical`, `ml`, `deep_learning`) inside either a serverless **Vertex AI `CustomJob`** (`runtime="vertex"`) or a direct **Compute Engine Single-VM** (`runtime="gce"`). Both runtimes share the same container image (`SF_CONTAINER_IMAGE`), GCS code-zip delivery (`scale_forecasting.zip` + `vertex_entry.py` + `config.json`), and `plan_vertex_pool` sizing translator — paying **zero Ray head-node tax** (`n1-standard-16`) and zero Spark driver overhead.
+
+How `vertex_engine` allocates VMs and shards work across families:
+
+- **Dedicated Per-Model VMs for Global & Deep-Learning Models:** When a family contains `deep_learning` or global/hybrid panel models (`tide`, `tft`, `tsmixer`, `patchtst`, `neuralprophet`) on `runtime="vertex"`, `effective_worker_count` automatically expands `requested_workers=1` to `len(models)` so **each model gets its own dedicated VM (and dedicated GPU)** in `worker_pool_specs`, eliminating cross-model VRAM/RAM contention (`partition_models_for_worker(models, rank=rank, world_size=world_size)`).
+- **Shared `ThreadPoolExecutor`, LPT Cell Ordering & Contiguous Storage Read Pushdown for Local Models (`statistical` / `ml`):** Local per-series models share a VM via `ThreadPoolExecutor(max_workers=exec_plan.slots_per_unit)` with intra-op threads pinned by `intraop_env_vars`, dispatching cells in **Longest Processing Time first (LPT)** order (`model_cost_weights`) to eliminate end-of-job straggler tails. When `workers > 1` and `hierarchy.enabled=False`, each worker rank computes its contiguous sorted `ts_id` block (`shard_series_for_worker`) and pushes `ts_id >= '<min>' AND ts_id <= '<max>'` (plus the fleetwide HPO sample union when `hpo.enabled=True`) directly into BigQuery Storage Read API `row_restriction` (`_read_source_panel`), reading only its assigned slice rather than the full table. When `hierarchy.enabled=True`, models are sharded across workers via `partition_models_for_worker` so each worker holds the full series panel needed to reconcile its assigned models in-memory.
+- **GCS Worker-Pool Completion Barrier:** Because Vertex AI `CustomJob` immediately terminates secondary worker pools (`worker_pool_specs[1]`) as soon as `worker_pool_specs[0]` (rank 0) exits, every worker writes a completion marker to `gs://<code_bucket>/runs/<run_id>/vertex_barriers/<job_id>/rank_<rank>.json` (`_write_worker_barrier_marker`) and rank 0 waits at `_wait_for_worker_pool_barrier` until all `0 .. world_size - 1` ranks have finished writing their cells to BigQuery.
+- **Triple-Redundant Zero-Orphan GCE Lifecycle (`runtime="gce"`):** [`gce_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/gce_submit.py) enforces three independent layers so a single-VM Compute Engine job can never leave an orphaned VM running: (1) GCE hypervisor hard TTL (`scheduling.maxRunDuration` + `scheduling.instanceTerminationAction = "DELETE"` + `automaticRestart = False`), (2) guest Container-Optimized OS startup script `trap cleanup EXIT` that writes `gs://<code_bucket>/runs/gce-status/<instance>.json`, calls `DELETE` on its own instance metadata URL via the GCE REST API, and runs `shutdown -h now || poweroff`, and (3) client-side `try ... finally` `delete_instance` in `gce_submit.py` plus `GceProbe.cancel()`.
+
 ### BigQuery-native — SQL only
 
-[`bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) runs `arima_plus` /
-`arima_plus_xreg` / `timesfm` entirely inside BigQuery as BQML SQL — no Python compute — and writes
+[`bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) runs `arima_plus` (`ARIMA_PLUS` / `ARIMA_PLUS_XREG`) and `timesfm` (`AI.FORECAST`) entirely inside BigQuery as BQML SQL — no Python compute — and writes
 its metrics and predictions through the **same** Storage Write API path as the Python cells (it
 reuses `write_api._proto_for` / `_encode_rows` / `_append_via_write_api`). It honors holidays (for BQML
 parity via `features.holiday_frame`) but not the Python target transform. It is the `native` family
@@ -227,12 +240,12 @@ the registry records them, so the namer and its inverse matcher must live togeth
 
 ### The pure / I-O split
 
-Both `spark_io.py` and `ray_io.py` are deliberately split so the *interesting* logic is
+`spark_io.py`, `ray_io.py`, and `vertex_engine.py` are deliberately structured so the *interesting* logic is
 offline-testable without a cluster:
 
 - **Pure** (no Spark, no Ray, no GCP): `run_group` (the per-cell loop), `aggregate_status` (COMPLETED
-  / PARTIAL / FAILED roll-up), `bucket_target` / `plan_cluster` / `chunk_cells` / `calibrate_gpu_fraction`
-  sizing math.
+  / PARTIAL / FAILED roll-up), `bucket_target` / `plan_cluster` / `chunk_cells` / `calibrate_gpu_fraction` /
+  `resolve_worker_topology` / `partition_cells_for_worker` sizing and sharding math.
 - **I-O**: reading the source table, cross-join, bucketing, and the group-runner closure that writes
   cells.
 
@@ -265,7 +278,7 @@ predictions, OOF rows, metrics, best params, and fit time — the raw material t
 Its pure downstream helpers, each a single-capability file:
 [`backtest.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/backtest.py) (fold layout),
 [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py) (transform + feature matrix),
-[`metrics/`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics) (the metric panel, one file per
+[`metrics/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/metrics) (the metric panel, one file per
 metric, shared by worker, backtest, the ensemble scorer *and* the BigQuery engine).
 
 ---
@@ -301,8 +314,7 @@ So dropping a new `models/foo.py` with one import line in `__init__.py` makes `f
 - `worker.run_cell` instantiates it and calls `fit`/`predict`.
 
 **BigQuery-native models are metadata shims** —
-[`bigquery_native.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/bigquery_native.py) registers `arima_plus`,
-`arima_plus_xreg`, and `timesfm` as `BaseModel` subclasses with `runtime="bigquery"` and
+[`bigquery_native.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/bigquery_native.py) registers `arima_plus` (`ARIMA_PLUS` / `ARIMA_PLUS_XREG`) and `timesfm` (`AI.FORECAST`) as `BaseModel` subclasses with `runtime="bigquery"` and
 `family="native"` whose `fit`/`predict` *raise* (they never run in Python). Their registration exists
 purely so the planner can *see* them and route them to `bigquery_engine`. This is why the families
 compose so cleanly — a native model is just a model with a different declared runtime.
@@ -344,16 +356,14 @@ The files:
 - [`views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) — the five analyst views: `v_run_summary`
   (per-run scaling/efficiency, unpacking the telemetry JSON), `v_run_jobs` (the per-family-job trace —
   latest attempt per family, its runtime/hardware/system job id/status/telemetry),
-  `v_model_leaderboard` (per-model accuracy), `v_backtest_coverage` (how much of the panel each
-  model was actually scored on), and `v_model_leaderboard_comparable` (the same ranking restricted
-  to the holdout fold, with the error pooled across the panel). The first three are what notebook 07
+  `v_model_leaderboard` (per-model accuracy across all 21 metrics), `v_model_leaderboard_comparable` (cross-run comparison grouped by `eval_fingerprint`), and `v_backtest_coverage` (fold-coverage distribution per run and model). The first three are what notebook 07
   reads.
 
 ---
 
 ## Layer 7 — per-job identity (one run, many systems)
 
-A run fans across several platforms — Dataproc, Vertex Ray, BigQuery — but every family job keeps one
+A run fans across several platforms — Dataproc, Vertex Ray, Vertex AI CustomJob, Compute Engine (GCE), BigQuery — but every family job keeps one
 identity that ties its platform job, its `run_jobs` row, and its offline plan together:
 
 - **The canonical key** — `registry.ids.make_job_key(run_id, family, attempt)` →
@@ -361,7 +371,7 @@ identity that ties its platform job, its `run_jobs` row, and its offline plan to
   and a trace keys on. It lands in `run_jobs.job_id`.
 - **The system id** — `job_launch._system_job_id(job_key, runtime)` maps the canonical key to each
   platform's legal charset/length: `dataproc_job_id` (Spark), `ray_submission_id` (Ray),
-  `bigquery_job_id` (native / ensemble). It lands in `run_jobs.system_job_id`, so you can jump from a
+  `vertex_display_name` (Vertex CustomJob), `gce_instance_name` (GCE Single-VM), and `bigquery_job_id` (native / ensemble). It lands in `run_jobs.system_job_id`, so you can jump from a
   run's trace straight to the platform console.
 - **Attempts** — `jobs.next_job_attempt(run_id, family, force=…)` bumps the attempt so a `--force`
   re-run is a fresh, distinctly-keyed job under the same `run_id`; `v_run_jobs` surfaces the latest
@@ -391,8 +401,9 @@ The "same code local ↔ cluster" guarantee rests on three small files:
   `export_infra_env(ns)` reads them on-cluster.
 
 On-cluster, the batch/job driver lands in a thin entrypoint —
-[`spark_entry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/spark_entry.py) or
-[`ray_entry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ray_entry.py) — which exports the infra env, loads the config
+[`spark_entry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/spark_entry.py),
+[`ray_entry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ray_entry.py), or
+[`vertex_entry.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/vertex_entry.py) — which exports the infra env, loads the config
 from its GCS URI, and dispatches to the named engine's `run()`. That's the whole boundary: the same
 `run()` you can call in a notebook is what the cluster calls.
 
@@ -417,19 +428,20 @@ flowchart LR
     subgraph Runtimes["Distributed Runtimes"]
         FamLaunch --> SparkSub["SparkSubmitter\nsubmit_batch / submit_cluster_job\n-> spark_entry -> spark_explode.run"]
         FamLaunch --> RaySub["RaySubmitter\nsubmit_ray\n-> ray_entry -> ray_engine.run"]
+        FamLaunch --> VtxSub["VertexSubmitter & GceSubmitter\nsubmit_vertex_job / submit_gce_job\n-> vertex_entry -> vertex_engine.run"]
         NatLaunch --> BQRun["bigquery_engine.run()\n(BQML + AI.FORECAST)"]
         EnsLaunch --> EnsRun["ensemble.run_ensembles()"]
     end
 
     subgraph Worker["Shared Unit of Work"]
-        SparkSub & RaySub --> RunGroup["spark_io.run_group()"]
+        SparkSub & RaySub & VtxSub --> RunGroup["spark_io.run_group() +\nworker.run_panel_model()"]
         RunGroup & Play --> RunCell["worker.run_cell()\n1. features.build_features\n2. hpo.tune_model\n3. backtest.backtest_cell\n4. BaseModel.fit & predict"]
         RunCell & BQRun & EnsRun --> WriteCells["registry.cells.write_cells()\n(Storage Write API)"]
     end
 ```
 
 **The reuse seams to notice:** `spark_io.run_group`, `cells.write_cells`, and `aggregate_status` are
-shared **verbatim** by Spark and Ray (`ray_io` re-exports them), and the `manage=True` header opened
+shared **verbatim** by Spark, Ray, Vertex CustomJob, and GCE (`ray_io` and `vertex_engine` reuse them directly), and the `manage=True` header opened
 by `main.run` threads `manage_header=False` into every family job so exactly one header row exists per
 `run_id` while each family keeps its own `run_jobs` row. Those facts are what make "same code
 everywhere, one job per family, one run" real.

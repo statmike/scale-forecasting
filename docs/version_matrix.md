@@ -25,7 +25,7 @@ flowchart TD
     Pin --> Container["Custom Container (/opt/venv)\n& Packed Venv Archive (3.11.15)"]
     Kernel <-->|"1. applyInPandas Pickle Parity"| Connect["Dataproc Spark Connect 2.3\n(Python 3.11 Workers)"]
     Kernel <-->|"2. JobSubmissionClient Handshake\n(Ray 2.47 + Python 3.11)"| VertexRay["Vertex AI Ray Cluster\n(Python 3.11 / Ray 2.47.1)"]
-    Container <-->|"3. Driver ↔ Executor Parity"| Batch["Dataproc Serverless Batch\n& Dataproc GCE Cluster"]
+    Container <-->|"3. Driver ↔ Executor Parity"| Batch["Dataproc Serverless / Cluster\n& Vertex CustomJob & GCE Single-VM"]
 ```
 
 ## The matrix

@@ -19,8 +19,9 @@ flowchart LR
         Src["Local src/scale_forecasting/"] --> Del["code_delivery.py"]
         Del -->|"python_file_uris (.zip)"| DP["Dataproc Serverless / Cluster"]
         Del -->|"runtime_env.working_dir"| Ray["Ray on Vertex"]
+        Del -->|"--code-uri / SF_CODE_ZIP_URI (.zip)"| Vtx["Vertex AI CustomJob & GCE Single-VM"]
     end
-    Img --> DP & Ray
+    Img --> DP & Ray & Vtx
 ```
 
 ## Why the image doesn't carry your code
@@ -37,6 +38,7 @@ Your code is delivered **at submit time**, freshly, on every run:
 |---------|-------------------------------------|
 | **Dataproc (Spark)** | `submit_batch` zips `src/` and uploads it to the code bucket, then passes it on the batch's `python_file_uris`. A tiny `gs://` shim is the `__main__`; it imports the in-package logic from the uploaded zip. |
 | **Ray on Vertex** | `code_delivery.build_runtime_env` ships `src/` as the job's `runtime_env.working_dir`, so every Ray worker imports the code you just submitted. |
+| **Vertex AI CustomJob** | `vertex_submit.submit_vertex_job` zips `src/` and uploads both `scale_forecasting.zip` and `vertex_entry.py` to the code bucket. Each worker container runs `/opt/venv/bin/python`, downloads `vertex_entry.py` and `--code-uri` via `google.cloud.storage`, prepends the zip to `sys.path`, and imports `scale_forecasting` live. |
 | **The seed job** | Same pattern — Terraform's `seed` module zips `src/` and ships it on `python_file_uris`. |
 
 In every case the image is the *environment* and `src/` is *cargo*. The two are decoupled on

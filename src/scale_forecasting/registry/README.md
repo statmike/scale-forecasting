@@ -1,6 +1,6 @@
 # BigQuery Run Registry (`src/scale_forecasting/registry/`)
 
-This subpackage owns the **data and metadata layer** of `scale-forecasting`: the five native BigQuery registry tables, the two source panel tables (`source_series_iceberg` and `source_series_native`), the four analyst SQL views, the high-throughput Storage Write API writer, the deterministic `run_id` hash calculator, and the eight-verb operator maintenance surface (`Registry` / `python -m scale_forecasting.registry.ops`).
+This subpackage owns the **data and metadata layer** of `scale-forecasting`: the five native BigQuery registry tables, the four source panel tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, and `source_series_covariates_native`), the five analyst SQL views, the high-throughput Storage Write API writer, the deterministic `run_id` hash calculator, and the eight-verb operator maintenance surface (`Registry` / `python -m scale_forecasting.registry.ops`).
 
 ```mermaid
 erDiagram
@@ -21,7 +21,7 @@ erDiagram
         STRING run_id FK
         STRING job_id PK
         STRING family "statistical | ml | deep_learning | native | ensemble"
-        STRING runtime "spark | ray | bigquery"
+        STRING runtime "spark | ray | vertex | gce | bigquery"
         STRING hardware "cpu | gpu"
         STRING status "EMITTED | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED"
         JSON job_telemetry "Platform handle, cluster, cell tallies"
@@ -31,7 +31,7 @@ erDiagram
         STRING series_id PK
         STRING model PK
         STRING status "ok | error"
-        FLOAT64 wape "Plus all 14 other panel metrics"
+        FLOAT64 wape "Plus all 20 other panel metrics"
         JSON best_params "Fitted/tuned parameters & calibration"
         STRUCT model_artifact "GCS object_ref lineage"
     }
@@ -60,13 +60,14 @@ erDiagram
 ## Modules in This Subpackage
 
 ### 1. Schema, Views & Identity
-- **[`ddl.py`](./ddl.py):** Pure SQL DDL generator for the two source tables (`source_series_iceberg`, `source_series_native`) and five registry tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), plus idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations derived from `METRIC_NAMES`.
-- **[`views.py`](./views.py):** Pure SQL definitions for the four analyst views created over the registry:
+- **[`ddl.py`](./ddl.py):** Pure SQL DDL generator for the four source tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, `source_series_covariates_native`) and five registry tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), plus idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations derived from `METRIC_NAMES`.
+- **[`views.py`](./views.py):** Pure SQL definitions for the five analyst views created over the registry:
   - `v_run_summary`: One row per run joining `run_registry` with cell completion counts and best model accuracy.
   - `v_run_jobs`: Deduplicated per-family job execution trace with runtime, hardware, and platform job IDs.
-  - `v_model_leaderboard`: Per-run model ranking across all 15 metrics with `RANK() OVER (PARTITION BY run_id ORDER BY wape)`.
-  - `v_forecast_results`: Latest deduplicated horizon forecasts joined with each cell's backtest metrics and fitted parameters.
-- **[`tables.py`](./tables.py):** Idempotent `ensure_tables(settings)` helper that creates missing tables, applies additive column migrations, and refreshes the four analyst views.
+  - `v_model_leaderboard`: Per-run model ranking across all 21 metrics with `RANK() OVER (PARTITION BY run_id ORDER BY wape)`.
+  - `v_model_leaderboard_comparable`: Cross-run model comparison grouped by `eval_fingerprint` so runs with identical evaluation layouts can be ranked directly.
+  - `v_backtest_coverage`: Fold-coverage distribution (`n_folds_completed`) per run and model.
+- **[`tables.py`](./tables.py):** Idempotent `ensure_tables(settings)` helper that creates missing tables, applies additive column migrations, and refreshes the five analyst views.
 - **[`ids.py`](./ids.py):** Computes deterministic `<slug>-<12hex>` `run_id`s (`make_run_id`) from canonicalized `RunConfig` JSON, maintaining historical `run_id` stability via `_REMOVED_DEFAULTS` and `_DEFAULT_ELIDED`.
 
 ### 2. High-Throughput Writing & Lifecycle

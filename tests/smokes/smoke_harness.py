@@ -87,6 +87,8 @@ def _service_for(runtime: str, spark_mode: str | None) -> str:
         return "BigQuery job"
     if runtime == "ray":
         return "Vertex Ray submission"
+    if runtime == "vertex":
+        return "Vertex CustomJob"
     if runtime == "spark":
         return "Dataproc cluster job" if spark_mode == "cluster" else "Dataproc Serverless batch"
     return runtime

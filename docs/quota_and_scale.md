@@ -19,8 +19,8 @@ Three quantities, and everything follows from them.
 flowchart LR
     Workload["Series × Models\n= Cells"] --> Fits["Cells × (Folds + 1)\n= Total Fits"]
     Fits --> Split{"Family Placement\n(compute.families)"}
-    Split -->|"Spark (Serverless / GCE)"| GCE["Compute Engine Quota\nCPUS · NVIDIA_T4_GPUS"]
-    Split -->|"Ray on Vertex"| VTX["Vertex AI Quota\ncustom_model_training_cpus\ncustom_model_training_nvidia_t4_gpus"]
+    Split -->|"Spark & GCE Single-VM"| GCE["Compute Engine Quota\nCPUS · NVIDIA_*_GPUS"]
+    Split -->|"Ray & Vertex CustomJob"| VTX["Vertex AI Quota\ncustom_model_training_cpus\ncustom_model_training_nvidia_*_gpus"]
     Split -->|"BigQuery-native"| BQS["BigQuery Slots\n(Zero VM / GPU Quota)"]
 ```
 
@@ -186,8 +186,8 @@ allowance depends on the runtime:
 
 | Deep-learning runtime | Quota metric | Typical default |
 |---|---|---|
-| Spark on a **Dataproc** cluster | `NVIDIA_T4_GPUS` (Compute Engine) | **4** |
-| **Ray on Vertex** | `custom_model_training_nvidia_t4_gpus` (Vertex AI) | **12** |
+| Spark on a **Dataproc** cluster / **Compute Engine (`gce`)** | `NVIDIA_T4_GPUS` / `GPUS_ALL_REGIONS` (Compute Engine) | **4** |
+| **Ray on Vertex** / **Vertex AI `CustomJob` (`vertex`)** | `custom_model_training_nvidia_t4_gpus` (Vertex AI) | **12** |
 
 These are separate pools in separate services. Raising one does nothing for the other, and the
 `gcloud compute regions describe` recipe below shows only the first — see

@@ -126,6 +126,20 @@ _DEFAULT_MACHINE_CORES = 8
 # pattern so they never disagree about whether a name is legible.
 _MACHINE_TYPE_RE = r"^([a-z0-9]+-[a-z]+)-(\d+)$"
 
+# Fixed ``(vcpus, memory_gib)`` for accelerator-optimized machine shapes whose suffix encodes
+# GPU count (``-1g``, ``-2g``, ...) rather than vCPU count.
+_FIXED_MACHINE_SHAPES: dict[str, tuple[int, int]] = {
+    "a2-highgpu-1g": (12, 85),
+    "a2-highgpu-2g": (24, 170),
+    "a2-highgpu-4g": (48, 340),
+    "a2-highgpu-8g": (96, 680),
+    "a2-megagpu-16g": (96, 1360),
+    "a2-ultragpu-1g": (12, 170),
+    "a2-ultragpu-2g": (24, 340),
+    "a2-ultragpu-4g": (48, 680),
+    "a2-ultragpu-8g": (96, 1360),
+}
+
 # Share of a node's RAM that is actually schedulable. Ray reserves ~30% of available
 # memory for the plasma object store by default and subtracts it from the node's ``memory``
 # resource, so sizing against the machine's nameplate RAM over-packs by roughly that much.
@@ -163,11 +177,14 @@ def machine_cores(machine_type: str) -> int:
     """vCPUs a GCE machine type implies — ``n1-standard-8`` → 8 (pure; unparseable → 8).
 
     The count suffix of a ``<family>-<class>-<cores>`` name — the same shape
-    `machine_memory_bytes` parses, so the two axes agree about which names they understand.
-    Matching the whole shape rather than just a trailing number is what keeps a custom type
-    (``n1-custom-8-16384``, where the trailing number is megabytes) from being read as a
-    16384-core machine.
+    `machine_memory_bytes` parses, so the two axes agree about which names they understand —
+    plus `_FIXED_MACHINE_SHAPES` for accelerator-optimized shapes whose suffix names GPUs
+    (``a2-highgpu-1g`` → 12 vCPUs). Matching the whole shape rather than just a trailing number
+    is what keeps a custom type (``n1-custom-8-16384``, where the trailing number is megabytes)
+    from being read as a 16384-core machine.
     """
+    if machine_type in _FIXED_MACHINE_SHAPES:
+        return _FIXED_MACHINE_SHAPES[machine_type][0]
     match = re.match(_MACHINE_TYPE_RE, machine_type)
     return int(match.group(2)) if match else _DEFAULT_MACHINE_CORES
 
@@ -177,7 +194,8 @@ def machine_memory_bytes(machine_type: str) -> int:
 
     Derived as ``cores x GiB-per-vCPU`` from `_MEMORY_PER_CORE_GIB`, keyed on the
     ``<family>-<class>`` prefix — so ``n1-standard-8`` is 30 GiB and ``n1-highmem-8`` is 52
-    GiB. Nameplate RAM, not schedulable RAM: `plan_resources` applies
+    GiB — or taken directly from `_FIXED_MACHINE_SHAPES` for ``-Ng`` GPU shapes
+    (``a2-highgpu-1g`` → 85 GiB). Nameplate RAM, not schedulable RAM: `plan_resources` applies
     `_SCHEDULABLE_MEMORY_FRACTION` on top.
 
     Two different kinds of "we don't know", kept distinct because they warrant different
@@ -188,6 +206,8 @@ def machine_memory_bytes(machine_type: str) -> int:
     treat that as no memory bound rather than as a machine with no memory, so an
     unrecognised type degrades to today's cores-only packing instead of to one slot.
     """
+    if machine_type in _FIXED_MACHINE_SHAPES:
+        return int(_FIXED_MACHINE_SHAPES[machine_type][1] * _GIB)
     match = re.match(_MACHINE_TYPE_RE, machine_type)
     if match is None:
         return 0

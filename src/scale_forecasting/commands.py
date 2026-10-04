@@ -42,7 +42,7 @@ class LaunchCommands:
     ``universal`` always exists; ``native`` is set only where a package-free form exists (Spark).
     """
 
-    runtime: str  # "spark" | "ray"
+    runtime: str  # "spark" | "ray" | "vertex" | "gce"
     universal: str  # python -m … (needs the package + ADC)
     native: str | None  # gcloud … (needs only gcloud + ADC); None where none exists
 
@@ -230,3 +230,140 @@ def build_ray_commands(
     if cluster_name is not None:
         argv += ["--cluster-name", cluster_name]
     return LaunchCommands(runtime="ray", universal=shell_join(argv), native=None)
+
+
+def build_vertex_commands(
+    *,
+    config_uri: str,
+    package_uri: str | None = None,
+    settings: Settings | None = None,
+    infra: BatchInfra | None = None,
+    display_name: str | None = None,
+    models: list[str] | None = None,
+    job_id: str | None = None,
+    hardware: str | None = None,
+    gpu_type: str | None = None,
+    machine_type: str = "n2-standard-8",
+    worker_count: int = 1,
+    accelerator_type: str | None = None,
+    accelerator_count: int = 0,
+) -> LaunchCommands:
+    """Build universal (`vertex_submit`) and native (`gcloud ai custom-jobs create`) commands."""
+    argv = ["python", "-m", "scale_forecasting.vertex_submit", "--config-uri", config_uri]
+    if models is not None:
+        argv += ["--models", ",".join(models)]
+    if job_id is not None:
+        argv += ["--job-id", job_id]
+    if hardware is not None:
+        argv += ["--hardware", hardware]
+    if gpu_type is not None:
+        argv += ["--gpu-type", gpu_type]
+    if machine_type:
+        argv += ["--machine-type", machine_type]
+    if worker_count > 1:
+        argv += ["--workers", str(worker_count)]
+
+    native: str | None = None
+    if settings is not None and infra is not None and infra.container_image and package_uri:
+        pool_base = f"machine-type={machine_type}"
+        if (
+            accelerator_type
+            and accelerator_count > 0
+            and accelerator_type != "ACCELERATOR_TYPE_UNSPECIFIED"
+        ):
+            pool_base += (
+                f",accelerator-type={accelerator_type},accelerator-count={accelerator_count}"
+            )
+        pool_0 = f"{pool_base},replica-count=1,container-image-uri={infra.container_image}"
+        gcloud = [
+            "gcloud",
+            "ai",
+            "custom-jobs",
+            "create",
+            f"--project={settings.project_id}",
+            f"--region={settings.region}",
+            f"--display-name={display_name or job_id or 'sf-vertex'}",
+            f"--worker-pool-spec={pool_0}",
+        ]
+        if worker_count > 1:
+            pool_1 = (
+                f"{pool_base},replica-count={worker_count - 1},"
+                f"container-image-uri={infra.container_image}"
+            )
+            gcloud.append(f"--worker-pool-spec={pool_1}")
+        if infra.compute_sa:
+            gcloud.append(f"--service-account={infra.compute_sa}")
+        driver_args = build_driver_args(
+            config_uri,
+            settings,
+            models=models,
+            manage_header=False,
+            provisioned_hardware=hardware,
+        )
+        gcloud.append("--args=" + ",".join(["--package-uri", package_uri, *driver_args]))
+        native = shell_join(gcloud)
+
+    return LaunchCommands(runtime="vertex", universal=shell_join(argv), native=native)
+
+
+def build_gce_commands(
+    *,
+    config_uri: str,
+    package_uri: str | None = None,
+    settings: Settings | None = None,
+    infra: BatchInfra | None = None,
+    instance_name: str | None = None,
+    models: list[str] | None = None,
+    hardware: str | None = None,
+    gpu_type: str | None = None,
+    machine_type: str = "n2-standard-8",
+) -> LaunchCommands:
+    """Build universal (`gce_submit`) and native (`gcloud compute instances`) commands."""
+    argv = ["python", "-m", "scale_forecasting.gce_submit", "--config-uri", config_uri]
+    if models is not None:
+        argv += ["--models", ",".join(models)]
+    if instance_name is not None:
+        argv += ["--instance-name", instance_name]
+    if hardware is not None:
+        argv += ["--hardware", hardware]
+    if gpu_type is not None:
+        argv += ["--gpu-type", gpu_type]
+    if machine_type:
+        argv += ["--machine-type", machine_type]
+
+    native: str | None = None
+    if settings is not None and infra is not None and infra.container_image and package_uri:
+        zone = f"{settings.region}-a"
+        gcloud = [
+            "gcloud",
+            "compute",
+            "instances",
+            "create-with-container",
+            instance_name or "sf-gce",
+            f"--project={settings.project_id}",
+            f"--zone={zone}",
+            f"--machine-type={machine_type}",
+            f"--container-image={infra.container_image}",
+            "--no-address",
+            f"--max-run-duration={infra.ttl_seconds}s",
+            "--instance-termination-action=DELETE",
+            "--maintenance-policy=TERMINATE",
+            "--no-restart-on-failure",
+        ]
+        if infra.compute_sa:
+            gcloud.append(f"--service-account={infra.compute_sa}")
+            gcloud.append("--scopes=https://www.googleapis.com/auth/cloud-platform")
+        if infra.subnetwork_uri:
+            gcloud.append(f"--subnet={infra.subnetwork_uri}")
+        driver_args = build_driver_args(
+            config_uri,
+            settings,
+            models=models,
+            manage_header=False,
+            provisioned_hardware=hardware,
+        )
+        for token in ["--package-uri", package_uri, *driver_args]:
+            gcloud.append(f"--container-arg={token}")
+        native = shell_join(gcloud)
+
+    return LaunchCommands(runtime="gce", universal=shell_join(argv), native=native)

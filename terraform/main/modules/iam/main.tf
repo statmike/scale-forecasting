@@ -112,11 +112,17 @@ locals {
     "bigquery.jobs.list",                 # native family: resolve the run's jobs by id prefix
     "bigquery.jobs.get",                  # ...and read each statement's state
     "aiplatform.persistentResources.get", # Ray: reach the cluster to read job status
+    "aiplatform.customJobs.get",          # Vertex CustomJob: read job state by resource name
+    "aiplatform.customJobs.list",         # Vertex CustomJob: resolve job state by display_name
+    "compute.instances.get",              # GCE single-VM runtime: read VM state by instance name
+    "compute.instances.list",             # GCE single-VM runtime: list VMs across candidate zones
   ]
   job_canceller_perms = concat(local.probe_reader_perms, [
-    "dataproc.batches.delete", # Serverless has no cancel — deleting a running batch stops it
-    "dataproc.jobs.cancel",    # Dataproc cluster job cancel
-    "bigquery.jobs.update",    # cancel a running BigQuery statement
+    "dataproc.batches.delete",     # Serverless has no cancel — deleting a running batch stops it
+    "dataproc.jobs.cancel",        # Dataproc cluster job cancel
+    "aiplatform.customJobs.cancel",# Vertex CustomJob cancel
+    "compute.instances.delete",    # GCE single-VM runtime: delete running instance
+    "bigquery.jobs.update",        # cancel a running BigQuery statement
     # Ray stop_job goes through the cluster dashboard — no IAM verb beyond persistentResources.get.
   ])
 

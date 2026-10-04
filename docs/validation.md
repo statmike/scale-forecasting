@@ -2,26 +2,26 @@
 
 **What has been proven on live Google Cloud infrastructure, and on which architecture.**
 
-This ledger is the single source of truth for live system validation across Dataproc Serverless, Dataproc Standard Clusters, Vertex AI Ray, BigQuery ML / AI.FORECAST, and Cloud Composer. Notice that **System Validation** refers to platform, runtime, and operational validation—for statistical forecast evaluation and backtesting, see [Backtesting and Model Selection](backtesting.md).
+This ledger is the single source of truth for live system validation across Dataproc Serverless, Dataproc Standard Clusters, Vertex AI Ray, Vertex AI `CustomJob`, Compute Engine Single-VM (`gce`), BigQuery ML / AI.FORECAST, and Cloud Composer. Notice that **System Validation** refers to platform, runtime, and operational validation—for statistical forecast evaluation and backtesting, see [Backtesting and Model Selection](backtesting.md).
 
 ```mermaid
 flowchart LR
     subgraph Surface["Declared Surface"]
-        Axes["24 Architecture Axes"]
-        RunCfg["RunConfig Schema\n(141 Literal & Bool Values)"]
-        Configs["35 Smoke Configs +\n19 Production Configs +\n8 Tour Notebooks"]
+        Axes["26 Architecture Axes"]
+        RunCfg["RunConfig Schema\n(153 Literal & Bool Values)"]
+        Configs["39 Smoke Configs +\n19 Production Configs +\n8 Tour Notebooks"]
     end
 
     subgraph Ledger["System Validation Ledger (docs/validation.md)"]
         T1["Architecture Axes Table"]
-        T2["Smoke Suite Table (35)"]
+        T2["Smoke Suite Table (39)"]
         T3["Production Configs Table (19)"]
         T4["Notebooks & Capabilities Tables (8 + 17)"]
     end
 
     subgraph Gates["Automated Offline Tripwires"]
         VTest["tests/unit/test_validation_ledger.py\nVerifies axes, statuses, run_ids,\nand benchmark citations"]
-        CTest["tests/unit/test_config_coverage.py\nVerifies all 141 RunConfig values\nare proven live or offline"]
+        CTest["tests/unit/test_config_coverage.py\nVerifies all 153 RunConfig values\nare proven live or offline"]
     end
 
     Axes --> T1
@@ -35,7 +35,7 @@ flowchart LR
 A live validation result is only meaningful relative to the architecture it ran on. Every entry in this ledger declares the **architecture axes** it depends on and the value each axis held when the run was proven:
 
 1. **Staleness Tripwire (`tests/unit/test_validation_ledger.py`)**: When an architectural axis changes, any ledger entry pinned to the previous value becomes mechanically stale. The offline test suite refuses to allow an entry with a superseded axis value, an unrecorded `run_id`, or a missing config row to claim `CURRENT`. Benchmark citations in [Quota, Throughput, and Scale](quota_and_scale.md) are also cross-checked against this ledger.
-2. **Config Surface Coverage Tripwire (`tests/unit/test_config_coverage.py`)**: Joins every reachable `Literal` member and `bool` state on `RunConfig` against the `CURRENT` rows in this ledger and the offline unit test suite. Every configuration value must be explicitly accounted for: **141 declared values — 110 proven live, 29 exercised offline, 0 genuine gaps, 2 not work.**
+2. **Config Surface Coverage Tripwire (`tests/unit/test_config_coverage.py`)**: Joins every reachable `Literal` member and `bool` state on `RunConfig` against the `CURRENT` rows in this ledger and the offline unit test suite. Every configuration value must be explicitly accounted for: **153 declared values — 116 proven live, 35 exercised offline, 0 genuine gaps, 2 not work.**
 
 ---
 
@@ -74,7 +74,7 @@ Each axis represents a core architectural contract. Changing an axis value in co
 
 ## Smoke Suite (`configs/smokes/`)
 
-The 37 smoke configurations live in [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes); see [Smoke Testing](smoke_testing.md) for how to execute and verify them. The ledger tripwire enforces a strict 1-to-1 mapping between `configs/smokes/*.json` and the rows below.
+The 39 smoke configurations live in [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes); see [Smoke Testing](smoke_testing.md) for how to execute and verify them. The ledger tripwire enforces a strict 1-to-1 mapping between `configs/smokes/*.json` and the rows below.
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
@@ -115,6 +115,9 @@ The 37 smoke configurations live in [`configs/smokes/`](https://github.com/statm
 | 35 | `35_hierarchy_reconciliation.json` | **Hierarchical forecast reconciliation:** 3-level hierarchy (`__total__` → `region` → `region/category` → 50 bottom series = 57 nodes) reconciled across all 7 FPP3 methods (`bottom_up`, `top_down`, `middle_out`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`) on Dataproc Serverless (`decision_metric="msis"`). | CURRENT | 2026-09-30 | `smoke-35-hierarchy-reconciliation-80a8810304fc` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 36 | `36_covariate_fallback_multi_runtime.json` | **Multi-runtime covariate fallback + HPO + ensemble:** 3-tier covariates across Spark (`theta`, `sarimax`, `xgboost`, `catboost`), Ray (`tide`, `patchtst` in `global` mode), and BigQuery ML (`arima_plus`, `timesfm`) with `on_unsupported_covariates="fallback"`, `fleetwide` HPO, and `ensemble` (`mean`, `inverse_error`, `nnls`). | CURRENT | 2026-10-01 | `smoke-36-covariate-fallback-multi-runtime-301a6be995a8` (attempt 2) | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 37 | `37_hierarchy_covariates_ensemble.json` | **Hierarchy + covariates + ensemble:** 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`) combined with 3-tier covariates (`static_covariates: ["region", "category"]`), univariate fallback (`theta`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`) scoring finite `mase` and `rmsse` across all bottom and aggregated hierarchy nodes. | CURRENT | 2026-10-01 | `smoke-37-hierarchy-covariates-ensemble-e6be5fed8071` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 38 | `38_vertex_custom_job.json` | **Vertex AI `CustomJob` (`runtime = "vertex"`) — multi-VM worker pools across all families + dedicated per-model NVIDIA L4 GPU VMs:** 2-VM CPU worker pools (`workers=2` on `statistical` for `theta` + `sarimax` and on `ml` for `xgboost` + `lightgbm`) and automatic 3-VM NVIDIA L4 GPU worker pool (`3 x g2-standard-8 + L4`, 1 dedicated GPU VM per model for global/hybrid `tide`, `tsmixer`, `neuralprophet`) with GCS worker-pool barrier synchronization, profile-driven hardware sizing, 3-tier covariates, 3-level hierarchy reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`). | CURRENT | 2026-10-03 | `smoke-38-vertex-custom-job-82b620bbd9ba` (attempt 1) | `serverless_deps=container-image`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 39 | `39_gce_single_vm.json` | **Compute Engine Single-VM (`runtime = "gce"`) — zero-orphan container execution + hardware sizing:** single-VM Container-Optimized OS execution across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide` in `global` mode) with triple-redundant anti-orphan lifecycle guarantees (`maxRunDuration` + `instanceTerminationAction="DELETE"`, guest `trap cleanup EXIT` GCS status marker + self-delete, and client `finally` teardown leaving `0` orphaned VMs), profile-driven sizing, 3-tier covariates, hierarchy reconciliation (`bottom_up`, `wls_struct`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`). | CURRENT | 2026-10-03 | `smoke-39-gce-single-vm-4aa21163baa6` (attempt 1) | `serverless_deps=container-image`, `dl_gpu_routing=resolved-per-family`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+
 
 
 ---

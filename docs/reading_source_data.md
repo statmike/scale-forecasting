@@ -18,6 +18,7 @@ flowchart LR
     Snap -->|"Storage Read API (Arrow)\nspark-bigquery + snapshotTimeMillis"| Spark["Spark Explode\n(spark_io.read_source_series)"]
     Snap -->|"Storage Read API (Arrow)\ncreate_read_session + row_restriction"| RayDC["Ray driver_collect (default)\n(ray_io._read_driver_collect)"]
     Snap -->|"Storage Read API (Arrow)\nray.data.read_bigquery"| RayData["Ray ray_data (opt-in)\n(ray_io._read_ray_data)"]
+    Snap -->|"Storage Read API (Arrow)\ncreate_read_session + contiguous shard row_restriction"| VertexGCE["Vertex CustomJob & GCE\n(vertex_engine._read_source_panel)"]
     Snap -->|"BigQuery Query API\nFOR SYSTEM_TIME AS OF subquery"| BQ["BigQuery-Native SQL\n(bigquery_sql)"]
 ```
 
@@ -26,9 +27,9 @@ flowchart LR
 ## The four invariants (true for every reader)
 
 1. **Column projection.** A cell needs only the id, date, and target columns plus any configured
-   `features.exog`, so every reader projects to exactly those columns — never `SELECT *`. Narrow rows
+   `features.exog` / `static_covariates` / `future_covariates` / `past_covariates` (and `hierarchy.levels`), so every reader projects to exactly those columns — never `SELECT *`. Narrow rows
    matter because the Spark fan-out cross-joins each series once per model, so an unused column is
-   paid for on every cell (Ray shards by series instead, but still pays it on every row). (The projection is order-preserving and de-duplicated.)
+   paid for on every cell (Ray, Vertex, and GCE shard by series instead, but still pay it on every row). (The projection is order-preserving and de-duplicated.)
 2. **Deterministic subset.** With `data.series_limit` set, each reader keeps the *same* first N series
    — distinct ids, ordered, first N — so "10 vs 100 vs 100k series" is a clean apples-to-apples
    runtime comparison rather than a different sample each time. Unset = the whole panel. *Where* the
@@ -82,7 +83,16 @@ stays a pure table scan. For the same reason it takes no `row_restriction`, so `
 applied on the driver *after* the read rather than pushed into it — one more reason a subsetting run
 is cheaper on the default reader. Select it with `compute.ray_read_mode="ray_data"`.
 
-### BigQuery-native (`arima_plus`, `arima_plus_xreg`, `timesfm`)
+### Vertex AI `CustomJob` (`vertex`) & Compute Engine (`gce`)
+
+`vertex_engine._read_source_panel` reads directly through the `BigQueryReadClient` (`create_read_session` in `DataFormat.ARROW`) with the same snapshot pin (`table_modifiers.snapshot_time`), column projection, and multi-stream reader as Ray's `driver_collect` path — and adds **per-worker contiguous shard pushdown** when a local-model family (`statistical` or `ml`) runs across multiple worker VMs (`workers > 1`):
+
+1. An initial lightweight ID scan (`_read_ordered_ts_ids`) reads only `ts_id_col` at the pinned snapshot to resolve the sorted distinct series IDs (bounded to `series_limit`).
+2. `shard_series_for_worker(all_ts_ids, rank=rank, world_size=world_size)` assigns each worker rank a **contiguous sorted slice** (`[shard_min, shard_max]`) rather than modulo-interleaved IDs.
+3. Because the slice is contiguous in UTF-8 sort order, the worker pushes `(ts_id >= '<shard_min>' AND ts_id <= '<shard_max>')` directly into the BigQuery Storage Read API `row_restriction` — so a 4-worker job transfers only ~1/4 of the table to each worker VM instead of scanning the full table on every worker.
+4. When fleetwide HPO (`hpo.enabled=true` and `granularity="fleetwide"`) is active on a multi-worker job, `sample_series_ids` deterministically selects the `hpo.sample_n` tuning series from the global ID list and unions them into the `row_restriction` (`(...range...) OR ts_id IN (...)`) so every worker derives identical fleetwide HPO hyperparameters before fitting its own shard.
+
+### BigQuery-native (`arima_plus`, `timesfm`)
 
 The native family never leaves BigQuery — it reads the source **via the query API** as a subquery
 inside its BQML SQL, not through the Storage Read API. Its snapshot pin is a `FOR SYSTEM_TIME AS OF`
@@ -121,12 +131,13 @@ because the preflight could not reach BigQuery.
 ## Bounding read parallelism — `read_max_streams`
 
 `compute.read_max_streams` caps the number of Storage Read streams the source read requests, shared
-across the two engines that read through the Storage Read API:
+across the three engines that read through the Storage Read API:
 
 | Reader | How the cap is applied |
 |--------|------------------------|
 | Spark connector | the connector's `maxParallelism` option |
 | Ray `driver_collect` | `create_read_session`'s `max_stream_count` |
+| Vertex `CustomJob` & GCE (`vertex_engine`) | `create_read_session`'s `max_stream_count` |
 
 `0` (the default) lets the **server** size the stream count from the table — the known-good default;
 leave it there unless you have a reason not to. Set a **positive** value to bound read parallelism —
@@ -151,7 +162,7 @@ entirely. We are **not** building that, and the reason is not effort — it is t
 costs more than it saves:
 
 - **It would fork the read.** Today one code path reads both formats, so there is no per-format
-  branch to keep in sync across three runtimes. A direct reader is native-vs-Iceberg forever.
+  branch to keep in sync across four Python runtimes. A direct reader is native-vs-Iceberg forever.
 - **It would lose the snapshot semantics the design depends on.** Every source read is pinned to one
   BigQuery time-travel timestamp so a run is reproducible and every family in a multi-runtime DAG
   sees byte-identical input. Object-storage reads would have to re-derive that from Iceberg snapshot

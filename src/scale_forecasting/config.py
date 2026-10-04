@@ -111,7 +111,7 @@ ComputeFamily = Literal["statistical", "ml", "deep_learning"]
 # node. It is the ``family`` component of a job's deterministic id (see ``registry.ids``), one step
 # broader than ``ComputeFamily`` since native and ensemble produce jobs but take no runtime choice.
 JobFamily = Literal["statistical", "ml", "deep_learning", "native", "ensemble"]
-Runtime = Literal["spark", "ray"]
+Runtime = Literal["spark", "ray", "vertex", "gce"]
 SparkMode = Literal["serverless", "cluster"]
 Hardware = Literal["cpu", "gpu"]
 
@@ -129,7 +129,7 @@ def _is_non_finite(value: Any) -> bool:
     return isinstance(value, float) and not math.isfinite(value)
 
 
-GpuType = Literal["T4", "L4"]
+GpuType = Literal["T4", "L4", "A100", "A100_80GB"]
 # What a series too short for the requested fold grid gets. Ordered by what each one gives up:
 # folds, fold independence, training history, the series, the run.
 ShortSeriesPolicy = Literal["adapt", "overlap", "shrink_train", "skip", "error"]
@@ -586,8 +586,10 @@ class FamilyCompute(BaseModel):
 
     Hardware constraints (validated): only the ``deep_learning`` family may request a GPU (enforced
     where the family key is known, in `ComputeConfig`); Dataproc Serverless offers **L4 only** (no
-    T4 — use ``spark_mode="cluster"`` or ``runtime="ray"`` for T4); Spark-only fields
-    (``spark_mode``/``spark_cluster_name``) are rejected on ``runtime="ray"``.
+    T4/A100 — use ``spark_mode="cluster"`` or ``runtime="ray"``/``"vertex"``/``"gce"``); Spark-only
+    fields (``spark_mode``/``spark_cluster_name``) are rejected on ``runtime in ("ray", "vertex",
+    "gce")``; VM fields (``machine_type``/``workers``) are rejected on ``runtime in ("spark",
+    "ray")``; and ``runtime="gce"`` is strictly single-VM (``workers`` cannot exceed 1).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -599,23 +601,76 @@ class FamilyCompute(BaseModel):
     spark_cluster_name: str | None = None
     hardware: Hardware | None = None
     gpu_type: GpuType | None = None
+    accelerator_count: int | None = Field(default=None, gt=0)
+    machine_type: str | None = None
+    workers: int | None = Field(default=None, gt=0)
+    min_workers: int | None = Field(default=None, gt=0)
+    max_workers: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_vertex_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        legacy_machine = out.pop("vertex_machine_type", None)
+        legacy_workers = out.pop("vertex_workers", None)
+        if legacy_machine is not None:
+            out.setdefault("machine_type", legacy_machine)
+        if legacy_workers is not None:
+            out.setdefault("workers", legacy_workers)
+        return out
+
+    @property
+    def vertex_machine_type(self) -> str | None:
+        return self.machine_type
+
+    @property
+    def vertex_workers(self) -> int | None:
+        return self.workers
 
     @model_validator(mode="after")
     def _check(self) -> FamilyCompute:
-        if self.runtime == "ray" and (
+        if self.runtime in ("ray", "vertex", "gce") and (
             self.spark_mode is not None or self.spark_cluster_name is not None
         ):
             raise ValueError("spark_mode/spark_cluster_name are only valid when runtime is 'spark'")
+        if self.min_workers is not None and self.max_workers is not None:
+            if self.min_workers > self.max_workers:
+                raise ValueError(
+                    f"min_workers ({self.min_workers}) cannot exceed "
+                    f"max_workers ({self.max_workers})"
+                )
+        if self.runtime in ("vertex", "gce") and (
+            self.min_workers is not None or self.max_workers is not None
+        ):
+            raise ValueError(
+                "min_workers/max_workers are only valid on autoscaling runtimes "
+                "('ray' or 'spark'); use 'workers' for fixed-pool 'vertex' or 'gce'"
+            )
+        if self.spark_mode == "serverless" and self.machine_type is not None:
+            raise ValueError(
+                "Dataproc Serverless does not use VM machine_type; "
+                "use spark_mode='cluster' or runtime='vertex'/'gce'/'ray'"
+            )
+        if self.runtime == "gce" and self.workers is not None and self.workers > 1:
+            raise ValueError(
+                "runtime='gce' supports single-VM execution only (workers=1); "
+                "use runtime='vertex' for multi-VM worker pools"
+            )
         if self.spark_cluster_name is not None and self.spark_mode not in (None, "cluster"):
             raise ValueError("spark_cluster_name requires spark_mode='cluster'")
-        if self.spark_mode == "serverless" and self.gpu_type == "T4":
+        if self.spark_mode == "serverless" and self.gpu_type is not None and self.gpu_type != "L4":
             raise ValueError(
-                "Dataproc Serverless supports L4 only, not T4; "
-                "use spark_mode='cluster' or runtime='ray' for T4"
+                f"Dataproc Serverless supports L4 only, not {self.gpu_type}; "
+                f"use spark_mode='cluster' or runtime='ray'/'vertex'/'gce' for {self.gpu_type}"
             )
-        if self.hardware == "cpu" and self.gpu_type is not None:
+        if self.hardware == "cpu" and (
+            self.gpu_type is not None or self.accelerator_count is not None
+        ):
             raise ValueError(
-                "gpu_type is set but hardware='cpu'; drop gpu_type or set hardware='gpu'"
+                "gpu_type/accelerator_count is set but hardware='cpu'; "
+                "drop it or set hardware='gpu'"
             )
         return self
 
@@ -886,6 +941,10 @@ class CapacityConfig(BaseModel):
     # Vertex Ray cluster creation — walks `compute.ray_regions`. The most expensive attempt
     # (~12 min for a GPU provision), so the shipped default is fewest tries and longest wait.
     ray: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+    # Vertex AI CustomJob creation — walks `compute.ray_regions` without a Ray head-node bootstrap.
+    vertex: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+    # Compute Engine single-VM creation — walks the zone/region candidates from `compute_fallback`.
+    gce: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Dataproc cluster creation — walks the zone/region candidates from `compute_fallback`.
     dataproc_cluster: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Dataproc Serverless batch submission — region only, and rejections come back in seconds.
@@ -912,6 +971,177 @@ class CapacityConfig(BaseModel):
         }
         max_passes = 1 if not self.enabled else (override.max_passes or base.max_passes)
         return replace(base, max_passes=max_passes, **fields)
+
+
+_L4_SINGLE_GPU_MACHINES: frozenset[str] = frozenset(
+    {
+        "g2-standard-4",
+        "g2-standard-8",
+        "g2-standard-12",
+        "g2-standard-16",
+        "g2-standard-32",
+    }
+)
+_L4_MULTI_GPU_MACHINES: dict[int, str] = {
+    2: "g2-standard-24",
+    4: "g2-standard-48",
+    8: "g2-standard-96",
+}
+_A100_MACHINES: dict[int, str] = {
+    1: "a2-highgpu-1g",
+    2: "a2-highgpu-2g",
+    4: "a2-highgpu-4g",
+    8: "a2-highgpu-8g",
+    16: "a2-megagpu-16g",
+}
+_A100_80GB_MACHINES: dict[int, str] = {
+    1: "a2-ultragpu-1g",
+    2: "a2-ultragpu-2g",
+    4: "a2-ultragpu-4g",
+    8: "a2-ultragpu-8g",
+}
+
+
+def _default_gpu_machine_type(gpu_type: str | None, accelerator_count: int) -> str:
+    eff_gpu = gpu_type or "T4"
+    if eff_gpu == "T4":
+        if accelerator_count not in (1, 2, 4):
+            raise ValueError(
+                f"accelerator_count for T4 must be 1, 2, or 4 (got {accelerator_count})"
+            )
+        return "n1-standard-16" if accelerator_count == 4 else "n1-standard-8"
+    if eff_gpu == "L4":
+        if accelerator_count == 1:
+            return "g2-standard-8"
+        if accelerator_count in _L4_MULTI_GPU_MACHINES:
+            return _L4_MULTI_GPU_MACHINES[accelerator_count]
+        raise ValueError(
+            f"accelerator_count for L4 must be 1, 2, 4, or 8 (got {accelerator_count})"
+        )
+    if eff_gpu == "A100":
+        if accelerator_count in _A100_MACHINES:
+            return _A100_MACHINES[accelerator_count]
+        raise ValueError(
+            f"accelerator_count for A100 must be 1, 2, 4, 8, or 16 (got {accelerator_count})"
+        )
+    if eff_gpu == "A100_80GB":
+        if accelerator_count in _A100_80GB_MACHINES:
+            return _A100_80GB_MACHINES[accelerator_count]
+        raise ValueError(
+            f"accelerator_count for A100_80GB must be 1, 2, 4, or 8 (got {accelerator_count})"
+        )
+    raise ValueError(f"Unsupported gpu_type {eff_gpu!r}")
+
+
+def resolve_vm_machine_type(
+    hardware: str,
+    gpu_type: str | None = None,
+    default_machine_type: str = "auto",
+    override_machine_type: str | None = None,
+    *,
+    accelerator_count: int = 1,
+) -> str:
+    """Resolve and validate the GCE/Vertex VM machine type for a family's hardware (pure).
+
+    Enforces GCP's three structural GPU-to-VM compatibility patterns at config load time:
+    * ``T4`` (``NVIDIA_TESLA_T4``): attaches to ``n1-*`` in counts of ``{1, 2, 4}`` (1-2 GPUs cap
+      at 48 vCPUs; default ``n1-standard-8`` for 1-2 GPUs, ``n1-standard-16`` for 4 GPUs).
+    * ``L4`` (``NVIDIA_L4``): bundled into ``g2-standard-*`` in counts of ``{1, 2, 4, 8}`` (1 GPU
+      allows ``g2-standard-{4,8,12,16,32}``, default ``g2-standard-8``; 2/4/8 GPUs require fixed
+      shapes ``g2-standard-{24,48,96}``).
+    * ``A100`` (``NVIDIA_TESLA_A100``, 40 GiB) & ``A100_80GB`` (``NVIDIA_A100_80GB``, 80 GiB):
+      strict 1:1 mapping from ``accelerator_count`` to ``a2-highgpu-{1,2,4,8}g`` /
+      ``a2-megagpu-16g`` or ``a2-ultragpu-{1,2,4,8}g``.
+    """
+    from .resources.catalog import machine_cores
+
+    if hardware == "gpu":
+        auto_gpu = _default_gpu_machine_type(gpu_type, accelerator_count)
+        if override_machine_type is not None and override_machine_type != "auto":
+            chosen = override_machine_type
+        elif default_machine_type in ("auto", "n2-standard-8"):
+            chosen = auto_gpu
+        else:
+            chosen = default_machine_type
+
+        eff_gpu = gpu_type or "T4"
+        if eff_gpu == "T4":
+            if not chosen.startswith("n1-"):
+                raise ValueError(
+                    f"Vertex AI / GCE T4 GPUs require an n1-* machine type (got {chosen!r})"
+                )
+            cores = machine_cores(chosen) or 0
+            if accelerator_count in (1, 2) and cores > 48:
+                raise ValueError(
+                    f"T4 with accelerator_count={accelerator_count} allows at most 48 vCPUs "
+                    f"on n1-* (got {chosen!r} with {cores} vCPUs)"
+                )
+        elif eff_gpu == "L4":
+            if not chosen.startswith("g2-"):
+                raise ValueError(
+                    f"Vertex AI / GCE L4 GPUs require a g2-* machine type (got {chosen!r})"
+                )
+            if accelerator_count == 1 and chosen not in _L4_SINGLE_GPU_MACHINES:
+                raise ValueError(
+                    f"1x L4 GPU requires one of {sorted(_L4_SINGLE_GPU_MACHINES)} (got {chosen!r})"
+                )
+            if accelerator_count > 1 and chosen != _L4_MULTI_GPU_MACHINES.get(accelerator_count):
+                expected = _L4_MULTI_GPU_MACHINES[accelerator_count]
+                raise ValueError(
+                    f"{accelerator_count}x L4 GPUs require machine_type={expected!r} "
+                    f"(got {chosen!r})"
+                )
+        elif eff_gpu == "A100":
+            expected = _A100_MACHINES[accelerator_count]
+            if chosen != expected:
+                raise ValueError(
+                    f"{accelerator_count}x A100 GPUs require machine_type={expected!r} "
+                    f"(got {chosen!r})"
+                )
+        elif eff_gpu == "A100_80GB":
+            expected = _A100_80GB_MACHINES[accelerator_count]
+            if chosen != expected:
+                raise ValueError(
+                    f"{accelerator_count}x A100_80GB GPUs require machine_type={expected!r} "
+                    f"(got {chosen!r})"
+                )
+        return chosen
+
+    if override_machine_type is not None and override_machine_type != "auto":
+        chosen = override_machine_type
+    elif default_machine_type == "auto" or default_machine_type.startswith(("g2-", "a2-")):
+        chosen = "n2-standard-8"
+    else:
+        chosen = default_machine_type
+
+    if chosen.startswith(("g2-", "a2-")):
+        raise ValueError(
+            f"CPU workloads cannot use GPU-attached machine family {chosen!r}; "
+            "set hardware='gpu' or choose a CPU machine family (e.g. 'n2-standard-8')"
+        )
+    return chosen
+
+
+def resolve_vertex_machine_type(
+    hardware: str,
+    gpu_type: str | None,
+    cpu_machine_type: str = "auto",
+    gpu_machine_type: str = "auto",
+    override_machine_type: str | None = None,
+    *,
+    accelerator_count: int = 1,
+) -> str:
+    """Backward-compatible wrapper around `resolve_vm_machine_type`."""
+    default_mt = (
+        gpu_machine_type if hardware == "gpu" and gpu_machine_type != "auto" else cpu_machine_type
+    )
+    return resolve_vm_machine_type(
+        hardware,
+        gpu_type,
+        default_mt,
+        override_machine_type,
+        accelerator_count=accelerator_count,
+    )
 
 
 class ComputeConfig(BaseModel):
@@ -958,10 +1188,57 @@ class ComputeConfig(BaseModel):
     # BaseModel.serialize.
     persist_models: bool = False
     use_gpu: bool = False
-    gpu_type: str = "T4"
+    gpu_type: GpuType = "T4"
     # "auto" = profile-driven calibration, or a fixed fraction in (0, 1].
     gpu_fraction: Literal["auto"] | float = "auto"
     budget_usd: float = Field(default=50.0, ge=0.0)
+
+    # --- Unified VM & Worker Pool Sizing --------------------------------------
+    # Universal compute knobs across runtimes:
+    # * `machine_type = "auto"` resolves from `(hardware, gpu_type, accelerator_count)`:
+    #     - CPU -> `n2-standard-8`
+    #     - T4  -> `n1-standard-8` (1-2 GPUs) or `n1-standard-16` (4 GPUs)
+    #     - L4  -> `g2-standard-8` (1 GPU) or `g2-standard-{24,48,96}` (2/4/8 GPUs)
+    #     - A100 -> `a2-highgpu-{1,2,4,8}g` / `a2-megagpu-16g`
+    #     - A100_80GB -> `a2-ultragpu-{1,2,4,8}g`
+    # * `workers` sets fixed worker VM count on `runtime == "vertex"` (or caps workers/executors
+    #   when set on `spark`/`ray`); `runtime == "gce"` is strictly single-VM (`workers == 1`).
+    # * `min_workers` / `max_workers` set autoscaling bounds on `ray` and `spark`.
+    machine_type: str = "auto"
+    workers: int = Field(default=1, gt=0)
+    min_workers: int | None = Field(default=None, gt=0)
+    max_workers: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_legacy_vertex_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            out = dict(data)
+            v_mt = out.pop("vertex_machine_type", None)
+            v_gpu_mt = out.pop("vertex_gpu_machine_type", None)
+            if "machine_type" not in out:
+                if v_gpu_mt is not None and v_gpu_mt != "auto":
+                    out["machine_type"] = v_gpu_mt
+                elif v_mt is not None:
+                    out["machine_type"] = v_mt
+            if "vertex_workers" in out:
+                vw = out.pop("vertex_workers")
+                if "workers" not in out and vw is not None:
+                    out["workers"] = vw
+            return out
+        return data
+
+    @property
+    def vertex_machine_type(self) -> str:
+        return "n2-standard-8" if self.machine_type == "auto" else self.machine_type
+
+    @property
+    def vertex_gpu_machine_type(self) -> str:
+        return self.machine_type if self.machine_type.startswith(("n1-", "g2-", "a2-")) else "auto"
+
+    @property
+    def vertex_workers(self) -> int:
+        return self.workers
 
     # --- Ray on Vertex ---------------------------------------------------------
     # The Ray runtime sizes an *autoscaling* cluster to the run's fan-out (default) and packs
@@ -1000,7 +1277,7 @@ class ComputeConfig(BaseModel):
     ray_head_machine_type: str = "n1-standard-16"
     ray_cpu_machine_type: str = "n1-standard-8"
     ray_gpu_machine_type: str = "n1-standard-8"
-    # GPUs per GPU worker node. T4 permits 1, 2, or 4 per node (not 3) — validated below.
+    # GPUs per GPU worker node. Validated against gpu_type below.
     accelerator_count: int = Field(default=1, gt=0)
     # Pool sizing: how many cells one worker slot should chew through before we add another node
     # (amortizes per-node warm-up), plus a hard ceiling so a huge fan-out can't request an unbounded
@@ -1095,10 +1372,19 @@ class ComputeConfig(BaseModel):
     def _check_gpu_fraction(self) -> ComputeConfig:
         if isinstance(self.gpu_fraction, float) and not (0.0 < self.gpu_fraction <= 1.0):
             raise ValueError("gpu_fraction must be 'auto' or a float in (0, 1]")
-        # T4 attaches in counts of 1, 2, or 4 per node (3 is not a valid GPU count on Vertex/GCE).
-        if self.gpu_type == "T4" and self.accelerator_count not in (1, 2, 4):
-            raise ValueError(
-                f"accelerator_count for T4 must be 1, 2, or 4 (got {self.accelerator_count})"
+        if self.min_workers is not None and self.max_workers is not None:
+            if self.min_workers > self.max_workers:
+                raise ValueError(
+                    f"min_workers ({self.min_workers}) cannot exceed "
+                    f"max_workers ({self.max_workers})"
+                )
+        _default_gpu_machine_type(self.gpu_type, self.accelerator_count)
+        if self.use_gpu and self.machine_type not in ("auto", "n2-standard-8"):
+            resolve_vm_machine_type(
+                "gpu",
+                self.gpu_type,
+                self.machine_type,
+                accelerator_count=self.accelerator_count,
             )
         # Per-pool autoscaling bounds must be coherent: an explicit max cannot fall below its min
         # (an unset max defers to ray_max_nodes, checked against the pool min too). Fail at load
@@ -1135,6 +1421,19 @@ class ResolvedFamilyCompute:
     spark_cluster_name: str | None
     hardware: str
     gpu_type: str | None
+    machine_type: str | None = None
+    workers: int | None = None
+    min_workers: int | None = None
+    max_workers: int | None = None
+    accelerator_count: int = 0
+
+    @property
+    def vertex_machine_type(self) -> str | None:
+        return self.machine_type
+
+    @property
+    def vertex_workers(self) -> int | None:
+        return self.workers
 
 
 # --- top-level config ----------------------------------------------------------
@@ -1147,7 +1446,7 @@ class RunConfig(BaseModel):
 
     run_name: str
     data: DataConfig
-    python_runtime: Literal["spark", "ray"] = "spark"
+    python_runtime: Runtime = "spark"
     models: list[str] = Field(min_length=1)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
@@ -1406,9 +1705,14 @@ class RunConfig(BaseModel):
         * ``hardware`` → ``gpu`` only for ``deep_learning`` (when ``compute.use_gpu`` or an explicit
           override); every other family is ``cpu``.
         * Spark: ``spark_mode`` → ``serverless``; ``spark_cluster_name`` applies only under
-          ``cluster``. On ``ray`` both are ``None``.
+          ``cluster``. On ``ray``, ``vertex``, and ``gce`` both are ``None``.
         * ``gpu_type`` (when ``hardware == "gpu"``) → the flat ``compute.gpu_type``, but **forced to
-          L4** on Dataproc Serverless (no T4 there). A T4 inherited onto Serverless raises.
+          L4** on Dataproc Serverless (no T4/A100 there). Inheriting T4/A100 on Serverless raises.
+        * ``machine_type`` → ``compute.machine_type`` (auto-resolved via `resolve_vm_machine_type`
+          from ``(hardware, gpu_type, accelerator_count)`` on ``vertex``/``gce``, or when explicitly
+          set on ``ray``/``spark`` ``cluster``); ``workers`` → ``compute.workers`` on ``vertex``,
+          ``1`` on ``gce``, or the family override when set on ``ray``/``spark``; ``min_workers`` /
+          ``max_workers`` apply on autoscaling runtimes (``ray``/``spark``).
         """
         if family == "native":
             raise ValueError(
@@ -1426,22 +1730,99 @@ class RunConfig(BaseModel):
             spark_mode = ov.spark_mode or "serverless"
             spark_cluster_name = ov.spark_cluster_name if spark_mode == "cluster" else None
         else:
+            if ov.spark_mode is not None or ov.spark_cluster_name is not None:
+                raise ValueError(
+                    f"family '{family}': spark_mode/spark_cluster_name require runtime='spark' "
+                    f"(got {runtime!r})"
+                )
             spark_mode = None
             spark_cluster_name = None
 
         gpu_type: str | None
+        accelerator_count: int
         if hardware == "gpu":
             if runtime == "spark" and spark_mode == "serverless":
-                if ov.gpu_type == "T4":
+                if ov.gpu_type in ("T4", "A100", "A100_80GB"):
                     raise ValueError(
-                        f"family '{family}': Dataproc Serverless supports L4 only, not T4; "
-                        "use spark_mode='cluster' or runtime='ray' for T4"
+                        f"family '{family}': Dataproc Serverless supports L4 only, not "
+                        f"{ov.gpu_type}; use spark_mode='cluster' or runtime='ray'/'vertex'/'gce'"
                     )
                 gpu_type = "L4"
             else:
                 gpu_type = ov.gpu_type or self.compute.gpu_type
+            accelerator_count = ov.accelerator_count or self.compute.accelerator_count
+            _default_gpu_machine_type(gpu_type, accelerator_count)
         else:
+            if ov.accelerator_count is not None:
+                raise ValueError(
+                    f"family '{family}': accelerator_count requires hardware='gpu' "
+                    f"(got hardware={hardware!r})"
+                )
             gpu_type = None
+            accelerator_count = 0
+
+        min_workers: int | None = None
+        max_workers: int | None = None
+        if runtime in ("vertex", "gce"):
+            if (
+                ov.min_workers is not None
+                or ov.max_workers is not None
+                or (
+                    ov.runtime is None
+                    and (
+                        self.compute.min_workers is not None or self.compute.max_workers is not None
+                    )
+                )
+            ):
+                raise ValueError(
+                    f"family '{family}': min_workers/max_workers are only supported on "
+                    f"autoscaling runtimes ('ray' or 'spark'), not {runtime!r}; use 'workers'"
+                )
+            machine_type = resolve_vm_machine_type(
+                hardware,
+                gpu_type,
+                self.compute.machine_type,
+                ov.machine_type,
+                accelerator_count=accelerator_count if hardware == "gpu" else 1,
+            )
+            if runtime == "gce":
+                if (ov.workers is not None and ov.workers > 1) or (
+                    ov.runtime is None and self.compute.workers > 1
+                ):
+                    raise ValueError(
+                        f"family '{family}': runtime='gce' supports single-VM execution only "
+                        "(workers=1); use runtime='vertex' for multi-VM worker pools"
+                    )
+                workers = 1
+            else:
+                workers = ov.workers or self.compute.workers
+        else:
+            if runtime == "spark" and spark_mode == "serverless" and ov.machine_type is not None:
+                raise ValueError(
+                    f"family '{family}': Dataproc Serverless does not use VM machine_type; "
+                    "use spark_mode='cluster' or runtime='vertex'/'gce'/'ray'"
+                )
+            if ov.machine_type is not None or (
+                self.compute.machine_type != "auto"
+                and not (runtime == "spark" and spark_mode == "serverless")
+            ):
+                machine_type = resolve_vm_machine_type(
+                    hardware,
+                    gpu_type,
+                    self.compute.machine_type,
+                    ov.machine_type,
+                    accelerator_count=accelerator_count if hardware == "gpu" else 1,
+                )
+            else:
+                machine_type = None
+            workers = ov.workers
+            min_workers = ov.min_workers if ov.min_workers is not None else self.compute.min_workers
+            max_workers = ov.max_workers if ov.max_workers is not None else self.compute.max_workers
+            if min_workers is not None and max_workers is not None and min_workers > max_workers:
+                raise ValueError(
+                    f"family '{family}': min_workers ({min_workers}) cannot exceed "
+                    f"max_workers ({max_workers})"
+                )
 
         return ResolvedFamilyCompute(
             family=family,
@@ -1450,6 +1831,11 @@ class RunConfig(BaseModel):
             spark_cluster_name=spark_cluster_name,
             hardware=hardware,
             gpu_type=gpu_type,
+            machine_type=machine_type,
+            workers=workers,
+            min_workers=min_workers,
+            max_workers=max_workers,
+            accelerator_count=accelerator_count,
         )
 
     @property

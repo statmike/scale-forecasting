@@ -65,7 +65,7 @@ class CellResult:
     run_id: str
     ts_id: str
     model_type: str
-    compute_engine: str  # "spark" | "ray" | "bigquery"
+    compute_engine: str  # "spark" | "ray" | "vertex" | "gce" | "bigquery"
     model_hash: str
     status: str  # "ok" | "error"
     error: str | None

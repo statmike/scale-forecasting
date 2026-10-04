@@ -64,6 +64,8 @@ def test_library_covers_every_runtime_combo() -> None:
             rc = job.compute
             if rc.runtime == "ray":
                 seen.add("ray_gpu" if rc.hardware == "gpu" else "ray_cpu")
+            elif rc.runtime == "vertex":
+                seen.add("vertex_gpu" if rc.hardware == "gpu" else "vertex_cpu")
             elif rc.runtime == "spark":
                 if rc.hardware == "gpu":
                     # Split by launch mode, not just by hardware. Serverless attaches an L4 through
@@ -86,6 +88,7 @@ def test_library_covers_every_runtime_combo() -> None:
         "spark_cluster_gpu",
         "ray_cpu",
         "ray_gpu",
+        "vertex_cpu",
         "native",
         "ensemble_barrier",
         "ensemble_microbatch",

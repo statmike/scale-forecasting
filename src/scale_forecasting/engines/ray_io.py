@@ -91,19 +91,30 @@ _GPU_FAMILY = "deep_learning"
 _DEVICE_MEMORY_BYTES = {
     "T4": 16 * 1024**3,  # NVIDIA Tesla T4 — 16 GiB
     "L4": 24 * 1024**3,  # NVIDIA L4 — 24 GiB
+    "A100": 40 * 1024**3,  # NVIDIA A100 40GB — 40 GiB
+    "A100_80GB": 80 * 1024**3,  # NVIDIA A100 80GB — 80 GiB
 }
 # Fallback for an unrecognised accelerator: assume the smallest device we know, so an unknown GPU
 # under-packs (wastes capacity) rather than over-packs (OOMs the run).
 _DEFAULT_DEVICE_MEMORY_BYTES = min(_DEVICE_MEMORY_BYTES.values())
 
 # Accelerator type strings Vertex expects, keyed by the config's short ``gpu_type``.
-_ACCELERATOR_TYPES = {"T4": "NVIDIA_TESLA_T4", "L4": "NVIDIA_L4"}
+_ACCELERATOR_TYPES = {
+    "T4": "NVIDIA_TESLA_T4",
+    "L4": "NVIDIA_L4",
+    "A100": "NVIDIA_TESLA_A100",
+    "A100_80GB": "NVIDIA_A100_80GB",
+}
 
-# Each accelerator attaches to one machine family: a T4 is an add-on card on an N1 VM, while an L4
-# is only offered on G2 VMs (the card is bundled into the machine type). Sizing/creation must pair
-# the two correctly, so the gpu machine type is validated against the chosen ``gpu_type`` — a T4 on
-# a g2 machine (or an L4 on an n1) is a create-time error, caught here at plan time instead.
-_GPU_MACHINE_PREFIX = {"T4": "n1-", "L4": "g2-"}
+# Each accelerator attaches to one machine family: a T4 is an add-on card on an N1 VM, an L4 is
+# bundled into a G2 VM, and A100 / A100_80GB ride A2 VMs. Sizing/creation must pair the two
+# correctly, so the gpu machine type is validated against the chosen ``gpu_type`` at plan time.
+_GPU_MACHINE_PREFIX = {
+    "T4": "n1-",
+    "L4": "g2-",
+    "A100": "a2-",
+    "A100_80GB": "a2-ultragpu-",
+}
 
 # When ``gpu_fraction == "auto"`` we can't run the live calibration at *submit* time (no cluster
 # yet) to size the pool, so sizing uses this nominal fraction (→ 2 NeuralProphet slots per T4). The
@@ -229,7 +240,46 @@ def device_memory_bytes(gpu_type: str | None) -> int:
     return _DEVICE_MEMORY_BYTES.get(gpu_type or "", _DEFAULT_DEVICE_MEMORY_BYTES)
 
 
-def pool_unit_shape(cfg: RunConfig, *, gpu: bool) -> UnitShape:
+def _resolve_ray_pool_machine_and_acc(
+    cfg: RunConfig, *, gpu: bool, gpu_type: str | None = None
+) -> tuple[str, int]:
+    """Resolve ``(machine_type, accelerator_count)`` for a Ray CPU or GPU pool (pure)."""
+    if gpu:
+        dl_ov = cfg.compute.families.get(_GPU_FAMILY)
+        eff_gpu = gpu_type or (dl_ov.gpu_type if dl_ov and dl_ov.gpu_type else cfg.compute.gpu_type)
+        acc = (
+            dl_ov.accelerator_count
+            if dl_ov and dl_ov.accelerator_count is not None
+            else cfg.compute.accelerator_count
+        )
+        if dl_ov is not None and dl_ov.machine_type is not None:
+            fc = cfg.resolve_family_compute(_GPU_FAMILY)
+            return fc.machine_type or cfg.compute.ray_gpu_machine_type, acc
+        if cfg.compute.machine_type not in ("auto", "n2-standard-8"):
+            from ..config import resolve_vm_machine_type
+
+            return (
+                resolve_vm_machine_type(
+                    "gpu", eff_gpu, cfg.compute.machine_type, accelerator_count=acc
+                ),
+                acc,
+            )
+        return cfg.compute.ray_gpu_machine_type, acc
+
+    for fam in ("statistical", "ml"):
+        ov = cfg.compute.families.get(fam)
+        if ov is not None and ov.machine_type is not None:
+            fc = cfg.resolve_family_compute(fam)
+            if fc.machine_type:
+                return fc.machine_type, 0
+    if cfg.compute.machine_type != "auto" and not cfg.compute.machine_type.startswith(
+        ("g2-", "a2-")
+    ):
+        return cfg.compute.machine_type, 0
+    return cfg.compute.ray_cpu_machine_type, 0
+
+
+def pool_unit_shape(cfg: RunConfig, *, gpu: bool, gpu_type: str | None = None) -> UnitShape:
     """One worker node of the CPU or GPU pool: cores and RAM from the machine type (pure).
 
     Shared by `plan_pool` and `calibrate_gpu_fraction` because the two have to agree about the
@@ -237,11 +287,11 @@ def pool_unit_shape(cfg: RunConfig, *, gpu: bool) -> UnitShape:
     that card then holds, and both answers are bounded by the same cores — sizing them off two
     independently-built shapes is how the two drift apart.
     """
-    machine_type = cfg.compute.ray_gpu_machine_type if gpu else cfg.compute.ray_cpu_machine_type
+    machine_type, acc = _resolve_ray_pool_machine_and_acc(cfg, gpu=gpu, gpu_type=gpu_type)
     return UnitShape(
         cores=machine_cores(machine_type),
         memory_bytes=machine_memory_bytes(machine_type),
-        accelerators=cfg.compute.accelerator_count if gpu else 0,
+        accelerators=acc if gpu else 0,
     )
 
 
@@ -528,6 +578,48 @@ def pool_families(models: list[str]) -> list[str]:
     return families
 
 
+def _pool_min_nodes(cfg: RunConfig, *, gpu: bool) -> int:
+    """The autoscaling floor for one Ray pool, honoring universal ``min_workers`` (pure)."""
+    if gpu:
+        dl_ov = cfg.compute.families.get(_GPU_FAMILY)
+        if dl_ov is not None and dl_ov.min_workers is not None:
+            return dl_ov.min_workers
+        if cfg.compute.min_workers is not None:
+            return cfg.compute.min_workers
+        return cfg.compute.ray_gpu_min_nodes
+    for fam in ("statistical", "ml"):
+        ov = cfg.compute.families.get(fam)
+        if ov is not None and ov.min_workers is not None:
+            return ov.min_workers
+    if cfg.compute.min_workers is not None:
+        return cfg.compute.min_workers
+    return cfg.compute.ray_cpu_min_nodes
+
+
+def _pool_explicit_max_nodes(cfg: RunConfig, *, gpu: bool) -> int | None:
+    """Explicit autoscaling ceiling pin for one Ray pool (``max_workers``/``workers``)."""
+    if gpu:
+        dl_ov = cfg.compute.families.get(_GPU_FAMILY)
+        if dl_ov is not None:
+            if dl_ov.max_workers is not None:
+                return dl_ov.max_workers
+            if dl_ov.workers is not None:
+                return dl_ov.workers
+        if cfg.compute.max_workers is not None:
+            return cfg.compute.max_workers
+        return cfg.compute.ray_gpu_max_nodes
+    for fam in ("statistical", "ml"):
+        ov = cfg.compute.families.get(fam)
+        if ov is not None:
+            if ov.max_workers is not None:
+                return ov.max_workers
+            if ov.workers is not None:
+                return ov.workers
+    if cfg.compute.max_workers is not None:
+        return cfg.compute.max_workers
+    return cfg.compute.ray_cpu_max_nodes
+
+
 def plan_pool(
     cfg: RunConfig,
     models: list[str],
@@ -565,9 +657,9 @@ def plan_pool(
     `ray_engine` passes the cluster's already-resolved ``[cpu|gpu]_max_nodes`` so that
     `tasks_for_ceiling` counts against the ceiling the pool can really reach.
     """
-    unit = pool_unit_shape(cfg, gpu=gpu)
+    unit = pool_unit_shape(cfg, gpu=gpu, gpu_type=gpu_type)
     ceiling = max_units if max_units is not None else _pool_ceiling(cfg, gpu=gpu)
-    floor_nodes = cfg.compute.ray_gpu_min_nodes if gpu else cfg.compute.ray_cpu_min_nodes
+    floor_nodes = _pool_min_nodes(cfg, gpu=gpu)
 
     families = pool_families(models) or [_GPU_FAMILY if gpu else "cpu"]
     slots = [
@@ -598,7 +690,7 @@ def plan_pool(
 
 def _pool_ceiling(cfg: RunConfig, *, gpu: bool) -> int:
     """The hard node ceiling for one pool: its explicit override, else the shared max (pure)."""
-    explicit = cfg.compute.ray_gpu_max_nodes if gpu else cfg.compute.ray_cpu_max_nodes
+    explicit = _pool_explicit_max_nodes(cfg, gpu=gpu)
     return explicit or cfg.compute.ray_max_nodes
 
 
@@ -680,10 +772,17 @@ def plan_cluster(
     # Resolved *before* the split, because the split depends on it: without a GPU pool the
     # deep-learning models are CPU work and have to be sized into the CPU pool (see
     # `split_gpu_cpu_models`), not dropped between the two.
+    dl_ov = cfg.compute.families.get(_GPU_FAMILY)
     effective_use_gpu = cfg.compute.use_gpu if use_gpu is None else use_gpu
-    effective_gpu_type = gpu_type or cfg.compute.gpu_type
+    effective_gpu_type = (
+        gpu_type or (dl_ov.gpu_type if dl_ov and dl_ov.gpu_type else None) or cfg.compute.gpu_type
+    )
+    cpu_mt, _ = _resolve_ray_pool_machine_and_acc(cfg, gpu=False)
+    gpu_mt, eff_acc_count = _resolve_ray_pool_machine_and_acc(
+        cfg, gpu=True, gpu_type=effective_gpu_type
+    )
     if effective_use_gpu:
-        _check_gpu_machine(effective_gpu_type, cfg.compute.ray_gpu_machine_type)
+        _check_gpu_machine(effective_gpu_type, gpu_mt)
 
     gpu_models, cpu_models = split_gpu_cpu_models(cfg, models, use_gpu=effective_use_gpu)
 
@@ -700,8 +799,8 @@ def plan_cluster(
     # than to a constant.
     cpu_ceiling = _pool_ceiling(cfg, gpu=False)
     gpu_ceiling = _pool_ceiling(cfg, gpu=True)
-    cpu_min = cfg.compute.ray_cpu_min_nodes
-    gpu_min = cfg.compute.ray_gpu_min_nodes
+    cpu_min = _pool_min_nodes(cfg, gpu=False)
+    gpu_min = _pool_min_nodes(cfg, gpu=True)
 
     # Derived fixed-size-equivalent node counts, each capped by its pool max and (when the pool is
     # used) floored at its pool min so the fixed path and the autoscale reference size agree with
@@ -724,8 +823,12 @@ def plan_cluster(
     cpu_nodes = cpu_pool.derived_units
 
     # The autoscaling ceilings, derived from those node counts unless a pool was explicitly pinned.
-    cpu_max = _resolve_pool_max(cfg.compute.ray_cpu_max_nodes, cpu_nodes, cpu_ceiling, cpu_min)
-    gpu_max = _resolve_pool_max(cfg.compute.ray_gpu_max_nodes, gpu_nodes, gpu_ceiling, gpu_min)
+    cpu_max = _resolve_pool_max(
+        _pool_explicit_max_nodes(cfg, gpu=False), cpu_nodes, cpu_ceiling, cpu_min
+    )
+    gpu_max = _resolve_pool_max(
+        _pool_explicit_max_nodes(cfg, gpu=True), gpu_nodes, gpu_ceiling, gpu_min
+    )
 
     # Re-plan each pool against the ceiling it can *actually* reach. The first pass had to use the
     # hard ceiling because the autoscaling one is derived from its answer; this pass makes the
@@ -749,12 +852,12 @@ def plan_cluster(
         cluster_name=cluster_name(cfg, run_id),
         reuse=cfg.compute.ray_cluster_name is not None,
         head_machine_type=cfg.compute.ray_head_machine_type,
-        cpu_machine_type=cfg.compute.ray_cpu_machine_type,
+        cpu_machine_type=cpu_mt,
         cpu_node_count=cpu_nodes,
-        gpu_machine_type=cfg.compute.ray_gpu_machine_type,
+        gpu_machine_type=gpu_mt,
         gpu_node_count=gpu_nodes,
         accelerator_type=_accelerator_type(effective_gpu_type),
-        accelerator_count=cfg.compute.accelerator_count,
+        accelerator_count=eff_acc_count,
         sizing_gpu_fraction=sizing_fraction,
         n_gpu_cells=n_gpu_cells,
         n_cpu_cells=n_cpu_cells,

@@ -61,16 +61,27 @@ def _system_job_id(job_key: str, runtime: str) -> str:
     Each platform stamps the ``job_key`` as its *own* job id so the platform job and the
     ``run_jobs`` row share an identity, but platforms differ on the legal charset/length — so the
     key is mapped to a legal form per runtime (`registry.ids`): a Dataproc batch/job id for
-    ``spark``, a Ray ``submission_id`` for ``ray``, a BigQuery parent job id for ``bigquery``. The
-    canonical key stays in ``run_jobs.job_id`` (this mapped id lands in ``system_job_id``), so a
-    trace never reverses a lossy mapping.
+    ``spark``, a Ray ``submission_id`` for ``ray``, a Vertex ``CustomJob.display_name`` for
+    ``vertex``, and a BigQuery parent job id for ``bigquery``. The canonical key stays in
+    ``run_jobs.job_id`` (this mapped id lands in ``system_job_id``), so a trace never reverses a
+    lossy mapping.
     """
-    from .registry.ids import bigquery_job_id, dataproc_job_id, ray_submission_id
+    from .registry.ids import (
+        bigquery_job_id,
+        dataproc_job_id,
+        gce_instance_id,
+        ray_submission_id,
+        vertex_job_id,
+    )
 
     if runtime == "spark":
         return dataproc_job_id(job_key)
     if runtime == "ray":
         return ray_submission_id(job_key)
+    if runtime == "vertex":
+        return vertex_job_id(job_key)
+    if runtime == "gce":
+        return gce_instance_id(job_key)
     return bigquery_job_id(job_key)
 
 
@@ -125,11 +136,12 @@ def _entry_handle(
 
     This is the handle a probe reads while the job is running, so it asserts only what is truly
     known at launch time. Every runtime can fill it, because every runtime names its own job:
-    Serverless passes ``batch_id``, Ray passes ``submission_id``, and the cluster path passes
-    ``JobReference.job_id`` (`cluster_submit.build_job`). The one coordinate still *predicted*
-    rather than known is the region of an ephemeral create, which a capacity hop can move — the
-    stamp-back refresh in `launch_family_job` corrects it at the end, and in the meantime a probe
-    that misses degrades to registry-only.
+    Serverless passes ``batch_id``, Ray passes ``submission_id``, Vertex passes ``display_name``
+    (stamped back to the server-assigned ``projects/.../customJobs/...`` name once created),
+    and the cluster path passes ``JobReference.job_id`` (`cluster_submit.build_job`). The one
+    coordinate still *predicted* rather than known is the region of an ephemeral create, which a
+    capacity hop can move — the stamp-back refresh in `launch_family_job` corrects it at the end,
+    and in the meantime a probe that misses degrades to registry-only.
 
     A free function rather than inline code because it is called twice per launch now: once for the
     row that gets written, and once per candidate attempt by `_attempt_free_of_taken_ids`, which
@@ -137,6 +149,18 @@ def _entry_handle(
     """
     from .probes.vocabulary import ProbeHandle
 
+    if compute.runtime == "vertex":
+        return ProbeHandle(
+            "vertex",
+            native_id=system_job_id,
+            region=settings.region,
+        )
+    if compute.runtime == "gce":
+        return ProbeHandle(
+            "gce",
+            native_id=system_job_id,
+            region=settings.region,
+        )
     if compute.runtime == "ray":
         from .engines.ray_io import cluster_name as ray_cluster_name_for
         from .ray_cluster import cluster_resource_path

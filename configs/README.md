@@ -12,9 +12,9 @@ flowchart LR
     dag["Family Execution DAG<br/>plan_dag(cfg)"]
 
     subgraph jobs["Parallel Per-Family Jobs"]
-        stat["statistical family<br/>(Spark or Ray)"]
-        ml["ml family<br/>(Spark or Ray)"]
-        dl["deep_learning family<br/>(Ray GPU or Spark)"]
+        stat["statistical family<br/>(Spark · Ray · Vertex · GCE)"]
+        ml["ml family<br/>(Spark · Ray · Vertex · GCE)"]
+        dl["deep_learning family<br/>(Ray · Vertex · GCE · Spark)"]
         nat["native family<br/>(BigQuery SQL)"]
     end
 
@@ -125,7 +125,7 @@ Paired configurations that hold data, seeds, and hyperparameters constant while 
 
 ## Smoke Configuration Suite (`configs/smokes/`)
 
-The **[`configs/smokes/`](./smokes/README.md)** subdirectory contains 31 numbered configurations (`01` through `31`) that systematically exercise every runtime, hardware mode, backtest scheme, HPO granularity, feature transform, and ensemble strategy in the platform. See **[`configs/smokes/README.md`](./smokes/README.md)** for the full index.
+The **[`configs/smokes/`](./smokes/README.md)** subdirectory contains 39 numbered configurations (`01` through `39`) that systematically exercise every runtime (`spark`, `ray`, `vertex`, `gce`, and `bigquery`), hardware mode, backtest scheme, HPO granularity, feature transform, covariate tier, hierarchical reconciliation method, and ensemble strategy in the platform. See **[`configs/smokes/README.md`](./smokes/README.md)** for the full index.
 
 ---
 

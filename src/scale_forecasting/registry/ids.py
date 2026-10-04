@@ -152,6 +152,10 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
         "reconciliation_methods": ["bottom_up", "wls_struct", "mint_shrink"],
         "middle_level": None,
     },
+    ("compute", "machine_type"): "auto",
+    ("compute", "workers"): 1,
+    ("compute", "min_workers"): None,
+    ("compute", "max_workers"): None,
 }
 
 
@@ -208,6 +212,19 @@ def _canonical_config(cfg: RunConfig) -> str:
                 break
         if isinstance(node, dict) and node.get(leaf) == _DEFAULT_ELIDED[(*parents, leaf)]:
             node.pop(leaf, None)
+    families = payload.get("compute", {}).get("families", {})
+    if isinstance(families, dict):
+        for fam_cfg in families.values():
+            if isinstance(fam_cfg, dict):
+                for k in (
+                    "machine_type",
+                    "workers",
+                    "min_workers",
+                    "max_workers",
+                    "accelerator_count",
+                ):
+                    if fam_cfg.get(k) is None:
+                        fam_cfg.pop(k, None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -349,6 +366,26 @@ def ray_submission_id(job_key: str) -> str:
     to ``JobSubmissionClient.submit_job(submission_id=…)`` makes the Ray job's own id deterministic.
     """
     return job_key
+
+
+def vertex_job_id(job_key: str) -> str:
+    """Map a ``job_key`` to a Vertex AI ``CustomJob.display_name``.
+
+    Vertex AI assigns a numeric resource id on creation
+    (``projects/.../locations/.../customJobs/<id>``), mirroring Dataproc cluster jobs, while
+    ``display_name`` carries the canonical ``job_key`` so every attempt is identifiable in the
+    Vertex AI console and ``gcloud ai custom-jobs list``.
+    """
+    return job_key
+
+
+def gce_instance_id(job_key: str) -> str:
+    """Map a ``job_key`` to a Compute Engine VM instance name (1–63 chars, ``[a-z0-9-]``).
+
+    Compute Engine instance names obey the exact RFC1035 hostname rules that `dataproc_job_id`
+    enforces (lowercase letters, digits, hyphens, starting with a letter and <= 63 chars).
+    """
+    return dataproc_job_id(job_key)
 
 
 def bigquery_job_id(job_key: str) -> str:

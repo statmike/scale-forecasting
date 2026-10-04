@@ -185,18 +185,19 @@ def test_spark_run_group_routes_panel_to_run_panel() -> None:
 
 
 def test_dag_check_model_params_validates_training_mode() -> None:
-    # 1. Valid global and hybrid on Ray
-    cfg_ok = RunConfig(
-        run_name="ok",
-        python_runtime="ray",
-        data={"source_table": "t", "freq": "D", "horizon": HORIZON},
-        models=["tide", "neuralprophet"],
-        model_params={
-            "tide": {"training_mode": "global"},
-            "neuralprophet": {"training_mode": "hybrid"},
-        },
-    )
-    check_model_params(cfg_ok)
+    # 1. Valid global and hybrid on Ray and Vertex CustomJob
+    for runtime in ("ray", "vertex"):
+        cfg_ok = RunConfig(
+            run_name="ok",
+            python_runtime=runtime,
+            data={"source_table": "t", "freq": "D", "horizon": HORIZON},
+            models=["tide", "neuralprophet"],
+            model_params={
+                "tide": {"training_mode": "global"},
+                "neuralprophet": {"training_mode": "hybrid"},
+            },
+        )
+        check_model_params(cfg_ok)
 
     # 2. Global on Spark is rejected
     cfg_spark = RunConfig(
@@ -206,7 +207,7 @@ def test_dag_check_model_params_validates_training_mode() -> None:
         models=["tide"],
         model_params={"tide": {"training_mode": "global"}},
     )
-    with pytest.raises(ConfigError, match="requires a Ray runtime"):
+    with pytest.raises(ConfigError, match="requires a Ray or Vertex runtime"):
         check_model_params(cfg_spark)
 
     # 3. Global on local-only model is rejected
