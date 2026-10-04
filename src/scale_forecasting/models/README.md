@@ -64,7 +64,7 @@ flowchart TB
 | `tsmixer` | [`tsmixer.py`](./tsmixer.py) | `deep_learning` | Python | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | `local`, `global` | Beneficial (`cuda`) | All-MLP time- and feature-mixing architecture (`TSMixerx`, Chen et al. 2023) with future, past, and static covariates. |
 | `patchtst` | [`patchtst.py`](./patchtst.py) | `deep_learning` | Python | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | No | `local`, `global` | Beneficial (`cuda`) | Channel-independent subseries-patch Transformer (`PatchTST`, Nie et al. 2023) with `MQLoss` quantile heads. |
 | `arima_plus` | [`bigquery_native.py`](./bigquery_native.py) | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | No | `local` | Managed SQL | BigQuery ML `ARIMA_PLUS` (with custom country holiday CTEs and `ARIMA_PLUS_XREG` SQL builder support). |
-| `timesfm` | [`bigquery_native.py`](./bigquery_native.py) | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | No | `global` (zero-shot) | Managed SQL | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` default, or `TimesFM 3.0`). |
+| `timesfm` | [`bigquery_native.py`](./bigquery_native.py) | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | No | `local` (zero-shot) | Managed SQL | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` default, or `TimesFM 3.0`). |
 
 ---
 

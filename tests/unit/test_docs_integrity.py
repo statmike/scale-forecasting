@@ -66,6 +66,7 @@ _FORBIDDEN_DOC_TOKENS = (
     "v_residual_distribution",
     "v_forecast_results",
     "scale_forecasting.sdk.Registry.doctor",
+    "`global` (zero-shot)",
 )
 
 

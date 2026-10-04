@@ -378,7 +378,7 @@ Every model lives in its own self-contained file under [`src/scale_forecasting/m
 | **`tsmixer`** | `deep_learning` | Spark / Ray / Vertex / GCE | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Yes / Yes / Yes | `local`, `global` | All 7 FPP3 + Global Panel | Google Research All-MLP time- and feature-mixing architecture (`TSMixerx`) with three-tier covariates. |
 | **`patchtst`** | `deep_learning` | Spark / Ray / Vertex / GCE | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | No / No / No | `local`, `global` | All 7 FPP3 + Global Panel | Subseries-patched channel-independent Transformer (`PatchTST`) with MultiQuantile loss. |
 | **`arima_plus`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `local` | N/A (SQL) | Pure BigQuery SQL: automated `ARIMA_PLUS` / `ARIMA_PLUS_XREG` pipeline with custom country holiday CTEs. |
-| **`timesfm`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `global` (zero-shot) | N/A (SQL) | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` default, or `TimesFM 3.0` + configurable `context_window`). |
+| **`timesfm`** | `native` | BigQuery ML | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | `local` (zero-shot) | N/A (SQL) | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` default, or `TimesFM 3.0` + configurable `context_window`). |
 
 ### Environment Agility: Omitting Optional Model Packages
 
