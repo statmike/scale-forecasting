@@ -73,11 +73,11 @@ spark = [
 ]
 # Python runtime B — Ray on Vertex AI.
 ray = [
-    # Vertex AI supports only a fixed set of Ray cluster-image versions, and the client-side Ray must
-    # MATCH the cluster's or the JobSubmissionClient handshake (GET /api/version) hangs → HTTP 524.
-    # On Python 3.11 the supported versions are 2.42 and 2.47; we run 2.47.1, so cap the client to that
-    # range (an unbounded >= floats to a newer, unsupported Ray — the original cause of the 524).
-    "ray[default]>=2.42,<2.48",
+    # Require ray>=2.52 for security vulnerability remediation. Client-side job submission uses the
+    # HTTP REST Ray Jobs API (`JobSubmissionClient` over PSC-I), which is wire-compatible with Vertex
+    # AI's managed 2.47.1 cluster image (`ray_infra.py` keeps `_DEFAULT_RAY_VERSION = "2.47"` and
+    # `code_delivery.py` excludes `ray` from the on-cluster `runtime_env` package list).
+    "ray[default]>=2.52",
     "google-cloud-aiplatform>=1.60",
     # vertex_ray imports immutabledict at module load; aiplatform only declares it under its own
     # [ray] extra, which would pin ray[default]<=2.47.1 and conflict with ours — so pull it directly.
@@ -91,7 +91,7 @@ ray = [
 # path, which runs in Colab). It is the union of the dataproc submit client + the [ray] client deps.
 submit = [
     "google-cloud-dataproc>=5.9",
-    "ray[default]>=2.42,<2.48",
+    "ray[default]>=2.52",
     "google-cloud-aiplatform>=1.60",
     "immutabledict>=4.0",
 ]

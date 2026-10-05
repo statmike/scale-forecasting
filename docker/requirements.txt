@@ -518,7 +518,7 @@ pyzmq==27.1.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sy
     # via
     #   ipykernel
     #   jupyter-client
-ray==2.47.1 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
+ray==2.59.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'
     # via
     #   neuralforecast
     #   scale-forecasting

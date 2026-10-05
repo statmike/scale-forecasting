@@ -24,7 +24,7 @@ flowchart TD
     Pin --> Kernel["Local uv Kernel &\nColab Enterprise sf-main (py311)"]
     Pin --> Container["Custom Container (/opt/venv)\n& Packed Venv Archive (3.11.15)"]
     Kernel <-->|"1. applyInPandas Pickle Parity"| Connect["Dataproc Spark Connect 2.3\n(Python 3.11 Workers)"]
-    Kernel <-->|"2. JobSubmissionClient Handshake\n(Ray 2.47 + Python 3.11)"| VertexRay["Vertex AI Ray Cluster\n(Python 3.11 / Ray 2.47.1)"]
+    Kernel <-->|"2. JobSubmissionClient REST API\n(Client Ray >=2.52 -> Cluster 2.47.1 + py311)"| VertexRay["Vertex AI Ray Cluster\n(Python 3.11 / Ray 2.47.1)"]
     Container <-->|"3. Driver ↔ Executor Parity"| Batch["Dataproc Serverless / Cluster\n& Vertex CustomJob & GCE Single-VM"]
 ```
 
@@ -32,11 +32,11 @@ flowchart TD
 
 | Surface | Where it runs | Runtime version | Base runtime Python | **Effective Python** | Spark / Ray | How Python is set |
 |---------|---------------|-----------------|---------------------|----------------------|-------------|-------------------|
-| **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11.15** | — | `.python-version` (3.11.15) + `pyproject.toml` `requires-python = ">=3.11,<3.12"`; Colab template PATCHed to `py311` |
+| **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11.15** | Ray >=2.52 (client) | `.python-version` (3.11.15) + `pyproject.toml` `requires-python = ">=3.11,<3.12"`; Colab template PATCHed to `py311` |
 | **Custom container** | attached to batch + Spark Connect | — | — | **3.11.15** | Spark 3.5.x (from base) | `docker/Dockerfile` — `uv` installs 3.11.15 (from `.python-version`) into `/opt/venv` on `debian:12-slim` |
 | **Dataproc batch** (`explode`) | Serverless | **2.2** (default) | 3.12 | **3.11** ← *container wins* | Spark 3.5.3 | container image attached on **every** submit (`submit.py`), overriding base |
 | **Spark Connect** (nb01, interactive) | Serverless session | **2.3** | 3.11 | **3.11** | Spark 3.5.3 | runtime 2.3 base is already 3.11 **and** container attached |
-| **Ray on Vertex** (nb04) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 | `ray_infra.py` pins `python_version="3.11"`, `ray_version="2.47"` |
+| **Ray on Vertex** (nb04) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 (cluster) | `ray_infra.py` pins `python_version="3.11"`, `ray_version="2.47"`; client uses `ray>=2.52` over REST Jobs API |
 | **BigQuery-native** (nb02: ARIMA_PLUS, TimesFM) | BigQuery engine | — | — | n/a (SQL) | — | no client Python on the compute path |
 
 > **"Effective Python" is what your code actually executes on.** For batch it's the *container's*
@@ -58,11 +58,12 @@ share a Python **minor** version (3.11 ≠ 3.12 for pickle/`applyInPandas`/cloud
    executors. So the executors must be 3.11. Runtime **2.3**'s workers are Python 3.11; runtime **3.0**'s
    are Python 3.12 → `PYTHON_VERSION_MISMATCH`. **This is the whole reason nb01 uses 2.3, not 3.0.**
 
-3. **Ray on Vertex: client ↔ cluster.** The `JobSubmissionClient` handshake (`GET /api/version`)
-   requires the **client Ray version to equal the cluster's**. Vertex offers Ray only for a fixed set
-   (2.9.3 / 2.33.0 / 2.42.0 / 2.47.1), and **on Python 3.11 only 2.42 or 2.47 are available**. A
-   version-skewed client doesn't error cleanly — the dashboard proxy **hangs** (→ HTTP 524). So the
-   `[ray]` extra is capped and `ray_infra.py` defaults `ray_version=2.47`, `python_version=3.11`.
+3. **Ray on Vertex: Python 3.11 cluster image + REST Jobs API.** Vertex offers prebuilt Ray cluster
+   images only for a fixed set (2.9.3 / 2.33.0 / 2.42.0 / 2.47.1), and **on Python 3.11 only 2.42 or
+   2.47 are available**. `ray_infra.py` defaults `ray_version="2.47"` and `python_version="3.11"` for
+   the cluster image, while the client-side `[ray]` extra installs `ray[default]>=2.52` (for security
+   remediation) and submits jobs via the HTTP REST `JobSubmissionClient` over PSC-I (with `ray`
+   excluded from the on-cluster `uv` `runtime_env` via `code_delivery._CLUSTER_PROVIDED`).
 
 4. **Same code locally and under Composer.** The `uv` project itself is `>=3.11,<3.12`, so a developer's
    local kernel, the CI kernel, and the Composer runner all resolve the same interpreter — the code

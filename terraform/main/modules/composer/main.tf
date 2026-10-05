@@ -66,16 +66,16 @@ variable "env_variables" {
 # The SUBMIT-side dependency subset — what the driver imports to talk to the services (BigQuery
 # registry, Dataproc/Vertex submit, the Ray JobSubmissionClient handshake). NOT the in-service model
 # stack (torch/darts/neuralprophet/pyspark): that ships to the jobs in the src/ zip + runs in the
-# container/venv/Ray cluster, never on Composer. The Ray client MUST match the cluster's Ray version
-# (SF_RAY_VERSION default, currently 2.47) or the dashboard handshake hangs. Validate this set against
-# Composer's preinstalled packages on first apply — the classic version-conflict trap lives here.
+# container/venv/Ray cluster, never on Composer. Require ray>=2.52 for security remediation; the
+# HTTP REST JobSubmissionClient is compatible with the managed 2.47.1 Vertex Ray cluster image.
+# Validate this set against Composer's preinstalled packages on first apply.
 variable "pypi_packages" {
   description = "Submit-side deps installed on the workers (map package -> version spec). NOT the model stack."
   type        = map(string)
   default = {
     "google-cloud-dataproc"   = ""
     "google-cloud-aiplatform" = ""
-    "ray"                     = "[default]==2.47.1" # extras go in the VALUE — Composer rejects extras in the key (must be a bare PEP-508 name)
+    "ray"                     = "[default]>=2.52" # extras go in the VALUE — Composer rejects extras in the key (must be a bare PEP-508 name)
     "pydantic"                = ">=2"
     # Feature-engineering that runs ON the launch point (not in a job): the native/BigQuery track
     # builds holiday exog columns in Python on the worker before issuing BQML SQL, so `holidays` is a

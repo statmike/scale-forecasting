@@ -31,11 +31,10 @@ _ENV_RAY_VERSION = "SF_RAY_VERSION"
 
 # Vertex Ray's supported Ray version + our runtime Python. Vertex AI accepts only a fixed set of Ray
 # versions for the cluster image (2.9.3 / 2.33.0 / 2.42.0 / 2.47.1; on Python 3.11 only 2.42 or
-# 2.47), and the client-side Ray MUST match the cluster's: the JobSubmissionClient handshake (GET
-# /api/version) hangs on a version-skewed dashboard rather than erroring cleanly. So the [ray] extra
-# is capped to a supported range (see pyproject.toml) and this default matches. Overridable via
-# SF_RAY_VERSION to select a different *supported* image without a code change — but the client Ray
-# must still equal it.
+# 2.47). While the local/container [ray] extra requires ray>=2.52 for security remediation, job
+# submission uses the HTTP REST Ray Jobs API (`JobSubmissionClient` over PSC-I) and `code_delivery`
+# excludes `ray` from the on-cluster `runtime_env`, so the cluster runs its prebuilt 2.47.1 image
+# cleanly. Overridable via SF_RAY_VERSION to select a different supported cluster image.
 _DEFAULT_RAY_VERSION = "2.47"
 _DEFAULT_PYTHON_VERSION = "3.11"
 
