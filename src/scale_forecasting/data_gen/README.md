@@ -1,7 +1,7 @@
 # Synthetic Data Generation & Seeding (`src/scale_forecasting/data_gen/`)
 
 This subpackage provides **one unified, deterministic time-series generator** with **dual capability** (univariate by default, plus opt-in three-tier covariates and hierarchy dimensions) used across the entire platform:
-- **Locally in memory** by [`playground.py`](../playground.py), [`notebooks/model_playground.ipynb`](../../../notebooks/model_playground.ipynb), and the offline unit test suite.
+- **Locally in memory** by [`playground.py`](../playground.py), [`notebooks/00_model_playground.ipynb`](../../../notebooks/00_model_playground.ipynb), and the offline unit test suite.
 - **At 100- to 100,000-series scale in Google Cloud** by [`seed_spark.py`](./seed_spark.py) and the Terraform `seed` module ([`terraform/main/modules/seed/`](../../../terraform/main/modules/seed/main.tf)), populating both **BigLake Apache Iceberg** (`*_iceberg`) and **Native BigQuery** (`*_native`) tables from a single generation pass.
 
 ```mermaid

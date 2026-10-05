@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://console.cloud.google.com/vertex-ai/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2Fstatmike%2Fscale-forecasting%2Fmain%2Fnotebooks%2Fmodel_playground.ipynb"><img src="https://img.shields.io/badge/Colab%20Enterprise-Launch%20Notebooks-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white" alt="Colab Enterprise"></a>
+  <a href="https://console.cloud.google.com/vertex-ai/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2Fstatmike%2Fscale-forecasting%2Fmain%2Fnotebooks%2F00_model_playground.ipynb"><img src="https://img.shields.io/badge/Colab%20Enterprise-Launch%20Notebooks-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white" alt="Colab Enterprise"></a>
   <a href="https://statmike.github.io/scale-forecasting/"><img src="https://img.shields.io/badge/Docs-Product%20Documentation-0F9D58?style=for-the-badge&logo=materialformkdocs&logoColor=white" alt="Docs"></a>
   <a href="./docs/workshop.md"><img src="https://img.shields.io/badge/Workshop-Hands--On%20Lab-F4B400?style=for-the-badge&logo=google&logoColor=white" alt="Workshop"></a>
   <a href="./terraform/README.md"><img src="https://img.shields.io/badge/Terraform-1--Click%20Deploy-7B42BC?style=for-the-badge&logo=terraform&logoColor=white" alt="Terraform"></a>
@@ -573,7 +573,7 @@ Whether you are building models, architecting cloud platforms, or managing produ
 flowchart TD
     subgraph DataScientist["🧑‍🔬 Data Scientist & Forecaster"]
         direction LR
-        DS1["Interactive Sandbox<br/>notebooks/model_playground.ipynb"] --> DS2["Custom Models & Metrics<br/>docs/adding_a_model.md"] --> DS3["HPO & Stacking Ensembles<br/>Optuna · NNLS / XGBoost"]
+        DS1["Interactive Sandbox<br/>notebooks/00_model_playground.ipynb"] --> DS2["Custom Models & Metrics<br/>notebooks/09_custom_models_and_metrics.ipynb"] --> DS3["HPO & Cross-Run Ensembles<br/>notebooks/07_hpo_backtesting_and_ensembles.ipynb"]
     end
 
     subgraph Architect["🏛️ Enterprise Cloud & Data Architect"]
@@ -593,47 +593,51 @@ flowchart TD
 
 ## Interactive Notebook Suite
 
-The [`notebooks/`](./notebooks/README.md) directory provides a structured learning curriculum with direct **Run in Colab Enterprise** integrations:
+The [`notebooks/`](./notebooks/README.md) directory provides an 11-notebook curriculum (`00`–`10`) across four tracks with direct **Run in Colab Enterprise** integrations:
 
 ```mermaid
 flowchart TD
-    subgraph Track1["Track 1: Foundations & Local Prototyping"]
-        NB0["model_playground.ipynb<br/>Single-series sandbox · 28 Python models · conformal intervals (Zero GCP Setup)"]
+    subgraph Track1["Track 1: Local Sandbox & Custom Plugins (Zero GCP Setup)"]
+        NB00["00_model_playground.ipynb<br/>30 Models · 21 Metrics · Local/Global/Hybrid · 7 FPP3 Reconciliation"]
+        NB09["09_custom_models_and_metrics.ipynb<br/>1-File BaseModel & BaseMetric Plugins + Zero-Rebuild Shipping"]
     end
 
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
-        direction TB
-        subgraph Single["Single-Engine Execution"]
-            direction LR
-            NB1["01_spark_via_connect.ipynb<br/>Dataproc Spark Connect & Serverless"]
-            NB2["02_bigquery_native.ipynb<br/>Serverless BigQuery ML (Pure SQL)"]
-        end
-        subgraph Multi["Multi-Engine & GPU Scaling"]
-            direction LR
-            NB3["03_combo_and_ensemble.ipynb<br/>Hybrid Spark ∥ BQ + Stacking Ensembles"]
-            NB4["04_ray_on_vertex.ipynb<br/>Autoscaling Ray on Vertex AI (CPU/GPU)"]
-        end
-        Single --> Multi
-    end
-
-    subgraph Track3["Track 3: Operations, Live Monitoring & Scale Benchmarking"]
         direction LR
-        NB8["08_run_and_monitor.ipynb<br/>Background Launch & Live Progress Bar"] --> NB9["09_review_run.ipynb<br/>Post-Run Leaderboards & Ensemble Lift"] --> NB7["07_scale_review.ipynb<br/>100k Cross-Platform Benchmark"]
+        NB01["01_bigquery_native_sql.ipynb<br/>BigQuery ML (ARIMA_PLUS · TimesFM)"]
+        NB02["02_vertex_and_gce_vms.ipynb<br/>GCE Single-VM & Vertex Multi-Worker"]
+        NB03["03_spark_serverless_and_connect.ipynb<br/>Dataproc Serverless & Spark Connect"]
+        NB04["04_ray_on_vertex_gpu.ipynb<br/>Vertex AI Ray + Fractional GPU"]
     end
 
-    Track1 --> Track2 --> Track3
+    subgraph Track3["Track 3: Covariates, Hierarchy, HPO & Cross-Run Ensembles"]
+        direction LR
+        NB05["05_covariates_and_global_models.ipynb<br/>3-Tier Covariates + Global ML"]
+        NB06["06_hierarchical_reconciliation.ipynb<br/>Coherent Hierarchy Rollups (MinT · WLS)"]
+        NB07["07_hpo_backtesting_and_ensembles.ipynb<br/>Optuna HPO + In-Run, Post-Run & Cross-Run Ensembles"]
+    end
+
+    subgraph Track4["Track 4: Master 4-Family DAG, Registry Ops & 100k Scale"]
+        direction LR
+        NB08["08_multi_engine_master_workflow.ipynb<br/>All 4 Model Families Parallel DAG"] --> NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes & 100k Review"]
+    end
+
+    Track1 --> Track2 --> Track3 --> Track4
 ```
 
 | Notebook | Focus Area | Runtime Environment | What You Will Learn |
 | :--- | :--- | :--- | :--- |
-| [`model_playground.ipynb`](./notebooks/model_playground.ipynb) | Foundations | Local Python (In-Memory) | Fit, score, and plot any of the 28 Python models on synthetic data with zero cloud credentials. |
-| [`01_spark_via_connect.ipynb`](./notebooks/01_spark_via_connect.ipynb) | Distributed Spark | Dataproc Spark Connect / Batch | Drive distributed Spark fan-out interactively, compare with serverless batch execution, and inspect write speed. |
-| [`02_bigquery_native.ipynb`](./notebooks/02_bigquery_native.ipynb) | Cloud SQL | BigQuery ML (`ARIMA_PLUS`, `TimesFM`) | Execute SQL-native forecasting over native and Iceberg tables without provisioning any compute clusters. |
-| [`03_combo_and_ensemble.ipynb`](./notebooks/03_combo_and_ensemble.ipynb) | Multi-Engine Hybrid | Spark Serverless $\parallel$ BigQuery ML | Run Spark and BigQuery concurrently under one `run_id`, blend models with stacking ensembles, and evaluate lift. |
-| [`04_ray_on_vertex.ipynb`](./notebooks/04_ray_on_vertex.ipynb) | Distributed Ray | Ray on Vertex AI (CPU & T4 GPU) | Provision an ephemeral Ray-on-Vertex cluster via Private Service Connect, pack GPUs fractionally, and observe auto-teardown. |
-| [`08_run_and_monitor.ipynb`](./notebooks/08_run_and_monitor.ipynb) | Operations & Telemetry | Background Thread + BigQuery | Launch a cloud job and monitor real-time cell completion via `Forecaster.monitor()` with automated probe escalation. |
-| [`09_review_run.ipynb`](./notebooks/09_review_run.ipynb) | Post-Run Evaluation | BigQuery Registry Views | Generate the model leaderboard, inspect per-series error quantiles (`p10`/`p50`/`p90`), and trace the job timeline. |
-| [`07_scale_review.ipynb`](./notebooks/07_scale_review.ipynb) | Enterprise Benchmark | BigQuery Registry (100k Runs) | Compare 100,000-series runs across Spark, Ray, and BigQuery: wall-clock time, cluster overhead, and numerical parity. |
+| [`00_model_playground.ipynb`](./notebooks/00_model_playground.ipynb) | Local Sandbox | Local Python (In-Memory) | Explore all 30 models, 21 metrics, `local`/`global`/`hybrid` regimes, 3-tier covariates, and all 7 FPP3 reconciliation methods offline. |
+| [`01_bigquery_native_sql.ipynb`](./notebooks/01_bigquery_native_sql.ipynb) | Cloud SQL | BigQuery ML (`ARIMA_PLUS`, `TimesFM`) | Execute SQL-native forecasting with zero cluster provisioning, blend into ensembles, and audit the 21-metric panel. |
+| [`02_vertex_and_gce_vms.ipynb`](./notebooks/02_vertex_and_gce_vms.ipynb) | Serverless VMs | GCE Single-VM & Vertex AI `CustomJob` | Compare single-VM GCE execution (triple-redundant auto-delete) and multi-worker Vertex AI sharding (`row_restriction` + LPT) with L4 GPUs. |
+| [`03_spark_serverless_and_connect.ipynb`](./notebooks/03_spark_serverless_and_connect.ipynb) | Distributed Spark | Dataproc Serverless, Cluster & Connect | Run Arrow-backed `applyInPandas` fan-out on Dataproc Serverless $\parallel$ BigQuery SQL, plus interactive Spark Connect. |
+| [`04_ray_on_vertex_gpu.ipynb`](./notebooks/04_ray_on_vertex_gpu.ipynb) | Distributed Ray | Ray on Vertex AI (CPU & GPU) | Provision an ephemeral Ray-on-Vertex cluster over PSC-I, pack GPUs fractionally (`gpu_fraction=0.25`), and compare DL training regimes. |
+| [`05_covariates_and_global_models.ipynb`](./notebooks/05_covariates_and_global_models.ipynb) | Exogenous Features | Vertex AI / Spark + Covariates Table | Configure `static_covariates`, `future_covariates`, and lag-shifted `past_covariates` with global cross-series ML models. |
+| [`06_hierarchical_reconciliation.ipynb`](./notebooks/06_hierarchical_reconciliation.ipynb) | Hierarchy Coherence | Vertex AI / Spark + Hierarchy | Reconcile multi-level business hierarchies (`region` $\rightarrow$ `category` $\rightarrow$ `ts_id`) with `bottom_up`, `wls_struct`, and `mint_shrink`. |
+| [`07_hpo_backtesting_and_ensembles.ipynb`](./notebooks/07_hpo_backtesting_and_ensembles.ipynb) | HPO & Ensembling | BigQuery + Vertex AI | Tune hyperparameters with Optuna (`best_params_df`), run post-run `reensemble()`, and combine separate runs via `ensemble_runs()`. |
+| [`08_multi_engine_master_workflow.ipynb`](./notebooks/08_multi_engine_master_workflow.ipynb) | 4-Family Master DAG | Spark $\parallel$ Vertex $\parallel$ BigQuery | Dispatch active model families concurrently across optimal runtimes (`explain()`, `run_live()`), ensemble, and run a 5-panel review. |
+| [`09_custom_models_and_metrics.ipynb`](./notebooks/09_custom_models_and_metrics.ipynb) | Extensibility | Local Python (In-Memory) | Author custom 1-file `BaseModel` and `BaseMetric` plugins (`@register`), test in `bakeoff()`, and inspect dynamic `src.zip` shipping. |
+| [`10_registry_operations_and_scale.ipynb`](./notebooks/10_registry_operations_and_scale.ipynb) | Operations & Scale | BigQuery Registry & Ops | Run `Registry.doctor()`, live job probes (`reg.probe()`), Cloud Composer 3 DAG generation (`emit_airflow()`), and 100k benchmark analysis. |
 
 ---
 

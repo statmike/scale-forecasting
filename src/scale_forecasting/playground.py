@@ -2,7 +2,7 @@
 
 This is the on-ramp for a data scientist opening the repo: pick a model, get a small
 sample dataset, run the *real* worker cell, and read the prediction frame + metric panel —
-no GCP, no config files. The notebook (``notebooks/model_playground.ipynb``) and the CLI
+no GCP, no config files. The notebook (``notebooks/00_model_playground.ipynb``) and the CLI
 (``python -m scale_forecasting.playground``) are both thin skins over the functions here,
 so the dev loop and production run the identical code path: sample → validate →
 `worker.run_cell`.
@@ -10,8 +10,8 @@ so the dev loop and production run the identical code path: sample → validate 
 Adding a model needs no change here — `available_models` reads the factory registry,
 so a new file under ``models/`` that ends in ``register(...)`` appears automatically.
 
-Public surface: ``available_models``, ``sample_data``, ``build_config``, ``run_model``,
-``summarize``.
+Public surface: ``available_models``, ``model_catalog``, ``metric_catalog``, ``sample_data``,
+``build_config``, ``run_model``, ``summarize``.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import pandas as pd
 
 from .config import RunConfig
 from .data_gen.generator import GenConfig, generate_panel
+from .metrics import METRIC_NAMES, get_metric
 from .models import get_model, list_models
 from .validation import validate_panel
 from .worker import CellResult, run_cell
@@ -53,8 +54,8 @@ def model_catalog() -> pd.DataFrame:
     hand-maintained list, so a new model file shows up here automatically:
 
     - **Python-runtime** models run the *identical* cell code (``worker.run_cell``) on every
-      Python compute — ``local`` (this playground), ``spark`` (Dataproc fan-out), and ``ray``
-      (Ray on Vertex). The one ``deep_learning`` model additionally uses the Ray **GPU** pool.
+      Python compute — ``local`` (this playground), ``spark`` (Dataproc fan-out), ``ray``
+      (Ray on Vertex), ``vertex`` (Vertex CustomJob), and ``gce`` (GCE Single-VM).
     - **BigQuery-native** models run only as SQL in ``bigquery`` (``engines/bigquery_engine``);
       they can't run in a local/Spark/Ray Python cell (their in-process fit/predict raise).
 
@@ -92,6 +93,29 @@ def model_catalog() -> pd.DataFrame:
     # runtime then family then name → Python models first, native last; stable and readable.
     df = pd.DataFrame(rows).sort_values(["runtime", "family", "model"]).reset_index(drop=True)
     return df
+
+
+def metric_catalog() -> pd.DataFrame:
+    """Every registered evaluation metric with its direction and input requirements.
+
+    Columns: ``metric, kind, direction, needs_intervals, needs_train_history,
+    needs_seasonal_period, mean_optimal``.
+    """
+    rows: list[dict[str, Any]] = []
+    for name in METRIC_NAMES:
+        cls = get_metric(name)
+        rows.append(
+            {
+                "metric": name,
+                "kind": "interval" if cls.needs_intervals else "point",
+                "direction": cls.direction,
+                "needs_intervals": cls.needs_intervals,
+                "needs_train_history": cls.needs_train_history,
+                "needs_seasonal_period": cls.needs_seasonal_period,
+                "mean_optimal": cls.mean_optimal,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def sample_data(

@@ -11,28 +11,28 @@ Terraform ships.
 version on every surface**: the `uv` kernel, the runtime image, every cluster, and every Colab
 template. For *why* 3.11 (Vertex Ray client↔cluster parity and the Dataproc packed-venv), see
 [version_matrix.md](./version_matrix.md) — the single source of truth for the version of each
-surface. The two notebooks that touch a live client↔cluster boundary (`04_ray_on_vertex` and
-`01_spark_via_connect`) are where that pin earns its keep; the [per-notebook mapping](#per-notebook-mapping)
+surface. The two notebooks that touch a live client↔cluster boundary (`04_ray_on_vertex_gpu` and
+`03_spark_serverless_and_connect`) are where that pin earns its keep; the [per-notebook mapping](#per-notebook-mapping)
 below spells out each.
 
 ```mermaid
 flowchart LR
     subgraph Surfaces["Three Ways to Run the Notebooks (Python 3.11)"]
-        S1["1. One-Click Colab Enterprise\nsf-main Template (SF_* Env Baked In)"]
-        S2["2. Headless Acceptance Harness\nnotebook_acceptance (smoke / batch / full)"]
-        S3["3. Local Kernel\nuv sync + ADC + SF_* Env"]
+        S1["1. One-Click Colab Enterprise<br/>sf-main Template (SF_* Env Baked In)"]
+        S2["2. Headless Acceptance Harness<br/>notebook_acceptance (smoke / batch / full)"]
+        S3["3. Local Kernel<br/>uv sync + ADC + SF_* Env"]
     end
-    S1 & S2 & S3 --> NB["8 Notebooks\nmodel_playground · 01..04 · 07..09"]
-    NB -->|"Orchestrate & Query"| Cloud["Dataproc · Vertex Ray · BigQuery"]
+    S1 & S2 & S3 --> NB["11 Notebooks<br/>00_model_playground .. 10_registry_operations_and_scale"]
+    NB -->|"Orchestrate & Query"| Cloud["BigQuery · GCE · Vertex AI · Dataproc Spark · Vertex Ray"]
 ```
 
 ## Running locally
 
-Every notebook except `model_playground` needs **ADC** and the `SF_*` identity. The `model_playground`
-needs neither — it runs the model suite on in-memory sample data with no cloud calls.
+Every notebook except `00_model_playground` and `09_custom_models_and_metrics` needs **ADC** and the `SF_*` identity. Both `00_model_playground` and `09_custom_models_and_metrics`
+need neither — they run the model and metric suites on in-memory sample data with no cloud calls.
 
 ```bash
-gcloud auth application-default login          # ADC — required for all but model_playground
+gcloud auth application-default login          # ADC — required for 01..08 and 10
 uv sync                                        # core deps incl. ipykernel + matplotlib
 uv run python -m ipykernel install --user --name scale-forecasting --display-name "scale-forecasting (uv)"
 ```
@@ -53,40 +53,42 @@ Colab Enterprise templates can bake them in, so no environment cell is needed (s
 
 | Notebook | Cloud compute | Python | Notes | Extra | Colab template |
 |----------|---------------|--------|-------|-------|----------------|
-| `model_playground` | none (fully local) | 3.11 | pure local, no cloud | none | `sf-main` |
-| `02_bigquery_native` | BigQuery | 3.11 | orchestration only | none | `sf-main` |
-| `03_combo_and_ensemble` | Dataproc (submit) + BigQuery | 3.11 | submits a Spark batch ∥ BQ, runs on-cluster | none | `sf-main` |
-| `07_scale_review` | BigQuery (read-only) | 3.11 | reads the registry views | none | `sf-main` |
-| `09_review_run` | BigQuery (read-only) | 3.11 | reviews a finished run_id — leaderboard, distribution, ensemble lift, timeline (the `review` layer) | none | `sf-main` |
-| `08_run_and_monitor` | Dataproc (submit) + BigQuery | 3.11 | launches a run on a bg thread, live-monitors it (the `review` layer) | none | `sf-main` |
-| `04_ray_on_vertex` | Ray on Vertex | 3.11 | client↔cluster Ray parity (2.47); an unsupported client Ray → HTTP 524 | `[ray]` | `sf-main` |
-| `01_spark_via_connect` | Dataproc Spark Connect | 3.11 | interactive Connect on runtime **2.3** (py3.11 workers); remote-batch fallback available | `[spark]` | `sf-main` |
+| `00_model_playground` | none (fully local) | 3.11 | pure local sandbox across 30 models, 21 metrics, covariates & 7 FPP3 reconciliation methods | none | `sf-main` |
+| `01_bigquery_native_sql` | BigQuery | 3.11 | pure SQL (`ARIMA_PLUS`, `TimesFM`) + ensembling | none | `sf-main` |
+| `02_vertex_and_gce_vms` | GCE Single-VM & Vertex `CustomJob` | 3.11 | compares `gce` single-VM and `vertex` multi-worker sharding | none | `sf-main` |
+| `03_spark_serverless_and_connect` | Dataproc Spark (`serverless` / `cluster` / `connect`) | 3.11 | Serverless Spark batch $\parallel$ BQ + interactive Spark Connect on runtime **2.3** | `[spark]` | `sf-main` |
+| `04_ray_on_vertex_gpu` | Ray on Vertex AI (CPU & GPU) | 3.11 | client↔cluster Ray parity (2.47) + fractional GPU (`gpu_fraction=0.25`) | `[ray]` | `sf-main` |
+| `05_covariates_and_global_models` | Vertex AI / Spark + BigQuery | 3.11 | 3-tier covariates (`static`, `future`, `past`) + global cross-series ML | none | `sf-main` |
+| `06_hierarchical_reconciliation` | Vertex AI / Spark + BigQuery | 3.11 | multi-level hierarchy rollups + `bottom_up`, `wls_struct`, `mint_shrink` | none | `sf-main` |
+| `07_hpo_backtesting_and_ensembles` | BigQuery + Vertex AI | 3.11 | Optuna HPO + in-run, post-run (`reensemble`), and cross-run (`ensemble_runs`) ensembling | none | `sf-main` |
+| `08_multi_engine_master_workflow` | Spark $\parallel$ Vertex $\parallel$ BigQuery | 3.11 | 4-family parallel DAG + `run_live()` monitoring + 5-panel review | none | `sf-main` |
+| `09_custom_models_and_metrics` | none (fully local) | 3.11 | author custom 1-file `BaseModel` & `BaseMetric` plugins offline | none | `sf-main` |
+| `10_registry_operations_and_scale` | BigQuery (read-only + ops) | 3.11 | `Registry.doctor()`, live probes, Composer DAG emitter & 100k scale review | none | `sf-main` |
 
 Every notebook runs on the single `sf-main` (py3.11) template. Most are *orchestration* — they submit
-work to Dataproc / Ray / BigQuery, which runs on-cluster Python, so the kernel minor doesn't change
+work to Dataproc / Ray / Vertex / GCE / BigQuery, which runs on-cluster Python, so the kernel minor doesn't change
 the result. The two that touch a live client↔cluster boundary both hold parity on 3.11:
 
-- **`04_ray_on_vertex`.** The *Ray package* version must match the cluster's (2.47); on 3.11 the
+- **`04_ray_on_vertex_gpu`.** The *Ray package* version must match the cluster's (2.47); on 3.11 the
   client resolves to a Vertex-supported Ray that matches, so the `JobSubmissionClient` handshake
   succeeds. An unsupported client Ray hangs the handshake (HTTP 524).
-- **`01_spark_via_connect`.** The interactive Connect session runs on **Dataproc runtime 2.3** (the
+- **`03_spark_serverless_and_connect`.** The interactive Connect session runs on **Dataproc runtime 2.3** (the
   Spark Connect floor), whose workers are **Python 3.11** — the same minor as the `sf-main` kernel, so
   `applyInPandas` fan-out satisfies the driver↔worker parity Connect enforces (`PYTHON_VERSION_MISMATCH`
-  otherwise). NB01's bootstrap installs the `[spark]` extra so `dataproc-spark-connect` is present on
-  `sf-main`. A **remote-batch** fallback (`main.run(cfg)` with no injected session — the *identical*
-  engine on-cluster, same `run_id`, same results) is documented in the notebook as an escape hatch.
+  otherwise). `03`'s bootstrap installs the `[spark]` extra so `dataproc-spark-connect` is present on
+  `sf-main`.
 
 - **The interactive Connect path ships code + deps + identity to its workers explicitly.** The
   `applyInPandas` fan-out pickles the group-runner closure on the notebook kernel and runs it on the
   session's executors, so those workers need (1) the third-party deps (`holidays`, `statsmodels`, …),
   (2) the `scale_forecasting` package on their path, and (3) a runtime identity with the Dataproc-worker
-  permissions the session needs. NB01 sets all three on the `Session`: it pins the session's
+  permissions the session needs. `03` sets all three on the `Session`: it pins the session's
   **container image** to `SF_CONTAINER_IMAGE` (the project image, which carries the deps), calls
   `spark.addArtifacts(zip, pyfile=True)` with the **same** package zip the batch delivers via
   `python_file_uris` (both built by `scale_forecasting.code_delivery`, so Connect and batch workers run
   byte-identical source), and runs the session runtime **as the compute SA** (`SF_COMPUTE_SA`,
   which carries `dataprocrm.nodes.mintOAuthToken` via `roles/dataproc.worker`; the runner impersonates
-  it). The remote-batch fallback needs none of this wiring on the kernel — it runs on the custom
+  it). The remote-batch path needs none of this wiring on the kernel — it runs on the custom
   container that already carries the deps, as the compute SA.
 
 ## On Colab Enterprise
@@ -97,7 +99,7 @@ idle-shutdown — so it is created **on by default** (`create_colab_templates = 
 
 | Template | Python | Extra | Use it for |
 |----------|--------|-------|------------|
-| `sf-main` | **3.11** | `.[ray,spark]` | **all** notebooks + `model_playground` |
+| `sf-main` | **3.11** | `.[ray,spark]` | **all 11** notebooks (`00`–`10`) |
 
 After `terraform apply`, the template resource name is surfaced as an output
 (`colab_main_runtime_template_id`).
@@ -129,9 +131,9 @@ Tiers escalate cost (each runs its tier plus the cheaper ones), gated like the o
 
 | Tier | Adds | Gate |
 |------|------|------|
-| `smoke` (default) | `02`, `07`, `09`, `model_playground` (BQ-only / local) | `@gcp` (`SF_PROJECT_ID` + ADC) |
-| `batch` | `01`, `03`, `08` (submit a Dataproc batch) | `SF_ENABLE_NB_BATCH` |
-| `full` | `04_ray_on_vertex` (live Ray cluster) | `SF_ENABLE_NB_FULL` |
+| `smoke` (default) | `00`, `01`, `09`, `10` (BQ-only / local) | `@gcp` (`SF_PROJECT_ID` + ADC) |
+| `batch` | `02`, `03`, `05`, `06`, `07`, `08` (Vertex / GCE / Dataproc batch) | `SF_ENABLE_NB_BATCH` |
+| `full` | `04_ray_on_vertex_gpu` (live Ray cluster) | `SF_ENABLE_NB_FULL` |
 
 ```bash
 # pytest wrapper (reads template ids + runner SA from `terraform output`):

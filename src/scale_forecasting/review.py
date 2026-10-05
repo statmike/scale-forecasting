@@ -51,6 +51,10 @@ from .registry.reads import parse_ts
 from .registry.rows import EMITTED, METRIC_COLUMNS
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    import pandas as pd
+
     from .probes.reconcile import ProbeReport
     from .settings import Settings
 
@@ -71,9 +75,21 @@ __all__ = [
     "best_overall",
     "best_per_family",
     "ensemble_lift",
+    "build_leaderboard_frame",
+    "build_predictions_frame",
+    "build_hierarchy_frame",
+    "build_cohorts_frame",
+    "build_calibration_frames",
+    "build_ensemble_weights_frame",
+    "explain_forecast_frame",
     "plot_progress",
     "plot_leaderboard",
     "plot_metric_distribution",
+    "plot_forecasts_frame",
+    "plot_hierarchy_frame",
+    "plot_calibration",
+    "plot_ensemble_weights",
+    "plot_forecast_explanation",
 ]
 
 # Display order for families in a progress/review readout: the base families in DAG order, then the
@@ -1139,3 +1155,1212 @@ def plot_metric_distribution(
             fontsize=9,
         )
     return ax
+
+
+# --- tabular frames & forecast/hierarchy plots ---------------------------------
+
+
+def build_leaderboard_frame(review: RunReview, *, all_metrics: bool = False) -> pd.DataFrame:
+    """Convert a `RunReview` into a ranked pandas ``DataFrame`` (pure, offline).
+
+    Includes core ranking columns (`rank`, `model_type`, `family`, `is_ensemble`, `compute_engine`,
+    `n_series`, `score`, `pooled_wape`, `n_comparable_series`), key accuracy and interval metrics
+    (`mean_wape`, `mean_smape`, `mean_mase`, `mean_rmsse`, `mean_mae`, `mean_rmse`,
+    `mean_coverage`, `mean_interval_score`), runtime/reliability (`mean_fit_seconds`,
+    `median_fit_seconds`, `no_artifact_rate`, `n_predictions`), and ensemble lift
+    (`lift_vs_best_base`, `lift_pct`). When ``all_metrics=True``, appends ``mean_<metric>`` and
+    ``p50_<metric>`` for every metric in `METRIC_COLUMNS`.
+    """
+    import pandas as pd
+
+    lift_map = {(e.model_type): e for e in review.ensemble_lift}
+    records: list[dict[str, Any]] = []
+    for idx, m in enumerate(review.models, start=1):
+        lift = lift_map.get(m.model_type)
+        row: dict[str, Any] = {
+            "rank": idx,
+            "model_type": m.model_type,
+            "family": m.family,
+            "is_ensemble": m.is_ensemble,
+            "ensemble_id": m.ensemble_id,
+            "compute_engine": m.compute_engine,
+            "n_series": m.n_series,
+            "decision_metric": review.decision_metric,
+            "score": m.score,
+            "pooled_wape": m.pooled_wape,
+            "n_comparable_series": m.n_comparable_series,
+            "mean_wape": m.metric_means.get("wape"),
+            "mean_smape": m.metric_means.get("smape"),
+            "mean_mase": m.metric_means.get("mase"),
+            "mean_rmsse": m.metric_means.get("rmsse"),
+            "mean_mae": m.metric_means.get("mae"),
+            "mean_rmse": m.metric_means.get("rmse"),
+            "mean_coverage": m.metric_means.get("coverage"),
+            "mean_interval_score": m.metric_means.get("interval_score"),
+            "mean_fit_seconds": m.mean_fit_seconds,
+            "median_fit_seconds": m.median_fit_seconds,
+            "no_artifact_rate": m.no_artifact_rate,
+            "n_predictions": m.n_predictions,
+            "lift_vs_best_base": lift.lift if lift is not None else None,
+            "lift_pct": lift.lift_pct if lift is not None else None,
+        }
+        if all_metrics:
+            for col in METRIC_COLUMNS:
+                row[f"mean_{col}"] = m.metric_means.get(col)
+                row[f"p50_{col}"] = m.metric_p50.get(col)
+        records.append(row)
+    if not records:
+        return pd.DataFrame(
+            columns=[
+                "rank",
+                "model_type",
+                "family",
+                "is_ensemble",
+                "ensemble_id",
+                "compute_engine",
+                "n_series",
+                "decision_metric",
+                "score",
+                "pooled_wape",
+                "n_comparable_series",
+                "mean_wape",
+                "mean_smape",
+                "mean_mase",
+                "mean_rmsse",
+                "mean_mae",
+                "mean_rmse",
+                "mean_coverage",
+                "mean_interval_score",
+                "mean_fit_seconds",
+                "median_fit_seconds",
+                "no_artifact_rate",
+                "n_predictions",
+                "lift_vs_best_base",
+                "lift_pct",
+            ]
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def build_predictions_frame(
+    pred_rows: list[dict[str, Any]],
+    *,
+    oof_rows: list[dict[str, Any]] | None = None,
+    history_rows: list[dict[str, Any]] | None = None,
+) -> pd.DataFrame:
+    """Stack historical observations, out-of-fold backtests, and forward predictions into one tidy
+    ``DataFrame`` (pure, offline).
+
+    Columns: ``ts_id``, ``segment`` (``"history"`` / ``"oof"`` / ``"forecast"``), ``model_type``,
+    ``ds``, ``y_true``, ``yhat``, ``yhat_lower``, ``yhat_upper``, ``fold_id``.
+    """
+    import pandas as pd
+
+    cols = [
+        "ts_id",
+        "segment",
+        "model_type",
+        "ds",
+        "y_true",
+        "yhat",
+        "yhat_lower",
+        "yhat_upper",
+        "fold_id",
+    ]
+    records: list[dict[str, Any]] = []
+    for r in history_rows or []:
+        records.append(
+            {
+                "ts_id": str(r["ts_id"]),
+                "segment": "history",
+                "model_type": "actual",
+                "ds": pd.to_datetime(r.get("ds") or r.get("forecast_date")),
+                "y_true": _num(r.get("y") if "y" in r else r.get("y_true")),
+                "yhat": None,
+                "yhat_lower": None,
+                "yhat_upper": None,
+                "fold_id": None,
+            }
+        )
+    for r in oof_rows or []:
+        records.append(
+            {
+                "ts_id": str(r["ts_id"]),
+                "segment": "oof",
+                "model_type": str(r["model_type"]),
+                "ds": pd.to_datetime(r.get("forecast_date") or r.get("ds")),
+                "y_true": _num(r.get("y_true")),
+                "yhat": _num(r.get("yhat")),
+                "yhat_lower": _num(r.get("yhat_lower")),
+                "yhat_upper": _num(r.get("yhat_upper")),
+                "fold_id": r.get("fold_id"),
+            }
+        )
+    for r in pred_rows:
+        records.append(
+            {
+                "ts_id": str(r["ts_id"]),
+                "segment": "forecast",
+                "model_type": str(r["model_type"]),
+                "ds": pd.to_datetime(r.get("forecast_date") or r.get("ds")),
+                "y_true": None,
+                "yhat": _num(r.get("yhat")),
+                "yhat_lower": _num(r.get("yhat_lower")),
+                "yhat_upper": _num(r.get("yhat_upper")),
+                "fold_id": None,
+            }
+        )
+    if not records:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame.from_records(records, columns=cols)
+    return df.sort_values(["ts_id", "segment", "model_type", "ds"]).reset_index(drop=True)
+
+
+def plot_forecasts_frame(
+    frame: pd.DataFrame,
+    *,
+    ts_id: str | None = None,
+    ts_ids: Sequence[str] | None = None,
+    models: Sequence[str] | None = None,
+    max_series: int = 3,
+    history_tail: int | None = None,
+    ax: Any = None,
+    title: str | None = None,
+) -> Any:
+    """Plot historical actuals, out-of-fold backtests, and forward predictions with 80% intervals
+    from a `build_predictions_frame` ``DataFrame`` (pure, offline).
+
+    Renders up to ``max_series`` subplots (one per ``ts_id``) and returns the matplotlib ``Axes``
+    (or array of ``Axes`` when multiple series are plotted).
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    if frame.empty:
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 3))
+        ax.set_title(f"{title or 'Forecasts'} (no rows)")
+        return ax
+
+    df = frame.copy()
+    if "ds" not in df.columns and "forecast_date" in df.columns:
+        df["ds"] = pd.to_datetime(df["forecast_date"])
+    if "segment" not in df.columns:
+        df["segment"] = "forecast"
+
+    effective_ts_ids = [ts_id] if ts_id is not None else (list(ts_ids) if ts_ids else None)
+    all_ts = list(dict.fromkeys(df["ts_id"].astype(str)))
+    chosen_ts = [t for t in all_ts if not effective_ts_ids or t in set(effective_ts_ids)][
+        : max(1, max_series)
+    ]
+    if not chosen_ts:
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 3))
+        ax.set_title(f"{title or 'Forecasts'} (no matching series)")
+        return ax
+
+    palette = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9"]
+    if ax is None:
+        _, axes_raw = plt.subplots(
+            len(chosen_ts),
+            1,
+            figsize=(11, 3.4 * len(chosen_ts)),
+            squeeze=False,
+        )
+        axes = [axes_raw[i, 0] for i in range(len(chosen_ts))]
+    else:
+        axes = [ax]
+        chosen_ts = chosen_ts[:1]
+
+    for sub_ax, tid in zip(axes, chosen_ts, strict=True):
+        sub = df[df["ts_id"].astype(str) == tid]
+        hist = sub[sub["segment"] == "history"].sort_values("ds")
+        if history_tail is not None and history_tail > 0:
+            hist = hist.tail(history_tail)
+        if not hist.empty:
+            sub_ax.plot(
+                hist["ds"],
+                hist["y_true"],
+                color="#222222",
+                linewidth=1.6,
+                label="actual (history)",
+            )
+        oof = sub[sub["segment"] == "oof"]
+        if not oof.empty and hist.empty and "y_true" in oof.columns:
+            actual_oof = (
+                oof.dropna(subset=["y_true"]).drop_duplicates(subset=["ds"]).sort_values("ds")
+            )
+            if not actual_oof.empty:
+                sub_ax.plot(
+                    actual_oof["ds"],
+                    actual_oof["y_true"],
+                    color="#222222",
+                    linewidth=1.5,
+                    label="actual (OOF)",
+                )
+        fc_models = [
+            m
+            for m in dict.fromkeys(sub[sub["segment"] != "history"]["model_type"].astype(str))
+            if not models or m in set(models)
+        ]
+        for m_idx, m_name in enumerate(fc_models):
+            color = palette[m_idx % len(palette)]
+            m_oof = oof[oof["model_type"].astype(str) == m_name].sort_values("ds")
+            if not m_oof.empty:
+                sub_ax.plot(
+                    m_oof["ds"],
+                    m_oof["yhat"],
+                    linestyle="--",
+                    linewidth=1.3,
+                    color=color,
+                    alpha=0.85,
+                    label=f"{m_name} (OOF)",
+                )
+            m_fc = sub[
+                (sub["segment"] == "forecast") & (sub["model_type"].astype(str) == m_name)
+            ].sort_values("ds")
+            if not m_fc.empty:
+                sub_ax.plot(
+                    m_fc["ds"],
+                    m_fc["yhat"],
+                    linestyle="-",
+                    linewidth=2.0,
+                    color=color,
+                    label=f"{m_name} (forecast)",
+                )
+                if (
+                    "yhat_lower" in m_fc.columns
+                    and "yhat_upper" in m_fc.columns
+                    and m_fc["yhat_lower"].notna().any()
+                    and m_fc["yhat_upper"].notna().any()
+                ):
+                    sub_ax.fill_between(
+                        m_fc["ds"],
+                        m_fc["yhat_lower"].astype(float),
+                        m_fc["yhat_upper"].astype(float),
+                        color=color,
+                        alpha=0.16,
+                    )
+        sub_ax.set_title(f"{title + ' — ' if title else ''}series: {tid}")
+        sub_ax.set_ylabel("value")
+        sub_ax.legend(loc="best", fontsize=8, ncol=2)
+    axes[-1].set_xlabel("date")
+    return axes[0] if len(axes) == 1 else axes
+
+
+def _hierarchy_level_label(ts_id: str) -> str:
+    """Classify a hierarchical ``ts_id`` into ``total``, ``aggregate``, or ``bottom`` (pure)."""
+    if ts_id == "__total__":
+        return "total"
+    if "/" in ts_id:
+        return "aggregate"
+    return "bottom"
+
+
+def build_hierarchy_frame(pred_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Summarize hierarchical predictions by model and level, verifying additive coherence
+    ($\\max_t |\\hat{y}_{\\text{total},t} - \\sum_{b \\in \\text{bottom}} \\hat{y}_{b,t}|$) (pure).
+    """
+    import pandas as pd
+
+    cols = [
+        "model_type",
+        "level",
+        "n_series",
+        "n_points",
+        "mean_yhat",
+        "sum_yhat",
+        "max_coherence_residual",
+    ]
+    if not pred_rows:
+        return pd.DataFrame(columns=cols)
+
+    df = pd.DataFrame.from_records(pred_rows)
+    df["ts_id"] = df["ts_id"].astype(str)
+    df["level"] = df["ts_id"].map(_hierarchy_level_label)
+    date_col = "forecast_date" if "forecast_date" in df.columns else "ds"
+
+    records: list[dict[str, Any]] = []
+    for model_type, m_grp in df.groupby("model_type", sort=True):
+        tot = m_grp[m_grp["level"] == "total"].groupby(date_col)["yhat"].sum()
+        bot = m_grp[m_grp["level"] == "bottom"].groupby(date_col)["yhat"].sum()
+        residual: float | None = None
+        if not tot.empty and not bot.empty:
+            aligned = pd.concat([tot.rename("total"), bot.rename("bottom")], axis=1).dropna()
+            if not aligned.empty:
+                residual = float((aligned["total"] - aligned["bottom"]).abs().max())
+        for lvl in ("total", "aggregate", "bottom"):
+            l_grp = m_grp[m_grp["level"] == lvl]
+            if l_grp.empty:
+                continue
+            records.append(
+                {
+                    "model_type": str(model_type),
+                    "level": lvl,
+                    "n_series": int(l_grp["ts_id"].nunique()),
+                    "n_points": int(len(l_grp)),
+                    "mean_yhat": float(l_grp["yhat"].astype(float).mean()),
+                    "sum_yhat": float(l_grp["yhat"].astype(float).sum()),
+                    "max_coherence_residual": residual,
+                }
+            )
+    return pd.DataFrame.from_records(records, columns=cols)
+
+
+def plot_hierarchy_frame(
+    pred_rows: list[dict[str, Any]] | pd.DataFrame,
+    *,
+    model_type: str | None = None,
+    ax: Any = None,
+    title: str | None = None,
+) -> Any:
+    """Plot top-level (``__total__``) forecast against the sum of bottom-level leaf forecasts (or
+    a level summary from `build_hierarchy_frame`) to visually verify hierarchical coherence.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    df = (
+        pred_rows.copy()
+        if isinstance(pred_rows, pd.DataFrame)
+        else pd.DataFrame.from_records(pred_rows)
+    )
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 4.5))
+    if df.empty:
+        ax.set_title(f"{title or 'Hierarchical Coherence'} (no rows)")
+        return ax
+
+    # Support passing the summary DataFrame from build_hierarchy_frame directly
+    if {"level", "sum_yhat", "model_type"} <= set(df.columns) and "ts_id" not in df.columns:
+        chosen_model = model_type or str(df["model_type"].iloc[0])
+        sub = df[df["model_type"].astype(str) == chosen_model]
+        ax.bar(sub["level"].astype(str), sub["sum_yhat"].astype(float), color="#0072B2", alpha=0.85)
+        ax.set_title(f"{title or 'Hierarchical Rollup Totals'}: {chosen_model}")
+        ax.set_xlabel("hierarchy level")
+        ax.set_ylabel("sum of yhat")
+        return ax
+
+    df["ts_id"] = df["ts_id"].astype(str)
+    df["level"] = df["ts_id"].map(_hierarchy_level_label)
+    date_col = "forecast_date" if "forecast_date" in df.columns else "ds"
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    chosen_model = model_type or str(df["model_type"].iloc[0])
+    sub = df[df["model_type"].astype(str) == chosen_model]
+    if sub.empty:
+        ax.set_title(f"{title or 'Hierarchical Coherence'} (no rows for {chosen_model})")
+        return ax
+
+    tot = sub[sub["level"] == "total"].groupby(date_col)["yhat"].sum().sort_index()
+    bot = sub[sub["level"] == "bottom"].groupby(date_col)["yhat"].sum().sort_index()
+    if not tot.empty:
+        ax.plot(
+            tot.index,
+            tot.to_numpy(),
+            color="#0072B2",
+            linewidth=2.4,
+            label=f"__total__ ({chosen_model})",
+        )
+    if not bot.empty:
+        ax.plot(
+            bot.index,
+            bot.to_numpy(),
+            color="#E69F00",
+            linestyle="--",
+            linewidth=2.0,
+            label=f"Σ bottom-level leaves ({chosen_model})",
+        )
+    residual_str = ""
+    if not tot.empty and not bot.empty:
+        aligned = pd.concat([tot.rename("t"), bot.rename("b")], axis=1).dropna()
+        if not aligned.empty:
+            max_err = float((aligned["t"] - aligned["b"]).abs().max())
+            residual_str = f" — max |total − Σ bottom| = {max_err:.2e}"
+    ax.set_title(f"{title or 'Hierarchical Coherence'}: {chosen_model}{residual_str}")
+    ax.set_xlabel("forecast date")
+    ax.set_ylabel("forecast value")
+    ax.legend(loc="best", fontsize=9)
+    return ax
+
+
+def build_cohorts_frame(review: RunReview) -> pd.DataFrame:
+    """Convert a `RunReview`'s per-model `BacktestCohort` and comparable holdout metrics into a
+    tidy ``DataFrame`` (pure, offline).
+
+    Exposes ``v_backtest_coverage`` and ``v_model_leaderboard_comparable`` side-by-side so you can
+    inspect achieved fold counts (`fold_histogram`), refit modes (`per_fold` / `recondition` /
+    `extrapolate` / `unsupported`), `staleness_gap` (cost of never refitting), and holdout-fold
+    `pooled_wape` alongside the fleet mean `score`.
+    """
+    import pandas as pd
+
+    cols = [
+        "model_type",
+        "family",
+        "is_ensemble",
+        "n_series",
+        "score",
+        "pooled_wape",
+        "n_comparable_series",
+        "n_full",
+        "n_reduced",
+        "n_unscored",
+        "n_failed",
+        "n_not_requested",
+        "fold_histogram",
+        "refit_modes",
+        "staleness_gap",
+    ]
+    if not review.models:
+        return pd.DataFrame(columns=cols)
+
+    records: list[dict[str, Any]] = []
+    for m in review.models:
+        c = m.cohort or BacktestCohort()
+        hist_str = ", ".join(f"{k}f:{v}" for k, v in c.fold_histogram.items()) or "none"
+        modes_str = ", ".join(f"{k}:{v}" for k, v in c.refit_modes.items()) or "none"
+        records.append(
+            {
+                "model_type": m.model_type,
+                "family": m.family,
+                "is_ensemble": m.is_ensemble,
+                "n_series": m.n_series if m.n_series is not None else c.n_series,
+                "score": m.score,
+                "pooled_wape": m.pooled_wape,
+                "n_comparable_series": m.n_comparable_series,
+                "n_full": c.n_full,
+                "n_reduced": c.n_reduced,
+                "n_unscored": c.n_unscored,
+                "n_failed": c.n_failed,
+                "n_not_requested": c.n_not_requested,
+                "fold_histogram": hist_str,
+                "refit_modes": modes_str,
+                "staleness_gap": c.staleness_gap,
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=cols)
+
+
+def build_calibration_frames(
+    report: CalibrationReport,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert a `CalibrationReport` into ``(arms_df, coverage_df)`` pandas ``DataFrame``s (pure).
+
+    * ``arms_df`` summarizes point-forecast bias-correction arm selection (`raw` vs `corrected`
+      win rates and relative margins per model).
+    * ``coverage_df`` reports empirical prediction-interval coverage and mean interval width at
+      each horizon step ($h = 1 \\dots H$) against `report.nominal_coverage`.
+    """
+    import pandas as pd
+
+    arm_cols = [
+        "model_type",
+        "compute_engine",
+        "interval_calibration",
+        "n_series",
+        "n_raw_arm",
+        "raw_arm_rate",
+        "n_auto_decided",
+        "n_compared",
+        "n_corrected_wins",
+        "win_rate",
+        "mean_margin",
+        "median_margin",
+    ]
+    cov_cols = [
+        "model_type",
+        "horizon_step",
+        "n",
+        "coverage",
+        "nominal_coverage",
+        "coverage_error",
+        "mean_width",
+    ]
+    arm_records = [
+        {
+            "model_type": a.model_type,
+            "compute_engine": a.compute_engine,
+            "interval_calibration": a.interval_calibration,
+            "n_series": a.n_series,
+            "n_raw_arm": a.n_raw_arm,
+            "raw_arm_rate": a.raw_arm_rate,
+            "n_auto_decided": a.n_auto_decided,
+            "n_compared": a.n_compared,
+            "n_corrected_wins": a.n_corrected_wins,
+            "win_rate": a.win_rate,
+            "mean_margin": a.mean_margin,
+            "median_margin": a.median_margin,
+        }
+        for a in report.arms
+    ]
+    cov_records = [
+        {
+            "model_type": p.model_type,
+            "horizon_step": p.horizon_step,
+            "n": p.n,
+            "coverage": p.coverage,
+            "nominal_coverage": report.nominal_coverage,
+            "coverage_error": (
+                p.coverage - report.nominal_coverage if p.coverage is not None else None
+            ),
+            "mean_width": p.mean_width,
+        }
+        for p in report.coverage
+    ]
+    arms_df = (
+        pd.DataFrame.from_records(arm_records, columns=arm_cols)
+        if arm_records
+        else pd.DataFrame(columns=arm_cols)
+    )
+    cov_df = (
+        pd.DataFrame.from_records(cov_records, columns=cov_cols)
+        if cov_records
+        else pd.DataFrame(columns=cov_cols)
+    )
+    return arms_df, cov_df
+
+
+def plot_calibration(
+    report: CalibrationReport,
+    *,
+    ax: Any = None,
+    title: str | None = None,
+) -> Any:
+    """Plot empirical prediction-interval coverage and mean interval width by horizon step from a
+    `CalibrationReport` (pure, offline).
+
+    When ``ax=None``, creates a two-panel side-by-side figure:
+    * Left panel: Empirical coverage by horizon step ($h = 1 \\dots H$) vs. nominal target
+      (dashed horizontal reference line at ``report.nominal_coverage``).
+    * Right panel: Mean prediction-interval width ($\\hat{y}_{\\text{upper}} -
+      \\hat{y}_{\\text{lower}}$) by horizon step.
+    """
+    import matplotlib.pyplot as plt
+
+    _, cov_df = build_calibration_frames(report)
+    palette = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9"]
+    heading = (
+        title or f"{report.run_id} — Interval Calibration (nominal {report.nominal_coverage:.0%})"
+    )
+
+    if ax is not None:
+        ax_cov = ax
+        ax_width = None
+    elif not cov_df.empty and cov_df["mean_width"].notna().any():
+        _, (ax_cov, ax_width) = plt.subplots(1, 2, figsize=(12, 4.2))
+    else:
+        _, ax_cov = plt.subplots(figsize=(8, 4.2))
+        ax_width = None
+
+    if cov_df.empty:
+        ax_cov.set_title(f"{heading} (no OOF coverage rows)")
+        return ax_cov
+
+    for idx, (m_name, grp) in enumerate(cov_df.groupby("model_type", sort=True)):
+        ordered = grp.sort_values("horizon_step")
+        color = palette[idx % len(palette)]
+        ax_cov.plot(
+            ordered["horizon_step"],
+            ordered["coverage"],
+            marker="o",
+            markersize=4,
+            linewidth=1.8,
+            color=color,
+            label=str(m_name),
+        )
+        if ax_width is not None and ordered["mean_width"].notna().any():
+            ax_width.plot(
+                ordered["horizon_step"],
+                ordered["mean_width"],
+                marker="s",
+                markersize=3.5,
+                linewidth=1.8,
+                color=color,
+                label=str(m_name),
+            )
+
+    ax_cov.axhline(
+        report.nominal_coverage,
+        color="#222222",
+        linestyle="--",
+        linewidth=1.4,
+        label=f"nominal ({report.nominal_coverage:.0%})",
+    )
+    ax_cov.set_ylim(-0.02, 1.05)
+    ax_cov.set_xlabel("horizon step (h)")
+    ax_cov.set_ylabel("empirical coverage")
+    ax_cov.set_title(heading)
+    ax_cov.legend(loc="best", fontsize=8)
+
+    if ax_width is not None:
+        ax_width.set_xlabel("horizon step (h)")
+        ax_width.set_ylabel("mean interval width (yhat_upper − yhat_lower)")
+        ax_width.set_title(f"{report.run_id} — Interval Width by Step")
+        ax_width.legend(loc="best", fontsize=8)
+        return (ax_cov, ax_width)
+    return ax_cov
+
+
+def build_ensemble_weights_frame(
+    best_params_rows: list[dict[str, Any]] | pd.DataFrame,
+) -> pd.DataFrame:
+    """Unpack learned ensemble stacking weights from `read_best_params` rows or a
+    `build_best_params_frame` ``DataFrame`` into a long-form ``DataFrame`` (pure, offline).
+
+    Columns: ``ts_id``, ``ensemble_model``, ``strategy``, ``base_model``, ``weight``, ``wape``.
+    """
+    import json
+
+    import pandas as pd
+
+    cols = ["ts_id", "ensemble_model", "strategy", "base_model", "weight", "wape"]
+    if isinstance(best_params_rows, pd.DataFrame):
+        if best_params_rows.empty:
+            return pd.DataFrame(columns=cols)
+        raw_list = best_params_rows.to_dict(orient="records")
+    else:
+        raw_list = list(best_params_rows)
+    if not raw_list:
+        return pd.DataFrame(columns=cols)
+
+    records: list[dict[str, Any]] = []
+    for r in raw_list:
+        m_type = str(r.get("model_type") or "")
+        is_ens = (
+            bool(r.get("is_ensemble"))
+            or (r.get("ensemble_id") is not None)
+            or m_type.startswith("ensemble_")
+        )
+        if not is_ens:
+            continue
+        raw_bp = r.get("best_params")
+        parsed: Any = None
+        if isinstance(raw_bp, dict):
+            parsed = raw_bp
+        elif isinstance(raw_bp, str) and raw_bp:
+            try:
+                parsed = json.loads(raw_bp)
+            except ValueError:
+                parsed = None
+        if not isinstance(parsed, dict) or not parsed:
+            continue
+        strategy = m_type.removeprefix("ensemble_")
+        for base_model, weight in sorted(parsed.items()):
+            w_val = _num(weight)
+            if w_val is None:
+                continue
+            records.append(
+                {
+                    "ts_id": str(r.get("ts_id") or ""),
+                    "ensemble_model": m_type,
+                    "strategy": strategy,
+                    "base_model": str(base_model),
+                    "weight": w_val,
+                    "wape": _num(r.get("wape")),
+                }
+            )
+    if not records:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame.from_records(records, columns=cols)
+
+
+def plot_ensemble_weights(
+    weights_df: list[dict[str, Any]] | pd.DataFrame,
+    *,
+    ax: Any = None,
+    title: str | None = None,
+) -> Any:
+    """Plot base-model stacking weights across learned ensemble strategies (`nnls`, `ridge`, `xgb`)
+    as a horizontal stacked bar chart (pure, offline).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    df = (
+        weights_df
+        if isinstance(weights_df, pd.DataFrame) and "base_model" in weights_df.columns
+        else build_ensemble_weights_frame(weights_df)
+    )
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 3.8))
+    if df.empty:
+        ax.set_title(f"{title or 'Ensemble Stacking Weights'} (no learned weight rows)")
+        return ax
+
+    pivot = (
+        df.groupby(["ensemble_model", "base_model"], as_index=False)["weight"]
+        .mean()
+        .pivot(index="ensemble_model", columns="base_model", values="weight")
+        .fillna(0.0)
+    )
+    # Normalize each strategy row to sum to 1.0 for clean stacked composition display
+    row_sums = pivot.sum(axis=1).replace(0.0, 1.0)
+    norm_pivot = pivot.div(row_sums, axis=0)
+
+    palette = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442"]
+    strategies = list(norm_pivot.index)
+    base_models = list(norm_pivot.columns)
+    ys = np.arange(len(strategies))
+    left = np.zeros(len(strategies))
+
+    for idx, bm in enumerate(base_models):
+        vals = norm_pivot[bm].to_numpy(dtype=float)
+        color = palette[idx % len(palette)]
+        ax.barh(ys, vals, left=left, height=0.55, color=color, label=bm)
+        for y_idx, v in enumerate(vals):
+            if v >= 0.08:
+                ax.text(
+                    left[y_idx] + v / 2.0,
+                    y_idx,
+                    f"{v:.0%}",
+                    ha="center",
+                    va="center",
+                    color="white" if idx in (0, 2, 3) else "#111111",
+                    fontsize=8.5,
+                    fontweight="bold",
+                )
+        left += vals
+
+    ax.set_yticks(list(ys))
+    ax.set_yticklabels(strategies)
+    ax.set_xlim(0, 1.05)
+    ax.set_xlabel("mean normalized base-model weight across series")
+    ax.set_title(title or "Learned Ensemble Stacking Weights by Strategy")
+    ax.legend(
+        loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=min(4, len(base_models)), fontsize=8.5
+    )
+    return ax
+
+
+def explain_forecast_frame(
+    frame: pd.DataFrame,
+    *,
+    ts_id: str | None = None,
+    model_type: str | None = None,
+    seasonal_period: int = 7,
+    covariate_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Decompose a single series' historical actuals, backtest OOF trajectory, and future forecast
+    into interpretable structural components (pure, offline).
+
+    Given a ``frame`` from `build_predictions_frame` (or `Forecaster.predictions_df`), extracts:
+    1. ``trend_baseline`` & ``level_shift``: Smooth rolling/piecewise trend plus abrupt regime-jump
+       detection via `features.level_shift_step`.
+    2. ``seasonal_effect``: Repeating periodic cycle (period ``seasonal_period``, default ``7``)
+       estimated from detrended history and projected across the forecast horizon.
+    3. ``covariate_effect`` (plus ``cov_<name>`` columns when ``covariate_df`` is provided):
+       Ridge-stabilized linear attribution of numeric exogenous covariates across history and the
+       future forecast horizon.
+    4. ``oof_residual`` & ``interval_width``: Out-of-fold error ($y - \\hat{y}_{\\text{OOF}}$) on
+       backtest dates and prediction-interval width ($\\hat{y}_{\\text{upper}} -
+       \\hat{y}_{\\text{lower}}$) across the future horizon.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from .features import level_shift_step
+
+    base_cols = [
+        "ts_id",
+        "model_type",
+        "segment",
+        "ds",
+        "y_true",
+        "yhat",
+        "yhat_lower",
+        "yhat_upper",
+        "trend_baseline",
+        "level_shift",
+        "seasonal_effect",
+        "covariate_effect",
+        "oof_residual",
+        "interval_width",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=base_cols)
+
+    df = frame.copy()
+    if "ds" not in df.columns and "forecast_date" in df.columns:
+        df["ds"] = pd.to_datetime(df["forecast_date"])
+    else:
+        df["ds"] = pd.to_datetime(df["ds"])
+    if "segment" not in df.columns:
+        df["segment"] = "forecast"
+
+    all_ts = list(dict.fromkeys(df["ts_id"].astype(str)))
+    chosen_ts = ts_id if (ts_id is not None and ts_id in set(all_ts)) else all_ts[0]
+    sub = df[df["ts_id"].astype(str) == chosen_ts]
+
+    fc_models = list(dict.fromkeys(sub[sub["segment"] != "history"]["model_type"].astype(str)))
+    chosen_model = (
+        model_type
+        if (model_type is not None and model_type in set(fc_models))
+        else (fc_models[0] if fc_models else "actual")
+    )
+
+    hist = sub[sub["segment"] == "history"].sort_values("ds").drop_duplicates(subset=["ds"])
+    fc = (
+        sub[(sub["segment"] == "forecast") & (sub["model_type"].astype(str) == chosen_model)]
+        .sort_values("ds")
+        .drop_duplicates(subset=["ds"])
+    )
+    oof = (
+        sub[(sub["segment"] == "oof") & (sub["model_type"].astype(str) == chosen_model)]
+        .sort_values("ds")
+        .drop_duplicates(subset=["ds"])
+    )
+
+    timeline_parts: list[pd.DataFrame] = []
+    if not hist.empty:
+        timeline_parts.append(
+            pd.DataFrame(
+                {
+                    "ds": hist["ds"].to_numpy(),
+                    "segment": "history",
+                    "y_true": hist["y_true"].astype(float).to_numpy(),
+                    "yhat": np.nan,
+                    "yhat_lower": np.nan,
+                    "yhat_upper": np.nan,
+                }
+            )
+        )
+    if not fc.empty:
+        timeline_parts.append(
+            pd.DataFrame(
+                {
+                    "ds": fc["ds"].to_numpy(),
+                    "segment": "forecast",
+                    "y_true": np.nan,
+                    "yhat": fc["yhat"].astype(float).to_numpy(),
+                    "yhat_lower": (
+                        fc["yhat_lower"].astype(float).to_numpy()
+                        if "yhat_lower" in fc.columns
+                        else np.nan
+                    ),
+                    "yhat_upper": (
+                        fc["yhat_upper"].astype(float).to_numpy()
+                        if "yhat_upper" in fc.columns
+                        else np.nan
+                    ),
+                }
+            )
+        )
+    if not timeline_parts:
+        return pd.DataFrame(columns=base_cols)
+
+    tl = pd.concat(timeline_parts, ignore_index=True).sort_values("ds").reset_index(drop=True)
+    tl["ts_id"] = chosen_ts
+    tl["model_type"] = chosen_model
+
+    # Overlay OOF yhat & residuals on matching history dates (or append if history was omitted)
+    oof_map: dict[pd.Timestamp, tuple[float | None, float | None, float | None, float | None]] = {}
+    for r in oof.itertuples(index=False):
+        oof_map[pd.Timestamp(r.ds)] = (
+            _num(getattr(r, "y_true", None)),
+            _num(getattr(r, "yhat", None)),
+            _num(getattr(r, "yhat_lower", None)),
+            _num(getattr(r, "yhat_upper", None)),
+        )
+
+    oof_residuals = np.full(len(tl), np.nan)
+    for idx, row_ds in enumerate(tl["ds"]):
+        ts_key = pd.Timestamp(row_ds)
+        if ts_key in oof_map:
+            y_t, yh_oof, lo_oof, hi_oof = oof_map[ts_key]
+            if tl.loc[idx, "segment"] == "history" and yh_oof is not None:
+                tl.loc[idx, "yhat"] = yh_oof
+                if lo_oof is not None:
+                    tl.loc[idx, "yhat_lower"] = lo_oof
+                if hi_oof is not None:
+                    tl.loc[idx, "yhat_upper"] = hi_oof
+                actual_val = tl.loc[idx, "y_true"] if pd.notna(tl.loc[idx, "y_true"]) else y_t
+                if actual_val is not None and pd.notna(actual_val):
+                    oof_residuals[idx] = float(actual_val) - float(yh_oof)
+
+    # Combined continuous signal (y_true on history, yhat on forecast)
+    signal = np.where(
+        tl["segment"] == "history",
+        tl["y_true"].to_numpy(dtype=float),
+        tl["yhat"].to_numpy(dtype=float),
+    )
+    n_hist = int((tl["segment"] == "history").sum())
+
+    # 1. Level-shift detection on history + rolling trend baseline
+    level_shift_arr = np.zeros(len(tl), dtype=float)
+    if n_hist >= 16:
+        hist_series = pd.Series(signal[:n_hist])
+        step_dummy = level_shift_step(hist_series)
+        if step_dummy.max() > 0:
+            pre_mean = float(hist_series[step_dummy == 0].mean())
+            post_mean = float(hist_series[step_dummy == 1].mean())
+            jump = post_mean - pre_mean
+            level_shift_arr[:n_hist] = step_dummy * jump
+            level_shift_arr[n_hist:] = jump
+
+    adj_signal = signal - level_shift_arr
+    win = max(3, int(seasonal_period))
+    trend_adj = (
+        pd.Series(adj_signal)
+        .rolling(window=win, center=True, min_periods=1)
+        .mean()
+        .to_numpy(dtype=float)
+    )
+    trend_baseline = trend_adj + level_shift_arr
+    detrended = signal - trend_baseline
+
+    # 2. Periodic seasonal profile (period = seasonal_period)
+    seasonal_effect = np.zeros(len(tl), dtype=float)
+    p = max(1, int(seasonal_period))
+    if p > 1 and len(tl) >= p:
+        ref_len = n_hist if n_hist >= p else len(tl)
+        phase_means = np.zeros(p, dtype=float)
+        for rem in range(p):
+            vals = detrended[:ref_len][np.arange(ref_len) % p == rem]
+            vals = vals[np.isfinite(vals)]
+            phase_means[rem] = float(vals.mean()) if vals.size else 0.0
+        phase_means -= float(phase_means.mean())
+        for idx in range(len(tl)):
+            seasonal_effect[idx] = phase_means[idx % p]
+
+    # 3. Exogenous covariate attribution (when covariate_df is supplied)
+    covariate_effect = np.zeros(len(tl), dtype=float)
+    cov_added_cols: list[str] = []
+    if covariate_df is not None and not covariate_df.empty:
+        cov_work = covariate_df.copy()
+        if "ts_id" in cov_work.columns:
+            cov_work = cov_work[cov_work["ts_id"].astype(str) == chosen_ts]
+        date_c = (
+            "ds"
+            if "ds" in cov_work.columns
+            else ("forecast_date" if "forecast_date" in cov_work.columns else None)
+        )
+        if date_c is not None and not cov_work.empty:
+            cov_work["ds"] = pd.to_datetime(cov_work[date_c])
+            cov_work = cov_work.sort_values("ds").drop_duplicates(subset=["ds"])
+            exclude = {
+                "ts_id",
+                "ds",
+                "forecast_date",
+                "y",
+                "y_true",
+                "yhat",
+                "yhat_lower",
+                "yhat_upper",
+                "segment",
+                "fold_id",
+            }
+            num_cols = [
+                c
+                for c in cov_work.columns
+                if c not in exclude and pd.api.types.is_numeric_dtype(cov_work[c])
+            ]
+            if num_cols:
+                merged_cov = pd.merge(tl[["ds"]], cov_work[["ds", *num_cols]], on="ds", how="left")
+                X_raw = merged_cov[num_cols].ffill().bfill().fillna(0.0).to_numpy(dtype=float)
+                fit_n = n_hist if n_hist >= len(num_cols) + 2 else len(tl)
+                col_means = X_raw[:fit_n].mean(axis=0)
+                X_centered = X_raw - col_means
+                target_res = (detrended - seasonal_effect)[:fit_n]
+                valid_mask = np.isfinite(target_res)
+                if int(valid_mask.sum()) >= 2:
+                    X_fit = X_centered[:fit_n][valid_mask]
+                    y_fit = target_res[valid_mask]
+                    # Small ridge penalty so collinear covariates decompose cleanly
+                    gram = X_fit.T @ X_fit + 1e-3 * np.eye(X_fit.shape[1])
+                    betas = np.linalg.solve(gram, X_fit.T @ y_fit)
+                    for c_idx, c_name in enumerate(num_cols):
+                        col_contrib = X_centered[:, c_idx] * float(betas[c_idx])
+                        out_col = f"cov_{c_name}"
+                        tl[out_col] = col_contrib
+                        cov_added_cols.append(out_col)
+                        covariate_effect += col_contrib
+
+    tl["trend_baseline"] = trend_baseline
+    tl["level_shift"] = level_shift_arr
+    tl["seasonal_effect"] = seasonal_effect
+    tl["covariate_effect"] = covariate_effect
+    tl["oof_residual"] = oof_residuals
+    tl["interval_width"] = np.where(
+        tl["yhat_upper"].notna() & tl["yhat_lower"].notna(),
+        tl["yhat_upper"].astype(float) - tl["yhat_lower"].astype(float),
+        np.nan,
+    )
+    return tl[[*base_cols, *cov_added_cols]]
+
+
+def plot_forecast_explanation(
+    explanation_df: pd.DataFrame,
+    *,
+    history_tail: int | None = None,
+    title: str | None = None,
+) -> Any:
+    """Render a 4-panel forecast explainability & decomposition chart from an
+    `explain_forecast_frame` ``DataFrame`` (pure, offline).
+
+    Panels:
+    1. **Trajectory, Trend Baseline & Regime Shift**: History, OOF backtest, future forecast + 80%
+       prediction interval, and structural trend baseline.
+    2. **Periodic Seasonal Cycle**: Extracted seasonal wave across history and forecast horizon.
+    3. **Exogenous Covariate Attribution** (or Detrended Residual Wave when univariate): Individual
+       ``cov_<name>`` contributions and total covariate effect across history and the future
+       horizon.
+    4. **Backtest OOF Residuals & Forecast Horizon Uncertainty**: Out-of-fold errors ($y -
+       \\hat{y}_{\\text{OOF}}$) transitioning into future 80% interval width
+       ($\\hat{y}_{\\text{upper}} - \\hat{y}_{\\text{lower}}$).
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    if explanation_df.empty:
+        _, ax = plt.subplots(figsize=(10, 3))
+        ax.set_title(f"{title or 'Forecast Explanation'} (no rows)")
+        return ax
+
+    df = explanation_df.copy()
+    df["ds"] = pd.to_datetime(df["ds"])
+    if history_tail is not None and history_tail > 0:
+        hist_part = df[df["segment"] == "history"].tail(history_tail)
+        fc_part = df[df["segment"] != "history"]
+        df = pd.concat([hist_part, fc_part], ignore_index=True)
+    tid = str(df["ts_id"].iloc[0])
+    m_name = str(df["model_type"].iloc[0])
+    heading = title or f"Forecast Decomposition & Attribution — series={tid} · model={m_name}"
+
+    _, axes = plt.subplots(4, 1, figsize=(11, 9.2), sharex=True)
+    ax_main, ax_seas, ax_cov, ax_err = axes
+
+    hist = df[df["segment"] == "history"]
+    fc = df[df["segment"] == "forecast"]
+
+    # Panel 1: Main trajectory + trend + level shift
+    if not hist.empty:
+        ax_main.plot(
+            hist["ds"],
+            hist["y_true"],
+            color="#222222",
+            linewidth=1.5,
+            label="actual (history)",
+        )
+        oof_valid = hist[hist["yhat"].notna()]
+        if not oof_valid.empty:
+            ax_main.plot(
+                oof_valid["ds"],
+                oof_valid["yhat"],
+                color="#E69F00",
+                linestyle="--",
+                linewidth=1.4,
+                label=f"{m_name} (OOF)",
+            )
+    if not fc.empty:
+        ax_main.plot(
+            fc["ds"],
+            fc["yhat"],
+            color="#0072B2",
+            linewidth=2.1,
+            label=f"{m_name} (forecast)",
+        )
+        if fc["yhat_lower"].notna().any() and fc["yhat_upper"].notna().any():
+            ax_main.fill_between(
+                fc["ds"],
+                fc["yhat_lower"].astype(float),
+                fc["yhat_upper"].astype(float),
+                color="#0072B2",
+                alpha=0.18,
+                label="80% interval",
+            )
+        ax_main.axvline(fc["ds"].iloc[0], color="#666666", linestyle=":", linewidth=1.2)
+
+    ax_main.plot(
+        df["ds"],
+        df["trend_baseline"],
+        color="#009E73",
+        linewidth=1.8,
+        alpha=0.9,
+        label="trend + regime baseline",
+    )
+    if df["level_shift"].abs().max() > 0:
+        shift_idx = df.index[df["level_shift"].abs() > 0][0]
+        ax_main.axvline(
+            df.loc[shift_idx, "ds"],
+            color="#D55E00",
+            linestyle="-.",
+            linewidth=1.3,
+            label="detected level shift",
+        )
+    ax_main.set_title(heading)
+    ax_main.set_ylabel("value")
+    ax_main.legend(loc="best", fontsize=8, ncol=3)
+
+    # Panel 2: Seasonal effect
+    ax_seas.plot(
+        df["ds"], df["seasonal_effect"], color="#0072B2", linewidth=1.4, label="seasonal cycle"
+    )
+    ax_seas.axhline(0.0, color="#999999", linestyle=":", linewidth=0.9)
+    if not fc.empty:
+        ax_seas.axvline(fc["ds"].iloc[0], color="#666666", linestyle=":", linewidth=1.2)
+    ax_seas.set_ylabel("seasonal")
+    ax_seas.legend(loc="upper right", fontsize=8)
+
+    # Panel 3: Exogenous covariate attribution
+    cov_cols = [c for c in df.columns if c.startswith("cov_")]
+    palette = ["#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9"]
+    if cov_cols:
+        for idx, c_col in enumerate(cov_cols):
+            ax_cov.plot(
+                df["ds"],
+                df[c_col],
+                linewidth=1.3,
+                color=palette[idx % len(palette)],
+                label=c_col.removeprefix("cov_"),
+            )
+        ax_cov.plot(
+            df["ds"],
+            df["covariate_effect"],
+            color="#222222",
+            linestyle="--",
+            linewidth=1.4,
+            label="total covariate effect",
+        )
+    else:
+        ax_cov.plot(
+            df["ds"],
+            df["covariate_effect"],
+            color="#666666",
+            linewidth=1.2,
+            label="covariate effect (none configured)",
+        )
+    ax_cov.axhline(0.0, color="#999999", linestyle=":", linewidth=0.9)
+    if not fc.empty:
+        ax_cov.axvline(fc["ds"].iloc[0], color="#666666", linestyle=":", linewidth=1.2)
+    ax_cov.set_ylabel("covariates")
+    ax_cov.legend(loc="upper right", fontsize=8, ncol=min(4, max(1, len(cov_cols) + 1)))
+
+    # Panel 4: OOF residuals & future interval width
+    oof_res = df[df["oof_residual"].notna()]
+    if not oof_res.empty:
+        ax_err.bar(
+            oof_res["ds"],
+            oof_res["oof_residual"],
+            width=0.8,
+            color="#E69F00",
+            alpha=0.75,
+            label="OOF residual (y − yhat)",
+        )
+    if not fc.empty and fc["interval_width"].notna().any():
+        ax_err.plot(
+            fc["ds"],
+            fc["interval_width"],
+            color="#0072B2",
+            marker="o",
+            markersize=3.5,
+            linewidth=1.6,
+            label="forecast 80% interval width",
+        )
+        ax_err.axvline(fc["ds"].iloc[0], color="#666666", linestyle=":", linewidth=1.2)
+    ax_err.axhline(0.0, color="#999999", linestyle=":", linewidth=0.9)
+    ax_err.set_ylabel("error / width")
+    ax_err.set_xlabel("date")
+    ax_err.legend(loc="best", fontsize=8, ncol=2)
+    return axes

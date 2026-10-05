@@ -78,9 +78,9 @@ always matches the code.
 End-to-end platform verification across Dataproc Serverless, Dataproc GCE clusters, Vertex AI Ray,
 and BigQuery (distinct from forecast backtesting).
 - [validation.md](./validation.md) — **System Validation Ledger**: the CI-enforced matrix of
-  architecture axes, 37 smoke configs, 19 demonstration configs, 8 notebooks, and 18 capabilities
+  architecture axes, 39 smoke configs, 19 demonstration configs, 11 notebooks, and 18 capabilities
   proven on live GCP.
-- [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 37-smoke suite
+- [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 39-smoke suite
   (`smoke_harness.py`) to verify a deployment or infrastructure change.
 
 ## Troubleshooting

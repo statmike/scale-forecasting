@@ -28,10 +28,10 @@ _MARKER = "<!--- sf-header --->"
 
 
 def _template_note(stem: str) -> str:
-    if stem == "model_playground":
+    if stem in ("00_model_playground", "09_custom_models_and_metrics"):
         return (
             "Runs on the **`sf-main`** runtime template (Python 3.11) — or fully locally with just "
-            "ADC + a clone; the playground needs no cloud at all."
+            "a clone; this notebook needs no cloud at all."
         )
     return "Runs on the **`sf-main`** runtime template (Python 3.11)."
 

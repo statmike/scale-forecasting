@@ -544,3 +544,336 @@ def read_comparable_leaderboard(
     except Exception as exc:  # noqa: BLE001 - re-raised with context
         raise RegistryError(f"read_comparable_leaderboard failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
+
+
+def read_predictions(
+    run_id: str,
+    *,
+    ts_ids: list[str] | None = None,
+    models: list[str] | None = None,
+    limit: int = 10000,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Return deduped ``forecast_predictions`` rows for ``run_id``, optionally filtered by series
+    and model.
+
+    Deduplicates with the same ``QUALIFY ROW_NUMBER()`` rule as the serving views (latest write
+    wins per ``(run_id, ts_id, model_type, ensemble_id, forecast_date)``) and orders by
+    ``ts_id, model_type, forecast_date``. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    clauses = ["run_id=@run_id"]
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    if ts_ids:
+        clauses.append("ts_id IN UNNEST(@ts_ids)")
+        params.append(bigquery.ArrayQueryParameter("ts_ids", "STRING", list(ts_ids)))
+    if models:
+        clauses.append("model_type IN UNNEST(@models)")
+        params.append(bigquery.ArrayQueryParameter("models", "STRING", list(models)))
+    where_sql = " AND ".join(clauses)
+    sql = (
+        "SELECT ts_id, model_type, ensemble_id, compute_engine, forecast_date, "
+        "yhat, yhat_lower, yhat_upper "
+        f"FROM `{resolved.registry_table_ref('forecast_predictions')}` "
+        f"WHERE {where_sql} "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY run_id, ts_id, model_type, ensemble_id, forecast_date "
+        "ORDER BY created_at DESC NULLS LAST) = 1 "
+        "ORDER BY ts_id, model_type, forecast_date LIMIT @limit"
+    )
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_predictions failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_oof(
+    run_id: str,
+    *,
+    ts_ids: list[str] | None = None,
+    models: list[str] | None = None,
+    limit: int = 10000,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Return deduped ``backtest_oof`` rows for ``run_id``, optionally filtered by series and model.
+
+    Deduplicates per ``(run_id, ts_id, model_type, ensemble_id, fold_id, forecast_date)`` and
+    orders by ``ts_id, model_type, fold_id, forecast_date``. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    clauses = ["run_id=@run_id"]
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    if ts_ids:
+        clauses.append("ts_id IN UNNEST(@ts_ids)")
+        params.append(bigquery.ArrayQueryParameter("ts_ids", "STRING", list(ts_ids)))
+    if models:
+        clauses.append("model_type IN UNNEST(@models)")
+        params.append(bigquery.ArrayQueryParameter("models", "STRING", list(models)))
+    where_sql = " AND ".join(clauses)
+    sql = (
+        "SELECT ts_id, model_type, ensemble_id, fold_id, cutoff_date, forecast_date, "
+        "horizon_step, y_true, yhat, yhat_lower, yhat_upper "
+        f"FROM `{resolved.registry_table_ref('backtest_oof')}` "
+        f"WHERE {where_sql} "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY run_id, ts_id, model_type, ensemble_id, fold_id, forecast_date "
+        "ORDER BY created_at DESC NULLS LAST) = 1 "
+        "ORDER BY ts_id, model_type, fold_id, forecast_date LIMIT @limit"
+    )
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_oof failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_series_history(
+    run_id: str,
+    *,
+    ts_ids: list[str] | None = None,
+    history_tail: int = 120,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read the last ``history_tail`` historical observations per series for ``run_id``'s source
+    panel.
+
+    Uses the run's stored `RunConfig` (`read_run_config`) to locate the source table and column
+    mappings (and builds hierarchical aggregate series when ``hierarchy.enabled=True``). Returns
+    ``[]`` if the run has no stored config. Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..config import RunConfig
+    from ..engines.bigquery_sql import build_history_query
+    from ..errors import RegistryError
+
+    raw = read_run_config(run_id, settings=settings)
+    if not raw:
+        return []
+    cfg = RunConfig.model_validate(raw)
+    resolved = _resolve_settings(settings)
+    base_sql = build_history_query(cfg, resolved.registry_dataset_ref).rstrip().rstrip(";")
+    if cfg.hierarchy.enabled:
+        client = bigquery.Client(project=resolved.project_id)
+        try:
+            df = client.query(base_sql).result().to_dataframe()
+        except Exception as exc:  # noqa: BLE001 - re-raised with context
+            raise RegistryError(f"read_series_history failed for run {run_id}: {exc}") from exc
+        if df.empty:
+            return []
+        hier_cols = {col for level in cfg.hierarchy.levels for col in level}
+        if hier_cols and hier_cols.issubset(df.columns):
+            from ..reconciliation import build_hierarchy
+
+            hist_cfg = cfg.model_copy(
+                update={
+                    "data": cfg.data.model_copy(
+                        update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
+                    )
+                }
+            )
+            df, _ = build_hierarchy(df, hist_cfg)
+        if ts_ids:
+            df = df[df["ts_id"].astype(str).isin(set(ts_ids))]
+        if history_tail > 0:
+            df = df.sort_values(["ts_id", "ds"]).groupby("ts_id", as_index=False).tail(history_tail)
+        return [
+            {"ts_id": str(r.ts_id), "ds": r.ds, "y": float(r.y)}
+            for r in df[["ts_id", "ds", "y"]].itertuples(index=False)
+        ]
+
+    params: list[Any] = [bigquery.ScalarQueryParameter("tail", "INT64", max(1, history_tail))]
+    ts_clause = ""
+    if ts_ids:
+        ts_clause = " WHERE ts_id IN UNNEST(@ts_ids)"
+        params.append(bigquery.ArrayQueryParameter("ts_ids", "STRING", list(ts_ids)))
+    sql = (
+        f"WITH hist AS ({base_sql}) "
+        f"SELECT ts_id, ds, y FROM hist{ts_clause} "
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_id ORDER BY ds DESC) <= @tail "
+        "ORDER BY ts_id, ds"
+    )
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_series_history failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_best_params(
+    run_id: str,
+    *,
+    limit: int = 5000,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Return deduped full-fit ``forecast_metadata`` rows carrying ``best_params`` for ``run_id``.
+
+    Captures both Optuna hyperparameter tuning winners (on base models) and learned ensemble
+    stacking weights (``nnls`` / ``ridge`` / ``xgb`` on ``ensemble_*`` rows). Raises
+    `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    sql = (
+        "SELECT ts_id, model_type, compute_engine, ensemble_id, "
+        "TO_JSON_STRING(best_params) AS best_params, fit_seconds, wape, mae, rmse, mase "
+        f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
+        "WHERE run_id=@run_id AND fold_id IS NULL AND best_params IS NOT NULL "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
+        "ORDER BY created_at DESC NULLS LAST) = 1 "
+        "ORDER BY model_type, ts_id LIMIT @limit"
+    )
+    params = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_best_params failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_recent_runs(
+    *,
+    limit: int = 25,
+    status: str | None = None,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Return the most recent ``v_run_summary`` rows in this registry, newest ``created_at`` first.
+
+    Optionally filters by ``status`` (e.g. ``"COMPLETED"``). Raises `RegistryError` on failure.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    where_clause = " WHERE status=@status" if status is not None else ""
+    sql = (
+        "SELECT run_id, created_at, status, python_runtime, n_series, n_models, "
+        "backtest_on, runtime_seconds, total_wall_s, overhead_seconds, overhead_fraction, "
+        "dcu_milli_seconds "
+        f"FROM `{resolved.registry_table_ref('v_run_summary')}`"
+        f"{where_clause} "
+        "ORDER BY created_at DESC NULLS LAST LIMIT @limit"
+    )
+    params: list[Any] = [bigquery.ScalarQueryParameter("limit", "INT64", max(1, limit))]
+    if status is not None:
+        params.append(bigquery.ScalarQueryParameter("status", "STRING", status))
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_recent_runs failed: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_series_covariates(
+    run_id: str,
+    *,
+    ts_id: str,
+    history_tail: int = 120,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read the last ``history_tail`` rows of configured dynamic covariates for ``ts_id`` on
+    ``run_id`` (plus future covariates from ``synthetic_future_covariates`` when available).
+
+    Returns ``[]`` if the run has no stored config or no configured dynamic covariates.
+    """
+    from google.cloud import bigquery
+
+    from ..config import RunConfig
+    from ..engines.bigquery_names import _source_ref
+    from ..errors import RegistryError
+
+    raw = read_run_config(run_id, settings=settings)
+    if not raw:
+        return []
+    cfg = RunConfig.model_validate(raw)
+    cov_cols = cfg.features.dynamic_covariates
+    if not cov_cols or cfg.hierarchy.enabled:
+        return []
+
+    resolved = _resolve_settings(settings)
+    source = _source_ref(cfg, resolved.registry_dataset_ref)
+    idc, datec = cfg.data.ts_id_col, cfg.data.date_col
+    col_sql = ", ".join([f"{idc} AS ts_id", f"{datec} AS ds", *cov_cols])
+    sql = (
+        f"SELECT {col_sql} FROM `{source}` "
+        f"WHERE {idc}=@ts_id "
+        f"QUALIFY ROW_NUMBER() OVER (PARTITION BY {idc} ORDER BY {datec} DESC) <= @tail "
+        f"ORDER BY {datec}"
+    )
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("ts_id", "STRING", ts_id),
+        bigquery.ScalarQueryParameter("tail", "INT64", max(1, history_tail)),
+    ]
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = [
+            dict(r)
+            for r in client.query(
+                sql, job_config=bigquery.QueryJobConfig(query_parameters=params)
+            ).result()
+        ]
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_series_covariates failed for run {run_id}: {exc}") from exc
+
+    # When known_future_covariates are configured on the shipped synthetic panel, also fetch
+    # future horizon rows from synthetic_future_covariates if present.
+    future_cols = cfg.features.known_future_covariates
+    if future_cols and cfg.data.source_table.endswith("synthetic_daily_series"):
+        fut_table = f"{resolved.registry_dataset_ref}.synthetic_future_covariates"
+        fut_col_sql = ", ".join(["ts_id", "ds", *future_cols])
+        fut_sql = (
+            f"SELECT {fut_col_sql} FROM `{fut_table}` WHERE ts_id=@ts_id ORDER BY ds LIMIT @horizon"
+        )
+        fut_params = [
+            bigquery.ScalarQueryParameter("ts_id", "STRING", ts_id),
+            bigquery.ScalarQueryParameter("horizon", "INT64", cfg.data.horizon),
+        ]
+        try:
+            fut_rows = [
+                dict(r)
+                for r in client.query(
+                    fut_sql, job_config=bigquery.QueryJobConfig(query_parameters=fut_params)
+                ).result()
+            ]
+            rows.extend(fut_rows)
+        except Exception:  # noqa: BLE001, S110 - optional future table
+            pass
+    return rows

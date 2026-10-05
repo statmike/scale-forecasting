@@ -99,7 +99,7 @@ Revisit only if Vertex Ray ships a Python 3.12 cluster image; until then 3.11 is
 | `uv`-installed 3.11.15 into `/opt/venv`, `debian:12-slim` | `docker/Dockerfile` |
 | Batch default runtime `"2.2"` | `src/scale_forecasting/batch_infra.py` |
 | Container attached on submit | `src/scale_forecasting/submit.py` |
-| Spark Connect session `version = "2.3"` + container | `notebooks/01_spark_via_connect.ipynb` (session cell) |
+| Spark Connect session `version = "2.3"` + container | `notebooks/03_spark_serverless_and_connect.ipynb` (Act 5) |
 | Ray `python_version="3.11"`, `ray_version="2.47"` | `src/scale_forecasting/ray_infra.py` |
 | Colab template pinned to `py311` (REST PATCH) | `terraform/main/modules/colab/main.tf` |
 

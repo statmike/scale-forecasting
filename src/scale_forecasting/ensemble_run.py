@@ -807,37 +807,280 @@ def _override_ensemble(cfg: RunConfig, strategies: list[str] | None) -> RunConfi
     return cfg.model_copy(update={"ensemble": ensemble})
 
 
+def merge_configs_for_ensemble(
+    configs: Iterable[RunConfig], strategies: list[str] | None = None
+) -> RunConfig:
+    """Merge multiple compatible `RunConfig` objects into a single composite config for cross-run
+    ensembling (pure).
+
+    Verifies that at least two configs are supplied and that all source configs share the same
+    ``data.source_table``, ``data.freq``, ``data.horizon``, and ``backtest`` geometry (`enabled`,
+    `n_folds`, `horizon`, `step`), raising `ConfigError` on any mismatch. The returned config uses
+    the first config as its base, sets ``models`` to the ordered deduplicated union of models
+    across all source configs, merges ``model_params``, and enables the requested ensemble
+    ``strategies`` (defaulting to ``["mean", "median", "inverse_error"]`` when neither
+    ``strategies`` nor any source config enables strategies).
+    """
+    from .config import EnsembleConfig, RunConfig
+    from .errors import ConfigError
+
+    cfg_list = list(configs)
+    if len(cfg_list) < 2:
+        raise ConfigError(
+            f"merge_configs_for_ensemble requires at least 2 source configs; got {len(cfg_list)}."
+        )
+    first = cfg_list[0]
+    merged_models: list[str] = []
+    merged_params: dict[str, dict[str, Any]] = {}
+    default_strategies: list[str] = []
+
+    for idx, c in enumerate(cfg_list):
+        if (c.data.source_table, c.data.freq) != (
+            first.data.source_table,
+            first.data.freq,
+        ):
+            raise ConfigError(
+                f"cross-run ensemble source config[{idx}] has incompatible data source/freq "
+                f"({c.data.source_table}, freq={c.data.freq!r}) vs "
+                f"({first.data.source_table}, freq={first.data.freq!r})."
+            )
+        if c.data.horizon != first.data.horizon:
+            raise ConfigError(
+                f"cross-run ensemble source config[{idx}] has data.horizon={c.data.horizon}, "
+                f"which does not match config[0].data.horizon={first.data.horizon}."
+            )
+        if (
+            c.backtest.enabled != first.backtest.enabled
+            or c.backtest.n_folds != first.backtest.n_folds
+            or c.backtest.horizon != first.backtest.horizon
+            or c.backtest.step != first.backtest.step
+        ):
+            raise ConfigError(
+                f"cross-run ensemble source config[{idx}] has incompatible backtest geometry "
+                f"(enabled={c.backtest.enabled}, n_folds={c.backtest.n_folds}, "
+                f"horizon={c.backtest.horizon}, step={c.backtest.step}) vs "
+                f"(enabled={first.backtest.enabled}, n_folds={first.backtest.n_folds}, "
+                f"horizon={first.backtest.horizon}, step={first.backtest.step})."
+            )
+        for m in c.models:
+            if m not in merged_models:
+                merged_models.append(m)
+        for m, p in c.model_params.items():
+            merged_params[m] = dict(p)
+        for s in c.ensemble.strategies:
+            if s not in default_strategies:
+                default_strategies.append(s)
+
+    chosen_strategies = (
+        list(strategies)
+        if strategies is not None
+        else (default_strategies or ["mean", "median", "inverse_error"])
+    )
+    ensemble = EnsembleConfig.model_validate(
+        {
+            "enabled": True,
+            "strategies": chosen_strategies,
+            "prune_threshold": first.ensemble.prune_threshold,
+        }
+    )
+    payload = first.model_dump(mode="python")
+    payload["models"] = merged_models
+    payload["model_params"] = merged_params
+    payload["ensemble"] = ensemble.model_dump(mode="python")
+    return RunConfig.model_validate(payload)
+
+
+def cross_run_copy_sql(
+    dataset: str,
+    table: str,
+    model_list: str,
+    dedupe_by: str,
+) -> str:
+    """Build an idempotent SQL ``INSERT INTO ... SELECT * REPLACE`` statement that consolidates
+    deduplicated base-model rows from ``@source_run_ids`` into ``@target_run_id`` (pure).
+
+    Only base-model rows (``ensemble_id IS NULL``) matching ``model_list`` are copied, deduplicated
+    across ``@source_run_ids`` with newest ``created_at`` winning per ``dedupe_by`` grain. Any
+    ``(ts_id, model_type)`` cell already present under ``@target_run_id`` is skipped via ``NOT
+    EXISTS`` so re-running cross-run ensembling with additional strategies never duplicates base
+    rows.
+    """
+    return (
+        f"INSERT INTO `{dataset}.{table}`\n"
+        f"SELECT * REPLACE (@target_run_id AS run_id, @created_at AS created_at)\n"
+        f"FROM `{dataset}.{table}` AS src\n"
+        f"WHERE src.run_id IN UNNEST(@source_run_ids)\n"
+        f"  AND src.model_type IN ({model_list})\n"
+        f"  AND src.ensemble_id IS NULL\n"
+        f"  AND NOT EXISTS (\n"
+        f"    SELECT 1 FROM `{dataset}.{table}` AS existing\n"
+        f"    WHERE existing.run_id = @target_run_id\n"
+        f"      AND existing.ts_id = src.ts_id\n"
+        f"      AND existing.model_type = src.model_type\n"
+        f"      AND existing.ensemble_id IS NULL\n"
+        f"  )\n"
+        f"QUALIFY ROW_NUMBER() OVER (\n"
+        f"  PARTITION BY {dedupe_by}\n"
+        f"  ORDER BY src.created_at DESC NULLS LAST\n"
+        f") = 1"
+    )
+
+
+def ensemble_cross_runs(
+    source_run_ids: Iterable[str],
+    strategies: list[str] | None = None,
+    *,
+    target_run_id: str | None = None,
+    settings: Settings | None = None,
+) -> str:  # pragma: no cover - GCP I/O, @gcp ensemble smoke
+    """Blend base models across multiple completed runs into a consolidated cross-run ensemble.
+
+    Reads the stored `RunConfig` for each run in ``source_run_ids``
+    (`registry.reads.read_run_config`), merges them via `merge_configs_for_ensemble`, derives
+    ``target_run_id`` (defaulting to ``make_run_id(merged_cfg)``), copies deduplicated base rows
+    (``forecast_predictions``, ``backtest_oof``, ``forecast_metadata``) into ``target_run_id`` via
+    `cross_run_copy_sql`, records a ``COMPLETED`` header + ``ensemble`` job row in the registry,
+    and executes `run_ensembles` so the cross-run ensembles and all contributing base models
+    appear side-by-side on ``v_model_leaderboard`` and `review.review_run`. Returns
+    ``target_run_id``.
+    """
+    import time
+    from datetime import UTC, datetime
+
+    from google.cloud import bigquery
+
+    from .config import RunConfig
+    from .errors import ConfigError, get_logger
+    from .registry.header import merge_header_telemetry, update_header, write_header
+    from .registry.ids import make_job_key, make_run_id
+    from .registry.jobs import update_job, write_job
+    from .registry.reads import read_run_config, read_run_summary
+    from .registry.rows import assemble_job_row
+    from .registry.tables import _resolve_settings
+
+    run_ids = [str(r).strip() for r in source_run_ids if str(r).strip()]
+    if len(run_ids) < 2:
+        raise ConfigError(
+            f"ensemble_cross_runs requires at least 2 source_run_ids; got {run_ids!r}."
+        )
+    resolved = _resolve_settings(settings)
+    configs: list[RunConfig] = []
+    for rid in run_ids:
+        raw = read_run_config(rid, settings=resolved)
+        if raw is None:
+            raise ConfigError(f"source run {rid!r} has no stored config in run_registry.")
+        configs.append(RunConfig.model_validate(raw))
+
+    merged_cfg = merge_configs_for_ensemble(configs, strategies=strategies)
+    out_run_id = target_run_id or make_run_id(merged_cfg)
+    log = get_logger(__name__)
+    t0 = time.monotonic()
+    created_at = datetime.now(UTC)
+
+    existing_summary = read_run_summary(out_run_id, settings=resolved)
+    if existing_summary is None:
+        write_header(merged_cfg, out_run_id, settings=resolved, status="RUNNING")
+
+    job_key = make_job_key(out_run_id, "ensemble", 1)
+    if existing_summary is None:
+        write_job(
+            assemble_job_row(
+                out_run_id,
+                "ensemble",
+                1,
+                created_at,
+                runtime="bigquery",
+                started_at=created_at,
+            ),
+            settings=resolved,
+        )
+
+    dataset = resolved.registry_dataset_ref
+    model_list = ", ".join(f"'{m}'" for m in merged_cfg.models)
+    client = bigquery.Client(project=resolved.project_id)
+    copy_params = [
+        bigquery.ArrayQueryParameter("source_run_ids", "STRING", run_ids),
+        bigquery.ScalarQueryParameter("target_run_id", "STRING", out_run_id),
+        bigquery.ScalarQueryParameter("created_at", "TIMESTAMP", created_at),
+    ]
+    for table, dedupe_by in (
+        ("forecast_predictions", "src.ts_id, src.model_type, src.forecast_date"),
+        ("backtest_oof", "src.ts_id, src.model_type, src.fold_id, src.forecast_date"),
+        ("forecast_metadata", "src.ts_id, src.model_type, src.fold_id"),
+    ):
+        sql = cross_run_copy_sql(dataset, table, model_list, dedupe_by)
+        client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=copy_params)).result()
+
+    run_ensembles(merged_cfg, out_run_id, settings=resolved)
+    elapsed = round(time.monotonic() - t0, 3)
+    ended_at = datetime.now(UTC)
+    if existing_summary is None:
+        update_job(
+            job_key,
+            settings=resolved,
+            status="COMPLETED",
+            ended_at=ended_at,
+            runtime_seconds=elapsed,
+        )
+        update_header(
+            out_run_id,
+            settings=resolved,
+            status="COMPLETED",
+            n_series=merged_cfg.data.series_limit,
+            n_models=len(merged_cfg.models),
+            runtime_seconds=elapsed,
+        )
+    try:
+        merge_header_telemetry(
+            out_run_id,
+            {"cross_run_sources": run_ids},
+            settings=resolved,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort telemetry
+        log.warning("cross_run_sources telemetry not recorded for %s: %s", out_run_id, exc)
+    log.info(
+        "cross-run ensemble complete: target_run_id=%s sources=%s models=%s strategies=%s",
+        out_run_id,
+        run_ids,
+        merged_cfg.models,
+        merged_cfg.ensemble.strategies,
+    )
+    return out_run_id
+
+
 def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI wrapper
-    """``python -m scale_forecasting.ensemble_run --config c.json [--run-id …] [--strategies …]``.
+    """``python -m scale_forecasting.ensemble_run [--config c.json] [--run-id …]
+    [--source-run-ids r1,r2] [--strategies …]``.
 
-    Re-runs the ensemble stage against an *already-completed* run's base predictions — the
-    standalone counterpart to the inline call `main.run` makes. Loads the config, optionally
-    overrides the ensemble strategies (``--strategies mean,median``), resolves the infra identity
-    from the ``SF_*`` environment (``--sf-*`` promoted first), and calls `run_ensembles`.
-
-    ``--run-id`` is the **base run whose forecasts are blended**; it defaults to the config's own
-    ``make_run_id`` (re-ensembling the run that config produced), but is passed explicitly to
-    ensemble a run whose base models were computed under a *different* config revision. The
-    ``ensemble_id`` is always derived from the (possibly overridden) ensemble block, so re-running
-    with new ``--strategies`` lands a *new* ``ensemble_id`` beside the existing one — never
-    overwriting (append-only), never colliding (distinctly keyed).
+    Re-runs the ensemble stage against an *already-completed* run's base predictions — or blends
+    base models across *multiple* completed runs when ``--source-run-ids`` is supplied.
     """
     import argparse
 
     from ._infra_args import add_infra_args, export_infra_env
     from .config import load_config
-    from .errors import get_logger
+    from .errors import ConfigError, get_logger
     from .registry.ids import make_run_id
     from .settings import Settings
 
     parser = argparse.ArgumentParser(
-        prog="ensemble_run", description="Re-run the ensemble stage for a completed run."
+        prog="ensemble_run",
+        description="Re-run the ensemble stage for a completed run or across multiple runs.",
     )
-    parser.add_argument("--config", required=True, help="path to the run config JSON")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="path to the run config JSON (required unless --source-run-ids is provided)",
+    )
     parser.add_argument(
         "--run-id",
         default=None,
         help="base run to ensemble (default: derived from --config via make_run_id)",
+    )
+    parser.add_argument(
+        "--source-run-ids",
+        default=None,
+        help="comma-separated list of 2+ completed run_ids to blend into a cross-run ensemble",
     )
     parser.add_argument(
         "--strategies",
@@ -853,6 +1096,19 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
         if ns.strategies is not None
         else None
     )
+    if ns.source_run_ids:
+        sources = [r.strip() for r in ns.source_run_ids.split(",") if r.strip()]
+        out_id = ensemble_cross_runs(
+            sources,
+            strategies=strategies,
+            target_run_id=ns.run_id,
+            settings=Settings.resolve(),
+        )
+        get_logger(__name__).info("ensemble_run cross-run CLI complete: target_run_id=%s", out_id)
+        return
+
+    if not ns.config:
+        raise ConfigError("ensemble_run requires either --config or --source-run-ids.")
     cfg = _override_ensemble(load_config(ns.config), strategies)
     run_id = ns.run_id or make_run_id(cfg)
     get_logger(__name__).info(

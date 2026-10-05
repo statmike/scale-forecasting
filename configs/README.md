@@ -98,7 +98,7 @@ Small, fast configurations used by the [interactive notebooks](../notebooks/READ
 
 ### 2. Scale Benchmarks (10k – 100k Series)
 
-Configurations designed for fleet-scale execution and reviewed in [`notebooks/07_scale_review.ipynb`](../notebooks/07_scale_review.ipynb) and [`docs/quota_and_scale.md`](../docs/quota_and_scale.md):
+Configurations designed for fleet-scale execution and reviewed in [`notebooks/10_registry_operations_and_scale.ipynb`](../notebooks/10_registry_operations_and_scale.ipynb) and [`docs/quota_and_scale.md`](../docs/quota_and_scale.md):
 
 | File | Series | Models | Runtimes Exercised | Purpose |
 | :--- | ---: | :--- | :--- | :--- |

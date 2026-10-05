@@ -92,14 +92,17 @@ nav:
       - Workshop: workshop.md
       - Notebook tour:
           - notebooks/README.md
-          - notebooks/01_spark_via_connect.ipynb
-          - notebooks/02_bigquery_native.ipynb
-          - notebooks/03_combo_and_ensemble.ipynb
-          - notebooks/04_ray_on_vertex.ipynb
-          - notebooks/07_scale_review.ipynb
-          - notebooks/08_run_and_monitor.ipynb
-          - notebooks/09_review_run.ipynb
-          - notebooks/model_playground.ipynb
+          - notebooks/00_model_playground.ipynb
+          - notebooks/01_bigquery_native_sql.ipynb
+          - notebooks/02_vertex_and_gce_vms.ipynb
+          - notebooks/03_spark_serverless_and_connect.ipynb
+          - notebooks/04_ray_on_vertex_gpu.ipynb
+          - notebooks/05_covariates_and_global_models.ipynb
+          - notebooks/06_hierarchical_reconciliation.ipynb
+          - notebooks/07_hpo_backtesting_and_ensembles.ipynb
+          - notebooks/08_multi_engine_master_workflow.ipynb
+          - notebooks/09_custom_models_and_metrics.ipynb
+          - notebooks/10_registry_operations_and_scale.ipynb
   - Reference:
       - Architecture: architecture.md
       - Configuration: configuration_reference.md

@@ -1,64 +1,82 @@
 # Interactive Notebooks (`notebooks/`)
 
 <p align="center">
-  <b>A Guided Interactive Tour of Enterprise Scale Forecasting on Google Cloud</b><br>
-  <i>From local single-series prototyping to distributed execution across Spark, Ray, and BigQuery ML, and 100,000-series scale benchmarking.</i>
+  <b>A Complete Interactive Curriculum for Enterprise Scale Forecasting on Google Cloud</b><br>
+  <i>From local zero-GCP prototyping across all 30 models and 21 metrics to distributed execution across BigQuery ML, GCE, Vertex AI, Spark, and Ray — plus 3-tier covariates, 7-method FPP3 reconciliation, cross-run ensembling, custom 1-file plugins, and 100,000-series operations.</i>
 </p>
 
 ```mermaid
 flowchart TD
-    subgraph Track1["Track 1: Foundations & Local Prototyping"]
-        NB0["model_playground.ipynb<br/>Single-series sandbox · 28 Python models · conformal intervals<br/>(Zero Google Cloud setup)"]
+    subgraph Track1["Track 1: Local Sandbox & Custom Plugins (Zero GCP Required)"]
+        NB00["00_model_playground.ipynb<br/>30 Models · 21 Metrics · Local/Global/Hybrid<br/>3-Tier Covariates · 7 FPP3 Reconciliation"]
+        NB09["09_custom_models_and_metrics.ipynb<br/>1-File BaseModel & BaseMetric Plugins<br/>+ Zero-Rebuild Dynamic Code Shipping"]
     end
 
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
-        NB1["01_spark_via_connect.ipynb<br/>Dataproc Spark Connect & Serverless"]
-        NB2["02_bigquery_native.ipynb<br/>Serverless BigQuery ML (ARIMA_PLUS · TimesFM)"]
-        NB3["03_combo_and_ensemble.ipynb<br/>Spark ∥ BigQuery ML + Stacking Ensembles"]
-        NB4["04_ray_on_vertex.ipynb<br/>Autoscaling Ray on Vertex AI (CPU & T4 GPU)"]
+        NB01["01_bigquery_native_sql.ipynb<br/>Serverless BigQuery SQL (ARIMA_PLUS · TimesFM 2.0)"]
+        NB02["02_vertex_and_gce_vms.ipynb<br/>GCE Single-VM & Vertex AI Multi-Worker (CPU + L4 GPU)"]
+        NB03["03_spark_serverless_and_connect.ipynb<br/>Dataproc Serverless Batch, Cluster & Spark Connect"]
+        NB04["04_ray_on_vertex_gpu.ipynb<br/>Autoscaling Ray on Vertex AI + Fractional GPU Packing"]
     end
 
-    subgraph Track3["Track 3: Operations, Live Monitoring & Scale Review"]
-        NB8["08_run_and_monitor.ipynb<br/>Background Launch & Live In-Place Progress Dashboard"]
-        NB9["09_review_run.ipynb<br/>Post-Run Leaderboard, Error Quantiles & Ensemble Lift"]
-        NB7["07_scale_review.ipynb<br/>100k-Series Cross-Platform Benchmark & Parity Review"]
+    subgraph Track3["Track 3: Covariates, Hierarchy, HPO & Cross-Run Ensembles"]
+        NB05["05_covariates_and_global_models.ipynb<br/>3-Tier Covariates (Static · Future · Past) + Global ML"]
+        NB06["06_hierarchical_reconciliation.ipynb<br/>Coherent Hierarchy Rollups (MinT Shrinkage · WLS · Bottom-Up)"]
+        NB07["07_hpo_backtesting_and_ensembles.ipynb<br/>Optuna HPO + In-Run, Post-Run & Cross-Run Ensembling"]
     end
 
-    Track1 --> Track2 --> Track3
-    NB1 & NB2 --> NB3
-    NB3 & NB4 --> NB8
-    NB8 --> NB9 --> NB7
+    subgraph Track4["Track 4: Master 4-Family DAG, Registry Ops & 100k Scale"]
+        NB08["08_multi_engine_master_workflow.ipynb<br/>All 4 Model Families Parallel DAG + Stacked Ensembles"]
+        NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes, Composer DAG & 100k Review"]
+    end
+
+    NB00 --> NB09
+    Track1 --> Track2 --> Track3 --> Track4
 ```
 
 ---
 
-## Three Learning Tracks
+## Eleven Focused & Combination Workflow Notebooks
 
-The eight notebooks are organized into three sequential learning tracks:
+Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-act journey**:
+1. **Setup & Architecture Context:** Bootstrap, `Settings.resolve()`, and visual Mermaid architecture map.
+2. **Configure & Explain Plan:** Author `RunConfig` and inspect the pre-flight execution table via `forecaster.explain()`.
+3. **Launch & Monitor Live:** Execute asynchronously with live in-place progress bars and infrastructure probes via `forecaster.run_live()`.
+4. **Retrieve & Review Results:** Inspect `forecaster.leaderboard_df()`, `plot_leaderboard()`, `plot_metric_distribution()`, `forecaster.plot_forecasts()`, `forecaster.cohorts_df()`, `forecaster.jobs_df()`, and `forecaster.trace()`.
+5. **Deep Dive / Follow-Up Action:** Inspect 4-panel forecast decomposition (`forecaster.plot_forecast_explanation()`), empirical interval calibration by horizon step (`forecaster.plot_calibration()`), learned ensemble stacking weights (`forecaster.plot_ensemble_weights()`), post-run `reensemble()`, cross-run `ensemble_runs()`, or direct Spark/Ray engine embedding (`run_group`, `chunk_cells`).
 
-### Track 1: Foundations & Local Prototyping
+### Track 1: Foundations, Local Prototyping & Extensibility (Zero GCP Setup)
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`model_playground.ipynb`](./model_playground.ipynb) | Local Python (Offline) | Experiment with any of the 28 Python time-series models on synthetic multi-archetype series. Perform 3-fold rolling-origin backtesting, calibrate conformal prediction intervals, and run multi-model bake-offs with zero GCP credentials. |
+| [`00_model_playground.ipynb`](./00_model_playground.ipynb) | Local Python (Offline) | Explore the full 30-model and 21-metric catalogs (`model_catalog()`, `metric_catalog()`), generate synthetic panels (`sample_data()`), run 3-fold rolling-origin backtesting and conformal interval calibration (`run_model()`, `bakeoff()`), decompose forecasts into trend, regime level shift, seasonality, and exogenous covariate attribution (`explain_forecast_frame()`, `plot_forecast_explanation()`), compare `local` vs. `global` vs. `hybrid` training modes, and run all 7 FPP3 hierarchical reconciliation methods with zero cloud credentials. |
+| [`09_custom_models_and_metrics.ipynb`](./09_custom_models_and_metrics.ipynb) | Local Python (Offline) | Author a custom 1-file `BaseModel` subclass (`@register`) and custom `BaseMetric` subclass, test them immediately in `run_model()` and `bakeoff()`, and inspect automatic BigQuery schema migration (`render_migrations`) and zero-rebuild `src.zip` shipping. |
 
 ---
 
-### Track 2: Distributed Cloud Engines
+### Track 2: Cloud Runtimes & Distributed Engines
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`01_spark_via_connect.ipynb`](./01_spark_via_connect.ipynb) | Dataproc Spark Connect / Batch | Drive the distributed Spark cross-join UDF fan-out (`applyInPandas`) interactively over a remote Spark Connect session. Compare with a fire-and-forget Dataproc Serverless batch. |
-| [`02_bigquery_native.ipynb`](./02_bigquery_native.ipynb) | Serverless BigQuery ML | Execute forecasting directly inside BigQuery using pure SQL (`ARIMA_PLUS`, `TimesFM`). Streamline operations with zero cluster provisioning and query results in `v_model_leaderboard`. |
-| [`03_combo_and_ensemble.ipynb`](./03_combo_and_ensemble.ipynb) | Spark $\parallel$ BigQuery ML + Ensembler | Run a hybrid multi-engine workflow: Spark and BigQuery ML execute concurrently under a single `run_id`. Blend base forecasts using stacked meta-learners (`nnls`, `ridge`, `xgb`) and measure ensemble lift. |
-| [`04_ray_on_vertex.ipynb`](./04_ray_on_vertex.ipynb) | Ray on Vertex AI $\parallel$ BigQuery | Deploy an ephemeral autoscaling Ray cluster over a Private Service Connect (PSC-I) network attachment. Pack deep learning fits (`NeuralProphet`) fractionally onto NVIDIA T4 GPUs and verify automatic cluster teardown. |
+| [`01_bigquery_native_sql.ipynb`](./01_bigquery_native_sql.ipynb) | Serverless BigQuery ML | Execute `arima_plus` (`ML.FORECAST`) and Google Research `timesfm` (`AI.FORECAST` TimesFM 2.0) directly inside BigQuery SQL with zero cluster provisioning, understand why both are per-series (`local`) models, blend them into an ensemble, audit all 21 metrics, and inspect horizon-step interval calibration (`plot_calibration()`) and forecast decomposition (`plot_forecast_explanation()`). |
+| [`02_vertex_and_gce_vms.ipynb`](./02_vertex_and_gce_vms.ipynb) | GCE Single-VM & Vertex AI CustomJob | Compare ephemeral GCE Single-VM (`runtime="gce"`, triple-redundant auto-delete) against multi-worker Vertex AI CustomJob (`runtime="vertex"`, BigQuery Storage Read API `row_restriction` sharding + LPT scheduling + per-family GPU overrides), and inspect job telemetry (`jobs_df()`) and cohort coverage (`cohorts_df()`). |
+| [`03_spark_serverless_and_connect.ipynb`](./03_spark_serverless_and_connect.ipynb) | Dataproc Spark (`serverless` / `cluster` / `connect`) | Run the distributed Arrow-backed `groupBy(bucket).applyInPandas` fan-out on Dataproc Serverless in parallel with BigQuery SQL, compare with Dataproc Standard Clusters and interactive Spark Connect (`DataprocSparkSession`), and embed the pure Spark UDF directly via `spark_io.run_group()`. |
+| [`04_ray_on_vertex_gpu.ipynb`](./04_ray_on_vertex_gpu.ipynb) | Vertex AI Ray (CPU & GPU) | Provision an ephemeral autoscaling Vertex AI Ray cluster over Private Service Connect (`PSC-I`), pack PyTorch deep learning tasks fractionally onto GPUs (`gpu_fraction=0.25`), compare `local`, `global`, and `hybrid` neural network regimes, and embed Ray task chunking directly via `ray_io.chunk_cells()`. |
 
 ---
 
-### Track 3: Operations, Live Monitoring & Scale Benchmarking
+### Track 3: Advanced Modeling — Covariates, Hierarchy, HPO & Cross-Run Ensembles
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`08_run_and_monitor.ipynb`](./08_run_and_monitor.ipynb) | Background Thread + BigQuery | Submit a multi-engine run asynchronously and render a live-refreshing in-place progress bar (`Forecaster.monitor()`). Experience automatic probe escalation when an engine goes quiet. |
-| [`09_review_run.ipynb`](./09_review_run.ipynb) | BigQuery Registry (Read-Only) | Point at any completed `run_id` to generate the model leaderboard, inspect per-series error quantile distributions (`p10`/`p50`/`p90`), and trace the family execution timeline. |
-| [`07_scale_review.ipynb`](./07_scale_review.ipynb) | BigQuery Registry (100k Runs) | Executive benchmark comparison across 100,000-series runs: evaluate compute vs. provisioning overhead on Spark and Ray, review family placement in `v_run_jobs`, and verify numerical parity. |
+| [`05_covariates_and_global_models.ipynb`](./05_covariates_and_global_models.ipynb) | Vertex AI / Spark + Exog Table | Configure all 3 exogenous covariate tiers (`static_covariates`, `future_covariates`, lag-shifted `past_covariates`) on `source_series_covariates_native`, train global cross-series deep learning (`tide`, `tsmixer`) and ML models (`lightgbm`, `xgboost`), and visualize exogenous covariate attribution with `forecaster.plot_forecast_explanation(model_type="lightgbm")`. |
+| [`06_hierarchical_reconciliation.ipynb`](./06_hierarchical_reconciliation.ipynb) | Vertex AI / Spark + Hierarchy | Configure multi-level business hierarchies (`region` $\rightarrow$ `category` $\rightarrow$ `ts_id`), reconcile forecasts across `bottom_up`, `wls_struct`, and `mint_shrink`, and verify exact coherence across levels with `forecaster.hierarchy_df()` and `forecaster.plot_hierarchy()`. |
+| [`07_hpo_backtesting_and_ensembles.ipynb`](./07_hpo_backtesting_and_ensembles.ipynb) | BigQuery + Vertex AI | Tune hyperparameters with Optuna (`hpo.enabled=True`, `forecaster.best_params_df()`), inspect backtest cohort health (`cohorts_df()`), run **in-run ensembling**, add new stacked strategies in seconds with **post-run re-ensembling** (`forecaster.reensemble()`), combine base models across two separate runs using **cross-run ensembling** (`forecaster.ensemble_runs()`), and plot learned base-model weights (`plot_ensemble_weights()`). |
+
+---
+
+### Track 4: Master 4-Family Workflow, Registry Operations & 100k Scale
+| Notebook | Target Environment | What You Will Learn |
+| :--- | :--- | :--- |
+| [`08_multi_engine_master_workflow.ipynb`](./08_multi_engine_master_workflow.ipynb) | Spark $\parallel$ Vertex $\parallel$ BigQuery | Dispatch all active model families concurrently across their optimal runtimes from a single `RunConfig` (**zero-idle per-family compute**), join them in a stacked ensemble, and run the complete diagnostic suite (`leaderboard_df`, `cohorts_df`, `jobs_df`, `plot_calibration`, `plot_ensemble_weights`, `plot_forecasts`, `plot_forecast_explanation`, `plot_trace`). |
+| [`10_registry_operations_and_scale.ipynb`](./10_registry_operations_and_scale.ipynb) | BigQuery Registry & Ops | Zero-SQL registry health audit (`reg.doctor()`, `reg.runs_df()`), historical run reattachment (`Forecaster.from_run_id()`), pre-flight fold feasibility (`feasibility()`), preview-safe Day-2 verbs (`retry`, `settle`, `cancel`), **all 5 production launch pathways** (including live execution of the Cloud Composer 3 `airflow_tasks` DAG sequence against a GCS-staged config), and 100,000-series benchmark review. |
 
 ---
 
@@ -81,7 +99,7 @@ When you deploy the platform via Terraform (`create_colab_runtimes = true`, enab
    uv sync --all-extras
    uv run python -m ipykernel install --user --name scale-forecasting
    ```
-2. Export your deployment's environment variables (not required for `model_playground.ipynb`):
+2. Export your deployment's environment variables (not required for `00_model_playground.ipynb` or `09_custom_models_and_metrics.ipynb`):
    ```bash
    eval "$(cd terraform/main && terraform output -raw sf_env_exports)"
    ```
@@ -91,7 +109,7 @@ When you deploy the platform via Terraform (`create_colab_runtimes = true`, enab
 
 ## Automated Verification
 
-All eight notebooks are continuously verified end-to-end against live Google Cloud infrastructure using the headless acceptance test runner:
+All eleven notebooks are verified end-to-end using the headless acceptance test runner:
 
 ```bash
 uv run python -m scale_forecasting.notebook_acceptance --tier all

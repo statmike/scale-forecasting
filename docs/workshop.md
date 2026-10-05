@@ -21,12 +21,12 @@ flowchart TD
     end
 
     subgraph Labs["Phase 2 · Guided Hands-On Curriculum (Colab Enterprise)"]
-        L1["Lab 1: Foundations & Local Prototyping<br/>model_playground.ipynb"]
-        L2["Lab 2: BigQuery ML Native Forecasting<br/>02_bigquery_native.ipynb"]
-        L3["Lab 3: Distributed Spark & Ray Engines<br/>01_spark_via_connect · 04_ray_on_vertex"]
-        L4["Lab 4: Multi-Engine Stacking Ensembles<br/>03_combo_and_ensemble.ipynb"]
-        L5["Lab 5: Live Operational Monitoring<br/>08_run_and_monitor · 09_review_run"]
-        L6["Lab 6: Enterprise Benchmark & Scale Review<br/>07_scale_review.ipynb"]
+        L1["Lab 1: Foundations & Custom Plugins<br/>00_model_playground · 09_custom_models_and_metrics"]
+        L2["Lab 2: BigQuery ML Native SQL<br/>01_bigquery_native_sql.ipynb"]
+        L3["Lab 3: Cloud Runtimes (Vertex · GCE · Spark · Ray)<br/>02_vertex_and_gce_vms · 03_spark · 04_ray"]
+        L4["Lab 4: Covariates, Global Models & Reconciliation<br/>05_covariates_and_global_models · 06_hierarchical_reconciliation"]
+        L5["Lab 5: HPO, Ensembles & Multi-Engine Blending<br/>07_hpo_backtesting_and_ensembles · 08_multi_engine_master_workflow"]
+        L6["Lab 6: Registry Operations, Monitoring & 100k Scale<br/>10_registry_operations_and_scale.ipynb"]
         L1 --> L2 --> L3 --> L4 --> L5 --> L6
     end
 
@@ -198,79 +198,74 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 
 ---
 
-### Lab 1: Foundations & Local Prototyping
-**Notebook:** [`notebooks/model_playground.ipynb`](notebooks/model_playground.ipynb)  
-**Duration:** 15 minutes  
-**Goal:** Explore the modeling contract, backtesting, and conformal interval calibration with zero cloud compute costs.
-
-#### Key Highlights
-- Inspect the 28 available Python time-series models across statistical, ML, and deep learning families.
-- Generate synthetic multi-archetype series (trending, seasonal, intermittent, promo-spiky).
-- Run [`worker.run_cell`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/worker.py) locally to fit a model, run 3-fold rolling-origin backtesting, and generate empirical conformal prediction bands.
-- Run a multi-model bake-off on a single series and visualize point forecasts and confidence bounds.
-
----
-
-### Lab 2: Serverless BigQuery ML Forecasting
-**Notebook:** [`notebooks/02_bigquery_native.ipynb`](notebooks/02_bigquery_native.ipynb)  
-**Duration:** 15 minutes  
-**Goal:** Execute time-series forecasting directly inside BigQuery with pure SQL.
-
-#### Key Highlights
-- Train `ARIMA_PLUS` across multiple series using native BigQuery ML pipelines.
-- Generate foundation model zero-shot forecasts via BigQuery `AI.FORECAST` (`TimesFM`).
-- Query the resulting `v_model_leaderboard` and `v_model_leaderboard_comparable` views (and `forecast_predictions` table) in BigQuery.
-- Understand how SQL-native models integrate into the same unified metadata schema as Python models.
-
----
-
-### Lab 3: Distributed Execution with Managed Spark & Gemini Enterprise Ray
-**Notebooks:** [`notebooks/01_spark_via_connect.ipynb`](notebooks/01_spark_via_connect.ipynb) & [`notebooks/04_ray_on_vertex.ipynb`](notebooks/04_ray_on_vertex.ipynb)  
-**Duration:** 30 minutes  
-**Goal:** Drive distributed cluster engines interactively and understand horizontal scaling.
-
-#### Key Highlights
-- **Spark Connect:** Open an interactive `DataprocSparkSession` from Colab Enterprise, partition series into groups, and execute `applyInPandas` pandas UDFs across remote executors.
-- **Serverless Batches:** Submit fire-and-forget Dataproc Serverless batches with dynamic core allocation.
-- **Gemini Enterprise (Managed Ray):** Provision an autoscaling Ray cluster via Private Service Connect, pack deep learning fits (`NeuralProphet`) fractionally across NVIDIA T4 GPUs, and verify automatic cluster teardown upon job completion.
-
----
-
-### Lab 4: Hybrid Multi-Engine Execution & Stacking Ensembles
-**Notebook:** [`notebooks/03_combo_and_ensemble.ipynb`](notebooks/03_combo_and_ensemble.ipynb)  
-**Duration:** 25 minutes  
-**Goal:** Execute Python and BigQuery models in parallel under one `run_id`, followed by learned ensemble blending.
-
-#### Key Highlights
-- Configure a hybrid run: Spark executes statistical models while BigQuery ML concurrently fits `ARIMA_PLUS`.
-- Blend base predictions using calculated consensus strategies (`mean`, `median`, `inverse_error`).
-- Train meta-learners (`nnls`, `ridge`, `xgb`) over out-of-fold validation predictions to produce stacked ensemble forecasts.
-- Plot the model leaderboard and measure **Ensemble Lift** (percentage error reduction over the best single base model).
-
----
-
-### Lab 5: Operational Monitoring & Live Progress
-**Notebooks:** [`notebooks/08_run_and_monitor.ipynb`](notebooks/08_run_and_monitor.ipynb) & [`notebooks/09_review_run.ipynb`](notebooks/09_review_run.ipynb)  
-**Duration:** 25 minutes  
-**Goal:** Monitor active distributed runs and perform comprehensive post-run quality audits.
-
-#### Key Highlights
-- Launch a multi-engine run on a background thread and render an interactive live-refreshing progress dashboard (`Forecaster.monitor()`).
-- Observe automatic probe escalation: if an engine slows down, the monitor queries platform job APIs to diagnose executor health.
-- Perform post-run review: analyze cross-series metric distributions (`p10`/`p50`/`p90` error quantiles) and visualize the end-to-end execution timeline.
-
----
-
-### Lab 6: Enterprise Benchmark & Scale Review
-**Notebook:** [`notebooks/07_scale_review.ipynb`](notebooks/07_scale_review.ipynb)  
+### Lab 1: Foundations, Local Prototyping & Custom Plugins
+**Notebooks:** [`notebooks/00_model_playground.ipynb`](notebooks/00_model_playground.ipynb) & [`notebooks/09_custom_models_and_metrics.ipynb`](notebooks/09_custom_models_and_metrics.ipynb)  
 **Duration:** 20 minutes  
-**Goal:** Compare 100,000-series runs across Dataproc Spark, Vertex AI Ray, and BigQuery ML.
+**Goal:** Explore the 30-model and 21-metric contracts, rolling-origin backtesting, conformal interval calibration, and custom plugin authoring with zero cloud compute costs.
 
 #### Key Highlights
-- Load the completed 100k runs from **Phase 1** into a unified comparison dashboard.
-- Compare wall-clock compute duration vs. cluster provisioning overhead across Spark and Ray.
-- Review per-family placement via `v_run_jobs`.
-- Inspect cross-runtime numerical parity: verify that identical statistical algorithms yield identical predictions regardless of the underlying execution engine.
+- Inspect `model_catalog()` (30 models) and `metric_catalog()` (21 metrics) across statistical, ML, deep learning, and native SQL families.
+- Generate synthetic multi-archetype series (trending, seasonal, intermittent, promo-spiky) and run single-series and panel bake-offs (`compare_models`, `compare_panel`).
+- Author custom `BaseModel` and `BaseMetric` plugins in [`notebooks/09_custom_models_and_metrics.ipynb`](notebooks/09_custom_models_and_metrics.ipynb) and verify them through the exact production worker contract (`run_cell`, `run_panel_model`).
+
+---
+
+### Lab 2: Serverless BigQuery ML Native SQL Forecasting
+**Notebook:** [`notebooks/01_bigquery_native_sql.ipynb`](notebooks/01_bigquery_native_sql.ipynb)  
+**Duration:** 15 minutes  
+**Goal:** Execute time-series forecasting directly inside BigQuery with pure SQL (`ARIMA_PLUS` and `AI.FORECAST` `TimesFM`).
+
+#### Key Highlights
+- Preview execution plans with `Forecaster.explain()` before launching any cloud jobs.
+- Train `ARIMA_PLUS` and generate zero-shot foundation model forecasts via BigQuery `AI.FORECAST` (`TimesFM`).
+- Inspect results via `Forecaster.leaderboard_df()`, `Forecaster.predictions_df()`, and `Forecaster.plot_forecasts()`.
+
+---
+
+### Lab 3: Cloud Runtimes — Vertex AI, GCE Single-VM, Managed Spark & Ray on Vertex AI
+**Notebooks:** [`notebooks/02_vertex_and_gce_vms.ipynb`](notebooks/02_vertex_and_gce_vms.ipynb), [`notebooks/03_spark_serverless_and_connect.ipynb`](notebooks/03_spark_serverless_and_connect.ipynb) & [`notebooks/04_ray_on_vertex_gpu.ipynb`](notebooks/04_ray_on_vertex_gpu.ipynb)  
+**Duration:** 30 minutes  
+**Goal:** Drive all four container and cluster compute runtimes and understand per-family hardware sizing.
+
+#### Key Highlights
+- **Vertex AI `CustomJob` & GCE Single-VM (`02`):** Compare managed multi-worker `CustomJob` sharding against low-latency single-VM `gce` execution with triple-redundant self-delete protection.
+- **Managed Spark (`03`):** Run Serverless Batches, Named Clusters, and interactive **Spark Connect** sessions from Colab Enterprise.
+- **Gemini Enterprise Managed Ray (`04`):** Pack deep learning fits (`nhits`, `nbeats`, `tft`, `deepar`, `neuralprophet`) fractionally across NVIDIA L4/T4 GPUs on Vertex AI Ray.
+
+---
+
+### Lab 4: Covariates, Global Training Modes & Hierarchical Reconciliation
+**Notebooks:** [`notebooks/05_covariates_and_global_models.ipynb`](notebooks/05_covariates_and_global_models.ipynb) & [`notebooks/06_hierarchical_reconciliation.ipynb`](notebooks/06_hierarchical_reconciliation.ipynb)  
+**Duration:** 25 minutes  
+**Goal:** Master `local`, `global`, and `local+global` training modes with future/past/static covariates and bottom-up/MinT hierarchical reconciliation.
+
+#### Key Highlights
+- Compare per-series (`local`) vs cross-series (`global`) vs dual (`local+global`) training modes on promotional and weather covariates (`source_series_covariates_native`).
+- Reconcile hierarchical forecasts (`bottom_up`, `top_down`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`) and verify parent-child additivity with `Forecaster.hierarchy_df()` and `Forecaster.plot_hierarchy()`.
+
+---
+
+### Lab 5: Hyperparameter Tuning, Stacking Ensembles & Cross-Run Blending
+**Notebooks:** [`notebooks/07_hpo_backtesting_and_ensembles.ipynb`](notebooks/07_hpo_backtesting_and_ensembles.ipynb) & [`notebooks/08_multi_engine_master_workflow.ipynb`](notebooks/08_multi_engine_master_workflow.ipynb)  
+**Duration:** 25 minutes  
+**Goal:** Combine Optuna hyperparameter tuning, multi-fold backtesting, in-run stacking ensembles, post-hoc re-ensembling, and cross-run multi-engine blending.
+
+#### Key Highlights
+- Run Optuna hyperparameter search and inspect tuned parameters per series via `Forecaster.best_params_df()`.
+- Train meta-learners (`nnls`, `ridge`, `xgb`) over out-of-fold validation predictions and re-run ensemble strategies on completed runs via `Forecaster.reensemble()` without re-fitting base models.
+- Combine completed runs from different engines into a single unified ensemble run via `Registry.ensemble_runs()`.
+
+---
+
+### Lab 6: Registry Operations, Live Monitoring & 100k Scale Review
+**Notebook:** [`notebooks/10_registry_operations_and_scale.ipynb`](notebooks/10_registry_operations_and_scale.ipynb)  
+**Duration:** 20 minutes  
+**Goal:** Operate the platform at 100,000-series scale, audit the 5 analytical SQL views, and export production Airflow DAGs.
+
+#### Key Highlights
+- Run pre-flight health checks (`Registry.doctor()`), live cloud resource probes (`Registry.probe()`), and `Forecaster.run_live()`.
+- Compare 100,000-series benchmark runs across Dataproc Spark, Vertex AI Ray, and BigQuery ML (`Registry.compare()`).
+- Export standalone Cloud Composer 3 / Airflow DAG Python files via `Forecaster.emit_airflow()`.
 
 ---
 

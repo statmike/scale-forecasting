@@ -21,32 +21,35 @@ def test_notebooks_for_tier_is_cumulative() -> None:
     batch = {s.name for s in na.notebooks_for_tier(na.TIER_BATCH)}
     full = {s.name for s in na.notebooks_for_tier(na.TIER_FULL)}
     assert smoke < batch < full  # each tier strictly contains the previous
-    assert "04_ray_on_vertex" in full and "04_ray_on_vertex" not in batch
-    # 09 reviews a finished run — registry-read-only (no compute) → cheapest tier.
-    assert "09_review_run" in smoke
-    # 08 launches a multi-engine run then monitors it — Dataproc spend → batch, not smoke.
-    assert "08_run_and_monitor" in batch and "08_run_and_monitor" not in smoke
+    assert "04_ray_on_vertex_gpu" in full and "04_ray_on_vertex_gpu" not in batch
+    # 10 reviews finished runs — registry-read-only (no compute) → cheapest tier.
+    assert "10_registry_operations_and_scale" in smoke
+    # 08 launches a multi-engine run then monitors it — Dataproc/Vertex spend → batch, not smoke.
+    assert (
+        "08_multi_engine_master_workflow" in batch
+        and "08_multi_engine_master_workflow" not in smoke
+    )
 
 
 def test_notebooks_by_name_selects_exactly_those_notebooks_in_registry_order() -> None:
     """The repair path: re-run one notebook without re-paying for its whole tier."""
-    specs = na.notebooks_by_name(["03_combo_and_ensemble"])
-    assert [s.name for s in specs] == ["03_combo_and_ensemble"]
+    specs = na.notebooks_by_name(["07_hpo_backtesting_and_ensembles"])
+    assert [s.name for s in specs] == ["07_hpo_backtesting_and_ensembles"]
 
     # Registry order, not argument order — the harness runs cheapest-first for a reason, and a
     # caller listing them backwards should not reorder the run.
-    picked = na.notebooks_by_name(["08_run_and_monitor", "02_bigquery_native"])
-    assert [s.name for s in picked] == ["02_bigquery_native", "08_run_and_monitor"]
+    picked = na.notebooks_by_name(["08_multi_engine_master_workflow", "01_bigquery_native_sql"])
+    assert [s.name for s in picked] == ["01_bigquery_native_sql", "08_multi_engine_master_workflow"]
 
 
 def test_notebooks_by_name_raises_on_a_typo_rather_than_selecting_nothing() -> None:
     """A typo that silently matched nothing would exit 0 having run no notebook — a false pass."""
     with pytest.raises(EngineError) as exc:
-        na.notebooks_by_name(["03_combo_and_ensembel"])
-    assert "03_combo_and_ensembel" in str(exc.value)
+        na.notebooks_by_name(["07_hpo_backtesting_and_ensembel"])
+    assert "07_hpo_backtesting_and_ensembel" in str(exc.value)
     # Known-good names alongside the typo must not rescue it.
     with pytest.raises(EngineError):
-        na.notebooks_by_name(["02_bigquery_native", "nope"])
+        na.notebooks_by_name(["01_bigquery_native_sql", "nope"])
 
 
 def test_every_notebook_file_is_registered() -> None:
@@ -192,7 +195,7 @@ def _run_one_acceptance(
     nb_bytes: bytes | None,
 ) -> na.AcceptanceResult:
     """Drive run_acceptance for a single notebook with submit/poll/download all stubbed."""
-    spec = na.REGISTRY["08_run_and_monitor"]
+    spec = na.REGISTRY["08_multi_engine_master_workflow"]
     nb_dir = _touch_notebooks(tmp_path, [spec])
 
     api_detail = "Error encountered during cell execution."
@@ -319,11 +322,13 @@ def test_run_fanout_submits_all_without_polling(
     assert all(r.job_id for r in results) and all(r.detail == "" for r in results)
     # Every notebook routes to the single sf-main template (the registry's routing).
     by_name = {c["notebook_path"].name: c["template_resource_name"] for c in calls}  # type: ignore[union-attr]
-    assert by_name["01_spark_via_connect.ipynb"] == "tmpl/main"
-    assert by_name["07_scale_review.ipynb"] == "tmpl/main"
+    assert by_name["03_spark_serverless_and_connect.ipynb"] == "tmpl/main"
+    assert by_name["10_registry_operations_and_scale.ipynb"] == "tmpl/main"
     # executed_uri is the path the run WILL land at: {out}/fanout/{label}/{name}/{job}/content.ipynb
-    r07 = next(r for r in results if r.name == "07_scale_review")
-    assert r07.executed_uri.endswith(f"fanout/tonight/07_scale_review/{r07.job_id}/content.ipynb")
+    r10 = next(r for r in results if r.name == "10_registry_operations_and_scale")
+    assert r10.executed_uri.endswith(
+        f"fanout/tonight/10_registry_operations_and_scale/{r10.job_id}/content.ipynb"
+    )
 
 
 class _FakeResp:
@@ -390,7 +395,7 @@ def test_run_fanout_missing_file_does_not_sink_others(
     specs = na.notebooks_for_tier(na.TIER_SMOKE)
     nb_dir = _touch_notebooks(tmp_path, specs)
     # Remove one notebook file so its submit is skipped with a detail, others still go.
-    (nb_dir / "02_bigquery_native.ipynb").unlink()
+    (nb_dir / "01_bigquery_native_sql.ipynb").unlink()
 
     monkeypatch.setattr(na, "submit_job", lambda **_: "job-ok")
     results = na.run_fanout(
@@ -404,6 +409,6 @@ def test_run_fanout_missing_file_does_not_sink_others(
         credentials=object(),
         run_label="tonight",
     )
-    missing = next(r for r in results if r.name == "02_bigquery_native")
+    missing = next(r for r in results if r.name == "01_bigquery_native_sql")
     assert missing.job_id == "" and "missing" in missing.detail
-    assert all(r.job_id == "job-ok" for r in results if r.name != "02_bigquery_native")
+    assert all(r.job_id == "job-ok" for r in results if r.name != "01_bigquery_native_sql")

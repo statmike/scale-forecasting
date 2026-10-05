@@ -54,7 +54,7 @@ Requires an active GCP deployment and `SF_*` environment variables exported:
 # Run live BigQuery/GCP integration tests
 uv run pytest -m gcp tests/integration/
 
-# Run headless Colab Enterprise acceptance across all 8 notebooks
+# Run headless Colab Enterprise acceptance across all 11 notebooks
 uv run pytest -m gcp tests/integration/test_notebook_acceptance.py
 
 # Run a numbered end-to-end smoke config from configs/smokes/

@@ -1,7 +1,7 @@
 """Headless notebook acceptance — run every notebook on its Colab Enterprise template.
 
-The 8 notebooks in ``notebooks/`` are first-class run drivers, and Terraform ships two Colab
-Enterprise runtime templates that carry the full ``SF_*`` run identity in their env (see
+The 11 notebooks in ``notebooks/`` (`00`–`10`) are first-class run drivers, and Terraform ships
+Colab Enterprise runtime templates that carry the full ``SF_*`` run identity in their env (see
 ``terraform/main/modules/colab``). This module is the repeatable way to *prove* each notebook runs
 green on the right template — and to re-prove it whenever a notebook changes — without a human
 driving the Colab browser UI.
@@ -23,7 +23,7 @@ and the human-open path validate the *same* thing.
   poll (mirroring ``ray_jobs``'s client-refresh) keeps a long poll from 401-ing.
 * The executed notebook lands at ``{gcsOutputUri}/{JOB_ID}/content.ipynb``.
 
-**Tiers** bound cost — most notebooks orchestrate real Dataproc/Ray compute, so the harness
+**Tiers** bound cost — most notebooks orchestrate real Dataproc/Vertex/Ray compute, so the harness
 escalates deliberately (smoke → batch → full); see `REGISTRY` and `notebooks_for_tier`.
 
 Public surface: `REGISTRY`, `AcceptanceResult`, `run_acceptance`, `notebooks_for_tier`,
@@ -52,7 +52,7 @@ TEMPLATE_MAIN = "main"
 
 # Acceptance tiers, cheapest first. A tier RUNS its own notebooks plus every cheaper tier's, so
 # "batch" implies "smoke" and "full" implies everything — escalate deliberately (each step adds real
-# Dataproc/Ray spend). See notebooks_for_tier().
+# Dataproc/Vertex/Ray spend). See notebooks_for_tier().
 TIER_SMOKE = "smoke"
 TIER_BATCH = "batch"
 TIER_FULL = "full"
@@ -63,7 +63,7 @@ _TIER_ORDER = (TIER_SMOKE, TIER_BATCH, TIER_FULL)
 class NotebookSpec:
     """One notebook's acceptance spec: which template runs it, its tier, and a timeout."""
 
-    name: str  # file stem under notebooks/, e.g. "02_bigquery_native"
+    name: str  # file stem under notebooks/, e.g. "01_bigquery_native_sql"
     template: str  # TEMPLATE_MAIN (the one template every notebook runs on)
     tier: str  # TIER_SMOKE | TIER_BATCH | TIER_FULL
     timeout_s: int  # executionTimeout budget (also the local poll ceiling)
@@ -71,37 +71,23 @@ class NotebookSpec:
 
 # The acceptance matrix. Tier rationale:
 #   * smoke  — BQ-only / fully-local notebooks: cheap, fast, safe to run on every change.
-#   * batch  — notebooks that submit a Dataproc Serverless batch (real, small spend). 01 is here
-#              too: its interactive Spark Connect path runs on Dataproc runtime 2.3 and submits real
-#              cluster work. 03 is here because its combo run is python_runtime="spark" → main.run
-#              launches a Dataproc batch (not BQ-only): real Spark spend, so it outlasts smoke.
-#   * full   — 04_ray_on_vertex provisions a live Vertex Ray cluster (biggest cost + wall-clock).
+#   * batch  — notebooks that submit Dataproc Serverless or Vertex AI CustomJob / GCE batches.
+#   * full   — 04_ray_on_vertex_gpu provisions a live Vertex Ray GPU cluster (biggest cost).
 # Routing: every notebook runs on the single sf-main template (py311, matches the pin).
 REGISTRY: dict[str, NotebookSpec] = {
     spec.name: spec
     for spec in (
-        NotebookSpec("model_playground", TEMPLATE_MAIN, TIER_SMOKE, 900),
-        NotebookSpec("02_bigquery_native", TEMPLATE_MAIN, TIER_SMOKE, 900),
-        NotebookSpec("07_scale_review", TEMPLATE_MAIN, TIER_SMOKE, 900),
-        # 09 is registry-read-only (reviews any finished run_id) → cheapest tier.
-        NotebookSpec("09_review_run", TEMPLATE_MAIN, TIER_SMOKE, 900),
-        # 01 brings up an interactive Spark Connect session AND its bootstrap installs the locked
-        # deps (incl. pyspark) into a private prefix from scratch (no cache on a fresh runtime) to
-        # shadow the base image's numpy 2.x — together ~30 min, so it gets a wider budget than a
-        # normal batch notebook.
-        NotebookSpec("01_spark_via_connect", TEMPLATE_MAIN, TIER_BATCH, 3600),
-        # 03 and 08 both block on a Dataproc Serverless batch, which carries ~30 min of fixed
-        # provisioning overhead before any cell of work runs — so a 1800 s ceiling gave them roughly
-        # zero margin, and on 2026-09-02 03 tripped it. Widened to 3600 s, matching 01, because of
-        # what tripping it costs: the run's finalizer lives in the notebook process, so a deadline
-        # kill lands *after* the batch has succeeded and *before* the header is closed, leaving a
-        # permanently RUNNING row in the registry. A ceiling is not a duration — nothing pays for
-        # the extra headroom unless it is needed — and the failure it prevents needs a human to
-        # clean up. 08 is the same shape and was passing only narrowly; it moves with 03.
-        NotebookSpec("03_combo_and_ensemble", TEMPLATE_MAIN, TIER_BATCH, 3600),
-        # 08 launches a multi-engine run (Spark ∥ BigQuery) then live-monitors it → Dataproc spend.
-        NotebookSpec("08_run_and_monitor", TEMPLATE_MAIN, TIER_BATCH, 3600),
-        NotebookSpec("04_ray_on_vertex", TEMPLATE_MAIN, TIER_FULL, 5400),
+        NotebookSpec("00_model_playground", TEMPLATE_MAIN, TIER_SMOKE, 900),
+        NotebookSpec("01_bigquery_native_sql", TEMPLATE_MAIN, TIER_SMOKE, 900),
+        NotebookSpec("09_custom_models_and_metrics", TEMPLATE_MAIN, TIER_SMOKE, 900),
+        NotebookSpec("10_registry_operations_and_scale", TEMPLATE_MAIN, TIER_SMOKE, 900),
+        NotebookSpec("02_vertex_and_gce_vms", TEMPLATE_MAIN, TIER_BATCH, 3600),
+        NotebookSpec("03_spark_serverless_and_connect", TEMPLATE_MAIN, TIER_BATCH, 3600),
+        NotebookSpec("05_covariates_and_global_models", TEMPLATE_MAIN, TIER_BATCH, 3600),
+        NotebookSpec("06_hierarchical_reconciliation", TEMPLATE_MAIN, TIER_BATCH, 3600),
+        NotebookSpec("07_hpo_backtesting_and_ensembles", TEMPLATE_MAIN, TIER_BATCH, 3600),
+        NotebookSpec("08_multi_engine_master_workflow", TEMPLATE_MAIN, TIER_BATCH, 3600),
+        NotebookSpec("04_ray_on_vertex_gpu", TEMPLATE_MAIN, TIER_FULL, 5400),
     )
 }
 
@@ -109,8 +95,8 @@ REGISTRY: dict[str, NotebookSpec] = {
 def notebooks_for_tier(tier: str) -> list[NotebookSpec]:
     """Every notebook at ``tier`` or a cheaper one (cumulative), in registry order.
 
-    ``smoke`` → the 4 BQ/local notebooks; ``batch`` → those + the 3 Dataproc ones; ``full`` →
-    all 8 (adds Ray). Raises `EngineError` on an unknown tier so a CLI typo fails clearly.
+    ``smoke`` → the 4 BQ/local notebooks; ``batch`` → those + the 6 Dataproc/Vertex ones; ``full`` →
+    all 11 (adds Ray GPU). Raises `EngineError` on an unknown tier so a CLI typo fails clearly.
     """
     if tier not in _TIER_ORDER:
         raise EngineError(f"unknown tier {tier!r}; choose one of {', '.join(_TIER_ORDER)}")

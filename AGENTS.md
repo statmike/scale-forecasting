@@ -122,7 +122,7 @@ Run this after *any* code, config, or documentation edit:
   tests/unit/test_api_docs_coverage.py \
   tests/smokes/test_smoke_configs.py -q
 ```
-- **`test_validation_ledger.py`:** Verifies every smoke config (`01`–`39`), root demo config (`19`), and notebook (`8`) has a valid row in `docs/validation.md` whose architecture axes match current code.
+- **`test_validation_ledger.py`:** Verifies every smoke config (`01`–`39`), root demo config (`19`), and notebook (`11`) has a valid row in `docs/validation.md` whose architecture axes match current code.
 - **`test_config_coverage.py`:** Verifies all 153 reachable `Literal` and `bool` values on `RunConfig` are proven live or exercised offline.
 - **`test_docs_integrity.py`:** Audits all 82+ `.md` files for valid `RunConfig` JSON examples, valid relative links and config paths, valid `python -m` module references, balanced Markdown table columns, valid Mermaid syntax, absence of deprecated parameter names, and dynamic model/metric/view/smoke count parity.
 - **`test_api_docs_coverage.py`:** Verifies every public Python module has a corresponding `docs/api/*.md` page and `mkdocs.yml` nav entry.

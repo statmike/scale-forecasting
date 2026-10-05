@@ -112,15 +112,13 @@ uv sync                                                          # core deps inc
 uv run python -m ipykernel install --user --name scale-forecasting --display-name "scale-forecasting (uv)"
 ```
 
-Three notebooks need **no** cluster and run fully locally: `model_playground.ipynb` (pure
-`worker.run_cell`), `07_scale_review.ipynb` (compares several runs side by side), and
-`09_review_run.ipynb` (review a finished run via the `review` layer) — the latter two are read-only
-over the registry, needing only the `SF_*` env + ADC. The rest submit to Dataproc / Ray / BigQuery
-(`08_run_and_monitor.ipynb` launches a run *and* watches it land, so it submits too).
+Three notebooks need **no** cluster and run locally or read-only: `00_model_playground.ipynb` (pure
+`worker.run_cell` / `run_panel_model`), `09_custom_models_and_metrics.ipynb` (custom 1-file plugins), and
+`10_registry_operations_and_scale.ipynb` (registry doctor, live probes, and 100k scale review over the registry, needing only the `SF_*` env + ADC). The workflow notebooks `01`–`08` configure, explain, submit, live-monitor (`forecaster.run_live()`), and review runs across BigQuery, GCE, Vertex AI, Spark, and Ray.
 
 **Python-version note.** The project pins Python **3.11** on every surface (why: Vertex Ray
 client↔cluster parity and the Dataproc packed-venv — see [version_matrix.md](./version_matrix.md)).
-Notebook 01's interactive Spark Connect path holds that parity too, and documents a **remote-batch**
+Notebook `03`'s interactive Spark Connect path holds that parity too, and documents a **remote-batch**
 escape hatch (`main.run(cfg)` with no injected session) — the *identical* engine on-cluster, same
 `run_id`, same results. For the full per-notebook version mapping (local and on Colab Enterprise) and
 the runtime template Terraform ships, see [notebook_runtimes.md](./notebook_runtimes.md).
@@ -236,13 +234,13 @@ SELECT family, runtime, hardware, system_job_id, status, runtime_seconds
 FROM `PROJECT.DATASET.v_run_jobs` WHERE run_id = 'YOUR_RUN_ID';
 ```
 
-Rather than poll SQL by hand, `review.monitor_run(run_id)` (also `Forecaster.monitor()`) rolls the
+Rather than poll SQL by hand, `review.monitor_run(run_id)` (also `Forecaster.monitor()` and `Forecaster.run_live()`) rolls the
 header, the run's own config, the per-family jobs, and the landed-cell counts into a `RunProgress`:
 per-family job state on its runner, `n_done / n_expected` cells, mean fit time, and a run-wide
 fraction — with `review.plot_progress` for the progress-bar readout. Progress is coarse (cells land
 when a family's writer runs, often at job end), so the per-job `status` is the primary live signal.
-[`08_run_and_monitor`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_run_and_monitor.ipynb)
-launches a run on a background thread and drives this live-refreshing dashboard until it lands.
+[`08_multi_engine_master_workflow`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_multi_engine_master_workflow.ipynb)
+launches a multi-family run on a background thread via `forecaster.run_live()` and drives this live-refreshing dashboard until it lands.
 
 **When the bar stops moving.** A registry row is written *by the job*, so a job that dies without
 writing leaves its row `RUNNING` and its bar frozen — visually identical to a slow one. Two things
@@ -259,7 +257,7 @@ tell them apart, and they cost differently:
   enough to be suspicious, not on every poll. An already-terminal run short-circuits and touches no
   runtime at all.
 
-`08`'s monitor loop is the worked example of that policy: it polls registry-only every 15 seconds
+`Forecaster.run_live()` is the worked implementation of that policy: it polls registry-only every 15 seconds
 and upgrades to `probe=True` only once the quietest unfinished family has been silent for 300
 seconds, with a 120-second floor between probes. Those two numbers decide *when to ask*; the probe's
 own 900-second startup grace decides *what the silence means*, so escalating after five minutes buys
@@ -315,10 +313,10 @@ over the best base model — with `plot_leaderboard` / `plot_metric_distribution
 execution timeline, `sdk.build_trace_frame` + `plot_trace`.
 
 The demo notebooks ([`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks)) wrap these queries in charts:
-[`07_scale_review`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_scale_review.ipynb) compares several runs
-side by side, [`08_run_and_monitor`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_run_and_monitor.ipynb) launches
-a run and watches it land, and [`09_review_run`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_review_run.ipynb)
-reviews any finished run in data-science detail.
+[`08_multi_engine_master_workflow`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_multi_engine_master_workflow.ipynb) launches
+a 4-family run, watches it land, and plots the full diagnostic suite, while
+[`10_registry_operations_and_scale`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/10_registry_operations_and_scale.ipynb)
+reviews any finished `run_id` and compares 100k-series benchmark runs side by side.
 
 ### Did every model answer the same question?
 

@@ -152,18 +152,21 @@ The 19 production, demonstration, and scale benchmark configurations in [`config
 
 ## Notebooks (`notebooks/`)
 
-All 8 notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks) are executed end-to-end against live GCP infrastructure and verified against theirdeclared architecture axes.
+All 11 notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks) are verified against their declared architecture axes.
 
 | Notebook | Status | Date | Axes at proof |
 |----------|--------|------|---------------|
-| `01_spark_via_connect.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
-| `02_bigquery_native.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only-v3` |
-| `03_combo_and_ensemble.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
-| `04_ray_on_vertex.ipynb` | CURRENT | 2026-09-20 | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only-v3` |
-| `07_scale_review.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
-| `08_run_and_monitor.ipynb` | CURRENT | 2026-09-20 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `job_status=derived-from-cell-tallies`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
-| `09_review_run.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
-| `model_playground.ipynb` | CURRENT | 2026-09-20 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
+| `00_model_playground.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
+| `01_bigquery_native_sql.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only-v3` |
+| `02_vertex_and_gce_vms.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3` |
+| `03_spark_serverless_and_connect.ipynb` | CURRENT | 2026-10-04 | `serverless_deps=container-image`, `python=3.11`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| `04_ray_on_vertex_gpu.ipynb` | CURRENT | 2026-10-04 | `ray_deps=stock-image+uv-runtime-env`, `ray_pool_shape=autoscaling`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `run_id_inputs=authored-config-only-v3` |
+| `05_covariates_and_global_models.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| `06_hierarchical_reconciliation.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3` |
+| `07_hpo_backtesting_and_ensembles.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
+| `08_multi_engine_master_workflow.ipynb` | CURRENT | 2026-10-04 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `job_status=derived-from-cell-tallies`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
+| `09_custom_models_and_metrics.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
+| `10_registry_operations_and_scale.ipynb` | CURRENT | 2026-10-04 | `python=3.11`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
 
 ---
 
@@ -172,9 +175,9 @@ All 8 notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/
 | Capability | Status | Evidence |
 |------------|--------|----------|
 | Workshop Act 1 (100k history, Cloud Shell / VM) | NEVER_RUN | Individual scale configs (`explode_100k.json`, `ray_100k.json`, `all_families_10k.json`, `all_families_10k_full.json`) are all `CURRENT` above, and all CLI/SQL snippets were verified on 2026-09-02; full fresh-deploy interactive session walk remains tracked as `NEVER_RUN`. |
-| Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | All 8 notebooks are proven `CURRENT` via the headless execution harness; running the workshop pre-renderer script against a brand-new deployment remains `NEVER_RUN`. |
-| Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | Interactive execution of the 8 notebooks inside a fresh Colab Enterprise `sf-main` runtime session remains `NEVER_RUN`. |
-| Run-inspection layer (`review.py`) | CURRENT | Exercised live through `08_run_and_monitor.ipynb` and `09_review_run.ipynb` against the deployed BigQuery registry views. |
+| Workshop Act 2 (pre-rendered notebook tour) | NEVER_RUN | All 11 notebooks are proven `CURRENT` via the headless execution harness; running the workshop pre-renderer script against a brand-new deployment remains `NEVER_RUN`. |
+| Workshop Act 3 (live Colab Enterprise tour) | NEVER_RUN | Interactive execution of the 11 notebooks inside a fresh Colab Enterprise `sf-main` runtime session remains `NEVER_RUN`. |
+| Run-inspection layer (`review.py`) | CURRENT | Exercised live through `08_multi_engine_master_workflow.ipynb` and `10_registry_operations_and_scale.ipynb` against the deployed BigQuery registry views. |
 | Airflow DAG emitter (`airflow_emit`) | CURRENT | Proven live on `smoke-15-airflow-multi-engine-60d76b813135` (2026-09-20): emitted DAG parsed cleanly by Cloud Composer 3 / Airflow 2.10.5 and orchestrated all 7 tasks across Serverless Spark, Vertex AI Ray GPU, and BigQuery to `COMPLETED`. |
 | RuntimeProbe read path (P1–P4) | CURRENT | Proven live across Dataproc Serverless, Dataproc Cluster, Vertex AI Ray, and BigQuery (`--probe` returning `TRUST_REGISTRY`, `RUNNING_CONFIRMED`, `STALE_REGISTRY`, and `LOST`). |
 | RuntimeProbe cancel (P5) | CURRENT | Proven live (`--cancel --force`) stopping in-flight Dataproc Serverless batches and Vertex AI Ray jobs, recording `job_telemetry.cancel` audit metadata, and preserving sticky `CANCELLED` status on unwind. |

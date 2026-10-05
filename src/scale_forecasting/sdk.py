@@ -27,6 +27,7 @@ from .registry.views import VIEW_NAMES
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     import pandas as pd
@@ -43,6 +44,8 @@ __all__ = [
     "RunResult",
     "ModelResult",
     "JobTrace",
+    "build_explain_frame",
+    "build_best_params_frame",
     "build_trace_frame",
     "plot_trace",
 ]
@@ -92,11 +95,15 @@ class RunResult:
     ``dataset_ref`` is ``project.dataset`` (``None`` when the GCP identity can't be resolved, e.g.
     an offline `Forecaster.review`); ``views`` are the registry view names to query under it
     (e.g. ``v_run_summary``, ``v_model_leaderboard``). Filter any of them by ``run_id``.
+    ``status`` and ``runtime_seconds`` carry the terminal outcome when returned by `Forecaster.run`
+    or `Forecaster.run_live`.
     """
 
     run_id: str
     dataset_ref: str | None
     views: tuple[str, ...]
+    status: str | None = None
+    runtime_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -594,6 +601,491 @@ class Forecaster:
         cell_rows = read_cell_timing(rid, limit=cell_limit, settings=self._settings)
         return build_trace_frame(job_rows, cell_rows)
 
+    def explain(self, *, validate_data: bool = False) -> pd.DataFrame:
+        """Return a per-family execution plan ``DataFrame`` for this config — pure, offline.
+
+        Each row represents one node in the planned execution DAG (`dag`), detailing the resolved
+        ``runtime``, ``machine_type``, ``workers``, ``hardware``, ``gpu_type``, selected ``models``,
+        per-model ``training_modes`` (``local`` / ``global`` / ``hybrid``), expected cell count,
+        active covariate tiers, and upstream ``depends_on`` keys. ``validate_data`` is accepted for
+        parity with dry-run workflows (when ``False``, stays 100% offline).
+        """
+        _ = validate_data
+        return build_explain_frame(self._config)
+
+    def run_live(
+        self,
+        *,
+        spark: object | None = None,
+        n_series: int | None = None,
+        max_executors: int | None = None,
+        poll_seconds: float = 10.0,
+        poll_s: float | None = None,
+        probe: bool = False,
+        plot: bool = True,
+    ) -> RunResult:
+        """Execute `run` while polling `monitor` for live progress updates, then return `RunResult`.
+
+        Launches `run` in a background thread and polls `monitor` every ``poll_seconds`` (or
+        ``poll_s``) seconds until the run finishes (or when ``poll_seconds <= 0``, executes
+        synchronously). When ``plot=True`` and the terminal progress snapshot contains family rows,
+        renders `review.plot_progress` once at completion. Safe in both interactive notebooks and
+        headless automation (`notebook_acceptance`).
+        """
+        import threading
+
+        effective_poll = poll_s if poll_s is not None else poll_seconds
+        t0 = time.monotonic()
+        if effective_poll <= 0:
+            res = self.run(spark=spark, n_series=n_series, max_executors=max_executors)
+            elapsed = time.monotonic() - t0
+            return RunResult(
+                run_id=res.run_id,
+                dataset_ref=res.dataset_ref,
+                views=res.views,
+                status=res.status or "COMPLETED",
+                runtime_seconds=res.runtime_seconds or elapsed,
+            )
+
+        effective_cfg = (
+            self._config
+            if n_series is None
+            else self._config.model_copy(
+                update={"data": self._config.data.model_copy(update={"series_limit": n_series})}
+            )
+        )
+        target_rid = make_run_id(effective_cfg)
+        outcome: dict[str, Any] = {}
+
+        def _worker() -> None:
+            try:
+                outcome["result"] = self.run(
+                    spark=spark, n_series=n_series, max_executors=max_executors
+                )
+            except BaseException as exc:  # noqa: BLE001 - re-raised on main thread
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=_worker, name=f"sf-run-{target_rid}", daemon=True)
+        thread.start()
+        last_snap: Any = None
+        while thread.is_alive():
+            thread.join(timeout=effective_poll)
+            try:
+                snap = self.monitor(target_rid, probe=probe)
+                last_snap = snap
+                if snap.status is not None:
+                    frac = f"{snap.fraction:.0%}" if snap.fraction is not None else "?"
+                    _log.info(
+                        "live progress [%s]: status=%s cells=%s/%s (%s)",
+                        target_rid,
+                        snap.status,
+                        snap.n_done,
+                        snap.n_expected if snap.n_expected is not None else "?",
+                        frac,
+                    )
+            except Exception:  # noqa: BLE001, S110 - transient read errors never abort the run
+                pass
+        thread.join()
+        elapsed = time.monotonic() - t0
+        if "error" in outcome:
+            raise outcome["error"]
+        res = outcome["result"]
+        final_snap = last_snap
+        try:
+            final_snap = self.monitor(res.run_id)
+        except Exception:  # noqa: BLE001
+            pass
+        if plot and final_snap is not None and getattr(final_snap, "families", None):
+            from .review import plot_progress
+
+            plot_progress(final_snap)
+        final_status = (
+            (getattr(final_snap, "status", None) if final_snap is not None else None)
+            or res.status
+            or "COMPLETED"
+        )
+        return RunResult(
+            run_id=res.run_id,
+            dataset_ref=res.dataset_ref,
+            views=res.views,
+            status=final_status,
+            runtime_seconds=res.runtime_seconds or elapsed,
+        )
+
+    def leaderboard_df(
+        self, run_id: str | None = None, *, all_metrics: bool = False
+    ) -> pd.DataFrame:
+        """Return a ranked leaderboard ``DataFrame`` for ``run_id`` (default: this config's id).
+
+        Delegates to `review_run` and `review.build_leaderboard_frame`. Pass ``all_metrics=True``
+        to include ``mean_<metric>`` and ``p50_<metric>`` for all 21 evaluation metrics.
+        """
+        from .review import build_leaderboard_frame
+
+        return build_leaderboard_frame(self.review_run(run_id), all_metrics=all_metrics)
+
+    def predictions_df(
+        self,
+        run_id: str | None = None,
+        *,
+        ts_id: str | None = None,
+        ts_ids: Sequence[str] | None = None,
+        models: Sequence[str] | None = None,
+        include_history: bool = True,
+        include_oof: bool = True,
+        history_tail: int = 120,
+        series_limit: int | None = None,
+        limit: int = 10000,
+    ) -> pd.DataFrame:
+        """Return a tidy ``DataFrame`` of forecasts (plus optional OOF and historical actuals) for
+        ``run_id``.
+
+        Columns: ``ts_id``, ``segment`` (``"history"`` / ``"oof"`` / ``"forecast"``),
+        ``model_type``, ``ds``, ``y_true``, ``yhat``, ``yhat_lower``, ``yhat_upper``, ``fold_id``.
+        """
+        from .registry.reads import read_oof, read_predictions, read_series_history
+        from .review import build_predictions_frame
+
+        rid = run_id or self.run_id
+        ts_list = [ts_id] if ts_id is not None else (list(ts_ids) if ts_ids is not None else None)
+        model_list = list(models) if models is not None else None
+        pred_rows = read_predictions(
+            rid, ts_ids=ts_list, models=model_list, limit=limit, settings=self._settings
+        )
+        resolved_ts = ts_list or (
+            list(dict.fromkeys(str(r["ts_id"]) for r in pred_rows)) if pred_rows else None
+        )
+        if series_limit is not None and resolved_ts is not None:
+            resolved_ts = resolved_ts[: max(1, series_limit)]
+            pred_rows = [r for r in pred_rows if str(r["ts_id"]) in set(resolved_ts)]
+        oof_rows = (
+            read_oof(
+                rid, ts_ids=resolved_ts, models=model_list, limit=limit, settings=self._settings
+            )
+            if include_oof
+            else None
+        )
+        hist_rows = (
+            read_series_history(
+                rid, ts_ids=resolved_ts, history_tail=history_tail, settings=self._settings
+            )
+            if include_history
+            else None
+        )
+        return build_predictions_frame(pred_rows, oof_rows=oof_rows, history_rows=hist_rows)
+
+    def plot_forecasts(
+        self,
+        run_id: str | None = None,
+        *,
+        ts_id: str | None = None,
+        ts_ids: Sequence[str] | None = None,
+        models: Sequence[str] | None = None,
+        max_series: int = 3,
+        history_tail: int = 120,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot historical actuals, backtest OOF trajectories, and future forecasts with 80%
+        prediction intervals for up to ``max_series`` series on ``run_id``.
+        """
+        from .registry.reads import read_predictions
+        from .review import plot_forecasts_frame
+
+        rid = run_id or self.run_id
+        effective_ts_ids = [ts_id] if ts_id is not None else ts_ids
+        chosen_ts = list(effective_ts_ids)[: max(1, max_series)] if effective_ts_ids else None
+        if chosen_ts is None:
+            sample_preds = read_predictions(
+                rid,
+                models=list(models) if models else None,
+                limit=max(500, max_series * 100),
+                settings=self._settings,
+            )
+            chosen_ts = list(dict.fromkeys(str(r["ts_id"]) for r in sample_preds))[
+                : max(1, max_series)
+            ]
+        frame = self.predictions_df(
+            rid,
+            ts_ids=chosen_ts,
+            models=models,
+            include_history=True,
+            include_oof=True,
+            history_tail=history_tail,
+        )
+        return plot_forecasts_frame(
+            frame,
+            ts_ids=chosen_ts,
+            models=models,
+            max_series=max_series,
+            history_tail=history_tail,
+            ax=ax,
+            title=title or rid,
+        )
+
+    def hierarchy_df(self, run_id: str | None = None, *, limit: int = 20000) -> pd.DataFrame:
+        """Summarize hierarchical predictions by level (``total``, ``aggregate``, ``bottom``) and
+        verify additive coherence ($\\max_t |\\hat{y}_{\\text{total},t} - \\sum_b \\hat{y}_{b,t}|$)
+        for ``run_id``.
+        """
+        from .registry.reads import read_predictions
+        from .review import build_hierarchy_frame
+
+        rid = run_id or self.run_id
+        rows = read_predictions(rid, limit=limit, settings=self._settings)
+        return build_hierarchy_frame(rows)
+
+    def plot_hierarchy(
+        self,
+        run_id: str | None = None,
+        *,
+        model_type: str | None = None,
+        limit: int = 20000,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot the top-level (``__total__``) forecast against the sum of bottom-level leaf
+        forecasts for ``run_id`` to visually verify hierarchical coherence.
+        """
+        from .registry.reads import read_predictions
+        from .review import plot_hierarchy_frame
+
+        rid = run_id or self.run_id
+        rows = read_predictions(rid, limit=limit, settings=self._settings)
+        return plot_hierarchy_frame(rows, model_type=model_type, ax=ax, title=title or rid)
+
+    def best_params_df(self, run_id: str | None = None, *, limit: int = 5000) -> pd.DataFrame:
+        """Return a ``DataFrame`` unpacking ``forecast_metadata.best_params`` for ``run_id``.
+
+        Includes both Optuna HPO winning hyperparameters (for base models) and learned ensemble
+        stacking weights (``nnls`` / ``ridge`` / ``xgb`` for ``ensemble_*`` rows).
+        """
+        from .registry.reads import read_best_params
+
+        rid = run_id or self.run_id
+        return build_best_params_frame(read_best_params(rid, limit=limit, settings=self._settings))
+
+    def jobs_df(self, run_id: str | None = None) -> pd.DataFrame:
+        """Return a tidy ``DataFrame`` of per-family job execution traces from ``v_run_jobs`` for
+        ``run_id`` (default: this config's id).
+        """
+        from dataclasses import asdict
+
+        import pandas as pd
+
+        cols = [
+            "family",
+            "job_key",
+            "system_job_id",
+            "runtime",
+            "status",
+            "attempt",
+            "hardware",
+            "gpu_type",
+            "spark_mode",
+            "runtime_seconds",
+        ]
+        traces = self.jobs(run_id)
+        if not traces:
+            return pd.DataFrame(columns=cols)
+        return pd.DataFrame.from_records([asdict(t) for t in traces], columns=cols)
+
+    def cohorts_df(self, run_id: str | None = None) -> pd.DataFrame:
+        """Return a ``DataFrame`` of backtest cohort coverage, achieved fold histograms, refit
+        modes, ``staleness_gap``, and holdout-fold ``pooled_wape`` for ``run_id``.
+        """
+        from .review import build_cohorts_frame
+
+        return build_cohorts_frame(self.review_run(run_id))
+
+    def calibration(self, run_id: str | None = None) -> Any:
+        """Return the `review.CalibrationReport` for ``run_id`` (point-forecast arm selection and
+        per-step prediction-interval coverage).
+        """
+        from .review import calibration_report
+
+        return calibration_report(run_id or self.run_id, settings=self._settings)
+
+    def calibration_df(
+        self,
+        run_id: str | None = None,
+        *,
+        by: str | None = None,
+    ) -> Any:
+        """Return ``(arms_df, coverage_df)`` ``DataFrame``s from `calibration` for ``run_id`` (or a
+        single ``DataFrame`` when ``by='horizon'`` or ``by='arms'``).
+        """
+        from .review import build_calibration_frames
+
+        arms_df, cov_df = build_calibration_frames(self.calibration(run_id))
+        if by == "horizon":
+            return cov_df
+        if by == "arms":
+            return arms_df
+        return arms_df, cov_df
+
+    def plot_calibration(
+        self,
+        run_id: str | None = None,
+        *,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot empirical interval coverage and mean interval width by horizon step ($h = 1 \\dots
+        H$) against the nominal coverage target for ``run_id``.
+        """
+        from .review import plot_calibration
+
+        return plot_calibration(self.calibration(run_id), ax=ax, title=title)
+
+    def ensemble_weights_df(self, run_id: str | None = None, *, limit: int = 5000) -> pd.DataFrame:
+        """Return a long-form ``DataFrame`` of learned ensemble stacking weights (`nnls`, `ridge`,
+        `xgb`) unpacked from ``forecast_metadata.best_params`` for ``run_id``.
+        """
+        from .registry.reads import read_best_params
+        from .review import build_ensemble_weights_frame
+
+        rid = run_id or self.run_id
+        return build_ensemble_weights_frame(
+            read_best_params(rid, limit=limit, settings=self._settings)
+        )
+
+    def plot_ensemble_weights(
+        self,
+        run_id: str | None = None,
+        *,
+        limit: int = 5000,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot normalized base-model weights across learned ensemble strategies (`nnls`, `ridge`,
+        `xgb`) as a horizontal stacked bar chart for ``run_id``.
+        """
+        from .review import plot_ensemble_weights
+
+        rid = run_id or self.run_id
+        return plot_ensemble_weights(
+            self.ensemble_weights_df(rid, limit=limit),
+            ax=ax,
+            title=title or f"{rid} — Learned Ensemble Weights",
+        )
+
+    def explain_forecast(
+        self,
+        run_id: str | None = None,
+        *,
+        ts_id: str | None = None,
+        model_type: str | None = None,
+        seasonal_period: int = 7,
+        history_tail: int = 120,
+    ) -> pd.DataFrame:
+        """Decompose a series' historical trajectory, OOF backtest, and future forecast into
+        structural trend, level shift, seasonal cycle, exogenous covariate attribution, and OOF
+        residuals / interval width for ``run_id``.
+        """
+        import pandas as pd
+
+        from .registry.reads import read_series_covariates
+        from .review import explain_forecast_frame
+
+        rid = run_id or self.run_id
+        pred_df = self.predictions_df(
+            rid,
+            ts_id=ts_id,
+            models=[model_type] if model_type is not None else None,
+            include_history=True,
+            include_oof=True,
+            history_tail=history_tail,
+            series_limit=1 if ts_id is None else None,
+        )
+        if pred_df.empty:
+            return explain_forecast_frame(pred_df)
+        chosen_ts = ts_id or str(pred_df["ts_id"].iloc[0])
+        cov_rows = read_series_covariates(
+            rid, ts_id=chosen_ts, history_tail=history_tail, settings=self._settings
+        )
+        cov_df = pd.DataFrame.from_records(cov_rows) if cov_rows else None
+        return explain_forecast_frame(
+            pred_df,
+            ts_id=chosen_ts,
+            model_type=model_type,
+            seasonal_period=seasonal_period,
+            covariate_df=cov_df,
+        )
+
+    def plot_forecast_explanation(
+        self,
+        run_id: str | None = None,
+        *,
+        ts_id: str | None = None,
+        model_type: str | None = None,
+        seasonal_period: int = 7,
+        history_tail: int = 120,
+        title: str | None = None,
+    ) -> Any:
+        """Render a 4-panel forecast explainability & decomposition chart for one series and model
+        on ``run_id``.
+        """
+        from .review import plot_forecast_explanation
+
+        df = self.explain_forecast(
+            run_id,
+            ts_id=ts_id,
+            model_type=model_type,
+            seasonal_period=seasonal_period,
+            history_tail=history_tail,
+        )
+        return plot_forecast_explanation(df, history_tail=history_tail, title=title)
+
+    def reensemble(
+        self,
+        strategies: list[str] | None = None,
+        *,
+        run_id: str | None = None,
+    ) -> str:
+        """Execute post-hoc re-ensembling on an already-completed run without re-fitting base
+        models; return the resulting ``ensemble_id``.
+
+        Delegates to `ensemble_run.run_ensembles` with ``strategies`` overriding the config's
+        ``ensemble.strategies`` block. New strategies land under a distinct ``ensemble_id`` and
+        appear alongside existing ensembles on ``v_model_leaderboard``.
+        """
+        from .ensemble_run import _override_ensemble, run_ensembles
+        from .registry.ids import make_ensemble_id
+        from .registry.tables import _resolve_settings
+
+        cfg = _override_ensemble(self._config, strategies)
+        if not cfg.ensemble.enabled:
+            cfg = _override_ensemble(
+                self._config, list(cfg.ensemble.strategies) or ["mean", "median", "inverse_error"]
+            )
+        rid = run_id or self.run_id
+        resolved = _resolve_settings(self._settings)
+        run_ensembles(cfg, rid, settings=resolved)
+        return make_ensemble_id(cfg.ensemble)
+
+    def ensemble_runs(
+        self,
+        source_run_ids: Sequence[str],
+        strategies: list[str] | None = None,
+        *,
+        target_run_id: str | None = None,
+    ) -> str:
+        """Blend base models across multiple completed runs into a consolidated cross-run ensemble;
+        return ``target_run_id``.
+
+        Convenience forwarder to `Registry.ensemble_runs` (`ensemble_run.ensemble_cross_runs`). If
+        ``source_run_ids`` contains a single run id distinct from ``self.run_id``, ``self.run_id``
+        is automatically prepended so ``forecaster_b.ensemble_runs([run_a_id])`` combines ``run_b``
+        with ``run_a``.
+        """
+        ids = list(source_run_ids)
+        if len(ids) == 1 and ids[0] != self.run_id:
+            ids = [self.run_id, ids[0]]
+        return self.registry().ensemble_runs(
+            ids, strategies=strategies, target_run_id=target_run_id
+        )
+
     def _resolved_dataset_ref(self) -> str | None:
         """``project.dataset`` from the injected/resolved `Settings`, or ``None`` if
         unresolvable (missing ``SF_*`` env) — keeps `review` graceful offline.
@@ -673,6 +1165,39 @@ class Registry:
 
         return ops.doctor(settings=self._settings)
 
+    def runs_df(self, *, limit: int = 25, status: str | None = None) -> pd.DataFrame:
+        """Return a ``DataFrame`` of the most recent runs in this registry from ``v_run_summary``,
+        newest first, optionally filtered by ``status``.
+        """
+        import pandas as pd
+
+        from .registry.reads import read_recent_runs
+
+        cols = [
+            "run_id",
+            "created_at",
+            "status",
+            "python_runtime",
+            "n_series",
+            "n_models",
+            "backtest_on",
+            "runtime_seconds",
+            "total_wall_s",
+            "overhead_seconds",
+            "overhead_fraction",
+            "dcu_milli_seconds",
+        ]
+        rows = read_recent_runs(limit=limit, status=status, settings=self._settings)
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        return pd.DataFrame.from_records(rows, columns=cols)
+
+    def probe(self, run_id: str, job: str | None = None) -> Any:
+        """Reconcile ``run_id`` against its live cloud runtime (`probes.reconcile.probe_run`)."""
+        from .probes.reconcile import probe_run
+
+        return probe_run(run_id, job=job, settings=self._settings)
+
     def close_runs(self, *run_ids: str, yes: bool = False) -> Any:
         """Finalize abandoned ``RUNNING`` headers to what their job rows already imply.
 
@@ -745,6 +1270,170 @@ class Registry:
         from .registry import ops
 
         return ops.export(destination_root, settings=self._settings, fmt=fmt)
+
+    def ensemble_runs(
+        self,
+        source_run_ids: Sequence[str],
+        strategies: list[str] | None = None,
+        *,
+        target_run_id: str | None = None,
+    ) -> str:
+        """Blend base models across multiple completed runs into a consolidated cross-run ensemble;
+        return ``target_run_id``.
+
+        Delegates to `ensemble_run.ensemble_cross_runs`: validates that the source runs share the
+        same source table, horizon, and backtest geometry, copies deduplicated base rows into
+        ``target_run_id`` (default: ``make_run_id(merged_cfg)``), and runs the requested calculated
+        and/or learned ensemble strategies so all base models and cross-run ensembles appear
+        together on ``v_model_leaderboard`` and `review_run`.
+        """
+        from .ensemble_run import ensemble_cross_runs
+
+        return ensemble_cross_runs(
+            source_run_ids,
+            strategies=strategies,
+            target_run_id=target_run_id,
+            settings=self._settings,
+        )
+
+
+def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
+    """Build a per-family execution plan ``DataFrame`` for ``cfg`` — pure, offline, no GCP.
+
+    One row per node in `dag.plan_dag` (each active model family plus the downstream ``ensemble``
+    node when enabled), summarizing ``run_id``, ``family``, ``job_key``, ``runtime``,
+    ``machine_type``, ``workers``, ``hardware``, ``gpu_type``, ``models``, ``training_modes``,
+    ``n_series``, ``n_folds``, ``expected_cells``, ``covariates``, and ``depends_on``.
+    """
+    import pandas as pd
+
+    from .dag import dag_nodes, plan_dag
+    from .models import get_model
+
+    run_dag = plan_dag(cfg)
+    nodes = dag_nodes(run_dag)
+    jobs_by_fam = {j.family: j for j in run_dag.jobs}
+    workload = estimate_workload(cfg)
+
+    cov_parts: list[str] = []
+    if cfg.features.known_future_covariates:
+        cov_parts.append(f"future({len(cfg.features.known_future_covariates)})")
+    if cfg.features.past_covariates:
+        cov_parts.append(f"past({len(cfg.features.past_covariates)})")
+    if cfg.features.static_covariates:
+        cov_parts.append(f"static({len(cfg.features.static_covariates)})")
+    cov_summary = ", ".join(cov_parts) if cov_parts else "none"
+
+    records: list[dict[str, Any]] = []
+    for node in nodes:
+        fjob = jobs_by_fam.get(node.family)
+        comp = fjob.compute if fjob is not None else None
+        if node.family == "ensemble":
+            models_str = ", ".join(f"ensemble_{s}" for s in cfg.ensemble.strategies)
+            modes_str = cfg.compute.ensemble.mode
+            n_cells = (
+                workload.n_series * len(cfg.ensemble.strategies)
+                if workload.n_series is not None
+                else None
+            )
+            machine_type = "sql"
+            workers: int | str = 1
+        elif node.family == "native":
+            models_str = ", ".join(node.models)
+            modes_str = ", ".join(f"{m}:local" for m in node.models)
+            n_cells = (
+                workload.n_series * len(node.models) if workload.n_series is not None else None
+            )
+            machine_type = "sql"
+            workers = 1
+        else:
+            models_str = ", ".join(node.models)
+            modes_list: list[str] = []
+            for m in node.models:
+                m_mode = str(cfg.model_params.get(m, {}).get("training_mode", "local"))
+                modes_list.append(f"{m}:{m_mode}")
+                get_model(m)  # ensure valid model registration
+            modes_str = ", ".join(modes_list)
+            n_cells = (
+                workload.n_series * len(node.models) if workload.n_series is not None else None
+            )
+            machine_type = comp.machine_type if comp is not None else "auto"
+            workers = comp.workers if comp is not None else 1
+
+        records.append(
+            {
+                "run_id": run_dag.run_id,
+                "family": node.family,
+                "job_key": node.job_key,
+                "runtime": node.runtime,
+                "machine_type": machine_type,
+                "workers": workers,
+                "hardware": node.hardware or "sql",
+                "gpu_type": node.gpu_type,
+                "models": models_str,
+                "training_modes": modes_str,
+                "n_series": workload.n_series,
+                "n_folds": workload.n_folds,
+                "expected_cells": n_cells,
+                "covariates": cov_summary,
+                "depends_on": ", ".join(node.depends_on) if node.depends_on else "",
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def build_best_params_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Unpack ``read_best_params`` rows (with JSON ``best_params``) into a tidy ``DataFrame``
+    (pure, offline).
+    """
+    import json
+
+    import pandas as pd
+
+    cols = [
+        "ts_id",
+        "model_type",
+        "compute_engine",
+        "is_ensemble",
+        "best_params_json",
+        "best_params",
+        "fit_seconds",
+        "wape",
+        "mae",
+        "rmse",
+        "mase",
+    ]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    records: list[dict[str, Any]] = []
+    for r in rows:
+        raw_bp = r.get("best_params")
+        parsed: Any = None
+        if isinstance(raw_bp, str) and raw_bp:
+            try:
+                parsed = json.loads(raw_bp)
+            except ValueError:
+                parsed = raw_bp
+        elif isinstance(raw_bp, dict):
+            parsed = raw_bp
+        records.append(
+            {
+                "ts_id": str(r.get("ts_id") or ""),
+                "model_type": str(r.get("model_type") or ""),
+                "compute_engine": r.get("compute_engine"),
+                "is_ensemble": r.get("ensemble_id") is not None,
+                "best_params_json": (
+                    json.dumps(parsed, sort_keys=True) if isinstance(parsed, dict) else str(raw_bp)
+                ),
+                "best_params": parsed,
+                "fit_seconds": r.get("fit_seconds"),
+                "wape": r.get("wape"),
+                "mae": r.get("mae"),
+                "rmse": r.get("rmse"),
+                "mase": r.get("mase"),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=cols)
 
 
 def _duration_s(start: Any, end: Any, fallback: Any) -> float | None:

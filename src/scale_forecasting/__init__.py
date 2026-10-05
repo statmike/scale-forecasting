@@ -61,6 +61,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "RunResult": (".sdk", "RunResult"),
     "ModelResult": (".sdk", "ModelResult"),
     "JobTrace": (".sdk", "JobTrace"),
+    "build_explain_frame": (".sdk", "build_explain_frame"),
+    "build_best_params_frame": (".sdk", "build_best_params_frame"),
     "build_trace_frame": (".sdk", "build_trace_frame"),
     "plot_trace": (".sdk", "plot_trace"),
     # Run inspection — monitor a running run, review a finished one.
@@ -70,10 +72,25 @@ _LAZY: dict[str, tuple[str, str]] = {
     "RunReview": (".review", "RunReview"),
     "calibration_report": (".review", "calibration_report"),
     "CalibrationReport": (".review", "CalibrationReport"),
+    "build_leaderboard_frame": (".review", "build_leaderboard_frame"),
+    "build_predictions_frame": (".review", "build_predictions_frame"),
+    "build_hierarchy_frame": (".review", "build_hierarchy_frame"),
+    "build_cohorts_frame": (".review", "build_cohorts_frame"),
+    "build_calibration_frames": (".review", "build_calibration_frames"),
+    "build_ensemble_weights_frame": (".review", "build_ensemble_weights_frame"),
+    "explain_forecast_frame": (".review", "explain_forecast_frame"),
     "plot_progress": (".review", "plot_progress"),
     "plot_leaderboard": (".review", "plot_leaderboard"),
     "plot_metric_distribution": (".review", "plot_metric_distribution"),
+    "plot_forecasts_frame": (".review", "plot_forecasts_frame"),
+    "plot_hierarchy_frame": (".review", "plot_hierarchy_frame"),
+    "plot_calibration": (".review", "plot_calibration"),
+    "plot_ensemble_weights": (".review", "plot_ensemble_weights"),
+    "plot_forecast_explanation": (".review", "plot_forecast_explanation"),
     "DagNode": (".dag", "DagNode"),
+    # Cross-run ensembling.
+    "merge_configs_for_ensemble": (".ensemble_run", "merge_configs_for_ensemble"),
+    "ensemble_cross_runs": (".ensemble_run", "ensemble_cross_runs"),
     # Orchestration.
     "run": (".main", "run"),
     # Direct path — pure core + writer-attached runners + unit of work.
@@ -85,9 +102,11 @@ _LAZY: dict[str, tuple[str, str]] = {
     "chunk_cells": (".engines.ray_io", "chunk_cells"),
     "run_cell": (".worker", "run_cell"),
     "CellResult": (".worker", "CellResult"),
-    # Model registry + runtime routing.
+    # Model registry + runtime routing + catalogs.
     "get_model": (".models", "get_model"),
     "list_models": (".models", "list_models"),
+    "model_catalog": (".playground", "model_catalog"),
+    "metric_catalog": (".playground", "metric_catalog"),
     "split_by_runtime": (".router", "split_by_runtime"),
     # Hierarchical aggregation + coherent reconciliation.
     "HierarchySpec": (".reconciliation", "HierarchySpec"),
@@ -128,8 +147,10 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         make_group_runner,
         run_group,
     )
+    from .ensemble_run import ensemble_cross_runs, merge_configs_for_ensemble  # noqa: F401
     from .main import run  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
+    from .playground import metric_catalog, model_catalog  # noqa: F401
     from .reconciliation import (  # noqa: F401
         HierarchySpec,
         build_hierarchy,
@@ -143,8 +164,20 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         CalibrationReport,
         RunProgress,
         RunReview,
+        build_calibration_frames,
+        build_cohorts_frame,
+        build_ensemble_weights_frame,
+        build_hierarchy_frame,
+        build_leaderboard_frame,
+        build_predictions_frame,
         calibration_report,
+        explain_forecast_frame,
         monitor_run,
+        plot_calibration,
+        plot_ensemble_weights,
+        plot_forecast_explanation,
+        plot_forecasts_frame,
+        plot_hierarchy_frame,
         plot_leaderboard,
         plot_metric_distribution,
         plot_progress,
@@ -158,6 +191,8 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         ModelResult,
         Registry,
         RunResult,
+        build_best_params_frame,
+        build_explain_frame,
         build_trace_frame,
         plot_trace,
     )

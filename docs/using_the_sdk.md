@@ -132,10 +132,35 @@ for job in forecaster.jobs():  # defaults to this config's run_id
 - `dag()` returns `DagNode`s (`job_key`, `family`, `runtime`, `models`, `hardware`, `gpu_type`,
   `spark_mode`, `depends_on`) — pure and offline, so you get every job's identity *before* the run.
 - `jobs()` returns `JobTrace`s (`family`, `job_key`, `system_job_id`, `runtime`, `status`,
-  `attempt`, `hardware`, `gpu_type`, `spark_mode`, `runtime_seconds`). `system_job_id` is the
-  platform's own id (a Dataproc batch/job id, a Ray `submission_id`, or a BigQuery job id), so you
-  can jump straight to that platform's console. Because it reads by `run_id`, it's a reattach path
-  from a fresh process.
+  `attempt`, `hardware`, `gpu_type`, `spark_mode`, `runtime_seconds`), and `jobs_df()` formats the
+  same trace directly as a pandas `DataFrame`. `system_job_id` is the platform's own id (a Dataproc
+  batch/job id, a Ray `submission_id`, or a BigQuery job id), so you can jump straight to that
+  platform's console. Because it reads by `run_id`, it's a reattach path from a fresh process.
+
+### Reviewing, explaining, and plotting results
+
+After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders and publication-grade
+`matplotlib` visualizers directly from the BigQuery registry:
+
+| Method | Returns | Purpose |
+|--------|---------|---------|
+| `forecaster.leaderboard()` | `pd.DataFrame` | Ranked model accuracy from `v_model_leaderboard` or `v_model_leaderboard_comparable` |
+| `forecaster.jobs_df()` | `pd.DataFrame` | Per-family execution telemetry (`runtime_seconds`, `status`, `system_job_id`) |
+| `forecaster.cohorts_df()` | `pd.DataFrame` | Backtest cohort health (`full_folds`, `partial_folds`, `zero_folds`), `refit_mode`, and staleness gap |
+| `forecaster.calibration()` | `dict[str, pd.DataFrame]` | Conformal interval coverage & Winkler Score by horizon (`by_horizon`) and point-forecast arm winner counts (`arm_summary`) |
+| `forecaster.calibration_df(by=...)` | `pd.DataFrame` | Single-DataFrame accessor for calibration (`by="horizon"` or `by="arms"`) |
+| `forecaster.plot_calibration()` | `matplotlib.figure.Figure` | 2-panel visualization of empirical vs nominal coverage + Winkler Score by step and point-arm winners |
+| `forecaster.ensemble_weights_df()` | `pd.DataFrame` | Base-learner blending weights across strategies (`ensemble_mean`, `ensemble_trimmed_mean`, `ensemble_inv_var`, `ensemble_nnls`, `ensemble_ridge`, `ensemble_xgb`) |
+| `forecaster.plot_ensemble_weights()` | `matplotlib.figure.Figure` | Horizontal stacked bar chart of base-learner contribution shares per ensemble strategy |
+| `forecaster.explain_forecast(ts_id, model)` | `pd.DataFrame` | Decomposes a series forecast into seasonal naive baseline, trend/model residual, and covariate alignment |
+| `forecaster.plot_forecast_explanation(ts_id, model)` | `matplotlib.figure.Figure` | Multi-panel decomposition plot (history + fan chart, baseline vs residual split, and future exogenous drivers) |
+| `forecaster.plot_series(ts_id, models=[...])` | `matplotlib.figure.Figure` | Overlay historical actuals, prediction intervals, and multi-model forecast trajectories |
+
+Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the
+top level of `scale_forecasting` (`explain_forecast_frame`, `plot_forecast_explanation`,
+`build_calibration_frames`, `plot_calibration`, `build_ensemble_weights_frame`,
+`plot_ensemble_weights`, `build_cohorts_frame`), so you can run the exact same diagnostics on
+in-memory `CellResult` objects in `00_model_playground.ipynb` before touching Google Cloud.
 
 ---
 
@@ -149,6 +174,7 @@ clean up run X":
 from scale_forecasting import Registry
 
 reg = Registry()  # or Forecaster.from_file(...).registry()
+runs = reg.runs_df(limit=20)  # zero-SQL DataFrame of recent runs from v_run_summary
 print(reg.doctor())  # row counts, runs stuck RUNNING, orphaned artifacts
 
 reg.close_runs()  # PREVIEW — stuck RUNNING headers and what they'd close to

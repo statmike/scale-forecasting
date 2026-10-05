@@ -10,12 +10,12 @@ resolves ``Settings`` exactly as a human who just opens the template would.
 **Tiers escalate cost** (see the harness registry), each gated so money-spending runs are opt-in —
 the same shape as ``@gpu``/``@raylive`` in ``tests/conftest.py``:
 
-* **smoke** (default, ``@gcp``) — the 3 BQ-only / fully-local notebooks. Cheap; runs whenever
+* **smoke** (default, ``@gcp``) — the 4 BQ-only / fully-local notebooks. Cheap; runs whenever
   ``SF_PROJECT_ID`` + ADC are present.
-* **batch** (``SF_ENABLE_NB_BATCH``) — adds the 4 notebooks that submit a Dataproc Serverless batch
-  (real, small spend), including NB01's Spark Connect run and NB03's Spark ∥ BQ combo.
-* **full** (``SF_ENABLE_NB_FULL``) — adds ``04_ray_on_vertex``, which provisions a live Vertex Ray
-  cluster (biggest cost + wall-clock).
+* **batch** (``SF_ENABLE_NB_BATCH``) — adds the 6 notebooks that submit Dataproc Serverless or
+  Vertex AI CustomJob / GCE batches.
+* **full** (``SF_ENABLE_NB_FULL``) — adds ``04_ray_on_vertex_gpu``, which provisions a live Vertex
+  Ray GPU cluster (biggest cost + wall-clock).
 
 Infra identity (template ids, runner SA, code bucket, project/region) is read from
 ``terraform output -json`` in ``terraform/main`` — the values a local operator wires from too. Run::
