@@ -1092,6 +1092,9 @@ def plot_leaderboard(
     )
     for y, m in zip(ys, ranked, strict=True):
         ax.text(m.score, y, f" {m.score:.4g}", va="center", fontsize=9)
+    max_score = max((float(m.score) for m in ranked if m.score is not None), default=0.0)
+    if max_score > 0:
+        ax.set_xlim(0, max_score * 1.32)
     ax.set_yticks(list(ys))
     ax.set_yticklabels([m.model_type for m in ranked])
     ax.set_xlabel(f"mean {review.decision_metric} (lower is better)")
@@ -1452,9 +1455,27 @@ def _hierarchy_level_label(ts_id: str) -> str:
     """Classify a hierarchical ``ts_id`` into ``total``, ``aggregate``, or ``bottom`` (pure)."""
     if ts_id == "__total__":
         return "total"
-    if "/" in ts_id:
+    if "/" in ts_id or "=" in ts_id:
         return "aggregate"
     return "bottom"
+
+
+def _default_hierarchy_model(models: pd.Series) -> str:
+    """Prefer a reconciled model (e.g. ``*_mint_shrink``) when ``model_type`` is omitted."""
+    unique = [str(m) for m in dict.fromkeys(models.astype(str))]
+    for suffix in (
+        "_mint_shrink",
+        "_wls_var",
+        "_wls_struct",
+        "_ols",
+        "_middle_out",
+        "_top_down",
+        "_bottom_up",
+    ):
+        for m in unique:
+            if m.endswith(suffix):
+                return m
+    return unique[0] if unique else ""
 
 
 def build_hierarchy_frame(pred_rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -1533,7 +1554,7 @@ def plot_hierarchy_frame(
 
     # Support passing the summary DataFrame from build_hierarchy_frame directly
     if {"level", "sum_yhat", "model_type"} <= set(df.columns) and "ts_id" not in df.columns:
-        chosen_model = model_type or str(df["model_type"].iloc[0])
+        chosen_model = model_type or _default_hierarchy_model(df["model_type"])
         sub = df[df["model_type"].astype(str) == chosen_model]
         ax.bar(sub["level"].astype(str), sub["sum_yhat"].astype(float), color="#0072B2", alpha=0.85)
         ax.set_title(f"{title or 'Hierarchical Rollup Totals'}: {chosen_model}")
@@ -1546,7 +1567,7 @@ def plot_hierarchy_frame(
     date_col = "forecast_date" if "forecast_date" in df.columns else "ds"
     df[date_col] = pd.to_datetime(df[date_col])
 
-    chosen_model = model_type or str(df["model_type"].iloc[0])
+    chosen_model = model_type or _default_hierarchy_model(df["model_type"])
     sub = df[df["model_type"].astype(str) == chosen_model]
     if sub.empty:
         ax.set_title(f"{title or 'Hierarchical Coherence'} (no rows for {chosen_model})")
@@ -1560,7 +1581,7 @@ def plot_hierarchy_frame(
             tot.to_numpy(),
             color="#0072B2",
             linewidth=2.4,
-            label=f"__total__ ({chosen_model})",
+            label=f"Top-level total ({chosen_model})",
         )
     if not bot.empty:
         ax.plot(
@@ -1580,6 +1601,7 @@ def plot_hierarchy_frame(
     ax.set_title(f"{title or 'Hierarchical Coherence'}: {chosen_model}{residual_str}")
     ax.set_xlabel("forecast date")
     ax.set_ylabel("forecast value")
+    ax.tick_params(axis="x", labelrotation=15)
     ax.legend(loc="best", fontsize=9)
     return ax
 
@@ -1745,12 +1767,13 @@ def plot_calibration(
     )
 
     if ax is not None:
+        fig = ax.figure
         ax_cov = ax
         ax_width = None
     elif not cov_df.empty and cov_df["mean_width"].notna().any():
-        _, (ax_cov, ax_width) = plt.subplots(1, 2, figsize=(12, 4.2))
+        fig, (ax_cov, ax_width) = plt.subplots(1, 2, figsize=(12, 4.2))
     else:
-        _, ax_cov = plt.subplots(figsize=(8, 4.2))
+        fig, ax_cov = plt.subplots(figsize=(8, 4.2))
         ax_width = None
 
     if cov_df.empty:
@@ -1790,15 +1813,19 @@ def plot_calibration(
     ax_cov.set_ylim(-0.02, 1.05)
     ax_cov.set_xlabel("horizon step (h)")
     ax_cov.set_ylabel("empirical coverage")
-    ax_cov.set_title(heading)
     ax_cov.legend(loc="best", fontsize=8)
 
     if ax_width is not None:
+        ax_cov.set_title(f"Empirical Coverage by Step (nominal {report.nominal_coverage:.0%})")
         ax_width.set_xlabel("horizon step (h)")
         ax_width.set_ylabel("mean interval width (yhat_upper − yhat_lower)")
-        ax_width.set_title(f"{report.run_id} — Interval Width by Step")
+        ax_width.set_title("Mean Interval Width by Step")
         ax_width.legend(loc="best", fontsize=8)
+        fig.suptitle(heading, fontsize=11, y=1.02)
+        fig.tight_layout()
         return (ax_cov, ax_width)
+
+    ax_cov.set_title(heading)
     return ax_cov
 
 
@@ -1895,9 +1922,11 @@ def plot_ensemble_weights(
         .pivot(index="ensemble_model", columns="base_model", values="weight")
         .fillna(0.0)
     )
-    # Normalize each strategy row to sum to 1.0 for clean stacked composition display
-    row_sums = pivot.sum(axis=1).replace(0.0, 1.0)
-    norm_pivot = pivot.div(row_sums, axis=0)
+    # Normalize each strategy row by sum(|w|) so unconstrained (ridge) negative weights
+    # never shift stacked bar segments backward or exceed 1.0
+    abs_pivot = pivot.abs()
+    row_sums = abs_pivot.sum(axis=1).replace(0.0, 1.0)
+    norm_pivot = abs_pivot.div(row_sums, axis=0)
 
     palette = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442"]
     strategies = list(norm_pivot.index)
@@ -1926,7 +1955,7 @@ def plot_ensemble_weights(
     ax.set_yticks(list(ys))
     ax.set_yticklabels(strategies)
     ax.set_xlim(0, 1.05)
-    ax.set_xlabel("mean normalized base-model weight across series")
+    ax.set_xlabel("mean relative weight share (|w| / sum |w|) across series")
     ax.set_title(title or "Learned Ensemble Stacking Weights by Strategy")
     ax.legend(
         loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=min(4, len(base_models)), fontsize=8.5
