@@ -309,6 +309,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 | `create_service_accounts` | `true` | you bring your own SAs (`runner_sa_email`, `compute_sa_email`) |
 | `create_network` | `true` | your org already has a network — pass an existing subnet (`subnetwork_uri`) with Private Google Access + internal-ingress |
 | `create_composer` | `false` | (already off) turn **on** for scheduled DAG runs |
+| `create_gke` | `false` | (already off) turn **on** for a standing GKE cluster (`SF_GKE_CLUSTER`) with scale-to-zero CPU & GPU node pools |
 | `build_image` | `true` | (already **on**) turn **off** when you build/push the runtime image yourself (CI / air-gapped) |
 | `run_seed` | `true` | (already **on**) turn **off** to skip the example dataset (bring your own source table) |
 | `create_project` (bootstrap) | `true` | your org pre-creates projects |
@@ -319,7 +320,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 
 | Module | Purpose |
 | :--- | :--- |
-| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets). |
+| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, GKE, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets). |
 | [`iam`](./main/modules/iam/main.tf) | Creates the two workload service accounts (`sf-runner` and `sf-compute`), custom least-privilege roles, and Google-managed service-agent bindings. |
 | [`network`](./main/modules/network/main.tf) | Provisions the VPC, regional subnet with Private Google Access, Cloud Router/NAT, internal firewall rules, Private Service Access peering, and PSC network attachment for Vertex Ray. |
 | [`storage`](./main/modules/storage/main.tf) | Creates the two GCS buckets (`<project>-warehouse` for Iceberg tables and model artifacts; `<project>-code` for staged configs, package zips, and packed-venv archives). |
@@ -329,6 +330,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 | [`smoke`](./main/modules/smoke/main.tf) | Submits a non-blocking end-to-end verification forecast (`smoke_entry.py`) running Spark and BigQuery ML in parallel against the freshly seeded data. |
 | [`colab`](./main/modules/colab/main.tf) | Creates the Colab Enterprise runtime template (`sf-main`, Python 3.11) pre-populated with all `SF_*` environment variables for one-click notebook execution. |
 | [`composer`](./main/modules/composer/main.tf) | Optional (`create_composer = false` by default): provisions a Cloud Composer 3 (Airflow) environment pre-wired with `SF_*` variables and submit-side PyPI packages. |
+| [`gke`](./main/modules/gke/main.tf) | Optional (`create_gke = false` by default): provisions a standing Google Kubernetes Engine cluster with scale-to-zero (`min_node_count = 0`) CPU and GPU node pools (`SF_GKE_CLUSTER`). |
 | [`budget`](./main/modules/budget/main.tf) | Creates a Cloud Billing budget alert on the project (`monthly_budget_amount`). |
 
 **Table schemas live in Python, not Terraform.** The source and registry table schemas are defined in [`src/scale_forecasting/registry/ddl.py`](../src/scale_forecasting/registry/ddl.py) and created idempotently by `registry.tables.ensure_tables()` at run time. Terraform provisions the containers (dataset, BigLake connection, buckets, IAM); the Python package owns the table DDL.

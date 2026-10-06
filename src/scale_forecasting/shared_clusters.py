@@ -110,7 +110,11 @@ def shared_ray_inputs(python_jobs: list[FamilyJob]) -> tuple[list[str], bool, st
     GPU type to size it (the first GPU family's) — the inputs to one shared cluster. A single Ray
     family (or none) returns ``None`` and keeps the proven self-provisioning path.
     """
-    ray_jobs = [j for j in python_jobs if j.runtime == "ray"]
+    ray_jobs = [
+        j
+        for j in python_jobs
+        if j.runtime == "ray" and (j.compute is None or j.compute.ray_mode != "gke")
+    ]
     if len(ray_jobs) < 2:
         return None
     models: list[str] = []

@@ -1552,6 +1552,22 @@
         1460
       ]
     ],
+    "configs/gke_demo.json": [
+      [
+        0,
+        0,
+        1404,
+        1404,
+        1432
+      ],
+      [
+        1,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
     "configs/mixed_demo.json": [
       [
         0,
@@ -2072,6 +2088,24 @@
       ]
     ],
     "configs/smokes/39_gce_single_vm.json": [
+      [
+        0,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
+    "configs/smokes/40_gke_indexed_job.json": [
+      [
+        0,
+        0,
+        1432,
+        1432,
+        1460
+      ]
+    ],
+    "configs/smokes/41_gke_ray.json": [
       [
         0,
         0,

@@ -2,14 +2,14 @@
 
 A **smoke test** is a small, end-to-end live run (20–100 time series) that verifies a specific runtime, hardware, backtesting, HPO, feature-engineering, or ensembling combination against live Google Cloud infrastructure.
 
-- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (39 JSON configs)
+- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (41 JSON configs)
 - **Direct Smoke Harness**: [`tests/smokes/smoke_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/smoke_harness.py)
 - **Composer / Airflow Harness**: [`tests/smokes/airflow_smoke.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/airflow_smoke.py)
 - **Live Results Record**: [System Validation Ledger](validation.md)
 
 ```mermaid
 flowchart LR
-    Cfg["configs/smokes/*.json\n(39 Smoke Configs)"] --> Dry["1. Plan\nplan_run()"]
+    Cfg["configs/smokes/*.json\n(41 Smoke Configs)"] --> Dry["1. Plan\nplan_run()"]
     Dry --> Stage["2. Stage\nstage_run() -> GCS"]
     Stage --> Run["3. Execute\nmain.run() or Composer DAG"]
     Run --> Verify["4. Verify\nv_run_summary, v_run_jobs,\nv_model_leaderboard, cells"]
@@ -19,7 +19,7 @@ flowchart LR
 
 ---
 
-## Smoke Suite Overview (`01`–`39`)
+## Smoke Suite Overview (`01`–`41`)
 
 Configs are ordered from fastest/cheapest to most comprehensive:
 
@@ -64,6 +64,8 @@ Configs are ordered from fastest/cheapest to most comprehensive:
 | `37` | `37_hierarchy_covariates_ensemble.json` | **Hierarchy + covariates + ensemble:** 3-level hierarchical reconciliation combined with 3-tier covariates, univariate fallback, and post-hoc ensembling across all hierarchy nodes |
 | `38` | `38_vertex_custom_job.json` | **Vertex AI CustomJob Multi-VM & Dedicated L4 GPU Pools (`runtime="vertex"`):** multi-VM worker pools (`workers=2` on `n2-standard-8` for `statistical` [`theta`, `sarimax`] and `ml` [`xgboost`, `lightgbm`] + `3 x g2-standard-8 + NVIDIA_L4` dedicated per-model GPU VMs for `deep_learning` [`tide`, `tsmixer` in `global` mode; `neuralprophet` in `hybrid` mode]), GCS worker-pool completion barrier, 3-tier covariates, 3-level hierarchical reconciliation, and ensembling |
 | `39` | `39_gce_single_vm.json` | **Compute Engine Single-VM (`runtime="gce"`):** single-VM Container-Optimized OS execution (`machine_type="n2-standard-8"`) across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide` in `global` mode) with triple-redundant zero-orphan VM lifecycle guarantees, 3-tier covariates, 3-level hierarchical reconciliation, and ensembling |
+| `40` | `40_gke_indexed_job.json` | **Google Kubernetes Engine (`runtime="gke"`, `gke_mode="job"`):** Kubernetes `batch/v1` Indexed Job (`completions=2`, `parallelism=2`, `JOB_COMPLETION_INDEX` rank sharding) across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`, `lightgbm`), and `deep_learning` (`tide` in `global` mode) with 3-tier covariates, 3-level hierarchical reconciliation, and ensembling |
+| `41` | `41_gke_ray.json` | **Ray on GKE (`gke_mode="ray"` & `ray_mode="gke"`):** distributed Ray (`ray==2.59.0`) on Google Kubernetes Engine exercising both `python_runtime="gke"` with `gke_mode="ray"` (`statistical` + `ml`) and `runtime="ray"` with `ray_mode="gke"` (`deep_learning`: `tide` in `global` mode), plus 3-tier covariates, 3-level hierarchical reconciliation, and ensembling |
 
 ---
 
@@ -105,8 +107,8 @@ SF_RAY_POLL_FAULT=transport,auth .venv/bin/python tests/smokes/smoke_harness.py 
 
 The first poll of each Ray job injects a simulated transport (`503`) and/or auth (`401`) error, logs the injection and reconnect at `WARNING` level, mints a fresh token, and completes the run normally.
 
-### Covariates, Global/Hybrid DL, Hierarchical Reconciliation, Vertex AI CustomJob, and Compute Engine (`32`–`39`)
-Smokes `32`–`39` exercise the Phase B and Phase C expansions and cross-feature interactions against the 100-series covariate + hierarchy benchmark tables (`source_series_covariates_iceberg` and `source_series_covariates_native`):
+### Covariates, Global/Hybrid DL, Hierarchical Reconciliation, Vertex AI CustomJob, Compute Engine, and GKE (`32`–`41`)
+Smokes `32`–`41` exercise the Phase B, Phase C, and Phase D expansions and cross-feature interactions against the 100-series covariate + hierarchy benchmark tables (`source_series_covariates_iceberg` and `source_series_covariates_native`):
 
 - **`32` (`32_covariates_three_tier.json`)**: Exercises `static_covariates` (`region`, `category`), `future_covariates` (`is_holiday`, `promo_flag`, `price_index`), and lookahead-safe lagged `past_covariates` (`temperature` lagged `[7, 14]`) across 8 statistical and ML models (`decision_metric="rmsse"`).
 - **`33` (`33_expanded_stats_ml.json`)**: Exercises all 6 new statistical models (`auto_arima`, `auto_ces`, `auto_theta`, `tbats`, `fft`, `kalman`) and 2 new ML models (`random_forest`, `catboost`) across 25 series on `source_series_covariates_native` (`decision_metric="msse"`).
@@ -116,6 +118,8 @@ Smokes `32`–`39` exercise the Phase B and Phase C expansions and cross-feature
 - **`37` (`37_hierarchy_covariates_ensemble.json`)**: Combines 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), 3-tier covariates (`static_covariates: ["region", "category"]`, `future_covariates`, `past_covariates`, `exog_lags`), univariate fallback (`theta` alongside `sarimax`, `xgboost`, `lightgbm`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`) scoring finite `mase` and `rmsse` across all bottom and aggregated hierarchy nodes.
 - **`38` (`38_vertex_custom_job.json`)**: Exercises `python_runtime="vertex"` with **multi-VM worker pools across all three Python families** (`workers=2` on `n2-standard-8` CPU pools for `statistical` [`theta` on rank 0, `sarimax` on rank 1] and `ml` [`xgboost` on rank 0, `lightgbm` on rank 1], plus `3 x g2-standard-8 + NVIDIA_L4` dedicated per-model GPU VMs for `deep_learning` [`tide` on rank 0, `tsmixer` on rank 1, `neuralprophet` on rank 2]), synchronized via the GCS worker-pool completion barrier, with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and ensembling (`mean`, `inverse_error`, `nnls`).
 - **`39` (`39_gce_single_vm.json`)**: Exercises `python_runtime="gce"` on **direct single-VM Compute Engine (`cos-cloud/cos-stable`, `machine_type="n2-standard-8"`)** across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide` in `global` mode) with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), ensembling (`mean`, `inverse_error`, `nnls`), and triple-redundant zero-orphan VM self-deletion.
+- **`40` (`40_gke_indexed_job.json`)**: Exercises `python_runtime="gke"` (`gke_mode="job"`) using a **Kubernetes `batch/v1` Indexed Job (`completions=2`, `parallelism=2`, `JOB_COMPLETION_INDEX` rank sharding)** across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`, `lightgbm`), and `deep_learning` (`tide` in `global` mode) with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and ensembling (`mean`, `inverse_error`, `nnls`).
+- **`41` (`41_gke_ray.json`)**: Exercises **Ray-on-GKE (`ray==2.59.0`)** under both syntax forms — `python_runtime="gke"` with `gke_mode="ray"` (`statistical`: `theta`, `sarimax`; `ml`: `xgboost`) and `runtime="ray"` with `ray_mode="gke"` (`deep_learning`: `tide` in `global` mode) — with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and ensembling (`mean`, `inverse_error`, `nnls`).
 
 ---
 
@@ -143,7 +147,7 @@ export SF_REGION=us-central1
 ```
 
 Additional requirements by smoke category:
-- **Source Tables**: `source_series_iceberg` and `source_series_native` (plus `source_series_covariates_iceberg` and `source_series_covariates_native` for Smokes `32`–`39`) must exist in your BigQuery dataset.
+- **Source Tables**: `source_series_iceberg` and `source_series_native` (plus `source_series_covariates_iceberg` and `source_series_covariates_native` for Smokes `32`–`41`) must exist in your BigQuery dataset.
 - **GPU Smokes (`03`, `06`, `08`, `09`, `10`, `14`, `15`, `16`, `38`)**: Requires regional GPU quota (`NVIDIA L4` for Dataproc Serverless and Vertex AI `CustomJob`; `NVIDIA T4` for Dataproc Standard Cluster and Vertex AI Ray).
 - **Cluster Reuse Smoke (`05`)**: Requires a standing Dataproc cluster named `sf-smoke-cluster`.
 
@@ -210,7 +214,7 @@ SELECT * FROM `PROJECT.DATASET.v_model_leaderboard` WHERE run_id = 'RUN_ID' ORDE
 
 The smoke configuration library and harness logic are continuously verified in the offline test suite (`make test`):
 
-- [`tests/smokes/test_smoke_configs.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_smoke_configs.py) — Validates that all 39 smoke configs parse, validate, and plan cleanly across every runtime, hardware, and ensemble combination.
+- [`tests/smokes/test_smoke_configs.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_smoke_configs.py) — Validates that all 41 smoke configs parse, validate, and plan cleanly across every runtime, hardware, and ensemble combination.
 - [`tests/smokes/test_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_harness.py) — Unit-tests the harness verification and reverse-trace logic against fixture rows.
 - [`tests/smokes/test_airflow_smoke.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_airflow_smoke.py) — Unit-tests the Composer command builders and DAG ID derivation.
 - [`tests/unit/test_airflow_dagbag.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_airflow_dagbag.py) — Loads emitted DAGs through a real `airflow.models.DagBag` in CI (`@airflow` marker).

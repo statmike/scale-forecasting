@@ -840,13 +840,32 @@ def _wait_for_worker_pool_barrier(
     return [collected[r] for r in sorted(collected)]
 
 
-def _should_use_worker_barrier(topology: WorkerTopology) -> bool:
-    """True when running in a multi-worker pool backed by a live orchestrator (`CLUSTER_SPEC`)."""
+def _should_use_worker_barrier(
+    topology: WorkerTopology,
+    *,
+    manage_header: bool = True,
+) -> bool:
+    """True when rank 0 must block at a GCS barrier until peer workers (`1..W-1`) finish.
+
+    - On Vertex AI ``CustomJob`` (``source == "vertex_cluster_spec"``), ``worker_pool_specs[0]``
+      (rank 0) is the chief replica whose exit immediately terminates ``worker_pool_specs[1]``
+      (ranks ``1..W-1``), so rank 0 must always wait for peers.
+    - On Kubernetes Indexed Jobs (``source == "k8s_indexed_job"``), each pod (``0..W-1``) is
+      tracked independently by the Kubernetes ``batch/v1`` ``Job`` controller until
+      ``succeeded == completions``. When ``manage_header=False`` (orchestrated via ``main.run`` /
+      ``gke_submit``), pods exit immediately as soon as their own model or shard finishes so GKE
+      Cluster Autoscaler can scale down completed nodes while slower pods continue running.
+    """
     if not topology.is_distributed:
         return False
-    return topology.source in ("CLUSTER_SPEC", "JOB_COMPLETION_INDEX") or bool(
-        os.environ.get("SF_VERTEX_JOB_ID")
-    )
+    if topology.source in ("k8s_indexed_job", "JOB_COMPLETION_INDEX") and not manage_header:
+        return False
+    return topology.source in (
+        "CLUSTER_SPEC",
+        "JOB_COMPLETION_INDEX",
+        "vertex_cluster_spec",
+        "k8s_indexed_job",
+    ) or bool(os.environ.get("SF_VERTEX_JOB_ID"))
 
 
 def run(
@@ -858,7 +877,7 @@ def run(
     worker_rank: int | None = None,
     worker_count: int | None = None,
 ) -> RunOutcome:
-    """Execute a Vertex AI ``CustomJob`` or GCE VM worker end-to-end: read → size → fit → close.
+    """Execute a Vertex AI ``CustomJob``, GCE VM, or GKE Indexed Job worker end-to-end.
 
     Structural twin of `ray_engine.run` and `spark_explode.run`, invoked by `vertex_entry`.
     """
@@ -873,7 +892,7 @@ def run(
     raw_gpu, job_gpu_type = ray_io.resolve_job_gpu(cfg)
     job_gpu = raw_gpu and ("deep_learning" in ray_io.pool_families(list(executed)))
     runtime_name = os.environ.get("SF_VM_RUNTIME", "vertex")
-    use_barrier = _should_use_worker_barrier(topology)
+    use_barrier = _should_use_worker_barrier(topology, manage_header=manage_header)
     barrier_id = (
         os.environ.get("SF_VERTEX_JOB_ID")
         or os.environ.get("CLOUD_ML_JOB_ID")

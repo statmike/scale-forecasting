@@ -88,6 +88,7 @@ locals {
     "dataproc.editor"  = "roles/dataproc.editor"          # submit Dataproc Serverless batches
     "aiplatform.user"  = "roles/aiplatform.user"          # submit Ray on Vertex jobs (get/list clusters)
     "ray.cluster"      = local.ray_cluster_role           # create/delete the Ray cluster it runs on
+    "container.admin"  = "roles/container.admin"          # provision ephemeral GKE clusters + dispatch K8s Indexed Jobs / Ray on GKE
     "composer.worker"  = "roles/composer.worker"          # Composer runs AS this SA: env workers need logging.logEntries.create + monitoring/storage (Google's prescribed env-SA role). Inert until create_composer = true.
   }
   compute_roles = {
@@ -98,6 +99,7 @@ locals {
     "storage.objAdmin" = "roles/storage.objectAdmin"      # read/write model artifacts
     "dataproc.worker"  = "roles/dataproc.worker"          # batch RUNTIME SA: logs/metrics/staging
     "artifactreg.read" = "roles/artifactregistry.reader"  # pull the custom Spark runtime image
+    "gke.nodeSa"       = "roles/container.defaultNodeServiceAccount" # GKE worker node telemetry + system logging/monitoring
   }
 
   # Run-observability operator permission sets (§9 two-tier). job-canceller is a strict SUPERSET of
@@ -116,12 +118,19 @@ locals {
     "aiplatform.customJobs.list",         # Vertex CustomJob: resolve job state by display_name
     "compute.instances.get",              # GCE single-VM runtime: read VM state by instance name
     "compute.instances.list",             # GCE single-VM runtime: list VMs across candidate zones
+    "container.clusters.get",             # GKE runtime: read cluster endpoint/status
+    "container.clusters.list",            # GKE runtime: resolve zonal/regional cluster by name
+    "container.jobs.get",                 # GKE runtime: read Kubernetes batch/v1 Job status
+    "container.pods.get",                 # GKE runtime: read Kubernetes Pod status
+    "container.pods.list",                # GKE runtime: list Pods for a Kubernetes Job
   ]
   job_canceller_perms = concat(local.probe_reader_perms, [
     "dataproc.batches.delete",     # Serverless has no cancel — deleting a running batch stops it
     "dataproc.jobs.cancel",        # Dataproc cluster job cancel
     "aiplatform.customJobs.cancel",# Vertex CustomJob cancel
     "compute.instances.delete",    # GCE single-VM runtime: delete running instance
+    "container.clusters.delete",   # GKE runtime: tear down ephemeral GKE cluster
+    "container.jobs.delete",       # GKE runtime: delete running Kubernetes Job
     "bigquery.jobs.update",        # cancel a running BigQuery statement
     # Ray stop_job goes through the cluster dashboard — no IAM verb beyond persistentResources.get.
   ])

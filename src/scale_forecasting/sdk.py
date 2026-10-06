@@ -1359,6 +1359,19 @@ def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
             )
             machine_type = comp.machine_type if comp is not None else "auto"
             workers = comp.workers if comp is not None else 1
+            if (
+                comp is not None
+                and comp.workers is not None
+                and (comp.runtime == "vertex" or (comp.runtime == "gke" and comp.gke_mode == "job"))
+            ):
+                from .engines.vertex_engine import effective_worker_count
+
+                workers = effective_worker_count(
+                    cfg,
+                    node.models,
+                    comp.workers,
+                    n_series=workload.n_series,
+                )
 
         records.append(
             {

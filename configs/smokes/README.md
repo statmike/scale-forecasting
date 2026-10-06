@@ -1,6 +1,6 @@
 # System Validation Smoke Configurations (`configs/smokes/`)
 
-This directory holds **39 numbered smoke configurations** (`01` through `39`). Each file is a small, self-contained [`RunConfig`](../../src/scale_forecasting/config.py) designed to prove a specific axis of the platform — a compute surface, hardware fallback, storage format, orchestration mode, model/ensemble catalogue, backtesting scheme, hyperparameter optimization mode, covariate tier, hierarchical reconciliation method, or feature-engineering pipeline.
+This directory holds **41 numbered smoke configurations** (`01` through `41`). Each file is a small, self-contained [`RunConfig`](../../src/scale_forecasting/config.py) designed to prove a specific axis of the platform — a compute surface, hardware fallback, storage format, orchestration mode, model/ensemble catalogue, backtesting scheme, hyperparameter optimization mode, covariate tier, hierarchical reconciliation method, or feature-engineering pipeline.
 
 Every configuration in this folder is guarded by two automated unit-test tripwires in [`tests/unit/`](../../tests/README.md):
 1. **[`test_validation_ledger.py`](../../tests/unit/test_validation_ledger.py)** verifies that every file in `configs/smokes/` has a corresponding row in [`docs/validation.md`](../../docs/validation.md) with an up-to-date `run_id` and architecture-axis proof.
@@ -8,12 +8,12 @@ Every configuration in this folder is guarded by two automated unit-test tripwir
 
 ```mermaid
 flowchart TB
-    suite["configs/smokes/ (01 – 39)<br/>39 Targeted System Validation Configs"]
+    suite["configs/smokes/ (01 – 41)<br/>41 Targeted System Validation Configs"]
 
-    subgraph rt["Runtimes & Hardware (01–10, 16–20, 38–39)"]
+    subgraph rt["Runtimes & Hardware (01–10, 16–20, 38–41)"]
         s_spark["Dataproc Spark<br/>01 Serverless CPU · 03 Serverless GPU<br/>04 Cluster CPU · 05 Cluster Reuse · 06 Cluster GPU<br/>16 Split Hardware"]
-        s_ray["Ray on Vertex AI<br/>07 Ray CPU · 08 Ray GPU · 09 Shared Ray"]
-        s_vtx_gce["Vertex CustomJob & GCE Single-VM<br/>38 Vertex CustomJob · 39 GCE Single-VM"]
+        s_ray["Ray on Vertex AI & GKE<br/>07 Ray CPU · 08 Ray GPU · 09 Shared Ray · 41 GKE Ray"]
+        s_vtx_gce["Vertex CustomJob, GCE Single-VM & GKE Indexed Job<br/>38 Vertex CustomJob · 39 GCE Single-VM · 40 GKE Indexed Job"]
         s_bq["BigQuery & Multi-Engine<br/>02 BQ Native · 10 Mixed Runtimes"]
         s_hw["Hardware Preflight & Fallbacks<br/>17–19 GPU-Absent Guards · 20 CPU Override"]
     end
@@ -53,7 +53,7 @@ uv run python -m tests.smokes.airflow_smoke --config configs/smokes/15_airflow_m
 
 ## Complete Index of Smoke Configurations
 
-### 1. Compute Runtimes & Hardware Routing (`01`–`10`, `16`–`20`, `38`–`39`)
+### 1. Compute Runtimes & Hardware Routing (`01`–`10`, `16`–`20`, `38`–`41`)
 
 | # | File | Series | Surface & Focus |
 | :--- | :--- | ---: | :--- |
@@ -74,6 +74,8 @@ uv run python -m tests.smokes.airflow_smoke --config configs/smokes/15_airflow_m
 | `20` | [`20_gpu_intent_cpu_family.json`](./20_gpu_intent_cpu_family.json) | 100 | Explicit per-family `hardware: "cpu"` override on `deep_learning` when top-level `use_gpu: true` is set. |
 | `38` | [`38_vertex_custom_job.json`](./38_vertex_custom_job.json) | 20 | Serverless **Vertex AI `CustomJob`** (`python_runtime: "vertex"`) across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`, `lightgbm`), and `deep_learning` (`tide`, `tsmixer`, `neuralprophet`) + `ensemble`. |
 | `39` | [`39_gce_single_vm.json`](./39_gce_single_vm.json) | 20 | Direct **Compute Engine Single-VM** (`python_runtime: "gce"`) across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide`) + `ensemble` with triple-redundant zero-orphan VM teardown. |
+| `40` | [`40_gke_indexed_job.json`](./40_gke_indexed_job.json) | 20 | **Google Kubernetes Engine (`gke_mode: "job"`)** Indexed Job (`completionMode: Indexed`) across `statistical` (`theta`, `sarimax`, 2 pods), `ml` (`xgboost`), and `deep_learning` (`tide`) + hierarchical reconciliation + `ensemble`. |
+| `41` | [`41_gke_ray.json`](./41_gke_ray.json) | 20 | **Ray on Google Kubernetes Engine (`gke_mode: "ray"` / `ray_mode: "gke"`)** across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide`) + `ensemble`. |
 
 ### 2. Ensembling, Storage Formats & Orchestration (`11`–`15`)
 

@@ -269,9 +269,14 @@ def _peak_gpu_bytes() -> int | None:
 
 
 def _compute_engine(model_cls: type[BaseModel], cfg: RunConfig) -> str:
-    """The engine that will execute this cell: the Python runtime, or BigQuery for native
+    """The engine that will execute this cell: the resolved family runtime, or BigQuery for native
     models (which run as SQL regardless of the run's Python runtime)."""
-    return "bigquery" if model_cls.runtime == "bigquery" else cfg.python_runtime
+    if model_cls.runtime == "bigquery":
+        return "bigquery"
+    family = getattr(model_cls, "family", None)
+    if family in ("statistical", "ml", "deep_learning"):
+        return cfg.resolve_family_compute(family).runtime
+    return cfg.python_runtime
 
 
 def _model_context(

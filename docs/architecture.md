@@ -21,7 +21,7 @@ For the *what/why* of each config knob see
 A run is **one JSON config**. [`main.run(cfg)`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py) computes a
 deterministic `run_id`, then resolves the config into an **execution DAG**: one **job per model
 family** present in the config — `statistical`, `ml`, `deep_learning`, `native` — plus a downstream
-`ensemble` node. Each Python family runs on **its own resolved runtime** (Spark *xor* Ray *xor* Vertex AI `CustomJob` *xor* Compute Engine `gce`, chosen
+`ensemble` node. Each Python family runs on **its own resolved runtime** (Spark *xor* Ray *xor* Vertex AI `CustomJob` *xor* Compute Engine `gce` *xor* Google Kubernetes Engine `gke`, chosen
 *per family*); the `native` family runs as SQL in BigQuery. All the family jobs launch **in parallel
 under one run header**, so a run's wall-clock is the *slowest* family, not the sum. Whichever runtime
 a family lands on, it fans out that family's cells and calls the **same** `worker.run_cell` for each,
@@ -34,9 +34,9 @@ flowchart TD
     Cfg["One JSON Config (RunConfig)"] --> Main["main.run(cfg)\nWrites run_registry header (RUNNING)"]
     Main --> Plan["dag.plan_dag(cfg)\nGroups models into parallel FamilyJobs"]
 
-    Plan --> Stat["statistical\n(Spark · Ray · Vertex · GCE)"]
-    Plan --> ML["ml\n(Spark · Ray · Vertex · GCE)"]
-    Plan --> DL["deep_learning\n(Spark · Ray · Vertex · GCE)"]
+    Plan --> Stat["statistical\n(Spark · Ray · Vertex · GCE · GKE)"]
+    Plan --> ML["ml\n(Spark · Ray · Vertex · GCE · GKE)"]
+    Plan --> DL["deep_learning\n(Spark · Ray · Vertex · GCE · GKE)"]
     Plan --> Nat["native\n(BigQuery SQL)"]
 
     Stat & ML & DL --> Engine["spark_explode / ray_engine / vertex_engine\nFans out (ts_id, model) cells & global panels"]
@@ -76,6 +76,7 @@ There are three ways a run begins, all converging on the same engines.
 | `ray_submit` | [`ray_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ray_submit.py) | Submit-side launcher for a **Ray** family — the *ordering* of the five steps and nothing else: size the cluster, stage the config, provision (or target) it, submit the Ray job, poll and stamp. Each step's machinery is one of the four modules above. |
 | `vertex_submit` | [`vertex_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/vertex_submit.py) | Submit-side launcher for a **Vertex AI `CustomJob`** family (`runtime="vertex"`): zip `src/`, upload `scale_forecasting.zip` + `vertex_entry.py` + `config.json` to GCS, build `worker_pool_specs` (1 dedicated VM per model for `deep_learning` / global models, or `workers` VMs for local `statistical` / `ml` families), submit with regional quota/capacity fallback, poll to terminal state, and merge `$.sizing` / `$.sizing_executed` telemetry onto the run header. |
 | `gce_submit` | [`gce_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/gce_submit.py) | Submit-side launcher for a **Compute Engine Single-VM** family (`runtime="gce"`): stages `scale_forecasting.zip` + `vertex_entry.py` + `config.json` to GCS, provisions a single Container-Optimized OS (`cos-stable`) VM with triple-redundant zero-orphan lifecycle guarantees (`maxRunDuration` + `instanceTerminationAction="DELETE"`, guest `trap cleanup EXIT` REST self-delete + `shutdown -h now`, and client `try ... finally` `delete_instance`), polls GCS status markers and instance state, and merges sizing telemetry onto the run header. |
+| `gke_submit` | [`gke_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/gke_submit.py) | Submit-side launcher for a **Google Kubernetes Engine (`GKE`)** family (`runtime="gke"` or `ray_mode="gke"`): stages `scale_forecasting.zip` + `config.json` to GCS, targets a standing GKE cluster (`compute.gke_cluster_name` / `SF_GKE_CLUSTER`) or provisions an ephemeral regional/zonal GKE cluster with quota preflight and `try ... finally` teardown, submits a Kubernetes `batch/v1` Indexed Job (`gke_mode="job"` running `vertex_engine.py` with `JOB_COMPLETION_INDEX`) or a Ray-on-GKE workload (`gke_mode="ray"` running `ray_engine.py` with a Headless `Service` + Worker `Deployment` + Head `Job`, plus `build_kuberay_cluster_manifest`), polls the Kubernetes API to terminal state, and merges `$.sizing` / `$.sizing_executed` telemetry onto the run header. |
 | `playground` | [`playground.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/playground.py) | Local single-cell path — one `run_cell` on the driver, no cluster, no registry. The fastest way to see a model run. |
 
 `main.run` orchestrates the DAG ([`main.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/main.py)):
@@ -96,7 +97,7 @@ There are three ways a run begins, all converging on the same engines.
 
 Each Python family's runtime dispatch lives in `launch_family_job`
 ([`job_launch.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/job_launch.py)): it looks up the family's **resolved**
-runtime (`job.compute.runtime` — Spark *xor* Ray *xor* Vertex *xor* GCE, chosen per family) and calls
+runtime (`job.compute.runtime` — Spark *xor* Ray *xor* Vertex *xor* GCE *xor* GKE, chosen per family) and calls
 `get_submitter(runtime).launch(...)` (Layer 1½). An injected Spark session (e.g. notebook 01's Spark
 Connect) makes a Spark family run **in-process** against that session instead of a remote batch,
 using the identical engine code.
@@ -105,8 +106,7 @@ using the identical engine code.
 
 [`submitters.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/submitters.py) captures "how do I launch a Python family on
 its runtime" as a `RuntimeSubmitter` protocol with one implementation per runtime — `SparkSubmitter`
-(→ `submit.submit_batch`, a Dataproc batch), `RaySubmitter` (→ `ray_submit.submit_ray`, a Vertex
-Ray job), `VertexSubmitter` (→ `vertex_submit.submit_vertex_job`, a Vertex AI `CustomJob`), and `GceSubmitter` (→ `gce_submit.submit_gce_job`, a single-VM Compute Engine instance). `get_submitter(runtime)` returns the right one, so `launch_family_job` is a single dispatch
+(→ `submit.submit_batch`, a Dataproc batch), `RaySubmitter` (→ `ray_submit.submit_ray` on Vertex AI or `gke_submit.submit_gke` when `ray_mode="gke"`), `VertexSubmitter` (→ `vertex_submit.submit_vertex_job`, a Vertex AI `CustomJob`), `GceSubmitter` (→ `gce_submit.submit_gce_job`, a single-VM Compute Engine instance), and `GkeSubmitter` (→ `gke_submit.submit_gke`, a Kubernetes `batch/v1` Indexed Job or Ray-on-GKE workload). `get_submitter(runtime)` returns the right one, so `launch_family_job` is a single dispatch
 line — the family doesn't know how its runtime is provisioned.
 
 ---
@@ -142,7 +142,7 @@ plain Python-vs-native split is all that's needed.
 Layer 2 decides *which* jobs run. This decides **how big each one is** — and it is the one concern
 that cuts across both halves of the stack, because the same arithmetic has to come out as four
 different vocabularies: Spark properties on Dataproc Serverless, Spark properties plus a worker count
-on a Dataproc cluster, `@ray.remote` resource requests on Vertex Ray, and VM worker-pool / thread-pool shapes on Vertex `CustomJob` and Compute Engine (`gce`).
+on a Dataproc cluster, `@ray.remote` resource requests on Vertex Ray / Ray-on-GKE, and VM / Pod worker-pool / thread-pool shapes on Vertex `CustomJob`, Compute Engine (`gce`), and GKE Indexed Jobs (`gke`).
 
 **One model, four translations.**
 The [`resources`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/resources)
@@ -154,8 +154,8 @@ translators render it:
 |---|---|---|---|
 | Dataproc Serverless | `translate_serverless` | `spark.executor.cores` / `memoryOverhead`, the `dynamicAllocation` min/initial/max band, `executorAllocationRatio`, thread pins — all snapped to Serverless's legal value tables | **at submit** |
 | Dataproc cluster | `translate_cluster` | one executor per worker minus an ApplicationMaster reserve, `spark.task.cpus` as the density lever, a derived worker count clamped to a spend ceiling | **at create** |
-| Ray on Vertex | `ray_io.plan_pool` / `plan_cluster` | per-pool node counts and per-task `num_cpus` / `num_gpus` | pool **at create**, task resources **in-run** |
-| Vertex `CustomJob` & GCE | `vertex_engine.plan_vertex_pool` | `UnitShape` (`n2-standard-8`, `g2-standard-*`, `n1-standard-*`, `a2-*`), `effective_worker_count` (dedicated per-model VMs for `deep_learning` / global models), `slots_per_unit` (`ThreadPoolExecutor` cap), and `intraop_env_vars` | worker pool **at submit**, thread slots **in-run** |
+| Ray on Vertex & Ray-on-GKE | `ray_io.plan_pool` / `plan_cluster` | per-pool node counts and per-task `num_cpus` / `num_gpus` | pool **at create**, task resources **in-run** |
+| Vertex `CustomJob`, GCE & GKE Indexed Jobs | `vertex_engine.plan_vertex_pool` | `UnitShape` (`n2-standard-8`, `g2-standard-*`, `n1-standard-*`, `a2-*`), `effective_worker_count` (dedicated per-model VMs/Pods for `deep_learning` / global models), `slots_per_unit` (`ThreadPoolExecutor` cap), and `intraop_env_vars` | worker pool / Indexed Job **at submit**, thread slots **in-run** |
 
 **How measurements feed back into fleet sizing.** Every execution cell automatically records its CPU seconds, process RSS high-water mark, peak GPU bytes, thread cap, and observation count (`n_obs`) into `forecast_metadata`. At submit time, `profiling.source.resolve_profile_source` resolves `compute.profile.source` (`"auto"` by default) through a four-step precedence chain:
 
@@ -210,18 +210,18 @@ fixed-size path.
 
 When more than one family resolves to Ray in the same run, the orchestrator provisions **one shared
 Ray cluster** for the launch block (`shared_clusters.shared_ray_cluster`) and each Ray family submits its job
-to it, instead of each family self-provisioning.
+to it, instead of each family self-provisioning. When `ray_mode="gke"` (or `runtime="gke"` with `gke_mode="ray"`), `gke_submit.py` executes the exact same `ray_engine.py` entrypoint on GKE (`RAY_GKE_BOOTSTRAP_CODE`).
 
-### Vertex AI CustomJob & Compute Engine (GCE) — the single-VM & worker-pool path
+### Vertex AI CustomJob, Compute Engine (GCE) & GKE Indexed Jobs — the single-VM & worker-pool path
 
-[`vertex_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/vertex_engine.py) executes any Python model family (`statistical`, `ml`, `deep_learning`) inside either a serverless **Vertex AI `CustomJob`** (`runtime="vertex"`) or a direct **Compute Engine Single-VM** (`runtime="gce"`). Both runtimes share the same container image (`SF_CONTAINER_IMAGE`), GCS code-zip delivery (`scale_forecasting.zip` + `vertex_entry.py` + `config.json`), and `plan_vertex_pool` sizing translator — paying **zero Ray head-node tax** (`n1-standard-16`) and zero Spark driver overhead.
+[`vertex_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/vertex_engine.py) executes any Python model family (`statistical`, `ml`, `deep_learning`) inside a serverless **Vertex AI `CustomJob`** (`runtime="vertex"`), a direct **Compute Engine Single-VM** (`runtime="gce"`), or a **Google Kubernetes Engine `batch/v1` Indexed Job** (`runtime="gke"`, `gke_mode="job"`). All three runtimes share the same container image (`SF_CONTAINER_IMAGE`), GCS code-zip delivery (`scale_forecasting.zip` + `vertex_entry.py` + `config.json`), and `plan_vertex_pool` sizing translator — paying **zero Ray head-node tax** (`n1-standard-16`) and zero Spark driver overhead.
 
-How `vertex_engine` allocates VMs and shards work across families:
+How `vertex_engine` allocates VMs/Pods and shards work across families:
 
-- **Dedicated Per-Model VMs for Global & Deep-Learning Models:** When a family contains `deep_learning` or global/hybrid panel models (`tide`, `tft`, `tsmixer`, `patchtst`, `neuralprophet`) on `runtime="vertex"`, `effective_worker_count` automatically expands `requested_workers=1` to `len(models)` so **each model gets its own dedicated VM (and dedicated GPU)** in `worker_pool_specs`, eliminating cross-model VRAM/RAM contention (`partition_models_for_worker(models, rank=rank, world_size=world_size)`).
-- **Shared `ThreadPoolExecutor`, LPT Cell Ordering & Contiguous Storage Read Pushdown for Local Models (`statistical` / `ml`):** Local per-series models share a VM via `ThreadPoolExecutor(max_workers=exec_plan.slots_per_unit)` with intra-op threads pinned by `intraop_env_vars`, dispatching cells in **Longest Processing Time first (LPT)** order (`model_cost_weights`) to eliminate end-of-job straggler tails. When `workers > 1` and `hierarchy.enabled=False`, each worker rank computes its contiguous sorted `ts_id` block (`shard_series_for_worker`) and pushes `ts_id >= '<min>' AND ts_id <= '<max>'` (plus the fleetwide HPO sample union when `hpo.enabled=True`) directly into BigQuery Storage Read API `row_restriction` (`_read_source_panel`), reading only its assigned slice rather than the full table. When `hierarchy.enabled=True`, models are sharded across workers via `partition_models_for_worker` so each worker holds the full series panel needed to reconcile its assigned models in-memory.
+- **Dedicated Per-Model VMs/Pods for Global & Deep-Learning Models:** When a family contains `deep_learning` or global/hybrid panel models (`tide`, `tft`, `tsmixer`, `patchtst`, `neuralprophet`) on `runtime="vertex"` or `runtime="gke"` (`gke_mode="job"`), `effective_worker_count` automatically expands `requested_workers=1` to `len(models)` so **each model gets its own dedicated VM or Pod (and dedicated GPU)**, eliminating cross-model VRAM/RAM contention (`partition_models_for_worker(models, rank=rank, world_size=world_size)`).
+- **Shared `ThreadPoolExecutor`, LPT Cell Ordering & Contiguous Storage Read Pushdown for Local Models (`statistical` / `ml`):** Local per-series models share a VM or Pod via `ThreadPoolExecutor(max_workers=exec_plan.slots_per_unit)` with intra-op threads pinned by `intraop_env_vars`, dispatching cells in **Longest Processing Time first (LPT)** order (`model_cost_weights`) to eliminate end-of-job straggler tails. When `workers > 1` and `hierarchy.enabled=False`, each worker rank (`CLUSTER_SPEC` on Vertex or `JOB_COMPLETION_INDEX` on GKE Indexed Jobs) computes its contiguous sorted `ts_id` block (`shard_series_for_worker`) and pushes `ts_id >= '<min>' AND ts_id <= '<max>'` (plus the fleetwide HPO sample union when `hpo.enabled=True`) directly into BigQuery Storage Read API `row_restriction` (`_read_source_panel`), reading only its assigned slice rather than the full table. When `hierarchy.enabled=True`, models are sharded across workers via `partition_models_for_worker` so each worker holds the full series panel needed to reconcile its assigned models in-memory.
 - **GCS Worker-Pool Completion Barrier:** Because Vertex AI `CustomJob` immediately terminates secondary worker pools (`worker_pool_specs[1]`) as soon as `worker_pool_specs[0]` (rank 0) exits, every worker writes a completion marker to `gs://<code_bucket>/runs/<run_id>/vertex_barriers/<job_id>/rank_<rank>.json` (`_write_worker_barrier_marker`) and rank 0 waits at `_wait_for_worker_pool_barrier` until all `0 .. world_size - 1` ranks have finished writing their cells to BigQuery.
-- **Triple-Redundant Zero-Orphan GCE Lifecycle (`runtime="gce"`):** [`gce_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/gce_submit.py) enforces three independent layers so a single-VM Compute Engine job can never leave an orphaned VM running: (1) GCE hypervisor hard TTL (`scheduling.maxRunDuration` + `scheduling.instanceTerminationAction = "DELETE"` + `automaticRestart = False`), (2) guest Container-Optimized OS startup script `trap cleanup EXIT` that writes `gs://<code_bucket>/runs/gce-status/<instance>.json`, calls `DELETE` on its own instance metadata URL via the GCE REST API, and runs `shutdown -h now || poweroff`, and (3) client-side `try ... finally` `delete_instance` in `gce_submit.py` plus `GceProbe.cancel()`.
+- **Triple-Redundant Zero-Orphan GCE & Ephemeral GKE Lifecycle:** [`gce_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/gce_submit.py) enforces three independent layers so a single-VM Compute Engine job can never leave an orphaned VM running: (1) GCE hypervisor hard TTL (`scheduling.maxRunDuration` + `scheduling.instanceTerminationAction = "DELETE"` + `automaticRestart = False`), (2) guest Container-Optimized OS startup script `trap cleanup EXIT` that writes `gs://<code_bucket>/runs/gce-status/<instance>.json`, calls `DELETE` on its own instance metadata URL via the GCE REST API, and runs `shutdown -h now || poweroff`, and (3) client-side `try ... finally` `delete_instance` in `gce_submit.py` plus `GceProbe.cancel()`. [`gke_submit.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/gke_submit.py) cleans up completed Kubernetes `Job`/`Deployment`/`Service` manifests and tears down any ephemeral GKE cluster in `try ... finally`.
 
 ### BigQuery-native — SQL only
 
@@ -363,7 +363,7 @@ The files:
 
 ## Layer 7 — per-job identity (one run, many systems)
 
-A run fans across several platforms — Dataproc, Vertex Ray, Vertex AI CustomJob, Compute Engine (GCE), BigQuery — but every family job keeps one
+A run fans across several platforms — Dataproc, Vertex Ray, Vertex AI CustomJob, Compute Engine (GCE), Google Kubernetes Engine (GKE), BigQuery — but every family job keeps one
 identity that ties its platform job, its `run_jobs` row, and its offline plan together:
 
 - **The canonical key** — `registry.ids.make_job_key(run_id, family, attempt)` →
@@ -371,7 +371,7 @@ identity that ties its platform job, its `run_jobs` row, and its offline plan to
   and a trace keys on. It lands in `run_jobs.job_id`.
 - **The system id** — `job_launch._system_job_id(job_key, runtime)` maps the canonical key to each
   platform's legal charset/length: `dataproc_job_id` (Spark), `ray_submission_id` (Ray),
-  `vertex_display_name` (Vertex CustomJob), `gce_instance_name` (GCE Single-VM), and `bigquery_job_id` (native / ensemble). It lands in `run_jobs.system_job_id`, so you can jump from a
+  `vertex_display_name` (Vertex CustomJob), `gce_instance_name` (GCE Single-VM), `gke_job_id` (GKE Indexed Job & Ray-on-GKE), and `bigquery_job_id` (native / ensemble). It lands in `run_jobs.system_job_id`, so you can jump from a
   run's trace straight to the platform console.
 - **Attempts** — `jobs.next_job_attempt(run_id, family, force=…)` bumps the attempt so a `--force`
   re-run is a fresh, distinctly-keyed job under the same `run_id`; `v_run_jobs` surfaces the latest
@@ -427,8 +427,8 @@ flowchart LR
 
     subgraph Runtimes["Distributed Runtimes"]
         FamLaunch --> SparkSub["SparkSubmitter\nsubmit_batch / submit_cluster_job\n-> spark_entry -> spark_explode.run"]
-        FamLaunch --> RaySub["RaySubmitter\nsubmit_ray\n-> ray_entry -> ray_engine.run"]
-        FamLaunch --> VtxSub["VertexSubmitter & GceSubmitter\nsubmit_vertex_job / submit_gce_job\n-> vertex_entry -> vertex_engine.run"]
+        FamLaunch --> RaySub["RaySubmitter & GkeSubmitter (gke_mode=ray)\nsubmit_ray / submit_gke\n-> ray_entry -> ray_engine.run"]
+        FamLaunch --> VtxSub["VertexSubmitter, GceSubmitter & GkeSubmitter (gke_mode=job)\nsubmit_vertex_job / submit_gce_job / submit_gke\n-> vertex_entry -> vertex_engine.run"]
         NatLaunch --> BQRun["bigquery_engine.run()\n(BQML + AI.FORECAST)"]
         EnsLaunch --> EnsRun["ensemble.run_ensembles()"]
     end
@@ -441,7 +441,7 @@ flowchart LR
 ```
 
 **The reuse seams to notice:** `spark_io.run_group`, `cells.write_cells`, and `aggregate_status` are
-shared **verbatim** by Spark, Ray, Vertex CustomJob, and GCE (`ray_io` and `vertex_engine` reuse them directly), and the `manage=True` header opened
+shared **verbatim** by Spark, Ray, Vertex CustomJob, GCE, and GKE (`ray_io` and `vertex_engine` reuse them directly), and the `manage=True` header opened
 by `main.run` threads `manage_header=False` into every family job so exactly one header row exists per
 `run_id` while each family keeps its own `run_jobs` row. Those facts are what make "same code
 everywhere, one job per family, one run" real.

@@ -40,6 +40,11 @@ _ENV_VENV_ARCHIVE = "SF_VENV_ARCHIVE"
 # driver at create via the stock init action (the fallback). CPU clusters, serverless, Ray ignore.
 _ENV_GPU_IMAGE = "SF_GPU_IMAGE"
 
+# Optional: standing GKE cluster name for `runtime == "gke"` or `ray_mode == "gke"` when
+# `compute.gke_cluster_name` is unset. Unset → GKE submitter provisions an ephemeral cluster per run
+# (or shared cluster across families) and tears it down in `finally`.
+_ENV_GKE_CLUSTER = "SF_GKE_CLUSTER"
+
 _DEFAULT_RUNTIME_VERSION = "2.2"
 
 # How a Dataproc SERVERLESS batch gets its dependencies. Two envelopes around the *same* locked
@@ -204,6 +209,8 @@ class BatchInfra:
     # How long the submitter blocks on a job — patience, not a cost bound. See above.
     cluster_job_wait_seconds: int = _DEFAULT_CLUSTER_JOB_WAIT_SECONDS
     batch_job_wait_seconds: int = _DEFAULT_BATCH_JOB_WAIT_SECONDS
+    # Optional standing GKE cluster name (resolved from `SF_GKE_CLUSTER` or `gke_cluster_name`).
+    gke_cluster_name: str | None = None
 
     @classmethod
     def resolve(cls) -> BatchInfra:
@@ -252,6 +259,7 @@ class BatchInfra:
             batch_job_wait_seconds=_env_seconds(
                 _ENV_BATCH_JOB_WAIT, _DEFAULT_BATCH_JOB_WAIT_SECONDS
             ),
+            gke_cluster_name=os.environ.get(_ENV_GKE_CLUSTER) or None,
         )
 
     @classmethod
@@ -262,8 +270,8 @@ class BatchInfra:
 
         Reads the keys the ``terraform/main`` stage emits — ``code_bucket``, ``runtime_image_repo``
         (a base path; ``image_tag`` is appended), ``compute_sa``, ``subnetwork_uri``, the optional
-        ``venv_archive_uri`` (the packed-venv archive for the cluster path), and the optional
-        ``gpu_image_uri`` (the pre-baked GPU cluster image).
+        ``venv_archive_uri`` (the packed-venv archive for the cluster path), the optional
+        ``gpu_image_uri`` (the pre-baked GPU cluster image), and the optional ``gke_cluster_name``.
         """
         try:
             return cls(
@@ -273,6 +281,7 @@ class BatchInfra:
                 subnetwork_uri=outputs["subnetwork_uri"],
                 venv_archive_uri=outputs.get("venv_archive_uri") or None,
                 gpu_image_uri=outputs.get("gpu_image_uri") or None,
+                gke_cluster_name=outputs.get("gke_cluster_name") or None,
             )
         except KeyError as exc:
             raise ConfigError(f"terraform outputs missing key: {exc.args[0]}") from exc

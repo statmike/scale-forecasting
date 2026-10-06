@@ -314,6 +314,7 @@ def test_shipped_policies_cover_every_service_with_a_candidate_walk() -> None:
         "ray",
         "vertex",
         "gce",
+        "gke",
         "dataproc_cluster",
         "dataproc_serverless",
     }

@@ -70,7 +70,21 @@ locals {
     module.network.network_attachment_id != null ? { SF_RAY_NETWORK_ATTACHMENT = module.network.network_attachment_id } : {},
     module.container.venv_archive_uri != null ? { SF_VENV_ARCHIVE = module.container.venv_archive_uri } : {},
     module.container.gpu_image_uri != null ? { SF_GPU_IMAGE = module.container.gpu_image_uri } : {},
+    module.gke.cluster_name != null ? { SF_GKE_CLUSTER = module.gke.cluster_name } : {},
   )
+}
+
+# Gated: standing GKE cluster with scale-to-zero CPU & GPU node pools (create_gke = false by default).
+module "gke" {
+  source                  = "./modules/gke"
+  create                  = var.create_gke
+  project_id              = var.project_id
+  region                  = var.region
+  network_id              = module.network.network_id
+  subnetwork_uri          = module.network.subnetwork_uri
+  compute_service_account = module.iam.compute_email
+
+  depends_on = [module.apis, module.iam, module.network]
 }
 
 # Gated: created only when create_composer = true (see modules/composer for the lifecycle). The

@@ -17,7 +17,7 @@ flowchart TB
     end
 
     subgraph smokes["Tier 3: Live System Validation Smokes (tests/smokes/)"]
-        sh["smoke_harness.py & airflow_smoke.py<br/>Executes configs/smokes/01..39 on live GCP,<br/>verifies BigQuery rows, metrics & teardown"]
+        sh["smoke_harness.py & airflow_smoke.py<br/>Executes configs/smokes/01..41 on live GCP,<br/>verifies BigQuery rows, metrics & teardown"]
     end
 
     offline --> integ --> smokes

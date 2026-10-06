@@ -367,3 +367,63 @@ def build_gce_commands(
         native = shell_join(gcloud)
 
     return LaunchCommands(runtime="gce", universal=shell_join(argv), native=native)
+
+
+def build_gke_commands(
+    *,
+    config_uri: str,
+    package_uri: str | None = None,
+    settings: Settings | None = None,
+    infra: BatchInfra | None = None,
+    job_id: str | None = None,
+    gke_mode: str = "job",
+    cluster_name: str | None = None,
+    models: list[str] | None = None,
+    hardware: str | None = None,
+    gpu_type: str | None = None,
+    machine_type: str = "n2-standard-8",
+    worker_count: int = 1,
+) -> LaunchCommands:
+    """Build universal (`gke_submit`) and native (`gcloud container clusters`) commands."""
+    argv = ["python", "-m", "scale_forecasting.gke_submit", "--config-uri", config_uri]
+    if models is not None:
+        argv += ["--models", *models]
+    if job_id is not None:
+        argv += ["--job-id", job_id]
+    if gke_mode and gke_mode != "job":
+        argv += ["--gke-mode", gke_mode]
+    if cluster_name is not None:
+        argv += ["--cluster-name", cluster_name]
+    if hardware is not None:
+        argv += ["--hardware", hardware]
+    if gpu_type is not None:
+        argv += ["--gpu-type", gpu_type]
+    if machine_type:
+        argv += ["--machine-type", machine_type]
+    if worker_count > 1:
+        argv += ["--workers", str(worker_count)]
+
+    native: str | None = None
+    if settings is not None and infra is not None and infra.container_image and package_uri:
+        zone = f"{settings.region}-a"
+        target_cluster = cluster_name or job_id or "sf-gke"
+        gcloud = [
+            "gcloud",
+            "container",
+            "clusters",
+            "create",
+            target_cluster[:40].rstrip("-"),
+            f"--project={settings.project_id}",
+            f"--zone={zone}",
+            f"--machine-type={machine_type}",
+            f"--num-nodes={max(1, worker_count)}",
+            "--disk-type=pd-balanced",
+            "--disk-size=100",
+        ]
+        if infra.compute_sa:
+            gcloud.append(f"--service-account={infra.compute_sa}")
+        if infra.subnetwork_uri:
+            gcloud.append(f"--subnetwork={infra.subnetwork_uri}")
+        native = shell_join(gcloud)
+
+    return LaunchCommands(runtime="gke", universal=shell_join(argv), native=native)

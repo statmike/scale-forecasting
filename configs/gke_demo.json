@@ -1,0 +1,32 @@
+{
+  "run_name": "gke_demo",
+  "python_runtime": "gke",
+  "data": {
+    "source_table": "source_series_iceberg",
+    "horizon": 28,
+    "series_limit": 6
+  },
+  "models": [
+    "theta",
+    "holtwinters",
+    "arima_plus",
+    "timesfm"
+  ],
+  "features": {
+    "holidays": [
+      "US"
+    ]
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 28,
+    "step": 28
+  },
+  "compute": {
+    "use_gpu": false,
+    "gke_mode": "job",
+    "machine_type": "n2-standard-8",
+    "workers": 1
+  }
+}

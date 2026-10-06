@@ -19,8 +19,8 @@ Three quantities, and everything follows from them.
 flowchart LR
     Workload["Series × Models\n= Cells"] --> Fits["Cells × (Folds + 1)\n= Total Fits"]
     Fits --> Split{"Family Placement\n(compute.families)"}
-    Split -->|"Spark & GCE Single-VM"| GCE["Compute Engine Quota\nCPUS · NVIDIA_*_GPUS"]
-    Split -->|"Ray & Vertex CustomJob"| VTX["Vertex AI Quota\ncustom_model_training_cpus\ncustom_model_training_nvidia_*_gpus"]
+    Split -->|"Spark, GCE Single-VM & GKE"| GCE["Compute Engine Quota\nCPUS · NVIDIA_*_GPUS"]
+    Split -->|"Ray (Vertex) & Vertex CustomJob"| VTX["Vertex AI Quota\ncustom_model_training_cpus\ncustom_model_training_nvidia_*_gpus"]
     Split -->|"BigQuery-native"| BQS["BigQuery Slots\n(Zero VM / GPU Quota)"]
 ```
 

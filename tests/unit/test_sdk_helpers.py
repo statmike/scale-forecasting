@@ -93,6 +93,31 @@ def test_explain_frame_captures_families_runtimes_and_covariates() -> None:
     assert "past(1)" in str(by_fam.loc["statistical", "covariates"])
     assert "static(1)" in str(by_fam.loc["statistical", "covariates"])
 
+    gke_cfg = _sample_config(
+        python_runtime="gke",
+        models=["autoets", "lightgbm", "tide", "tsmixer", "timesfm"],
+        compute={
+            "gke_mode": "job",
+            "workers": 2,
+            "families": {
+                "deep_learning": {
+                    "runtime": "gke",
+                    "gke_mode": "job",
+                    "hardware": "gpu",
+                    "gpu_type": "L4",
+                    "workers": 1,
+                },
+            },
+        },
+    )
+    gke_by_fam = Forecaster(gke_cfg).explain().set_index("family")
+    assert gke_by_fam.loc["statistical", "runtime"] == "gke"
+    assert gke_by_fam.loc["statistical", "workers"] == 2
+    assert gke_by_fam.loc["deep_learning", "runtime"] == "gke"
+    assert (
+        gke_by_fam.loc["deep_learning", "workers"] == 2
+    )  # auto-expanded 1 -> len(["tide", "tsmixer"])
+
 
 def test_build_leaderboard_frame_and_all_metrics() -> None:
     m1 = ModelReview(

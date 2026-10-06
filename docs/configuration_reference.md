@@ -22,7 +22,7 @@ schema) surfaces as a single `ConfigError`.
 |-------|------|---------|---------|
 | `run_name` | `str` | *required* | Human name for the run. |
 | `data` | `DataConfig` | *required* | Where the series come from and their shape. |
-| `python_runtime` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
+| `python_runtime` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
 | `models` | `list[str]` | *required* (≥1) | Model names to run (see [models_reference.md](./models_reference.md) or `playground --list`). |
 | `model_params` | `dict[str, dict[str, …]]` | `{}` | Per-model hyperparameters, keyed by model name — see below. |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
@@ -56,17 +56,20 @@ flowchart LR
 **`python_runtime` — the run-level default runtime for the Python model families** (the native family
 always runs in parallel in BigQuery, regardless of this choice):
 
-- `spark` (default) — Dataproc Serverless. The **100k CPU workhorse**; it fans out one task per
+- `spark` (default) — Dataproc Serverless (`spark_mode="serverless"`) or Dataproc Standard Cluster (`spark_mode="cluster"`). The **100k CPU workhorse**; it fans out one task per
   `(series, model)` cell (series cross-joined with the family's models), so a family's job finishes in
   ~its slowest cell.
-- `ray` — Ray on Vertex AI. Supports **fractional-GPU packing** and autoscaling worker pools across CPU and GPU families; the Ray `compute` knobs apply.
+- `ray` — Distributed Ray on Vertex AI (`ray_mode="vertex"`, default) or Ray-on-GKE / KubeRay (`ray_mode="gke"`). Supports **fractional-GPU packing** and autoscaling worker pools across CPU and GPU families; the Ray `compute` knobs apply.
 - `vertex` — Serverless **Vertex AI `CustomJob`**. Provisions a dedicated single VM (`workers = 1`, zero Ray head-node tax or Spark driver overhead) or a multi-worker pool (`workers > 1`) with deterministic rank-sharded execution, contiguous BigQuery Storage Read API `row_restriction` pushdown, LPT cell ordering, and a GCS completion barrier (`SF_VERTEX_JOB_ID`). When a family contains `deep_learning` or global/hybrid panel models (`tide`, `tft`, `tsmixer`, `patchtst`, `neuralprophet`), `effective_worker_count` automatically allocates **1 dedicated VM per model** (`max(workers, len(models))`) so global/deep-learning models never contend for VRAM or RAM.
 - `gce` — Direct **Compute Engine Single-VM** (`cos-cloud/cos-stable`). Runs the exact same container image and `vertex_engine.py` entrypoint on a single Compute Engine VM (`workers` must be omitted or `1`) with triple-redundant zero-orphan lifecycle guarantees: (1) GCE hypervisor hard TTL (`scheduling.maxRunDuration` + `scheduling.instanceTerminationAction = "DELETE"`), (2) guest startup script `trap cleanup EXIT` REST API self-deletion + `shutdown -h now`, and (3) client-side `try ... finally` deletion.
+- `gke` — **Google Kubernetes Engine (`GKE`)**. Executes Python families on a standing GKE cluster (`compute.gke_cluster_name` / `SF_GKE_CLUSTER`) or an ephemeral GKE cluster provisioned for the run and deleted in `try ... finally`. Supports two execution modes (`compute.gke_mode`):
+  - `gke_mode = "job"` (default): Launches a Kubernetes `batch/v1` **Indexed Job** (`completionMode: Indexed`, `completions = W`, `parallelism = W`) running `vertex_engine.py` with `JOB_COMPLETION_INDEX` (`0..W-1`) mapped to `WorkerTopology(rank=r, world_size=W, source="k8s_indexed_job")`, contiguous Storage Read `row_restriction`, LPT cell ordering, and dedicated per-model Pods for `deep_learning` / global models.
+  - `gke_mode = "ray"`: Launches a Ray-on-GKE cluster (`ray_engine.py`, `ray==2.59.0`) inside the GKE namespace (using a Headless `Service` + Worker `Deployment` + Head `Job`, or a KubeRay `ray.io/v1` `RayCluster` manifest).
 
 A run resolves its models into **one job per family** (`statistical` / `ml` / `deep_learning`, plus
 `native` in BigQuery), all running in parallel under one `run_id`. Each Python family runs on
 `python_runtime` unless it is overridden **per family** via `compute.families` (below) — so one run
-can put its statistical family on Spark and its deep-learning family on Vertex `CustomJob`, GCE, or Ray. See the DAG model in
+can put its statistical family on Spark and its deep-learning family on Vertex `CustomJob`, GCE, GKE, or Ray. See the DAG model in
 [architecture.md](./architecture.md).
 
 ## `data` — `DataConfig`
@@ -726,11 +729,15 @@ knobs only matter for a family that runs on Ray.
 | `gpu_fraction` | `"auto"` \| `float` | `"auto"` | float ∈ `(0, 1]` | `"auto"` = profile-driven fractional GPU, else a fixed fraction. |
 | `budget_usd` | `float` | `50.0` | `≥ 0.0` | Cost guardrail (USD). |
 | `ray_cluster_name` | `str` \| `null` | `null` | — | Reuse a standing Ray cluster by name; `null` = ephemeral. |
+| `ray_mode` | `"vertex"` \| `"gke"` | `"vertex"` | — | Execution backend when `runtime="ray"`: `"vertex"` runs on Vertex AI Managed Ray; `"gke"` routes the Ray cluster onto Google Kubernetes Engine (`gke_mode="ray"`). |
+| `gke_mode` | `"job"` \| `"ray"` | `"job"` | — | Execution mode when `runtime="gke"`: `"job"` launches a Kubernetes `batch/v1` Indexed Job (`vertex_engine.py`); `"ray"` launches a Ray-on-GKE cluster (`ray_engine.py`). |
+| `gke_cluster_name` | `str` \| `null` | `null` | — | Reuse a standing GKE cluster by name (or `SF_GKE_CLUSTER`); `null` provisions an ephemeral GKE cluster per run/hardware kind and deletes it on exit. |
+| `gke_namespace` | `str` | `"default"` | — | Kubernetes namespace for GKE Indexed Jobs and Ray-on-GKE workloads (overridable via `SF_GKE_NAMESPACE`). |
 | `ray_regions` | `list[str]` \| `null` | `null` | — | Priority-ordered candidate regions for the ephemeral cluster. |
 | `ray_head_machine_type` | `str` | `"n1-standard-16"` | — | Head-node type (don't drop below, or job submit hangs). |
 | `ray_cpu_machine_type` | `str` | `"n1-standard-8"` | — | CPU worker-pool machine type (overridden when `machine_type` is explicitly set). |
 | `ray_gpu_machine_type` | `str` | `"n1-standard-8"` | — | GPU worker-pool machine type (overridden when `machine_type` is explicitly set; auto-derived from `gpu_type` when left at default). |
-| `accelerator_count` | `int` | `1` | T4 ∈ `{1,2,4}`; L4 ∈ `{1,2,4,8}`; A100 ∈ `{1,2,4,8,16}`; A100_80GB ∈ `{1,2,4,8}` | GPUs per GPU worker node across `ray`, `vertex`, and `gce`. |
+| `accelerator_count` | `int` | `1` | T4 ∈ `{1,2,4}`; L4 ∈ `{1,2,4,8}`; A100 ∈ `{1,2,4,8,16}`; A100_80GB ∈ `{1,2,4,8}` | GPUs per GPU worker node across `ray`, `vertex`, `gce`, and `gke`. |
 | `ray_target_cells_per_slot` | `int` | `8` | `> 0` | Cells one worker slot chews before a node is added. |
 | `ray_max_nodes` | `int` | `16` | `> 0` | Shared per-pool ceiling; the fallback when a pool's own max (`max_workers` or `ray_*_max_nodes`) is unset. |
 | `ray_autoscale` | `bool` | `true` | — | Autoscale each worker pool between its min/max (default). `false` restores fixed-size sizing (the derived `node_count`, no autoscaling spec). |
@@ -742,10 +749,10 @@ knobs only matter for a family that runs on Ray.
 | `gpu_safety_margin` | `float` | `1.3` | `> 1.0` | Headroom multiplier on measured peak GPU memory. |
 | `ray_read_mode` | `"driver_collect"` \| `"ray_data"` | `"driver_collect"` | — | Ray source reader: the proven Storage Read client, or `ray.data.read_bigquery` (same Storage Read API, opt-in). |
 | `read_max_streams` | `int` | `0` | `≥ 0` | Max Storage Read streams for the source read, shared by the Spark connector (`maxParallelism`), Ray's `driver_collect` reader (`max_stream_count`), and `vertex_engine` (`max_stream_count`). `0` lets the server size it from the table; a positive value caps read parallelism (e.g. to fit a slot/quota budget). Inert for the `ray_data` path and BigQuery-native models. See [reading_source_data.md](./reading_source_data.md). |
-| `machine_type` | `str` | `"auto"` | validated against `(hardware, gpu_type, accelerator_count)` | Unified GCE machine type across **Vertex AI `CustomJob`** (`runtime="vertex"`), **Compute Engine** (`runtime="gce"`), and **Ray on Vertex AI** (`runtime="ray"`). `"auto"` resolves to `"n2-standard-8"` on `vertex`/`gce` CPU (or `ray_*_machine_type` on `ray`), `"n1-standard-8"` / `"n1-standard-16"` on `T4`, `"g2-standard-{8,24,48,96}"` on `L4`, `"a2-highgpu-{1,2,4,8}g"` / `"a2-megagpu-16g"` on `A100`, and `"a2-ultragpu-{1,2,4,8}g"` on `A100_80GB`. Rejected on `spark` `serverless` (which is vCPU/RAM shaped). (Legacy `vertex_machine_type` and `vertex_gpu_machine_type` remain accepted aliases.) |
-| `workers` | `int` | `1` | `≥ 1` (`1` on `gce`) | Unified fixed worker/replica count across runtimes: number of worker VMs for a **Vertex AI `CustomJob`** family (`1` = single dedicated VM with 1 `WorkerPoolSpec`; `> 1` = multi-worker pool with `pool 0` at `replica_count=1` and `pool 1` at `replica_count=workers-1`, sharding local cells via contiguous BigQuery Storage Read API `row_restriction` or sharding models deterministically by worker rank; automatically expanded to `max(workers, len(models))` for `deep_learning` / global models so each gets 1 dedicated VM; must be `1` when `runtime="gce"`), or fallback worker ceiling on `ray` and `spark` when `max_workers` is unset. (Legacy `vertex_workers` remains an accepted alias.) |
-| `min_workers` | `int` \| `null` | `null` | `> 0`, `≤ max_workers` | Unified autoscaling floor for `runtime="ray"` (overrides `ray_cpu_min_nodes` / `ray_gpu_min_nodes`) and `runtime="spark"`. Rejected on `runtime="vertex"` and `runtime="gce"`, which do not support dynamic worker autoscaling (use `workers` instead). |
-| `max_workers` | `int` \| `null` | `null` | `> 0`, `≥ min_workers` | Unified autoscaling ceiling for `runtime="ray"` (overrides `ray_cpu_max_nodes` / `ray_gpu_max_nodes`) and `runtime="spark"` (overrides `max_executors`). Rejected on `runtime="vertex"` and `runtime="gce"`, which do not support dynamic worker autoscaling (use `workers` instead). |
+| `machine_type` | `str` | `"auto"` | validated against `(hardware, gpu_type, accelerator_count)` | Unified GCE machine type across **Vertex AI `CustomJob`** (`runtime="vertex"`), **Compute Engine** (`runtime="gce"`), **Google Kubernetes Engine** (`runtime="gke"`), and **Ray** (`runtime="ray"`). `"auto"` resolves to `"n2-standard-8"` on `vertex`/`gce`/`gke` CPU (or `ray_*_machine_type` on `ray`), `"n1-standard-8"` / `"n1-standard-16"` on `T4`, `"g2-standard-{8,24,48,96}"` on `L4`, `"a2-highgpu-{1,2,4,8}g"` / `"a2-megagpu-16g"` on `A100`, and `"a2-ultragpu-{1,2,4,8}g"` on `A100_80GB`. Rejected on `spark` `serverless` (which is vCPU/RAM shaped). (Legacy `vertex_machine_type` and `vertex_gpu_machine_type` remain accepted aliases.) |
+| `workers` | `int` | `1` | `≥ 1` (`1` on `gce`) | Unified fixed worker/replica count across runtimes: number of worker VMs/Pods for a **Vertex AI `CustomJob`** (`runtime="vertex"`) or **GKE Indexed Job / Ray-on-GKE** (`runtime="gke"`) family (`1` = single dedicated VM/Pod; `> 1` = multi-worker pool or Indexed Job with `completions=workers` and `parallelism=workers`, sharding local cells via contiguous BigQuery Storage Read API `row_restriction` or sharding models deterministically by worker rank; automatically expanded to `max(workers, len(models))` for `deep_learning` / global models so each gets 1 dedicated VM/Pod; must be `1` when `runtime="gce"`), or fallback worker ceiling on `ray` and `spark` when `max_workers` is unset. (Legacy `vertex_workers` remains an accepted alias.) |
+| `min_workers` | `int` \| `null` | `null` | `> 0`, `≤ max_workers` | Unified autoscaling floor for `runtime="ray"` (overrides `ray_cpu_min_nodes` / `ray_gpu_min_nodes`) and `runtime="spark"`. Rejected on `runtime="vertex"`, `runtime="gce"`, and `runtime="gke"`, which use fixed `workers`. |
+| `max_workers` | `int` \| `null` | `null` | `> 0`, `≥ min_workers` | Unified autoscaling ceiling for `runtime="ray"` (overrides `ray_cpu_max_nodes` / `ray_gpu_max_nodes`) and `runtime="spark"` (overrides `max_executors`). Rejected on `runtime="vertex"`, `runtime="gce"`, and `runtime="gke"`, which use fixed `workers`. |
 
 > **Note on GCE VM hypervisor TTL:** Single-VM Compute Engine jobs (`runtime="gce"`) enforce a hard hypervisor-level TTL (`scheduling.maxRunDuration` with `instanceTerminationAction="DELETE"`) via the `SF_GCE_MAX_RUN_DURATION_S` environment variable (default `21600` seconds / 6 hours, minimum `300` seconds). Like `SF_CLUSTER_MAX_AGE`, it is an operational environment variable rather than a `RunConfig` field so adjusting it does not change `run_id`.
 
@@ -760,8 +767,8 @@ cluster. What it does *not* do is as important:
   that only attaches to `n1`, an L4 is bundled inside `g2`, and A100s require `a2` — so a family override there would ask
   GCE for a shape it does not sell. A run spanning both hardware kinds gets its CPU workers on your
   family and its GPU workers on the accelerator's.
-- **It does nothing on Serverless, Ray, Vertex CustomJob, or GCE.** Serverless has no machine concept at all (its shape is
-  executor cores/memory properties); the Ray pools, Vertex CustomJob, and GCE have their own explicit
+- **It does nothing on Serverless, Ray, Vertex CustomJob, GCE, or GKE.** Serverless has no machine concept at all (its shape is
+  executor cores/memory properties); the Ray pools, Vertex CustomJob, GCE, and GKE have their own explicit
   `machine_type` (and `ray_*_machine_type`) knobs.
 
 The offered families are exactly those `resources` can price (`_MEMORY_PER_CORE_GIB`), so the
@@ -781,7 +788,7 @@ in [architecture.md](./architecture.md).
 ### `compute.capacity` — how hard to look for room
 
 "Resources are not available" is a **state**, not an exception. When a create fails for want of
-machines the launcher walks its candidate places (Ray: `ray_regions`; Vertex CustomJob: candidate regions; GCE / Dataproc cluster: the
+machines the launcher walks its candidate places (Ray: `ray_regions`; Vertex CustomJob: candidate regions; GCE / GKE / Dataproc cluster: the
 zone/region fallback map; Serverless: the region), and if none has room it backs off and walks them
 again until a budget runs out. While it waits the family's `run_jobs` row reads `AWAITING_CAPACITY`
 and carries a ledger of every attempt; on exhaustion the row is `FAILED` with
@@ -796,14 +803,14 @@ number you have an opinion about and inherit the rest.
 |-------|------|---------|-----------|---------|
 | `enabled` | `bool` | `true` | — | `false` = one pass over the candidates, no back-off, all services. Beats an authored `max_passes`. |
 | `preflight` | `bool` | `true` | — | Read each candidate region's quota **before** the first create, and skip or clamp accordingly. See below. |
-| `ray` \| `dataproc_cluster` \| `dataproc_serverless` \| `vertex` \| `gce` | `object` | `{}` | — | Per-service partial override; unset fields inherit the shipped default below. |
+| `ray` \| `dataproc_cluster` \| `dataproc_serverless` \| `vertex` \| `gce` \| `gke` | `object` | `{}` | — | Per-service partial override; unset fields inherit the shipped default below. |
 | `retry` | `object` | `{}` | — | How wide a **repair** runs — not a capacity policy, but the same digest-excluded surface. See below. |
 
 `preflight` is the cheap half of the same problem: retrying is for a region that is *temporarily*
 full, and a preflight is for one that was never going to work. It reads the region's allowance,
 drops a region that cannot host even the minimum (recorded as a hard ceiling, no create attempted),
 and lowers this run's pool ceilings — or, on the Dataproc-cluster path, its physical worker count —
-to what a smaller region will grant rather than failing there. It applies to Ray on Vertex, Vertex AI `CustomJob`, Compute Engine (`gce`), and to
+to what a smaller region will grant rather than failing there. It applies to Ray on Vertex, Vertex AI `CustomJob`, Compute Engine (`gce`), Google Kubernetes Engine (`gke`), and to
 ephemeral Dataproc clusters, each read against *its own* service's meters. It only ever lowers, and
 it never touches `run_id`. `--quota` prints the same report without
 launching — see [Quota and scale](./quota_and_scale.md#4-which-quotas-and-where). Set it `false`
@@ -812,16 +819,16 @@ on any read failure, so a missing permission costs you the diagnostic, not the r
 
 Per-service fields, all optional, `0` disables that bound:
 
-| Field | Type | `ray` | `dataproc_cluster` | `dataproc_serverless` | `vertex` | `gce` | Purpose |
-|-------|------|-------|--------------------|-----------------------|----------|-------|---------|
-| `max_attempts` | `int ≥ 0` | `6` | `8` | `10` | `8` | `8` | Total attempts across all candidates. |
-| `max_wall_seconds` | `float ≥ 0` | `3600` | `2700` | `1800` | `1800` | `1800` | Clock budget for the whole walk. |
-| `max_passes` | `int ≥ 0` | unbounded | unbounded | unbounded | unbounded | unbounded | Full sweeps of the candidate list. |
-| `backoff_seconds` | `float ≥ 0` | `120` | `60` | `30` | `60` | `60` | First wait after a fruitless pass. |
-| `backoff_multiplier` | `float ≥ 1.0` | `2.0` | `2.0` | `2.0` | `2.0` | `2.0` | Growth per pass. |
-| `backoff_max_seconds` | `float ≥ 0` | `600` | `300` | `120` | `300` | `300` | Cap on the wait. |
+| Field | Type | `ray` | `dataproc_cluster` | `dataproc_serverless` | `vertex` | `gce` | `gke` | Purpose |
+|-------|------|-------|--------------------|-----------------------|----------|-------|-------|---------|
+| `max_attempts` | `int ≥ 0` | `6` | `8` | `10` | `8` | `8` | `8` | Total attempts across all candidates. |
+| `max_wall_seconds` | `float ≥ 0` | `3600` | `2700` | `1800` | `1800` | `1800` | `2700` | Clock budget for the whole walk. |
+| `max_passes` | `int ≥ 0` | unbounded | unbounded | unbounded | unbounded | unbounded | unbounded | Full sweeps of the candidate list. |
+| `backoff_seconds` | `float ≥ 0` | `120` | `60` | `30` | `60` | `60` | `60` | First wait after a fruitless pass. |
+| `backoff_multiplier` | `float ≥ 1.0` | `2.0` | `2.0` | `2.0` | `2.0` | `2.0` | `2.0` | Growth per pass. |
+| `backoff_max_seconds` | `float ≥ 0` | `600` | `300` | `120` | `300` | `300` | `300` | Cap on the wait. |
 
-The four differ because the services do. A Vertex Ray GPU provision costs ~12 minutes per attempt,
+The services differ because provisioning latencies do. A Vertex Ray GPU provision costs ~12 minutes per attempt,
 so it gets the fewest tries and the longest patience; a Serverless batch or Vertex `CustomJob` is rejected much faster, so
 retrying is cheap and the clock is the bound that matters.
 
@@ -1008,7 +1015,7 @@ sized for *typical* work (median). Sizing the fleet off the worst case over-prov
 sizing memory off the median OOM-kills it. Using one tail for both is the mistake the split exists
 to prevent.
 
-`compute.profile` (except `compute.profile.source`, which is resolved provenance) is part of the `run_id` digest, like everything else under `compute`. See [System Validation Ledger](./validation.md) for live runs across Spark, Dataproc clusters, and Vertex AI Ray using this sizing overlay.
+`compute.profile` (except `compute.profile.source`, which is resolved provenance) is part of the `run_id` digest, like everything else under `compute`. See [System Validation Ledger](./validation.md) for live runs across Spark, Dataproc clusters, Vertex AI Ray, Vertex CustomJob, GCE, and GKE using this sizing overlay.
 
 ### `compute.families` — per-family runtime & hardware
 
@@ -1021,8 +1028,8 @@ runs in BigQuery).
 **This block is canonical; the flat `compute.use_gpu` / `compute.gpu_type` pair is legacy.** Both
 still work and neither is deprecated, but they are the coarse version of what `families` says
 precisely. `use_gpu` is read by `RunConfig.resolve_family_compute`, the single resolver every
-runtime goes through, so it puts the `deep_learning` family on an accelerator on **Ray, Vertex AI `CustomJob`, Dataproc
-Serverless, and a Dataproc cluster alike** — an L4 on Serverless, a T4 (or L4) on Vertex `CustomJob`, and a T4 on the other two. It never
+runtime goes through, so it puts the `deep_learning` family on an accelerator on **Ray, Vertex AI `CustomJob`, GCE, GKE, Dataproc
+Serverless, and a Dataproc cluster alike** — an L4 on Serverless, a T4 (or L4) on Vertex `CustomJob` / GCE / GKE, and a T4 on the other two. It never
 touches any other family: `hardware` is `"cpu"` for `statistical` and `ml` no matter what the flag
 says.
 
@@ -1048,26 +1055,32 @@ measured answer is CPU.
 
 | Field | Type | Options | Purpose |
 |-------|------|---------|---------|
-| `runtime` | `str` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` | Runtime for this family (overrides `python_runtime`). |
+| `runtime` | `str` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` | Runtime for this family (overrides `python_runtime`). |
 | `spark_mode` | `str` | `"serverless"` \| `"cluster"` | Spark launch mode (Spark only). `"cluster"` runs on a Dataproc cluster — needed for a T4 or A100 GPU on Spark. |
 | `spark_cluster_name` | `str` | — | Reuse an existing Dataproc cluster by name (requires `spark_mode="cluster"`). |
+| `gke_mode` | `str` | `"job"` \| `"ray"` | Execution mode when `runtime="gke"`: `"job"` runs a Kubernetes `batch/v1` Indexed Job (`vertex_engine.py`); `"ray"` runs Ray-on-GKE (`ray_engine.py`). |
+| `gke_cluster_name` | `str` | — | Reuse an existing GKE cluster by name for this family (`runtime="gke"` or `ray_mode="gke"`). |
+| `ray_mode` | `str` | `"vertex"` \| `"gke"` | Execution backend when `runtime="ray"`: `"vertex"` runs on Vertex AI Managed Ray; `"gke"` routes the Ray cluster onto GKE (`gke_mode="ray"`). |
 | `hardware` | `str` | `"cpu"` \| `"gpu"` | Hardware profile for this family (GPU only for `deep_learning`). |
 | `gpu_type` | `str` | `"T4"` \| `"L4"` \| `"A100"` \| `"A100_80GB"` | GPU type when `hardware="gpu"`. |
 | `accelerator_count` | `int` | `≥ 1` | Per-VM GPU count override for this family (`T4` ∈ `{1,2,4}`; `L4` ∈ `{1,2,4,8}`; `A100` ∈ `{1,2,4,8,16}`; `A100_80GB` ∈ `{1,2,4,8}`). |
-| `machine_type` | `str` | `"auto"` or GCE machine type | Per-family GCE machine type override across `vertex`, `gce`, and `ray` (rejected on `spark` `serverless`). Validated against `(hardware, gpu_type, accelerator_count)`. |
-| `workers` | `int` | `≥ 1` (`1` on `gce`) | Per-family fixed worker/replica count across `vertex`, `ray`, and `spark` (must be omitted or `1` on single-VM `runtime="gce"`). |
-| `min_workers` | `int` | `≥ 1` | Per-family autoscaling floor for `runtime="ray"` or `runtime="spark"` (rejected on `vertex` and `gce`). |
-| `max_workers` | `int` | `≥ 1` (`≥ min_workers`) | Per-family autoscaling ceiling for `runtime="ray"` or `runtime="spark"` (rejected on `vertex` and `gce`). |
+| `machine_type` | `str` | `"auto"` or GCE machine type | Per-family GCE machine type override across `vertex`, `gce`, `gke`, and `ray` (rejected on `spark` `serverless`). Validated against `(hardware, gpu_type, accelerator_count)`. |
+| `workers` | `int` | `≥ 1` (`1` on `gce`) | Per-family fixed worker/replica count across `vertex`, `gke`, `ray`, and `spark` (must be omitted or `1` on single-VM `runtime="gce"`). |
+| `min_workers` | `int` | `≥ 1` | Per-family autoscaling floor for `runtime="ray"` or `runtime="spark"` (rejected on `vertex`, `gce`, and `gke`). |
+| `max_workers` | `int` | `≥ 1` (`≥ min_workers`) | Per-family autoscaling ceiling for `runtime="ray"` or `runtime="spark"` (rejected on `vertex`, `gce`, and `gke`). |
 
 **Cross-field rules** (enforced at config-load):
 
 - `spark_mode` / `spark_cluster_name` are valid only when `runtime="spark"`; `spark_cluster_name`
   requires `spark_mode="cluster"`.
+- `gke_mode` is valid only when `runtime="gke"`.
+- `ray_mode` is valid only when `runtime="ray"`.
+- `gke_cluster_name` requires `runtime="gke"` or `ray_mode="gke"`.
 - `runtime="gce"` is a single-VM runtime (`workers` must be omitted or `1`).
-- `min_workers` / `max_workers` are valid only on autoscaling runtimes (`ray`, `spark`); `vertex` and `gce` require fixed `workers`.
+- `min_workers` / `max_workers` are valid only on autoscaling runtimes (`ray`, `spark`); `vertex`, `gce`, and `gke` require fixed `workers`.
 - `machine_type` is rejected when `runtime="spark"` and `spark_mode="serverless"`.
 - A GPU (`hardware="gpu"`, `gpu_type`, or `accelerator_count`) is allowed **only** for the `deep_learning` family.
-- Dataproc Serverless supports **`L4` only** (`T4`, `A100`, and `A100_80GB` require `spark_mode="cluster"` or `runtime in ("ray", "vertex", "gce")`).
+- Dataproc Serverless supports **`L4` only** (`T4`, `A100`, and `A100_80GB` require `spark_mode="cluster"` or `runtime in ("ray", "vertex", "gce", "gke")`).
 - `hardware="cpu"` with `gpu_type` or `accelerator_count` set → error (drop it or set `hardware="gpu"`).
 
 **A GPU plan is checked again at plan time, before anything is provisioned.** Two separate things

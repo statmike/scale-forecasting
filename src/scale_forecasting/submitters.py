@@ -215,7 +215,32 @@ class RaySubmitter:
         # so the job's own id is deterministic; hardware="gpu" provisions the Ray GPU pool for this
         # family (kept out of cfg for run_id). ray_cluster_name/region, when set, target the run's
         # shared ephemeral cluster (reuse path — submit this family's own job to it, no create).
+        from .models import get_model
         from .probes.vocabulary import ProbeHandle
+
+        ray_mode = cfg.compute.ray_mode
+        if models:
+            family = get_model(models[0]).family
+            if family != "native":
+                fc = cfg.resolve_family_compute(family)
+                if fc.ray_mode:
+                    ray_mode = fc.ray_mode
+        if ray_mode == "gke":
+            return GkeSubmitter().launch(
+                cfg,
+                models=models,
+                manage_header=manage_header,
+                settings=settings,
+                spark=spark,
+                wait=wait,
+                max_executors=max_executors,
+                system_job_id=system_job_id,
+                hardware=hardware,
+                gpu_type=gpu_type,
+                ray_cluster_name=ray_cluster_name,
+                ray_cluster_region=ray_cluster_region,
+            )
+
         from .ray_submit import submit_ray
 
         job_id, resource_name, region = submit_ray(
@@ -340,12 +365,74 @@ class GceSubmitter:
         return handle
 
 
+class GkeSubmitter:
+    """Google Kubernetes Engine runtime (`runtime="gke"` or `ray_mode="gke"`)."""
+
+    name = "gke"
+
+    def launch(
+        self,
+        cfg: RunConfig,
+        *,
+        models: list[str],
+        manage_header: bool,
+        settings: Settings,
+        spark: object | None = None,
+        wait: bool = True,
+        max_executors: int | None = None,
+        system_job_id: str | None = None,
+        hardware: str = "cpu",
+        gpu_type: str | None = None,
+        spark_mode: str | None = None,
+        spark_cluster_name: str | None = None,
+        spark_cluster_region: str | None = None,
+        ray_cluster_name: str | None = None,
+        ray_cluster_region: str | None = None,
+    ) -> ProbeHandle | None:
+        from .gke_submit import submit_gke
+        from .models import get_model
+
+        machine_type: str | None = None
+        worker_count: int | None = None
+        accelerator_count: int | None = None
+        gke_mode: str | None = None
+        cluster_name: str | None = ray_cluster_name
+        if models:
+            family = get_model(models[0]).family
+            if family != "native":
+                fc = cfg.resolve_family_compute(family)
+                machine_type = fc.machine_type
+                worker_count = fc.workers
+                accelerator_count = fc.accelerator_count or None
+                gke_mode = "ray" if (fc.runtime == "ray" and fc.ray_mode == "gke") else fc.gke_mode
+                cluster_name = cluster_name or fc.gke_cluster_name
+
+        _, _, handle = submit_gke(
+            cfg,
+            settings=settings,
+            wait=wait,
+            models=models,
+            job_id=system_job_id,
+            gke_mode=gke_mode,
+            cluster_name=cluster_name,
+            cluster_location=ray_cluster_region,
+            manage_header=manage_header,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            machine_type=machine_type,
+            worker_count=worker_count,
+            accelerator_count=accelerator_count,
+        )
+        return handle
+
+
 # Registered by cfg.python_runtime. A new runtime = one class + one entry here.
 _SUBMITTERS: dict[str, RuntimeSubmitter] = {
     SparkSubmitter.name: SparkSubmitter(),
     RaySubmitter.name: RaySubmitter(),
     VertexSubmitter.name: VertexSubmitter(),
     GceSubmitter.name: GceSubmitter(),
+    GkeSubmitter.name: GkeSubmitter(),
 }
 
 

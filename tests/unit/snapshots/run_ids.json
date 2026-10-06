@@ -5,6 +5,7 @@
   "configs/ensemble_demo.json": "ensemble-demo-b2ff15a4d418",
   "configs/explode_100k.json": "explode-100k-ef602ea229b4",
   "configs/explode_demo.json": "explode-demo-088f172ad2f5",
+  "configs/gke_demo.json": "gke-demo-4886e298cb99",
   "configs/mixed_demo.json": "mixed-demo-db2dfb2f675d",
   "configs/neuralprophet_ab_cluster_cpu.json": "neuralprophet-ab-cluster-cpu-a402414abf5e",
   "configs/neuralprophet_ab_cluster_gpu.json": "neuralprophet-ab-cluster-gpu-273d32b553c8",
@@ -56,5 +57,7 @@
   "configs/smokes/36_covariate_fallback_multi_runtime.json": "smoke-36-covariate-fallback-multi-runtime-301a6be995a8",
   "configs/smokes/37_hierarchy_covariates_ensemble.json": "smoke-37-hierarchy-covariates-ensemble-e6be5fed8071",
   "configs/smokes/38_vertex_custom_job.json": "smoke-38-vertex-custom-job-82b620bbd9ba",
-  "configs/smokes/39_gce_single_vm.json": "smoke-39-gce-single-vm-4aa21163baa6"
+  "configs/smokes/39_gce_single_vm.json": "smoke-39-gce-single-vm-4aa21163baa6",
+  "configs/smokes/40_gke_indexed_job.json": "smoke-40-gke-indexed-job-c593ae5b6035",
+  "configs/smokes/41_gke_ray.json": "smoke-41-gke-ray-f9c3cd840845"
 }

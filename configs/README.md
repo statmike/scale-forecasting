@@ -12,9 +12,9 @@ flowchart LR
     dag["Family Execution DAG<br/>plan_dag(cfg)"]
 
     subgraph jobs["Parallel Per-Family Jobs"]
-        stat["statistical family<br/>(Spark · Ray · Vertex · GCE)"]
-        ml["ml family<br/>(Spark · Ray · Vertex · GCE)"]
-        dl["deep_learning family<br/>(Ray · Vertex · GCE · Spark)"]
+        stat["statistical family<br/>(Spark · Ray · Vertex · GCE · GKE)"]
+        ml["ml family<br/>(Spark · Ray · Vertex · GCE · GKE)"]
+        dl["deep_learning family<br/>(Ray · Vertex · GCE · GKE · Spark)"]
         nat["native family<br/>(BigQuery SQL)"]
     end
 
@@ -91,6 +91,7 @@ Small, fast configurations used by the [interactive notebooks](../notebooks/READ
 | [`ensemble_demo.json`](./ensemble_demo.json) | 10 | `theta`, `arima_plus`, `timesfm` | Spark $\parallel$ BigQuery + Ensemble | End-to-end multi-engine run with calculated (`mean`, `median`, `inverse_error`) and learned (`nnls`) ensembles. |
 | [`ray_cpu_demo.json`](./ray_cpu_demo.json) | 6 | `theta`, `holtwinters`, `arima_plus`, `timesfm` | Ray CPU $\parallel$ BigQuery | Quick Ray-on-Vertex CPU run alongside BigQuery native models. |
 | [`ray_gpu_demo.json`](./ray_gpu_demo.json) | 6 | `neuralprophet`, `theta`, `arima_plus`, `timesfm` | Ray GPU + CPU $\parallel$ BigQuery | Demonstrates fractional-GPU packing (`gpu_fraction: "auto"`) for `neuralprophet` on Vertex AI T4s. |
+| [`gke_demo.json`](./gke_demo.json) | 6 | `theta`, `holtwinters`, `arima_plus`, `timesfm` | GKE Indexed Job $\parallel$ BigQuery | Quick Google Kubernetes Engine (`gke_mode: "job"`) CPU run alongside BigQuery native models. |
 | [`per_family_runtimes_demo.json`](./per_family_runtimes_demo.json) | 50 | `theta`, `holtwinters`, `xgboost`, `neuralprophet`, `arima_plus` | Spark CPU + Ray GPU + BigQuery | Routes `statistical` and `ml` to Spark Serverless, `deep_learning` to Ray GPU, and `native` to BigQuery in one run. |
 | [`per_family_runtimes_cpu_demo.json`](./per_family_runtimes_cpu_demo.json) | 50 | `theta`, `holtwinters`, `xgboost`, `neuralprophet`, `arima_plus` | Spark CPU + Ray CPU + BigQuery | Quota-free CPU twin of `per_family_runtimes_demo.json` (runs `neuralprophet` on Ray CPU workers). |
 | [`repair_demo.json`](./repair_demo.json) | 3,000 | `theta`, `holtwinters`, `xgboost` | Spark Serverless (CPU) | Medium-scale multi-family run used to demonstrate run inspection, cancellation, and cell-level repair (`--retry`). |
@@ -125,7 +126,7 @@ Paired configurations that hold data, seeds, and hyperparameters constant while 
 
 ## Smoke Configuration Suite (`configs/smokes/`)
 
-The **[`configs/smokes/`](./smokes/README.md)** subdirectory contains 39 numbered configurations (`01` through `39`) that systematically exercise every runtime (`spark`, `ray`, `vertex`, `gce`, and `bigquery`), hardware mode, backtest scheme, HPO granularity, feature transform, covariate tier, hierarchical reconciliation method, and ensemble strategy in the platform. See **[`configs/smokes/README.md`](./smokes/README.md)** for the full index.
+The **[`configs/smokes/`](./smokes/README.md)** subdirectory contains 41 numbered configurations (`01` through `41`) that systematically exercise every runtime (`spark`, `ray`, `vertex`, `gce`, `gke`, and `bigquery`), hardware mode, backtest scheme, HPO granularity, feature transform, covariate tier, hierarchical reconciliation method, and ensemble strategy in the platform. See **[`configs/smokes/README.md`](./smokes/README.md)** for the full index.
 
 ---
 

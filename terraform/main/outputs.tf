@@ -112,3 +112,8 @@ output "colab_main_runtime_template_id" {
   description = "sf-main (Python 3.11 / [ray,spark]) Colab runtime template — the one template for every notebook (01–07 + the playground). Pick it in Colab Enterprise. null unless create_colab_templates = true."
   value       = module.colab.main_runtime_template_id
 }
+
+output "gke_cluster_name" {
+  description = "Standing GKE cluster name (feeds SF_GKE_CLUSTER; null unless create_gke = true)."
+  value       = module.gke.cluster_name
+}

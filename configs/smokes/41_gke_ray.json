@@ -1,0 +1,74 @@
+{
+  "run_name": "smoke_41_gke_ray",
+  "python_runtime": "gke",
+  "data": {
+    "source_table": "source_series_covariates_iceberg",
+    "horizon": 28,
+    "series_limit": 20
+  },
+  "models": [
+    "theta",
+    "sarimax",
+    "xgboost",
+    "tide"
+  ],
+  "model_params": {
+    "tide": {
+      "training_mode": "global",
+      "max_steps": 20,
+      "input_size": 28
+    }
+  },
+  "backtest": {
+    "enabled": true,
+    "horizon": 28,
+    "n_folds": 1,
+    "step": 28,
+    "decision_metric": "rmsse"
+  },
+  "features": {
+    "static_covariates": [
+      "region",
+      "category"
+    ],
+    "future_covariates": [
+      "is_holiday",
+      "promo_flag",
+      "price_index"
+    ],
+    "past_covariates": [
+      "temperature"
+    ],
+    "on_unsupported_covariates": "fallback"
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": [
+      "mean",
+      "inverse_error",
+      "nnls"
+    ]
+  },
+  "compute": {
+    "use_gpu": false,
+    "gke_mode": "ray",
+    "ray_mode": "gke",
+    "machine_type": "n2-standard-8",
+    "workers": 1,
+    "families": {
+      "ml": {
+        "runtime": "gke",
+        "gke_mode": "ray",
+        "machine_type": "n2-standard-8",
+        "workers": 1
+      },
+      "deep_learning": {
+        "runtime": "ray",
+        "ray_mode": "gke",
+        "hardware": "cpu",
+        "machine_type": "n2-standard-8",
+        "workers": 1
+      }
+    }
+  }
+}

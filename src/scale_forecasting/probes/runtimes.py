@@ -686,6 +686,100 @@ class GceProbe:
             return _cancel_failure(exc)
 
 
+class GkeProbe:
+    """Probe a Google Kubernetes Engine Job via the GKE cluster & K8s ``batch/v1`` Job API."""
+
+    name = "gke"
+
+    @staticmethod
+    def _resolve_coordinates(handle: ProbeHandle, settings: Settings) -> tuple[str, str, str, str]:
+        """Return ``(location, cluster_name, namespace, job_name)`` from ``handle`` (pure)."""
+        from ..gke_submit import _ephemeral_cluster_name
+
+        resource = handle.resource_name or ""
+        parts = resource.split("/") if resource else []
+        if "locations" in parts and "clusters" in parts:
+            loc_idx = parts.index("locations") + 1
+            cl_idx = parts.index("clusters") + 1
+            ns_idx = parts.index("namespaces") + 1 if "namespaces" in parts else -1
+            job_idx = parts.index("jobs") + 1 if "jobs" in parts else -1
+            loc = parts[loc_idx] if loc_idx < len(parts) else (handle.region or settings.region)
+            cl = parts[cl_idx] if cl_idx < len(parts) else _ephemeral_cluster_name(handle.native_id)
+            ns = parts[ns_idx] if 0 < ns_idx < len(parts) else "default"
+            jb = parts[job_idx] if 0 < job_idx < len(parts) else handle.native_id
+            return loc, cl, ns, jb
+
+        location = handle.region or settings.region
+        cluster_name = ""
+        try:
+            from ..batch_infra import BatchInfra
+
+            cluster_name = BatchInfra.resolve().gke_cluster_name or ""
+        except Exception:  # noqa: BLE001
+            cluster_name = ""
+        if not cluster_name:
+            cluster_name = _ephemeral_cluster_name(handle.native_id)
+        return location, cluster_name, "default", handle.native_id
+
+    def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
+        if not handle.native_id:
+            return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="gke job id not set")
+        try:
+            from ..gke_submit import GkeK8sClient, get_gke_cluster, k8s_job_state
+
+            location, cluster_name, namespace, job_name = self._resolve_coordinates(
+                handle, settings
+            )
+            cluster = get_gke_cluster(settings.project_id, location, cluster_name)
+            if cluster is None:
+                return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="gke cluster not found")
+            c_status = str(cluster.get("status") or "").upper()
+            if c_status == "PROVISIONING":
+                return ProbeResult(NATIVE_RUNNING, exists=True, detail="gke cluster provisioning")
+            if c_status in {"STOPPING", "ERROR", "DEGRADED"} and not cluster.get("endpoint"):
+                return ProbeResult(
+                    NATIVE_FAILED, exists=True, detail=f"gke cluster status={c_status}"
+                )
+
+            with GkeK8sClient(cluster) as k8s:
+                job_obj = k8s.get_job(namespace, job_name)
+            state, detail = k8s_job_state(job_obj)
+            if state == "NOT_FOUND":
+                return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail=detail)
+            if state == "SUCCEEDED":
+                return ProbeResult(NATIVE_SUCCEEDED, exists=True, detail=detail)
+            if state == "FAILED":
+                return ProbeResult(NATIVE_FAILED, exists=True, detail=detail)
+            return ProbeResult(NATIVE_RUNNING, exists=True, detail=detail)
+        except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
+            return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
+
+    def cancel(self, handle: ProbeHandle, *, settings: Settings) -> CancelResult:
+        if not handle.native_id:
+            return CancelResult(stopped=False, already_gone=False, detail="gke job id not set")
+        try:
+            from ..gke_submit import GkeK8sClient, get_gke_cluster
+
+            location, cluster_name, namespace, job_name = self._resolve_coordinates(
+                handle, settings
+            )
+            cluster = get_gke_cluster(settings.project_id, location, cluster_name)
+            if cluster is None:
+                return CancelResult(
+                    stopped=False, already_gone=True, detail="gke cluster already gone"
+                )
+            with GkeK8sClient(cluster) as k8s:
+                existing = k8s.get_job(namespace, job_name)
+                if existing is None:
+                    return CancelResult(
+                        stopped=False, already_gone=True, detail="gke job already gone"
+                    )
+                k8s.delete_job(namespace, job_name)
+            return CancelResult(stopped=True, already_gone=False, detail="gke job deletion issued")
+        except Exception as exc:  # noqa: BLE001 - cancel is advisory: report failure, never raise
+            return _cancel_failure(exc)
+
+
 # Registered by ``runtime`` (a `ProbeHandle.runtime`). A new probe = one class + one entry here,
 # mirroring `submitters._SUBMITTERS`.
 _PROBES: dict[str, RuntimeProbe] = {
@@ -693,6 +787,7 @@ _PROBES: dict[str, RuntimeProbe] = {
     RayProbe.name: RayProbe(),
     VertexProbe.name: VertexProbe(),
     GceProbe.name: GceProbe(),
+    GkeProbe.name: GkeProbe(),
     BigQueryProbe.name: BigQueryProbe(),
 }
 

@@ -1,7 +1,7 @@
 site_name: scale-forecasting
 site_description: >-
-  Massively-parallel time-series forecasting on Google Cloud — Spark, Ray, and
-  BigQuery, one config away.
+  Massively-parallel time-series forecasting on Google Cloud — Spark, Ray,
+  Vertex AI, GKE, Compute Engine, and BigQuery, one config away.
 repo_url: https://github.com/statmike/scale-forecasting
 repo_name: statmike/scale-forecasting
 edit_uri: blob/main/docs/
@@ -105,6 +105,7 @@ nav:
           - notebooks/10_registry_operations_and_scale.ipynb
   - Reference:
       - Architecture: architecture.md
+      - Compute runtimes: runtimes_reference.md
       - Configuration: configuration_reference.md
       - Models & ensembles: models_reference.md
       - Evaluation metrics: metrics_reference.md
@@ -151,6 +152,7 @@ nav:
       - Vertex AI CustomJob engine: api/engines_vertex_engine.md
       - Vertex AI CustomJob submitter: api/vertex_submit.md
       - Compute Engine Single-VM submitter: api/gce_submit.md
+      - Google Kubernetes Engine submitter: api/gke_submit.md
       - BigQuery-native engine: api/engines_bigquery_engine.md
       - Compute profiling: api/profiling.md
       - Resource planning: api/resources.md

@@ -329,6 +329,10 @@ DEFAULT_POLICIES: dict[str, CapacityPolicy] = {
     "gce": CapacityPolicy(
         max_attempts=8, max_wall_seconds=2700.0, backoff_seconds=45.0, backoff_max_seconds=300.0
     ),
+    # ~1-3 min per GKE node-pool scale-up or ephemeral cluster provision across candidate zones.
+    "gke": CapacityPolicy(
+        max_attempts=8, max_wall_seconds=2700.0, backoff_seconds=45.0, backoff_max_seconds=300.0
+    ),
     # ~5-7 min per create, and the richest candidate list (zones as well as regions).
     "dataproc_cluster": CapacityPolicy(
         max_attempts=8, max_wall_seconds=2700.0, backoff_seconds=60.0, backoff_max_seconds=300.0

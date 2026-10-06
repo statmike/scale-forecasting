@@ -1320,6 +1320,76 @@ def preflight_gce(
     return result
 
 
+# --- Google Kubernetes Engine (GKE): node-pool Compute Engine meters ----------------------------
+
+
+def gke_demands(plan: Any, region: str) -> list[QuotaDemand]:
+    """The meters a GKE job's node pool will draw on, in one region (pure).
+
+    GKE node pools provision Compute Engine VMs underneath, so they draw on the regional Compute
+    Engine device (`compute_gpu_metric`) and vCPU (`compute_cpu_metric`) meters with ``fixed=0``
+    (GKE's control plane is Google-managed and consumes zero project vCPU quota).
+    """
+    demands: list[QuotaDemand] = []
+    workers = max(1, int(getattr(plan, "worker_count", 1) or 1))
+
+    gpu_type = plan.gpu_type or gpu_type_from_accelerator(getattr(plan, "accelerator_type", ""))
+    if plan.accelerator_count > 0 and gpu_type:
+        metric = compute_gpu_metric(gpu_type)
+        if metric is not None:
+            demands.append(
+                QuotaDemand(
+                    metric=metric,
+                    region=region,
+                    pool="gpu",
+                    per_unit=plan.accelerator_count,
+                    min_units=1,
+                    max_units=workers,
+                )
+            )
+
+    demands.append(
+        QuotaDemand(
+            metric=compute_cpu_metric(),
+            region=region,
+            pool="worker",
+            per_unit=machine_cores(plan.machine_type),
+            min_units=1,
+            max_units=workers,
+            fixed=0,
+        )
+    )
+    return demands
+
+
+def preflight_gke(
+    plan: Any,
+    regions: list[str],
+    project_id: str,
+    *,
+    fetch: Any = None,
+) -> dict[str, QuotaPreflight]:
+    """Read each candidate region's Compute Engine meters and judge a GKE ``plan`` against them."""
+    demands_by_region = {region: gke_demands(plan, region) for region in regions}
+    metrics = {d.metric.metric: d.metric for ds in demands_by_region.values() for d in ds}
+    readings = read_limits(project_id, list(metrics.values()), regions, fetch=fetch)
+
+    result: dict[str, QuotaPreflight] = {}
+    for region, demands in demands_by_region.items():
+        outcomes = [
+            reconcile(
+                demand,
+                readings.get(
+                    (demand.metric.metric, region),
+                    QuotaReading(demand.metric, region, None, "not read"),
+                ),
+            )
+            for demand in demands
+        ]
+        result[region] = QuotaPreflight(region=region, outcomes=tuple(outcomes))
+    return result
+
+
 # --- regional prerequisites: things that must exist here, quota aside ---------------------------
 
 _ATTACHMENT_REGION_RE = re.compile(r"/regions/([^/]+)/networkAttachments/")
@@ -1384,6 +1454,8 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
     * **Vertex CustomJob** — the Vertex training-CPU and GPU meters with zero head-node tax.
     * **Compute Engine single VM** — the Compute Engine device and vCPU meters with zero
       head-node tax.
+    * **Google Kubernetes Engine** — the Compute Engine device and vCPU meters with zero
+      control-plane vCPU tax.
     * **Spark on an ephemeral cluster** — the Compute Engine device and vCPU meters, and the worker
       count the region will actually grant.
     * **Spark on Serverless, BigQuery, and a reused cluster** — named, not metered. A reused cluster
@@ -1427,6 +1499,8 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
             lines.extend(_report_vertex_node(cfg, node, run_id, regions, settings, profile))
         elif node.runtime == "gce":
             lines.extend(_report_gce_node(cfg, node, run_id, settings, profile))
+        elif node.runtime == "gke":
+            lines.extend(_report_gke_node(cfg, node, run_id, settings, profile))
         elif node.runtime == "spark" and node.spark_mode == "cluster" and node.family not in reused:
             lines.extend(_report_cluster_node(cfg, node, settings, profile))
         else:
@@ -1503,6 +1577,46 @@ def _report_gce_node(
     regions = list(dict.fromkeys(c.region for c in candidates))
     preflights = preflight_gce(plan, regions, settings.project_id)
     lines = [f"  {node.family} on gce/{plan.hardware}: 1 x {plan.machine_type} (0 head-node tax)"]
+    for region in regions:
+        pf = preflights.get(region)
+        if pf is None:
+            continue
+        lines.extend(_render_region(region, pf))
+    return lines
+
+
+def _report_gke_node(
+    cfg: Any, node: Any, run_id: str, settings: Any, profile: Any = None
+) -> list[str]:
+    """One Google Kubernetes Engine family's block: its node pool, judged per candidate region."""
+    from .batch_infra import BatchInfra
+    from .compute_fallback import resolve_candidates
+    from .gke_submit import plan_gke_job
+
+    fc = cfg.resolve_family_compute(node.family)
+    infra = BatchInfra.resolve()
+    plan = plan_gke_job(
+        cfg,
+        list(node.models),
+        run_id=run_id,
+        gke_mode=fc.gke_mode,
+        cluster_name=fc.gke_cluster_name,
+        namespace=fc.gke_namespace,
+        hardware=fc.hardware,
+        gpu_type=fc.gpu_type,
+        machine_type=fc.machine_type,
+        worker_count=fc.workers,
+        accelerator_count=fc.accelerator_count or None,
+        profile=profile,
+        infra=infra,
+    )
+    candidates = resolve_candidates(settings=settings, infra=infra)
+    regions = list(dict.fromkeys(c.region for c in candidates))
+    preflights = preflight_gke(plan, regions, settings.project_id)
+    lines = [
+        f"  {node.family} on gke/{plan.gke_mode}/{plan.hardware}: "
+        f"{plan.worker_count} x {plan.machine_type} (0 control-plane vCPU tax)"
+    ]
     for region in regions:
         pf = preflights.get(region)
         if pf is None:
