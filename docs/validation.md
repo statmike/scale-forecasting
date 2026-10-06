@@ -2,26 +2,26 @@
 
 **What has been proven on live Google Cloud infrastructure, and on which architecture.**
 
-This ledger is the single source of truth for live system validation across Dataproc Serverless, Dataproc Standard Clusters, Vertex AI Ray, Vertex AI `CustomJob`, Compute Engine Single-VM (`gce`), BigQuery ML / AI.FORECAST, and Cloud Composer. Notice that **System Validation** refers to platform, runtime, and operational validation—for statistical forecast evaluation and backtesting, see [Backtesting and Model Selection](backtesting.md).
+This ledger is the single source of truth for live system validation across Dataproc Serverless, Dataproc Standard Clusters, Vertex AI Ray, Ray on Google Kubernetes Engine (`gke`), Vertex AI `CustomJob`, Compute Engine Single-VM (`gce`), Google Kubernetes Engine Indexed Jobs (`gke`), BigQuery ML / AI.FORECAST, and Cloud Composer. Notice that **System Validation** refers to platform, runtime, and operational validation—for statistical forecast evaluation and backtesting, see [Backtesting and Model Selection](backtesting.md).
 
 ```mermaid
 flowchart LR
     subgraph Surface["Declared Surface"]
         Axes["26 Architecture Axes"]
-        RunCfg["RunConfig Schema\n(153 Literal & Bool Values)"]
-        Configs["39 Smoke Configs +\n19 Production Configs +\n8 Tour Notebooks"]
+        RunCfg["RunConfig Schema\n(161 Literal & Bool Values)"]
+        Configs["41 Smoke Configs +\n20 Production Configs +\n11 Tour Notebooks"]
     end
 
     subgraph Ledger["System Validation Ledger (docs/validation.md)"]
         T1["Architecture Axes Table"]
-        T2["Smoke Suite Table (39)"]
-        T3["Production Configs Table (19)"]
-        T4["Notebooks & Capabilities Tables (8 + 17)"]
+        T2["Smoke Suite Table (41)"]
+        T3["Production Configs Table (20)"]
+        T4["Notebooks & Capabilities Tables (11 + 17)"]
     end
 
     subgraph Gates["Automated Offline Tripwires"]
         VTest["tests/unit/test_validation_ledger.py\nVerifies axes, statuses, run_ids,\nand benchmark citations"]
-        CTest["tests/unit/test_config_coverage.py\nVerifies all 153 RunConfig values\nare proven live or offline"]
+        CTest["tests/unit/test_config_coverage.py\nVerifies all 161 RunConfig values\nare proven live or offline"]
     end
 
     Axes --> T1
@@ -35,7 +35,7 @@ flowchart LR
 A live validation result is only meaningful relative to the architecture it ran on. Every entry in this ledger declares the **architecture axes** it depends on and the value each axis held when the run was proven:
 
 1. **Staleness Tripwire (`tests/unit/test_validation_ledger.py`)**: When an architectural axis changes, any ledger entry pinned to the previous value becomes mechanically stale. The offline test suite refuses to allow an entry with a superseded axis value, an unrecorded `run_id`, or a missing config row to claim `CURRENT`. Benchmark citations in [Quota, Throughput, and Scale](quota_and_scale.md) are also cross-checked against this ledger.
-2. **Config Surface Coverage Tripwire (`tests/unit/test_config_coverage.py`)**: Joins every reachable `Literal` member and `bool` state on `RunConfig` against the `CURRENT` rows in this ledger and the offline unit test suite. Every configuration value must be explicitly accounted for: **153 declared values — 116 proven live, 35 exercised offline, 0 genuine gaps, 2 not work.**
+2. **Config Surface Coverage Tripwire (`tests/unit/test_config_coverage.py`)**: Joins every reachable `Literal` member and `bool` state on `RunConfig` against the `CURRENT` rows in this ledger and the offline unit test suite. Every configuration value must be explicitly accounted for: **161 declared values — 123 proven live, 36 exercised offline, 0 genuine gaps, 2 not work.**
 
 ---
 
@@ -74,7 +74,7 @@ Each axis represents a core architectural contract. Changing an axis value in co
 
 ## Smoke Suite (`configs/smokes/`)
 
-The 39 smoke configurations live in [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes); see [Smoke Testing](smoke_testing.md) for how to execute and verify them. The ledger tripwire enforces a strict 1-to-1 mapping between `configs/smokes/*.json` and the rows below.
+The 41 smoke configurations live in [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes); see [Smoke Testing](smoke_testing.md) for how to execute and verify them. The ledger tripwire enforces a strict 1-to-1 mapping between `configs/smokes/*.json` and the rows below.
 
 | # | Config | Proves | Status | Date | run_id | Axes at proof |
 |---|--------|--------|--------|------|--------|---------------|
@@ -117,6 +117,8 @@ The 39 smoke configurations live in [`configs/smokes/`](https://github.com/statm
 | 37 | `37_hierarchy_covariates_ensemble.json` | **Hierarchy + covariates + ensemble:** 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`) combined with 3-tier covariates (`static_covariates: ["region", "category"]`), univariate fallback (`theta`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`) scoring finite `mase` and `rmsse` across all bottom and aggregated hierarchy nodes. | CURRENT | 2026-10-01 | `smoke-37-hierarchy-covariates-ensemble-e6be5fed8071` (attempt 2) | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 38 | `38_vertex_custom_job.json` | **Vertex AI `CustomJob` (`runtime = "vertex"`) — multi-VM worker pools across all families + dedicated per-model NVIDIA L4 GPU VMs:** 2-VM CPU worker pools (`workers=2` on `statistical` for `theta` + `sarimax` and on `ml` for `xgboost` + `lightgbm`) and automatic 3-VM NVIDIA L4 GPU worker pool (`3 x g2-standard-8 + L4`, 1 dedicated GPU VM per model for global/hybrid `tide`, `tsmixer`, `neuralprophet`) with GCS worker-pool barrier synchronization, profile-driven hardware sizing, 3-tier covariates, 3-level hierarchy reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`). | CURRENT | 2026-10-03 | `smoke-38-vertex-custom-job-82b620bbd9ba` (attempt 1) | `serverless_deps=container-image`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 | 39 | `39_gce_single_vm.json` | **Compute Engine Single-VM (`runtime = "gce"`) — zero-orphan container execution + hardware sizing:** single-VM Container-Optimized OS execution across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide` in `global` mode) with triple-redundant anti-orphan lifecycle guarantees (`maxRunDuration` + `instanceTerminationAction="DELETE"`, guest `trap cleanup EXIT` GCS status marker + self-delete, and client `finally` teardown leaving `0` orphaned VMs), profile-driven sizing, 3-tier covariates, hierarchy reconciliation (`bottom_up`, `wls_struct`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`). | CURRENT | 2026-10-03 | `smoke-39-gce-single-vm-4aa21163baa6` (attempt 1) | `serverless_deps=container-image`, `dl_gpu_routing=resolved-per-family`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 40 | `40_gke_indexed_job.json` | **Google Kubernetes Engine (`runtime = "gke"`, `gke_mode = "job"`) — multi-pod Kubernetes Indexed Jobs:** 2-pod distributed series sharding (`workers=2` via `JOB_COMPLETION_INDEX` on `statistical` for `theta` + `sarimax`), single-pod execution on `ml` (`xgboost`) and `deep_learning` (`tide` in `global` mode), in-memory `/dev/shm`, GCS worker-pool barrier synchronization, profile-driven sizing, 3-tier covariates, 3-level hierarchy reconciliation (`bottom_up`, `wls_struct`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`). | CURRENT | 2026-10-06 | `smoke-40-gke-indexed-job-c593ae5b6035` (attempt 2) | `serverless_deps=container-image`, `dl_gpu_routing=resolved-per-family`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
+| 41 | `41_gke_ray.json` | **Ray on Google Kubernetes Engine (`gke_mode = "ray"` & `ray_mode = "gke"`):** multi-pod ephemeral Ray cluster on GKE (`workers=2`: 1 Ray head pod + 1 Ray worker pod via Kubernetes Headless Service + Deployment on `statistical` for `theta` + `sarimax`), `runtime = "ray"` with `ray_mode = "gke"` on `deep_learning` (`tide` in `global` mode), `runtime = "gke"` with `gke_mode = "job"` on `ml` (`xgboost`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`). | CURRENT | 2026-10-06 | `smoke-41-gke-ray-f9c3cd840845` (attempt 2) | `serverless_deps=container-image`, `dl_gpu_routing=resolved-per-family`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `job_status=derived-from-cell-tallies`, `horizon_features=computed-at-future-dates`, `run_id_inputs=authored-config-only-v3` |
 
 
 
@@ -124,7 +126,7 @@ The 39 smoke configurations live in [`configs/smokes/`](https://github.com/statm
 
 ## Demonstration & Scale Configs (`configs/`)
 
-The 19 production, demonstration, and scale benchmark configurations in [`configs/`](https://github.com/statmike/scale-forecasting/tree/main/configs) back the [Hands-On Workshop](workshop.md) and [Quota, Throughput, and Scale](quota_and_scale.md).
+The 20 production, demonstration, and scale benchmark configurations in [`configs/`](https://github.com/statmike/scale-forecasting/tree/main/configs) back the [Hands-On Workshop](workshop.md) and [Quota, Throughput, and Scale](quota_and_scale.md).
 
 | Config | Proves | Status | Date | run_id | Axes at proof |
 |--------|--------|--------|------|--------|---------------|
@@ -137,6 +139,7 @@ The 19 production, demonstration, and scale benchmark configurations in [`config
 | `ray_cpu_demo.json` | Vertex AI Ray CPU alongside BigQuery-native models with backtesting (6 series). | CURRENT | 2026-09-15 | `ray-cpu-demo-1650659c3c20` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `native_source_pin=unpinned-all-sources`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_gpu_demo.json` | Vertex AI Ray GPU (`neuralprophet` on T4) alongside BigQuery-native models, recording `device_verdict=ENGAGED_IDLE` on small univariate series (6 series). | CURRENT | 2026-09-15 | `ray-gpu-demo-fa53d37c8122` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `native_source_pin=unpinned-all-sources`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_autoscale_demo.json` | Shipped `ray_autoscale=true` default scaling 1→8 CPU worker nodes on 10,000 series. | CURRENT | 2026-09-10 | `ray-autoscale-demo-9728c900963a` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only` |
+| `gke_demo.json` | Google Kubernetes Engine Indexed Job (`runtime = "gke"`, `gke_mode = "job"`) alongside BigQuery-native models (`arima_plus`, `timesfm`) with backtesting (6 series). | CURRENT | 2026-10-06 | `gke-demo-4886e298cb99` (attempt 4) | `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `explode_100k.json` | 100,000-series scale benchmark on Dataproc Serverless Spark (`statistical` + `ml`, 400,000 cells). | CURRENT | 2026-09-10 | `explode-100k-ef602ea229b4` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `ray_100k.json` | 100,000-series scale benchmark on Vertex AI Ray CPU (`statistical` + `ml`, 400,000 cells; supersedes earlier baseline harvest run `ray-100k-dcc77a9d1e9b`). | CURRENT | 2026-09-10 | `ray-100k-3fbc82fe3b6d` | `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth` |
 | `all_families_10k.json` | All four model families (`statistical`, `ml`, `deep_learning` on 12 T4s, `native`) across 10,000 series on Vertex AI Ray + BigQuery (9.0 NeuralProphet fits/min per T4 at 7 cells/card). | CURRENT | 2026-09-16 | `all-families-10k-a0f6797d69c1` | `gpu_slot_fraction=measured-on-device`, `ray_pool_shape=autoscaling`, `ray_deps=stock-image+uv-runtime-env`, `ray_slot_memory=harvest-only`, `ray_poll_recovery=transient-transport+auth`, `dl_gpu_routing=resolved-per-family`, `gpu_device_probe=trainer-root-device`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |

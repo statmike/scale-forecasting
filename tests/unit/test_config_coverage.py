@@ -172,6 +172,9 @@ UNPROVEN: dict[str, str] = {
     "compute.families.gpu_type=A100_80GB": (
         "tests/unit/test_vertex_runtime.py::test_gpu_machine_type_resolution_and_validation"
     ),
+    "compute.families.ray_mode=vertex": (
+        "tests/unit/test_gke_submit.py::test_dag_submitters_and_commands_for_gke_and_ray_mode_gke"
+    ),
     "compute.families.runtime=spark": (
         "tests/unit/test_airflow_emit.py::test_two_cluster_spark_families_emit_a_shared_dataproc_bracket"
     ),

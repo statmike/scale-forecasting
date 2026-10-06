@@ -258,29 +258,70 @@ def test_embedded_runconfig_json_examples_validate(markdown_files: list[Path]) -
     assert not errors, "Embedded RunConfig JSON errors:\n" + "\n".join(errors)
 
 
+def _markdown_anchors(text: str) -> set[str]:
+    """Return all heading slugs (GitHub/MkDocs slugify) and explicit ``<a id="...">`` anchors."""
+    import pymdownx.slugs
+
+    slugify = pymdownx.slugs.slugify(case="lower")
+    anchors = set(re.findall(r'<a\s+id=["\']([^"\']+)["\']', text))
+    counts: dict[str, int] = {}
+    for _, line in _strip_fenced_code(text):
+        m = re.match(r"^#{1,6}\s+(.*?)\s*$", line)
+        if not m:
+            continue
+        raw = re.sub(r"`([^`]*)`", r"\1", m.group(1))
+        raw = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", raw)
+        slug = slugify(raw, "-")
+        if slug in counts:
+            counts[slug] += 1
+            anchors.add(f"{slug}_{counts[slug]}")
+            anchors.add(f"{slug}-{counts[slug]}")
+        else:
+            counts[slug] = 0
+            anchors.add(slug)
+    return anchors
+
+
 def test_markdown_relative_links_and_config_paths_exist(markdown_files: list[Path]) -> None:
-    """Every relative Markdown link and configs/*.json reference resolves to a file on disk."""
+    """Every relative Markdown link, ``#anchor``, and ``configs/*.json`` reference resolves."""
     errors: list[str] = []
-    link_re = re.compile(r"\[[^\]]+\]\(([^)#\s]+)(?:#[^)]*)?\)")
+    link_re = re.compile(r"\[[^\]]+\]\(([^)#\s]*)(?:#([^)\s]+))?\)")
     cfg_re = re.compile(r"`((?:configs/)?(?:smokes/)?[0-9a-z_]+\.json)`")
     all_json_names = {p.name for p in (_REPO_ROOT / "configs").rglob("*.json")} | {
         p.name for p in (_REPO_ROOT / "tests").rglob("*.json")
     }
+    anchor_cache: dict[Path, set[str]] = {}
     for path in markdown_files:
         rel = path.relative_to(_REPO_ROOT)
         for line_no, line in _strip_fenced_code(path.read_text(encoding="utf-8")):
             for match in link_re.finditer(line):
-                target = match.group(1)
+                target, frag = match.group(1), match.group(2)
                 if target.startswith(
                     ("http://", "https://", "mailto:", "conversation://", "file://")
                 ):
                     continue
-                resolved = (path.parent / target).resolve()
-                # notebooks/README.md is mounted at docs/notebooks/README.md in MkDocs.
-                if not resolved.exists() and path == _REPO_ROOT / "notebooks" / "README.md":
-                    resolved = Path(os.path.normpath(_REPO_ROOT / "docs" / "notebooks" / target))
+                if not target:
+                    resolved = path
+                else:
+                    resolved = (path.parent / target).resolve()
+                    # notebooks/README.md is mounted at docs/notebooks/README.md in MkDocs.
+                    if not resolved.exists() and path == _REPO_ROOT / "notebooks" / "README.md":
+                        resolved = Path(
+                            os.path.normpath(_REPO_ROOT / "docs" / "notebooks" / target)
+                        )
                 if not resolved.exists():
                     errors.append(f"{rel}:{line_no}: broken relative link {target!r}")
+                    continue
+                if frag and resolved.suffix == ".md":
+                    if resolved not in anchor_cache:
+                        anchor_cache[resolved] = _markdown_anchors(
+                            resolved.read_text(encoding="utf-8")
+                        )
+                    if frag not in anchor_cache[resolved]:
+                        errors.append(
+                            f"{rel}:{line_no}: broken anchor #{frag} in "
+                            f"{resolved.relative_to(_REPO_ROOT)}"
+                        )
             for match in cfg_re.finditer(line):
                 ref = match.group(1)
                 if ref in {
@@ -347,7 +388,7 @@ def test_no_stale_config_names_or_counts_in_docs(markdown_files: list[Path]) -> 
         errors.append(f"src/scale_forecasting/README.md missing '{n_models} models'")
     if f"{n_metrics} metrics" not in pkg_readme:
         errors.append(f"src/scale_forecasting/README.md missing '{n_metrics} metrics'")
-    if n_smokes != 39:
-        errors.append(f"Expected 39 smoke configs on disk, found {n_smokes}")
+    if n_smokes != 41:
+        errors.append(f"Expected 41 smoke configs on disk, found {n_smokes}")
 
     assert not errors, "Documentation inventory drift:\n" + "\n".join(errors)

@@ -155,19 +155,25 @@ def _check_idempotency(run_id: str, settings: Settings) -> Idempotency:
 
 
 def _needs_batch_infra(cfg: RunConfig) -> bool:
-    """Does any family in ``cfg`` run on Spark, Vertex CustomJob, or GCE (needing `BatchInfra`)?"""
-    if cfg.python_runtime in ("spark", "vertex", "gce"):
+    """Does any family in ``cfg`` run on Spark, Vertex, GCE, or GKE (needing `BatchInfra`)?"""
+    if cfg.python_runtime in ("spark", "vertex", "gce", "gke"):
         return True
-    return any(fc.runtime in ("spark", "vertex", "gce") for fc in cfg.compute.families.values())
+    if cfg.python_runtime == "ray" and cfg.compute.ray_mode == "gke":
+        return True
+    return any(
+        fc.runtime in ("spark", "vertex", "gce", "gke")
+        or (fc.runtime == "ray" and fc.ray_mode == "gke")
+        for fc in cfg.compute.families.values()
+    )
 
 
 def _resolve_infra(cfg: RunConfig, infra: object | None) -> object:
     """The runtime's infra identity: the injected ``infra``, else resolved from the ``SF_*`` env.
 
-    Spark, Vertex, and GCE resolve a `BatchInfra`, pure Ray resolves a `RayInfra`; both carry the
-    ``code_bucket`` the config stages to. Raises `ConfigError` (from ``resolve``) when the env is
-    unset — plan emission is best-effort, so `plan_run` catches that and returns a plan without
-    commands.
+    Spark, Vertex, GCE, and GKE resolve a `BatchInfra`, pure Vertex Ray resolves a `RayInfra`; both
+    carry the ``code_bucket`` the config stages to. Raises `ConfigError` (from ``resolve``) when the
+    env is unset — plan emission is best-effort, so `plan_run` catches that and returns a plan
+    without commands.
     """
     if infra is not None:
         return infra
@@ -186,10 +192,11 @@ def _template_uris(
     """The ``gs://`` URIs a run's artifacts *will* land at (pure — mirrors the staging scheme).
 
     Returns ``(config_uri, package_uri, launcher_uri)``. The config URI always exists; the
-    package/launcher URIs are set whenever a Spark, Vertex CustomJob, or GCE family has Python
-    models (Ray delivers code via its ``runtime_env`` working dir, not a staged zip). The package
-    name carries the code hash from `code_delivery.build_package_zip` — a deterministic local build,
-    no network — so the template is byte-faithful to what `staging.stage_code` would upload.
+    package/launcher URIs are set whenever a Spark, Vertex CustomJob, GCE, or GKE family has Python
+    models (Vertex Ray delivers code via its ``runtime_env`` working dir, not a staged zip). The
+    package name carries the code hash from `code_delivery.build_package_zip` — a deterministic
+    local build, no network — so the template is byte-faithful to what `staging.stage_code` would
+    upload.
     """
     config_uri = f"gs://{code_bucket}/runs/{plan.run_id}.json"
     if not _needs_batch_infra(cfg) or not plan.python_models:
@@ -218,11 +225,12 @@ def _assemble_commands(
     Always emits ``"main"`` — ``python -m scale_forecasting.main --config-uri …``, the orchestrator
     that reproduces the *full* run (both engines under one run_id). When there are Python-runtime
     models it adds the per-runtime tier: ``"ray"`` (universal only), ``"spark:<family>"`` per
-    Serverless family, ``"vertex:<family>"`` per Vertex CustomJob family, and/or
-    ``"gce:<family>"`` per Compute Engine single-VM family.
+    Serverless family, ``"vertex:<family>"`` per Vertex CustomJob family, ``"gce:<family>"`` per
+    Compute Engine single-VM family, and/or ``"gke:<family>"`` per GKE family.
     """
     from .commands import (
         build_gce_commands,
+        build_gke_commands,
         build_main_command,
         build_ray_commands,
         build_spark_commands,
@@ -237,13 +245,14 @@ def _assemble_commands(
         commands["ray"] = build_ray_commands(
             config_uri=config_uri, cluster_name=cfg.compute.ray_cluster_name
         )
-    if not any(n.runtime in ("spark", "vertex", "gce") for n in nodes):
+    if not any(n.runtime in ("spark", "vertex", "gce", "gke") for n in nodes):
         return commands
 
     from .batch_infra import BatchInfra
     from .gce_submit import plan_gce_job
+    from .gke_submit import plan_gke_job
     from .profiling.source import profile_for_run
-    from .registry.ids import dataproc_job_id, gce_instance_id, vertex_job_id
+    from .registry.ids import dataproc_job_id, gce_instance_id, gke_job_id, vertex_job_id
     from .submit import sizing_properties
     from .vertex_submit import plan_vertex_job
 
@@ -332,6 +341,42 @@ def _assemble_commands(
                 hardware=gplan.hardware,
                 gpu_type=gplan.gpu_type,
                 machine_type=gplan.machine_type,
+            )
+        elif node.runtime == "gke":
+            fc = cfg.resolve_family_compute(node.family)
+            kplan = plan_gke_job(
+                cfg,
+                models,
+                run_id=plan.run_id,
+                job_id=gke_job_id(node.job_key),
+                gke_mode=fc.gke_mode,
+                cluster_name=fc.gke_cluster_name,
+                namespace=cfg.compute.gke_namespace,
+                hardware=hardware,
+                gpu_type=node.gpu_type,
+                machine_type=fc.machine_type,
+                worker_count=fc.workers,
+                accelerator_count=fc.accelerator_count or None,
+                image_uri=infra.container_image or "",
+                package_uri=package_uri or "",
+                config_uri=config_uri,
+                service_account=infra.compute_sa,
+                subnetwork_uri=infra.subnetwork_uri,
+                infra=infra,
+            )
+            commands[f"gke:{node.family}"] = build_gke_commands(
+                config_uri=config_uri,
+                package_uri=package_uri,
+                settings=settings,
+                infra=infra,
+                job_id=kplan.job_name,
+                gke_mode=kplan.gke_mode,
+                cluster_name=None if kplan.ephemeral_cluster else kplan.cluster_name,
+                models=models,
+                hardware=kplan.hardware,
+                gpu_type=kplan.gpu_type,
+                machine_type=kplan.machine_type,
+                worker_count=kplan.worker_count,
             )
     return commands
 

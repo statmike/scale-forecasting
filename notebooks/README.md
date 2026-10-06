@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>A Complete Interactive Curriculum for Enterprise Scale Forecasting on Google Cloud</b><br>
-  <i>From local zero-GCP prototyping across all 30 models and 21 metrics to distributed execution across BigQuery ML, GCE, Vertex AI, Spark, and Ray — plus 3-tier covariates, 7-method FPP3 reconciliation, cross-run ensembling, custom 1-file plugins, and 100,000-series operations.</i>
+  <i>From local zero-GCP prototyping across all 30 models and 21 metrics to distributed execution across BigQuery ML, GCE, Vertex AI, GKE (Indexed Jobs & Ray on GKE), Spark, and Ray — plus 3-tier covariates, 7-method FPP3 reconciliation, cross-run ensembling, custom 1-file plugins, and 100,000-series operations.</i>
 </p>
 
 ```mermaid
@@ -14,9 +14,9 @@ flowchart TD
 
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
         NB01["01_bigquery_native_sql.ipynb<br/>Serverless BigQuery SQL (ARIMA_PLUS · TimesFM 2.0)"]
-        NB02["02_vertex_and_gce_vms.ipynb<br/>GCE Single-VM & Vertex AI Multi-Worker (CPU + L4 GPU)"]
+        NB02["02_vertex_and_gce_vms.ipynb<br/>GCE Single-VM, Vertex AI & GKE Indexed Jobs (CPU + L4 GPU)"]
         NB03["03_spark_serverless_and_connect.ipynb<br/>Dataproc Serverless Batch, Cluster & Spark Connect"]
-        NB04["04_ray_on_vertex_gpu.ipynb<br/>Autoscaling Ray on Vertex AI + Fractional GPU Packing"]
+        NB04["04_ray_on_vertex_gpu.ipynb<br/>Autoscaling Ray on Vertex AI & GKE + Fractional GPU Packing"]
     end
 
     subgraph Track3["Track 3: Covariates, Hierarchy, HPO & Cross-Run Ensembles"]
@@ -57,9 +57,9 @@ Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-ac
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
 | [`01_bigquery_native_sql.ipynb`](./01_bigquery_native_sql.ipynb) | Serverless BigQuery ML | Execute `arima_plus` (`ML.FORECAST`) and Google Research `timesfm` (`AI.FORECAST` TimesFM 2.0) directly inside BigQuery SQL with zero cluster provisioning, understand why both are per-series (`local`) models, blend them into an ensemble, audit all 21 metrics, and inspect horizon-step interval calibration (`plot_calibration()`) and forecast decomposition (`plot_forecast_explanation()`). |
-| [`02_vertex_and_gce_vms.ipynb`](./02_vertex_and_gce_vms.ipynb) | GCE Single-VM & Vertex AI CustomJob | Compare ephemeral GCE Single-VM (`runtime="gce"`, triple-redundant auto-delete) against multi-worker Vertex AI CustomJob (`runtime="vertex"`, BigQuery Storage Read API `row_restriction` sharding + LPT scheduling + per-family GPU overrides), and inspect job telemetry (`jobs_df()`) and cohort coverage (`cohorts_df()`). |
+| [`02_vertex_and_gce_vms.ipynb`](./02_vertex_and_gce_vms.ipynb) | GCE Single-VM, Vertex AI CustomJob & GKE Indexed Jobs | Compare all three direct container runtimes powered by `vertex_engine.py`: ephemeral GCE Single-VM (`runtime="gce"`, triple-redundant auto-delete), multi-worker Vertex AI CustomJob (`runtime="vertex"`), and Google Kubernetes Engine Indexed Jobs (`runtime="gke", gke_mode="job"`, per-model GPU pod auto-expansion and independent node scale-down). |
 | [`03_spark_serverless_and_connect.ipynb`](./03_spark_serverless_and_connect.ipynb) | Dataproc Spark (`serverless` / `cluster` / `connect`) | Run the distributed Arrow-backed `groupBy(bucket).applyInPandas` fan-out on Dataproc Serverless in parallel with BigQuery SQL, compare with Dataproc Standard Clusters and interactive Spark Connect (`DataprocSparkSession`), and embed the pure Spark UDF directly via `spark_io.run_group()`. |
-| [`04_ray_on_vertex_gpu.ipynb`](./04_ray_on_vertex_gpu.ipynb) | Vertex AI Ray (CPU & GPU) | Provision an ephemeral autoscaling Vertex AI Ray cluster over Private Service Connect (`PSC-I`), pack PyTorch deep learning tasks fractionally onto GPUs (`gpu_fraction=0.25`), compare `local`, `global`, and `hybrid` neural network regimes, and embed Ray task chunking directly via `ray_io.chunk_cells()`. |
+| [`04_ray_on_vertex_gpu.ipynb`](./04_ray_on_vertex_gpu.ipynb) | Ray on Vertex AI & Ray on GKE (CPU & GPU) | Provision ephemeral autoscaling Ray clusters on Vertex AI (`ray_mode="vertex"`) or GKE (`ray_mode="gke"` / `runtime="gke", gke_mode="ray"`), pack PyTorch deep learning tasks fractionally onto GPUs (`gpu_fraction=0.25`), compare `local`, `global`, and `hybrid` neural network regimes, and embed Ray task chunking directly via `ray_io.chunk_cells()`. |
 
 ---
 
@@ -75,7 +75,7 @@ Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-ac
 ### Track 4: Master 4-Family Workflow, Registry Operations & 100k Scale
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`08_multi_engine_master_workflow.ipynb`](./08_multi_engine_master_workflow.ipynb) | Spark $\parallel$ Vertex $\parallel$ BigQuery | Dispatch all active model families concurrently across their optimal runtimes from a single `RunConfig` (**zero-idle per-family compute**), join them in a stacked ensemble, and run the complete diagnostic suite (`leaderboard_df`, `cohorts_df`, `jobs_df`, `plot_calibration`, `plot_ensemble_weights`, `plot_forecasts`, `plot_forecast_explanation`, `plot_trace`). |
+| [`08_multi_engine_master_workflow.ipynb`](./08_multi_engine_master_workflow.ipynb) | Spark $\parallel$ Vertex / GKE $\parallel$ BigQuery | Dispatch all active model families concurrently across their optimal runtimes from a single `RunConfig` (**zero-idle per-family compute** — or all Python families on a single shared GKE cluster with fit-for-purpose CPU and GPU node pools), join them in a stacked ensemble, and run the complete diagnostic suite (`leaderboard_df`, `cohorts_df`, `jobs_df`, `plot_calibration`, `plot_ensemble_weights`, `plot_forecasts`, `plot_forecast_explanation`, `plot_trace`). |
 | [`10_registry_operations_and_scale.ipynb`](./10_registry_operations_and_scale.ipynb) | BigQuery Registry & Ops | Zero-SQL registry health audit (`reg.doctor()`, `reg.runs_df()`), historical run reattachment (`Forecaster.from_run_id()`), pre-flight fold feasibility (`feasibility()`), preview-safe Day-2 verbs (`retry`, `settle`, `cancel`), **all 5 production launch pathways** (including live execution of the Cloud Composer 3 `airflow_tasks` DAG sequence against a GCS-staged config), and 100,000-series benchmark review. |
 
 ---
@@ -115,4 +115,4 @@ All eleven notebooks are verified end-to-end using the headless acceptance test 
 uv run python -m scale_forecasting.notebook_acceptance --tier all
 ```
 
-For technical details on runtime templates and interpreter configurations, see [`docs/notebook_runtimes.md`](../notebook_runtimes.md).
+For technical details on all 6 cloud compute runtimes and 4-tier scaling, see [`docs/runtimes_reference.md`](../runtimes_reference.md). For Colab Enterprise runtime templates and interpreter configurations, see [`docs/notebook_runtimes.md`](../notebook_runtimes.md).

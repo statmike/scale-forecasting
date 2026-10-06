@@ -250,9 +250,9 @@ def check_model_params(cfg: RunConfig) -> None:
             if family_compute.runtime == "spark":
                 raise ConfigError(
                     f"model_params.{name} sets training_mode={mode!r}, which trains a single "
-                    f"shared network across the full panel and requires a Ray or Vertex runtime "
-                    f"(set python_runtime='ray' or 'vertex', or "
-                    f"compute.families.{model_cls.family}.runtime='ray' or 'vertex'), "
+                    f"shared network across the full panel and requires a Ray, Vertex, GCE, or "
+                    f"GKE runtime (set python_runtime='ray' / 'vertex' / 'gce' / 'gke', or "
+                    f"compute.families.{model_cls.family}.runtime='ray'/'vertex'/'gce'/'gke'), "
                     f"or set training_mode='local' for per-series Spark execution."
                 )
 

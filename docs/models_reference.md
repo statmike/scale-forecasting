@@ -151,7 +151,7 @@ All five models in the `ml` family share the autoregressive lag engine in [`_lag
 
 Models in the `deep_learning` family support GPU acceleration (`gpu_usefulness = "beneficial"`) and configurable **`training_mode`** (`model_params.<model>.training_mode`):
 
-- **`"local"` (default):** Fits one independent neural network per `(ts_id, model)` cell across Spark, Ray, Vertex CustomJob, or GCE workers.
+- **`"local"` (default):** Fits one independent neural network per `(ts_id, model)` cell across Spark, Ray, Vertex CustomJob, GCE, or GKE workers.
 - **`"global"`:** Fits a single shared cross-series model across the entire panel (`worker.run_panel_model`) using shared weights across all `unique_id`s. Supported by all five `deep_learning` models (`neuralprophet`, `tide`, `tft`, `tsmixer`, `patchtst`).
 - **`"hybrid"`:** Supported by `neuralprophet`, combining global shared AR-Net / seasonality weights with per-series local trend (`trend_global_local="local"`, `season_global_local="global"`).
 
@@ -167,7 +167,7 @@ Models in the `deep_learning` family support GPU acceleration (`gpu_usefulness =
 
 ### 4. BigQuery-native SQL family (`native`)
 
-Models in the `native` family execute directly inside BigQuery via [`engines/bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) in parallel with any Spark, Ray, Vertex CustomJob, or GCE families. Although both models submit the entire panel in a single SQL statement (`time_series_id_col = 'ts_id'` for `arima_plus` and `id_cols => ['ts_id']` for `timesfm`), BigQuery partitions by `ts_id` and forecasts each series independently in isolation (**`local`**): `arima_plus` fits an independent seasonal ARIMA pipeline per `ts_id`, while `timesfm` runs zero-shot univariate inference per `ts_id` over only that series' own trailing `context_window`. Once each fold's SQL query completes, out-of-fold predictions are scored through the exact same Python [`metrics.compute_metrics`](./metrics_reference.md) pipeline as the Python models.
+Models in the `native` family execute directly inside BigQuery via [`engines/bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) in parallel with any Spark, Ray, Vertex CustomJob, GCE, or GKE families. Although both models submit the entire panel in a single SQL statement (`time_series_id_col = 'ts_id'` for `arima_plus` and `id_cols => ['ts_id']` for `timesfm`), BigQuery partitions by `ts_id` and forecasts each series independently in isolation (**`local`**): `arima_plus` fits an independent seasonal ARIMA pipeline per `ts_id`, while `timesfm` runs zero-shot univariate inference per `ts_id` over only that series' own trailing `context_window`. Once each fold's SQL query completes, out-of-fold predictions are scored through the exact same Python [`metrics.compute_metrics`](./metrics_reference.md) pipeline as the Python models.
 
 | Model | Upstream Package | Underlying BigQuery SQL Construct | Authored `model_params` & Defaults | Notes |
 | :--- | :--- | :--- | :--- | :--- |
@@ -176,6 +176,7 @@ Models in the `native` family execute directly inside BigQuery via [`engines/big
 
 ---
 
+<a id="hierarchical-forecasting-coherent-reconciliation"></a>
 ## Hierarchical forecasting & coherent reconciliation
 
 When `hierarchy.enabled: true`, the platform aggregates the bottom-level series across `hierarchy.levels` (including `"__total__"` at the root), fits base models across all hierarchy nodes, and reconciles base forecasts into coherent hierarchy-wide forecasts $\tilde{y_h} = S G \hat{y_h}$ ([`reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/reconciliation.py)) following [Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd ed., Ch. 11)](https://otexts.com/fpp3/hierarchical.html) and [Wickramasuriya et al. (2019) *MinT*](https://doi.org/10.1080/01621459.2018.1448825):

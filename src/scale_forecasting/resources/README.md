@@ -1,10 +1,10 @@
 # Resource Sizing & Hardware Translation (`src/scale_forecasting/resources/`)
 
-This subpackage translates **what a model family needs per cell** (from [`profiling/`](../profiling/README.md)) and **what the cloud region allows** (from [`quota.py`](../quota.py) and [`RunConfig.compute`](../config.py)) into concrete executor, worker, and task resource requests across all four Python compute surfaces:
+This subpackage translates **what a model family needs per cell** (from [`profiling/`](../profiling/README.md)) and **what the cloud region allows** (from [`quota.py`](../quota.py) and [`RunConfig.compute`](../config.py)) into concrete executor, worker, and task resource requests across all five Python compute surfaces:
 1. **Dataproc Serverless** (`serverless.py`)
 2. **Dataproc GCE Clusters** (`cluster.py`)
-3. **Ray on Vertex AI** (`fleet.py` + `slot.py`)
-4. **Vertex AI `CustomJob` & Compute Engine Single-VM** (`catalog.py` + `slot.py` + [`engines/vertex_engine.py`](../engines/vertex_engine.py))
+3. **Ray on Vertex AI & GKE** (`fleet.py` + `slot.py`)
+4. **Vertex AI `CustomJob`, Compute Engine Single-VM & GKE Indexed Jobs** (`catalog.py` + `slot.py` + [`engines/vertex_engine.py`](../engines/vertex_engine.py))
 
 Every function in `resources/` is **pure** (zero network or cloud I/O), making the entire sizing pipeline deterministic and unit-tested offline in [`tests/unit/test_resources.py`](../../../tests/unit/test_resources.py).
 
@@ -19,8 +19,8 @@ flowchart LR
     subgraph targets["Surface-Specific Fleet Plans"]
         sls["serverless.py<br/>Dataproc Serverless Spark properties<br/>(driver/executor cores, memory, L4 GPU)"]
         cls["cluster.py<br/>Dataproc GCE Cluster topology<br/>(worker machine type, 1 executor/worker, task.cpus)"]
-        ray["fleet.py<br/>Ray on Vertex AI pool sizing<br/>(CPU & GPU worker pools, autoscale min/max)"]
-        vtx["vertex_engine.plan_vertex_pool<br/>Vertex CustomJob & GCE Single-VM<br/>(UnitShape, effective_worker_count, ThreadPoolExecutor slots)"]
+        ray["fleet.py<br/>Ray on Vertex AI & GKE pool sizing<br/>(CPU & GPU worker pools, autoscale min/max)"]
+        vtx["vertex_engine.plan_vertex_pool<br/>Vertex CustomJob, GCE Single-VM & GKE Indexed Job<br/>(UnitShape, effective_worker_count, ThreadPoolExecutor slots)"]
     end
 
     audit["audit.py<br/>Plan-vs-Actual Sizing Telemetry<br/>(stamped on run_registry.run_telemetry)"]

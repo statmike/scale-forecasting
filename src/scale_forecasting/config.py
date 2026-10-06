@@ -111,8 +111,10 @@ ComputeFamily = Literal["statistical", "ml", "deep_learning"]
 # node. It is the ``family`` component of a job's deterministic id (see ``registry.ids``), one step
 # broader than ``ComputeFamily`` since native and ensemble produce jobs but take no runtime choice.
 JobFamily = Literal["statistical", "ml", "deep_learning", "native", "ensemble"]
-Runtime = Literal["spark", "ray", "vertex", "gce"]
+Runtime = Literal["spark", "ray", "vertex", "gce", "gke"]
 SparkMode = Literal["serverless", "cluster"]
+GkeMode = Literal["job", "ray"]
+RayMode = Literal["vertex", "gke"]
 Hardware = Literal["cpu", "gpu"]
 
 # What a `model_params` value may be. Deliberately narrow: the canonical config string is
@@ -599,6 +601,9 @@ class FamilyCompute(BaseModel):
     # Reuse an existing Dataproc cluster by name (requires spark_mode="cluster"). None = ephemeral
     # per-run cluster (create → submit → delete), mirroring the Ray cluster lifecycle.
     spark_cluster_name: str | None = None
+    gke_mode: GkeMode | None = None
+    gke_cluster_name: str | None = None
+    ray_mode: RayMode | None = None
     hardware: Hardware | None = None
     gpu_type: GpuType | None = None
     accelerator_count: int | None = Field(default=None, gt=0)
@@ -631,39 +636,52 @@ class FamilyCompute(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> FamilyCompute:
-        if self.runtime in ("ray", "vertex", "gce") and (
+        if self.runtime in ("ray", "vertex", "gce", "gke") and (
             self.spark_mode is not None or self.spark_cluster_name is not None
         ):
             raise ValueError("spark_mode/spark_cluster_name are only valid when runtime is 'spark'")
+        if self.runtime in ("spark", "ray", "vertex", "gce") and self.gke_mode is not None:
+            raise ValueError("gke_mode is only valid when runtime is 'gke'")
+        if self.runtime in ("spark", "vertex", "gce", "gke") and self.ray_mode is not None:
+            raise ValueError("ray_mode is only valid when runtime is 'ray'")
+        if self.gke_cluster_name is not None and (
+            self.runtime in ("spark", "vertex", "gce")
+            or (self.runtime == "ray" and self.ray_mode == "vertex")
+        ):
+            raise ValueError(
+                "gke_cluster_name is only valid when runtime is 'gke' or ray_mode is 'gke'"
+            )
         if self.min_workers is not None and self.max_workers is not None:
             if self.min_workers > self.max_workers:
                 raise ValueError(
                     f"min_workers ({self.min_workers}) cannot exceed "
                     f"max_workers ({self.max_workers})"
                 )
-        if self.runtime in ("vertex", "gce") and (
-            self.min_workers is not None or self.max_workers is not None
-        ):
+        if (
+            self.runtime in ("vertex", "gce") or (self.runtime == "gke" and self.gke_mode == "job")
+        ) and (self.min_workers is not None or self.max_workers is not None):
             raise ValueError(
                 "min_workers/max_workers are only valid on autoscaling runtimes "
-                "('ray' or 'spark'); use 'workers' for fixed-pool 'vertex' or 'gce'"
+                "('ray', 'spark', or 'gke' with gke_mode='ray'); "
+                "use 'workers' for fixed-pool 'vertex', 'gce', or 'gke' job mode"
             )
         if self.spark_mode == "serverless" and self.machine_type is not None:
             raise ValueError(
                 "Dataproc Serverless does not use VM machine_type; "
-                "use spark_mode='cluster' or runtime='vertex'/'gce'/'ray'"
+                "use spark_mode='cluster' or runtime='vertex'/'gce'/'gke'/'ray'"
             )
         if self.runtime == "gce" and self.workers is not None and self.workers > 1:
             raise ValueError(
                 "runtime='gce' supports single-VM execution only (workers=1); "
-                "use runtime='vertex' for multi-VM worker pools"
+                "use runtime='vertex' or 'gke' for multi-worker pools"
             )
         if self.spark_cluster_name is not None and self.spark_mode not in (None, "cluster"):
             raise ValueError("spark_cluster_name requires spark_mode='cluster'")
         if self.spark_mode == "serverless" and self.gpu_type is not None and self.gpu_type != "L4":
             raise ValueError(
                 f"Dataproc Serverless supports L4 only, not {self.gpu_type}; "
-                f"use spark_mode='cluster' or runtime='ray'/'vertex'/'gce' for {self.gpu_type}"
+                "use spark_mode='cluster' or runtime='ray'/'vertex'/'gce'/'gke' "
+                f"for {self.gpu_type}"
             )
         if self.hardware == "cpu" and (
             self.gpu_type is not None or self.accelerator_count is not None
@@ -945,6 +963,8 @@ class CapacityConfig(BaseModel):
     vertex: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Compute Engine single-VM creation — walks the zone/region candidates from `compute_fallback`.
     gce: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+    # Google Kubernetes Engine cluster / node-pool creation and job dispatch.
+    gke: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Dataproc cluster creation — walks the zone/region candidates from `compute_fallback`.
     dataproc_cluster: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Dataproc Serverless batch submission — region only, and rejections come back in seconds.
@@ -1259,6 +1279,21 @@ class ComputeConfig(BaseModel):
     # Reuse opt-in: target an existing cluster by name (skip create + skip teardown). None (default)
     # = ephemeral per-run cluster (create → submit → delete-in-finally).
     ray_cluster_name: str | None = None
+    # Where the Ray cluster executes when runtime == "ray":
+    #   "vertex" (default) : Vertex AI Managed Ray cluster.
+    #   "gke"              : Ray on Google Kubernetes Engine (KubeRay / native K8s Ray cluster).
+    ray_mode: RayMode = "vertex"
+    # --- Google Kubernetes Engine (GKE) ----------------------------------------
+    # Execution mode when runtime == "gke":
+    #   "job" (default) : Kubernetes batch/v1 Indexed Job (`completionMode: Indexed`) running
+    #                     `vertex_engine.py` (`JOB_COMPLETION_INDEX` -> WorkerTopology).
+    #   "ray"           : Ray on GKE (`ray_engine.py` over KubeRay / native K8s Ray pods).
+    gke_mode: GkeMode = "job"
+    # Target an existing GKE cluster by name (or via `SF_GKE_CLUSTER`). None (default) = ephemeral
+    # per-run GKE Standard cluster when neither `gke_cluster_name` nor `SF_GKE_CLUSTER` is set.
+    gke_cluster_name: str | None = None
+    # Kubernetes namespace for GKE Indexed Jobs and Ray pods.
+    gke_namespace: str = "default"
     # Priority-ordered candidate regions for the ephemeral cluster. GPU capacity is regional and can
     # stock out transiently (a create is accepted, then fails to reach RUNNING with "Resources are
     # insufficient in region: <r>") even when quota is fine — so the launcher tries these in order,
@@ -1411,8 +1446,9 @@ class ResolvedFamilyCompute:
 
     The fully-resolved plan the DAG orchestrator acts on: ``runtime`` is where the family's job
     runs; ``spark_mode``/``spark_cluster_name`` are ``None`` unless ``runtime == "spark"``;
-    ``gpu_type`` is ``None`` unless ``hardware == "gpu"``. Produced by
-    `RunConfig.resolve_family_compute`.
+    ``gke_mode``/``gke_cluster_name`` apply when ``runtime == "gke"`` (or ``runtime == "ray"`` with
+    ``ray_mode == "gke"``); ``ray_mode`` applies when ``runtime == "ray"``; ``gpu_type`` is ``None``
+    unless ``hardware == "gpu"``. Produced by `RunConfig.resolve_family_compute`.
     """
 
     family: str
@@ -1426,6 +1462,9 @@ class ResolvedFamilyCompute:
     min_workers: int | None = None
     max_workers: int | None = None
     accelerator_count: int = 0
+    gke_mode: str | None = None
+    gke_cluster_name: str | None = None
+    ray_mode: str | None = None
 
     @property
     def vertex_machine_type(self) -> str | None:
@@ -1705,14 +1744,18 @@ class RunConfig(BaseModel):
         * ``hardware`` → ``gpu`` only for ``deep_learning`` (when ``compute.use_gpu`` or an explicit
           override); every other family is ``cpu``.
         * Spark: ``spark_mode`` → ``serverless``; ``spark_cluster_name`` applies only under
-          ``cluster``. On ``ray``, ``vertex``, and ``gce`` both are ``None``.
+          ``cluster``. On ``ray``, ``vertex``, ``gce``, and ``gke`` both are ``None``.
+        * GKE & Ray modes: ``gke_mode`` → ``compute.gke_mode`` (``"job"`` | ``"ray"``) on ``gke``;
+          ``ray_mode`` → ``compute.ray_mode`` (``"vertex"`` | ``"gke"``) on ``ray`` (or ``"gke"``
+          when ``runtime == "gke"`` and ``gke_mode == "ray"``).
         * ``gpu_type`` (when ``hardware == "gpu"``) → the flat ``compute.gpu_type``, but **forced to
           L4** on Dataproc Serverless (no T4/A100 there). Inheriting T4/A100 on Serverless raises.
         * ``machine_type`` → ``compute.machine_type`` (auto-resolved via `resolve_vm_machine_type`
-          from ``(hardware, gpu_type, accelerator_count)`` on ``vertex``/``gce``, or when explicitly
-          set on ``ray``/``spark`` ``cluster``); ``workers`` → ``compute.workers`` on ``vertex``,
-          ``1`` on ``gce``, or the family override when set on ``ray``/``spark``; ``min_workers`` /
-          ``max_workers`` apply on autoscaling runtimes (``ray``/``spark``).
+          from ``(hardware, gpu_type, accelerator_count)`` on ``vertex``/``gce``/``gke`` ``job``, or
+          when explicitly set on ``ray``/``spark`` ``cluster``/``gke`` ``ray``); ``workers`` →
+          ``compute.workers`` on ``vertex`` and ``gke`` ``job``, ``1`` on ``gce``, or the family
+          override when set on ``ray``/``spark``; ``min_workers`` / ``max_workers`` apply on
+          autoscaling runtimes (``ray``/``spark``/``gke`` ``ray``).
         """
         if family == "native":
             raise ValueError(
@@ -1738,6 +1781,47 @@ class RunConfig(BaseModel):
             spark_mode = None
             spark_cluster_name = None
 
+        gke_mode: str | None = None
+        gke_cluster_name: str | None = None
+        ray_mode: str | None = None
+        if runtime == "gke":
+            if ov.ray_mode is not None:
+                raise ValueError(
+                    f"family '{family}': ray_mode requires runtime='ray' (got {runtime!r}); "
+                    "use gke_mode='ray' instead"
+                )
+            gke_mode = ov.gke_mode or self.compute.gke_mode
+            gke_cluster_name = ov.gke_cluster_name or self.compute.gke_cluster_name
+            ray_mode = "gke" if gke_mode == "ray" else None
+        elif runtime == "ray":
+            if ov.gke_mode is not None:
+                raise ValueError(
+                    f"family '{family}': gke_mode requires runtime='gke' (got {runtime!r}); "
+                    "use ray_mode='gke' instead"
+                )
+            ray_mode = ov.ray_mode or self.compute.ray_mode
+            if ray_mode == "gke":
+                gke_mode = "ray"
+                gke_cluster_name = (
+                    ov.gke_cluster_name
+                    or self.compute.gke_cluster_name
+                    or self.compute.ray_cluster_name
+                )
+            elif ov.gke_cluster_name is not None:
+                raise ValueError(
+                    f"family '{family}': gke_cluster_name requires runtime='gke' or ray_mode='gke'"
+                )
+        else:
+            if ov.gke_mode is not None or ov.gke_cluster_name is not None:
+                raise ValueError(
+                    f"family '{family}': gke_mode/gke_cluster_name require runtime='gke' "
+                    f"(got {runtime!r})"
+                )
+            if ov.ray_mode is not None:
+                raise ValueError(
+                    f"family '{family}': ray_mode requires runtime='ray' (got {runtime!r})"
+                )
+
         gpu_type: str | None
         accelerator_count: int
         if hardware == "gpu":
@@ -1745,7 +1829,8 @@ class RunConfig(BaseModel):
                 if ov.gpu_type in ("T4", "A100", "A100_80GB"):
                     raise ValueError(
                         f"family '{family}': Dataproc Serverless supports L4 only, not "
-                        f"{ov.gpu_type}; use spark_mode='cluster' or runtime='ray'/'vertex'/'gce'"
+                        f"{ov.gpu_type}; use spark_mode='cluster' or "
+                        "runtime='ray'/'vertex'/'gce'/'gke'"
                     )
                 gpu_type = "L4"
             else:
@@ -1763,7 +1848,7 @@ class RunConfig(BaseModel):
 
         min_workers: int | None = None
         max_workers: int | None = None
-        if runtime in ("vertex", "gce"):
+        if runtime in ("vertex", "gce") or (runtime == "gke" and gke_mode == "job"):
             if (
                 ov.min_workers is not None
                 or ov.max_workers is not None
@@ -1791,7 +1876,7 @@ class RunConfig(BaseModel):
                 ):
                     raise ValueError(
                         f"family '{family}': runtime='gce' supports single-VM execution only "
-                        "(workers=1); use runtime='vertex' for multi-VM worker pools"
+                        "(workers=1); use runtime='vertex' or runtime='gke' for multi-worker pools"
                     )
                 workers = 1
             else:
@@ -1800,7 +1885,7 @@ class RunConfig(BaseModel):
             if runtime == "spark" and spark_mode == "serverless" and ov.machine_type is not None:
                 raise ValueError(
                     f"family '{family}': Dataproc Serverless does not use VM machine_type; "
-                    "use spark_mode='cluster' or runtime='vertex'/'gce'/'ray'"
+                    "use spark_mode='cluster' or runtime='vertex'/'gce'/'gke'/'ray'"
                 )
             if ov.machine_type is not None or (
                 self.compute.machine_type != "auto"
@@ -1836,6 +1921,9 @@ class RunConfig(BaseModel):
             min_workers=min_workers,
             max_workers=max_workers,
             accelerator_count=accelerator_count,
+            gke_mode=gke_mode,
+            gke_cluster_name=gke_cluster_name,
+            ray_mode=ray_mode,
         )
 
     @property

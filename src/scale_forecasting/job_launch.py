@@ -70,6 +70,7 @@ def _system_job_id(job_key: str, runtime: str) -> str:
         bigquery_job_id,
         dataproc_job_id,
         gce_instance_id,
+        gke_job_id,
         ray_submission_id,
         vertex_job_id,
     )
@@ -82,6 +83,8 @@ def _system_job_id(job_key: str, runtime: str) -> str:
         return vertex_job_id(job_key)
     if runtime == "gce":
         return gce_instance_id(job_key)
+    if runtime == "gke":
+        return gke_job_id(job_key)
     return bigquery_job_id(job_key)
 
 
@@ -159,6 +162,14 @@ def _entry_handle(
         return ProbeHandle(
             "gce",
             native_id=system_job_id,
+            region=settings.region,
+        )
+    if compute.runtime == "gke" or (compute.runtime == "ray" and compute.ray_mode == "gke"):
+        from .registry.ids import gke_job_id
+
+        return ProbeHandle(
+            "gke",
+            native_id=gke_job_id(system_job_id),
             region=settings.region,
         )
     if compute.runtime == "ray":
@@ -246,7 +257,10 @@ def _attempt_free_of_taken_ids(
 
     compute = job.compute
     assert compute is not None
-    probe = get_probe(compute.runtime)
+    probe_runtime = (
+        "gke" if compute.runtime == "ray" and compute.ray_mode == "gke" else compute.runtime
+    )
+    probe = get_probe(probe_runtime)
     for _ in range(_MAX_ID_WALK):
         candidate = _system_job_id(make_job_key(run_id, job.family, attempt), compute.runtime)
         handle = _entry_handle(cfg, run_id, compute, candidate, settings, **handle_kwargs)

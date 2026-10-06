@@ -156,6 +156,10 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("compute", "workers"): 1,
     ("compute", "min_workers"): None,
     ("compute", "max_workers"): None,
+    ("compute", "gke_mode"): "job",
+    ("compute", "gke_cluster_name"): None,
+    ("compute", "gke_namespace"): "default",
+    ("compute", "ray_mode"): "vertex",
 }
 
 
@@ -222,6 +226,9 @@ def _canonical_config(cfg: RunConfig) -> str:
                     "min_workers",
                     "max_workers",
                     "accelerator_count",
+                    "gke_mode",
+                    "gke_cluster_name",
+                    "ray_mode",
                 ):
                     if fam_cfg.get(k) is None:
                         fam_cfg.pop(k, None)
@@ -379,6 +386,9 @@ def vertex_job_id(job_key: str) -> str:
     return job_key
 
 
+_GKE_JOB_ID_MAX = 52
+
+
 def gce_instance_id(job_key: str) -> str:
     """Map a ``job_key`` to a Compute Engine VM instance name (1–63 chars, ``[a-z0-9-]``).
 
@@ -386,6 +396,23 @@ def gce_instance_id(job_key: str) -> str:
     enforces (lowercase letters, digits, hyphens, starting with a letter and <= 63 chars).
     """
     return dataproc_job_id(job_key)
+
+
+def gke_job_id(job_key: str) -> str:
+    """Map a ``job_key`` to a K8s ``Job`` / KubeRay resource name (<= 52 chars, ``[a-z0-9-]``).
+
+    Kubernetes ``batch/v1`` Indexed Jobs append ``-<index>-<5char>`` to the Job name when creating
+    Pod names and label values (which must be <= 63 chars). Capping the Job name at 52 chars while
+    preserving the ``sf-`` prefix and the trailing ``-<12hex>-<family>-a<attempt>`` guarantees that
+    all generated Pod names and labels stay within RFC1123 limits and remain collision-free.
+    """
+    s = _DATAPROC_BAD.sub("-", job_key.lower()).strip("-")
+    if len(s) > _GKE_JOB_ID_MAX:
+        tail = s[-(_GKE_JOB_ID_MAX - 3) :].lstrip("-")
+        s = f"sf-{tail}"
+    if not s[:1].isalpha():
+        s = f"j-{s}"[:_GKE_JOB_ID_MAX]
+    return s.rstrip("-")
 
 
 def bigquery_job_id(job_key: str) -> str:

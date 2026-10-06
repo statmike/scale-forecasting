@@ -58,6 +58,18 @@ variable "create_composer" {
   default     = false
 }
 
+variable "create_gke" {
+  description = <<-EOT
+    Create a standing Google Kubernetes Engine (GKE) cluster with scale-to-zero (min_node_count = 0)
+    CPU and GPU node pools. Default FALSE — `runtime = "gke"` works without a standing cluster by
+    provisioning an ephemeral GKE cluster per run and tearing it down in `finally`. Turn this on to
+    eliminate the 3-5 minute cluster creation overhead for frequent GKE Indexed Job (`gke_mode = "job"`)
+    or Ray-on-GKE (`gke_mode = "ray"` / `ray_mode = "gke"`) runs.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # --- Colab Enterprise runtime template -----------------------------------------
 # Blueprint for the VM a Colab runtime runs on — one template (sf-main, Python 3.11) serves every
 # notebook. Free at rest (a template costs nothing until a runtime starts, and runtimes

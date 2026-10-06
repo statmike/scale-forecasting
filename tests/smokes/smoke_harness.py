@@ -89,6 +89,10 @@ def _service_for(runtime: str, spark_mode: str | None) -> str:
         return "Vertex Ray submission"
     if runtime == "vertex":
         return "Vertex CustomJob"
+    if runtime == "gce":
+        return "GCE single-VM instance"
+    if runtime == "gke":
+        return "GKE Indexed Job"
     if runtime == "spark":
         return "Dataproc cluster job" if spark_mode == "cluster" else "Dataproc Serverless batch"
     return runtime
