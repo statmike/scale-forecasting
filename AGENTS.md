@@ -135,14 +135,16 @@ Run this after *any* code, config, or documentation edit:
 - **`test_test_dependencies_declared.py`:** Verifies every third-party module imported anywhere under `tests/` (including lazy, function-level imports) belongs to a distribution that CI's `uv sync --frozen --all-extras` installs, computed from `uv.lock`. A package that is only in your `.venv` because of `make docs` or an ad-hoc `uv pip install` is **not** declared; add it to `[dependency-groups].dev` (or an extra) in `pyproject.toml` and run `make lock`.
 - **`test_notebook_hygiene.py`:** Scans every notebook's sources **and persisted outputs** (stream text, text/JSON display data, tracebacks) for the identifiers §1 rule 4 forbids — e-mail addresses, personal or corporate home paths, internal hostnames and short links, credential material. The failure message names the notebook, cell, and pattern, never the matched text. Fix the cell (silence the warning at its source, clear or re-run the output); do not widen the allowlists.
 
-### Gate 2: Formatting, Linting, Lock Drift & Strict MkDocs Site Build
+### Gate 2: Formatting, Linting, Type-Checking, Lock Drift & Strict MkDocs Site Build
 ```bash
 .venv/bin/ruff format --check src/ tests/
 .venv/bin/ruff check src/ tests/
+.venv/bin/mypy src/scale_forecasting
 make lock-check
 .venv/bin/mkdocs build --strict
 ```
-- The first three are also run by `.githooks/pre-push` (enabled with `make hooks`), with exactly the flags CI uses, so a push can never be the first place they fail.
+- The first four are also run by `.githooks/pre-push` (enabled with `make hooks`), with exactly the flags CI uses, so a push can never be the first place they fail.
+- **mypy is a zero-error gate on `src/` only.** The package ships `py.typed`, so every public signature is a promise to downstream type-checkers. Fix a report by narrowing (a small typed helper, an `isinstance` branch, a `Protocol` for a duck-typed estimator) rather than by `cast`, `Any`, or `# type: ignore`; tests stay dynamically typed on purpose.
 - After editing `pyproject.toml` or any test import, run `make ci-offline`: it syncs a second environment (`.venv-ci`) with the CI `offline` job's exact command and runs the full offline gate there. Your working `.venv` is a superset of CI's and cannot reproduce a missing-package failure.
 
 ### Gate 3: Offline Unit & Contract Test Suite

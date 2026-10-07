@@ -2,10 +2,10 @@
 
 Two families of reference, and the distinction is not recoverable later, which is why every
 builder makes it at the call site: **source tables** are read-only input, qualified against the
-source ``dataset`` (`_source_ref`); **model objects** are run *outputs*, keyed by ``run_id`` exactly
-like the registry rows and living in the registry dataset (`_model_ref` / `_registry_of`).
+source ``dataset`` (`source_ref`); **model objects** are run *outputs*, keyed by ``run_id`` exactly
+like the registry rows and living in the registry dataset (`model_ref` / `registry_of`).
 
-`model_object_matches_run` is the inverse of `_model_ref`'s naming rule, and it lives here for that
+`model_object_matches_run` is the inverse of `model_ref`'s naming rule, and it lives here for that
 reason — the two must never drift. It has an outside consumer: a per-run teardown
 (`registry.ops.drop_run`) has no other way to find a run's BQML objects, because nothing in the
 registry records their names. The only handle is the name itself.
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 _MODEL_PREFIX = "sf_model_"
 
 
-def _sanitize_identifier(text: str) -> str:
+def sanitize_identifier(text: str) -> str:
     """Coerce arbitrary text into a valid BigQuery identifier fragment.
 
     Custom holiday names must be valid column names — no spaces — because ``ML.EXPLAIN_FORECAST``
@@ -37,7 +37,7 @@ def _sanitize_identifier(text: str) -> str:
     return out.strip("_") or "x"
 
 
-def _source_ref(cfg: RunConfig, dataset: str) -> str:
+def source_ref(cfg: RunConfig, dataset: str) -> str:
     """Fully-qualify the source table: pass through a dotted name, else qualify against ``dataset``.
 
     Mirrors ``spark_io._resolve_source_table`` so both runtimes read the identical table.
@@ -49,7 +49,7 @@ def _source_ref(cfg: RunConfig, dataset: str) -> str:
 def model_object_matches_run(model_id: str, run_id: str) -> bool:
     """Does a BQML model object name belong to ``run_id`` (the final model or any of its folds)?
 
-    The inverse of `_model_ref`'s naming rule, kept beside it so the two cannot drift. A run's
+    The inverse of `model_ref`'s naming rule, kept beside it so the two cannot drift. A run's
     persisted model objects are the fourth thing a per-run teardown has to delete — they are
     invisible to the registry tables (nothing records their names), so the only way to find them is
     to list the dataset's models and match the name back to the run. ``model_id`` is the bare object
@@ -57,7 +57,7 @@ def model_object_matches_run(model_id: str, run_id: str) -> bool:
     """
     if not model_id.startswith(_MODEL_PREFIX):
         return False
-    tail = f"_{_sanitize_identifier(run_id)}"
+    tail = f"_{sanitize_identifier(run_id)}"
     rest = model_id[len(_MODEL_PREFIX) :]
     if rest.endswith(tail):
         return True
@@ -66,7 +66,7 @@ def model_object_matches_run(model_id: str, run_id: str) -> bool:
     return bool(sep) and fold.isdigit() and head.endswith(tail)
 
 
-def _registry_of(dataset: str, registry_dataset: str | None) -> str:
+def registry_of(dataset: str, registry_dataset: str | None) -> str:
     """The dataset that owns a run's *outputs* — ``registry_dataset``, else ``dataset``.
 
     Every builder takes the source ``dataset`` positionally and an optional keyword
@@ -78,7 +78,7 @@ def _registry_of(dataset: str, registry_dataset: str | None) -> str:
     return registry_dataset or dataset
 
 
-def _model_ref(
+def model_ref(
     cfg: RunConfig, model_name: str, registry_dataset: str, *, fold_id: int | None = None
 ) -> str:
     """The backtick-quoted BQML model object path for one ``(model, run[, fold])`` (persisted).
@@ -96,5 +96,5 @@ def _model_ref(
     """
     run_id = make_run_id(cfg)
     suffix = f"_f{fold_id}" if fold_id is not None else ""
-    stem = f"{_MODEL_PREFIX}{model_name}_{_sanitize_identifier(run_id)}{suffix}"
+    stem = f"{_MODEL_PREFIX}{model_name}_{sanitize_identifier(run_id)}{suffix}"
     return f"`{registry_dataset}.{stem}`"

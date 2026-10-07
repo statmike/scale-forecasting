@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .rows import assemble_metadata_row, assemble_oof_rows, assemble_prediction_rows
-from .tables import _resolve_settings
+from .tables import resolve_settings
 from .write_api import (
     _CELL_TABLES,
     _META_SPEC,
@@ -64,7 +64,7 @@ def write_cells(
     if len(run_ids) != 1:
         raise RegistryError(f"write_cells expects one run_id per call, got {sorted(run_ids)}")
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     created_at = datetime.now(UTC)
 
     # 1. Assemble rows. Upload artifacts first so the metadata row carries the URI.

@@ -106,6 +106,8 @@ Strategy = Literal["mean", "median", "inverse_error", "nnls", "ridge", "xgb"]
 # ``ComputeFamily`` mirrors ``models.base_model.Family`` *minus* "native": native models always run
 # in BigQuery (their natural engine), so they are never given a per-family runtime choice.
 ComputeFamily = Literal["statistical", "ml", "deep_learning", "automl"]
+# The same vocabulary as a runtime tuple, so a ``str`` family can be checked against it.
+COMPUTE_FAMILIES: tuple[ComputeFamily, ...] = ("statistical", "ml", "deep_learning", "automl")
 # ``JobFamily`` is the identity vocabulary of a *job* in the run DAG: every model family that can
 # launch a job (``ComputeFamily`` + "native", which runs in BigQuery) plus the downstream "ensemble"
 # node. It is the ``family`` component of a job's deterministic id (see ``registry.ids``), one step
@@ -130,6 +132,18 @@ ModelParam = bool | int | float | str | None | list[bool | int | float | str | N
 def _is_non_finite(value: Any) -> bool:
     """True for NaN and ±inf. Bools are ints to Python, so they are excluded explicitly."""
     return isinstance(value, float) and not math.isfinite(value)
+
+
+def _as_compute_family(family: str) -> ComputeFamily:
+    """``family`` as the `ComputeFamily` literal ``compute.families`` is keyed by.
+
+    Callers hold a model's family as a plain ``str``; a name outside the vocabulary is a caller
+    bug, and naming it beats resolving the flat defaults for a family that does not exist.
+    """
+    for known in COMPUTE_FAMILIES:
+        if family == known:
+            return known
+    raise ValueError(f"unknown compute family {family!r}; expected one of {COMPUTE_FAMILIES}")
 
 
 GpuType = Literal["T4", "L4", "A100", "A100_80GB"]
@@ -1798,7 +1812,7 @@ class RunConfig(BaseModel):
             raise ValueError(
                 "native models always run in BigQuery; they have no per-family compute"
             )
-        ov = self.compute.families.get(family) or FamilyCompute()
+        ov = self.compute.families.get(_as_compute_family(family)) or FamilyCompute()
         if family == "automl":
             runtime = ov.runtime or "vertex_automl"
             if runtime != "vertex_automl":
@@ -1923,6 +1937,8 @@ class RunConfig(BaseModel):
             gpu_type = None
             accelerator_count = 0
 
+        # ``None`` on the autoscaling runtimes means "no fixed pool" — the ceiling is max_workers.
+        workers: int | None
         min_workers: int | None = None
         max_workers: int | None = None
         if runtime in ("vertex", "gce") or (runtime == "gke" and gke_mode == "job"):

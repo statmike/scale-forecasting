@@ -258,14 +258,14 @@ def test_a_non_product_model_object_never_matches():
 
 
 def test_the_matcher_is_the_inverse_of_the_naming_rule():
-    """Match what `_model_ref` actually renders, so the namer and the matcher cannot drift apart.
+    """Match what `model_ref` actually renders, so the namer and the matcher cannot drift apart.
 
     This is the test that matters: `drop_run` finds a run's BQML objects by *name* (nothing records
     them), so a change to the naming rule that this matcher doesn't follow silently strands every
     model object a run creates.
     """
     from scale_forecasting.config import RunConfig
-    from scale_forecasting.engines.bigquery_names import _model_ref
+    from scale_forecasting.engines.bigquery_names import model_ref
     from scale_forecasting.registry.ids import make_run_id
 
     cfg = RunConfig(
@@ -282,7 +282,7 @@ def test_the_matcher_is_the_inverse_of_the_naming_rule():
     assert run_id != other_id
 
     for fold_id in (None, 0, 3):
-        ref = _model_ref(cfg, "arima_plus", "proj.reg", fold_id=fold_id)
+        ref = model_ref(cfg, "arima_plus", "proj.reg", fold_id=fold_id)
         model_id = ref.strip("`").rsplit(".", 1)[-1]
         assert model_object_matches_run(model_id, run_id)
         assert not model_object_matches_run(model_id, other_id)

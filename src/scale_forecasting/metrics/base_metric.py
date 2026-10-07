@@ -128,6 +128,16 @@ class MetricContext:
         """True when both bounds are present — what the interval metrics check before scoring."""
         return self.lower is not None and self.upper is not None
 
+    def bounds(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """``(lower, upper)`` when both bounds are present, else ``None``.
+
+        The same check as `has_intervals`, shaped so that the one guard an interval metric makes
+        also hands it the arrays — a boolean property cannot tell a type checker the bounds exist.
+        """
+        if self.lower is None or self.upper is None:
+            return None
+        return self.lower, self.upper
+
     def value(self, name: str) -> float:
         """This window's value for the registered metric ``name``, computed at most once.
 

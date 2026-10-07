@@ -28,6 +28,7 @@ flowchart LR
   | `SF_DATASET_ID` | no | `scale_forecasting` | Dataset holding the **source** panel (and, by default, the registry). |
   | `SF_REGISTRY_DATASET_ID` | no | `SF_DATASET_ID` | Dataset holding the **registry** — set it only to split the two. |
   | `SF_REGION` | no | `us-central1` | Region. |
+  | `SF_LOG_LEVEL` | no | `INFO` | Log level for every `python -m scale_forecasting.<module>` command. The package itself attaches no handlers (library convention: one `NullHandler`, records propagate), so inside Airflow or a notebook the host's logging configuration applies instead. |
 
   `SF_REGISTRY_DATASET_ID` exists because the registry and the source panel have different
   lifetimes. The registry is churn — you clear it, you keep several of them side by side, you tear

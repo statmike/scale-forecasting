@@ -21,14 +21,14 @@ from typing import TYPE_CHECKING, Any
 from ..errors import get_logger
 from .params import (
     _HEADER_PARAM_TYPES,
-    _header_param,
     _status_guard_param,
+    header_param,
     render_status_guard,
     render_telemetry_merge,
     telemetry_merge_params,
 )
 from .rows import assemble_header_row
-from .tables import _resolve_settings
+from .tables import resolve_settings
 
 if TYPE_CHECKING:
     from ..config import RunConfig
@@ -61,7 +61,7 @@ def resolve_snapshot_millis(
     """
     from google.cloud import bigquery
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(client.query("SELECT UNIX_MILLIS(CURRENT_TIMESTAMP()) AS ms").result())
@@ -89,12 +89,12 @@ def snapshot_millis_for(
     """
     from google.cloud import bigquery
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT snapshot_millis FROM `{resolved.registry_table_ref('run_registry')}` "
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -130,7 +130,7 @@ def write_header(
     from ..errors import RegistryError
     from ..identity import resolve_principal
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     snapshot_millis = resolve_snapshot_millis(settings=resolved)
     row = assemble_header_row(
         cfg,
@@ -146,7 +146,7 @@ def write_header(
         f"INSERT INTO `{resolved.registry_table_ref('run_registry')}` "
         f"({', '.join(columns)}) VALUES ({placeholders})"
     )
-    params = [_header_param(col, row[col]) for col in columns]
+    params = [header_param(col, row[col]) for col in columns]
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -239,11 +239,11 @@ def update_header(
     if unknown:
         raise RegistryError(f"update_header: unknown run_registry column(s): {sorted(unknown)}")
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     table = resolved.registry_table_ref("run_registry")
     sql = render_header_update(table, list(fields), unless_status_in)
-    params = [_header_param(col, value) for col, value in fields.items()]
-    params.append(_header_param("run_id", run_id))
+    params = [header_param(col, value) for col, value in fields.items()]
+    params.append(header_param("run_id", run_id))
     if unless_status_in:
         params.append(_status_guard_param(unless_status_in))
     client = bigquery.Client(project=resolved.project_id)
@@ -324,9 +324,9 @@ def merge_header_telemetry(
     if not patch:
         return
     params = telemetry_merge_params(patch, caller="merge_header_telemetry")
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = render_header_telemetry_merge(resolved.registry_table_ref("run_registry"), list(patch))
-    params.append(_header_param("run_id", run_id))
+    params.append(header_param("run_id", run_id))
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -349,12 +349,12 @@ def header_status(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT status FROM `{resolved.registry_table_ref('run_registry')}` "
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(

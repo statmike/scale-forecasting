@@ -750,7 +750,7 @@ def plan_run(
     # Best-effort, exactly like everything else in this try: no environment means an unpinned
     # preview, not a failure.
     with suppress(Exception):
-        settings = settings or _resolve_settings()
+        settings = settings or resolve_settings()
         cfg = lock_profile_source(cfg, settings=settings)
 
     plan = _plan(cfg)
@@ -760,7 +760,7 @@ def plan_run(
     commands: dict[str, LaunchCommands] | None = None
     idempotency = Idempotency(checked=False, exists=False, prior_status=None)
     try:
-        settings = settings or _resolve_settings()
+        settings = settings or resolve_settings()
         idempotency = _check_idempotency(plan.run_id, settings)
         # Only now that a registry is reachable — see `_nodes_with_submit_attempts`. Rebinding
         # `nodes` rather than using a second name is deliberate: the LaunchPlan below carries these
@@ -815,11 +815,11 @@ def read_series_lengths(
     """
     from google.cloud import bigquery
 
-    from .engines.bigquery_names import _source_ref
+    from .engines.bigquery_names import source_ref
     from .settings import Settings as _Settings
 
     settings = settings or _Settings.resolve()
-    table = _source_ref(cfg, settings.dataset_ref)
+    table = source_ref(cfg, settings.dataset_ref)
     limit = "" if cfg.data.series_limit is None else f"\nLIMIT {int(cfg.data.series_limit)}"
     sql = (
         f"SELECT `{cfg.data.ts_id_col}` AS ts_id, COUNT(*) AS n_obs\n"
@@ -1019,7 +1019,7 @@ def stage_run(
     preflight(cfg)
     # Pin `source: "auto"` to what it resolves to *now*, before the digest — the staged config is
     # the reproducibility artifact, so what actually sized this run has to be written into it.
-    settings = settings or _resolve_settings()
+    settings = settings or resolve_settings()
     # Before the lock, so this only ever judges what a *person* pinned (see `check_pinned_source`).
     check_pinned_source(cfg, settings=settings, force=force)
     cfg = lock_profile_source(cfg, settings=settings)
@@ -1081,7 +1081,7 @@ def stage_run(
     return result
 
 
-def _resolve_settings() -> Settings:
+def resolve_settings() -> Settings:
     """Resolve `Settings` from the ``SF_*`` env (raises `ConfigError` when unset)."""
     from .settings import Settings
 

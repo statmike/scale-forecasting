@@ -4,7 +4,7 @@ The infra identity (project / dataset / connection / warehouse) is not on ``RunC
 resolved from the environment via `Settings`, so the identical writer code runs locally under ADC
 and on Composer under the runner SA. Every writer and reader in this package takes an optional
 ``settings=`` for callers that already hold one and otherwise resolves from ``SF_*`` env vars
-through `_resolve_settings` here. `ensure_tables` / `ensure_views` render and execute the
+through `resolve_settings` here. `ensure_tables` / `ensure_views` render and execute the
 deployment DDL; both are idempotent, so setup can run on every deploy.
 """
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from ..settings import Settings
 
 
-def _resolve_settings(settings: Settings | None) -> Settings:
+def resolve_settings(settings: Settings | None) -> Settings:
     """Return the passed settings, or resolve from the ``SF_*`` environment."""
     if settings is not None:
         return settings
@@ -47,7 +47,7 @@ def ensure_tables(
         render_migrations,
     )
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     # Registry tables land in the registry dataset, source tables in the source dataset. These are
     # the same dataset unless SF_REGISTRY_DATASET_ID says otherwise, so this is a no-op for an
     # existing deployment — but the two families are now addressed separately all the way down.
@@ -97,7 +97,7 @@ def ensure_views(
     from ..errors import RegistryError
     from .views import render_create_views
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     views = render_create_views(resolved.registry_dataset_ref)
     client = bigquery.Client(project=resolved.project_id)
     for name, statement in views.items():

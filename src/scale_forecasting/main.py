@@ -55,6 +55,7 @@ from .registry.ids import make_run_id
 
 if TYPE_CHECKING:
     from .config import RunConfig
+    from .engines.bigquery_engine import BqOutcome
     from .probes.cancel import CancelReport
     from .probes.reconcile import ProbeReport
     from .probes.settle import SettleReport
@@ -189,7 +190,7 @@ def run(
         run_dag.ensemble_enabled,
     )
 
-    bq_outcome = None
+    bq_outcome: BqOutcome | None = None
     # One error slot per family job (keyed by family name), plus the ensemble node's.
     job_errors: dict[str, BaseException] = {}
     ensemble_error: BaseException | None = None
@@ -514,23 +515,11 @@ def _print_retry_report(report: RetryReport) -> None:
 def _main(argv: list[str] | None = None) -> None:
     """CLI: ``main (--config …|--config-uri …|--run-id …) [--dry-run|--stage-only|--probe|…]``."""
     import argparse
-    import logging
-    import os
 
     from .config import load_config_uri
+    from .errors import configure_cli_logging
 
-    # Attach a handler to the root logger, because nothing else in the package does. Every verb
-    # here reports through `_log.info` — the resolved run_id, the fanout, "submitted" — and the
-    # root logger ships with no handler and a WARNING threshold, so as a *library* that is right
-    # and as a *CLI* it means the documented commands print nothing at all. `--dry-run`, whose
-    # entire job is to tell you what a run would do, exited 0 in silence. Guarded on `handlers` so
-    # importing `_main` from a process that has already configured logging (Airflow, a notebook)
-    # does not get a second copy of every line.
-    if not logging.getLogger().handlers:
-        logging.basicConfig(
-            level=os.environ.get("SF_LOG_LEVEL", "INFO").upper(),
-            format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
-        )
+    configure_cli_logging()
 
     p = argparse.ArgumentParser(prog="main", description="Run a forecast (Spark + BigQuery).")
     # Where the config comes from. A local path (--config, the interactive UX), a gs:// URI

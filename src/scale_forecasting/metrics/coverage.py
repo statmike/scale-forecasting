@@ -29,9 +29,11 @@ class Coverage(BaseMetric):
     needs_intervals: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:
-        if not ctx.has_intervals:
+        bounds = ctx.bounds()
+        if bounds is None:
             return float("nan")
-        inside = (ctx.y_true >= ctx.lower) & (ctx.y_true <= ctx.upper)
+        lower, upper = bounds
+        inside = (ctx.y_true >= lower) & (ctx.y_true <= upper)
         return float(np.mean(inside))
 
 

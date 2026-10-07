@@ -11,7 +11,7 @@
 export UV_NO_CONFIG := 1
 EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra models --extra ray --format requirements-txt
 
-.PHONY: lock lock-check sync test ci-offline hooks docs composer-sync
+.PHONY: lock lock-check sync test typecheck ci-offline hooks docs composer-sync
 
 ## lock: re-resolve uv.lock from pyproject.toml and regenerate docker/requirements.txt from it.
 ## Run this after editing dependencies in pyproject.toml, then commit both files.
@@ -49,12 +49,20 @@ lock-check:
 sync:
 	uv sync --frozen --all-extras
 
-## test: the offline test gate (no GCP / Spark / Ray required).
+## typecheck: mypy over the package (src only — tests stay dynamically typed on purpose).
+## The package ships py.typed, so every public signature is a promise to downstream checkers; this
+## is the gate that keeps it true, and zero errors is the bar. Warm runs take seconds (.mypy_cache);
+## the first run on a clone is about a minute.
+typecheck:
+	uv run mypy src/scale_forecasting
+
+## test: the offline test gate (no GCP / Spark / Ray required) — the CI `offline` job, step for step.
 ## `format --check` is a gate, not a suggestion: layout is machine-decided so review reads diffs of
 ## meaning. Run `make format` to fix.
 test:
 	uv run ruff format --check src tests
 	uv run ruff check src tests
+	uv run mypy src/scale_forecasting
 	uv run pytest -m "not gcp and not spark and not ray" -q
 
 ## ci-offline: the offline gate in a venv built EXACTLY as CI builds it, not in your working venv.
@@ -70,6 +78,7 @@ ci-offline:
 	UV_PROJECT_ENVIRONMENT=.venv-ci uv sync --frozen --all-extras
 	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen ruff format --check src tests
 	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen ruff check src tests
+	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen mypy src/scale_forecasting
 	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen pytest -m "not gcp and not spark and not ray" -q
 
 ## hooks: enable the tracked git hooks in .githooks (one-time, per clone).
@@ -78,9 +87,9 @@ ci-offline:
 ## validation ledger, the config-coverage map, docs integrity, API-docs coverage, smoke-config
 ## validity, and test-dependency declaration) in a few seconds; they compare prose and declarations
 ## against code, so an edit made after a green `make test` can turn them red with no code change.
-## pre-push runs the deterministic half of CI — ruff, `uv lock --check`, and the requirements-export
-## drift check — so a push cannot carry what CI's first thirty seconds would reject. Neither runs the
-## six-minute suite; that stays `make test` / `make ci-offline`.
+## pre-push runs the deterministic half of CI — ruff, mypy, `uv lock --check`, and the
+## requirements-export drift check — so a push cannot carry what CI's first minute would reject.
+## Neither runs the six-minute suite; that stays `make test` / `make ci-offline`.
 hooks:
 	git config core.hooksPath .githooks
 	@echo "git hooks enabled (.githooks): pre-commit + pre-push. Bypass once with: git commit --no-verify / git push --no-verify"

@@ -38,7 +38,7 @@ import math
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 # The measured-profile → runtime-knobs translation. It lives at the top level rather than under
 # ``engines/`` and depends on no engine, so importing it here cannot cycle.
@@ -81,8 +81,9 @@ __all__ = [
     "split_gpu_cpu_models",
 ]
 
-# The model family that benefits from a GPU (only NeuralProphet today). Everything else is CPU work.
-_GPU_FAMILY = "deep_learning"
+# The model family that benefits from a GPU — the Lightning trainers. Everything else is CPU work.
+# `Final` keeps the literal type, which is what `compute.families` is keyed by.
+_GPU_FAMILY: Final = "deep_learning"
 
 # Device memory per supported accelerator — the denominator when auto-calibration turns a measured
 # peak-memory footprint into a GPU fraction. Per *device*, not per node (a node may carry several,

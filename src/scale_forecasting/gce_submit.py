@@ -42,7 +42,7 @@ from .compute_fallback import US_ZONES, Candidate, resolve_candidates
 from .config import RunConfig, resolve_vm_machine_type
 from .engines.ray_io import pool_families, resolve_job_gpu
 from .engines.vertex_engine import plan_vertex_pool
-from .errors import ConfigError, EngineError, get_logger
+from .errors import ConfigError, EngineError, configure_cli_logging, get_logger
 from .job_outcome import launch_window_start
 from .job_wait import is_stalled
 from .probes.vocabulary import ProbeHandle
@@ -1003,6 +1003,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> str:
     from .config import load_config_uri
 
+    configure_cli_logging()
     args = _build_parser().parse_args(argv)
     cfg = load_config_uri(args.config or args.config_uri).with_series_limit(args.n_series)
     models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None

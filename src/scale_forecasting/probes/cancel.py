@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .reconcile import ProbeReport, _read_and_probe
+from .reconcile import ProbeReport, read_and_probe
 from .runtimes import get_probe
 from .vocabulary import (
     _AWAITING_CAPACITY,
@@ -328,7 +328,7 @@ def cancel_run(
 ) -> CancelReport:  # pragma: no cover - GCP I/O
     """Cancel a run (or one family) — preview unless ``confirm``; finalize registry to CANCELLED.
 
-    Probes the run first (`reconcile._read_and_probe`) to reconcile live state, builds the blast-
+    Probes the run first (`reconcile.read_and_probe`) to reconcile live state, builds the blast-
     radius `CancelPlan`, and — **only when ``confirm``** — stops each cancellable family's runtime
     job and finalizes its row to ``CANCELLED`` with an audit blob (`_finalize_cancelled`), then
     rolls the run header up (`_roll_header_after_cancel`). Without ``confirm`` it returns the plan,
@@ -341,7 +341,7 @@ def cancel_run(
     from ..settings import Settings
 
     s = settings if settings is not None else Settings.resolve()
-    _progress, report, rows = _read_and_probe(
+    _progress, report, rows = read_and_probe(
         run_id, job=job, settings=s, stale_after_s=stale_after_s
     )
     plan = _assemble_cancel_plan(report)

@@ -91,9 +91,9 @@ def read_cell_counts(
     """
     from google.cloud import bigquery
 
-    from .registry.tables import _resolve_settings
+    from .registry.tables import resolve_settings
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT COUNT(*) AS cells, COUNTIF(cell_status='error') AS errors "
         f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
@@ -136,9 +136,9 @@ def cells_written(
     """
     from google.cloud import bigquery
 
-    from .registry.tables import _resolve_settings
+    from .registry.tables import resolve_settings
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT COUNT(*) AS cells "
         f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "

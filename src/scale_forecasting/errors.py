@@ -8,6 +8,7 @@ only when a caller would branch on it, not for decoration.
 from __future__ import annotations
 
 import logging
+import os
 
 
 class ScaleForecastError(Exception):
@@ -66,16 +67,41 @@ class JobIdTaken(EngineError):
     """
 
 
-def get_logger(name: str) -> logging.Logger:
-    """Return a package logger.
+PACKAGE_LOGGER = "scale_forecasting"
+CLI_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
 
-    We attach a single stream handler once so library use doesn't duplicate lines,
-    and leave the level to the root/app config (default WARNING) unless overridden.
+# The library's whole opinion about where its records go: nowhere, by default. A single
+# ``NullHandler`` on the package logger stops the stdlib's "no handlers could be found" last-resort
+# path, and every record propagates to whatever the host configured — Airflow's task handler, a
+# notebook's root handler, the CLI handler `configure_cli_logging` attaches. Added at import so it
+# is there before the first ``get_logger`` call and never duplicated.
+logging.getLogger(PACKAGE_LOGGER).addHandler(logging.NullHandler())
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Return the package logger for ``name`` — ``__name__`` at every call site.
+
+    No handler is attached here and propagation is left on, which is what lets an application
+    route this package's records with its own configuration. Until 1.0 each logger carried its own
+    ``StreamHandler`` with propagation off, and an Airflow task log never saw a line this package
+    wrote; the CLIs that relied on that handler now call `configure_cli_logging` instead.
     """
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        logger.addHandler(handler)
-        logger.propagate = False
-    return logger
+    return logging.getLogger(name)
+
+
+def configure_cli_logging(default_level: str = "INFO") -> None:
+    """Attach a root handler for a command-line entry point, unless the host already has one.
+
+    Every ``python -m scale_forecasting.<module>`` verb reports through ``_log.info`` — the resolved
+    run_id, the fanout, "submitted" — and the root logger ships with no handler and a WARNING
+    threshold, so as a library that is right and as a CLI it means the documented commands print
+    nothing at all (``--dry-run``, whose whole job is to say what a run would do, once exited 0 in
+    silence). Guarded on the root's handlers so a process that has already configured logging
+    (Airflow, a notebook) does not get a second copy of every line. ``SF_LOG_LEVEL`` overrides the
+    level.
+    """
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=os.environ.get("SF_LOG_LEVEL", default_level).upper(), format=CLI_LOG_FORMAT
+    )

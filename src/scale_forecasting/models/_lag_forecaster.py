@@ -12,12 +12,20 @@ Not a public API: the leading underscore marks it internal to ``models``.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
 
 from ..errors import ModelError
+
+
+class SupportsPredict(Protocol):
+    """The one method the recursive forecaster needs of a fitted regressor — the sklearn /
+    XGBoost / LightGBM / CatBoost estimators all have it, none of them share a typed base."""
+
+    def predict(self, X: Any) -> Any: ...
+
 
 # Lag depths and calendar features used by the tree models. Fixed here (not config-driven)
 # because the recursion depends on knowing them; HPO tunes the estimator, not the lags.
@@ -89,7 +97,7 @@ def build_design(
 
 
 def recursive_predict(
-    estimator: object,
+    estimator: SupportsPredict,
     history: pd.Series,
     future_index: pd.DatetimeIndex,
     feature_names: list[str],
@@ -111,7 +119,7 @@ def recursive_predict(
             for c in future_exog.columns:
                 row[c] = float(future_exog.iloc[i][c])
         x = np.array([[row[name] for name in feature_names]], dtype=float)
-        raw = estimator.predict(x)  # type: ignore[attr-defined]
+        raw = estimator.predict(x)
         yhat = float(np.asarray(raw, dtype=float).ravel()[0])
         preds.append(yhat)
         series = pd.concat([series, pd.Series([yhat], index=[ts])])
@@ -119,7 +127,7 @@ def recursive_predict(
 
 
 def global_feature_attributions(
-    estimator: object,
+    estimator: Any,
     feature_names: list[str],
     design: pd.DataFrame | np.ndarray | None = None,
 ) -> dict[str, float]:
@@ -156,7 +164,7 @@ def global_feature_attributions(
 
 
 def _step_shap_or_linear_contribs(
-    estimator: object,
+    estimator: Any,
     x: np.ndarray,
     feature_names: list[str],
     design_mean: np.ndarray | None = None,
@@ -179,7 +187,7 @@ def _step_shap_or_linear_contribs(
             if len(raw_c) == d + 1:
                 contribs, base_val = raw_c[:d], float(raw_c[d])
         elif cls_name == "LGBMRegressor":
-            raw_c = np.asarray(estimator.predict(x, pred_contrib=True), dtype=float).ravel()  # type: ignore[attr-defined]
+            raw_c = np.asarray(estimator.predict(x, pred_contrib=True), dtype=float).ravel()
             if len(raw_c) == d + 1:
                 contribs, base_val = raw_c[:d], float(raw_c[d])
         elif cls_name == "CatBoostRegressor" and hasattr(estimator, "get_feature_importance"):
@@ -203,7 +211,7 @@ def _step_shap_or_linear_contribs(
                 base_val = float(intercept + np.dot(mean_x, coef))
                 contribs = coef * (x.ravel() - mean_x)
         elif hasattr(estimator, "feature_importances_"):
-            yhat = float(np.asarray(estimator.predict(x), dtype=float).ravel()[0])  # type: ignore[attr-defined]
+            yhat = float(np.asarray(estimator.predict(x), dtype=float).ravel()[0])
             imp = np.abs(np.asarray(estimator.feature_importances_, dtype=float).ravel())
             mean_x = (
                 np.asarray(design_mean, dtype=float).ravel()
@@ -234,7 +242,7 @@ def _step_shap_or_linear_contribs(
 
 
 def recursive_explain(
-    estimator: object,
+    estimator: SupportsPredict,
     history: pd.Series,
     future_index: pd.DatetimeIndex,
     feature_names: list[str],
@@ -255,7 +263,7 @@ def recursive_explain(
             for c in future_exog.columns:
                 row[c] = float(future_exog.iloc[i][c])
         x = np.array([[row[name] for name in feature_names]], dtype=float)
-        raw = estimator.predict(x)  # type: ignore[attr-defined]
+        raw = estimator.predict(x)
         yhat = float(np.asarray(raw, dtype=float).ravel()[0])
         explanations.append(
             _step_shap_or_linear_contribs(

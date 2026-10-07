@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Pre-push: the fast, environment-independent CI checks, run at the moment a commit leaves the machine.
 #
-# CI's `lock-check` job and the first two steps of its `offline` job are deterministic and take a
-# few seconds — `ruff format --check`, `ruff check`, `uv lock --check`, and "does the committed
-# docker/requirements.txt equal what the lock exports". None of them can go red for a reason that
-# is not in the diff, so there is no excuse for discovering them from a red badge after the push.
-# This hook runs exactly those, with exactly the flags CI uses (the export flags are read from the
-# Makefile's EXPORT_ARGS so the three places cannot drift apart).
+# CI's `lock-check` job and the first three steps of its `offline` job are deterministic and take
+# seconds — `ruff format --check`, `ruff check`, `mypy` (warm .mypy_cache; the first run on a clone
+# is about a minute), `uv lock --check`, and "does the committed docker/requirements.txt equal what
+# the lock exports". None of them can go red for a reason that is not in the diff, so there is no
+# excuse for discovering them from a red badge after the push. This hook runs exactly those, with
+# exactly the flags CI uses (the export flags are read from the Makefile's EXPORT_ARGS so the three
+# places cannot drift apart).
 #
 # What it deliberately does NOT run: the six-minute offline test suite and the strict MkDocs build.
 # Those are real gates, but a pre-push that takes minutes gets `--no-verify`d, and a bypassed guard
@@ -51,16 +52,30 @@ if (( ${#ruff[@]} )); then
   "${ruff[@]}" check src tests          || fail "ruff check failed."
 fi
 
+# 2. Types are a gate because the package ships py.typed. Same resolution rule as ruff: the venv's
+#    mypy when it exists, `uv run --no-sync` otherwise, never a sync. Warm cache makes this seconds.
+if [[ -x .venv/bin/mypy ]]; then
+  mypy=(.venv/bin/mypy)
+elif command -v uv >/dev/null 2>&1; then
+  mypy=(uv run --frozen --no-sync mypy)
+else
+  echo "pre-push: no .venv/bin/mypy and no uv — skipping the type check." >&2
+  mypy=()
+fi
+if (( ${#mypy[@]} )); then
+  "${mypy[@]}" src/scale_forecasting || fail "mypy found type errors (run: make typecheck)."
+fi
+
 if ! command -v uv >/dev/null 2>&1; then
   echo "pre-push: uv not found — skipping the lock and requirements checks." >&2
   exit 0
 fi
 
-# 2. The lock must already satisfy pyproject.toml — a dependency edit that was not re-locked fails
+# 3. The lock must already satisfy pyproject.toml — a dependency edit that was not re-locked fails
 #    CI's lock-check in the first thirty seconds. `uv lock --check` never touches the venv.
 uv lock --check || fail "uv.lock is out of sync with pyproject.toml (run: make lock, commit both files)."
 
-# 3. docker/requirements.txt is a derived export of the lock; CI regenerates it in place and diffs.
+# 4. docker/requirements.txt is a derived export of the lock; CI regenerates it in place and diffs.
 #    Do the same here into a temp file so a failure never leaves the working tree modified. The flags
 #    are the Makefile's EXPORT_ARGS, read rather than copied, so this cannot drift from `make lock`.
 #    uv writes its own invocation — including `-o <path>` — into the file's second line, so that

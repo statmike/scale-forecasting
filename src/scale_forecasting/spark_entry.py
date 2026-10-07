@@ -17,6 +17,7 @@ this file imports cleanly offline (parity with the seed entry / the engines).
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 
 from ._entry import parse_models, run_entry
 
@@ -24,7 +25,7 @@ from ._entry import parse_models, run_entry
 _parse_models = parse_models
 
 
-def _resolve_engine(ns: argparse.Namespace) -> tuple[object, str]:
+def _resolve_engine(ns: argparse.Namespace) -> tuple[Callable[..., object], str]:
     """Return the one Spark engine's ``run`` + its runtime label — a fixed single engine
     (`spark_explode`, the cross-join/explode strategy), no dispatch. Mirrors `ray_entry`."""
     from .engines import spark_explode

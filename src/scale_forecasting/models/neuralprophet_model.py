@@ -35,7 +35,7 @@ import pandas as pd
 
 from ..errors import ConfigError, ModelError
 from ..features import invert_transform
-from ._neuralforecast_base import _ensure_mpl_dir, _quiet_lightning
+from ._neuralforecast_base import ensure_mpl_dir, quiet_lightning
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
 if TYPE_CHECKING:
@@ -74,7 +74,7 @@ def _quiet() -> Iterator[None]:
     would otherwise reach the terminal or the notebook, prefixed with the absolute path of the
     site-packages file that raised it. Same categories the ``neuralforecast`` base suppresses.
     """
-    _quiet_lightning()
+    quiet_lightning()
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning)
         warnings.filterwarnings("ignore", category=FutureWarning)
@@ -105,7 +105,7 @@ class NeuralProphetModel(BaseModel):
     optional_extra = "models-dl"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
-        _ensure_mpl_dir()
+        ensure_mpl_dir()
         try:
             NeuralProphet, set_log_level, set_random_seed = _import_neuralprophet()
         except ImportError as e:  # pragma: no cover - exercised only without the extra
@@ -169,7 +169,7 @@ class NeuralProphetModel(BaseModel):
         static_map: Mapping[str, dict[str, Any]] | None = None,
     ) -> None:
         """Fit one global or hybrid NeuralProphet network across all series in ``series_map``."""
-        _ensure_mpl_dir()
+        ensure_mpl_dir()
         try:
             NeuralProphet, set_log_level, set_random_seed = _import_neuralprophet()
         except ImportError as e:  # pragma: no cover - exercised only without the extra

@@ -20,11 +20,12 @@ file imports cleanly offline (parity with `spark_entry`).
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 
 from ._entry import run_entry
 
 
-def _resolve_engine(ns: argparse.Namespace) -> tuple[object, str]:
+def _resolve_engine(ns: argparse.Namespace) -> tuple[Callable[..., object], str]:
     """Return `engines.ray_engine.run` + the ``ray`` label (the single Ray engine)."""
     from .engines import ray_engine
 

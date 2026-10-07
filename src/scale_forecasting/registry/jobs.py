@@ -16,7 +16,7 @@ from .params import (
     render_telemetry_merge,
     telemetry_merge_params,
 )
-from .tables import _resolve_settings
+from .tables import resolve_settings
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -36,7 +36,7 @@ def write_job(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     columns = list(row)
     placeholders = ", ".join(f"@{col}" for col in columns)
     sql = (
@@ -102,7 +102,7 @@ def update_job(
         # the same way whether or not this process can reach a project.
         params.extend(telemetry_merge_params(patch, caller="update_job"))
         assignments.append(render_telemetry_merge(list(patch)))
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     table = resolved.registry_table_ref("run_jobs")
     sql = (
         f"UPDATE `{table}` SET {', '.join(assignments)} WHERE job_id=@job_id"
@@ -131,7 +131,7 @@ def latest_job_attempt(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT MAX(attempt) AS max_attempt FROM `{resolved.registry_table_ref('run_jobs')}` "
         "WHERE run_id=@run_id AND family=@family"
@@ -175,7 +175,7 @@ def read_run_jobs(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT * FROM `{resolved.registry_table_ref('v_run_jobs')}` "
         "WHERE run_id=@run_id ORDER BY family"

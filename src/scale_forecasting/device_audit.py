@@ -142,9 +142,9 @@ def read_device_use(
     """
     from google.cloud import bigquery
 
-    from .registry.tables import _resolve_settings
+    from .registry.tables import resolve_settings
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT COUNT(*) AS cells, "
         "COUNTIF(device_used='cuda') AS cells_on_device, "

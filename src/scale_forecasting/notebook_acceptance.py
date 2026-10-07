@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .errors import EngineError, get_logger
+from .errors import EngineError, configure_cli_logging, get_logger
 
 _log = get_logger(__name__)
 
@@ -702,6 +702,7 @@ def _run_fanout_cli(
 
 def main(argv: list[str] | None = None) -> int:
     """Run the selected tier, print a per-notebook table; return non-zero on any failure."""
+    configure_cli_logging()
     args = _parse_args(argv)
     notebooks_dir = (
         Path(args.notebooks_dir)

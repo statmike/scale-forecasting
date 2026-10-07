@@ -242,7 +242,7 @@ def bakeoff(
     - **learned** (default ``nnls``): `ensembler.fit_learned` trains the meta-learner on
       the base backtest OOF, then `ensemble_run._apply_weights` applies the weights.
     - **scoring**: `ensembler.combine_oof` + `metrics.compute_metrics` /
-      `worker._rollup_metrics` score every ensemble on the OOF window — the identical
+      `worker.rollup_metrics` score every ensemble on the OOF window — the identical
       path `ensemble_run.run_ensembles` uses, minus the BigQuery I/O.
 
     Because it drives real framework code, the leaderboard here is what a scaled run would
@@ -254,7 +254,7 @@ def bakeoff(
     from .ensembler import combine_calculated, combine_oof, fit_learned
     from .metrics import METRIC_NAMES, compute_metrics
     from .seasonality import seasonal_period
-    from .worker import _rollup_metrics
+    from .worker import rollup_metrics
 
     if models is None:
         # Fast, dependency-light defaults so the bake-off runs anywhere the repo imports.
@@ -372,7 +372,7 @@ def bakeoff(
             )
             for _fold, fg in g.sort_values("forecast_date").groupby("fold_id")
         ]
-        panel = _rollup_metrics(fold_panels)
+        panel = rollup_metrics(fold_panels)
         row = {"model": str(model_type), "kind": "ensemble", "status": "ok"}
         row.update({m: panel.get(m, float("nan")) for m in METRIC_NAMES})
         base_rows.append(row)

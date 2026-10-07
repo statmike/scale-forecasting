@@ -11,7 +11,7 @@ flowchart TB
         snaps["Pinned Golden Snapshots (snapshots/)<br/>SQL DDL & views · BQML SQL<br/>run_id digests · numeric golden panel"]
         trips["Consistency Tripwires (pre-commit hook)<br/>test_validation_ledger.py · test_config_coverage.py<br/>test_docs_integrity.py · test_api_docs_coverage.py<br/>test_test_dependencies_declared.py · test_notebook_hygiene.py<br/>test_smoke_configs.py"]
         guards["Architectural Guards<br/>test_code_delivery.py · test_launch_point_lean.py<br/>test_source_conventions.py"]
-        push["Deterministic CI Half (pre-push hook)<br/>ruff format --check · ruff check<br/>uv lock --check · requirements export drift"]
+        push["Deterministic CI Half (pre-push hook)<br/>ruff format --check · ruff check · mypy<br/>uv lock --check · requirements export drift"]
     end
 
     subgraph integ["Tier 2: Live Integration Tests (tests/integration/)"]
@@ -34,7 +34,7 @@ flowchart TB
 Two tracked hooks in [`.githooks/`](../.githooks/) run automatically once enabled via `make hooks` (one-time per clone):
 
 - **`pre-commit`** runs the AGENTS.md Gate 1 tripwires — the validation ledger, config coverage, docs integrity, API-docs coverage, test-dependency declaration, notebook hygiene, and smoke-config validity. They compare prose, declarations, and persisted notebook outputs against code and policy, so an edit made after a green `make test` can turn them red with no code change.
-- **`pre-push`** runs the deterministic half of CI at the moment a commit leaves the machine — `ruff format --check`, `ruff check`, `uv lock --check`, and a `docker/requirements.txt` export-drift check (same flags as `make lock`, read from the Makefile's `EXPORT_ARGS`).
+- **`pre-push`** runs the deterministic half of CI at the moment a commit leaves the machine — `ruff format --check`, `ruff check`, `mypy src/scale_forecasting` (zero errors; the package ships `py.typed`), `uv lock --check`, and a `docker/requirements.txt` export-drift check (same flags as `make lock`, read from the Makefile's `EXPORT_ARGS`).
 
 ```bash
 make hooks  # one-time setup per clone
@@ -45,7 +45,7 @@ To reproduce the CI `offline` job's environment exactly (a second `.venv-ci` syn
 
 ### 2. Full Offline Gate (`make test`)
 
-Runs `ruff format --check`, `ruff check`, and all offline unit, contract, and snapshot tests (deselecting `@gcp`, `@spark`, and `@ray` markers):
+Runs `ruff format --check`, `ruff check`, `mypy` over `src/` (`make typecheck` on its own), and all offline unit, contract, and snapshot tests (deselecting `@gcp`, `@spark`, and `@ray` markers) — the CI `offline` job, step for step:
 
 ```bash
 make test
@@ -91,6 +91,7 @@ Several unit test modules enforce structural guarantees across the repository:
 - **[`test_prebreak_snapshots.py`](./unit/test_prebreak_snapshots.py):** Locks the deterministic `<slug>-<12hex>` `run_id` digests of all shipped configurations and the numerical outputs of the golden panel so refactoring never alters run identity or model math silently.
 - **[`test_code_delivery.py`](./unit/test_code_delivery.py):** Ensures `docker/Dockerfile` and `docker/cloudbuild.yaml` never bake `src/scale_forecasting` into the container image.
 - **[`test_launch_point_lean.py`](./unit/test_launch_point_lean.py):** Ensures importing model classes and planning DAGs never eagerly imports heavy compute libraries (`torch`, `statsmodels`, `xgboost`, `lightgbm`, `prophet`, `neuralprophet`), keeping thin submission environments (such as Cloud Composer workers) lean.
+- **[`test_source_conventions.py`](./unit/test_source_conventions.py):** Static checks ruff does not make: every relative import (including the lazy, function-level ones on the submit path) names a module that exists; no module name shadows a stdlib module (a Composer plugins delivery puts inner directories on `sys.path`); the four deliberately duplicated terminal-status sets agree; and cross-module imports of underscore-prefixed names can only **ratchet down** — the test carries an exact allowlist of today's debt, fails on any new entry (promote the helper instead) and on any stale entry (so the list is always a true picture).
 - **[`test_api_docs_coverage.py`](./unit/test_api_docs_coverage.py):** Ensures every module re-exported by `scale_forecasting.__init__` and every subpackage is documented in `docs/api/`, every `docs/api/*.md` page is wired into `mkdocs.yml`, and every folder `README.md` in the repository spine includes a Mermaid diagram.
 - **[`test_test_dependencies_declared.py`](./unit/test_test_dependencies_declared.py):** Computes, from `uv.lock`, the closure of what the CI `offline` job installs (`uv sync --frozen --all-extras`: core dependencies, every extra, and the default dependency groups) and fails if any file under `tests/` imports a third-party module — at module level or lazily inside a function — whose distribution is outside that closure. Imports guarded by `try/except ImportError` or `pytest.importorskip` are exempt. It exists because a package present in a developer venv (via `make docs` or an ad-hoc install) but absent from CI's sync left `main` red for two merges.
 - **[`test_notebook_hygiene.py`](./unit/test_notebook_hygiene.py):** Scans every notebook's markdown and code sources **and its persisted outputs** (stream text, `text/*` and JSON display data, tracebacks) for the identifiers [AGENTS.md §1 rule 4](../AGENTS.md) forbids in a public repository: e-mail addresses (service-account and RFC 2606 example domains excepted), personal or corporate home paths, internal hostnames and short links, and credential material. The demo project ID, bucket, and dataset names are deliberately allowed. Failures name the notebook, cell, and pattern — never the matched text, because CI logs are public. It exists because a library warning's first token is the absolute path of the file that raised it, which on a workstation is a home directory and a username; nothing else reads notebook outputs.

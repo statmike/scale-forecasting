@@ -49,7 +49,7 @@ from .config import RunConfig, resolve_vm_machine_type
 from .engines import ray_io
 from .engines.ray_io import RayClusterPlan, pool_families, resolve_job_gpu
 from .engines.vertex_engine import effective_worker_count, plan_vertex_pool
-from .errors import ConfigError, EngineError, get_logger
+from .errors import ConfigError, EngineError, configure_cli_logging, get_logger
 from .job_outcome import launch_window_start
 from .job_wait import is_stalled
 from .probes.vocabulary import ProbeHandle
@@ -1187,7 +1187,9 @@ def resolve_gke_candidates(
     if cfg.compute.ray_regions:
         out: list[Candidate] = []
         for reg in cfg.compute.ray_regions:
-            sub = infra.subnetwork_uri if reg == settings.region else None
+            # "" is the plan's "default network" value (`GkeJobPlan.subnetwork_uri`) for a
+            # cross-region candidate, whose subnet the deployment's cannot serve.
+            sub = infra.subnetwork_uri if reg == settings.region else ""
             zones = US_ZONES.get(reg, [f"{reg}-a"])
             for z in zones:
                 out.append(Candidate(region=reg, zone=z, subnetwork_uri=sub))
@@ -1572,6 +1574,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:  # pragma: no cover - CLI entrypoint
     from .config import load_config, load_config_uri
 
+    configure_cli_logging()
     args = _build_parser().parse_args(argv)
     cfg = load_config_uri(args.config_uri) if args.config_uri else load_config(args.config)
     submit_gke(

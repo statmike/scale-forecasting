@@ -38,7 +38,7 @@ _HEADER_PARAM_TYPES: dict[str, str] = {
 }
 
 
-def _header_param(name: str, value: Any) -> Any:
+def header_param(name: str, value: Any) -> Any:
     """Build a scalar or array query parameter for a run_registry column."""
     from google.cloud import bigquery
 

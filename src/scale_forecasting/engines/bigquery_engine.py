@@ -85,7 +85,7 @@ def run(
     * **Scored evaluation (backtest only).** When ``backtest.enabled``, a fold loop
       (`fold_plan`) trains one model per fold on ``ds <= cutoff``, reads each fold's forecast
       joined to actuals via `build_eval_query`, writes ``backtest_oof`` with real
-      ``fold_id``s, and rolls the per-fold panels up (via ``worker._rollup_metrics``) into a
+      ``fold_id``s, and rolls the per-fold panels up (via ``worker.rollup_metrics``) into a
       ``fold_id=NULL``
       ``forecast_metadata`` row. When backtest is off, a single unscored ``fold_id=NULL`` metadata
       row per ``(series, model)`` (NaN panel) is written instead — parity with the Python worker.
@@ -114,7 +114,7 @@ def run(
     from ..registry.lifecycle import run_header
     from ..registry.write_api import _META_SPEC, _OOF_SPEC
     from ..settings import Settings
-    from ..worker import _rollup_metrics
+    from ..worker import rollup_metrics
     from .bigquery_sql import (
         bqml_options,
         build_eval_query,
@@ -130,7 +130,7 @@ def run(
     settings = settings or Settings.resolve()
     run_id = make_run_id(cfg)
     # Source reads resolve against `dataset`; model objects and forecast_predictions land in
-    # `registry_dataset`. Identical strings unless the deployment split them (`_registry_of`).
+    # `registry_dataset`. Identical strings unless the deployment split them (`registry_of`).
     dataset = settings.dataset_ref
     registry_dataset = settings.registry_dataset_ref
     client = bigquery.Client(project=settings.project_id)
@@ -195,7 +195,7 @@ def run(
                 # window, not the whole series, and `backtest.training_window` cuts it at the
                 # fold's cutoff. Keyed off `ORDER BY ts_id, ds`, so each group is already sorted.
                 hist_by_id = {
-                    tid: (pd.to_datetime(g["ds"]).to_numpy(), g["y"].to_numpy())
+                    str(tid): (pd.to_datetime(g["ds"]).to_numpy(), g["y"].to_numpy())
                     for tid, g in history.groupby("ts_id")
                 }
                 plan = fold_plan(cfg)
@@ -263,7 +263,7 @@ def run(
                         for ts_id, panel in fold_panels.items():
                             panels_by_ts.setdefault(ts_id, []).append(panel)
                     for ts_id, panels in panels_by_ts.items():
-                        rolled = _rollup_metrics(panels)
+                        rolled = rollup_metrics(panels)
                         first_val, last_val = span_by_ts.get(ts_id, (None, None))
                         meta_rows.append(
                             _meta_row(
@@ -355,7 +355,7 @@ def _score_fold(
     ``hist_by_id`` maps ``ts_id`` to a ``(ds, y)`` pair of aligned, date-sorted arrays.
 
     Panels are keyed by ``str(ts_id)`` to match `_meta_row`'s key type — the caller accumulates one
-    list per series across folds and rolls them up exactly as `worker._rollup_metrics` does.
+    list per series across folds and rolls them up exactly as `worker.rollup_metrics` does.
     """
     from ..backtest import training_window
     from ..metrics import compute_metrics
@@ -366,9 +366,9 @@ def _score_fold(
     panels: dict[str, dict[str, float]] = {}
     for ts_id, g in eval_df.groupby("ts_id"):
         g = g.sort_values("forecast_date")
-        for _, row in g.iterrows():
-            oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, row, created_at))
-        hist = hist_by_id.get(ts_id)
+        for rec in g.to_dict(orient="records"):
+            oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, rec, created_at))
+        hist = hist_by_id.get(str(ts_id))
         # One cutoff per fold — the native path trains every series to the same global origin — so
         # any row of the group carries it. Absent on a hand-built or pre-cutoff frame, in which
         # case `training_window` keeps the whole history, which is what this path used to do.
@@ -389,7 +389,7 @@ def _oof_row(
     ts_id: str,
     model_name: str,
     fold_id: int,
-    row: Mapping[str, Any],
+    row: Mapping[Any, Any],
     created_at: Any = None,
 ) -> dict[str, Any]:
     """Assemble one ``backtest_oof`` row from a fold's eval-query result row (pure).
@@ -589,9 +589,10 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
     import argparse
 
     from ..config import load_config
-    from ..errors import get_logger
+    from ..errors import configure_cli_logging, get_logger
     from ..router import split_by_runtime
 
+    configure_cli_logging()
     parser = argparse.ArgumentParser(description="Run the BigQuery-native forecasting models.")
     parser.add_argument("--config", required=True, help="Path to the run config JSON.")
     args = parser.parse_args(argv)

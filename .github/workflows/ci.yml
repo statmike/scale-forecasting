@@ -5,9 +5,9 @@ name: ci
 #      and docker/requirements.txt (the derived export the container + packed-venv build from) must
 #      equal what the lock produces. This is the automated half of the "one source of truth" design:
 #      a hand-edited requirements.txt, or a pyproject change that wasn't re-locked, fails here.
-#   2. offline — the code gate that needs no cloud: ruff + the offline test suite. Interpreter and
-#      every dependency come from the same uv.lock + .python-version the runtime image is built from,
-#      so a green CI run reflects the exact versions production runs.
+#   2. offline — the code gate that needs no cloud: ruff + mypy + the offline test suite. Interpreter
+#      and every dependency come from the same uv.lock + .python-version the runtime image is built
+#      from, so a green CI run reflects the exact versions production runs.
 
 on:
   push:
@@ -51,6 +51,10 @@ jobs:
         run: uv run ruff format --check src tests
       - name: ruff
         run: uv run ruff check src tests
+      # The package ships py.typed, so every public signature is a promise to downstream checkers.
+      # Zero errors is the bar (pyproject [tool.mypy]); tests stay dynamically typed on purpose.
+      - name: mypy
+        run: uv run mypy src/scale_forecasting
       - name: offline test gate
         run: uv run pytest -m "not gcp and not spark and not ray" -q
 

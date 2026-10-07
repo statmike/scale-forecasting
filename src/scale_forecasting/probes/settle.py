@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .reconcile import ProbeReport, _read_and_probe
+from .reconcile import ProbeReport, read_and_probe
 from .vocabulary import (
     _EMITTED,
     _TERMINAL,
@@ -380,7 +380,7 @@ def settle_run(
 ) -> SettleReport:  # pragma: no cover - GCP I/O
     """Repair a run's stale job rows from the probe's own verdicts — preview unless ``yes``.
 
-    Probes the run (`reconcile._read_and_probe`), builds the `SettlePlan`, and — **only when
+    Probes the run (`reconcile.read_and_probe`), builds the `SettlePlan`, and — **only when
     ``yes``** — writes each settleable family's row: the decided status, the ``failure_reason``
     token when there is one, and the audit blob merged under ``job_telemetry.$.settle``. Without
     ``yes`` it returns the plan and writes nothing. ``job`` narrows to one family; ``reason`` and
@@ -398,7 +398,7 @@ def settle_run(
     from ..settings import Settings
 
     s = settings if settings is not None else Settings.resolve()
-    _progress, report, rows = _read_and_probe(
+    _progress, report, rows = read_and_probe(
         run_id,
         job=job,
         settings=s,
