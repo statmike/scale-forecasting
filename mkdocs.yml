@@ -154,6 +154,8 @@ nav:
       - Compute Engine Single-VM submitter: api/gce_submit.md
       - Google Kubernetes Engine submitter: api/gke_submit.md
       - BigQuery-native engine: api/engines_bigquery_engine.md
+      - Vertex AI AutoML & Tabular Workflows engine: api/engines_automl_engine.md
+      - Vertex AI AutoML & Tabular Workflows submitter: api/automl_submit.md
       - Compute profiling: api/profiling.md
       - Resource planning: api/resources.md
       - Quota preflight & advisor: api/quota.md

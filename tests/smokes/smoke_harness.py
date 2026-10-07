@@ -89,6 +89,8 @@ def _service_for(runtime: str, spark_mode: str | None) -> str:
         return "Vertex Ray submission"
     if runtime == "vertex":
         return "Vertex CustomJob"
+    if runtime == "vertex_automl":
+        return "Vertex AI AutoML pipeline"
     if runtime == "gce":
         return "GCE single-VM instance"
     if runtime == "gke":

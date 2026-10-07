@@ -39,12 +39,12 @@ flowchart TD
 
 ## Workshop Overview & Objectives
 
-In this hands-on workshop, you will deploy and operate **`scale-forecasting`** — Google Cloud's blueprint for enterprise time-series forecasting across **BigQuery ML**, **Managed Service for Apache Spark (Dataproc)**, **Gemini Enterprise (Managed Ray on Vertex AI)**, **Vertex AI `CustomJob`**, and **Compute Engine (`gce`) Single-VM**.
+In this hands-on workshop, you will deploy and operate **`scale-forecasting`** — Google Cloud's blueprint for enterprise time-series forecasting across **BigQuery ML**, **Managed Service for Apache Spark (Dataproc)**, **Gemini Enterprise (Managed Ray on Vertex AI)**, **Vertex AI `CustomJob`**, **Compute Engine (`gce`) Single-VM**, **Google Kubernetes Engine (`gke`)**, and **Vertex AI AutoML & Tabular Workflows (`vertex_automl`)**.
 
 ### Key Learning Outcomes
 1. **Infrastructure as Code:** Deploy the complete data lakehouse and compute infrastructure using Terraform in under 15 minutes.
-2. **Unified Modeling Contract:** Train, backtest, and evaluate 30 statistical, machine learning, deep learning, and BigQuery SQL models with zero code changes.
-3. **Multi-Engine Hybrid Execution:** Run Spark, Ray, Vertex `CustomJob`, GCE Single-VM, and BigQuery ML concurrently under a single declarative configuration and deterministic `run_id`.
+2. **Unified Modeling Contract:** Train, backtest, and evaluate 34 statistical, machine learning, deep learning, Vertex AI AutoML, and BigQuery SQL models with zero code changes.
+3. **Multi-Engine Hybrid Execution:** Run Spark, Ray, Vertex `CustomJob`, GCE Single-VM, GKE, Vertex AI AutoML (`vertex_automl`), and BigQuery ML concurrently under a single declarative configuration and deterministic `run_id`.
 4. **Stacked Ensembling:** Train meta-learners (Non-Negative Least Squares, Ridge, XGBoost) over out-of-fold predictions to outperform any single model.
 5. **Operational Observability:** Stream real-time cell telemetry into BigQuery via the Storage Write API, track live progress bars, and inspect 5 analytical SQL views.
 6. **Enterprise Scale & Parity:** Benchmark 100,000 time series across distributed engines and verify cross-platform numerical parity.
@@ -54,7 +54,7 @@ In this hands-on workshop, you will deploy and operate **`scale-forecasting`** �
 ## Target Audience & Prerequisites
 
 - **Lead Data Scientists & Quantitative Researchers:** Interested in scaling models from single-series prototypes to hundreds of thousands of series without writing distributed infrastructure code.
-- **Enterprise Cloud & Data Architects:** Evaluating hybrid execution patterns (BigQuery vs Dataproc vs Ray on Vertex AI vs Vertex `CustomJob` vs GCE Single-VM) and Lakehouse storage (BigLake Apache Iceberg on GCS).
+- **Enterprise Cloud & Data Architects:** Evaluating hybrid execution patterns (BigQuery vs Dataproc vs Ray on Vertex AI vs Vertex `CustomJob` vs GCE Single-VM vs GKE vs Vertex AI AutoML) and Lakehouse storage (BigLake Apache Iceberg on GCS).
 - **ML Platform & MLOps Engineers:** Seeking automated DAG orchestration, quota preflight validation, and unified lineage tracking.
 
 ### Prerequisites
@@ -201,10 +201,10 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 ### Lab 1: Foundations, Local Prototyping & Custom Plugins
 **Notebooks:** [`notebooks/00_model_playground.ipynb`](notebooks/00_model_playground.ipynb) & [`notebooks/09_custom_models_and_metrics.ipynb`](notebooks/09_custom_models_and_metrics.ipynb)  
 **Duration:** 20 minutes  
-**Goal:** Explore the 30-model and 21-metric contracts, rolling-origin backtesting, conformal interval calibration, and custom plugin authoring with zero cloud compute costs.
+**Goal:** Explore the 34-model and 21-metric contracts, rolling-origin backtesting, conformal interval calibration, Two-Tier Explainability, and custom plugin authoring with zero cloud compute costs.
 
 #### Key Highlights
-- Inspect `model_catalog()` (30 models) and `metric_catalog()` (21 metrics) across statistical, ML, deep learning, and native SQL families.
+- Inspect `model_catalog()` (34 models) and `metric_catalog()` (21 metrics) across statistical, ML, deep learning, Vertex AI AutoML, and native SQL families.
 - Generate synthetic multi-archetype series (trending, seasonal, intermittent, promo-spiky) and run single-series and panel bake-offs (`compare_models`, `compare_panel`).
 - Author custom `BaseModel` and `BaseMetric` plugins in [`notebooks/09_custom_models_and_metrics.ipynb`](notebooks/09_custom_models_and_metrics.ipynb) and verify them through the exact production worker contract (`run_cell`, `run_panel_model`).
 
@@ -222,38 +222,38 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 
 ---
 
-### Lab 3: Cloud Runtimes — Vertex AI, GCE Single-VM, Managed Spark & Ray on Vertex AI
+### Lab 3: Cloud Runtimes — Vertex AI, GCE Single-VM, GKE, Managed Spark & Ray on Vertex AI
 **Notebooks:** [`notebooks/02_vertex_and_gce_vms.ipynb`](notebooks/02_vertex_and_gce_vms.ipynb), [`notebooks/03_spark_serverless_and_connect.ipynb`](notebooks/03_spark_serverless_and_connect.ipynb) & [`notebooks/04_ray_on_vertex_gpu.ipynb`](notebooks/04_ray_on_vertex_gpu.ipynb)  
 **Duration:** 30 minutes  
-**Goal:** Drive all four container and cluster compute runtimes and understand per-family hardware sizing.
+**Goal:** Drive container and cluster compute runtimes across Vertex AI, GCE, GKE (`gke_mode="job"` & `gke_mode="ray"`), Dataproc Spark, and Vertex AI Ray, and understand per-family hardware sizing.
 
 #### Key Highlights
-- **Vertex AI `CustomJob` & GCE Single-VM (`02`):** Compare managed multi-worker `CustomJob` sharding against low-latency single-VM `gce` execution with triple-redundant self-delete protection.
+- **Vertex AI `CustomJob`, GCE Single-VM & GKE (`02`):** Compare managed multi-worker `CustomJob` and GKE Indexed Job sharding against low-latency single-VM `gce` execution with triple-redundant self-delete protection.
 - **Managed Spark (`03`):** Run Serverless Batches, Named Clusters, and interactive **Spark Connect** sessions from Colab Enterprise.
-- **Gemini Enterprise Managed Ray (`04`):** Pack deep learning fits (`nhits`, `nbeats`, `tft`, `deepar`, `neuralprophet`) fractionally across NVIDIA L4/T4 GPUs on Vertex AI Ray.
+- **Gemini Enterprise Managed Ray & Ray on GKE (`04`):** Pack deep learning fits (`nhits`, `nbeats`, `tft`, `deepar`, `neuralprophet`) fractionally across NVIDIA L4/T4 GPUs on Vertex AI Ray or self-managed KubeRay on GKE.
 
 ---
 
-### Lab 4: Covariates, Global Training Modes & Hierarchical Reconciliation
+### Lab 4: Covariates, Global Training Modes, Explainability & Hierarchical Reconciliation
 **Notebooks:** [`notebooks/05_covariates_and_global_models.ipynb`](notebooks/05_covariates_and_global_models.ipynb) & [`notebooks/06_hierarchical_reconciliation.ipynb`](notebooks/06_hierarchical_reconciliation.ipynb)  
 **Duration:** 25 minutes  
-**Goal:** Master `local`, `global`, and `local+global` training modes with future/past/static covariates and bottom-up/MinT hierarchical reconciliation.
+**Goal:** Master `local`, `global`, and `local+global` training modes with future/past/static covariates, Two-Tier Feature Attributions (`global` & `local`), and bottom-up/MinT hierarchical reconciliation.
 
 #### Key Highlights
-- Compare per-series (`local`) vs cross-series (`global`) vs dual (`local+global`) training modes on promotional and weather covariates (`source_series_covariates_native`).
+- Compare per-series (`local`) vs cross-series (`global`) vs dual (`local+global`) training modes on promotional and weather covariates (`source_series_covariates_native`), and inspect model-level (`level="global"`) and per-horizon (`level="local"`) feature attributions via `Forecaster.attributions_df()` and `Forecaster.plot_attributions()`.
 - Reconcile hierarchical forecasts (`bottom_up`, `top_down`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`) and verify parent-child additivity with `Forecaster.hierarchy_df()` and `Forecaster.plot_hierarchy()`.
 
 ---
 
-### Lab 5: Hyperparameter Tuning, Stacking Ensembles & Cross-Run Blending
+### Lab 5: Hyperparameter Tuning, Stacking Ensembles, Vertex AI AutoML & Cross-Run Blending
 **Notebooks:** [`notebooks/07_hpo_backtesting_and_ensembles.ipynb`](notebooks/07_hpo_backtesting_and_ensembles.ipynb) & [`notebooks/08_multi_engine_master_workflow.ipynb`](notebooks/08_multi_engine_master_workflow.ipynb)  
 **Duration:** 25 minutes  
-**Goal:** Combine Optuna hyperparameter tuning, multi-fold backtesting, in-run stacking ensembles, post-hoc re-ensembling, and cross-run multi-engine blending.
+**Goal:** Combine Optuna hyperparameter tuning, multi-fold backtesting, in-run stacking ensembles, managed Vertex AI AutoML (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`), post-hoc re-ensembling, and cross-run multi-engine blending.
 
 #### Key Highlights
 - Run Optuna hyperparameter search and inspect tuned parameters per series via `Forecaster.best_params_df()`.
 - Train meta-learners (`nnls`, `ridge`, `xgb`) over out-of-fold validation predictions and re-run ensemble strategies on completed runs via `Forecaster.reensemble()` without re-fitting base models.
-- Combine completed runs from different engines into a single unified ensemble run via `Registry.ensemble_runs()`.
+- Combine completed runs from different engines (including `vertex_automl` Tabular Workflows and AutoML Training Jobs) into a single unified ensemble run via `Registry.ensemble_runs()`.
 
 ---
 

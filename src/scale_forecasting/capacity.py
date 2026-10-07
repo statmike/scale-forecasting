@@ -325,6 +325,10 @@ DEFAULT_POLICIES: dict[str, CapacityPolicy] = {
     "vertex": CapacityPolicy(
         max_attempts=6, max_wall_seconds=3600.0, backoff_seconds=60.0, backoff_max_seconds=600.0
     ),
+    # Vertex AI AutoML Tabular Workflow PipelineJob / ForecastingTrainingJob + BatchPredictionJob.
+    "vertex_automl": CapacityPolicy(
+        max_attempts=6, max_wall_seconds=3600.0, backoff_seconds=60.0, backoff_max_seconds=600.0
+    ),
     # ~30-90s per single-VM GCE instance insert across explicit zones.
     "gce": CapacityPolicy(
         max_attempts=8, max_wall_seconds=2700.0, backoff_seconds=45.0, backoff_max_seconds=300.0

@@ -17,11 +17,11 @@ Three quantities, and everything follows from them.
 
 ```mermaid
 flowchart LR
-    Workload["Series × Models\n= Cells"] --> Fits["Cells × (Folds + 1)\n= Total Fits"]
-    Fits --> Split{"Family Placement\n(compute.families)"}
-    Split -->|"Spark, GCE Single-VM & GKE"| GCE["Compute Engine Quota\nCPUS · NVIDIA_*_GPUS"]
-    Split -->|"Ray (Vertex) & Vertex CustomJob"| VTX["Vertex AI Quota\ncustom_model_training_cpus\ncustom_model_training_nvidia_*_gpus"]
-    Split -->|"BigQuery-native"| BQS["BigQuery Slots\n(Zero VM / GPU Quota)"]
+    Workload["Series × Models<br/>= Cells"] --> Fits["Cells × (Folds + 1)<br/>= Total Fits"]
+    Fits --> Split{"Family Placement<br/>(compute.families)"}
+    Split -->|"Spark, GCE Single-VM & GKE"| GCE["Compute Engine Quota<br/>CPUS · NVIDIA_*_GPUS"]
+    Split -->|"Ray (Vertex), Vertex CustomJob & Vertex AutoML"| VTX["Vertex AI Quota<br/>custom_model_training_cpus<br/>custom_model_training_nvidia_*_gpus"]
+    Split -->|"BigQuery-native"| BQS["BigQuery Slots<br/>(Zero VM / GPU Quota)"]
 ```
 
 **Cells.** The unit of work is one *cell* — one model fitted to one series.

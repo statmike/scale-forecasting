@@ -1,7 +1,7 @@
 # Runtime dependencies — how each compute surface gets its packages
 
-The same forecasting code runs on six compute surfaces — Colab Enterprise runtimes,
-Dataproc Serverless batches, Dataproc **clusters**, Ray on Vertex, Vertex AI `CustomJob`, and Compute Engine (`gce`) Single-VM — and **each has its own native
+The same forecasting code runs across eight Python compute surfaces — Colab Enterprise runtimes,
+Dataproc Serverless batches, Dataproc **clusters**, Ray on Vertex, Vertex AI `CustomJob`, Compute Engine (`gce`) Single-VM, Google Kubernetes Engine (`gke` Indexed Jobs & Ray on GKE), and Vertex AI AutoML (`vertex_automl`) — and **each has its own native
 way of installing software**. This page is the single source of truth for *how the dependencies reach
 each surface*, so that a fit running on any of them imports the identical `scale_forecasting` package
 and the identical third-party stack (statsmodels, lightgbm, torch, …).
@@ -32,14 +32,14 @@ image and the archive both rebuild only when the locked deps change, never on a 
 
 ```mermaid
 flowchart LR
-    Lock["pyproject.toml +\n.python-version (3.11.15)\n↓\nuv.lock"] --> Req["docker/requirements.txt\n(Derived Export)"]
-    Lock --> Img["Shared Runtime Container\n(/opt/venv on debian:12-slim)"]
-    Img --> Sless["Dataproc Serverless\n& Spark Connect"]
-    Img --> Vtx["Vertex AI CustomJob &\nGCE Single-VM"]
-    Img -->|"tar /opt/venv"| Venv["Packed Venv Archive\n(gs://.../envs/<hash>.tar.gz)"]
-    Venv --> Cluster["Dataproc GCE Cluster\n(--archives=...#env)"]
-    Req --> RayEnv["Vertex AI Ray\n(runtime_env uv plugin)"]
-    Lock --> Colab["Colab Enterprise (sf-main)\n& Local uv sync --frozen"]
+    Lock["pyproject.toml +<br/>.python-version (3.11.15)<br/>↓<br/>uv.lock"] --> Req["docker/requirements.txt<br/>(Derived Export)"]
+    Lock --> Img["Shared Runtime Container<br/>(/opt/venv on debian:12-slim)"]
+    Img --> Sless["Dataproc Serverless<br/>& Spark Connect"]
+    Img --> Vtx["Vertex AI CustomJob · GCE Single-VM<br/>& GKE (Indexed Job & Ray on GKE)"]
+    Img -->|"tar /opt/venv"| Venv["Packed Venv Archive<br/>(gs://.../envs/<hash>.tar.gz)"]
+    Venv --> Cluster["Dataproc GCE Cluster<br/>(--archives=...#env)"]
+    Req --> RayEnv["Vertex AI Ray<br/>(runtime_env uv plugin)"]
+    Lock --> Colab["Colab Enterprise (sf-main)<br/>& Local uv sync --frozen"]
 ```
 
 ## The matrix
@@ -48,8 +48,11 @@ flowchart LR
 |---------|-----------|-----------------------|--------|
 | **Dataproc Serverless** (`explode` / `multi` batches) | **Custom container** | the shared runtime image, attached on every submit | `submit.py` (`runtime_config.container_image`) |
 | **Vertex AI CustomJob** (`runtime="vertex"`) | **Custom container** | the same shared runtime image (`/opt/venv/bin/python`), attached to each `WorkerPoolSpec` | `vertex_submit.py` (`container_spec.image_uri`) |
-| **Spark Connect** (interactive, nb01) — *the same Serverless product, session API not batch API* | **Custom container** + artifacts | the same image, pinned on the session; code via `addArtifacts`. Covers the **executors only** — the driver is your local process | notebook session cell |
-| **Ray on Vertex** (nb04) | **`uv` runtime_env** | `uv` installs the frozen lock into the per-job venv on Vertex's **prebuilt** Ray image | `code_delivery.py` (`build_runtime_env`) |
+| **Compute Engine Single-VM** (`runtime="gce"`) | **Container on COS VM** | the same shared runtime image launched via `docker run` on Container-Optimized OS | `vertex_submit.py` (`_build_gce_startup_script`) |
+| **GKE Indexed Job & Ray on GKE** (`runtime="gke"`) | **Custom container** | the same shared runtime image (`/opt/venv/bin/python` + bundled `ray==2.59.0`) on GKE Autopilot or Standard pods | `gke_submit.py` / `gke_ray_infra.py` |
+| **Vertex AI AutoML** (`runtime="vertex_automl"`) | **Managed Vertex pipelines / training containers** | launcher uses local/container `google-cloud-aiplatform` + `google-cloud-pipeline-components`; remote AutoML stages run inside Google-managed Kubeflow Pipeline / AutoML containers | `automl_submit.py` (`automl_mode="tabular_workflow" \| "training_job"`) |
+| **Spark Connect** (interactive, nb03) — *the same Serverless product, session API not batch API* | **Custom container** + artifacts | the same image, pinned on the session; code via `addArtifacts`. Covers the **executors only** — the driver is your local process | notebook session cell |
+| **Ray on Vertex** (`runtime="ray"`, `ray_mode="vertex"`) | **`uv` runtime_env** | `uv` installs the frozen lock into the per-job venv on Vertex's **prebuilt** Ray image | `code_delivery.py` (`build_runtime_env`) |
 | **Dataproc cluster** (`spark_mode="cluster"`) | **Self-contained venv archive** | a tar of the image's `/opt/venv` (interpreter bundled) attached to the job (`#env`) | `cluster_deps.py` + `compute.spark_deps` |
 | **Colab Enterprise** (all notebooks) | **`uv`-from-lock install** | `uv` installs the frozen lock in the runtime (bootstrap or post-startup) | notebook bootstrap cell / template |
 | **Local dev** | **`uv` project env** | `uv sync --frozen` installs the same lock | `uv.lock` |
@@ -81,7 +84,7 @@ platform facts rather than preferences. Four of them decide the whole shape:
    nothing else should have to.
 
 Constraints 2 and 3 together set the ceiling: **at most two mechanisms**, because the surface that
-must install at job start (Ray) and the surfaces that must not (Serverless and Vertex CustomJob) share none. What *is*
+must install at job start (Ray) and the surfaces that must not (Serverless, Vertex CustomJob, GCE, and GKE) share none. What *is*
 single is the thing that matters — one `uv.lock`, one build, one bump.
 
 ### The Artifact-Registry-free fallback (`SF_SERVERLESS_DEPS`)
@@ -126,6 +129,9 @@ service and how they stay aligned*:
 |---------|-------------------|----------------|------------|
 | **Dataproc Serverless** | Google-managed | shared container image (from `uv.lock`) | **Google-managed** |
 | **Vertex AI CustomJob** | Google-managed | shared container image (from `uv.lock`) | **Google-managed** |
+| **Compute Engine Single-VM (`gce`)** | Container-Optimized OS (`cos-stable`) | shared container image (from `uv.lock`) | **COS `cos-extensions install gpu`** |
+| **GKE (`job` & `ray`)** | GKE Autopilot or Standard node pools | shared container image (from `uv.lock`) | **GKE-managed NVIDIA device plugin** |
+| **Vertex AI AutoML (`vertex_automl`)** | Google-managed Vertex AI / Dataflow | Google-managed pipeline containers (launched via `uv.lock` client) | **Google-managed** |
 | **Ray on Vertex** | Google-managed | Vertex prebuilt image + `uv` runtime_env (same lock) | **Google-managed** |
 | **Dataproc cluster — CPU** | stock `2.2-debian12` VM image | packed-venv archive (same lock) | — (no GPU) |
 | **Dataproc cluster — GPU** | stock VM image, pinned to `2.2.85-debian12` | packed-venv archive (same lock) | **provided by us**, installed by an init action at cluster create |
@@ -134,12 +140,12 @@ Two invariants keep the whole picture aligned:
 
 - **One Python source of truth across every service.** `uv.lock` builds the container image and the
   `requirements.txt` export; the cluster archive is a tar of that *same* image's `/opt/venv`. Dataproc
-  Serverless and Vertex AI CustomJob consume the container directly; Ray installs the same locked deps with `uv` into the
+  Serverless, Vertex AI CustomJob, GCE Single-VM, and GKE (`job` and `ray`) consume the container directly; Ray on Vertex installs the same locked deps with `uv` into the
   per-job venv on Vertex's prebuilt image (byte-aligned with the container, no custom image needed);
   clusters can't take a container, so they carry the byte-identical environment as an archive. There is
   no second dependency definition anywhere — see [the one source of truth](#the-one-source-of-truth-uvlock--python-version).
 - **The GPU driver is the one layer managed services get for free and clusters do not.** Serverless,
-  Vertex AI CustomJob, and Ray run on Google-managed substrate with the driver already present. A Dataproc cluster is a plain set
+  Vertex AI CustomJob, GKE, Vertex AI AutoML, and Ray on Vertex run on Google-managed substrate with the driver already present (and GCE Single-VM installs it cleanly via COS's built-in `cos-extensions install gpu`). A Dataproc cluster is a plain set
   of VMs, so the driver is ours to supply — and by default it is **installed by an init action on each
   cluster create**, which costs a few minutes of boot time and needs no artifact of ours at all. Because
   that install compiles NVIDIA's kernel modules against the node's running kernel, GPU clusters pin the
@@ -151,12 +157,12 @@ Two invariants keep the whole picture aligned:
 > Only the deep-learning family on GPU hardware touches the driver layer. Statistical and ML families,
 > and everything running on CPU, ignore it entirely.
 
-## Dataproc Serverless & Vertex AI CustomJob — custom container
+## Dataproc Serverless, Vertex AI CustomJob, GCE Single-VM & GKE — custom container
 
-Serverless batches and Vertex AI CustomJobs both accept a **custom container image**, so the cleanest path is to hand them the
+Serverless batches, Vertex AI CustomJobs, GCE Single-VMs, and GKE pods all accept our **custom container image**, so the cleanest path is to hand them the
 shared runtime image directly. `submit.py` attaches it on **every** batch via
-`runtime_config.container_image`, and `vertex_submit.py` attaches it on **every** worker pool via
-`container_spec.image_uri` (invoking `/opt/venv/bin/python` directly). Nothing is installed at launch — the image is already the environment — so
+`runtime_config.container_image`, `vertex_submit.py` attaches it on **every** worker pool via
+`container_spec.image_uri` (or `docker run` on GCE COS), and `gke_submit.py` / `gke_ray_infra.py` attach it on every Kubernetes pod (invoking `/opt/venv/bin/python` directly). Nothing is installed at launch — the image is already the environment — so
 startup is fast and the executed environment is byte-for-byte the one that was built and tested. It
 also decouples our Python from the runtime version's: runtime 3.0 ships 3.12, we need 3.11 (Ray's
 ceiling), and the image makes that a non-issue.

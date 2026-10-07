@@ -11,11 +11,11 @@ one-thing-one-file rule, same `register(...)` at the bottom of the file.
 
 ```mermaid
 flowchart LR
-    M["1. Copy docs/metric_template.py\n→ metrics/my_metric.py"] --> Reg["2. Register in metrics/__init__.py\n+ append to METRIC_NAMES"]
-    Reg --> DDL["registry/ddl.py\nCREATE TABLE + ADD COLUMN IF NOT EXISTS"]
-    Reg --> Proto["registry/write_api.py\nStorage Write API Proto Field"]
-    Reg --> Score["metrics.compute_metrics\nSpark · Ray · BigQuery-native · Ensembles"]
-    Reg --> Rev["registry/reads.py & review.py\nmean_ / p10_ / p50_ / p90_"]
+    M["1. Copy docs/metric_template.py<br/>→ metrics/my_metric.py"] --> Reg["2. Register in metrics/__init__.py<br/>+ append to METRIC_NAMES"]
+    Reg --> DDL["registry/ddl.py<br/>CREATE TABLE + ADD COLUMN IF NOT EXISTS"]
+    Reg --> Proto["registry/write_api.py<br/>Storage Write API Proto Field"]
+    Reg --> Score["metrics.compute_metrics<br/>Spark · Ray · Vertex · AutoML · BigQuery · Ensembles"]
+    Reg --> Rev["registry/reads.py & review.py<br/>mean_ / p10_ / p50_ / p90_"]
 ```
 
 ## The 4-step checklist
@@ -57,11 +57,11 @@ Four things that look like they'd need editing don't, because all four are gener
 | The leaderboard aggregate projection | `registry/reads.py`, `review.py` | `mean_my_metric` / `p10_` / `p50_` / `p90_` appear in the per-run aggregate and in `review_run`. |
 
 Also free: **every engine computes it.** There is exactly one function that turns arrays into
-metric numbers — `metrics.compute_metrics` — and the Spark worker, the Ray worker, the ensemble
-scorer, and the BigQuery-native path all call it. (The native path pulls each fold's eval frame
-back to the driver and scores it in Python precisely so that a `wape` from `arima_plus` and a
+metric numbers — `metrics.compute_metrics` — and the Spark worker, the Ray worker, the Vertex/GCE/GKE worker, the Vertex AI AutoML engine, the ensemble
+scorer, and the BigQuery-native path all call it. (The native and AutoML paths pull each fold's eval frame
+back to the driver and score it in Python precisely so that a `wape` from `arima_plus` or `vertex_tide` and a
 `wape` from `xgboost` are the same quantity.) There is no SQL implementation of any metric
-anywhere, so a Python metric works for all four families the day you write it.
+anywhere, so a Python metric works for all five families the day you write it.
 
 **Two things are *not* generated**, by design:
 

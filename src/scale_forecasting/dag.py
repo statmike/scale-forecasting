@@ -27,9 +27,10 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-# The order families are listed in the DAG: the Python families first, ``native`` last, so logs and
-# manifests read consistently. Purely cosmetic — the jobs execute in parallel, not in this order.
-_FAMILY_ORDER: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native")
+# The order families are listed in the DAG: the Python/AutoML families first, ``native`` last, so
+# logs and manifests read consistently. Purely cosmetic — the jobs execute in parallel, not in this
+# order.
+_FAMILY_ORDER: tuple[str, ...] = ("statistical", "ml", "deep_learning", "automl", "native")
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,7 @@ class RunDag:
 
     @property
     def python_jobs(self) -> list[FamilyJob]:
-        """The jobs that run on a Python runtime (everything but ``native``).
+        """The jobs that run on a family submitter (everything but ``native``).
 
         Asks `registry.ids.base_family`, so a repair DAG's ``native_repair`` job routes to BigQuery
         like the family it repairs. Splitting them here — the one place the two launchers are
@@ -228,7 +229,8 @@ def check_model_params(cfg: RunConfig) -> None:
         authored = dict(cfg.model_params.get(name, {}))
         model_cls = get_model(name)
         model_cls.validate_params(authored, max_horizon=cfg.max_horizon)
-        mode = str(authored.get("training_mode", "local"))
+        default_mode = "global" if model_cls.family == "automl" else "local"
+        mode = str(authored.get("training_mode", default_mode))
         if mode in ("global", "hybrid"):
             if mode == "global" and not model_cls.supports_global:
                 raise ConfigError(
@@ -328,6 +330,8 @@ def check_hardware_coherence(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> Non
     routed_gpu, routed_type = resolve_job_gpu(cfg)
     for job in jobs:
         if job.compute is None or job.compute.hardware != "gpu":
+            continue
+        if base_family(job.family) == "automl":
             continue
         # A GPU job must have at least one model the engine will actually send to the GPU pool.
         # `split_gpu_cpu_models` is the function that does the sending, so ask it rather than

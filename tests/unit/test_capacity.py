@@ -313,6 +313,7 @@ def test_shipped_policies_cover_every_service_with_a_candidate_walk() -> None:
     assert set(cap.DEFAULT_POLICIES) == {
         "ray",
         "vertex",
+        "vertex_automl",
         "gce",
         "gke",
         "dataproc_cluster",

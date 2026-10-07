@@ -7,10 +7,10 @@ system discovers models by name at import time.
 
 ```mermaid
 flowchart LR
-    T["1. Copy docs/model_template.py\n→ models/my_model.py"] --> I["2. Implement BaseModel\nfit(y, X) & predict(horizon, X, quantiles)"]
-    I --> R["3. Call register(MyModel)\n+ import in models/__init__.py"]
-    R --> W["worker.run_cell\n(Spark / Ray / Playground)"]
-    W --> C["calibration.apply_calibration\n(Point & Interval Calibration)"]
+    T["1. Copy docs/model_template.py<br/>→ models/my_model.py"] --> I["2. Implement BaseModel<br/>fit(y, X) & predict(horizon, X, quantiles)"]
+    I --> R["3. Call register(MyModel)<br/>+ import in models/__init__.py"]
+    R --> W["worker.run_cell<br/>(Spark / Ray / Vertex / GCE / GKE / Playground)"]
+    W --> C["calibration.apply_calibration<br/>(Point & Interval Calibration)"]
     C --> BQ["Registry Tables & Leaderboard"]
 ```
 
@@ -40,9 +40,10 @@ A model is a `BaseModel` subclass (see `models/base_model.py`). The seams:
 | Piece | What it is |
 |-------|------------|
 | `name` | unique selector string |
-| `runtime` | `"python"` (runs in a Spark/Ray cell) or `"bigquery"` (SQL) |
-| `family` | `"statistical"` \| `"ml"` \| `"deep_learning"` \| `"native"` (metadata only) |
+| `runtime` | `"python"` (runs in a Spark/Ray/Vertex/GCE/GKE cell), `"vertex_automl"`, or `"bigquery"` (SQL) |
+| `family` | `"statistical"` \| `"ml"` \| `"deep_learning"` \| `"automl"` \| `"native"` |
 | `supports_exog` | `True` if `fit`/`predict` use the `X` frame |
+| `supports_explainability` | `True` if the model populates `feature_attributions` and `explanations` |
 | `supports_native_intervals` | `True` if you produce your own prediction bounds |
 | `fit(y, X)` | fit on one series; `y` is indexed by `ds`, already transformed per config |
 | `predict(horizon, X, quantiles)` | return the canonical frame in **original units** |
@@ -121,6 +122,14 @@ never recover one from an estimate that was already adjusted.
   honored. Run `pytest tests/unit/test_models_contract.py -k my_model`.
 - **HPO** (optional): implement `search_space(cls, trial)` to expose an Optuna search space;
   it's used only when `hpo.enabled` in the config.
+- **Two-tier explainability** (optional): set `supports_explainability = True`, implement
+  `feature_attributions` (returning a normalized `dict[str, float]` of Tier 1 global/series-level
+  driver importances that the worker merges into `forecast_metadata.fit_diagnostics["feature_attributions"]`),
+  and attach an `"explanations"` column on the frame returned by `predict()` containing per-horizon-step
+  dicts `{"baseline_score": float, "attributions": {feature: float}}` (Tier 2 local step-by-step
+  attributions streamed to `forecast_predictions.explanations`). Both tiers are immediately queryable
+  and visualizable via `Forecaster.attributions_df()` and `Forecaster.plot_attributions()` (or
+  `review.build_attributions_frame()` offline).
 - **Fit diagnostics** (optional): implement `diagnostics()` to return whatever your library says
   about the fit — an AIC, the order an `auto_arima` picked, the epoch an early stop landed on. It
   is called once per cell after the final fit and lands in `forecast_metadata.fit_diagnostics`, a

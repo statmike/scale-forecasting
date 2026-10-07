@@ -79,6 +79,7 @@ ray = [
     # `code_delivery.py` excludes `ray` from the on-cluster `runtime_env` package list).
     "ray[default]>=2.52",
     "google-cloud-aiplatform>=1.60",
+    "google-cloud-pipeline-components>=2.14",
     # vertex_ray imports immutabledict at module load; aiplatform only declares it under its own
     # [ray] extra, which would pin ray[default]<=2.47.1 and conflict with ours — so pull it directly.
     "immutabledict>=4.0",
@@ -93,6 +94,7 @@ submit = [
     "google-cloud-dataproc>=5.9",
     "ray[default]>=2.52",
     "google-cloud-aiplatform>=1.60",
+    "google-cloud-pipeline-components>=2.14",
     "immutabledict>=4.0",
 ]
 # Granular model extras for environment agility — install individual model libraries
@@ -215,6 +217,8 @@ module = [
     "neuralprophet.*",
     "neuralforecast.*",
     "sklearn.*",
+    "google_cloud_pipeline_components.*",
+    "kfp.*",
 ]
 ignore_missing_imports = true
 

@@ -47,7 +47,8 @@ _PYTHON_MODELS = {
     "xgboost",
 }
 _BIGQUERY_MODELS = {"arima_plus", "timesfm"}
-_ALL_MODELS = _PYTHON_MODELS | _BIGQUERY_MODELS
+_VERTEX_AUTOML_MODELS = {"vertex_l2l", "vertex_seq2seq", "vertex_tft", "vertex_tide"}
+_ALL_MODELS = _PYTHON_MODELS | _BIGQUERY_MODELS | _VERTEX_AUTOML_MODELS
 
 
 def test_all_models_registered() -> None:
@@ -77,6 +78,11 @@ def test_python_models_have_python_runtime(name: str) -> None:
 @pytest.mark.parametrize("name", sorted(_BIGQUERY_MODELS))
 def test_bigquery_models_have_bigquery_runtime(name: str) -> None:
     assert get_model(name).runtime == "bigquery"
+
+
+@pytest.mark.parametrize("name", sorted(_VERTEX_AUTOML_MODELS))
+def test_vertex_automl_models_have_vertex_automl_runtime(name: str) -> None:
+    assert get_model(name).runtime == "vertex_automl"
 
 
 def test_unknown_model_raises_listing_known() -> None:

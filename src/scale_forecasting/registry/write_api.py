@@ -51,6 +51,7 @@ _PRED_SPEC: tuple[tuple[str, str], ...] = (
     # so every ensemble prediction row before that date carries NULL — which is why every read of
     # this table orders `created_at DESC NULLS LAST` rather than plain DESC.
     ("created_at", "S"),
+    ("explanations", "S"),
 )
 
 _OOF_SPEC: tuple[tuple[str, str], ...] = (

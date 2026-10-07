@@ -43,25 +43,30 @@ def available_models(*, include_bigquery: bool = False, installed_only: bool = F
     names = list_models(available_only=installed_only)
     if include_bigquery:
         return names
-    return [n for n in names if get_model(n).runtime != "bigquery"]
+    return [n for n in names if get_model(n).runtime == "python"]
 
 
 def model_catalog() -> pd.DataFrame:
     """Every registered model with the runtimes it can run on — the whole suite, one table.
 
-    One row per model (Python *and* BigQuery-native), so the story is complete: which model
-    runs where. The where-it-runs flags are derived from the model's class metadata, not a
-    hand-maintained list, so a new model file shows up here automatically:
+    One row per model (Python, Vertex AI AutoML, *and* BigQuery-native), so the story is
+    complete: which model runs where, what covariates it accepts, and whether it emits
+    two-tier feature attributions (`explainability`). The flags are derived from the model's
+    class metadata, not a hand-maintained list, so a new model file shows up here automatically:
 
     - **Python-runtime** models run the *identical* cell code (``worker.run_cell``) on every
       Python compute — ``local`` (this playground), ``spark`` (Dataproc fan-out), ``ray``
-      (Ray on Vertex), ``vertex`` (Vertex CustomJob), and ``gce`` (GCE Single-VM).
+      (Ray on Vertex or GKE), ``vertex`` (Vertex CustomJob), ``gce`` (GCE Single-VM), and
+      ``gke`` (GKE Indexed Jobs).
+    - **Vertex AI AutoML** models (``runtime == "vertex_automl"``) run global cross-series
+      Tabular Workflows or AutoML training jobs in the cloud (``engines/automl_engine``) and
+      also provide an offline panel ridge approximation for local sandbox testing.
     - **BigQuery-native** models run only as SQL in ``bigquery`` (``engines/bigquery_engine``);
       they can't run in a local/Spark/Ray Python cell (their in-process fit/predict raise).
 
     Columns: ``model, family, runtime, package, package_url, available, local, spark, ray, gpu,
-    bigquery, exog, future_covariates, past_covariates, static_covariates, global_mode,
-    hybrid_mode``.
+    vertex_automl, bigquery, exog, future_covariates, past_covariates, static_covariates,
+    explainability, global_mode, hybrid_mode``.
     """
     rows: list[dict[str, Any]] = []
     for name in list_models():
@@ -81,11 +86,13 @@ def model_catalog() -> pd.DataFrame:
                 # The model's own capability flag, not a family guess: "deep_learning" is a
                 # scheduling family, "has a tensor library under it" is what a device needs.
                 "gpu": cls.gpu_capable,
+                "vertex_automl": cls.runtime == "vertex_automl",
                 "bigquery": cls.runtime == "bigquery",
                 "exog": cls.supports_exog,
                 "future_covariates": cls.supports_future_covariates,
                 "past_covariates": cls.supports_past_covariates,
                 "static_covariates": cls.supports_static_covariates,
+                "explainability": cls.supports_explainability,
                 "global_mode": cls.supports_global,
                 "hybrid_mode": cls.supports_hybrid,
             }

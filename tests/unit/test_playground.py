@@ -34,7 +34,7 @@ def test_available_models_excludes_bigquery_by_default() -> None:
 def test_available_models_is_the_factory_registry() -> None:
     from scale_forecasting.models import get_model, list_models
 
-    expected = [n for n in list_models() if get_model(n).runtime != "bigquery"]
+    expected = [n for n in list_models() if get_model(n).runtime == "python"]
     assert available_models() == expected
 
 
@@ -42,9 +42,9 @@ def test_model_catalog_covers_every_registered_model() -> None:
     from scale_forecasting.models import list_models
 
     df = model_catalog()
-    # Every registered model appears — Python AND BigQuery-native (the whole suite, one table).
+    # Every registered model appears — Python, BigQuery-native, AND Vertex AutoML.
     assert set(df["model"]) == set(list_models())
-    assert {"arima_plus", "timesfm"}.issubset(set(df["model"]))
+    assert {"arima_plus", "timesfm", "vertex_l2l", "vertex_tide"}.issubset(set(df["model"]))
 
 
 def test_model_catalog_runtime_flags_are_consistent() -> None:
@@ -53,12 +53,28 @@ def test_model_catalog_runtime_flags_are_consistent() -> None:
     py = df[df["runtime"] == "python"]
     assert py[["local", "spark", "ray"]].all().all()
     assert not py["bigquery"].any()
+    assert not py["vertex_automl"].any()
     native = df[df["runtime"] == "bigquery"]
     assert native["bigquery"].all()
-    assert not native[["local", "spark", "ray"]].any().any()
-    # GPU is only the deep-learning family (neuralprophet), never a native model.
+    assert not native[["local", "spark", "ray", "vertex_automl"]].any().any()
+    automl = df[df["runtime"] == "vertex_automl"]
+    assert automl["vertex_automl"].all()
+    assert set(automl.index) == {"vertex_l2l", "vertex_tide", "vertex_tft", "vertex_seq2seq"}
+    # Explainability is supported by all 5 ml models and all 4 automl models.
+    assert set(df[df["explainability"]].index) == {
+        "regression_lags",
+        "random_forest",
+        "lightgbm",
+        "xgboost",
+        "catboost",
+        "vertex_l2l",
+        "vertex_tide",
+        "vertex_tft",
+        "vertex_seq2seq",
+    }
+    # GPU is only the deep-learning and automl families, never a statistical/ml/native model.
     assert bool(df.loc["neuralprophet", "gpu"]) is True
-    assert not df[df["family"] != "deep_learning"]["gpu"].any()
+    assert not df[~df["family"].isin(["deep_learning", "automl"])]["gpu"].any()
 
 
 def test_bakeoff_runs_base_models_and_two_ensembles() -> None:

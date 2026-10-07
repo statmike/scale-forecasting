@@ -24,8 +24,8 @@ the module comment (next to the resource) wins.
 ```mermaid
 flowchart LR
     subgraph Stage1["Stage 1 · terraform/bootstrap/ (Local State, Run Once)"]
-        B1["GCP Project (optional)\n+ Billing Link"]
-        B2["GCS State Bucket\n<project_id>-tfstate"]
+        B1["GCP Project (optional)<br/>+ Billing Link"]
+        B2["GCS State Bucket<br/><project_id>-tfstate"]
         B1 --> B2
     end
     subgraph Stage2["Stage 2 · terraform/main/ (Remote State in GCS)"]
@@ -57,7 +57,7 @@ the services are on); everything else depends on it.
 
 | Module | Creates | Notes |
 |--------|---------|-------|
-| `apis` | Enables the ~15 Google APIs the platform uses | `disable_on_destroy = false` so a teardown never yanks APIs other work relies on |
+| `apis` | Enables the ~18 Google APIs the platform uses | `disable_on_destroy = false` so a teardown never yanks APIs other work relies on |
 | `iam` | The two service accounts + their least-privilege roles + three custom roles | The heart of "why permissions" — see [Permissions](#permissions-why-each-is-granted-and-who-uses-it) |
 | `storage` | Three GCS buckets: `warehouse`, `artifacts`, `code` | Separate buckets, not one with prefixes — see [Storage](#storage-three-buckets-on-purpose) |
 | `bigquery` | The dataset + the BigLake (Cloud Resource) connection | Tables are **not** here — the app creates them. Connection exists for the Iceberg source variant |
@@ -65,6 +65,7 @@ the services are on); everything else depends on it.
 | `container` | The Artifact Registry Docker repo **and the Cloud Build run that fills it** | Owns the *repo* and builds + pushes the shared runtime image on apply (`build_image`, content-addressed on `docker/`) — see [The runtime image](#the-runtime-image) |
 | `network` | VPC + subnet + firewall + PSA peering + Cloud NAT + PSC-I attachment | Serverless compute needs a private-access subnet; Ray needs the private path — see [Networking](#networking-what-each-piece-is-for) |
 | `composer` | *(gated, off by default)* Composer 3 (Airflow) environment | The only real at-rest cost (~$300–400/mo). Start/stop with one variable |
+| `gke` | *(gated, off by default)* Standing GKE cluster with scale-to-zero CPU & GPU node pools | Optional standing cluster (`create_gke = false` by default); `gke_submit` can also provision an ephemeral GKE cluster per job |
 | `seed` | *(on by default)* The Dataproc Serverless batch that materializes the example dataset | Runs once on the first apply; `terraform apply` submits **and waits** for the batch. See [The example dataset](#the-example-dataset) |
 
 The **infrastructure** — everything except the image build, the seed batch, and `composer` — is
@@ -152,11 +153,12 @@ toggles (all default to the greenfield/quickstart behavior).
 | `create_service_accounts` | `true` | You bring your own SAs | `runner_sa_email` + `compute_sa_email` (and your admin owns their grants) |
 | `create_network` | `true` | Your org already manages a VPC | `subnetwork_uri` — a subnet with **Private Google Access** + an **internal-ingress** firewall rule |
 | `create_composer` | `false` | You want scheduled DAG runs | Nothing — flip **on** (starts the ~$300–400/mo meter); flip off to stop it |
+| `create_gke` | `false` | You want a standing GKE cluster (`SF_GKE_CLUSTER`) | Nothing — flip **on** (node pools scale to `0` at rest) |
 | `build_image` | `true` | You build/push the runtime image yourself (CI / air-gapped) | Push your image to the `seed_image_tag` before running compute |
 | `run_seed` | `true` | You'll bring your own source table (skip the example data) | Flip **off**; then point runs at your own `source_series_*` table |
 | `create_project` *(bootstrap)* | `true` | Your org pre-creates projects | An existing `project_id` |
 
-The BYO pattern is identical across `apis`, `iam`, `network`, `composer`, and `seed`: `create = false`
+The BYO pattern is identical across `apis`, `iam`, `network`, `composer`, `gke`, and `seed`: `create = false`
 → the module builds nothing and passes your existing resource through. A locked-down org owns its own
 VPC/SAs/APIs and this deployment stays out of the way.
 
@@ -173,9 +175,9 @@ subnet without it will fail at batch-submission time, not at apply time.
 The `apis` module enables exactly these, grouped by what they're for:
 
 **Data + lineage**
-- **BigQuery** (`bigquery.googleapis.com`) — the run registry (three native tables + backtest OOF),
+- **BigQuery** (`bigquery.googleapis.com`, `bigquerystorage.googleapis.com`) — the run registry (five native tables: `run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof` + five curated views),
   the BigQuery-native models (`ARIMA_PLUS`, `TimesFM`, SQL-only), and the example
-  input tables. This is the system's spine: every run's config, metrics, forecasts, and artifact
+  input tables. This is the system's spine: every run's config, metrics, forecasts, feature attributions, and artifact
   links land here.
 - **BigLake / Cloud Resource connection** (`bigqueryconnection.googleapis.com`) — the managed-Iceberg
   source variant (`source_series_iceberg`) reads/writes its GCS files *through* this connection's
@@ -183,21 +185,18 @@ The `apis` module enables exactly these, grouped by what they're for:
   connection; the connection exists only for the Iceberg input format.
 - **Cloud Storage** (`storage.googleapis.com`) — three buckets (below).
 
-**Python compute (one runtime per run)**
-- **Dataproc Serverless** (`dataproc.googleapis.com`) — the Spark engine and the seed batch. No
-  cluster to manage; you submit a batch and it runs.
-- **Vertex AI** (`aiplatform.googleapis.com`) — Ray on Vertex. The runner SA creates an autoscaling
-  Ray cluster (a Vertex `PersistentResource`), runs the job, and tears it down.
-
-**Networking for that compute**
-- **Compute Engine** (`compute.googleapis.com`) — the networking substrate: the VPC, subnet,
-  firewall, Cloud NAT, and the PSC-I network attachment.
+**Compute runtimes (one runtime per family job)**
+- **Dataproc Serverless & Clusters** (`dataproc.googleapis.com`) — the Spark engine (`serverless`, `cluster`, `connect`) and the seed batch.
+- **Vertex AI** (`aiplatform.googleapis.com`) — Ray on Vertex (`PersistentResource`), serverless Vertex AI `CustomJob` (`runtime="vertex"`), and Vertex AI AutoML & Tabular Workflows (`runtime="vertex_automl"`, `PipelineJob`, `AutoMLForecastingTrainingJob`, `BatchPredictionJob`).
+- **Dataflow & Pipelines** (`dataflow.googleapis.com`, `pipelines.googleapis.com`) — used by Vertex AI Tabular Workflows for Forecasting (`feature_transform_engine` Dataflow step inside the managed Kubeflow Pipeline).
+- **Google Kubernetes Engine** (`container.googleapis.com`) — GKE Indexed Jobs (`gke_mode="job"`) and Ray on GKE (`gke_mode="ray"` / `ray_mode="gke"`).
+- **Compute Engine** (`compute.googleapis.com`) — both the single-VM container runtime (`runtime="gce"`) and the networking substrate (VPC, subnet, firewall, Cloud NAT, and PSC-I network attachment).
 - **Service Networking** (`servicenetworking.googleapis.com`) — Private Services Access peering, the
   private path Vertex Managed Ray needs to reach the cluster over internal IPs.
 
 **Image supply chain**
-- **Artifact Registry** (`artifactregistry.googleapis.com`) — holds the one shared Spark/Ray runtime
-  image, so the *same* code + deps run local == Dataproc == Ray.
+- **Artifact Registry** (`artifactregistry.googleapis.com`) — holds the one shared Spark/Ray/Vertex/GCE/GKE runtime
+  image, so the *same* code + deps run across all container runtimes.
 - **Cloud Build** (`cloudbuild.googleapis.com`) — builds that image from `docker/Dockerfile` on the
   first apply (`build_image`, on by default).
 
@@ -269,8 +268,8 @@ ever**.
 
 | SA | Who runs as it | What it does |
 |----|----------------|--------------|
-| `scale-forecasting-runner` | The orchestrator (you locally, or Composer) | Reads/writes BigQuery, submits Dataproc/Ray jobs, and creates/tears down its own Ray cluster |
-| `scale-forecasting-compute` | Attached to Dataproc/Ray **workers** | BigQuery data + GCS artifacts only — no job-submission or cluster-lifecycle power |
+| `scale-forecasting-runner` | The orchestrator (you locally, Colab Enterprise, or Composer) | Reads/writes BigQuery, submits Dataproc, Ray, Vertex CustomJob, GCE, GKE, and Vertex AI AutoML jobs, and manages ephemeral clusters/VMs |
+| `scale-forecasting-compute` | Attached to Dataproc, Ray, Vertex CustomJob, GCE, GKE, and Vertex AI AutoML **workers** | BigQuery data + GCS artifacts + Dataflow/Batch worker execution |
 
 The runner is allowed to **impersonate** the compute SA (`roles/iam.serviceAccountUser`) so it can
 attach it to worker jobs — again, no keys.
@@ -283,8 +282,11 @@ attach it to worker jobs — again, no keys.
 | `roles/bigquery.jobUser` | Run queries / load jobs | predefined |
 | **`sfConnectionDelegate`** | Get + use + **delegate** the BigLake connection (delegate is what lets it create managed-Iceberg tables *through* the connection's agent) | **custom** |
 | `roles/storage.objectAdmin` | Read/write the warehouse + artifacts + code buckets | predefined |
-| `roles/dataproc.editor` | Submit Dataproc Serverless batches | predefined |
-| `roles/aiplatform.user` | Submit Ray-on-Vertex jobs (get/list clusters) | predefined |
+| `roles/dataproc.editor` | Submit Dataproc Serverless batches and manage ephemeral Dataproc clusters | predefined |
+| `roles/aiplatform.user` | Submit Ray-on-Vertex jobs, Vertex AI `CustomJob`s, and Vertex AI AutoML `PipelineJob` / `BatchPredictionJob`s | predefined |
+| `roles/dataflow.developer` | Allow Vertex AI Tabular Workflows (`automl_mode="tabular_workflow"`) to launch Dataflow feature-transform jobs | predefined |
+| `roles/compute.instanceAdmin.v1` | Create and delete ephemeral single-VM Compute Engine (`runtime="gce"`) instances | predefined |
+| `roles/container.admin` | Create/delete ephemeral GKE clusters and submit Kubernetes `Job`/`Deployment` manifests (`runtime="gke"`) | predefined |
 | **`sfRayClusterManager`** | Create + delete + get + list the Ray cluster it runs on | **custom** |
 
 ### Compute SA roles
@@ -293,10 +295,12 @@ attach it to worker jobs — again, no keys.
 |------|-----|---------|
 | `roles/bigquery.dataEditor` | Read `source_series`, write results | predefined |
 | `roles/bigquery.jobUser` | Run queries | predefined |
-| `roles/bigquery.readSessionUser` | Storage Read API — the spark-bigquery connector reads the input | predefined |
+| `roles/bigquery.readSessionUser` | Storage Read API — Spark, Ray, Vertex, GCE, and GKE workers read the input panel | predefined |
 | **`sfConnectionDelegate`** | Get + use + delegate the BigLake connection | **custom** |
-| `roles/storage.objectAdmin` | Read/write model artifacts | predefined |
+| `roles/storage.objectAdmin` | Read/write model artifacts and staging markers | predefined |
 | `roles/dataproc.worker` | Batch runtime SA: logs, metrics, staging | predefined |
+| `roles/aiplatform.user` | Execute Vertex AI Pipeline components (`tabular_workflow`) and `BatchPredictionJob` steps | predefined |
+| `roles/dataflow.developer` + `roles/dataflow.worker` | Launch and execute Dataflow workers inside Vertex AI Tabular Workflows (`feature_transform_engine`) | predefined |
 | `roles/artifactregistry.reader` | Pull the shared runtime image | predefined |
 
 ### Why three custom roles instead of predefined ones

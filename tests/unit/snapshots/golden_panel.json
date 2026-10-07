@@ -2113,6 +2113,15 @@
         1432,
         1460
       ]
+    ],
+    "configs/smokes/42_vertex_automl_tabular_workflow.json": [
+      [
+        0,
+        0,
+        1446,
+        1446,
+        1460
+      ]
     ]
   }
 }

@@ -22,7 +22,7 @@ schema) surfaces as a single `ConfigError`.
 |-------|------|---------|---------|
 | `run_name` | `str` | *required* | Human name for the run. |
 | `data` | `DataConfig` | *required* | Where the series come from and their shape. |
-| `python_runtime` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
+| `python_runtime` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` \| `"vertex_automl"` | `"spark"` | Run-level **default** runtime for the Python model families; each family can override it (see below). |
 | `models` | `list[str]` | *required* (≥1) | Model names to run (see [models_reference.md](./models_reference.md) or `playground --list`). |
 | `model_params` | `dict[str, dict[str, …]]` | `{}` | Per-model hyperparameters, keyed by model name — see below. |
 | `features` | `FeaturesConfig` | `{}` | Optional feature engineering. |
@@ -35,15 +35,15 @@ schema) surfaces as a single `ConfigError`.
 
 ```mermaid
 flowchart LR
-    RunCfg["RunConfig"] --> Data["data (DataConfig)\nsource_table · freq · horizon"]
-    RunCfg --> Models["models + model_params\n30 registered models across 4 families"]
-    RunCfg --> Feat["features (FeaturesConfig)\ntransform · holidays · fourier\nlevel_shift · static/future/past covariates"]
-    RunCfg --> BT["backtest (BacktestConfig)\nscheme · n_folds · gap\nshort_series · decision_metric"]
-    RunCfg --> Out["output (OutputConfig)\npoint_forecast: auto | median | mean | raw"]
-    RunCfg --> HPO["hpo (HpoConfig)\nOptuna: fleetwide | per_series"]
-    RunCfg --> Ens["ensemble (EnsembleConfig)\nmean · median · inverse_error\nnnls · ridge · xgb"]
-    RunCfg --> Hier["hierarchy (HierarchyConfig)\nlevels · reconciliation_methods\nbottom_up · top_down · mint_shrink"]
-    RunCfg --> Comp["compute (ComputeConfig)\nfamilies · ensemble · capacity · profile"]
+    RunCfg["RunConfig"] --> Data["data (DataConfig)<br/>source_table · freq · horizon"]
+    RunCfg --> Models["models + model_params<br/>34 registered models across 5 families"]
+    RunCfg --> Feat["features (FeaturesConfig)<br/>transform · holidays · fourier<br/>level_shift · static/future/past covariates"]
+    RunCfg --> BT["backtest (BacktestConfig)<br/>scheme · n_folds · gap<br/>short_series · decision_metric"]
+    RunCfg --> Out["output (OutputConfig)<br/>point_forecast: auto | median | mean | raw"]
+    RunCfg --> HPO["hpo (HpoConfig)<br/>Optuna: fleetwide | per_series"]
+    RunCfg --> Ens["ensemble (EnsembleConfig)<br/>mean · median · inverse_error<br/>nnls · ridge · xgb"]
+    RunCfg --> Hier["hierarchy (HierarchyConfig)<br/>levels · reconciliation_methods<br/>bottom_up · top_down · mint_shrink"]
+    RunCfg --> Comp["compute (ComputeConfig)<br/>families · ensemble · capacity · profile"]
 ```
 
 **Cross-field rules** (enforced after parsing):
@@ -54,7 +54,7 @@ flowchart LR
   are dropped with a warning (they need OOF); calculated strategies remain. Not an error.
 
 **`python_runtime` — the run-level default runtime for the Python model families** (the native family
-always runs in parallel in BigQuery, regardless of this choice):
+always runs in parallel in BigQuery, and the `automl` family defaults to `vertex_automl`):
 
 - `spark` (default) — Dataproc Serverless (`spark_mode="serverless"`) or Dataproc Standard Cluster (`spark_mode="cluster"`). The **100k CPU workhorse**; it fans out one task per
   `(series, model)` cell (series cross-joined with the family's models), so a family's job finishes in
@@ -65,11 +65,12 @@ always runs in parallel in BigQuery, regardless of this choice):
 - `gke` — **Google Kubernetes Engine (`GKE`)**. Executes Python families on a standing GKE cluster (`compute.gke_cluster_name` / `SF_GKE_CLUSTER`) or an ephemeral GKE cluster provisioned for the run and deleted in `try ... finally`. Supports two execution modes (`compute.gke_mode`):
   - `gke_mode = "job"` (default): Launches a Kubernetes `batch/v1` **Indexed Job** (`completionMode: Indexed`, `completions = W`, `parallelism = W`) running `vertex_engine.py` with `JOB_COMPLETION_INDEX` (`0..W-1`) mapped to `WorkerTopology(rank=r, world_size=W, source="k8s_indexed_job")`, contiguous Storage Read `row_restriction`, LPT cell ordering, and dedicated per-model Pods for `deep_learning` / global models.
   - `gke_mode = "ray"`: Launches a Ray-on-GKE cluster (`ray_engine.py`, `ray==2.59.0`) inside the GKE namespace (using a Headless `Service` + Worker `Deployment` + Head `Job`, or a KubeRay `ray.io/v1` `RayCluster` manifest).
+- `vertex_automl` — **Gemini Enterprise / Vertex AI AutoML Forecasting & Tabular Workflow for Forecasting** (`automl_engine.py`). Runs the `automl` family (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`) via Vertex AI Pipelines (`automl_mode="tabular_workflow"`, default) or managed `AutoMLForecastingTrainingJob` (`automl_mode="training_job"`), indexing `stage_1_tuning_result_artifact_uri` by `run_id` for Stage-2 warm-starting and capturing both Tier 1 (`forecast_metadata.fit_diagnostics["feature_attributions"]`) and Tier 2 (`forecast_predictions.explanations`) feature attributions.
 
-A run resolves its models into **one job per family** (`statistical` / `ml` / `deep_learning`, plus
+A run resolves its models into **one job per family** (`statistical` / `ml` / `deep_learning` / `automl`, plus
 `native` in BigQuery), all running in parallel under one `run_id`. Each Python family runs on
 `python_runtime` unless it is overridden **per family** via `compute.families` (below) — so one run
-can put its statistical family on Spark and its deep-learning family on Vertex `CustomJob`, GCE, GKE, or Ray. See the DAG model in
+can put its statistical family on Spark, its deep-learning family on Vertex `CustomJob`, GCE, GKE, or Ray, and its `automl` family on `vertex_automl`. See the DAG model in
 [architecture.md](./architecture.md).
 
 ## `data` — `DataConfig`
@@ -716,7 +717,7 @@ knobs only matter for a family that runs on Ray.
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
-| `families` | `dict[family → FamilyCompute]` | `{}` | keys ∈ `statistical`/`ml`/`deep_learning` | Per-family runtime/hardware overrides (see below). |
+| `families` | `dict[family → FamilyCompute]` | `{}` | keys ∈ `statistical`/`ml`/`deep_learning`/`automl` | Per-family runtime/hardware overrides (see below). |
 | `ensemble` | `EnsembleCompute` | `{}` | — | *When* the ensemble node runs relative to the families (see below). |
 | `max_parallelism` | `int` | `1000` | `> 0` | Max parallel tasks. |
 | `bucket_target_cells` | `int` | `8` | `> 0` | Target cells per Spark bucket (shuffle-partition sizing). |
@@ -733,6 +734,7 @@ knobs only matter for a family that runs on Ray.
 | `gke_mode` | `"job"` \| `"ray"` | `"job"` | — | Execution mode when `runtime="gke"`: `"job"` launches a Kubernetes `batch/v1` Indexed Job (`vertex_engine.py`); `"ray"` launches a Ray-on-GKE cluster (`ray_engine.py`). |
 | `gke_cluster_name` | `str` \| `null` | `null` | — | Reuse a standing GKE cluster by name (or `SF_GKE_CLUSTER`); `null` provisions an ephemeral GKE cluster per run/hardware kind and deletes it on exit. |
 | `gke_namespace` | `str` | `"default"` | — | Kubernetes namespace for GKE Indexed Jobs and Ray-on-GKE workloads (overridable via `SF_GKE_NAMESPACE`). |
+| `automl_mode` | `"tabular_workflow"` \| `"training_job"` | `"tabular_workflow"` | — | Execution mode when `runtime="vertex_automl"`: `"tabular_workflow"` launches the glass-box Kubeflow Pipeline (`google-cloud-pipeline-components`) with Stage-1/Stage-2 tuning reuse; `"training_job"` launches a managed `AutoMLForecastingTrainingJob` (`vertex_l2l` only). |
 | `ray_regions` | `list[str]` \| `null` | `null` | — | Priority-ordered candidate regions for the ephemeral cluster. |
 | `ray_head_machine_type` | `str` | `"n1-standard-16"` | — | Head-node type (don't drop below, or job submit hangs). |
 | `ray_cpu_machine_type` | `str` | `"n1-standard-8"` | — | CPU worker-pool machine type (overridden when `machine_type` is explicitly set). |
@@ -1055,19 +1057,20 @@ measured answer is CPU.
 
 | Field | Type | Options | Purpose |
 |-------|------|---------|---------|
-| `runtime` | `str` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` | Runtime for this family (overrides `python_runtime`). |
+| `runtime` | `str` | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` \| `"vertex_automl"` | Runtime for this family (overrides `python_runtime`). |
 | `spark_mode` | `str` | `"serverless"` \| `"cluster"` | Spark launch mode (Spark only). `"cluster"` runs on a Dataproc cluster — needed for a T4 or A100 GPU on Spark. |
 | `spark_cluster_name` | `str` | — | Reuse an existing Dataproc cluster by name (requires `spark_mode="cluster"`). |
 | `gke_mode` | `str` | `"job"` \| `"ray"` | Execution mode when `runtime="gke"`: `"job"` runs a Kubernetes `batch/v1` Indexed Job (`vertex_engine.py`); `"ray"` runs Ray-on-GKE (`ray_engine.py`). |
 | `gke_cluster_name` | `str` | — | Reuse an existing GKE cluster by name for this family (`runtime="gke"` or `ray_mode="gke"`). |
 | `ray_mode` | `str` | `"vertex"` \| `"gke"` | Execution backend when `runtime="ray"`: `"vertex"` runs on Vertex AI Managed Ray; `"gke"` routes the Ray cluster onto GKE (`gke_mode="ray"`). |
-| `hardware` | `str` | `"cpu"` \| `"gpu"` | Hardware profile for this family (GPU only for `deep_learning`). |
+| `automl_mode` | `str` | `"tabular_workflow"` \| `"training_job"` | Execution mode when `runtime="vertex_automl"`: `"tabular_workflow"` runs the glass-box Vertex AI Pipeline (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`); `"training_job"` runs a managed `AutoMLForecastingTrainingJob` (`vertex_l2l`). |
+| `hardware` | `str` | `"cpu"` \| `"gpu"` | Hardware profile for this family (GPU only for `deep_learning` and `automl`). |
 | `gpu_type` | `str` | `"T4"` \| `"L4"` \| `"A100"` \| `"A100_80GB"` | GPU type when `hardware="gpu"`. |
 | `accelerator_count` | `int` | `≥ 1` | Per-VM GPU count override for this family (`T4` ∈ `{1,2,4}`; `L4` ∈ `{1,2,4,8}`; `A100` ∈ `{1,2,4,8,16}`; `A100_80GB` ∈ `{1,2,4,8}`). |
-| `machine_type` | `str` | `"auto"` or GCE machine type | Per-family GCE machine type override across `vertex`, `gce`, `gke`, and `ray` (rejected on `spark` `serverless`). Validated against `(hardware, gpu_type, accelerator_count)`. |
-| `workers` | `int` | `≥ 1` (`1` on `gce`) | Per-family fixed worker/replica count across `vertex`, `gke`, `ray`, and `spark` (must be omitted or `1` on single-VM `runtime="gce"`). |
-| `min_workers` | `int` | `≥ 1` | Per-family autoscaling floor for `runtime="ray"` or `runtime="spark"` (rejected on `vertex`, `gce`, and `gke`). |
-| `max_workers` | `int` | `≥ 1` (`≥ min_workers`) | Per-family autoscaling ceiling for `runtime="ray"` or `runtime="spark"` (rejected on `vertex`, `gce`, and `gke`). |
+| `machine_type` | `str` | `"auto"` or GCE machine type | Per-family GCE machine type override across `vertex`, `gce`, `gke`, `ray`, and `vertex_automl` (rejected on `spark` `serverless`). Validated against `(hardware, gpu_type, accelerator_count)`. |
+| `workers` | `int` | `≥ 1` (`1` on `gce`) | Per-family fixed worker/replica count across `vertex`, `gke`, `ray`, `spark`, and `vertex_automl` (must be omitted or `1` on single-VM `runtime="gce"`). |
+| `min_workers` | `int` | `≥ 1` | Per-family autoscaling floor for `runtime="ray"` or `runtime="spark"` (rejected on `vertex`, `gce`, `gke`, and `vertex_automl`). |
+| `max_workers` | `int` | `≥ 1` (`≥ min_workers`) | Per-family autoscaling ceiling for `runtime="ray"` or `runtime="spark"` (rejected on `vertex`, `gce`, `gke`, and `vertex_automl`). |
 
 **Cross-field rules** (enforced at config-load):
 
@@ -1075,12 +1078,13 @@ measured answer is CPU.
   requires `spark_mode="cluster"`.
 - `gke_mode` is valid only when `runtime="gke"`.
 - `ray_mode` is valid only when `runtime="ray"`.
+- `automl_mode` is valid only when `runtime="vertex_automl"`.
 - `gke_cluster_name` requires `runtime="gke"` or `ray_mode="gke"`.
 - `runtime="gce"` is a single-VM runtime (`workers` must be omitted or `1`).
-- `min_workers` / `max_workers` are valid only on autoscaling runtimes (`ray`, `spark`); `vertex`, `gce`, and `gke` require fixed `workers`.
+- `min_workers` / `max_workers` are valid only on autoscaling runtimes (`ray`, `spark`); `vertex`, `gce`, `gke`, and `vertex_automl` require fixed `workers`.
 - `machine_type` is rejected when `runtime="spark"` and `spark_mode="serverless"`.
-- A GPU (`hardware="gpu"`, `gpu_type`, or `accelerator_count`) is allowed **only** for the `deep_learning` family.
-- Dataproc Serverless supports **`L4` only** (`T4`, `A100`, and `A100_80GB` require `spark_mode="cluster"` or `runtime in ("ray", "vertex", "gce", "gke")`).
+- A GPU (`hardware="gpu"`, `gpu_type`, or `accelerator_count`) is allowed **only** for the `deep_learning` and `automl` families.
+- Dataproc Serverless supports **`L4` only** (`T4`, `A100`, and `A100_80GB` require `spark_mode="cluster"` or `runtime in ("ray", "vertex", "gce", "gke", "vertex_automl")`).
 - `hardware="cpu"` with `gpu_type` or `accelerator_count` set → error (drop it or set `hardware="gpu"`).
 
 **A GPU plan is checked again at plan time, before anything is provisioned.** Two separate things

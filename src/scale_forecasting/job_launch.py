@@ -72,6 +72,7 @@ def _system_job_id(job_key: str, runtime: str) -> str:
         gce_instance_id,
         gke_job_id,
         ray_submission_id,
+        vertex_automl_job_id,
         vertex_job_id,
     )
 
@@ -81,6 +82,8 @@ def _system_job_id(job_key: str, runtime: str) -> str:
         return ray_submission_id(job_key)
     if runtime == "vertex":
         return vertex_job_id(job_key)
+    if runtime == "vertex_automl":
+        return vertex_automl_job_id(job_key)
     if runtime == "gce":
         return gce_instance_id(job_key)
     if runtime == "gke":
@@ -155,6 +158,12 @@ def _entry_handle(
     if compute.runtime == "vertex":
         return ProbeHandle(
             "vertex",
+            native_id=system_job_id,
+            region=settings.region,
+        )
+    if compute.runtime == "vertex_automl":
+        return ProbeHandle(
+            "vertex_automl",
             native_id=system_job_id,
             region=settings.region,
         )

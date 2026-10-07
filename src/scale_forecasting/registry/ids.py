@@ -37,7 +37,14 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 # The families a *config* can plan: every model family plus the downstream ensemble node. Mirrors
 # ``config.JobFamily``; duplicated as a runtime tuple here (a ``Literal`` isn't iterable) so the key
 # helpers can validate without importing config at runtime.
-BASE_JOB_FAMILIES: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native", "ensemble")
+BASE_JOB_FAMILIES: tuple[str, ...] = (
+    "statistical",
+    "ml",
+    "deep_learning",
+    "automl",
+    "native",
+    "ensemble",
+)
 
 # The families a *repair* can plan. A repair re-asks a subset of a family's models, and it submits
 # under its own family token — ``statistical_repair`` beside ``statistical`` — rather than as a
@@ -55,7 +62,7 @@ BASE_JOB_FAMILIES: tuple[str, ...] = ("statistical", "ml", "deep_learning", "nat
 # ``ensemble_enabled=False``), because whether to re-ensemble after a repair is a question about the
 # run's node ordering rather than about a narrowed job list.
 REPAIR_SUFFIX = "_repair"
-REPAIRABLE_FAMILIES: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native")
+REPAIRABLE_FAMILIES: tuple[str, ...] = ("statistical", "ml", "deep_learning", "automl", "native")
 REPAIR_JOB_FAMILIES: tuple[str, ...] = tuple(f + REPAIR_SUFFIX for f in REPAIRABLE_FAMILIES)
 
 # Every family token that can own a job row — what `make_job_key` validates against and what
@@ -160,6 +167,7 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("compute", "gke_cluster_name"): None,
     ("compute", "gke_namespace"): "default",
     ("compute", "ray_mode"): "vertex",
+    ("compute", "automl_mode"): "tabular_workflow",
 }
 
 
@@ -229,6 +237,7 @@ def _canonical_config(cfg: RunConfig) -> str:
                     "gke_mode",
                     "gke_cluster_name",
                     "ray_mode",
+                    "automl_mode",
                 ):
                     if fam_cfg.get(k) is None:
                         fam_cfg.pop(k, None)
@@ -423,6 +432,17 @@ def bigquery_job_id(job_key: str) -> str:
     lookup); child statements get their own ids under it, all traceable to this one parent.
     """
     return job_key
+
+
+def vertex_automl_job_id(job_key: str) -> str:
+    """Map a ``job_key`` to a Vertex AI PipelineJob / AutoML Forecasting job id.
+
+    Vertex AI ``PipelineJob.job_id`` requires ``^[a-z0-9][a-z0-9-]{0,127}$`` (lowercase letters,
+    digits, and hyphens, starting with a letter or digit). Using `dataproc_job_id` maps any
+    underscores (such as ``automl_repair``) to hyphens while preserving the deterministic
+    ``sf-<run_id>-<family>-a<attempt>`` identity.
+    """
+    return dataproc_job_id(job_key)
 
 
 def decide_attempt(current_max: int | None, *, force: bool) -> tuple[int, bool]:

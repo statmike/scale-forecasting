@@ -2,24 +2,24 @@
 
 A **smoke test** is a small, end-to-end live run (20–100 time series) that verifies a specific runtime, hardware, backtesting, HPO, feature-engineering, or ensembling combination against live Google Cloud infrastructure.
 
-- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (41 JSON configs)
+- **Smoke Config Library**: [`configs/smokes/`](https://github.com/statmike/scale-forecasting/tree/main/configs/smokes) (42 JSON configs)
 - **Direct Smoke Harness**: [`tests/smokes/smoke_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/smoke_harness.py)
 - **Composer / Airflow Harness**: [`tests/smokes/airflow_smoke.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/airflow_smoke.py)
 - **Live Results Record**: [System Validation Ledger](validation.md)
 
 ```mermaid
 flowchart LR
-    Cfg["configs/smokes/*.json\n(41 Smoke Configs)"] --> Dry["1. Plan\nplan_run()"]
-    Dry --> Stage["2. Stage\nstage_run() -> GCS"]
-    Stage --> Run["3. Execute\nmain.run() or Composer DAG"]
-    Run --> Verify["4. Verify\nv_run_summary, v_run_jobs,\nv_model_leaderboard, cells"]
-    Verify --> Rerun["5. Idempotent Rerun\nSame run_id, deduplicated\nrow counts unchanged"]
-    Rerun --> Trace["6. Reverse-Trace\nsystem_job_id -> GCP Service"]
+    Cfg["configs/smokes/*.json<br/>(42 Smoke Configs)"] --> Dry["1. Plan<br/>plan_run()"]
+    Dry --> Stage["2. Stage<br/>stage_run() -> GCS"]
+    Stage --> Run["3. Execute<br/>main.run() or Composer DAG"]
+    Run --> Verify["4. Verify<br/>v_run_summary, v_run_jobs,<br/>v_model_leaderboard, cells"]
+    Verify --> Rerun["5. Idempotent Rerun<br/>Same run_id, deduplicated<br/>row counts unchanged"]
+    Rerun --> Trace["6. Reverse-Trace<br/>system_job_id -> GCP Service"]
 ```
 
 ---
 
-## Smoke Suite Overview (`01`–`41`)
+## Smoke Suite Overview (`01`–`42`)
 
 Configs are ordered from fastest/cheapest to most comprehensive:
 
@@ -38,7 +38,7 @@ Configs are ordered from fastest/cheapest to most comprehensive:
 | `11` | `11_ensemble_barrier.json` | Ensembling in `barrier` gather mode (wait for all member families, then blend once) |
 | `12` | `12_ensemble_microbatch.json` | Ensembling in `microbatch` gather mode (poll and blend completed series incrementally) |
 | `13` | `13_native_format.json` | Reading directly from the native BigQuery source table (`source_series_native`) |
-| `14` | `14_full_dag.json` | Flagship multi-family run: all 4 model families + native + ensemble under one `run_id` |
+| `14` | `14_full_dag.json` | Flagship multi-family run: 4 model families (`statistical`, `ml`, `deep_learning`, `native`) + ensemble under one `run_id` |
 | `15` | `15_airflow_multi_engine.json` | Full multi-engine DAG orchestrated by Cloud Composer 3 / Airflow |
 | `16` | `16_cluster_split_hardware.json` | Concurrent provisioning of two Dataproc Standard Clusters (one CPU, one GPU) in one run |
 | `17` | `17_gpu_absent_serverless.json` | **Negative GPU contract (Serverless L4):** refuses execution when GPU is hidden |
@@ -66,13 +66,14 @@ Configs are ordered from fastest/cheapest to most comprehensive:
 | `39` | `39_gce_single_vm.json` | **Compute Engine Single-VM (`runtime="gce"`):** single-VM Container-Optimized OS execution (`machine_type="n2-standard-8"`) across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide` in `global` mode) with triple-redundant zero-orphan VM lifecycle guarantees, 3-tier covariates, 3-level hierarchical reconciliation, and ensembling |
 | `40` | `40_gke_indexed_job.json` | **Google Kubernetes Engine (`runtime="gke"`, `gke_mode="job"`):** Kubernetes `batch/v1` Indexed Job (`completions=2`, `parallelism=2`, `JOB_COMPLETION_INDEX` rank sharding) across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`, `lightgbm`), and `deep_learning` (`tide` in `global` mode) with 3-tier covariates, 3-level hierarchical reconciliation, and ensembling |
 | `41` | `41_gke_ray.json` | **Ray on GKE (`gke_mode="ray"` & `ray_mode="gke"`):** distributed Ray (`ray==2.59.0`) on Google Kubernetes Engine exercising both `python_runtime="gke"` with `gke_mode="ray"` (`statistical` + `ml`) and `runtime="ray"` with `ray_mode="gke"` (`deep_learning`: `tide` in `global` mode), plus 3-tier covariates, 3-level hierarchical reconciliation, and ensembling |
+| `42` | `42_vertex_automl_tabular_workflow.json` | **Vertex AI Tabular Workflow for Forecasting & Two-Tier Explainability (`runtime="vertex_automl"`, `automl_mode="tabular_workflow"`):** runs `vertex_tide` (`automl` family on `vertex_automl`) alongside `xgboost` (`ml` family on `vertex` CustomJob) and `arima_plus` (`native` family on BigQuery ML) with 3-tier covariates, ensembling (`mean`, `inverse_error`, `nnls`), Stage-1 tuning artifact indexing, and Tier 1 (`fit_diagnostics.feature_attributions`) + Tier 2 (`forecast_predictions.explanations`) feature attributions |
 
 ---
 
 ## Design Notes on Specialized Smokes
 
 ### Why Smoke `21` Exists alongside Smoke `14`
-Smoke `14` proves the full architectural topology (four model families + ensemble under one `run_id`) using a representative subset of models. Smoke `21` runs **all 18 registered models** and **all 6 ensemble strategies** (including learned `ridge` and `xgb` stacking) on Dataproc Serverless CPU across 50 series, verifying that every model produces non-null forecasts and valid scores across all 15 metrics.
+Smoke `14` proves the multi-family DAG topology (`statistical`, `ml`, `deep_learning`, `native`, and `ensemble` under one `run_id`, with smoke `42` adding the 5th `automl` family) using a representative subset of models. Smoke `21` runs **all 18 Phase-A registered models** and **all 6 ensemble strategies** (including learned `ridge` and `xgb` stacking) on Dataproc Serverless CPU across 50 series, verifying that every model produces non-null forecasts and valid scores across all metrics.
 
 ### Backtest Semantics Sweep (`22`–`25`)
 Every series in the seeded benchmark panel has 1,460 daily observations. Smokes `22`–`25` request 6 folds of 28 days with `min_train_size: 1300` (which requires 1,468 observations for non-overlapping folds), intentionally triggering each short-series policy:
@@ -107,19 +108,20 @@ SF_RAY_POLL_FAULT=transport,auth .venv/bin/python tests/smokes/smoke_harness.py 
 
 The first poll of each Ray job injects a simulated transport (`503`) and/or auth (`401`) error, logs the injection and reconnect at `WARNING` level, mints a fresh token, and completes the run normally.
 
-### Covariates, Global/Hybrid DL, Hierarchical Reconciliation, Vertex AI CustomJob, Compute Engine, and GKE (`32`–`41`)
-Smokes `32`–`41` exercise the Phase B, Phase C, and Phase D expansions and cross-feature interactions against the 100-series covariate + hierarchy benchmark tables (`source_series_covariates_iceberg` and `source_series_covariates_native`):
+### Covariates, Global/Hybrid DL, Hierarchical Reconciliation, Vertex AI CustomJob, Compute Engine, GKE, and Vertex AI AutoML (`32`–`42`)
+Smokes `32`–`42` exercise the Phase B, Phase C, Phase D, and Phase E expansions and cross-feature interactions against the 100-series covariate + hierarchy benchmark tables (`source_series_covariates_iceberg` and `source_series_covariates_native`):
 
 - **`32` (`32_covariates_three_tier.json`)**: Exercises `static_covariates` (`region`, `category`), `future_covariates` (`is_holiday`, `promo_flag`, `price_index`), and lookahead-safe lagged `past_covariates` (`temperature` lagged `[7, 14]`) across 8 statistical and ML models (`decision_metric="rmsse"`).
 - **`33` (`33_expanded_stats_ml.json`)**: Exercises all 6 new statistical models (`auto_arima`, `auto_ces`, `auto_theta`, `tbats`, `fft`, `kalman`) and 2 new ML models (`random_forest`, `catboost`) across 25 series on `source_series_covariates_native` (`decision_metric="msse"`).
 - **`34` (`34_global_hybrid_dl.json`)**: Exercises multi-series panel training across all 4 `neuralforecast` global models (`tide`, `tft`, `tsmixer`, `patchtst`) and `neuralprophet` (`training_mode="hybrid"`) with three-tier covariates on Vertex AI Ray (`decision_metric="interval_score"`).
 - **`35` (`35_hierarchy_reconciliation.json`)**: Aggregates 40 bottom series into a 57-node hierarchy (`__total__` → `region` → `region/category` → bottom) and reconciles base forecasts and prediction intervals across all 7 FPP3 reconciliation methods (`bottom_up`, `top_down`, `middle_out`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`) (`decision_metric="msis"`).
-- **`36` (`36_covariate_fallback_multi_runtime.json`)**: Exercises `on_unsupported_covariates="fallback"` across all 4 model families and all 3 runtimes (`theta`, `sarimax`, `xgboost`, `catboost` on Dataproc Serverless Spark; `tide` and `patchtst` in `global` mode on Vertex AI Ray CPU; `arima_plus` and `timesfm` on BigQuery ML), combined with `fleetwide` HPO and `ensemble` (`mean`, `inverse_error`, `nnls`).
+- **`36` (`36_covariate_fallback_multi_runtime.json`)**: Exercises `on_unsupported_covariates="fallback"` across 4 model families and 3 runtimes (`theta`, `sarimax`, `xgboost`, `catboost` on Dataproc Serverless Spark; `tide` and `patchtst` in `global` mode on Vertex AI Ray CPU; `arima_plus` and `timesfm` on BigQuery ML), combined with `fleetwide` HPO and `ensemble` (`mean`, `inverse_error`, `nnls`).
 - **`37` (`37_hierarchy_covariates_ensemble.json`)**: Combines 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), 3-tier covariates (`static_covariates: ["region", "category"]`, `future_covariates`, `past_covariates`, `exog_lags`), univariate fallback (`theta` alongside `sarimax`, `xgboost`, `lightgbm`), and post-hoc `ensemble` (`mean`, `inverse_error`, `nnls`) scoring finite `mase` and `rmsse` across all bottom and aggregated hierarchy nodes.
 - **`38` (`38_vertex_custom_job.json`)**: Exercises `python_runtime="vertex"` with **multi-VM worker pools across all three Python families** (`workers=2` on `n2-standard-8` CPU pools for `statistical` [`theta` on rank 0, `sarimax` on rank 1] and `ml` [`xgboost` on rank 0, `lightgbm` on rank 1], plus `3 x g2-standard-8 + NVIDIA_L4` dedicated per-model GPU VMs for `deep_learning` [`tide` on rank 0, `tsmixer` on rank 1, `neuralprophet` on rank 2]), synchronized via the GCS worker-pool completion barrier, with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and ensembling (`mean`, `inverse_error`, `nnls`).
 - **`39` (`39_gce_single_vm.json`)**: Exercises `python_runtime="gce"` on **direct single-VM Compute Engine (`cos-cloud/cos-stable`, `machine_type="n2-standard-8"`)** across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`), and `deep_learning` (`tide` in `global` mode) with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), ensembling (`mean`, `inverse_error`, `nnls`), and triple-redundant zero-orphan VM self-deletion.
 - **`40` (`40_gke_indexed_job.json`)**: Exercises `python_runtime="gke"` (`gke_mode="job"`) using a **Kubernetes `batch/v1` Indexed Job (`completions=2`, `parallelism=2`, `JOB_COMPLETION_INDEX` rank sharding)** across `statistical` (`theta`, `sarimax`), `ml` (`xgboost`, `lightgbm`), and `deep_learning` (`tide` in `global` mode) with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and ensembling (`mean`, `inverse_error`, `nnls`).
 - **`41` (`41_gke_ray.json`)**: Exercises **Ray-on-GKE (`ray==2.59.0`)** under both syntax forms — `python_runtime="gke"` with `gke_mode="ray"` (`statistical`: `theta`, `sarimax`; `ml`: `xgboost`) and `runtime="ray"` with `ray_mode="gke"` (`deep_learning`: `tide` in `global` mode) — with 3-tier covariates, 3-level hierarchical reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`), and ensembling (`mean`, `inverse_error`, `nnls`).
+- **`42` (`42_vertex_automl_tabular_workflow.json`)**: Exercises **Vertex AI Tabular Workflow for Forecasting (`runtime="vertex_automl"`, `automl_mode="tabular_workflow"`)** running `vertex_tide` (`automl` family on `vertex_automl`) alongside `xgboost` (`ml` family on `vertex` CustomJob) and `arima_plus` (`native` family on BigQuery ML) with 3-tier covariates, ensembling (`mean`, `inverse_error`, `nnls`), Stage-1 tuning artifact indexing, and Two-Tier Explainability (`fit_diagnostics.feature_attributions` + `forecast_predictions.explanations`).
 
 ---
 
@@ -147,7 +149,7 @@ export SF_REGION=us-central1
 ```
 
 Additional requirements by smoke category:
-- **Source Tables**: `source_series_iceberg` and `source_series_native` (plus `source_series_covariates_iceberg` and `source_series_covariates_native` for Smokes `32`–`41`) must exist in your BigQuery dataset.
+- **Source Tables**: `source_series_iceberg` and `source_series_native` (plus `source_series_covariates_iceberg` and `source_series_covariates_native` for Smokes `32`–`42`) must exist in your BigQuery dataset.
 - **GPU Smokes (`03`, `06`, `08`, `09`, `10`, `14`, `15`, `16`, `38`)**: Requires regional GPU quota (`NVIDIA L4` for Dataproc Serverless and Vertex AI `CustomJob`; `NVIDIA T4` for Dataproc Standard Cluster and Vertex AI Ray).
 - **Cluster Reuse Smoke (`05`)**: Requires a standing Dataproc cluster named `sf-smoke-cluster`.
 
@@ -214,7 +216,7 @@ SELECT * FROM `PROJECT.DATASET.v_model_leaderboard` WHERE run_id = 'RUN_ID' ORDE
 
 The smoke configuration library and harness logic are continuously verified in the offline test suite (`make test`):
 
-- [`tests/smokes/test_smoke_configs.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_smoke_configs.py) — Validates that all 41 smoke configs parse, validate, and plan cleanly across every runtime, hardware, and ensemble combination.
+- [`tests/smokes/test_smoke_configs.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_smoke_configs.py) — Validates that all 42 smoke configs parse, validate, and plan cleanly across every runtime, hardware, and ensemble combination.
 - [`tests/smokes/test_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_harness.py) — Unit-tests the harness verification and reverse-trace logic against fixture rows.
 - [`tests/smokes/test_airflow_smoke.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/test_airflow_smoke.py) — Unit-tests the Composer command builders and DAG ID derivation.
 - [`tests/unit/test_airflow_dagbag.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_airflow_dagbag.py) — Loads emitted DAGs through a real `airflow.models.DagBag` in CI (`@airflow` marker).

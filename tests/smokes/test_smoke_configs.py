@@ -70,6 +70,8 @@ def test_library_covers_every_runtime_combo() -> None:
                 seen.add("gce_gpu" if rc.hardware == "gpu" else "gce_cpu")
             elif rc.runtime == "gke":
                 seen.add(f"gke_{rc.gke_mode}")
+            elif rc.runtime == "vertex_automl":
+                seen.add(f"vertex_automl_{rc.automl_mode}")
             elif rc.runtime == "spark":
                 if rc.hardware == "gpu":
                     # Split by launch mode, not just by hardware. Serverless attaches an L4 through
@@ -96,6 +98,7 @@ def test_library_covers_every_runtime_combo() -> None:
         "gce_cpu",
         "gke_job",
         "gke_ray",
+        "vertex_automl_tabular_workflow",
         "native",
         "ensemble_barrier",
         "ensemble_microbatch",

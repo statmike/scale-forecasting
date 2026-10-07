@@ -105,16 +105,17 @@ Strategy = Literal["mean", "median", "inverse_error", "nnls", "ridge", "xgb"]
 # Per-family compute vocabulary (kept as Literals to match python_runtime/spark_deps idiom).
 # ``ComputeFamily`` mirrors ``models.base_model.Family`` *minus* "native": native models always run
 # in BigQuery (their natural engine), so they are never given a per-family runtime choice.
-ComputeFamily = Literal["statistical", "ml", "deep_learning"]
+ComputeFamily = Literal["statistical", "ml", "deep_learning", "automl"]
 # ``JobFamily`` is the identity vocabulary of a *job* in the run DAG: every model family that can
 # launch a job (``ComputeFamily`` + "native", which runs in BigQuery) plus the downstream "ensemble"
 # node. It is the ``family`` component of a job's deterministic id (see ``registry.ids``), one step
 # broader than ``ComputeFamily`` since native and ensemble produce jobs but take no runtime choice.
-JobFamily = Literal["statistical", "ml", "deep_learning", "native", "ensemble"]
-Runtime = Literal["spark", "ray", "vertex", "gce", "gke"]
+JobFamily = Literal["statistical", "ml", "deep_learning", "automl", "native", "ensemble"]
+Runtime = Literal["spark", "ray", "vertex", "gce", "gke", "vertex_automl"]
 SparkMode = Literal["serverless", "cluster"]
 GkeMode = Literal["job", "ray"]
 RayMode = Literal["vertex", "gke"]
+AutomlMode = Literal["tabular_workflow", "training_job"]
 Hardware = Literal["cpu", "gpu"]
 
 # What a `model_params` value may be. Deliberately narrow: the canonical config string is
@@ -604,6 +605,7 @@ class FamilyCompute(BaseModel):
     gke_mode: GkeMode | None = None
     gke_cluster_name: str | None = None
     ray_mode: RayMode | None = None
+    automl_mode: AutomlMode | None = None
     hardware: Hardware | None = None
     gpu_type: GpuType | None = None
     accelerator_count: int | None = Field(default=None, gt=0)
@@ -636,16 +638,24 @@ class FamilyCompute(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> FamilyCompute:
-        if self.runtime in ("ray", "vertex", "gce", "gke") and (
+        if self.runtime in ("ray", "vertex", "gce", "gke", "vertex_automl") and (
             self.spark_mode is not None or self.spark_cluster_name is not None
         ):
             raise ValueError("spark_mode/spark_cluster_name are only valid when runtime is 'spark'")
-        if self.runtime in ("spark", "ray", "vertex", "gce") and self.gke_mode is not None:
+        if self.runtime in ("spark", "ray", "vertex", "gce", "vertex_automl") and (
+            self.gke_mode is not None
+        ):
             raise ValueError("gke_mode is only valid when runtime is 'gke'")
-        if self.runtime in ("spark", "vertex", "gce", "gke") and self.ray_mode is not None:
+        if self.runtime in ("spark", "vertex", "gce", "gke", "vertex_automl") and (
+            self.ray_mode is not None
+        ):
             raise ValueError("ray_mode is only valid when runtime is 'ray'")
+        if self.runtime in ("spark", "ray", "vertex", "gce", "gke") and (
+            self.automl_mode is not None
+        ):
+            raise ValueError("automl_mode is only valid when runtime is 'vertex_automl'")
         if self.gke_cluster_name is not None and (
-            self.runtime in ("spark", "vertex", "gce")
+            self.runtime in ("spark", "vertex", "gce", "vertex_automl")
             or (self.runtime == "ray" and self.ray_mode == "vertex")
         ):
             raise ValueError(
@@ -662,7 +672,7 @@ class FamilyCompute(BaseModel):
         ) and (self.min_workers is not None or self.max_workers is not None):
             raise ValueError(
                 "min_workers/max_workers are only valid on autoscaling runtimes "
-                "('ray', 'spark', or 'gke' with gke_mode='ray'); "
+                "('ray', 'spark', 'vertex_automl', or 'gke' with gke_mode='ray'); "
                 "use 'workers' for fixed-pool 'vertex', 'gce', or 'gke' job mode"
             )
         if self.spark_mode == "serverless" and self.machine_type is not None:
@@ -961,6 +971,8 @@ class CapacityConfig(BaseModel):
     ray: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Vertex AI CustomJob creation — walks `compute.ray_regions` without a Ray head-node bootstrap.
     vertex: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
+    # Vertex AI AutoML Tabular Workflow PipelineJob / ForecastingTrainingJob + BatchPredictionJob.
+    vertex_automl: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Compute Engine single-VM creation — walks the zone/region candidates from `compute_fallback`.
     gce: CapacityServicePolicy = Field(default_factory=CapacityServicePolicy)
     # Google Kubernetes Engine cluster / node-pool creation and job dispatch.
@@ -1294,6 +1306,14 @@ class ComputeConfig(BaseModel):
     gke_cluster_name: str | None = None
     # Kubernetes namespace for GKE Indexed Jobs and Ray pods.
     gke_namespace: str = "default"
+    # --- Vertex AI AutoML / Tabular Workflows ----------------------------------
+    # Execution mode when runtime == "vertex_automl":
+    #   "tabular_workflow" (default) : Vertex AI Pipelines (KFP v2) Tabular Workflow for Forecasting
+    #                                  with worker pool overrides, stage_1 tuning artifact export &
+    #                                  warm-start reuse, and BatchPredictionJob explanations.
+    #   "training_job"               : Managed Vertex AI *ForecastingTrainingJob +
+    #                                  BatchPredictionJob.
+    automl_mode: AutomlMode = "tabular_workflow"
     # Priority-ordered candidate regions for the ephemeral cluster. GPU capacity is regional and can
     # stock out transiently (a create is accepted, then fails to reach RUNNING with "Resources are
     # insufficient in region: <r>") even when quota is fine — so the launcher tries these in order,
@@ -1383,23 +1403,34 @@ class ComputeConfig(BaseModel):
 
     # --- per-family compute (the multi-runtime job DAG) ------------------------
     # Sparse overrides layered over the flat defaults above: each family (statistical/ml/
-    # deep_learning) may pick its own runtime + hardware; an unset family inherits the run-level
-    # python_runtime / Spark-serverless / CPU defaults. Native models are never here — they always
-    # run in BigQuery. ``ensemble`` runs the ensemble DAG node on its own runtime with a
-    # barrier|microbatch trigger. Both are inert until the DAG orchestrator consumes them; a config
-    # that omits them behaves exactly as before. See RunConfig.resolve_family_compute.
+    # deep_learning/automl) may pick its own runtime + hardware; an unset family inherits the
+    # run-level python_runtime / Spark-serverless / CPU defaults (or vertex_automl for automl).
+    # Native models are never here — they always run in BigQuery. ``ensemble`` runs the ensemble
+    # DAG node on its own runtime with a barrier|microbatch trigger. See
+    # RunConfig.resolve_family_compute.
     families: dict[ComputeFamily, FamilyCompute] = Field(default_factory=dict)
     ensemble: EnsembleCompute = Field(default_factory=EnsembleCompute)
 
     @model_validator(mode="after")
     def _check_families(self) -> ComputeConfig:
-        # GPU is a deep_learning-only capability; statistical/ml are CPU work. The family key is
-        # known here (unlike inside FamilyCompute), so this is where that constraint is enforced.
+        # GPU is supported on deep_learning and automl; statistical/ml are CPU work. The family key
+        # is known here (unlike inside FamilyCompute), so this is where that constraint is enforced.
         for fam, fc in self.families.items():
-            if fam != "deep_learning" and (fc.hardware == "gpu" or fc.gpu_type is not None):
+            if fam not in ("deep_learning", "automl") and (
+                fc.hardware == "gpu" or fc.gpu_type is not None
+            ):
                 raise ValueError(
                     f"family '{fam}' cannot use a GPU (hardware='gpu'/gpu_type set); "
-                    "only the deep_learning family supports GPU"
+                    "only the deep_learning and automl families support GPU"
+                )
+            if fam == "automl" and fc.runtime is not None and fc.runtime != "vertex_automl":
+                raise ValueError(
+                    f"family 'automl' models require runtime='vertex_automl' (got {fc.runtime!r})"
+                )
+            if fam != "automl" and (fc.runtime == "vertex_automl" or fc.automl_mode is not None):
+                raise ValueError(
+                    f"family '{fam}': runtime='vertex_automl'/automl_mode is only valid for the "
+                    "'automl' family"
                 )
         return self
 
@@ -1447,8 +1478,9 @@ class ResolvedFamilyCompute:
     The fully-resolved plan the DAG orchestrator acts on: ``runtime`` is where the family's job
     runs; ``spark_mode``/``spark_cluster_name`` are ``None`` unless ``runtime == "spark"``;
     ``gke_mode``/``gke_cluster_name`` apply when ``runtime == "gke"`` (or ``runtime == "ray"`` with
-    ``ray_mode == "gke"``); ``ray_mode`` applies when ``runtime == "ray"``; ``gpu_type`` is ``None``
-    unless ``hardware == "gpu"``. Produced by `RunConfig.resolve_family_compute`.
+    ``ray_mode == "gke"``); ``ray_mode`` applies when ``runtime == "ray"``; ``automl_mode`` applies
+    when ``runtime == "vertex_automl"``; ``gpu_type`` is ``None`` unless ``hardware == "gpu"``.
+    Produced by `RunConfig.resolve_family_compute`.
     """
 
     family: str
@@ -1465,6 +1497,7 @@ class ResolvedFamilyCompute:
     gke_mode: str | None = None
     gke_cluster_name: str | None = None
     ray_mode: str | None = None
+    automl_mode: str | None = None
 
     @property
     def vertex_machine_type(self) -> str | None:
@@ -1737,34 +1770,51 @@ class RunConfig(BaseModel):
 
         Pure and deterministic — the single resolver the DAG orchestrator also uses, so a config
         validated at load needs no re-check at submit. ``family`` is a compute family
-        (``statistical``/``ml``/``deep_learning``); ``native`` has no compute choice (it always runs
-        in BigQuery) and raises. Resolution rules for unset override fields:
+        (``statistical``/``ml``/``deep_learning``/``automl``); ``native`` has no compute choice (it
+        always runs in BigQuery) and raises. Resolution rules for unset override fields:
 
-        * ``runtime`` → ``python_runtime``.
-        * ``hardware`` → ``gpu`` only for ``deep_learning`` (when ``compute.use_gpu`` or an explicit
-          override); every other family is ``cpu``.
+        * ``runtime`` → ``python_runtime`` (or ``"vertex_automl"`` for ``automl``).
+        * ``hardware`` → ``gpu`` only for ``deep_learning`` and ``automl`` (when
+          ``compute.use_gpu`` or an explicit override); every other family is ``cpu``.
         * Spark: ``spark_mode`` → ``serverless``; ``spark_cluster_name`` applies only under
-          ``cluster``. On ``ray``, ``vertex``, ``gce``, and ``gke`` both are ``None``.
+          ``cluster``. On ``ray``, ``vertex``, ``gce``, ``gke``, and ``vertex_automl`` both are
+          ``None``.
         * GKE & Ray modes: ``gke_mode`` → ``compute.gke_mode`` (``"job"`` | ``"ray"``) on ``gke``;
           ``ray_mode`` → ``compute.ray_mode`` (``"vertex"`` | ``"gke"``) on ``ray`` (or ``"gke"``
           when ``runtime == "gke"`` and ``gke_mode == "ray"``).
+        * AutoML mode: ``automl_mode`` → ``compute.automl_mode`` (``"tabular_workflow"`` |
+          ``"training_job"``) on ``vertex_automl``.
         * ``gpu_type`` (when ``hardware == "gpu"``) → the flat ``compute.gpu_type``, but **forced to
           L4** on Dataproc Serverless (no T4/A100 there). Inheriting T4/A100 on Serverless raises.
         * ``machine_type`` → ``compute.machine_type`` (auto-resolved via `resolve_vm_machine_type`
           from ``(hardware, gpu_type, accelerator_count)`` on ``vertex``/``gce``/``gke`` ``job``, or
-          when explicitly set on ``ray``/``spark`` ``cluster``/``gke`` ``ray``); ``workers`` →
-          ``compute.workers`` on ``vertex`` and ``gke`` ``job``, ``1`` on ``gce``, or the family
-          override when set on ``ray``/``spark``; ``min_workers`` / ``max_workers`` apply on
-          autoscaling runtimes (``ray``/``spark``/``gke`` ``ray``).
+          when explicitly set on ``ray``/``spark`` ``cluster``/``gke`` ``ray``/``vertex_automl``);
+          ``workers`` → ``compute.workers`` on ``vertex`` and ``gke`` ``job``, ``1`` on ``gce``, or
+          the family override when set on ``ray``/``spark``/``vertex_automl``; ``min_workers`` /
+          ``max_workers`` apply on autoscaling runtimes (``ray``/``spark``/``gke`` ``ray``/
+          ``vertex_automl``).
         """
         if family == "native":
             raise ValueError(
                 "native models always run in BigQuery; they have no per-family compute"
             )
         ov = self.compute.families.get(family) or FamilyCompute()
-        runtime = ov.runtime or self.python_runtime
+        if family == "automl":
+            runtime = ov.runtime or "vertex_automl"
+            if runtime != "vertex_automl":
+                raise ValueError(
+                    f"family 'automl' models require runtime='vertex_automl' (got {runtime!r})"
+                )
+        else:
+            runtime = ov.runtime or self.python_runtime
+            if runtime == "vertex_automl":
+                raise ValueError(
+                    f"family '{family}' cannot run on runtime='vertex_automl'; "
+                    f"set compute.families.{family}.runtime or use "
+                    "python_runtime='spark'/'ray'/'vertex'/'gce'/'gke'"
+                )
 
-        if family == "deep_learning":
+        if family in ("deep_learning", "automl"):
             hardware = ov.hardware or ("gpu" if self.compute.use_gpu else "cpu")
         else:
             hardware = "cpu"
@@ -1784,11 +1834,17 @@ class RunConfig(BaseModel):
         gke_mode: str | None = None
         gke_cluster_name: str | None = None
         ray_mode: str | None = None
+        automl_mode: str | None = None
         if runtime == "gke":
             if ov.ray_mode is not None:
                 raise ValueError(
                     f"family '{family}': ray_mode requires runtime='ray' (got {runtime!r}); "
                     "use gke_mode='ray' instead"
+                )
+            if ov.automl_mode is not None:
+                raise ValueError(
+                    f"family '{family}': automl_mode requires runtime='vertex_automl' "
+                    f"(got {runtime!r})"
                 )
             gke_mode = ov.gke_mode or self.compute.gke_mode
             gke_cluster_name = ov.gke_cluster_name or self.compute.gke_cluster_name
@@ -1798,6 +1854,11 @@ class RunConfig(BaseModel):
                 raise ValueError(
                     f"family '{family}': gke_mode requires runtime='gke' (got {runtime!r}); "
                     "use ray_mode='gke' instead"
+                )
+            if ov.automl_mode is not None:
+                raise ValueError(
+                    f"family '{family}': automl_mode requires runtime='vertex_automl' "
+                    f"(got {runtime!r})"
                 )
             ray_mode = ov.ray_mode or self.compute.ray_mode
             if ray_mode == "gke":
@@ -1811,6 +1872,17 @@ class RunConfig(BaseModel):
                 raise ValueError(
                     f"family '{family}': gke_cluster_name requires runtime='gke' or ray_mode='gke'"
                 )
+        elif runtime == "vertex_automl":
+            if ov.gke_mode is not None or ov.gke_cluster_name is not None:
+                raise ValueError(
+                    f"family '{family}': gke_mode/gke_cluster_name require runtime='gke' "
+                    f"(got {runtime!r})"
+                )
+            if ov.ray_mode is not None:
+                raise ValueError(
+                    f"family '{family}': ray_mode requires runtime='ray' (got {runtime!r})"
+                )
+            automl_mode = ov.automl_mode or self.compute.automl_mode
         else:
             if ov.gke_mode is not None or ov.gke_cluster_name is not None:
                 raise ValueError(
@@ -1820,6 +1892,11 @@ class RunConfig(BaseModel):
             if ov.ray_mode is not None:
                 raise ValueError(
                     f"family '{family}': ray_mode requires runtime='ray' (got {runtime!r})"
+                )
+            if ov.automl_mode is not None:
+                raise ValueError(
+                    f"family '{family}': automl_mode requires runtime='vertex_automl' "
+                    f"(got {runtime!r})"
                 )
 
         gpu_type: str | None
@@ -1924,6 +2001,7 @@ class RunConfig(BaseModel):
             gke_mode=gke_mode,
             gke_cluster_name=gke_cluster_name,
             ray_mode=ray_mode,
+            automl_mode=automl_mode,
         )
 
     @property

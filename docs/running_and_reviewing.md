@@ -7,11 +7,11 @@ your `src/` ships at submit time (see [editing code without rebuilding](./editin
 
 ```mermaid
 flowchart LR
-    S1["1. Preflight\n--dry-run / --feasibility"] --> S2["2. Submit\nmain.run / Forecaster.run"]
-    S2 --> S3["3. Watch & Probe\nmonitor_run / --probe"]
-    S3 --> S4["4. Review & Calibrate\nreview_run / calibration_report"]
-    S4 --> S5["5. Re-ensemble (Optional)\nensemble_run"]
-    S4 --> S6["6. Manage Registry\nregistry.ops"]
+    S1["1. Preflight<br/>--dry-run / --feasibility"] --> S2["2. Submit<br/>main.run / Forecaster.run"]
+    S2 --> S3["3. Watch & Probe<br/>monitor_run / --probe"]
+    S3 --> S4["4. Review, Explain & Calibrate<br/>review_run / attributions_df / calibration_report"]
+    S4 --> S5["5. Re-ensemble (Optional)<br/>ensemble_run"]
+    S4 --> S6["6. Manage Registry<br/>registry.ops"]
 ```
 
 ## Prerequisites
@@ -114,7 +114,7 @@ uv run python -m ipykernel install --user --name scale-forecasting --display-nam
 
 Three notebooks need **no** cluster and run locally or read-only: `00_model_playground.ipynb` (pure
 `worker.run_cell` / `run_panel_model`), `09_custom_models_and_metrics.ipynb` (custom 1-file plugins), and
-`10_registry_operations_and_scale.ipynb` (registry doctor, live probes, and 100k scale review over the registry, needing only the `SF_*` env + ADC). The workflow notebooks `01`–`08` configure, explain, submit, live-monitor (`forecaster.run_live()`), and review runs across BigQuery, GCE, Vertex AI, Spark, and Ray.
+`10_registry_operations_and_scale.ipynb` (registry doctor, live probes, and 100k scale review over the registry, needing only the `SF_*` env + ADC). The workflow notebooks `01`–`08` configure, explain, submit, live-monitor (`forecaster.run_live()`), and review runs across BigQuery, GCE, Vertex AI, GKE, Vertex AI AutoML, Spark, and Ray.
 
 **Python-version note.** The project pins Python **3.11** on every surface (why: Vertex Ray
 client↔cluster parity and the Dataproc packed-venv — see [version_matrix.md](./version_matrix.md)).
@@ -298,7 +298,7 @@ ORDER BY mean_wape;
 
 `v_model_leaderboard` is one row per `(run_id, model_type, ensemble_id)`:
 
-- `compute_engine` — `spark` / `ray` / `bigquery` / `ensemble`, so the two tracks (and ensembles)
+- `compute_engine` — `spark` / `ray` / `vertex` / `gce` / `gke` / `vertex_automl` / `bigquery` / `ensemble`, so every compute runtime (and ensembles)
   are distinguishable on one board.
 - `n_cells` / `no_artifact_rate` — coverage and failure signal (a model failing every cell —
   e.g. a missing native lib — shows as `no_artifact_rate = 1.0`).
@@ -403,6 +403,22 @@ badly wrong should not read as healthy, and an average will always say it does. 
 number to watch when a model's `interval_calibration` is `in-sample` or `oof-flat` rather than
 `oof-per-step` — a flat band is too wide early and too narrow late, and only the per-step view shows
 it.
+
+### Why did the model predict that? (Two-tier explainability & decomposition)
+
+After reviewing which model won and how its intervals calibrated, you can inspect **why** the forecast moved using two complementary SDK surfaces:
+
+1. **Two-Tier Feature Attributions (`Forecaster.attributions_df()` & `Forecaster.plot_attributions()`):**
+   For all 5 Python `ml` models (`xgboost`, `lightgbm`, `catboost` via exact C++ TreeSHAP; `regression_lags` via closed-form linear attributions; `random_forest` via importance-weighted deviation) and all 4 `automl` models (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq` when `generate_explanation=True`):
+   - **Tier 1 (`level="global"`):** Reads `forecast_metadata.fit_diagnostics["feature_attributions"]` to rank normalized driver importance across series.
+   - **Tier 2 (`level="local"`):** Reads `forecast_predictions.explanations` to decompose every future `forecast_date` into `baseline_score + sum(attributions)` (`lag_1`, `lag_7`, `dow`, `promo_flag`, `price_index`, etc.).
+   ```python
+   # Inspect global and per-horizon-step feature attributions:
+   attr_df = forecaster.attributions_df(model_type="xgboost", ts_id="S000001")
+   fig = forecaster.plot_attributions(model_type="xgboost", ts_id="S000001", top_k=8)
+   ```
+2. **4-Panel Structural Decomposition (`Forecaster.explain_forecast()` & `Forecaster.plot_forecast_explanation()`):**
+   Works universally across all **34 models** and ensembles, decomposing historical actuals and future predictions into trend, regime level shift, seasonal cycle, and exogenous covariate ridge attribution.
 
 These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or
@@ -558,11 +574,15 @@ Two things you won't find here:
 
 | Command | Purpose |
 |---------|---------|
-| `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run — a job per family in parallel (Spark/Ray ∥ BigQuery) under one `run_id`. |
+| `python -m scale_forecasting.main --config C [--dry-run]` | Orchestrate one run — a job per family in parallel (Spark / Ray / Vertex / GCE / GKE / Vertex AI AutoML ∥ BigQuery) under one `run_id`. |
 | `python -m scale_forecasting.main --config C --feasibility` | Plan without running, then read the source panel's series lengths and report what this run's fold geometry does to it: cost multiplier, fold-coverage histogram, and the `min_train` that would fix it. Implies `--dry-run`. |
 | `python -m scale_forecasting.main --config C --quota` | Read this run's capacity meters in every candidate region: what they allow, what they would clamp, and what a quota increase would buy in wall clock. Reads only. See [Quota and scale](quota_and_scale.md#4-which-quotas-and-where). |
 | `python -m scale_forecasting.submit --config C` | Submit a single Spark family job to Dataproc. |
-| `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex. |
+| `python -m scale_forecasting.ray_submit --config C` | Submit a Ray run to Vertex AI or GKE (`--ray-mode vertex\|gke`). |
+| `python -m scale_forecasting.vertex_submit --config C` | Submit a Vertex AI `CustomJob` family run. |
+| `python -m scale_forecasting.gce_submit --config C` | Submit an ephemeral single-VM GCE family run. |
+| `python -m scale_forecasting.gke_submit --config C` | Submit a GKE Indexed Job or Ray-on-GKE family run (`--gke-mode job\|ray`). |
+| `python -m scale_forecasting.automl_submit --config C` | Submit a Vertex AI AutoML Tabular Workflow (`tabular_workflow`) or AutoML Training Job (`training_job`) family run. |
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
 | `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` / `reap-clusters` / `snapshot` / `export`. |

@@ -24,11 +24,11 @@ that tie by asking the runtime itself.
 
 ```mermaid
 flowchart TD
-    Watch["monitor_run(run_id)\nCheck quiet_seconds"] -->|"Suspiciously quiet"| Probe["main --probe / monitor(probe=True)\nQuery Dataproc · Vertex Ray · Vertex CustomJob · GCE · BigQuery"]
-    Probe -->|"RUNNING_CONFIRMED"| Wait["Healthy & Running\nKeep waiting (or --cancel --force)"]
-    Probe -->|"STALE_REGISTRY or\nLIKELY_COMPLETED"| SettleOK["Work Landed\nmain --settle --force → COMPLETED"]
-    Probe -->|"LOST or\nABANDONED_WAIT"| SettleFail["Job Gone / Walk Abandoned\nmain --settle --force → FAILED"]
-    SettleOK & SettleFail --> Close["All Job Rows Terminal\nregistry.ops close-runs --yes"]
+    Watch["monitor_run(run_id)<br/>Check quiet_seconds"] -->|"Suspiciously quiet"| Probe["main --probe / monitor(probe=True)<br/>Query Dataproc · Vertex Ray · Vertex CustomJob · GCE · GKE · Vertex AutoML · BigQuery"]
+    Probe -->|"RUNNING_CONFIRMED"| Wait["Healthy & Running<br/>Keep waiting (or --cancel --force)"]
+    Probe -->|"STALE_REGISTRY or<br/>LIKELY_COMPLETED"| SettleOK["Work Landed<br/>main --settle --force → COMPLETED"]
+    Probe -->|"LOST or<br/>ABANDONED_WAIT"| SettleFail["Job Gone / Walk Abandoned<br/>main --settle --force → FAILED"]
+    SettleOK & SettleFail --> Close["All Job Rows Terminal<br/>registry.ops close-runs --yes"]
 ```
 
 ### Probe a run
@@ -44,7 +44,7 @@ Forecaster(cfg).monitor(probe=True)  # progress bars *with* the reconciliation a
 ```
 
 The probe reads the registry, then escalates every **non-terminal** family to its own runtime
-(Dataproc / Vertex Ray / Vertex CustomJob / Compute Engine / BigQuery) using the `probe_handle` recorded in
+(Dataproc / Vertex Ray / Vertex CustomJob / Compute Engine / GKE / Vertex AutoML / BigQuery) using the `probe_handle` recorded in
 `run_jobs.job_telemetry` at launch. Three properties are worth knowing before you put it in a loop:
 
 - **It is advisory.** Every native call is capped (20 s) and any error degrades that family to
@@ -403,7 +403,7 @@ look when one stage's tasks finish long after the rest.
 ### `RegistryError: Storage Write API … 500/503/429`, or `400 Cannot route on empty project id`
 **Symptom:** intermittent write failures over long, high-volume runs.
 **Cause:** transient backend/routing blips on the Storage Write API over sustained streams.
-**Fix:** handled — `_append_via_write_api` retries with exponential backoff (all four engines route
+**Fix:** handled — `_append_via_write_api` retries with exponential backoff (all engines route
 writes through it). A *genuine* 400 (real bad request) still fails fast.
 
 ### A submit is refused — the job id is already taken

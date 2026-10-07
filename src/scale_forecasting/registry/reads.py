@@ -580,7 +580,7 @@ def read_predictions(
     where_sql = " AND ".join(clauses)
     sql = (
         "SELECT ts_id, model_type, ensemble_id, compute_engine, forecast_date, "
-        "yhat, yhat_lower, yhat_upper "
+        "yhat, yhat_lower, yhat_upper, TO_JSON_STRING(explanations) AS explanations "
         f"FROM `{resolved.registry_table_ref('forecast_predictions')}` "
         f"WHERE {where_sql} "
         "QUALIFY ROW_NUMBER() OVER ("
@@ -877,3 +877,74 @@ def read_series_covariates(
         except Exception:  # noqa: BLE001, S110 - optional future table
             pass
     return rows
+
+
+def read_feature_attributions(
+    run_id: str,
+    *,
+    ts_ids: list[str] | None = None,
+    models: list[str] | None = None,
+    level: str = "global",
+    limit: int = 5000,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read Tier 1 (``level="global"``) or Tier 2 (``level="local"``) feature attributions.
+
+    - ``level="global"`` queries deduped full-fit ``forecast_metadata`` rows carrying
+      ``fit_diagnostics`` (where ``$.feature_attributions`` is stored).
+    - ``level="local"`` queries deduped ``forecast_predictions`` rows carrying non-null
+      ``explanations`` JSON per forecast horizon step.
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = _resolve_settings(settings)
+    clauses = ["run_id=@run_id", "ensemble_id IS NULL"]
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", limit),
+    ]
+    if ts_ids:
+        clauses.append("ts_id IN UNNEST(@ts_ids)")
+        params.append(bigquery.ArrayQueryParameter("ts_ids", "STRING", list(ts_ids)))
+    if models:
+        clauses.append("model_type IN UNNEST(@models)")
+        params.append(bigquery.ArrayQueryParameter("models", "STRING", list(models)))
+
+    if level == "local":
+        clauses.append("explanations IS NOT NULL")
+        where_sql = " AND ".join(clauses)
+        sql = (
+            "SELECT ts_id, model_type, compute_engine, forecast_date, yhat, "
+            "TO_JSON_STRING(explanations) AS explanations "
+            f"FROM `{resolved.registry_table_ref('forecast_predictions')}` "
+            f"WHERE {where_sql} "
+            "QUALIFY ROW_NUMBER() OVER ("
+            "PARTITION BY run_id, ts_id, model_type, ensemble_id, forecast_date "
+            "ORDER BY created_at DESC NULLS LAST) = 1 "
+            "ORDER BY ts_id, model_type, forecast_date LIMIT @limit"
+        )
+    else:
+        clauses.append("fold_id IS NULL")
+        clauses.append("fit_diagnostics IS NOT NULL")
+        where_sql = " AND ".join(clauses)
+        sql = (
+            "SELECT ts_id, model_type, compute_engine, "
+            "TO_JSON_STRING(fit_diagnostics) AS fit_diagnostics "
+            f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
+            f"WHERE {where_sql} "
+            "QUALIFY ROW_NUMBER() OVER ("
+            "PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id "
+            "ORDER BY created_at DESC NULLS LAST) = 1 "
+            "ORDER BY ts_id, model_type LIMIT @limit"
+        )
+
+    client = bigquery.Client(project=resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised with context
+        raise RegistryError(f"read_feature_attributions failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]

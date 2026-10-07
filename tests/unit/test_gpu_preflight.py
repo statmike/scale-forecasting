@@ -41,7 +41,17 @@ def _cfg(**over: Any) -> RunConfig:
 
 def test_only_the_model_with_a_tensor_library_under_it_is_gpu_capable() -> None:
     capable = [n for n in list_models() if get_model(n).gpu_capable]
-    assert capable == ["neuralprophet", "patchtst", "tft", "tide", "tsmixer"]
+    assert capable == [
+        "neuralprophet",
+        "patchtst",
+        "tft",
+        "tide",
+        "tsmixer",
+        "vertex_l2l",
+        "vertex_seq2seq",
+        "vertex_tft",
+        "vertex_tide",
+    ]
 
 
 def test_capable_does_not_mean_useful_at_the_shipped_defaults() -> None:

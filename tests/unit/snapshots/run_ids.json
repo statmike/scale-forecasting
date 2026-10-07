@@ -59,5 +59,6 @@
   "configs/smokes/38_vertex_custom_job.json": "smoke-38-vertex-custom-job-82b620bbd9ba",
   "configs/smokes/39_gce_single_vm.json": "smoke-39-gce-single-vm-4aa21163baa6",
   "configs/smokes/40_gke_indexed_job.json": "smoke-40-gke-indexed-job-c593ae5b6035",
-  "configs/smokes/41_gke_ray.json": "smoke-41-gke-ray-f9c3cd840845"
+  "configs/smokes/41_gke_ray.json": "smoke-41-gke-ray-f9c3cd840845",
+  "configs/smokes/42_vertex_automl_tabular_workflow.json": "smoke-42-vertex-automl-tabular-workflow-d3fea0c6efc5"
 }

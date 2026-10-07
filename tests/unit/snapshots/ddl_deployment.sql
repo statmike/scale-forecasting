@@ -125,7 +125,8 @@ CREATE TABLE IF NOT EXISTS `proj.scale_forecasting.forecast_predictions` (
   yhat_lower    FLOAT64,
   yhat_upper    FLOAT64,
   quantiles     JSON,
-  created_at    TIMESTAMP
+  created_at    TIMESTAMP,
+  explanations  JSON
 )
 PARTITION BY forecast_date
 CLUSTER BY run_id, ts_id;

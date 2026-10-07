@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 
     import optuna
 
-Runtime = Literal["python", "bigquery"]
-Family = Literal["statistical", "ml", "deep_learning", "native"]
+Runtime = Literal["python", "bigquery", "vertex_automl"]
+Family = Literal["statistical", "ml", "deep_learning", "automl", "native"]
 
 # Canonical prediction-frame columns, in order.
 #
@@ -125,6 +125,7 @@ class BaseModel(ABC):
     supports_future_covariates: ClassVar[bool] = False
     supports_past_covariates: ClassVar[bool] = False
     supports_static_covariates: ClassVar[bool] = False
+    supports_explainability: ClassVar[bool] = False
     supports_native_intervals: ClassVar[bool] = False
     # Can this model train a single shared network across a multi-series panel
     # (`training_mode="global"`) or a shared-plus-series-specific architecture
@@ -179,6 +180,11 @@ class BaseModel(ABC):
             cls.supports_future_covariates = bool(cls.supports_exog)
         if "supports_past_covariates" not in cls.__dict__:
             cls.supports_past_covariates = bool(cls.supports_exog)
+        if "supports_explainability" not in cls.__dict__:
+            cls.supports_explainability = bool(
+                getattr(cls, "supports_explainability", False)
+                or (cls.explain is not BaseModel.explain)
+            )
 
     @classmethod
     def unsupported_covariate_tiers(cls, features: Any) -> tuple[str, ...]:
@@ -349,6 +355,19 @@ class BaseModel(ABC):
         ``float``/``int``/``str`` here and the value survives.
         """
         return {}
+
+    def explain(
+        self, horizon: int, X: pd.DataFrame | None = None
+    ) -> list[dict[str, Any] | None] | None:
+        """Per-horizon-step local feature attributions (`{"baseline_score": ..., ...}`).
+
+        Optional Tier-2 explainability hook: returns a list of ``horizon`` JSON-serializable
+        dictionaries (one per forecast step), or ``None`` when the model does not emit per-step
+        local attributions. Written to ``forecast_predictions.explanations``. Series/model-level
+        global feature importances live in ``diagnostics()["feature_attributions"]`` (Tier 1,
+        written to ``forecast_metadata.fit_diagnostics``).
+        """
+        return None
 
     def serialize(self) -> bytes | None:
         """Serialize the fitted model for artifact persistence.

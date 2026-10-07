@@ -49,6 +49,10 @@ from . import (  # noqa: E402,F401
     tide,
     tsmixer,
     ucm,
+    vertex_l2l,
+    vertex_seq2seq,
+    vertex_tft,
+    vertex_tide,
     xgboost_model,
 )
 from .base_model import _REGISTRY, BaseModel

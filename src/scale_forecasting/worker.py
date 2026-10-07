@@ -85,6 +85,10 @@ class CellResult:
     # boundary as plain data with no local-fs lifecycle; the registry writer uploads it to GCS and
     # stamps the ObjectRef onto forecast_metadata.model_artifact for model-artifact lineage.
     artifact_bytes: bytes | None = None
+    # Pre-existing GCS or Vertex resource URI for the fitted model / tuning artifact (used by
+    # managed cloud trainers such as Vertex AI AutoML Tabular Workflows that write their own
+    # artifacts directly to GCS).
+    model_artifact_uri: str | None = None
     # --- harvested compute measurement (compute.profile.measure) -------------------------------
     # What this cell cost, recorded so a completed run can size a later one. All None/0 when
     # measurement is off, which is also how a row written before these columns existed reads.
@@ -176,6 +180,11 @@ class CellResult:
     # `models.base_model.BaseModel.diagnostics` for the distinction and `_collect_diagnostics` for
     # how a misbehaving one is contained.
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    # Per-horizon-step local feature attributions (`{"baseline_score": float, ...}`),
+    # or None when the model does not emit per-step explanations. Written to
+    # `forecast_predictions.explanations` (`JSON`). Kept as a field on `CellResult` alongside
+    # `predictions` so `predictions.columns` stays identical to `CALIBRATED_COLUMNS`.
+    explanations: list[dict[str, Any] | None] | None = None
     # --- what this cell actually paid for, in fits ---------------------------------------------
     # `n_fits` counts every ``.fit()`` behind the *published* forecast: the backtest arms plus the
     # final full-history fit. It is the measured counterpart of `config.Workload.n_fits`, the
@@ -511,6 +520,42 @@ def _collect_diagnostics(model: BaseModel, ts_id: str, model_name: str) -> dict[
     return kept
 
 
+def _collect_explanations(
+    model: BaseModel,
+    horizon: int,
+    future_exog: pd.DataFrame | None,
+    ts_id: str,
+    model_name: str,
+) -> list[dict[str, Any] | None] | None:
+    """Call `model.explain(horizon, future_exog)` and return JSON-safe per-step dicts, or None."""
+    try:
+        raw = model.explain(horizon, future_exog)
+    except Exception as e:  # noqa: BLE001 - explainability is best-effort, never fatal
+        _log.warning("explain failed for %s/%s: %r", ts_id, model_name, e)
+        return None
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or len(raw) != horizon:
+        _log.warning(
+            "explain for %s/%s returned invalid shape (expected list of len %d) — dropped",
+            ts_id,
+            model_name,
+            horizon,
+        )
+        return None
+    cleaned: list[dict[str, Any] | None] = []
+    for step_item in raw:
+        if step_item is None or not isinstance(step_item, dict):
+            cleaned.append(None)
+            continue
+        try:
+            json.dumps(step_item)
+            cleaned.append(step_item)
+        except (TypeError, ValueError):
+            cleaned.append(None)
+    return cleaned if any(x is not None for x in cleaned) else None
+
+
 def run_cell(
     series: pd.DataFrame,
     model_name: str,
@@ -672,6 +717,9 @@ def run_cell(
         # genuinely unknown.
         future_exog = build_future_features(y, X, model_cfg)
         predictions = model.predict(model_cfg.data.horizon, future_exog)
+        explanations = _collect_explanations(
+            model, model_cfg.data.horizon, future_exog, ts_id, model_name
+        )
 
         # Recalibrate the forward forecast against held-out error.
         #
@@ -775,6 +823,7 @@ def run_cell(
             point_forecast_margin=arm_comparison.get("margin"),
             hpo_scoring=hpo_scoring_basis(len(series), cfg, params),
             diagnostics=_collect_diagnostics(model, ts_id, model_name),
+            explanations=explanations,
             n_fits=fits.n_fits,
             train_rows_total=fits.train_rows,
             n_hpo_fits=hpo_fits.n_fits,

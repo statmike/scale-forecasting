@@ -156,6 +156,9 @@ UNPROVEN: dict[str, str] = {
         "test_the_panel_gate_refuses_only_under_error_and_only_when_a_series_is_short"
     ),
     # --- compute -------------------------------------------------------------------------------
+    "compute.automl_mode=training_job": (
+        "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
+    ),
     "compute.capacity.enabled=false": (
         "tests/unit/test_capacity.py::test_disabling_capacity_retry_beats_an_authored_pass_count"
     ),
@@ -166,6 +169,9 @@ UNPROVEN: dict[str, str] = {
     # The ensemble node's `runtime`/`spark_mode`/`spark_cluster_name` used to sit here as gaps. They
     # were read by nothing — the node is hard-wired to the driver — so they were deleted from
     # `EnsembleCompute` rather than exempted. A value that no longer exists needs no entry.
+    "compute.families.automl_mode=training_job": (
+        "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
+    ),
     "compute.families.gpu_type=A100": (
         "tests/unit/test_vertex_runtime.py::test_gpu_machine_type_resolution_and_validation"
     ),
@@ -236,6 +242,16 @@ UNPROVEN: dict[str, str] = {
     "features.on_unsupported_covariates=error": (
         "tests/unit/test_features.py::"
         "test_on_unsupported_covariates_error_refuses_in_preflight_and_effective_config"
+    ),
+    # --- models --------------------------------------------------------------------------------
+    "models=vertex_l2l": (
+        "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
+    ),
+    "models=vertex_seq2seq": (
+        "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
+    ),
+    "models=vertex_tft": (
+        "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
     ),
     # --- output ------------------------------------------------------------------------------
     "output.point_forecast=(unset)": (

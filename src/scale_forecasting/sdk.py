@@ -1037,6 +1037,77 @@ class Forecaster:
         )
         return plot_forecast_explanation(df, history_tail=history_tail, title=title)
 
+    def attributions_df(
+        self,
+        run_id: str | None = None,
+        *,
+        ts_id: str | list[str] | None = None,
+        models: str | list[str] | None = None,
+        model_type: str | None = None,
+        level: str = "global",
+        limit: int = 5000,
+    ) -> pd.DataFrame:
+        """Return a tidy ``DataFrame`` of Tier 1 (``level="global"``) or Tier 2 (``level="local"``)
+        feature attributions for ``run_id``.
+
+        - ``level="global"`` reads ``forecast_metadata.fit_diagnostics["feature_attributions"]``
+          and returns ``["ts_id", "model_type", "compute_engine", "feature", "importance"]``.
+        - ``level="local"`` reads per-horizon-step ``forecast_predictions.explanations`` and
+          returns ``["ts_id", "model_type", "compute_engine", "forecast_date", "yhat",
+          "baseline_score", "feature", "attribution"]``.
+        """
+        from .registry.reads import read_feature_attributions
+        from .review import build_attributions_frame
+
+        rid = run_id or self.run_id
+        ts_list = [ts_id] if isinstance(ts_id, str) else (list(ts_id) if ts_id else None)
+        eff_models = models if models is not None else model_type
+        model_list = (
+            [eff_models]
+            if isinstance(eff_models, str)
+            else (list(eff_models) if eff_models else None)
+        )
+        rows = read_feature_attributions(
+            rid,
+            ts_ids=ts_list,
+            models=model_list,
+            level=level,
+            limit=limit,
+            settings=self._settings,
+        )
+        return build_attributions_frame(rows, level=level)
+
+    def plot_attributions(
+        self,
+        run_id: str | None = None,
+        *,
+        ts_id: str | None = None,
+        model_type: str | None = None,
+        level: str = "global",
+        top_k: int = 12,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot Tier 1 global driver importance or Tier 2 per-horizon-step local feature
+        attributions for ``run_id``.
+        """
+        from .review import plot_attributions
+
+        df = self.attributions_df(
+            run_id,
+            ts_id=ts_id,
+            models=[model_type] if model_type else None,
+            level=level,
+        )
+        return plot_attributions(
+            df,
+            ts_id=ts_id,
+            model_type=model_type,
+            top_k=top_k,
+            ax=ax,
+            title=title,
+        )
+
     def reensemble(
         self,
         strategies: list[str] | None = None,
@@ -1350,9 +1421,10 @@ def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
             models_str = ", ".join(node.models)
             modes_list: list[str] = []
             for m in node.models:
-                m_mode = str(cfg.model_params.get(m, {}).get("training_mode", "local"))
+                m_cls = get_model(m)
+                default_mode = "global" if m_cls.family == "automl" else "local"
+                m_mode = str(cfg.model_params.get(m, {}).get("training_mode", default_mode))
                 modes_list.append(f"{m}:{m_mode}")
-                get_model(m)  # ensure valid model registration
             modes_str = ", ".join(modes_list)
             n_cells = (
                 workload.n_series * len(node.models) if workload.n_series is not None else None

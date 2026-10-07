@@ -1,20 +1,21 @@
 # Compute Runtimes & Scaling Reference
 
-`scale-forecasting` decouples **what** you forecast (`models`, `features`, `backtest`, `hpo`, `hierarchy`, `ensemble`) from **where** it executes (`python_runtime`, `compute`, and `compute.families.<family>`). The same declarative [`RunConfig`](./configuration_reference.md) runs unchanged across **6 cloud compute runtimes** and **4 execution engines**, either uniformly across the entire run or mixed per model family within a single content-addressed `run_id`.
+`scale-forecasting` decouples **what** you forecast (`models`, `features`, `backtest`, `hpo`, `hierarchy`, `ensemble`) from **where** it executes (`python_runtime`, `compute`, and `compute.families.<family>`). The same declarative [`RunConfig`](./configuration_reference.md) runs unchanged across **7 cloud compute runtimes** and **5 execution engines**, either uniformly across the entire run or mixed per model family within a single content-addressed `run_id`.
 
 ---
 
-## 1. Unified 6-Runtime & Execution Mode Taxonomy
+## 1. Unified 7-Runtime & Execution Mode Taxonomy
 
 ```mermaid
 flowchart LR
     subgraph Cfg["Declarative RunConfig"]
-        RC["python_runtime · compute<br/>compute.families.{statistical, ml, deep_learning}"]
+        RC["python_runtime · compute<br/>compute.families.{statistical, ml, deep_learning, automl}"]
     end
 
-    subgraph Runtimes["6 Compute Runtimes & Execution Modes"]
+    subgraph Runtimes["7 Compute Runtimes & Execution Modes"]
         direction TB
         R_BQ["bigquery<br/>Serverless SQL"]
+        R_AML["vertex_automl<br/>automl_mode = 'tabular_workflow' | 'training_job'"]
         R_GCE["gce<br/>Single-VM COS Container<br/>(workers = 1)"]
         R_VTX["vertex<br/>Vertex AI CustomJob<br/>(workers = 1..N VMs)"]
         R_GKE["gke<br/>gke_mode = 'job' (Indexed Job Pods)<br/>gke_mode = 'ray' (Ray on GKE)"]
@@ -22,16 +23,18 @@ flowchart LR
         R_SPK["spark<br/>spark_mode = 'serverless'<br/>spark_mode = 'cluster' | 'connect'"]
     end
 
-    subgraph Kernels["4 Execution Kernels (src/scale_forecasting/engines/)"]
+    subgraph Kernels["5 Execution Kernels (src/scale_forecasting/engines/)"]
         direction TB
         K_BQ["bigquery_engine.py<br/>ML.FORECAST · AI.FORECAST"]
+        K_AML["automl_engine.py<br/>KFP v2 Tabular Workflows + BatchPrediction"]
         K_VTX["vertex_engine.py<br/>LPT ThreadPool + BQ Storage Read Shards"]
         K_RAY["ray_engine.py<br/>Fractional CPU/GPU @ray.remote Tasks"]
         K_SPK["spark_engine.py<br/>applyInPandas Executor Partitions"]
     end
 
-    RC --> R_BQ & R_GCE & R_VTX & R_GKE & R_RAY & R_SPK
+    RC --> R_BQ & R_AML & R_GCE & R_VTX & R_GKE & R_RAY & R_SPK
     R_BQ --> K_BQ
+    R_AML --> K_AML
     R_GCE --> K_VTX
     R_VTX --> K_VTX
     R_GKE -->|"gke_mode = 'job'"| K_VTX
@@ -43,6 +46,7 @@ flowchart LR
 | Runtime (`runtime`) | Mode Selector | Underlying GCP Service | Execution Kernel | Scaling & Sharding Unit | Supported Hardware & GPUs | Provisioning Latency | Best-Fit Workload |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **`bigquery`** | *(automatic for `native` family)* | BigQuery ML (`ARIMA_PLUS`) & BigQuery AI (`AI.FORECAST` TimesFM) | [`bigquery_engine.py`](./api/engines_bigquery_engine.md) | BigQuery serverless SQL slots | Serverless (managed by BigQuery) | **~0 s** | Zero-infrastructure SQL baselines (`arima_plus`, `timesfm`) and post-run SQL ensembling (`compute.ensemble.mode = "bigquery"`). |
+| **`vertex_automl`** | `automl_mode = "tabular_workflow"` *(default)* \| `"training_job"` | Gemini Enterprise / Vertex AI Pipelines (`google-cloud-pipeline-components`) & AutoML Forecasting | [`automl_engine.py`](./api/engines_automl_engine.md) | Managed KFP v2 Stage-1 HPO + Stage-2 Ensemble + `BatchPredictionJob` | CPU shapes (`n1-standard-*`, `c2-standard-*`) or GPU (`T4`, `L4`, `A100`) | **~60–90 s** *(pipeline start)* | Global cross-series AutoML (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`) with reusable Stage-1 HPO artifacts (`reuse_tuning_from_run_id`) and native baseline-anchored feature attributions. |
 | **`gce`** | *(none — always Single-VM)* | Compute Engine Container-Optimized OS (COS) VM | [`vertex_engine.py`](./api/engines_vertex_engine.md) | Single VM (`workers = 1`) + intra-VM LPT `ThreadPoolExecutor` | Any CPU shape (`e2`, `n2`, `c2`) or GPU (`T4`, `L4`, `A100`, `A100_80GB`) | **~35–50 s** | Fast, low-latency single-VM CPU or GPU runs without cluster or CustomJob queue overhead; enforces triple-redundant zero-orphan VM self-deletion. |
 | **`vertex`** | *(none — always CustomJob)* | Vertex AI Training CustomJob (`workerPoolSpecs`) | [`vertex_engine.py`](./api/engines_vertex_engine.md) | `workers = 1..N` VMs (`replica_count`) + intra-VM LPT `ThreadPoolExecutor` | Any CPU shape (`e2`, `n2`, `c2`) or GPU (`T4`, `L4`, `A100`, `A100_80GB`) | **~60–120 s** | Managed serverless multi-VM sharding (`workers > 1`) and dedicated per-model GPU VMs without managing clusters. |
 | **`gke`** | `gke_mode = "job"` *(default)* | Google Kubernetes Engine (`batch/v1` Indexed Job + Node Pool Autoscaler) | [`vertex_engine.py`](./api/engines_vertex_engine.md) | `workers = 1..N` pods (`JOB_COMPLETION_INDEX`) + intra-pod LPT `ThreadPoolExecutor` | Any CPU shape or GPU (`T4`, `L4`, `A100`, `A100_80GB`) via per-family node pools | **~5–15 s** *(warm pool)* / **~60–90 s** *(new node)* | Unified cluster runner for all Python families: fit-for-purpose CPU/GPU node pools per family, fast pod startup, and **independent per-pod GPU exit + node scale-down**. |
@@ -69,6 +73,7 @@ flowchart TB
         J_STAT["statistical Job<br/>(CPU Pool / Runtime)"]
         J_ML["ml Job<br/>(CPU Pool / Runtime)"]
         J_DL["deep_learning Job<br/>(GPU Pool / Runtime)"]
+        J_AML["automl Job<br/>(Vertex AI AutoML / Pipelines)"]
         J_NAT["native Job<br/>(BigQuery SQL)"]
     end
 
@@ -93,7 +98,7 @@ flowchart TB
 ```
 
 ### Tier 1: Family-Level Parallel DAG Dispatch & Fit-for-Purpose Hardware (`dag.py`)
-`plan_dag(cfg)` partitions `cfg.models` by model family (`statistical`, `ml`, `deep_learning`, `native`) and dispatches **one independent job per active family in parallel**:
+`plan_dag(cfg)` partitions `cfg.models` by model family (`statistical`, `ml`, `deep_learning`, `automl`, `native`) and dispatches **one independent job per active family in parallel**:
 - **Zero Cross-Family Waiting:** Fast CPU families (`statistical`, `ml`) finish and tear down their CPU VMs, pods, or executors immediately—never sitting idle while `deep_learning` GPU models finish multi-epoch training.
 - **Per-Family Hardware & Runtime Routing (`compute.families.<family>`):** Each family resolves its own `runtime`, `hardware` (`"cpu"` vs `"gpu"`), `gpu_type`, `machine_type`, and `workers` / `min_workers` / `max_workers`.
 - **Single-Cluster Shared GKE Mode:** When multiple families target `runtime = "gke"`, `shared_clusters.py` provisions a single shared GKE cluster (`sf-gke-<hash>`) once before parallel family dispatch, attaches dedicated per-family node pools (`np-statistical`, `np-ml`, `np-deep-learning` with GPUs), and tears the cluster down in a `try ... finally` block once all families complete.
@@ -121,21 +126,22 @@ To prevent nested multi-threading and memory spikes inside worker slots:
 
 ## 3. Compute Configuration Parameters (`compute` & `compute.families.<family>`)
 
-Every field below can be set at the top level (`cfg.compute.<field>`) as a run-wide default or overridden per family under `cfg.compute.families.<family>.<field>` (`statistical`, `ml`, `deep_learning`):
+Every field below can be set at the top level (`cfg.compute.<field>`) as a run-wide default or overridden per family under `cfg.compute.families.<family>.<field>` (`statistical`, `ml`, `deep_learning`, `automl`):
 
 | Field | Type & Allowed Values | Default | Applies To | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `python_runtime` *(top-level)* / `runtime` *(family)* | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` | `"spark"` | All Python families (`statistical`, `ml`, `deep_learning`) | Selects the cloud execution platform for Python models. (`native` models always execute on `"bigquery"`). |
+| `python_runtime` *(top-level)* / `runtime` *(family)* | `"spark"` \| `"ray"` \| `"vertex"` \| `"gce"` \| `"gke"` \| `"vertex_automl"` | `"spark"` (`"vertex_automl"` for `automl`) | All Python & AutoML families | Selects the cloud execution platform for Python/AutoML models. (`native` models always execute on `"bigquery"`). |
+| `automl_mode` | `"tabular_workflow"` \| `"training_job"` | `"tabular_workflow"` | `runtime = "vertex_automl"` (`automl` family) | Selects KFP v2 Tabular Workflow for Forecasting (`"tabular_workflow"`, default) or managed `AutoMLForecastingTrainingJob` (`"training_job"`). |
 | `gke_mode` | `"job"` \| `"ray"` | `"job"` | `runtime = "gke"` | Selects Kubernetes Indexed Job pods (`"job"`, running `vertex_engine.py`) or ephemeral Ray-on-GKE head/worker pods (`"ray"`, running `ray_engine.py`). |
 | `gke_cluster_name` | `str` \| `null` | `null` | `runtime = "gke"` or `ray_mode = "gke"` | Name of an existing GKE Standard cluster to reuse (creating only a job-scoped node pool if needed). When `null`, an ephemeral cluster (`sf-gke-<hash>`) is auto-created and deleted after the run. |
 | `ray_mode` | `"vertex"` \| `"gke"` | `"vertex"` | `runtime = "ray"` | Selects Vertex AI Managed Ray (`"vertex"`) or Ray on GKE (`"gke"`). |
 | `ray_cluster_name` | `str` \| `null` | `null` | `runtime = "ray"` | Existing Vertex AI Ray `PersistentResource` ID (when `ray_mode = "vertex"`) or GKE cluster name fallback (when `ray_mode = "gke"`). |
 | `spark_mode` | `"serverless"` \| `"cluster"` \| `"connect"` | `"serverless"` | `runtime = "spark"` | Selects Dataproc Serverless Batches (`"serverless"`), Dataproc on GCE Cluster (`"cluster"`), or interactive Spark Connect (`"connect"`). |
 | `spark_cluster_name` | `str` \| `null` | `null` | `runtime = "spark"` (`spark_mode = "cluster"`) | Existing Dataproc GCE cluster name; when `null`, an ephemeral cluster is provisioned per run/family. |
-| `hardware` *(family)* / `use_gpu` *(top-level)* | `"cpu"` \| `"gpu"` (`bool` for `use_gpu`) | `"cpu"` (`False`) | `deep_learning` family | Enables GPU acceleration for `deep_learning` models (`statistical` and `ml` are enforced CPU-only). |
-| `gpu_type` | `"T4"` \| `"L4"` \| `"A100"` \| `"A100_80GB"` | `"T4"` (`"L4"` on Spark Serverless) | `deep_learning` when `hardware = "gpu"` | Selects the NVIDIA GPU accelerator family. Validated against `machine_type` and `accelerator_count` in [`resources/catalog.py`](./api/resources.md). |
-| `accelerator_count` | `int` (`1`, `2`, `4`, `8`, `16`) | `1` | `deep_learning` when `hardware = "gpu"` | Number of GPUs attached per VM or pod. Auto-selects the matching `n1-standard-*`, `g2-standard-*`, or `a2-*` machine shape when `machine_type = "auto"`. |
-| `machine_type` | `"auto"` or GCE machine type (`"e2-standard-4"`, `"g2-standard-8"`, …) | `"auto"` | `gce`, `vertex`, `gke`, `ray`, `spark` (`cluster`) | VM or GKE node pool machine shape. `"auto"` resolves to `e2-standard-4` on CPU or the canonical GPU host for `(gpu_type, accelerator_count)`. |
+| `hardware` *(family)* / `use_gpu` *(top-level)* | `"cpu"` \| `"gpu"` (`bool` for `use_gpu`) | `"cpu"` (`False`) | `deep_learning` & `automl` families | Enables GPU acceleration for `deep_learning` and `automl` models (`statistical` and `ml` are enforced CPU-only). |
+| `gpu_type` | `"T4"` \| `"L4"` \| `"A100"` \| `"A100_80GB"` | `"T4"` (`"L4"` on Spark Serverless) | `deep_learning` / `automl` when `hardware = "gpu"` | Selects the NVIDIA GPU accelerator family. Validated against `machine_type` and `accelerator_count` in [`resources/catalog.py`](./api/resources.md). |
+| `accelerator_count` | `int` (`1`, `2`, `4`, `8`, `16`) | `1` | `deep_learning` / `automl` when `hardware = "gpu"` | Number of GPUs attached per VM or pod. Auto-selects the matching `n1-standard-*`, `g2-standard-*`, or `a2-*` machine shape when `machine_type = "auto"`. |
+| `machine_type` | `"auto"` or GCE machine type (`"e2-standard-4"`, `"g2-standard-8"`, …) | `"auto"` | `gce`, `vertex`, `gke`, `ray`, `spark` (`cluster`), `vertex_automl` | VM or GKE node pool machine shape. `"auto"` resolves to `e2-standard-4` on CPU or the canonical GPU host for `(gpu_type, accelerator_count)`. |
 | `workers` | `int >= 1` | `1` | `vertex`, `gke` (`gke_mode = "job"`), `gce` (must be `1`), or fixed-size `ray`/`spark` | Number of parallel VMs (`vertex`) or Indexed Job pods (`gke`). Auto-expands `1 -> len(models)` when multiple `deep_learning` / global models run in one `vertex` or `gke` job. |
 | `min_workers` / `max_workers` | `int >= 1` \| `null` | `null` | `spark`, `ray`, `gke` (`gke_mode = "ray"`) | Autoscaling worker bounds for Dataproc Serverless/Cluster executors or Ray worker nodes/pods. |
 
@@ -314,7 +320,7 @@ Schedules per-cell `@ray.remote` tasks with profile-driven fractional CPU/GPU al
 ```
 
 ### 4.6. BigQuery Native SQL (`native` family & SQL Ensembling)
-Models in the `native` family (`arima_plus`, `timesfm`) always execute directly inside BigQuery via `bigquery_engine.py` with zero VM or container provisioning, and can be freely combined with any Python runtime in the same `RunConfig`:
+Models in the `native` family (`arima_plus`, `timesfm`) always execute directly inside BigQuery via `bigquery_engine.py` with zero VM or container provisioning, and can be freely combined with any Python or AutoML runtime in the same `RunConfig`:
 
 ```json
 {
@@ -324,6 +330,66 @@ Models in the `native` family (`arima_plus`, `timesfm`) always execute directly 
     "horizon": 14
   },
   "models": ["arima_plus", "timesfm"]
+}
+```
+
+### 4.7. Gemini Enterprise / Vertex AI AutoML (`runtime = "vertex_automl"`, `automl_mode = "tabular_workflow" | "training_job"`)
+Models in the `automl` family (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`) execute on `runtime = "vertex_automl"` via [`automl_engine.py`](./api/engines_automl_engine.md):
+- **`automl_mode = "tabular_workflow"` *(default)*:** Compiles and submits a glass-box Kubeflow Pipelines v2 DAG (`google-cloud-pipeline-components`) to Vertex AI Pipelines under `{artifact_root}/{run_id}/tabular_workflow/{model_type}`, stamps `stage_1_tuning_result_artifact_uri` (`forecast_metadata.model_artifact`) and `vertex_model_resource_name` (`forecast_metadata.best_params`) into BigQuery so future runs can warm-start (`reuse_tuning_from_run_id`), and runs `BatchPredictionJob(generate_explanation=True)` to populate both Tier-1 (`fit_diagnostics["feature_attributions"]`) and Tier-2 (`forecast_predictions.explanations`) feature attributions.
+- **`automl_mode = "training_job"`:** Uses the classic managed `aiplatform.AutoMLForecastingTrainingJob` API for single-call black-box AutoML training and batch prediction.
+
+```json
+{
+  "run_name": "vertex-automl-tabular-workflow",
+  "python_runtime": "vertex",
+  "data": {
+    "source_table": "source_series_covariates_native",
+    "series_limit": 20,
+    "horizon": 14
+  },
+  "models": ["vertex_tide", "xgboost", "arima_plus"],
+  "model_params": {
+    "vertex_tide": {
+      "train_budget_milli_node_hours": 1000,
+      "stage_1_num_parallel_trials": 4,
+      "stage_2_num_selected_trials": 2,
+      "optimization_objective": "minimize-wape-mae"
+    }
+  },
+  "compute": {
+    "automl_mode": "tabular_workflow",
+    "families": {
+      "automl": {
+        "runtime": "vertex_automl",
+        "automl_mode": "tabular_workflow",
+        "hardware": "cpu"
+      },
+      "ml": {
+        "runtime": "vertex",
+        "machine_type": "e2-standard-4",
+        "workers": 1
+      }
+    }
+  },
+  "features": {
+    "holidays": ["US"],
+    "static_covariates": ["region", "category"],
+    "future_covariates": ["promo_flag", "price_index"],
+    "past_covariates": ["temperature"],
+    "on_unsupported_covariates": "fallback"
+  },
+  "backtest": {
+    "enabled": true,
+    "scheme": "expanding",
+    "n_folds": 1,
+    "horizon": 14,
+    "step": 14,
+    "decision_metric": "wape"
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": ["mean", "inverse_error", "nnls"]
+  }
 }
 ```
 

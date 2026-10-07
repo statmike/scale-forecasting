@@ -72,15 +72,37 @@ _FORBIDDEN_DOC_TOKENS = (
 
 def _all_markdown_files() -> list[Path]:
     files: list[Path] = []
-    for path in sorted(_REPO_ROOT.rglob("*.md")):
-        rel_parts = path.relative_to(_REPO_ROOT).parts
-        if any(part in _EXCLUDED_DIRS for part in rel_parts):
+    for top in ("README.md", "AGENTS.md"):
+        p = _REPO_ROOT / top
+        if p.exists():
+            files.append(p)
+    for sub in ("docs", "src", "configs", "notebooks", "tests", "docker", "terraform"):
+        sub_dir = _REPO_ROOT / sub
+        if not sub_dir.exists():
             continue
-        # Skip docs/notebooks symlink duplicates (checked via notebooks/ directly).
-        if len(rel_parts) >= 2 and rel_parts[0] == "docs" and rel_parts[1] == "notebooks":
-            continue
-        files.append(path)
-    return files
+        for path in sorted(sub_dir.rglob("*.md")):
+            rel_parts = path.relative_to(_REPO_ROOT).parts
+            if any(part in _EXCLUDED_DIRS for part in rel_parts):
+                continue
+            # Skip docs/notebooks symlink duplicates (checked via notebooks/ directly).
+            if len(rel_parts) >= 2 and rel_parts[0] == "docs" and rel_parts[1] == "notebooks":
+                continue
+            files.append(path)
+    return sorted(files)
+
+
+def _all_notebook_markdown_sources() -> list[tuple[str, str]]:
+    """Return ``(label, markdown_text)`` for every markdown cell in ``notebooks/*.ipynb``."""
+    sources: list[tuple[str, str]] = []
+    nb_dir = _REPO_ROOT / "notebooks"
+    for nb_path in sorted(nb_dir.glob("*.ipynb")):
+        rel = nb_path.relative_to(_REPO_ROOT)
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        for idx, cell in enumerate(nb.get("cells", [])):
+            if cell.get("cell_type") == "markdown":
+                src = "".join(cell.get("source", []))
+                sources.append((f"{rel}#cell{idx}", src))
+    return sources
 
 
 def _strip_fenced_code(markdown: str) -> list[tuple[int, str]]:
@@ -136,9 +158,12 @@ def markdown_files() -> list[Path]:
 def test_markdown_tables_column_parity(markdown_files: list[Path]) -> None:
     """Every Markdown table row has the same column count as its header row."""
     errors: list[str] = []
-    for path in markdown_files:
-        rel = path.relative_to(_REPO_ROOT)
-        non_code_lines = _strip_fenced_code(path.read_text(encoding="utf-8"))
+    sources: list[tuple[str, str]] = [
+        (str(path.relative_to(_REPO_ROOT)), path.read_text(encoding="utf-8"))
+        for path in markdown_files
+    ] + _all_notebook_markdown_sources()
+    for rel, text in sources:
+        non_code_lines = _strip_fenced_code(text)
         i = 0
         while i < len(non_code_lines):
             line_no, line = non_code_lines[i]
@@ -173,12 +198,15 @@ def test_markdown_tables_column_parity(markdown_files: list[Path]) -> None:
 
 
 def test_mermaid_blocks_syntax_and_quoting(markdown_files: list[Path]) -> None:
-    """Every Mermaid block has a supported header, balanced subgraphs, and quoted labels."""
+    """Every Mermaid block has a supported header, balanced subgraphs, quoted labels, and <br/>."""
     errors: list[str] = []
     unquoted_node_re = re.compile(r"\b[A-Za-z0-9_]+\[(?![\"\[/\(])([^\]\"\n]*[()<][^\]\"\n]*)\]")
-    for path in markdown_files:
-        rel = path.relative_to(_REPO_ROOT)
-        lines = path.read_text(encoding="utf-8").splitlines()
+    sources: list[tuple[str, str]] = [
+        (str(path.relative_to(_REPO_ROOT)), path.read_text(encoding="utf-8"))
+        for path in markdown_files
+    ] + _all_notebook_markdown_sources()
+    for rel, text in sources:
+        lines = text.splitlines()
         in_mermaid = False
         start_line = 0
         block: list[tuple[int, str]] = []
@@ -210,6 +238,10 @@ def test_mermaid_blocks_syntax_and_quoting(markdown_files: list[Path]) -> None:
                 for b_no, b_line in block:
                     if b_line.strip().startswith("%%"):
                         continue
+                    if r"\n" in b_line:
+                        errors.append(
+                            f"{rel}:{b_no}: literal \\n in mermaid label (use <br/> instead)"
+                        )
                     for match in unquoted_node_re.finditer(b_line):
                         errors.append(
                             f"{rel}:{b_no}: unquoted special chars in mermaid label "
@@ -388,7 +420,7 @@ def test_no_stale_config_names_or_counts_in_docs(markdown_files: list[Path]) -> 
         errors.append(f"src/scale_forecasting/README.md missing '{n_models} models'")
     if f"{n_metrics} metrics" not in pkg_readme:
         errors.append(f"src/scale_forecasting/README.md missing '{n_metrics} metrics'")
-    if n_smokes != 41:
-        errors.append(f"Expected 41 smoke configs on disk, found {n_smokes}")
+    if n_smokes != 42:
+        errors.append(f"Expected 42 smoke configs on disk, found {n_smokes}")
 
     assert not errors, "Documentation inventory drift:\n" + "\n".join(errors)
