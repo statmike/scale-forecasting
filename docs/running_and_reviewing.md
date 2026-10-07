@@ -114,7 +114,7 @@ uv run python -m ipykernel install --user --name scale-forecasting --display-nam
 
 Three notebooks need **no** cluster and run locally or read-only: `00_model_playground.ipynb` (pure
 `worker.run_cell` / `run_panel_model`), `09_custom_models_and_metrics.ipynb` (custom 1-file plugins), and
-`10_registry_operations_and_scale.ipynb` (registry doctor, live probes, and 100k scale review over the registry, needing only the `SF_*` env + ADC). The workflow notebooks `01`–`08` configure, explain, submit, live-monitor (`forecaster.run_live()`), and review runs across BigQuery, GCE, Vertex AI, GKE, Vertex AI AutoML, Spark, and Ray.
+`10_registry_operations_and_scale.ipynb` (registry doctor, live probes, and a cross-platform review of every completed run in the registry, needing only the `SF_*` env + ADC). The workflow notebooks `01`–`08` configure, explain, submit, live-monitor (`forecaster.run_live()`), and review runs across BigQuery, GCE, Vertex AI, GKE, Vertex AI AutoML, Spark, and Ray.
 
 **Python-version note.** The project pins Python **3.11** on every surface (why: Vertex Ray
 client↔cluster parity and the Dataproc packed-venv — see [version_matrix.md](./version_matrix.md)).

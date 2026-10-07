@@ -1,7 +1,7 @@
 [project]
 name = "scale-forecasting"
 version = "0.1.0"
-description = "Massively-parallel time-series forecasting on Google Cloud — Spark, Ray, and BigQuery, one config away."
+description = "Time-series forecasting on Google Cloud at any scale: one JSON configuration runs every model family on Dataproc Serverless, Ray, Vertex AI, GKE, Compute Engine, or BigQuery ML and writes forecasts and leaderboards back to BigQuery."
 readme = "README.md"
 # 3.11 is the single tested/supported version everywhere: Vertex Ray client↔cluster parity at 2.47,
 # the Dataproc packed-venv is built against 3.11, and notebook 01's interactive Spark Connect path

@@ -54,6 +54,7 @@ output="$(env "${sf_unset[@]}" "${runner[@]}" \
   tests/unit/test_docs_integrity.py \
   tests/unit/test_api_docs_coverage.py \
   tests/unit/test_test_dependencies_declared.py \
+  tests/unit/test_notebook_hygiene.py \
   tests/smokes/test_smoke_configs.py \
   -q --no-header -p no:cacheprovider 2>&1)"
 status=$?
@@ -71,11 +72,14 @@ pre-commit: a consistency tripwire failed — see above.
                                     A value that becomes proven, or stops being proven, needs its
                                     classification updated in the UNPROVEN map.
   test_docs_integrity             — all Markdown tables, Mermaid diagrams, embedded RunConfig JSON
-                                    blocks, relative links, CLI module invocations, and canonical
-                                    model/metric/view counts across all .md files.
+                                    blocks, relative links, CLI module invocations, exception-class
+                                    names, and canonical model/metric/view counts across all .md files.
   test_api_docs_coverage          — every public module has a docs/api page wired into mkdocs.yml.
   test_test_dependencies_declared — every module the tests import is installed by the CI offline
                                     sync (declared in pyproject, not merely present in your venv).
+  test_notebook_hygiene           — no e-mail, personal or corporate home path, internal hostname,
+                                    or credential in any notebook source or persisted output
+                                    (AGENTS.md §1 rule 4). The message names the cell, never the text.
   test_smoke_configs              — every configs/smokes/*.json validates against RunConfig.
 
 Fix the row, map, declaration, or documentation and commit again. To commit anyway: git commit --no-verify

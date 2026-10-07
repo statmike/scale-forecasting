@@ -289,6 +289,32 @@ def effective_config_for_model(cfg: RunConfig, model_cls: type[Any]) -> RunConfi
     return cfg.model_copy(update={"features": new_features})
 
 
+def _with_inferred_freq(index: pd.Index) -> pd.Index:
+    """``index`` with its frequency set, when the dates are regular enough to carry one.
+
+    A series that passed pre-flight is regular by contract, but ``set_index`` does not know that,
+    and a ``DatetimeIndex`` without a ``freq`` makes every statsmodels model *re-derive* it at fit
+    time — correctly, and with a ``ValueWarning`` whose text is the caller's site-packages path.
+    Declaring what the index already is keeps the arithmetic identical (statsmodels used the same
+    inferred value) and keeps a warning that is not about the user's data out of their notebook.
+
+    Irregular dates, duplicates, or fewer than the three points inference needs leave the index as
+    it was: statsmodels then falls back exactly as it does today, and the warning it raises there
+    is a true statement about that series.
+    """
+    if not isinstance(index, pd.DatetimeIndex) or index.freq is not None or len(index) < 3:
+        return index
+    try:
+        inferred = pd.infer_freq(index)
+    except (TypeError, ValueError):
+        return index
+    if inferred is None:
+        return index
+    with_freq = pd.DatetimeIndex(index, freq=inferred)
+    with_freq.name = index.name
+    return with_freq
+
+
 def build_features(
     series: pd.DataFrame,
     cfg: RunConfig,
@@ -298,7 +324,8 @@ def build_features(
     """Build ``(y, X)`` fit inputs for one series.
 
     ``series`` is one ts_id's rows with the configured date/target (and optional covariates)
-    columns. ``y`` is returned indexed by ds, sorted, with the transform applied. ``X``
+    columns. ``y`` is returned indexed by ds, sorted, with the transform applied, and with the
+    index's frequency set whenever the dates are regular (see `_with_inferred_freq`). ``X``
     carries any configured dynamic covariates (``exog``, ``future_covariates``,
     ``past_covariates``), an ``is_holiday`` flag, Fourier terms, and lagged covariates —
     aligned to ``y`` — or None when nothing is configured.
@@ -327,6 +354,7 @@ def build_features(
     frame[d.date_col] = pd.to_datetime(frame[d.date_col]).astype("datetime64[ns]")
     frame = frame.sort_values(d.date_col).set_index(d.date_col)
     frame.index.name = "ds"
+    frame.index = _with_inferred_freq(frame.index)
 
     y = frame[d.target_col].astype(float)
     y = apply_transform(y, f.transform, lam)

@@ -63,7 +63,7 @@ Colab Enterprise templates can bake them in, so no environment cell is needed (s
 | `07_hpo_backtesting_and_ensembles` | BigQuery + Vertex AI | 3.11 | Optuna HPO + in-run, post-run (`reensemble`), and cross-run (`ensemble_runs`) ensembling | none | `sf-main` |
 | `08_multi_engine_master_workflow` | Spark $\parallel$ Vertex / GKE / AutoML $\parallel$ BigQuery | 3.11 | multi-family parallel DAG + `run_live()` monitoring + full diagnostic & explainability review | none | `sf-main` |
 | `09_custom_models_and_metrics` | none (fully local) | 3.11 | author custom 1-file `BaseModel` & `BaseMetric` plugins offline | none | `sf-main` |
-| `10_registry_operations_and_scale` | BigQuery (read-only + ops) | 3.11 | `Registry.doctor()`, live probes, Composer DAG emitter & 100k scale review | none | `sf-main` |
+| `10_registry_operations_and_scale` | BigQuery (read-only + ops) | 3.11 | `Registry.doctor()`, live probes, Composer DAG emitter & cross-platform run review | none | `sf-main` |
 
 Every notebook runs on the single `sf-main` (py3.11) template. Most are *orchestration* — they submit
 work to Dataproc / Ray / Vertex / GCE / BigQuery, which runs on-cluster Python, so the kernel minor doesn't change

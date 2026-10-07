@@ -25,6 +25,9 @@ and place any requested quantile from that Gaussian, honoring arbitrary quantile
 
 from __future__ import annotations
 
+import logging
+import warnings
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -32,16 +35,51 @@ import pandas as pd
 
 from ..errors import ConfigError, ModelError
 from ..features import invert_transform
-from ._neuralforecast_base import _ensure_mpl_dir
+from ._neuralforecast_base import _ensure_mpl_dir, _quiet_lightning
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     import optuna
 
 # Fixed band fit into the network; sigma is backed out of it for arbitrary quantiles.
 _BAND = (0.1, 0.9)
+
+
+def _import_neuralprophet() -> tuple[Any, Any, Any]:
+    """Import the library lazily and quietly.
+
+    Importing ``neuralprophet`` has side effects a caller cannot opt out of: it turns on
+    ``logging.captureWarnings`` process-wide with its own stderr handler, logs an *error* when
+    ``plotly`` is absent (it is not a dependency here; interactive plots are not used), and pulls in
+    ``tqdm.auto``, which warns when ``ipywidgets`` is missing. None of it is actionable by the user
+    of this model, so the import runs with warnings off and the library's logger held at CRITICAL
+    until it has installed its own level. The ``ImportError`` for a missing extra still propagates.
+    """
+    logging.getLogger("NP").setLevel(logging.CRITICAL)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        from neuralprophet import NeuralProphet, set_log_level, set_random_seed
+    return NeuralProphet, set_log_level, set_random_seed
+
+
+@contextmanager
+def _quiet() -> Iterator[None]:
+    """Silence the library's deprecation and configuration chatter for one fit or predict call.
+
+    Because the import above has routed every warning through ``logging``, each pandas
+    ``FutureWarning`` NeuralProphet triggers inside its own training loop — hundreds per fit — and
+    each Lightning ``PossibleUserWarning`` about an unconfigured logger or an inferred batch size
+    would otherwise reach the terminal or the notebook, prefixed with the absolute path of the
+    site-packages file that raised it. Same categories the ``neuralforecast`` base suppresses.
+    """
+    _quiet_lightning()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        yield
 
 
 class NeuralProphetModel(BaseModel):
@@ -69,7 +107,7 @@ class NeuralProphetModel(BaseModel):
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         _ensure_mpl_dir()
         try:
-            from neuralprophet import NeuralProphet, set_log_level, set_random_seed
+            NeuralProphet, set_log_level, set_random_seed = _import_neuralprophet()
         except ImportError as e:  # pragma: no cover - exercised only without the extra
             raise ModelError("neuralprophet not installed; install the 'models' extra") from e
         if len(y) < 2:
@@ -97,7 +135,8 @@ class NeuralProphetModel(BaseModel):
             collect_metrics=False,
             trainer_config=self._trainer_config(),
         )
-        model.fit(self._train, freq=self.ctx.freq, progress=None, minimal=True)
+        with _quiet():
+            model.fit(self._train, freq=self.ctx.freq, progress=None, minimal=True)
         self._model = model
 
     def predict(
@@ -111,8 +150,10 @@ class NeuralProphetModel(BaseModel):
         # Read the whole span from the fit's last observation and keep the tail, so an advanced
         # origin lands on the right steps of the network's own output rather than re-anchoring it.
         steps = self._forecast_steps(horizon)
-        future = self._model.make_future_dataframe(self._train, periods=steps)
-        mean, lo, hi = (a[-horizon:] for a in self._read_steps(self._model.predict(future), steps))
+        with _quiet():
+            future = self._model.make_future_dataframe(self._train, periods=steps)
+            forecast = self._model.predict(future)
+        mean, lo, hi = (a[-horizon:] for a in self._read_steps(forecast, steps))
         # Back out sigma from the symmetric band, then place any requested quantile.
         z = norm.ppf(_BAND[1])
         sigma = (hi - lo) / (2.0 * z)
@@ -130,7 +171,7 @@ class NeuralProphetModel(BaseModel):
         """Fit one global or hybrid NeuralProphet network across all series in ``series_map``."""
         _ensure_mpl_dir()
         try:
-            from neuralprophet import NeuralProphet, set_log_level, set_random_seed
+            NeuralProphet, set_log_level, set_random_seed = _import_neuralprophet()
         except ImportError as e:  # pragma: no cover - exercised only without the extra
             raise ModelError("neuralprophet not installed; install the 'models' extra") from e
         if not series_map:
@@ -175,7 +216,8 @@ class NeuralProphetModel(BaseModel):
             collect_metrics=False,
             trainer_config=self._trainer_config(),
         )
-        model.fit(self._panel_train, freq=self.ctx.freq, progress=None, minimal=True)
+        with _quiet():
+            model.fit(self._panel_train, freq=self.ctx.freq, progress=None, minimal=True)
         self._model = model
 
     def predict_panel(
@@ -188,8 +230,9 @@ class NeuralProphetModel(BaseModel):
         """Predict ``horizon`` steps for every series in the fitted global/hybrid panel."""
         from scipy.stats import norm
 
-        future = self._model.make_future_dataframe(self._panel_train, periods=horizon)
-        fc = self._model.predict(future)
+        with _quiet():
+            future = self._model.make_future_dataframe(self._panel_train, periods=horizon)
+            fc = self._model.predict(future)
         z = norm.ppf(_BAND[1])
         t = self.ctx.transform
         out: dict[str, pd.DataFrame] = {}

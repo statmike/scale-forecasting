@@ -50,9 +50,13 @@ class ThetaModel(BaseModel):
         # data-driven rule (deseasonalize only with ≥2 full seasons). Absent → the default.
         deseasonalize = bool(self.params.get("deseasonalize", len(y) >= 2 * period))
         self._last_date = y.index[-1]
-        self._fitted = _StatsmodelsTheta(
-            y.astype(float), period=period, deseasonalize=deseasonalize
-        ).fit()
+        # statsmodels extends the sample index to label its forecast. A DatetimeIndex without a
+        # `freq` cannot be extended, so it warns (UserWarning from theta.py) and falls back to
+        # positions — and that warning carries the caller's site-packages path into every notebook
+        # output. We never read statsmodels' index (`predict` builds its own from `ctx`), so hand it
+        # a RangeIndex: the fit is on values alone, so forecasts and intervals are bit-identical.
+        endog = pd.Series(y.to_numpy(dtype=float))
+        self._fitted = _StatsmodelsTheta(endog, period=period, deseasonalize=deseasonalize).fit()
 
     def predict(
         self,

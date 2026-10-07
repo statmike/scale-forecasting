@@ -11,6 +11,7 @@ This file is the authoritative engineering charter and review checklist for AI c
 1. **Zero Customer or Proprietary Leakage:** Never include customer names, engagement identifiers, internal corporate hostnames, or third-party vendor migration notes in code, comments, commit messages, configs, or documentation.
 2. **Sanitized Identity in Validation Records:** In [`docs/validation.md`](./docs/validation.md) and commit messages, never record personal or corporate user email addresses; always use the literal placeholder `<the launching user email>` when illustrating populated `user_id` lineage fields.
 3. **No Secret or Credential Artifacts:** Never commit service account keys (`*.json.key`, `service-account*.json`), `.env` files, or `.tfvars` files. All Google Cloud execution authenticates via Application Default Credentials (ADC) locally and least-privilege attached service accounts in cloud runtimes.
+4. **Persisted Notebook Outputs — What Is and Is Not Acceptable:** Notebook outputs are committed so GitHub and the docs site render results without execution. The demo **project ID and bucket names may appear** in those outputs: Google Cloud does not treat them as secrets (they appear in console URLs and official samples) and knowing them grants nothing without IAM; the buckets they name enforce public access prevention. What must **never** appear in a persisted output: e-mail addresses, internal corporate hostnames, absolute paths under a personal or corporate home directory (`/usr/local/google/home/...`, `/Users/<name>/...`, `/home/<name>/...`), OS usernames, access tokens, or service-account key material. [`tests/unit/test_notebook_hygiene.py`](./tests/unit/test_notebook_hygiene.py) enforces exactly this split; suppress or clear the offending cell output rather than widening the allowlist.
 
 ---
 
@@ -46,6 +47,7 @@ flowchart LR
         T3["test_docs_integrity.py"]
         T4["test_api_docs_coverage.py"]
         T5["test_test_dependencies_declared.py"]
+        T6["test_notebook_hygiene.py"]
     end
 
     Pure -->|"Shared execution contract"| Cloud
@@ -123,13 +125,15 @@ Run this after *any* code, config, or documentation edit:
   tests/unit/test_docs_integrity.py \
   tests/unit/test_api_docs_coverage.py \
   tests/unit/test_test_dependencies_declared.py \
+  tests/unit/test_notebook_hygiene.py \
   tests/smokes/test_smoke_configs.py -q
 ```
 - **`test_validation_ledger.py`:** Verifies every smoke config (`01`–`42`), root demo config (`20`), and notebook (`11`) has a valid row in `docs/validation.md` whose architecture axes match current code.
 - **`test_config_coverage.py`:** Verifies all reachable `Literal` and `bool` values on `RunConfig` are proven live or exercised offline.
-- **`test_docs_integrity.py`:** Audits all 83+ `.md` files for valid `RunConfig` JSON examples, valid relative links and config paths, valid `python -m` module references, balanced Markdown table columns, valid Mermaid syntax, absence of deprecated parameter names, and dynamic model/metric/view/smoke count parity.
+- **`test_docs_integrity.py`:** Audits all 83+ `.md` files for valid `RunConfig` JSON examples, valid relative links and config paths, valid `python -m` module references, balanced Markdown table columns, valid Mermaid syntax, absence of deprecated parameter names, backticked exception-class names that resolve to real classes in `errors.py`, and dynamic model/metric/view/smoke count parity.
 - **`test_api_docs_coverage.py`:** Verifies every public Python module has a corresponding `docs/api/*.md` page and `mkdocs.yml` nav entry.
 - **`test_test_dependencies_declared.py`:** Verifies every third-party module imported anywhere under `tests/` (including lazy, function-level imports) belongs to a distribution that CI's `uv sync --frozen --all-extras` installs, computed from `uv.lock`. A package that is only in your `.venv` because of `make docs` or an ad-hoc `uv pip install` is **not** declared; add it to `[dependency-groups].dev` (or an extra) in `pyproject.toml` and run `make lock`.
+- **`test_notebook_hygiene.py`:** Scans every notebook's sources **and persisted outputs** (stream text, text/JSON display data, tracebacks) for the identifiers §1 rule 4 forbids — e-mail addresses, personal or corporate home paths, internal hostnames and short links, credential material. The failure message names the notebook, cell, and pattern, never the matched text. Fix the cell (silence the warning at its source, clear or re-run the output); do not widen the allowlists.
 
 ### Gate 2: Formatting, Linting, Lock Drift & Strict MkDocs Site Build
 ```bash
