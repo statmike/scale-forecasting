@@ -45,6 +45,7 @@ flowchart LR
         T2["test_config_coverage.py"]
         T3["test_docs_integrity.py"]
         T4["test_api_docs_coverage.py"]
+        T5["test_test_dependencies_declared.py"]
     end
 
     Pure -->|"Shared execution contract"| Cloud
@@ -113,7 +114,7 @@ All documentation across `README.md`, `docs/*.md`, and directory `README.md` fil
 
 Never declare a feature, bugfix, documentation update, or phase complete until **all applicable verification gates below have been executed and shown passing**. During review rounds, agents should run these commands directly before signing off.
 
-### Gate 1: Fast Consistency & Documentation Tripwires (< 3 seconds, runs in `.githooks/pre-commit`)
+### Gate 1: Fast Consistency & Documentation Tripwires (seconds, runs in `.githooks/pre-commit`)
 Run this after *any* code, config, or documentation edit:
 ```bash
 .venv/bin/pytest \
@@ -121,19 +122,24 @@ Run this after *any* code, config, or documentation edit:
   tests/unit/test_config_coverage.py \
   tests/unit/test_docs_integrity.py \
   tests/unit/test_api_docs_coverage.py \
+  tests/unit/test_test_dependencies_declared.py \
   tests/smokes/test_smoke_configs.py -q
 ```
 - **`test_validation_ledger.py`:** Verifies every smoke config (`01`–`42`), root demo config (`20`), and notebook (`11`) has a valid row in `docs/validation.md` whose architecture axes match current code.
 - **`test_config_coverage.py`:** Verifies all reachable `Literal` and `bool` values on `RunConfig` are proven live or exercised offline.
 - **`test_docs_integrity.py`:** Audits all 83+ `.md` files for valid `RunConfig` JSON examples, valid relative links and config paths, valid `python -m` module references, balanced Markdown table columns, valid Mermaid syntax, absence of deprecated parameter names, and dynamic model/metric/view/smoke count parity.
 - **`test_api_docs_coverage.py`:** Verifies every public Python module has a corresponding `docs/api/*.md` page and `mkdocs.yml` nav entry.
+- **`test_test_dependencies_declared.py`:** Verifies every third-party module imported anywhere under `tests/` (including lazy, function-level imports) belongs to a distribution that CI's `uv sync --frozen --all-extras` installs, computed from `uv.lock`. A package that is only in your `.venv` because of `make docs` or an ad-hoc `uv pip install` is **not** declared; add it to `[dependency-groups].dev` (or an extra) in `pyproject.toml` and run `make lock`.
 
-### Gate 2: Formatting, Linting & Strict MkDocs Site Build
+### Gate 2: Formatting, Linting, Lock Drift & Strict MkDocs Site Build
 ```bash
 .venv/bin/ruff format --check src/ tests/
 .venv/bin/ruff check src/ tests/
+make lock-check
 .venv/bin/mkdocs build --strict
 ```
+- The first three are also run by `.githooks/pre-push` (enabled with `make hooks`), with exactly the flags CI uses, so a push can never be the first place they fail.
+- After editing `pyproject.toml` or any test import, run `make ci-offline`: it syncs a second environment (`.venv-ci`) with the CI `offline` job's exact command and runs the full offline gate there. Your working `.venv` is a superset of CI's and cannot reproduce a missing-package failure.
 
 ### Gate 3: Offline Unit & Contract Test Suite
 ```bash

@@ -9,7 +9,9 @@ flowchart TB
         unit["Pure Unit & Seam Tests<br/>~4,800+ tests · Zero cloud/Spark/Ray required<br/>(make test)"]
         contracts["Catalogue Contract Suites<br/>test_models_contract.py (all 34 models)<br/>test_worker_model_matrix.py (full run_cell)<br/>test_metrics_contract.py (all 21 metrics)"]
         snaps["Pinned Golden Snapshots (snapshots/)<br/>SQL DDL & views · BQML SQL<br/>run_id digests · numeric golden panel"]
-        trips["Consistency Tripwires (pre-commit)<br/>test_validation_ledger.py<br/>test_config_coverage.py<br/>test_docs_integrity.py<br/>test_code_delivery.py · test_launch_point_lean.py"]
+        trips["Consistency Tripwires (pre-commit hook)<br/>test_validation_ledger.py · test_config_coverage.py<br/>test_docs_integrity.py · test_api_docs_coverage.py<br/>test_test_dependencies_declared.py · test_smoke_configs.py"]
+        guards["Architectural Guards<br/>test_code_delivery.py · test_launch_point_lean.py<br/>test_source_conventions.py"]
+        push["Deterministic CI Half (pre-push hook)<br/>ruff format --check · ruff check<br/>uv lock --check · requirements export drift"]
     end
 
     subgraph integ["Tier 2: Live Integration Tests (tests/integration/)"]
@@ -27,14 +29,19 @@ flowchart TB
 
 ## Running the Tests
 
-### 1. Fast Pre-Commit Consistency Tripwires (~2 seconds)
+### 1. Fast Consistency Tripwires (pre-commit hook, seconds)
 
-Runs automatically on `git commit` once enabled via `make hooks`:
+Two tracked hooks in [`.githooks/`](../.githooks/) run automatically once enabled via `make hooks` (one-time per clone):
+
+- **`pre-commit`** runs the AGENTS.md Gate 1 tripwires — the validation ledger, config coverage, docs integrity, API-docs coverage, test-dependency declaration, and smoke-config validity. They compare prose and declarations against code, so an edit made after a green `make test` can turn them red with no code change.
+- **`pre-push`** runs the deterministic half of CI at the moment a commit leaves the machine — `ruff format --check`, `ruff check`, `uv lock --check`, and a `docker/requirements.txt` export-drift check (same flags as `make lock`, read from the Makefile's `EXPORT_ARGS`).
 
 ```bash
 make hooks  # one-time setup per clone
-uv run pytest tests/unit/test_validation_ledger.py tests/unit/test_config_coverage.py tests/unit/test_docs_integrity.py -q
+uv run pytest tests/unit/test_validation_ledger.py tests/unit/test_config_coverage.py tests/unit/test_docs_integrity.py tests/unit/test_api_docs_coverage.py tests/unit/test_test_dependencies_declared.py tests/smokes/test_smoke_configs.py -q
 ```
+
+To reproduce the CI `offline` job's environment exactly (a second `.venv-ci` synced with `uv sync --frozen --all-extras` and nothing else — no `docs` group, no ad-hoc installs), run `make ci-offline`. It catches the one failure shape your working venv cannot: a test that imports a package only your machine has.
 
 ### 2. Full Offline Gate (`make test`)
 
@@ -68,7 +75,7 @@ uv run python -m tests.smokes.smoke_harness --only 01_serverless_cpu
 | Directory / File | Purpose |
 | :--- | :--- |
 | [`conftest.py`](./conftest.py) | Shared pytest fixtures, marker registrations (`gcp`, `spark`, `ray`, `airflow`), and autouse guards that prevent offline unit tests from reading ambient `SF_*` environment variables or making accidental cloud calls. |
-| **[`unit/`](./unit/)** | 70+ test modules covering every module in `src/scale_forecasting/`. Includes contract suites (`test_models_contract.py`, `test_metrics_contract.py`, `test_worker_model_matrix.py`), architectural guards (`test_code_delivery.py`, `test_launch_point_lean.py`, `test_source_conventions.py`), and doc/config tripwires (`test_validation_ledger.py`, `test_config_coverage.py`, `test_docs_integrity.py`). |
+| **[`unit/`](./unit/)** | 70+ test modules covering every module in `src/scale_forecasting/`. Includes contract suites (`test_models_contract.py`, `test_metrics_contract.py`, `test_worker_model_matrix.py`), architectural guards (`test_code_delivery.py`, `test_launch_point_lean.py`, `test_source_conventions.py`), and doc/config/dependency tripwires (`test_validation_ledger.py`, `test_config_coverage.py`, `test_docs_integrity.py`, `test_api_docs_coverage.py`, `test_test_dependencies_declared.py`). |
 | **[`unit/snapshots/`](./unit/snapshots/README.md)** | Golden snapshot files pinning generated BigQuery DDL (`ddl_deployment.sql`, `ddl_drop.sql`), analyst views (`views.sql`), BQML query shapes (`bigquery_native.sql`), deterministic `run_id` digests (`run_ids.json`), and numerical forecast outputs (`golden_panel.json`). |
 | **[`integration/`](./integration/)** | Live integration tests against BigQuery, Dataproc Spark Connect/Serverless, Vertex AI Ray, `Registry` operations (`test_registry_ops_live.py`), and headless notebook execution (`test_notebook_acceptance.py`). |
 | **[`smokes/`](./smokes/)** | Live end-to-end smoke driver (`smoke_harness.py`), Cloud Composer / Airflow DAG smoke driver (`airflow_smoke.py`), and offline tests for the harness and smoke configs (`test_harness.py`, `test_airflow_smoke.py`, `test_smoke_configs.py`). |
@@ -85,3 +92,4 @@ Several unit test modules enforce structural guarantees across the repository:
 - **[`test_code_delivery.py`](./unit/test_code_delivery.py):** Ensures `docker/Dockerfile` and `docker/cloudbuild.yaml` never bake `src/scale_forecasting` into the container image.
 - **[`test_launch_point_lean.py`](./unit/test_launch_point_lean.py):** Ensures importing model classes and planning DAGs never eagerly imports heavy compute libraries (`torch`, `statsmodels`, `xgboost`, `lightgbm`, `prophet`, `neuralprophet`), keeping thin submission environments (such as Cloud Composer workers) lean.
 - **[`test_api_docs_coverage.py`](./unit/test_api_docs_coverage.py):** Ensures every module re-exported by `scale_forecasting.__init__` and every subpackage is documented in `docs/api/`, every `docs/api/*.md` page is wired into `mkdocs.yml`, and every folder `README.md` in the repository spine includes a Mermaid diagram.
+- **[`test_test_dependencies_declared.py`](./unit/test_test_dependencies_declared.py):** Computes, from `uv.lock`, the closure of what the CI `offline` job installs (`uv sync --frozen --all-extras`: core dependencies, every extra, and the default dependency groups) and fails if any file under `tests/` imports a third-party module — at module level or lazily inside a function — whose distribution is outside that closure. Imports guarded by `try/except ImportError` or `pytest.importorskip` are exempt. It exists because a package present in a developer venv (via `make docs` or an ad-hoc install) but absent from CI's sync left `main` red for two merges.

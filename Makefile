@@ -11,7 +11,7 @@
 export UV_NO_CONFIG := 1
 EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra models --extra ray --format requirements-txt
 
-.PHONY: lock lock-check sync test hooks docs composer-sync
+.PHONY: lock lock-check sync test ci-offline hooks docs composer-sync
 
 ## lock: re-resolve uv.lock from pyproject.toml and regenerate docker/requirements.txt from it.
 ## Run this after editing dependencies in pyproject.toml, then commit both files.
@@ -57,16 +57,33 @@ test:
 	uv run ruff check src tests
 	uv run pytest -m "not gcp and not spark and not ray" -q
 
+## ci-offline: the offline gate in a venv built EXACTLY as CI builds it, not in your working venv.
+##
+## Your .venv is a superset of CI's: `make docs` adds the docs group, an ad-hoc `uv pip install`
+## adds whatever you were debugging, and none of that is in `uv sync --frozen --all-extras`. A test
+## that imports one of those packages passes at your desk and fails on the runner — which is how
+## `main` sat red for two merges in October 2026 (test_docs_integrity importing pymdownx). This
+## target syncs a second environment (.venv-ci, gitignored, hard-linked from the uv cache so it is
+## cheap after the first run) with the CI job's exact command and runs the CI job's exact gate in
+## it. Run it before merging anything that touches dependencies or test imports.
+ci-offline:
+	UV_PROJECT_ENVIRONMENT=.venv-ci uv sync --frozen --all-extras
+	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen ruff format --check src tests
+	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen ruff check src tests
+	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen pytest -m "not gcp and not spark and not ray" -q
+
 ## hooks: enable the tracked git hooks in .githooks (one-time, per clone).
 ##
-## Installs one pre-commit hook that runs the two *consistency* tripwires — the validation ledger
-## and the config-coverage map — in about two seconds. Both compare prose against code, so a
-## documentation-only edit can turn them red with no code change, which is precisely the case
-## `make test` tends to miss: the suite takes six minutes, so it gets run before the last edit
-## rather than after it. This is a narrow guard for that gap, not a second `make test`.
+## Installs two hooks. pre-commit runs the fast consistency tripwires (AGENTS.md Gate 1 — the
+## validation ledger, the config-coverage map, docs integrity, API-docs coverage, smoke-config
+## validity, and test-dependency declaration) in a few seconds; they compare prose and declarations
+## against code, so an edit made after a green `make test` can turn them red with no code change.
+## pre-push runs the deterministic half of CI — ruff, `uv lock --check`, and the requirements-export
+## drift check — so a push cannot carry what CI's first thirty seconds would reject. Neither runs the
+## six-minute suite; that stays `make test` / `make ci-offline`.
 hooks:
 	git config core.hooksPath .githooks
-	@echo "git hooks enabled (.githooks). Bypass a single commit with: git commit --no-verify"
+	@echo "git hooks enabled (.githooks): pre-commit + pre-push. Bypass once with: git commit --no-verify / git push --no-verify"
 
 ## format: apply the canonical layout in place (the fix for a `make test` format failure).
 format:

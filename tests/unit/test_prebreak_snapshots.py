@@ -88,7 +88,7 @@ _SCORED_AT_2_3 = frozenset({"coverage", "pinball", "interval_score", "interval_w
 # did not touch.
 #
 # The numeric pin is not lost, it moved: `golden_panel.json` carries it, with no exemptions and at
-# an exact tolerance for every model that can hold one (see `_UNSTABLE_FIT` for the five that
+# an exact tolerance for every model that can hold one (see `_UNSTABLE_FIT` for the seven that
 # cannot). `test_current_cell_output_matches_the_pinned_panel` is now the only test in this module
 # that reads a forecast value. That test is the one to keep sharp.
 _MOVED_AT_2_5 = True
@@ -198,24 +198,27 @@ _HORIZON = 28
 _FOLD_OBS = 1460
 
 # Absolute vs relative tolerance for the numbers: an exact pin in everything but name, and what
-# most of the panel is held to. Six of the fifteen models reproduce bit for bit on every machine
+# most of the panel is held to. Six of the fifteen models reproduced bit for bit on every machine
 # the fleet survey below reached, and four more move by less than this band: `prophet` and
 # `naive_moving_average` by a single ULP, `regression_lags` by 4.5e-13, `stl_bagging` by 4.3e-10.
 # That last one has only about twice the room it needs, so it is the name to look at first if this
-# band ever fails on a runner and passes at a desk.
+# band ever fails on a runner and passes at a desk. (Two of the six have since moved on runners the
+# survey did not reach — see the last paragraph before `_UNSTABLE_FIT` — so eight models are held
+# to this exact band today.)
 _RTOL = 1e-9
 _ATOL = 1e-9
 
-# The other five, and the one place this module admits a number it cannot pin exactly.
+# The others, and the one place this module admits a number it cannot pin exactly.
 #
-# These five fit by iterative numerical optimisation inside `statsmodels`, and the optimiser does
-# not halt at the same point on every machine: the BLAS kernel it dispatches to depends on the
-# instruction set found at load time, the reduction order changes with the kernel, and the search
-# stops an iteration sooner or later. The evidence that it is the machine and not the code: exactly
-# these five move on CI and the other ten stay inside the exact band, while locally the whole panel
-# is reproducible to the bit under any thread count. Note that `stl_bagging` also fits an ARIMA and
-# stayed inside the exact band — so this set is what was observed, not a category anyone reasoned
-# their way to. A sixth name belongs here only with the same kind of evidence behind it.
+# The first five named here fit by iterative numerical optimisation inside `statsmodels`, and the
+# optimiser does not halt at the same point on every machine: the BLAS kernel it dispatches to
+# depends on the instruction set found at load time, the reduction order changes with the kernel,
+# and the search stops an iteration sooner or later. The evidence that it is the machine and not
+# the code: exactly these five moved on CI and the other ten stayed inside the exact band, while
+# locally the whole panel is reproducible to the bit under any thread count. Note that
+# `stl_bagging` also fits an ARIMA and stayed inside the exact band — so this set is what was
+# observed, not a category anyone reasoned their way to. A further name belongs here only with the
+# same kind of evidence behind it (and two have since arrived with it; see below).
 #
 # **The bands are measured, and here is the measurement.** The first pair of numbers came off a
 # single runner, which is a sample of one drawn from a fleet that is heterogeneous by CPU make and
@@ -253,7 +256,21 @@ _ATOL = 1e-9
 # movement WAPE made anywhere in the survey (1.2e-04) it is nearly five hundred times. Absorbing
 # `bias` into the shared band instead would have left that margin at 1.4x. A change with a cause is
 # not subtle, and the point of splitting `bias` out is to keep it that way.
-_UNSTABLE_FIT = frozenset({"autoets", "holtwinters", "sarimax", "theta", "ucm"})
+#
+# **The sixth and seventh names, with the evidence the paragraph above asks for.** `auto_arima`
+# and `kalman` were two of the six that reproduced bit for bit across the 48-sample survey, and
+# then moved on runners the survey had not reached: the `offline` job of 2026-10-01 (`d0ed8fc`)
+# and again on 2026-10-05 (`c460ac4`), both on commits that changed nothing numeric, while the
+# other thirteen models stayed inside the exact band on the same runners. The movement has the
+# survey's discrete signature — `kalman` landed on the identical worst forecast step both times,
+# 224.870522 -> 224.871152 (2.80e-06 relative), and `auto_arima` on 2.83e-08 and 6.28e-08 — and it
+# is the same mechanism: both fit by iterative optimisation in `statsmodels` (the ARIMA search and
+# the Kalman-filter likelihood), so the kernel-dispatch path moves where the search halts. Worst
+# metric movement was `kalman`'s `bias`, 9.6e-05 relative; every other metric moved below 1.3e-05.
+# Both sit two to four orders inside the existing bands, so the bands themselves do not move.
+_UNSTABLE_FIT = frozenset(
+    {"auto_arima", "autoets", "holtwinters", "kalman", "sarimax", "theta", "ucm"}
+)
 _UNSTABLE_FIT_RTOL_FORECAST = 5e-4
 _UNSTABLE_FIT_RTOL_METRIC = 1e-2
 _UNSTABLE_FIT_RTOL_BIAS = 4e-2
@@ -471,10 +488,10 @@ def _cell_complaints(
 
     Shared by both panel tests so that "unchanged" means one thing rather than two. Numbers are
     compared with `_close`, at the exact tolerance for most models and at the wider cross-machine
-    band for the five named in `_UNSTABLE_FIT` — with `bias` wider still, being the one metric whose
-    signed errors cancel. See the comment by those constants for why those five, why `bias` is on
-    its own, and where every width was measured. A pin that fails on a difference between two CPUs
-    is a pin someone switches off.
+    band for the seven named in `_UNSTABLE_FIT` — with `bias` wider still, being the one metric
+    whose signed errors cancel. See the comment by those constants for why those seven, why `bias`
+    is on its own, and where every width was measured. A pin that fails on a difference between two
+    CPUs is a pin someone switches off.
 
     `newly_scored` names metrics allowed to have gone from "not computed" to a number since the
     snapshot was taken. It is one-directional on purpose — the reverse move, a metric that used to
@@ -601,7 +618,7 @@ def test_current_cell_output_matches_the_pinned_panel(
     unrelated reason.
 
     It carries no *exemption* — nothing here is allowed to change direction or appear from nowhere
-    — but it does carry a tolerance, and for the five models in `_UNSTABLE_FIT` that tolerance is
+    — but it does carry a tolerance, and for the seven models in `_UNSTABLE_FIT` that tolerance is
     wide enough to absorb the difference between two CPUs. That is a limit of what a numeric pin
     can promise across machines, written down where it applies rather than left for whoever next
     sees the gate go red on a runner and green at their desk.
@@ -632,7 +649,7 @@ def test_the_cross_machine_band_names_only_models_the_panel_still_runs() -> None
     )
 
 
-def test_the_cross_machine_band_is_wide_for_five_models_and_for_no_others() -> None:
+def test_the_cross_machine_band_is_wide_for_named_models_and_for_no_others() -> None:
     """The band is the module's one loose thread, so it is worth testing and not just writing.
 
     Two claims in one: the same 1e-6 movement that a named model is allowed to make is a failure
@@ -673,7 +690,7 @@ def test_bias_gets_its_own_band_and_takes_nothing_else_with_it() -> None:
 
     assert not _cell_complaints({"autoets": moved_bias}, {"autoets": base})
     assert _cell_complaints({"autoets": moved_wape}, {"autoets": base})
-    # And the wide `bias` band is the unstable five's alone — an exactly-pinned model keeps the
+    # And the wide `bias` band is the unstable seven's alone — an exactly-pinned model keeps the
     # exact tolerance for every metric it has, `bias` included.
     assert _cell_complaints({"croston": moved_bias}, {"croston": base})
 
