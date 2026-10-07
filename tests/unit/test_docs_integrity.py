@@ -13,6 +13,8 @@ Verifies across every Markdown file in the repository (root ``README.md``, ``AGE
 5. Every ``python -m scale_forecasting.<module>`` CLI invocation references an existing module.
 6. Canonical counts (models, metrics, analytical views, smoke configs) and current field names stay
    synchronized with the code.
+7. Every backticked exception-class name (``...Error``, ``...Exception``, ``JobIdTaken``) resolves
+   to a class in ``scale_forecasting.errors``, a Python builtin, or a short third-party allowlist.
 """
 
 from __future__ import annotations
@@ -424,3 +426,50 @@ def test_no_stale_config_names_or_counts_in_docs(markdown_files: list[Path]) -> 
         errors.append(f"Expected 42 smoke configs on disk, found {n_smokes}")
 
     assert not errors, "Documentation inventory drift:\n" + "\n".join(errors)
+
+
+# Exception names from other systems that the docs legitimately quote and this package never raises.
+_THIRD_PARTY_EXCEPTIONS = frozenset(
+    {
+        "FetchFailedException",  # org.apache.spark.shuffle — Spark executor OOM cascade
+    }
+)
+
+
+def test_backticked_exception_names_resolve_to_real_classes(markdown_files: list[Path]) -> None:
+    """Every backticked ``...Error`` / ``...Exception`` / ``JobIdTaken`` name in Markdown exists.
+
+    A name resolves if it is a class in ``scale_forecasting.errors`` (bare or ``sf.``-prefixed), a
+    Python builtin exception, or one of the third-party names above. Added 2026-10-07 after the
+    package README advertised four error classes that had never existed.
+    """
+    import builtins
+
+    import scale_forecasting.errors as errors_module
+
+    own = {
+        name
+        for name, obj in vars(errors_module).items()
+        if isinstance(obj, type) and issubclass(obj, BaseException)
+    }
+    builtin = {
+        name
+        for name in dir(builtins)
+        if isinstance(getattr(builtins, name), type)
+        and issubclass(getattr(builtins, name), BaseException)
+    }
+    known = own | builtin | _THIRD_PARTY_EXCEPTIONS
+    name_re = re.compile(r"`(?:sf\.)?([A-Z][A-Za-z0-9]*(?:Error|Exception|Taken))(?:\([^)`]*\))?`")
+    problems: list[str] = []
+    for path in markdown_files:
+        rel = path.relative_to(_REPO_ROOT)
+        for idx, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for match in name_re.finditer(line):
+                if match.group(1) not in known:
+                    problems.append(
+                        f"{rel}:{idx}: `{match.group(1)}` is not a real exception class"
+                    )
+    assert not problems, (
+        "Documentation names exception classes that do not exist (see scale_forecasting.errors):\n"
+        + "\n".join(problems)
+    )

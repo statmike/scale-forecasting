@@ -635,9 +635,9 @@ flowchart TD
         NB07["07_hpo_backtesting_and_ensembles.ipynb<br/>Optuna HPO + In-Run, Post-Run & Cross-Run Ensembles"]
     end
 
-    subgraph Track4["Track 4: Master Multi-Family DAG, Registry Ops & 100k Scale"]
+    subgraph Track4["Track 4: Master Multi-Family DAG, Registry Ops & Run Review"]
         direction LR
-        NB08["08_multi_engine_master_workflow.ipynb<br/>Multi-Family Parallel DAG + Full Diagnostic & Explainability Suite"] --> NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes & 100k Review"]
+        NB08["08_multi_engine_master_workflow.ipynb<br/>Multi-Family Parallel DAG + Full Diagnostic & Explainability Suite"] --> NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes & Run Review"]
     end
 
     Track1 --> Track2 --> Track3 --> Track4

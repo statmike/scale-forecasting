@@ -25,9 +25,9 @@ flowchart TD
         NB07["07_hpo_backtesting_and_ensembles.ipynb<br/>Optuna HPO + In-Run, Post-Run & Cross-Run Ensembling"]
     end
 
-    subgraph Track4["Track 4: Master Multi-Family DAG, Registry Ops & 100k Scale"]
+    subgraph Track4["Track 4: Master Multi-Family DAG, Registry Ops & Run Review"]
         NB08["08_multi_engine_master_workflow.ipynb<br/>Multi-Family Parallel DAG + Stacked Ensembles"]
-        NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes, Composer DAG & 100k Review"]
+        NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes, Composer DAG & Run Review"]
     end
 
     NB00 --> NB09
@@ -72,11 +72,11 @@ Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-ac
 
 ---
 
-### Track 4: Master Multi-Family Workflow, Registry Operations & 100k Scale
+### Track 4: Master Multi-Family Workflow, Registry Operations & Run Review
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
 | [`08_multi_engine_master_workflow.ipynb`](./08_multi_engine_master_workflow.ipynb) | Spark $\parallel$ Vertex / GKE / AutoML $\parallel$ BigQuery | Dispatch active model families concurrently across their optimal runtimes from a single `RunConfig` (**zero-idle per-family compute** — including a 5-family execution plan preview with `automl` on `vertex_automl`), join them in a stacked ensemble, and run the complete diagnostic & explainability suite (`leaderboard_df`, `cohorts_df`, `jobs_df`, `attributions_df`, `plot_attributions`, `plot_calibration`, `plot_ensemble_weights`, `plot_forecasts`, `plot_forecast_explanation`, `plot_trace`). |
-| [`10_registry_operations_and_scale.ipynb`](./10_registry_operations_and_scale.ipynb) | BigQuery Registry & Ops | Zero-SQL registry health audit (`reg.doctor()`, `reg.runs_df()`), historical run reattachment (`Forecaster.from_run_id()`, `attributions_df()`), pre-flight fold feasibility (`feasibility()`), preview-safe Day-2 verbs (`retry`, `settle`, `cancel`), **all 5 production launch pathways** (including live execution of the Cloud Composer 3 `airflow_tasks` DAG sequence against a GCS-staged config), and 100,000-series benchmark review. |
+| [`10_registry_operations_and_scale.ipynb`](./10_registry_operations_and_scale.ipynb) | BigQuery Registry & Ops | Zero-SQL registry health audit (`reg.doctor()`, `reg.runs_df()`), historical run reattachment (`Forecaster.from_run_id()`, `attributions_df()`), pre-flight fold feasibility (`feasibility()`), preview-safe Day-2 verbs (`retry`, `settle`, `cancel`), **all 5 production launch pathways** (including live execution of the Cloud Composer 3 `airflow_tasks` DAG sequence against a GCS-staged config), and a cross-platform review of every completed run in the registry (the 100,000-series benchmark `run_id`s themselves are recorded in [Quota & Scale](../quota_and_scale.md)). |
 
 ---
 

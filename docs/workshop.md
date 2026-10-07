@@ -26,7 +26,7 @@ flowchart TD
         L3["Lab 3: Cloud Runtimes (Vertex · GCE · Spark · Ray)<br/>02_vertex_and_gce_vms · 03_spark · 04_ray"]
         L4["Lab 4: Covariates, Global Models & Reconciliation<br/>05_covariates_and_global_models · 06_hierarchical_reconciliation"]
         L5["Lab 5: HPO, Ensembles & Multi-Engine Blending<br/>07_hpo_backtesting_and_ensembles · 08_multi_engine_master_workflow"]
-        L6["Lab 6: Registry Operations, Monitoring & 100k Scale<br/>10_registry_operations_and_scale.ipynb"]
+        L6["Lab 6: Registry Operations, Monitoring & Run Review<br/>10_registry_operations_and_scale.ipynb"]
         L1 --> L2 --> L3 --> L4 --> L5 --> L6
     end
 
@@ -257,10 +257,10 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 
 ---
 
-### Lab 6: Registry Operations, Live Monitoring & 100k Scale Review
+### Lab 6: Registry Operations, Live Monitoring & Cross-Platform Run Review
 **Notebook:** [`notebooks/10_registry_operations_and_scale.ipynb`](notebooks/10_registry_operations_and_scale.ipynb)  
 **Duration:** 20 minutes  
-**Goal:** Operate the platform at 100,000-series scale, audit the 5 analytical SQL views, and export production Airflow DAGs.
+**Goal:** Operate the platform day-to-day — audit the registry and its 5 analytical SQL views, reattach to historical runs, compare completed runs across every runtime, and export production Airflow DAGs.
 
 #### Key Highlights
 - Run pre-flight health checks (`Registry.doctor()`), live cloud resource probes (`Registry.probe()`), and `Forecaster.run_live()`.

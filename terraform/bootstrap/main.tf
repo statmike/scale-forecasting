@@ -53,12 +53,15 @@ resource "google_project_service" "storage" {
 
 # --- the remote-state bucket ---------------------------------------------------
 # Versioned so a botched apply can be rolled back; uniform access (no ACLs); force_destroy
-# stays false so state can never be deleted by an accidental `terraform destroy`.
+# stays false so state can never be deleted by an accidental `terraform destroy`. Public access
+# prevention is enforced at the bucket (not left to inherit): state files carry resource names,
+# service-account emails and project structure, and an org policy may not be there to backstop it.
 resource "google_storage_bucket" "tfstate" {
   project                     = var.project_id
   name                        = local.state_bucket
   location                    = var.region
   uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
   force_destroy               = false
 
   versioning {
