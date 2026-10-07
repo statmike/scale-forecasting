@@ -559,11 +559,11 @@ def test_monitor_run_with_probe_reuses_the_probe_reader_and_attaches_the_report(
     report = reconcile.ProbeReport("rid", "RUNNING", True, (), False)
     seen: dict[str, Any] = {}
 
-    def _read_and_probe(rid: str, *, job: Any, settings: Any, stale_after_s: Any) -> Any:
+    def read_and_probe(rid: str, *, job: Any, settings: Any, stale_after_s: Any) -> Any:
         seen.update(run_id=rid, job=job, settings=settings, stale_after_s=stale_after_s)
         return progress, report, []
 
-    monkeypatch.setattr(reconcile, "_read_and_probe", _read_and_probe)
+    monkeypatch.setattr(reconcile, "read_and_probe", read_and_probe)
 
     rp = R.monitor_run("rid", probe=True, stale_after_s=60.0, settings=_SETTINGS)
     assert rp.probe is report and rp.status == "RUNNING"

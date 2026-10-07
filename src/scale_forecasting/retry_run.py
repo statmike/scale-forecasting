@@ -364,9 +364,9 @@ def _expected_series(
 
     from .engines.bigquery_sql import build_series_count_query
     from .registry.header import snapshot_millis_for
-    from .registry.tables import _resolve_settings
+    from .registry.tables import resolve_settings
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     try:
         millis = snapshot_millis_for(run_id, settings=resolved)
     except Exception as exc:  # noqa: BLE001 - a missing denominator is reported, not raised

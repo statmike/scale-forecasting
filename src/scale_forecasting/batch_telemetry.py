@@ -20,12 +20,14 @@ from typing import TYPE_CHECKING, Any
 from .errors import get_logger
 
 if TYPE_CHECKING:
+    from google.cloud.dataproc_v1 import BatchControllerClient
+
     from .settings import Settings
 
 _log = get_logger(__name__)
 
 
-def _batch_client(region: str) -> object:
+def _batch_client(region: str) -> BatchControllerClient:
     """A regional `BatchControllerClient` (Dataproc batches are a regional resource)."""
     from google.api_core.client_options import ClientOptions
     from google.cloud import dataproc_v1 as dataproc

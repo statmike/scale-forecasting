@@ -27,7 +27,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ._infra_args import add_infra_args, export_infra_env
-from .errors import get_logger
+from .errors import configure_cli_logging, get_logger
 from .hardware import add_hardware_arg, export_hardware_env
 
 if TYPE_CHECKING:
@@ -87,6 +87,7 @@ def run_entry(
     """
     from .config import load_config_uri
 
+    configure_cli_logging()
     p = build_parser(prog, description)
     ns = p.parse_args(argv)
     export_infra_env(ns)

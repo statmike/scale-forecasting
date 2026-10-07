@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 from scale_forecasting.automl_submit import plan_automl_job, submit_automl
 from scale_forecasting.config import RunConfig
 from scale_forecasting.engines.automl_engine import (
+    TRAINING_JOB_CLASSES,
     AutoMLModelPlan,
     build_automl_column_specs,
     compile_tabular_workflow_spec,
@@ -24,8 +26,11 @@ from scale_forecasting.engines.automl_engine import (
     plan_automl_model,
     prepare_inference_panel,
     prepare_training_panel,
+    training_job_class,
+    training_job_kwargs,
+    training_run_kwargs,
 )
-from scale_forecasting.errors import ConfigError
+from scale_forecasting.errors import ConfigError, EngineError
 from scale_forecasting.models import get_model
 from scale_forecasting.models._vertex_automl_base import (
     VertexAutoMLBaseModel,
@@ -268,6 +273,74 @@ class TestAutoMLEngineColumnSpecsAndPanels:
         assert parameter_values["target_column"] == "y"
         assert parameter_values["forecast_horizon"] == 7
         assert parameter_values["context_window"] == 14
+
+
+class TestTrainingJobModeBindsToTheInstalledSdk:
+    """``training_job`` mode is the one AutoML path no live smoke covers, and its unit test drives a
+    ``MagicMock`` trainer that accepts any keyword. Two bugs lived there unnoticed: the constructor
+    was passed ``column_types=`` (the SDK's word is ``column_specs``) and the seq2seq class was
+    looked up under a name the SDK never had, with a ``getattr`` fallback that quietly trained L2L
+    instead. These tests bind the pure builders against the real SDK so a vocabulary drift fails
+    here, in seconds, rather than on a user's first live run.
+    """
+
+    @staticmethod
+    def _plan(model_name: str = "vertex_tide") -> tuple[AutoMLModelPlan, RunConfig]:
+        hist_df, _ = _make_panel()
+        cfg = _make_automl_config(
+            models=[model_name],
+            model_params={
+                model_name: {"context_window": 14, "train_budget_milli_node_hours": 1000}
+            },
+        )
+        train_df = prepare_training_panel(hist_df, cfg)
+        plan = plan_automl_model(
+            cfg,
+            model_name,
+            train_df,
+            run_id="unit-automl-000000000001",
+            artifact_root="gs://test-bucket/artifacts",
+        )
+        return plan, cfg
+
+    @pytest.mark.parametrize("model_name", sorted(TRAINING_JOB_CLASSES))
+    def test_every_trainer_name_resolves_and_binds_our_kwargs(self, model_name: str) -> None:
+        aiplatform = pytest.importorskip("google.cloud.aiplatform")
+        plan, cfg = self._plan(model_name)
+
+        trainer = training_job_class(aiplatform, model_name)
+        assert trainer.__name__ == TRAINING_JOB_CLASSES[model_name]
+
+        # `Signature.bind` raises TypeError on an unknown or missing keyword — exactly the failure
+        # a mocked trainer swallows. `None` stands in for `self`.
+        inspect.signature(trainer.__init__).bind(None, **training_job_kwargs(plan, "unit"))
+        inspect.signature(trainer.run).bind(
+            None, **training_run_kwargs(plan, cfg, dataset=object())
+        )
+
+    def test_column_specs_use_the_sdk_data_type_vocabulary(self) -> None:
+        aiplatform = pytest.importorskip("google.cloud.aiplatform")
+        plan, _ = self._plan()
+        sdk_types = {
+            value
+            for name, value in vars(aiplatform.AutoMLTabularTrainingJob.column_data_types).items()
+            if not name.startswith("_") and isinstance(value, str)
+        }
+        ours = set(training_job_kwargs(plan, "unit")["column_specs"].values())
+        assert ours, "a plan with covariates must declare at least one column spec"
+        assert ours <= sdk_types, f"unknown AutoML column data types: {sorted(ours - sdk_types)}"
+
+    def test_quantiles_only_accompany_the_quantile_loss_objective(self) -> None:
+        plan, cfg = self._plan()
+        assert plan.optimization_objective != "minimize-quantile-loss"
+        assert training_run_kwargs(plan, cfg, dataset=object())["quantiles"] is None
+
+    def test_missing_trainer_class_is_an_error_not_a_substitution(self) -> None:
+        sdk_without_seq2seq = SimpleNamespace(AutoMLForecastingTrainingJob=object)
+        with pytest.raises(EngineError, match="SequenceToSequencePlusForecastingTrainingJob"):
+            training_job_class(sdk_without_seq2seq, "vertex_seq2seq")
+        with pytest.raises(EngineError, match="no training_job trainer"):
+            training_job_class(sdk_without_seq2seq, "not_a_model")
 
 
 class TestAutoMLEngineArtifactsAndExecution:

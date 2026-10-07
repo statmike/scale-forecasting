@@ -50,7 +50,8 @@ the literature carries separate adaptive variants for time series. What this is:
 empirical quantile calibration. Much better than in-sample, and honest about what it claims.
 
 Public surface: ``Calibration``, ``StepCalibration``, ``calibrate_from_oof``,
-``apply_calibration``, ``compare_arms``, ``coverage_by_step``, ``POINT_FORECAST_ARMS``.
+``apply_calibration``, ``compare_arms``, ``coverage_by_step``, ``select_arm``, ``resolve_arm``,
+``POINT_FORECAST_ARMS``.
 """
 
 from __future__ import annotations
@@ -473,7 +474,7 @@ def compare_arms(oof: pd.DataFrame, metric: str, arm: str = "median") -> dict[st
     # because the pooled margin and the count of folds that agree with it are different evidence
     # and measurement says the count is the better of the two — see `select_arm`.
     wins, compared = 0, 0
-    folds = pd.to_numeric(df.get("fold_id"), errors="coerce") if "fold_id" in df else None
+    folds = pd.to_numeric(df["fold_id"], errors="coerce") if "fold_id" in df else None
     for fold in sorted(set(folds.dropna())) if folds is not None else []:
         m = (folds == fold).to_numpy() & keep
         if not m.any():
@@ -547,3 +548,20 @@ def select_arm(oof: pd.DataFrame | None, metric: str, fallback: str) -> tuple[st
     # be told apart, the corrected arm is still carrying the estimation variance of a shift it did
     # not need, so equal measured loss is not equal expected loss.
     return (fallback, "auto-corrected") if win_rate > 0.5 else ("raw", "auto-raw")
+
+
+def resolve_arm(
+    point_forecast: str | None, oof: pd.DataFrame | None, metric: str, fallback: str
+) -> tuple[str, str]:
+    """The arm a cell forecasts with, and why: ``(arm, decision)``.
+
+    ``point_forecast`` is `config.OutputConfig.point_forecast`. A named arm is taken as written
+    (``decision="configured"``); ``"auto"`` defers to `select_arm`, which reads this cell's own
+    held-out folds and reports one of its four decisions. ``None`` only reaches here from a config
+    built by hand — `RunConfig._normalize` resolves an unset field before a run starts — and falls
+    back to ``"median"``, the model's own correction. Every engine that calibrates a point forecast
+    asks this one question, so it lives here rather than in each of them.
+    """
+    if point_forecast == "auto":
+        return select_arm(oof, metric, fallback)
+    return point_forecast or "median", "configured"

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..errors import get_logger
 from .reads import read_run_config
-from .tables import _resolve_settings
+from .tables import resolve_settings
 
 if TYPE_CHECKING:
     from ..settings import Settings
@@ -64,7 +64,7 @@ def read_compute_harvest(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT ts_id, model_type, fold_id, ensemble_id, fit_seconds, cpu_seconds, "
         "process_rss_bytes, peak_gpu_bytes, intraop_threads, n_obs, created_at "
@@ -207,7 +207,7 @@ def discover_harvest_run(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     # run_registry is append-only (the header is written, then updated on finalize), so it is
     # deduped to the latest row per run before the join — otherwise a finalized run fans out.
     sql = (

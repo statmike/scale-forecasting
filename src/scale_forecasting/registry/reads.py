@@ -12,9 +12,9 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .params import _header_param
+from .params import header_param
 from .rows import METRIC_COLUMNS
-from .tables import _resolve_settings
+from .tables import resolve_settings
 
 if TYPE_CHECKING:
     from ..settings import Settings
@@ -57,9 +57,9 @@ def read_run_summary(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = f"SELECT * FROM `{resolved.registry_table_ref('v_run_summary')}` WHERE run_id=@run_id"
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -82,12 +82,12 @@ def read_leaderboard(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT * FROM `{resolved.registry_table_ref('v_model_leaderboard')}` "
         "WHERE run_id=@run_id ORDER BY mean_wape ASC NULLS LAST"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -111,13 +111,13 @@ def read_prediction_counts(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT model_type, COUNT(*) AS n "
         f"FROM `{resolved.registry_table_ref('forecast_predictions')}` "
         "WHERE run_id=@run_id GROUP BY model_type"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -151,7 +151,7 @@ def read_cell_groups(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     meta_ref = resolved.registry_table_ref("forecast_metadata")
     pred_ref = resolved.registry_table_ref("forecast_predictions")
     sql = (
@@ -173,7 +173,7 @@ def read_cell_groups(
         "FROM meta m LEFT JOIN preds p ON p.ts_id=m.ts_id AND p.model_type=m.model_type "
         "GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -203,7 +203,7 @@ def read_cell_timing(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT ts_id, model_type, compute_engine, worker_id, cell_started_at, cell_ended_at "
         f"FROM `{resolved.registry_table_ref('forecast_metadata')}` "
@@ -243,13 +243,13 @@ def read_run_config(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT TO_JSON_STRING(raw_config) AS raw_config "
         f"FROM `{resolved.registry_table_ref('run_registry')}` "
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -278,7 +278,7 @@ def read_progress(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "WITH deduped AS ("
         "  SELECT * FROM `" + resolved.registry_table_ref("forecast_metadata") + "`"
@@ -291,7 +291,7 @@ def read_progress(
         "COUNT(*) AS n_cells_done, AVG(fit_seconds) AS mean_fit_seconds "
         "FROM deduped GROUP BY model_type, ensemble_id"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -319,7 +319,7 @@ def read_metric_aggregates(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     metric_aggs = ", ".join(
         f"AVG({m}) AS mean_{m}, "
         f"APPROX_QUANTILES({m}, 10)[OFFSET(1)] AS p10_{m}, "
@@ -339,7 +339,7 @@ def read_metric_aggregates(
         "COUNT(*) AS n_series, AVG(fit_seconds) AS mean_fit_seconds, " + metric_aggs + " "
         "FROM deduped GROUP BY model_type, ensemble_id"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -365,7 +365,7 @@ def read_cell_metrics(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     metric_cols = ", ".join(METRIC_COLUMNS)
     sql = (
         "SELECT ts_id, model_type, ensemble_id, compute_engine, fit_seconds, " + metric_cols + " "
@@ -409,7 +409,7 @@ def read_arm_comparison(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "WITH deduped AS ("
         "  SELECT * FROM `" + resolved.registry_table_ref("forecast_metadata") + "`"
@@ -434,7 +434,7 @@ def read_arm_comparison(
         "APPROX_QUANTILES(point_forecast_margin, 10)[OFFSET(5)] AS median_margin "
         "FROM deduped GROUP BY model_type ORDER BY model_type"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -465,7 +465,7 @@ def read_coverage_by_step(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT model_type, horizon_step, "
         "COUNT(*) AS n, "
@@ -476,7 +476,7 @@ def read_coverage_by_step(
         "AND yhat_lower IS NOT NULL AND yhat_upper IS NOT NULL "
         "GROUP BY model_type, horizon_step ORDER BY model_type, horizon_step"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -500,13 +500,13 @@ def read_backtest_coverage(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT * FROM `{resolved.registry_table_ref('v_backtest_coverage')}` "
         "WHERE run_id=@run_id "
         "ORDER BY model_type, ensemble_id NULLS FIRST, n_folds_achieved DESC NULLS LAST"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -530,12 +530,12 @@ def read_comparable_leaderboard(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         f"SELECT * FROM `{resolved.registry_table_ref('v_model_leaderboard_comparable')}` "
         "WHERE run_id=@run_id ORDER BY pooled_wape ASC NULLS LAST"
     )
-    params = [_header_param("run_id", run_id)]
+    params = [header_param("run_id", run_id)]
     client = bigquery.Client(project=resolved.project_id)
     try:
         rows = list(
@@ -565,7 +565,7 @@ def read_predictions(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     clauses = ["run_id=@run_id"]
     params: list[Any] = [
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
@@ -615,7 +615,7 @@ def read_oof(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     clauses = ["run_id=@run_id"]
     params: list[Any] = [
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
@@ -672,7 +672,7 @@ def read_series_history(
     if not raw:
         return []
     cfg = RunConfig.model_validate(raw)
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     base_sql = build_history_query(cfg, resolved.registry_dataset_ref).rstrip().rstrip(";")
     if cfg.hierarchy.enabled:
         client = bigquery.Client(project=resolved.project_id)
@@ -699,8 +699,8 @@ def read_series_history(
         if history_tail > 0:
             df = df.sort_values(["ts_id", "ds"]).groupby("ts_id", as_index=False).tail(history_tail)
         return [
-            {"ts_id": str(r.ts_id), "ds": r.ds, "y": float(r.y)}
-            for r in df[["ts_id", "ds", "y"]].itertuples(index=False)
+            {"ts_id": str(rec["ts_id"]), "ds": rec["ds"], "y": float(rec["y"])}
+            for rec in df[["ts_id", "ds", "y"]].to_dict(orient="records")
         ]
 
     params: list[Any] = [bigquery.ScalarQueryParameter("tail", "INT64", max(1, history_tail))]
@@ -740,7 +740,7 @@ def read_best_params(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     sql = (
         "SELECT ts_id, model_type, compute_engine, ensemble_id, "
         "TO_JSON_STRING(best_params) AS best_params, fit_seconds, wape, mae, rmse, mase "
@@ -779,7 +779,7 @@ def read_recent_runs(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     where_clause = " WHERE status=@status" if status is not None else ""
     sql = (
         "SELECT run_id, created_at, status, python_runtime, n_series, n_models, "
@@ -817,7 +817,7 @@ def read_series_covariates(
     from google.cloud import bigquery
 
     from ..config import RunConfig
-    from ..engines.bigquery_names import _source_ref
+    from ..engines.bigquery_names import source_ref
     from ..errors import RegistryError
 
     raw = read_run_config(run_id, settings=settings)
@@ -828,8 +828,8 @@ def read_series_covariates(
     if not cov_cols or cfg.hierarchy.enabled:
         return []
 
-    resolved = _resolve_settings(settings)
-    source = _source_ref(cfg, resolved.registry_dataset_ref)
+    resolved = resolve_settings(settings)
+    source = source_ref(cfg, resolved.registry_dataset_ref)
     idc, datec = cfg.data.ts_id_col, cfg.data.date_col
     col_sql = ", ".join([f"{idc} AS ts_id", f"{datec} AS ds", *cov_cols])
     sql = (
@@ -899,7 +899,7 @@ def read_feature_attributions(
 
     from ..errors import RegistryError
 
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     clauses = ["run_id=@run_id", "ensemble_id IS NULL"]
     params: list[Any] = [
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),

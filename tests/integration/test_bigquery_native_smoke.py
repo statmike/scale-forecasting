@@ -235,9 +235,9 @@ def test_bigquery_native_smoke(settings: Settings, scratch_source: str) -> None:
     # remain (it backs forecast_predictions) while no orphaned fold objects linger. TimesFM trains
     # no object, so this concerns arima_plus only. list_models is the live ground truth (no
     # INFORMATION_SCHEMA path-quoting to fight).
-    from scale_forecasting.engines.bigquery_names import _sanitize_identifier
+    from scale_forecasting.engines.bigquery_names import sanitize_identifier
 
-    final_model = f"sf_model_arima_plus_{_sanitize_identifier(run_id)}"
+    final_model = f"sf_model_arima_plus_{sanitize_identifier(run_id)}"
     models_seen = {
         m.model_id
         for m in client.list_models(settings.dataset_ref)

@@ -689,16 +689,17 @@ def add_bucket(
 
     panel_set = set(panel_models)
     series_hash = F.hash(F.col(cfg.data.ts_id_col))
-    bucket = None
-    for name, (offset, width) in allocation.items():
+    # Nested from the flat fallback outward: each model's slice wraps what is already there. The
+    # conditions are mutually exclusive (one model name each), so the nesting order is immaterial.
+    bucket = flat
+    for name, (offset, width) in reversed(allocation.items()):
         sliced = (
             F.lit(offset)
             if name in panel_set
             else F.lit(offset) + F.pmod(series_hash, F.lit(width))
         )
-        condition = F.col(_MODEL_COL) == F.lit(name)
-        bucket = F.when(condition, sliced) if bucket is None else bucket.when(condition, sliced)
-    return df.withColumn(_BUCKET_COL, bucket.otherwise(flat))
+        bucket = F.when(F.col(_MODEL_COL) == F.lit(name), sliced).otherwise(bucket)
+    return df.withColumn(_BUCKET_COL, bucket)
 
 
 def status_schema() -> Any:

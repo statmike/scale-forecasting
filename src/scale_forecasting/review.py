@@ -51,7 +51,7 @@ from .registry.reads import parse_ts
 from .registry.rows import EMITTED, METRIC_COLUMNS
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import pandas as pd
 
@@ -370,15 +370,19 @@ class CalibrationReport:
     @property
     def mean_coverage(self) -> float | None:
         """Row-count-weighted achieved coverage across every model and step."""
-        pts = [p for p in self.coverage if p.coverage is not None and p.n]
-        total = sum(p.n for p in pts)
-        return None if not total else sum(p.coverage * p.n for p in pts) / total  # type: ignore[misc]
+        pairs = [(p.coverage, p.n) for p in self.coverage if p.coverage is not None and p.n]
+        total = sum(n for _, n in pairs)
+        return None if not total else sum(c * n for c, n in pairs) / total
 
     @property
     def worst_step(self) -> CoveragePoint | None:
         """The model/step furthest from nominal — the thing an average is designed to hide."""
-        pts = [p for p in self.coverage if p.coverage is not None]
-        return max(pts, key=lambda p: abs(p.coverage - self.nominal_coverage), default=None)  # type: ignore[arg-type]
+        scored = [
+            (abs(p.coverage - self.nominal_coverage), p)
+            for p in self.coverage
+            if p.coverage is not None
+        ]
+        return max(scored, key=lambda item: item[0])[1] if scored else None
 
 
 def _assemble_calibration(
@@ -461,6 +465,24 @@ def _num(value: Any) -> float | None:
     return None if math.isnan(f) else f
 
 
+def _sort_key(value: float | None) -> float:
+    """Order an optional metric with the unknowns last. (``value or math.inf`` would also send a
+    genuine ``0.0`` to the end, which is why this is a function and not an expression.)"""
+    return math.inf if value is None else value
+
+
+def _first_date(row: Mapping[str, Any], *keys: str) -> pd.Timestamp | None:
+    """The first of ``keys`` present and non-null in ``row`` as a ``Timestamp``, else ``None``.
+    Registry rows carry the date as ``forecast_date`` or ``ds`` depending on the table."""
+    import pandas as pd
+
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            return pd.Timestamp(value)
+    return None
+
+
 def family_of(model_type: str, ensemble_id: str | None = None) -> str:
     """The family a result row belongs to: ``"ensemble"`` if ``ensemble_id`` is set, else the
     model's registered ``family`` (``"unknown"`` for a name this build no longer registers)."""
@@ -509,7 +531,7 @@ def _assemble_progress(
     With no config (run never ran) this is an empty snapshot carrying just the header status.
     ``now`` is the clock the per-family ``quiet_seconds`` is measured against — injectable so the
     age arithmetic is deterministic offline, and so a caller that probes in the same pass
-    (`probes.reconcile._read_and_probe`) reconciles every family against one instant.
+    (`probes.reconcile.read_and_probe`) reconciles every family against one instant.
     """
     status = (summary or {}).get("status")
     at = now or datetime.now(UTC)
@@ -639,7 +661,7 @@ def monitor_run(
     ``probe=True`` additionally escalates the run's non-terminal jobs to their runtime and attaches
     the reconciled `probes.reconcile.ProbeReport` as ``RunProgress.probe`` — the answer to *is this
     job still alive*, which the registry alone cannot give. It shares one pass of reads with the
-    registry side (`probes.reconcile._read_and_probe`), so probing costs the native calls and not a
+    registry side (`probes.reconcile.read_and_probe`), so probing costs the native calls and not a
     second set of queries; an already-terminal run short-circuits and touches no runtime at all.
     ``stale_after_s`` overrides the probe's startup grace (see `probes.reconcile.probe_run`) and
     is ignored when ``probe`` is ``False``.
@@ -648,11 +670,11 @@ def monitor_run(
     from .registry.reads import read_progress, read_run_config, read_run_summary
 
     if probe:
-        from .probes.reconcile import _read_and_probe
+        from .probes.reconcile import read_and_probe
         from .settings import Settings as _Settings
 
         s = settings if settings is not None else _Settings.resolve()
-        progress, report, _rows = _read_and_probe(
+        progress, report, _rows = read_and_probe(
             run_id, job=None, settings=s, stale_after_s=stale_after_s
         )
         return replace(progress, probe=report)
@@ -673,7 +695,7 @@ def monitor_run(
 def best_overall(models: list[ModelReview] | tuple[ModelReview, ...]) -> ModelReview | None:
     """The single best base model (lowest ``score``); ``None`` if no base model was scored."""
     scored = [m for m in models if not m.is_ensemble and m.score is not None]
-    return min(scored, key=lambda m: m.score) if scored else None
+    return min(scored, key=lambda m: _sort_key(m.score)) if scored else None
 
 
 def best_per_family(
@@ -685,7 +707,7 @@ def best_per_family(
         if m.is_ensemble or m.score is None:
             continue
         cur = best.get(m.family)
-        if cur is None or m.score < cur.score:
+        if cur is None or cur.score is None or m.score < cur.score:
             best[m.family] = m
     return best
 
@@ -698,16 +720,17 @@ def ensemble_lift(
     Empty when there is no scored base model to compare against, or no scored ensemble.
     """
     champ = best_overall(models)
-    if champ is None:
+    if champ is None or champ.score is None:
         return []
+    champ_score = champ.score
     lifts = [
         EnsembleLift(
             model_type=m.model_type,
             score=m.score,
             best_base_model=champ.model_type,
-            best_base_score=champ.score,
-            lift=champ.score - m.score,
-            lift_pct=((champ.score - m.score) / champ.score if champ.score else None),
+            best_base_score=champ_score,
+            lift=champ_score - m.score,
+            lift_pct=((champ_score - m.score) / champ_score if champ_score else None),
         )
         for m in models
         if m.is_ensemble and m.score is not None
@@ -1143,7 +1166,7 @@ def plot_metric_distribution(
     if not rows:
         return ax
 
-    ordered = sorted(rows, key=lambda m: m.metric_p50[chosen], reverse=True)  # best (low) on top
+    ordered = sorted(rows, key=lambda m: _sort_key(m.metric_p50.get(chosen)), reverse=True)
     for y, m in enumerate(ordered):
         color = _ENSEMBLE_COLOR if m.is_ensemble else _BASE_COLOR
         lo = m.metric_p10.get(chosen)
@@ -1286,7 +1309,7 @@ def build_predictions_frame(
                 "ts_id": str(r["ts_id"]),
                 "segment": "history",
                 "model_type": "actual",
-                "ds": pd.to_datetime(r.get("ds") or r.get("forecast_date")),
+                "ds": _first_date(r, "ds", "forecast_date"),
                 "y_true": _num(r.get("y") if "y" in r else r.get("y_true")),
                 "yhat": None,
                 "yhat_lower": None,
@@ -1300,7 +1323,7 @@ def build_predictions_frame(
                 "ts_id": str(r["ts_id"]),
                 "segment": "oof",
                 "model_type": str(r["model_type"]),
-                "ds": pd.to_datetime(r.get("forecast_date") or r.get("ds")),
+                "ds": _first_date(r, "forecast_date", "ds"),
                 "y_true": _num(r.get("y_true")),
                 "yhat": _num(r.get("yhat")),
                 "yhat_lower": _num(r.get("yhat_lower")),
@@ -1314,7 +1337,7 @@ def build_predictions_frame(
                 "ts_id": str(r["ts_id"]),
                 "segment": "forecast",
                 "model_type": str(r["model_type"]),
-                "ds": pd.to_datetime(r.get("forecast_date") or r.get("ds")),
+                "ds": _first_date(r, "forecast_date", "ds"),
                 "y_true": None,
                 "yhat": _num(r.get("yhat")),
                 "yhat_lower": _num(r.get("yhat_lower")),
@@ -1851,6 +1874,7 @@ def build_ensemble_weights_frame(
     import pandas as pd
 
     cols = ["ts_id", "ensemble_model", "strategy", "base_model", "weight", "wape"]
+    raw_list: Sequence[Mapping[Any, Any]]
     if isinstance(best_params_rows, pd.DataFrame):
         if best_params_rows.empty:
             return pd.DataFrame(columns=cols)
@@ -2094,12 +2118,12 @@ def explain_forecast_frame(
 
     # Overlay OOF yhat & residuals on matching history dates (or append if history was omitted)
     oof_map: dict[pd.Timestamp, tuple[float | None, float | None, float | None, float | None]] = {}
-    for r in oof.itertuples(index=False):
-        oof_map[pd.Timestamp(r.ds)] = (
-            _num(getattr(r, "y_true", None)),
-            _num(getattr(r, "yhat", None)),
-            _num(getattr(r, "yhat_lower", None)),
-            _num(getattr(r, "yhat_upper", None)),
+    for rec in oof.to_dict(orient="records"):
+        oof_map[pd.Timestamp(rec["ds"])] = (
+            _num(rec.get("y_true")),
+            _num(rec.get("yhat")),
+            _num(rec.get("yhat_lower")),
+            _num(rec.get("yhat_upper")),
         )
 
     oof_residuals = np.full(len(tl), np.nan)
@@ -2113,9 +2137,11 @@ def explain_forecast_frame(
                     tl.loc[idx, "yhat_lower"] = lo_oof
                 if hi_oof is not None:
                     tl.loc[idx, "yhat_upper"] = hi_oof
-                actual_val = tl.loc[idx, "y_true"] if pd.notna(tl.loc[idx, "y_true"]) else y_t
-                if actual_val is not None and pd.notna(actual_val):
-                    oof_residuals[idx] = float(actual_val) - float(yh_oof)
+                actual_val = _num(tl.loc[idx, "y_true"])
+                if actual_val is None:
+                    actual_val = y_t
+                if actual_val is not None:
+                    oof_residuals[idx] = actual_val - yh_oof
 
     # Combined continuous signal (y_true on history, yhat on forecast)
     signal = np.where(
@@ -2457,7 +2483,10 @@ def build_attributions_frame(
                 if isinstance(baseline, (int, float)) and math.isfinite(float(baseline))
                 else 0.0
             )
-            fdate = pd.to_datetime(r.get("forecast_date")).tz_localize(None)
+            fdate_raw = _first_date(r, "forecast_date")
+            if fdate_raw is None:
+                continue
+            fdate = fdate_raw.tz_localize(None)
             yhat_raw = r.get("yhat")
             yhat_val = (
                 float(yhat_raw)
@@ -2557,42 +2586,39 @@ def plot_attributions(
         # Aggregate mean |attribution| to pick top_k features, then plot signed mean attribution
         # or horizon trajectory.
         top_feats = (
-            df.assign(abs_attr=df["attribution"].abs())
-            .groupby("feature", as_index=False)["abs_attr"]
+            df["attribution"]
+            .abs()
+            .groupby(df["feature"])
             .mean()
-            .sort_values("abs_attr", ascending=False)
-            .head(max(1, top_k))["feature"]
-            .tolist()
+            .sort_values(ascending=False)
+            .head(max(1, top_k))
+            .index.tolist()
         )
         sub = df[df["feature"].isin(top_feats)]
-        agg = (
-            sub.groupby("feature", as_index=False)["attribution"]
-            .mean()
-            .sort_values("attribution", ascending=True)
-        )
+        agg = sub.groupby("feature")["attribution"].mean().sort_values(ascending=True)
         ys = np.arange(len(agg))
-        vals = agg["attribution"].to_numpy(dtype=float)
+        vals = agg.to_numpy(dtype=float)
         colors = ["#0072B2" if v >= 0 else "#D55E00" for v in vals]
         ax.barh(ys, vals, color=colors, height=0.6)
         ax.axvline(0.0, color="#666666", linestyle=":", linewidth=1.0)
         ax.set_yticks(list(ys))
-        ax.set_yticklabels(agg["feature"].tolist())
+        ax.set_yticklabels([str(f) for f in agg.index])
         ax.set_xlabel("mean signed local attribution across horizon")
         ax.set_title(title or "Tier 2 Local Feature Attributions (Horizon Mean)")
         return ax
 
     agg = (
-        df.groupby("feature", as_index=False)["importance"]
+        df.groupby("feature")["importance"]
         .mean()
-        .sort_values("importance", ascending=False)
+        .sort_values(ascending=False)
         .head(max(1, top_k))
         .iloc[::-1]
     )
     ys = np.arange(len(agg))
-    vals = agg["importance"].to_numpy(dtype=float)
+    vals = agg.to_numpy(dtype=float)
     ax.barh(ys, vals, color="#0072B2", height=0.6)
     ax.set_yticks(list(ys))
-    ax.set_yticklabels(agg["feature"].tolist())
+    ax.set_yticklabels([str(f) for f in agg.index])
     ax.set_xlabel("normalized driver importance")
     ax.set_title(title or "Tier 1 Global Feature Attributions")
     return ax

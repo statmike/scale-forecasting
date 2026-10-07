@@ -20,7 +20,8 @@ Supports two execution modes configured via ``compute.automl_mode`` (or
 2. ``"training_job"``: Managed ``AutoMLForecastingTrainingJob`` /
    ``TimeSeriesDenseEncoderForecastingTrainingJob`` /
    ``TemporalFusionTransformerForecastingTrainingJob`` /
-   ``Seq2SeqPlusForecastingTrainingJob`` followed by ``BatchPredictionJob``.
+   ``SequenceToSequencePlusForecastingTrainingJob`` (see `TRAINING_JOB_CLASSES`) followed by
+   ``BatchPredictionJob``.
 
 Every completed run writes standard ``CellResult`` records to ``forecast_metadata``,
 ``forecast_predictions`` (including Tier 2 per-horizon-step ``explanations`` JSON), and
@@ -49,7 +50,7 @@ from ..backtest import (
     make_folds,
     resolve_geometry,
 )
-from ..calibration import apply_calibration, calibrate_from_oof, compare_arms, select_arm
+from ..calibration import apply_calibration, calibrate_from_oof, compare_arms, resolve_arm
 from ..config import corrected_arm_for
 from ..errors import EngineError, get_logger
 from ..metrics import METRIC_NAMES, compute_metrics
@@ -60,8 +61,8 @@ from ..seasonality import seasonal_period
 from ..worker import (
     CellResult,
     _backtest_outcome,
-    _rollup_metrics,
     _worker_id,
+    rollup_metrics,
 )
 
 if TYPE_CHECKING:
@@ -451,6 +452,15 @@ def resolve_prior_tuning_artifact_uri(
     return None
 
 
+def _as_int(value: object, *, what: str) -> int:
+    """``value`` as an ``int`` — the ``model_params`` scalars are typed as a union that admits lists
+    (models take grids), so a list or null where a count belongs is named rather than left to
+    ``int()``'s own message."""
+    if isinstance(value, (int, float, str)):
+        return int(value)
+    raise EngineError(f"model_params.{what} must be a number, got {type(value).__name__}")
+
+
 def plan_automl_model(
     cfg: RunConfig,
     model_type: str,
@@ -470,14 +480,16 @@ def plan_automl_model(
     eff_horizon = int(horizon or cfg.data.horizon)
 
     default_ctx = max(eff_horizon, min(eff_horizon * 2, 60))
-    context_window = int(authored.get("context_window", default_ctx))
-    budget = int(authored.get("train_budget_milli_node_hours", 1000))
+    context_window = _as_int(authored.get("context_window", default_ctx), what="context_window")
+    budget = _as_int(
+        authored.get("train_budget_milli_node_hours", 1000), what="train_budget_milli_node_hours"
+    )
     objective = str(authored.get("optimization_objective", "minimize-rmse"))
     quantiles = resolve_quantiles([0.8, 0.95], authored.get("quantiles"))
     enable_explainability = bool(
         authored.get("enable_explainability", authored.get("generate_explanation", True))
     )
-    max_num_trials = int(authored.get("max_num_trials", 15))
+    max_num_trials = _as_int(authored.get("max_num_trials", 15), what="max_num_trials")
 
     tuning_uri = (
         str(authored["stage_1_tuning_result_artifact_uri"])
@@ -494,19 +506,23 @@ def plan_automl_model(
     if "data_granularity_unit" in authored:
         unit = str(authored["data_granularity_unit"])
     if "data_granularity_count" in authored:
-        count = int(authored["data_granularity_count"])
+        count = _as_int(authored["data_granularity_count"], what="data_granularity_count")
 
     # Right-size Dataflow evaluation and BatchPrediction replica bounds so small/medium panels do
     # not default to 22-25 workers and never violate starting <= max.
-    max_df_workers = int(
+    max_df_workers = _as_int(
         authored.get("evaluation_dataflow_max_num_workers")
         or authored.get("dataflow_max_num_workers")
         or fc.max_workers
         or fc.workers
-        or 2
+        or 2,
+        what="evaluation_dataflow_max_num_workers",
     )
     start_df_workers = min(
-        int(authored.get("evaluation_dataflow_starting_num_workers") or fc.min_workers or 1),
+        _as_int(
+            authored.get("evaluation_dataflow_starting_num_workers") or fc.min_workers or 1,
+            what="evaluation_dataflow_starting_num_workers",
+        ),
         max_df_workers,
     )
     df_machine = str(
@@ -515,14 +531,18 @@ def plan_automl_model(
         or "n1-standard-4"
     )
 
-    max_bp_replicas = int(
+    max_bp_replicas = _as_int(
         authored.get("evaluation_batch_predict_max_replica_count")
         or fc.max_workers
         or fc.workers
-        or 2
+        or 2,
+        what="evaluation_batch_predict_max_replica_count",
     )
     start_bp_replicas = min(
-        int(authored.get("evaluation_batch_predict_starting_replica_count") or fc.min_workers or 1),
+        _as_int(
+            authored.get("evaluation_batch_predict_starting_replica_count") or fc.min_workers or 1,
+            what="evaluation_batch_predict_starting_replica_count",
+        ),
         max_bp_replicas,
     )
     bp_machine = str(authored.get("evaluation_batch_predict_machine_type", "n1-highmem-8"))
@@ -548,7 +568,13 @@ def plan_automl_model(
                 fc.gpu_type, "NVIDIA_TESLA_T4"
             )
             machine_spec["accelerator_count"] = max(1, fc.accelerator_count)
-        replicas = max(1, int(authored.get("trainer_replica_count") or fc.workers or 1))
+        replicas = max(
+            1,
+            _as_int(
+                authored.get("trainer_replica_count") or fc.workers or 1,
+                what="trainer_replica_count",
+            ),
+        )
         pool_spec = [{"machine_spec": machine_spec, "replica_count": replicas}]
         tuner_override = pool_spec
         trainer_override = pool_spec
@@ -799,6 +825,84 @@ def compile_tabular_workflow_spec(
     return str(src_path), params
 
 
+# The ``aiplatform`` trainer class for each AutoML model in ``training_job`` mode. All four share
+# one constructor and one ``run()`` signature (they subclass the SDK's ``_ForecastingTrainingJob``),
+# so `training_job_kwargs` / `training_run_kwargs` serve every entry. Names are the SDK's own and
+# a unit test resolves each against the installed SDK — a map that quietly fell back to the L2L
+# trainer when a name was misspelled trained the wrong architecture without a word.
+TRAINING_JOB_CLASSES: dict[str, str] = {
+    "vertex_l2l": "AutoMLForecastingTrainingJob",
+    "vertex_tide": "TimeSeriesDenseEncoderForecastingTrainingJob",
+    "vertex_tft": "TemporalFusionTransformerForecastingTrainingJob",
+    "vertex_seq2seq": "SequenceToSequencePlusForecastingTrainingJob",
+}
+
+
+def training_job_class(aiplatform_module: Any, model_type: str) -> Any:
+    """The trainer class `TRAINING_JOB_CLASSES` names for ``model_type``, from the given SDK module.
+
+    Raises `EngineError` — never substitutes — when the SDK lacks the class: a user who asked for
+    ``vertex_seq2seq`` must get seq2seq or an error, not L2L under a seq2seq label.
+    """
+    try:
+        class_name = TRAINING_JOB_CLASSES[model_type]
+    except KeyError:
+        raise EngineError(
+            f"'{model_type}' has no training_job trainer; choose one of "
+            f"{sorted(TRAINING_JOB_CLASSES)} or use automl_mode='tabular_workflow'."
+        ) from None
+    trainer = getattr(aiplatform_module, class_name, None)
+    if trainer is None:
+        raise EngineError(
+            f"The installed google-cloud-aiplatform has no '{class_name}' (needed for "
+            f"'{model_type}' in automl_mode='training_job'). Upgrade the SDK or use "
+            "automl_mode='tabular_workflow'."
+        )
+    return trainer
+
+
+def training_job_kwargs(plan: AutoMLModelPlan, job_prefix: str) -> dict[str, Any]:
+    """Constructor kwargs for the ``aiplatform.*ForecastingTrainingJob`` of ``training_job`` mode.
+
+    Pure, and named once so a test can bind them against the installed SDK's signature. The
+    keyword vocabulary here is the SDK's, not ours — ``column_specs`` maps each column to one of
+    ``AutoMLTabularTrainingJob.column_data_types`` — and a mocked trainer accepts a misspelling the
+    real class rejects at the first live run.
+    """
+    return {
+        "display_name": f"sf-train-{job_prefix}",
+        "optimization_objective": plan.optimization_objective,
+        "column_specs": {spec["column_name"]: spec["data_type"] for spec in plan.column_specs},
+    }
+
+
+def training_run_kwargs(plan: AutoMLModelPlan, cfg: RunConfig, dataset: Any) -> dict[str, Any]:
+    """``run()`` kwargs for the training job `training_job_kwargs` constructs (pure).
+
+    Quantiles are only meaningful to the quantile-loss objective; the SDK rejects them otherwise,
+    so they are passed as ``None`` for every other objective.
+    """
+    return {
+        "dataset": dataset,
+        "target_column": cfg.data.target_col,
+        "time_column": cfg.data.date_col,
+        "time_series_identifier_column": cfg.data.ts_id_col,
+        "unavailable_at_forecast_columns": plan.unavailable_at_forecast_columns,
+        "available_at_forecast_columns": plan.available_at_forecast_columns,
+        "time_series_attribute_columns": plan.time_series_attribute_columns,
+        "forecast_horizon": plan.horizon,
+        "context_window": plan.context_window,
+        "data_granularity_unit": plan.data_granularity_unit,
+        "data_granularity_count": plan.data_granularity_count,
+        "predefined_split_column_name": _SPLIT_COL,
+        "budget_milli_node_hours": plan.train_budget_milli_node_hours,
+        "quantiles": (
+            plan.quantiles if plan.optimization_objective == "minimize-quantile-loss" else None
+        ),
+        "sync": True,
+    }
+
+
 def extract_pipeline_artifacts(pipeline_job: Any) -> dict[str, Any]:
     """Extract tuning result GCS URI, uploaded Model resource name, and task telemetry (pure).
 
@@ -902,6 +1006,8 @@ def _extract_prediction_value_and_bounds(
             raw_q_values = _to_seq(parsed.get("quantile_values"))
             raw_quantiles = _to_seq(parsed.get("quantiles"))
 
+            q_keys: list[Any] | None
+            q_vals: list[Any] | None
             if q_preds_seq is not None and raw_q_values is not None:
                 q_keys = raw_q_values
                 q_vals = q_preds_seq
@@ -1554,50 +1660,9 @@ def _execute_automl_fit_and_predict(
                 bq_source=train_bq_uri,
                 sync=True,
             )
-            col_types = {spec["column_name"]: spec["data_type"] for spec in plan.column_specs}
-            job_cls_map = {
-                "vertex_l2l": aiplatform.AutoMLForecastingTrainingJob,
-                "vertex_tide": getattr(
-                    aiplatform,
-                    "TimeSeriesDenseEncoderForecastingTrainingJob",
-                    aiplatform.AutoMLForecastingTrainingJob,
-                ),
-                "vertex_tft": getattr(
-                    aiplatform,
-                    "TemporalFusionTransformerForecastingTrainingJob",
-                    aiplatform.AutoMLForecastingTrainingJob,
-                ),
-                "vertex_seq2seq": getattr(
-                    aiplatform,
-                    "Seq2SeqPlusForecastingTrainingJob",
-                    aiplatform.AutoMLForecastingTrainingJob,
-                ),
-            }
-            trainer_cls = job_cls_map[plan.model_type]
-            training_job = trainer_cls(
-                display_name=f"sf-train-{job_prefix}",
-                optimization_objective=plan.optimization_objective,
-                column_types=col_types,
-            )
-            model_resource = training_job.run(
-                dataset=ds,
-                target_column=cfg.data.target_col,
-                time_column=cfg.data.date_col,
-                time_series_identifier_column=cfg.data.ts_id_col,
-                unavailable_at_forecast_columns=plan.unavailable_at_forecast_columns,
-                available_at_forecast_columns=plan.available_at_forecast_columns,
-                time_series_attribute_columns=plan.time_series_attribute_columns,
-                forecast_horizon=plan.horizon,
-                context_window=plan.context_window,
-                data_granularity_unit=plan.data_granularity_unit,
-                data_granularity_count=plan.data_granularity_count,
-                predefined_split_column_name=_SPLIT_COL,
-                budget_milli_node_hours=plan.train_budget_milli_node_hours,
-                quantiles=plan.quantiles
-                if plan.optimization_objective == "minimize-quantile-loss"
-                else None,
-                sync=True,
-            )
+            trainer_cls = training_job_class(aiplatform, plan.model_type)
+            training_job = trainer_cls(**training_job_kwargs(plan, job_prefix))
+            model_resource = training_job.run(**training_run_kwargs(plan, cfg, ds))
             artifacts_info = {
                 "vertex_model_resource_name": getattr(model_resource, "resource_name", None),
                 "stage_1_tuning_result_artifact_uri": plan.stage_1_tuning_result_artifact_uri,
@@ -1863,7 +1928,7 @@ def execute_automl_model_cells(
             flist = folds_by_uid[uid]
             n_ach = len(fmetrics_by_uid[uid])
             n_folds_by_uid[uid] = n_ach
-            metrics_by_uid[uid] = _rollup_metrics(fmetrics_by_uid[uid])
+            metrics_by_uid[uid] = rollup_metrics(fmetrics_by_uid[uid])
             bt_status_by_uid[uid], bt_note_by_uid[uid] = _backtest_outcome(n_ach, cfg, sub)
             if n_ach > 0:
                 oof_by_uid[uid] = pd.concat(oof_chunks_by_uid[uid], ignore_index=True)
@@ -1958,9 +2023,7 @@ def execute_automl_model_cells(
             )
 
         oof = oof_by_uid[uid]
-        arm, arm_decision = cfg.output.point_forecast or "median", "configured"
-        if arm == "auto":
-            arm, arm_decision = select_arm(oof, metric, corrected)
+        arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
         cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
         calibrated, interval_calibration = apply_calibration(raw_pred, cal, arm)
         arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}

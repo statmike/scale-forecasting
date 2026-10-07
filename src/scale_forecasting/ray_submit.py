@@ -57,7 +57,7 @@ from . import ray_cluster, ray_jobs, ray_telemetry
 from .code_delivery import build_runtime_env
 from .commands import build_driver_args
 from .engines import ray_io
-from .errors import EngineError, get_logger
+from .errors import EngineError, configure_cli_logging, get_logger
 from .ray_infra import RayInfra
 from .resources.audit import sizing_telemetry
 from .staging import stage_config
@@ -295,6 +295,7 @@ def main(argv: list[str] | None = None) -> None:
     """CLI: ``python -m scale_forecasting.ray_submit --config run.json [--cluster-name ...]``."""
     from .config import load_config_uri
 
+    configure_cli_logging()
     p = argparse.ArgumentParser(
         prog="ray_submit", description="Submit a forecast run to Vertex Ray."
     )

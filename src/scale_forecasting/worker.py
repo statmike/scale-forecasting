@@ -18,13 +18,13 @@ import socket
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
 
 from .backtest import FitTally, achievable_folds, backtest_cell, resolve_geometry
-from .calibration import apply_calibration, calibrate_from_oof, compare_arms, select_arm
+from .calibration import apply_calibration, calibrate_from_oof, compare_arms, resolve_arm
 from .config import corrected_arm_for
 from .errors import ConfigError, get_logger
 from .features import (
@@ -324,7 +324,7 @@ def _model_context(
     )
 
 
-def _resolve_device(cfg: RunConfig, family: str | None) -> str:
+def _resolve_device(cfg: RunConfig, family: str | None) -> Literal["auto", "cpu", "gpu"]:
     """Which device this cell's model should fit on: ``"auto"``, ``"cpu"`` or ``"gpu"``.
 
     Two facts have to agree before a cell is told to use a device. The **job** must have been
@@ -443,7 +443,7 @@ def hpo_scoring_basis(n_obs: int, cfg: RunConfig, params: dict[str, Any] | None)
     return "holdout" if achievable_folds(n_obs, cfg) >= 2 else "in_sample"
 
 
-def _rollup_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:
+def rollup_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:
     """Average the per-fold metric panels into one panel.
 
     NaNs are ignored per metric (a metric undefined on one fold shouldn't sink the mean);
@@ -684,7 +684,7 @@ def run_cell(
                     fits,
                     model_cls.lags_covariates_internally,
                 )
-                metrics = _rollup_metrics(fold_metrics)
+                metrics = rollup_metrics(fold_metrics)
                 n_folds_achieved = len(fold_metrics)
                 backtest_status, backtest_note = _backtest_outcome(
                     n_folds_achieved, model_cfg, series
@@ -739,9 +739,7 @@ def run_cell(
         # cell chose, so a fleet-wide average stays comparable across cells that chose differently.
         metric = cfg.backtest.decision_metric
         corrected = corrected_arm_for(metric)
-        arm, arm_decision = cfg.output.point_forecast or "median", "configured"
-        if arm == "auto":
-            arm, arm_decision = select_arm(oof, metric, corrected)
+        arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
         cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
         predictions, interval_calibration = apply_calibration(predictions, cal, arm)
         # `corrected`, not `arm`: the margin has to mean the same thing on every row for a
@@ -1047,7 +1045,7 @@ def run_panel(
                     flist = folds_by_uid[uid]
                     n_ach = len(fmetrics_by_uid[uid])
                     n_folds_by_uid[uid] = n_ach
-                    metrics_by_uid[uid] = _rollup_metrics(fmetrics_by_uid[uid])
+                    metrics_by_uid[uid] = rollup_metrics(fmetrics_by_uid[uid])
                     bt_status_by_uid[uid], bt_note_by_uid[uid] = _backtest_outcome(
                         n_ach, model_cfg, sub
                     )
@@ -1107,9 +1105,7 @@ def run_panel(
         results: list[CellResult] = []
         for idx, uid in enumerate(uids):
             oof = oof_by_uid[uid]
-            arm, arm_decision = cfg.output.point_forecast or "median", "configured"
-            if arm == "auto":
-                arm, arm_decision = select_arm(oof, metric, corrected)
+            arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
             cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
             predictions, interval_calibration = apply_calibration(raw_preds_map[uid], cal, arm)
             arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}

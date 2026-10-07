@@ -27,9 +27,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from scale_forecasting.config import EnsembleConfig, RunConfig
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -171,6 +173,16 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
 }
 
 
+def _descend(payload: dict[str, Any], path: Sequence[str]) -> dict[str, Any] | None:
+    """The mapping at ``path`` inside ``payload``, or ``None`` if any step is missing or a leaf."""
+    node: Any = payload
+    for key in path:
+        node = node.get(key) if isinstance(node, dict) else None
+        if node is None:
+            return None
+    return node if isinstance(node, dict) else None
+
+
 def _canonical_config(cfg: RunConfig) -> str:
     """Serialize a config to a stable, order-independent JSON string.
 
@@ -200,29 +212,17 @@ def _canonical_config(cfg: RunConfig) -> str:
     """
     payload = cfg.model_dump(mode="json")
     for *parents, leaf in _NOT_IDENTITY:
-        node = payload
-        for key in parents:
-            node = node.get(key) if isinstance(node, dict) else None
-            if node is None:
-                break
-        if isinstance(node, dict):
+        node = _descend(payload, parents)
+        if node is not None:
             node.pop(leaf, None)
     for path, defaults in _REMOVED_DEFAULTS.items():
-        node = payload
-        for key in path:
-            node = node.get(key) if isinstance(node, dict) else None
-            if node is None:
-                break
-        if isinstance(node, dict):
+        node = _descend(payload, path)
+        if node is not None:
             for key, value in defaults.items():
                 node.setdefault(key, value)
     for *parents, leaf in _DEFAULT_ELIDED:
-        node = payload
-        for key in parents:
-            node = node.get(key) if isinstance(node, dict) else None
-            if node is None:
-                break
-        if isinstance(node, dict) and node.get(leaf) == _DEFAULT_ELIDED[(*parents, leaf)]:
+        node = _descend(payload, parents)
+        if node is not None and node.get(leaf) == _DEFAULT_ELIDED[(*parents, leaf)]:
             node.pop(leaf, None)
     families = payload.get("compute", {}).get("families", {})
     if isinstance(families, dict):

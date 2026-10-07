@@ -1123,7 +1123,7 @@ class Forecaster:
         """
         from .ensemble_run import _override_ensemble, run_ensembles
         from .registry.ids import make_ensemble_id
-        from .registry.tables import _resolve_settings
+        from .registry.tables import resolve_settings
 
         cfg = _override_ensemble(self._config, strategies)
         if not cfg.ensemble.enabled:
@@ -1131,7 +1131,7 @@ class Forecaster:
                 self._config, list(cfg.ensemble.strategies) or ["mean", "median", "inverse_error"]
             )
         rid = run_id or self.run_id
-        resolved = _resolve_settings(self._settings)
+        resolved = resolve_settings(self._settings)
         run_ensembles(cfg, rid, settings=resolved)
         return make_ensemble_id(cfg.ensemble)
 
@@ -1399,6 +1399,11 @@ def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
     for node in nodes:
         fjob = jobs_by_fam.get(node.family)
         comp = fjob.compute if fjob is not None else None
+        # The three branches bind these to different shapes — SQL nodes have no machine; a family
+        # node's shape may be unresolved (``None``) until the submitter sizes it.
+        modes_str: str
+        machine_type: str | None
+        workers: int | None
         if node.family == "ensemble":
             models_str = ", ".join(f"ensemble_{s}" for s in cfg.ensemble.strategies)
             modes_str = cfg.compute.ensemble.mode
@@ -1408,7 +1413,7 @@ def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
                 else None
             )
             machine_type = "sql"
-            workers: int | str = 1
+            workers = 1
         elif node.family == "native":
             models_str = ", ".join(node.models)
             modes_str = ", ".join(f"{m}:local" for m in node.models)

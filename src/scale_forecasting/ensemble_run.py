@@ -396,7 +396,7 @@ def _ensemble_batch(
     from .registry.rows import assemble_ensemble_oof_rows, stamp_ensemble_prediction_rows
     from .registry.write_api import _META_SPEC, _OOF_SPEC, _PRED_SPEC
     from .seasonality import seasonal_period
-    from .worker import _rollup_metrics
+    from .worker import rollup_metrics
 
     # Every table read here (forecast_predictions / backtest_oof / forecast_metadata) is a registry
     # table — the ensemble reads run outputs, never the source panel.
@@ -544,7 +544,7 @@ def _ensemble_batch(
     meta_rows: list[dict[str, Any]] = []
     for (model_type, ts_id), g in ens_oof.groupby(["model_type", "ts_id"]):
         # Score per fold, then roll up (NaN-ignoring mean) — identical to the base-model path
-        # (worker._rollup_metrics), so ensemble and base metrics are computed the same way.
+        # (worker.rollup_metrics), so ensemble and base metrics are computed the same way.
         hist = hist_by_id.get(ts_id)
         fold_panels: list[dict[str, float]] = []
         for _fold, fg in g.sort_values("forecast_date").groupby("fold_id"):
@@ -568,7 +568,7 @@ def _ensemble_batch(
                 run_id=run_id,
                 ts_id=str(ts_id),
                 model_type=str(model_type),
-                panel=_rollup_metrics(fold_panels),
+                panel=rollup_metrics(fold_panels),
                 ensemble_id=ensemble_id,
                 weights=learned_weights.get(strategy),
                 artifact_uri=artifact_uris.get(strategy),
@@ -956,14 +956,14 @@ def ensemble_cross_runs(
     from .registry.jobs import update_job, write_job
     from .registry.reads import read_run_config, read_run_summary
     from .registry.rows import assemble_job_row
-    from .registry.tables import _resolve_settings
+    from .registry.tables import resolve_settings
 
     run_ids = [str(r).strip() for r in source_run_ids if str(r).strip()]
     if len(run_ids) < 2:
         raise ConfigError(
             f"ensemble_cross_runs requires at least 2 source_run_ids; got {run_ids!r}."
         )
-    resolved = _resolve_settings(settings)
+    resolved = resolve_settings(settings)
     configs: list[RunConfig] = []
     for rid in run_ids:
         raw = read_run_config(rid, settings=resolved)
@@ -1059,10 +1059,11 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
 
     from ._infra_args import add_infra_args, export_infra_env
     from .config import load_config
-    from .errors import ConfigError, get_logger
+    from .errors import ConfigError, configure_cli_logging, get_logger
     from .registry.ids import make_run_id
     from .settings import Settings
 
+    configure_cli_logging()
     parser = argparse.ArgumentParser(
         prog="ensemble_run",
         description="Re-run the ensemble stage for a completed run or across multiple runs.",

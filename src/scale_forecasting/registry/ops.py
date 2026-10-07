@@ -77,7 +77,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..capacity import AWAITING_CAPACITY
-from ..errors import get_logger
+from ..errors import configure_cli_logging, get_logger
 from . import artifacts
 from .artifacts import ArtifactPrefix
 from .ddl import REGISTRY_TABLE_NAMES
@@ -533,9 +533,9 @@ def format_doctor(report: DoctorReport) -> str:
 
 def _resolved(settings: Settings | None) -> Settings:
     """The passed settings, or a fresh resolve from the ``SF_*`` environment."""
-    from .tables import _resolve_settings
+    from .tables import resolve_settings
 
-    return _resolve_settings(settings)
+    return resolve_settings(settings)
 
 
 def _known_run_ids(settings: Settings) -> set[str]:  # pragma: no cover - GCP I/O, @gcp smoke
@@ -1184,6 +1184,7 @@ def main(argv: list[str] | None = None) -> None:
     """
     import argparse
 
+    configure_cli_logging()
     p = argparse.ArgumentParser(
         prog="registry-ops",
         description="Manage one scale-forecasting registry (the dataset SF_REGISTRY_DATASET_ID, "

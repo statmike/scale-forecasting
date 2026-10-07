@@ -168,7 +168,7 @@ class SparkSubmitter:
             return ProbeHandle("spark", native_id=real_id, region=region, spark_mode="cluster")
         from .submit import submit_batch
 
-        submit_batch(
+        batch_id = submit_batch(
             cfg,
             models=models,
             manage_header=manage_header,
@@ -179,9 +179,10 @@ class SparkSubmitter:
             hardware=hardware,
             gpu_type=gpu_type,
         )
-        # Serverless batch id == system_job_id (we set it); single-region (settings.region).
+        # The batch id is the ``system_job_id`` we set, or the derived ``sf-<run_id>`` when the
+        # caller passed none; either way `submit_batch` reports the one it used. Single-region.
         return ProbeHandle(
-            "spark", native_id=system_job_id, region=settings.region, spark_mode="serverless"
+            "spark", native_id=batch_id, region=settings.region, spark_mode="serverless"
         )
 
 
@@ -218,7 +219,7 @@ class RaySubmitter:
         from .models import get_model
         from .probes.vocabulary import ProbeHandle
 
-        ray_mode = cfg.compute.ray_mode
+        ray_mode: str = cfg.compute.ray_mode
         if models:
             family = get_model(models[0]).family
             if family != "native":

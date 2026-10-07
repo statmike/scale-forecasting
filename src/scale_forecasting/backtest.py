@@ -613,12 +613,29 @@ def training_window(ds: np.ndarray, y: np.ndarray, cutoff: object, cfg: RunConfi
     before the cutoff was recorded, and it is the only honest answer for an OOF frame that never
     wrote one down.
     """
-    if cutoff is None or pd.isna(cutoff):
+    ts = _as_cutoff(cutoff)
+    if ts is None:
         return y
-    window = y[np.asarray(ds) <= pd.Timestamp(cutoff).to_datetime64()]
+    window = y[np.asarray(ds) <= ts.to_datetime64()]
     if cfg.backtest.scheme == "sliding":
         window = window[-training_width(cfg) :]
     return window
+
+
+def _as_cutoff(cutoff: object) -> pd.Timestamp | None:
+    """``cutoff`` as a ``Timestamp``, or ``None`` when it is missing (``None``, ``NaT``, ``NaN``).
+
+    A cutoff arrives as whatever the frame that carried it held: a ``Timestamp`` or ``datetime64``
+    from a Python engine's OOF rows, a ``date`` from a BigQuery ``DATE`` column, a string from a
+    hand-built frame. Anything else is a caller bug, and saying so beats a parse that happens to
+    work.
+    """
+    if cutoff is None or (isinstance(cutoff, float) and math.isnan(cutoff)):
+        return None
+    if isinstance(cutoff, (date, np.datetime64, str)):
+        ts = pd.Timestamp(cutoff)
+        return None if pd.isna(ts) else ts
+    raise TypeError(f"cutoff must be date-like or None, got {type(cutoff).__name__}")
 
 
 def _cut(X: pd.DataFrame | None, start: int, end: int) -> pd.DataFrame | None:
@@ -752,7 +769,7 @@ def _walk_folds(
     model_factory: Callable[[], BaseModel],
     cfg: RunConfig,
     tally: FitTally | None = None,
-) -> tuple[list[tuple[pd.DataFrame, pd.DataFrame | None]], str]:
+) -> tuple[Sequence[tuple[pd.DataFrame, pd.DataFrame | None]], str]:
     """Produce each fold's forecast frames, and report how the model was carried between them.
 
     Returns ``(arms, refit_mode)``, where ``arms[i]`` is ``(primary, blind_or_None)`` for
@@ -789,8 +806,8 @@ def _walk_folds(
         if not control.supports_extrapolate:
             return [(p, None) for p in primaries], "per_fold"
         _fit_one(control, y, X, base, tally)
-        blind = [_predict_blind(control, X, base, f, gap, y, cfg) for f in folds]
-        return list(zip(primaries, blind, strict=True)), "per_fold"
+        control_blind = [_predict_blind(control, X, base, f, gap, y, cfg) for f in folds]
+        return list(zip(primaries, control_blind, strict=True)), "per_fold"
 
     base = folds[0]
     blind = model_factory()
@@ -815,14 +832,13 @@ def _walk_folds(
         # `expanding_frozen` on a model that cannot absorb an observation. It refits per fold and
         # says so — but the blind arm is already fitted and costs only a forecast, so the control
         # arm still runs and the staleness diagnostic is still available for this model.
-        arms = [
+        return [
             (
                 _fit_predict(model_factory, y, X, f, gap, tally, cfg),
                 _predict_blind(blind, X, base, f, gap, y, cfg),
             )
             for f in folds
-        ]
-        return arms, "unsupported"
+        ], "unsupported"
 
     # The frozen arm proper: a second fit on the same window, then walked forward on the real
     # observations between origins with its parameters held fixed.
@@ -993,7 +1009,7 @@ def backtest_cell(
                 # Which fold this panel belongs to, so a caller can hold the newest one out of a
                 # fit (`holdout_fold_id`). The list is in fold order and a survivor keeps its
                 # original id, so position would *usually* work and would be wrong exactly when a
-                # series is short — the case the invariant is most delicate on. `_rollup_metrics`
+                # series is short — the case the invariant is most delicate on. `rollup_metrics`
                 # walks `METRIC_NAMES`, so this extra key is carried, never averaged.
                 "fold_id": fold.fold_id,
             }

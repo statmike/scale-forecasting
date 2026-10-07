@@ -71,9 +71,10 @@ def test_spark_launch_no_session_submits_batch(monkeypatch: pytest.MonkeyPatch) 
     assert seen["manage_header"] is False
     assert "engine" not in seen  # the Spark engine is built in — no method flag threaded through
     assert seen["batch_id"] is None  # standalone: no per-family id → submit derives one from run_id
-    # A Serverless launch reports a single-region spark handle for later probing.
+    # The handle names the batch `submit_batch` actually created — the derived id here — so even a
+    # standalone launch is probe-able. (It used to echo the `None` the caller passed in.)
     assert handle == ProbeHandle(
-        "spark", native_id=None, region="us-central1", spark_mode="serverless"
+        "spark", native_id="batch-1", region="us-central1", spark_mode="serverless"
     )
 
 
@@ -83,7 +84,12 @@ def test_spark_launch_threads_system_job_id_as_batch_id(monkeypatch: pytest.Monk
     import scale_forecasting.submit as submit_mod
 
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(submit_mod, "submit_batch", lambda cfg, **kw: seen.update(kw) or "b")
+
+    def _fake_submit_batch(cfg: RunConfig, **kw: Any) -> str:
+        seen.update(kw)
+        return kw["batch_id"]  # the real submit_batch returns the id it used
+
+    monkeypatch.setattr(submit_mod, "submit_batch", _fake_submit_batch)
 
     handle = SparkSubmitter().launch(
         _cfg(),

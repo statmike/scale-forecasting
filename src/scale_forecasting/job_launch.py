@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from .capacity import CapacityLedger
     from .config import ResolvedFamilyCompute, RunConfig
     from .dag import FamilyJob, RunDag
+    from .engines.bigquery_engine import BqOutcome
     from .probes.vocabulary import ProbeHandle
     from .settings import Settings
 
@@ -501,7 +502,7 @@ def launch_native_job(
     settings: Settings,
     *,
     force: bool = False,
-) -> object:
+) -> BqOutcome:
     """Run the BigQuery-native family inline (main thread), wrapped in its ``run_jobs`` row.
 
     Native models execute as SQL in BigQuery — no Python runtime, no worker thread — so this runs on

@@ -14,7 +14,7 @@ Dispatches the four managed Vertex AI AutoML Forecasting model plugins (``vertex
    Submits a fully managed ``AutoMLForecastingTrainingJob`` /
    ``TimeSeriesDenseEncoderForecastingTrainingJob`` /
    ``TemporalFusionTransformerForecastingTrainingJob`` /
-   ``Seq2SeqPlusForecastingTrainingJob`` via the ``google-cloud-aiplatform`` SDK.
+   ``SequenceToSequencePlusForecastingTrainingJob`` via the ``google-cloud-aiplatform`` SDK.
 
 After training completes, executes a ``BatchPredictionJob`` with ``generate_explanation=True`` and
 writes calibrated forecasts, backtest OOF evaluations, Tier 1 series-level feature attributions
@@ -34,7 +34,7 @@ from . import staging
 from .batch_infra import BatchInfra
 from .config import RunConfig
 from .engines import automl_engine
-from .errors import ConfigError, get_logger
+from .errors import ConfigError, configure_cli_logging, get_logger
 from .models import get_model
 from .probes.vocabulary import ProbeHandle
 from .profiling.source import profile_for_run
@@ -250,7 +250,9 @@ def submit_automl(
 
     # If the pipeline produced a concrete resource_name or pipeline_job_id, update the handle.
     models_telem = outcome.get("models") or {}
-    first_telem = next(iter(models_telem.values()), {}) if isinstance(models_telem, dict) else {}
+    first_telem: dict[str, Any] = (
+        next(iter(models_telem.values()), {}) if isinstance(models_telem, dict) else {}
+    )
     resource_name = first_telem.get("pipeline_resource_name") or first_telem.get(
         "vertex_model_resource_name"
     )
@@ -355,6 +357,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> str:
     from .config import load_config_uri
 
+    configure_cli_logging()
     args = _build_parser().parse_args(argv)
     cfg = load_config_uri(args.config or args.config_uri).with_series_limit(args.n_series)
     models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None

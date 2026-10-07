@@ -7,7 +7,7 @@ exists. One `FamilyVerdict` per family is what you get from fusing all three.
 
 Split pure from I/O, as the rest of this codebase is: `_verdict_for_family`,
 `_assemble_probe_report` and `_narrow_to_job` are pure and unit-tested per matrix row, and
-`_read_and_probe` is the one function that reads BigQuery and calls the probes before handing the
+`read_and_probe` is the one function that reads BigQuery and calls the probes before handing the
 assembled inputs over.
 
 **Escalation is the cost control.** A terminal family is never probed — the registry is
@@ -450,7 +450,7 @@ def _narrow_to_job(
 ) -> tuple[RunProgress, list[dict[str, Any]]]:
     """Narrow a run's progress **and** its job rows to one family — or both untouched (pure).
 
-    Extracted from `_read_and_probe`'s GCP body precisely because the two filters have to agree.
+    Extracted from `read_and_probe`'s GCP body precisely because the two filters have to agree.
     They feed different consumers: the narrowed ``progress`` becomes the `ProbeReport` an operator
     reads, while the narrowed ``rows`` are what `cancel.cancel_run` stops and finalizes. Filtering
     one and not the other would let ``--job statistical`` print a one-family preview and then cancel
@@ -477,7 +477,7 @@ def _narrow_to_job(
 # here rather than reading the registry a second time; all GCP imports stay lazy in the function.
 
 
-def _read_and_probe(
+def read_and_probe(
     run_id: str,
     *,
     job: str | None,
@@ -567,7 +567,7 @@ def probe_run(
     from ..settings import Settings
 
     s = settings if settings is not None else Settings.resolve()
-    _progress, report, _rows = _read_and_probe(
+    _progress, report, _rows = read_and_probe(
         run_id,
         job=job,
         settings=s,

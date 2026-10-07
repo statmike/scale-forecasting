@@ -37,7 +37,7 @@ from __future__ import annotations
 import argparse
 
 from ._infra_args import add_infra_args, export_infra_env
-from .errors import get_logger
+from .errors import configure_cli_logging, get_logger
 
 _log = get_logger(__name__)
 
@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> None:
     from .config import load_config_uri
     from .main import run
 
+    configure_cli_logging()
     ns = _parse_args(argv)
     _log.info("smoke_run: config_uri=%s", ns.config_uri)
 

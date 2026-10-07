@@ -28,9 +28,11 @@ class IntervalWidth(BaseMetric):
     needs_intervals: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:
-        if not ctx.has_intervals:
+        bounds = ctx.bounds()
+        if bounds is None:
             return float("nan")
-        return float(np.mean(ctx.upper - ctx.lower))
+        lower, upper = bounds
+        return float(np.mean(upper - lower))
 
 
 register(IntervalWidth)

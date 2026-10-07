@@ -18,7 +18,7 @@ import pytest
 
 from scale_forecasting.backtest import make_folds
 from scale_forecasting.config import RunConfig
-from scale_forecasting.engines.bigquery_names import _model_ref
+from scale_forecasting.engines.bigquery_names import model_ref
 from scale_forecasting.engines.bigquery_sql import (
     bqml_options,
     build_create_model_sql,
@@ -283,7 +283,7 @@ def test_fold_create_and_drop_target_the_same_object() -> None:
     create = build_fold_create_statements(cfg, "arima_plus", _DS, fold_id=1, back_steps=56)
     drop = build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=1)
     assert len(create) == 1 and len(drop) == 1
-    obj = _model_ref(cfg, "arima_plus", _DS, fold_id=1)
+    obj = model_ref(cfg, "arima_plus", _DS, fold_id=1)
     assert obj in create[0] and obj in drop[0]
     assert drop[0].startswith("DROP MODEL IF EXISTS ")  # safe if the fold CREATE failed
 
@@ -292,7 +292,7 @@ def test_fold_drop_never_targets_the_final_model() -> None:
     # The final true-future model (fold_id=None) backs forecast_predictions and must survive; only
     # fold-suffixed objects are dropped.
     cfg = _cfg(["arima_plus"])
-    final_obj = _model_ref(cfg, "arima_plus", _DS)  # no fold suffix
+    final_obj = model_ref(cfg, "arima_plus", _DS)  # no fold suffix
     for k in range(3):
         drop = build_fold_drop_statements(cfg, "arima_plus", _DS, fold_id=k)
         assert final_obj not in drop[0]

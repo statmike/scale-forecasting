@@ -21,12 +21,14 @@ from typing import TYPE_CHECKING, Any
 from .errors import get_logger
 
 if TYPE_CHECKING:
+    from google.cloud.dataproc_v1 import JobControllerClient
+
     from .settings import Settings
 
 _log = get_logger(__name__)
 
 
-def _job_client(region: str) -> object:  # pragma: no cover - thin client factory
+def _job_client(region: str) -> JobControllerClient:  # pragma: no cover - thin client factory
     from google.api_core.client_options import ClientOptions
     from google.cloud import dataproc_v1 as dataproc
 

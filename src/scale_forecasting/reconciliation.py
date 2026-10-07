@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -175,7 +175,7 @@ def build_hierarchy(
     def _aggregate_group(group_df: pd.DataFrame, node_id: str) -> pd.DataFrame:
         grouped = group_df.groupby(date_col, as_index=False, sort=True)
         agg_spec: dict[str, str] = {target_col: "sum"}
-        non_num_vals: dict[str, object] = {}
+        non_num_vals: dict[str, Any] = {}
         for cov in cov_cols:
             if pd.api.types.is_numeric_dtype(group_df[cov]):
                 agg_spec[cov] = "mean"

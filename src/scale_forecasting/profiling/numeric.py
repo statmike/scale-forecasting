@@ -17,10 +17,10 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, TypeGuard
 
 
-def usable(value: float | int | None) -> bool:
+def usable(value: float | int | None) -> TypeGuard[float]:
     """True when a measured value is real evidence: present, finite, and strictly positive.
 
     Zero is not evidence on any axis here — an RSS delta of 0 is the high-water-mark artefact,
@@ -53,7 +53,7 @@ def as_number(value: Any) -> float:
     reading needs no second representation and no branch at every call site.
     """
     try:
-        out = float(value)  # type: ignore[arg-type]
+        out = float(value)
     except (TypeError, ValueError):
         return 0.0
     return out if math.isfinite(out) else 0.0

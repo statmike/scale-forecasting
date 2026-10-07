@@ -233,6 +233,11 @@ class BaseModel(ABC):
         # be rolled through it. None everywhere else, and None whenever the offset is 0.
         self._gap_exog: pd.DataFrame | None = None
 
+    # The last observed date of the series this model was fitted on — the anchor `_forecast_index`
+    # walks forward from. Every model's ``fit()`` sets it (``y.index[-1]``) before any ``predict``;
+    # declared here, unassigned, because reading it before a fit is the bug, not a default.
+    _last_date: pd.Timestamp
+
     @abstractmethod
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         """Fit on one series. ``y`` is indexed by ds (datetime64); ``X`` is aligned exog or None."""

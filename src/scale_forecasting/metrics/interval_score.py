@@ -30,9 +30,10 @@ class IntervalScore(BaseMetric):
     needs_intervals: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:
-        if not ctx.has_intervals:
+        bounds = ctx.bounds()
+        if bounds is None:
             return float("nan")
-        lo, up, yt = ctx.lower, ctx.upper, ctx.y_true
+        (lo, up), yt = bounds, ctx.y_true
         penalty = 2.0 / INTERVAL_ALPHA
         score = (up - lo) + penalty * np.maximum(lo - yt, 0.0) + penalty * np.maximum(yt - up, 0.0)
         return float(np.mean(score))

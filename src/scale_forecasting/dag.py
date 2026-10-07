@@ -376,21 +376,24 @@ def gpu_usefulness_report(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> list[s
     ``dag``, and the submit log.
     """
     lines: list[str] = []
-    gpu_jobs = [j for j in jobs if j.compute is not None and j.compute.hardware == "gpu"]
+    # Pair each GPU job with its compute, which the filter has proven present.
+    gpu_jobs = [
+        (j, j.compute) for j in jobs if j.compute is not None and j.compute.hardware == "gpu"
+    ]
 
-    for job in gpu_jobs:
+    for job, compute in gpu_jobs:
         capable = [m for m in job.models if get_model(m).gpu_capable]
         incapable = [m for m in job.models if m not in capable]
         if incapable:
             lines.append(
-                f"family '{job.family}' has a {job.compute.gpu_type} attached, but "
+                f"family '{job.family}' has a {compute.gpu_type} attached, but "
                 f"{incapable} cannot use a device at all — those cells will run on the host CPU "
                 f"while the accelerator is billed."
             )
         idle = [m for m in capable if not get_model(m).gpu_useful(cfg.model_params.get(m, {}))]
         if idle:
             lines.append(
-                f"family '{job.family}' has a {job.compute.gpu_type} attached and {idle} can use "
+                f"family '{job.family}' has a {compute.gpu_type} attached and {idle} can use "
                 f"it, but not at the hyperparameters this config authors. Measured over 31,356 "
                 f"fits on live T4s: peak device memory 50-78 KB against a 17 GB card, and "
                 f"cpu_seconds/fit_seconds 0.93-0.996 — the device is engaged and idle, so this is "

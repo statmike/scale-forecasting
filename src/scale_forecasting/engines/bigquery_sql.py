@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..backtest import training_width
 from ..features import holiday_frame
-from .bigquery_names import _model_ref, _registry_of, _sanitize_identifier, _source_ref
+from .bigquery_names import model_ref, registry_of, sanitize_identifier, source_ref
 
 if TYPE_CHECKING:
     from ..config import RunConfig
@@ -234,10 +234,10 @@ def build_custom_holiday_cte(cfg: RunConfig) -> str:
     frame = holiday_frame(cfg)
     if frame.empty:
         return ""
-    region = _sanitize_identifier("_".join(codes))
+    region = sanitize_identifier("_".join(codes))
     rows = []
     for ds, name in zip(frame["ds"], frame["holiday"], strict=True):
-        holiday_name = _sanitize_identifier(str(name))
+        holiday_name = sanitize_identifier(str(name))
         primary = ds.date().isoformat()
         rows.append(
             f"    STRUCT('{region}' AS region, '{holiday_name}' AS holiday_name, "
@@ -314,10 +314,10 @@ def build_create_model_sql(
     TimesFM has no CREATE MODEL — see `build_forecast_insert_sql`.
 
     The model object goes to ``registry_dataset`` (default: ``dataset``) while the training data is
-    read from ``dataset`` — see `_registry_of`.
+    read from ``dataset`` — see `registry_of`.
     """
-    ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
-    source = _source_ref(cfg, dataset)
+    ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
+    source = source_ref(cfg, dataset)
     # A fold model is trained for the fold's request (which reaches across the embargo), the final
     # model for the shipped forecast. `back_steps` is exactly the "is this a fold" signal.
     options = _render_options(bqml_options(cfg, model_name, fold=back_steps is not None))
@@ -356,7 +356,7 @@ def _forecast_source(
     `backtest._forecast_validation` does on the Python side. At the default ``gap`` of 0 the two
     expressions are identical to what they were.
     """
-    source = _source_ref(cfg, dataset)
+    source = source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     # The same function the CREATE MODEL reads, so a model is never asked for more than it was
     # trained to emit. Two expressions that happened to agree is how they came to disagree.
@@ -388,7 +388,7 @@ def _forecast_source(
             f"    confidence_level => {_CONFIDENCE_LEVEL}{extra})"
         )
 
-    ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
+    ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
     struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
 
@@ -428,7 +428,7 @@ def build_forecast_insert_sql(
     output" for every row in the table, rather than "the model's own output, unless a native model
     wrote the row, in which case NULL".
     """
-    dataset_q = f"`{_registry_of(dataset, registry_dataset)}.forecast_predictions`"
+    dataset_q = f"`{registry_of(dataset, registry_dataset)}.forecast_predictions`"
     forecast = _forecast_source(
         cfg,
         model_name,
@@ -483,7 +483,7 @@ def build_eval_query(
     horizon would then never share a ``horizon_step`` value, so no degradation curve could be laid
     over the other. The absolute distance is not lost either way; ``cutoff_date`` is on every row.
     """
-    source = _source_ref(cfg, dataset)
+    source = source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     forecast = _forecast_source(
         cfg,
@@ -529,7 +529,7 @@ def build_history_query(
     Post-alignment this is the full series history (the natives train on all of it for the final
     forecast) — a robust, freq-agnostic scale for the fold metrics.
     """
-    source = _source_ref(cfg, dataset)
+    source = source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
     clause = f"\nWHERE {sfilter}" if sfilter else ""
@@ -558,7 +558,7 @@ def build_series_ids_query(
     metadata row per ``(series, model)`` (NaN metric panel) that keeps native parity with the Python
     worker's always-emitted metadata row.
     """
-    source = _source_ref(cfg, dataset)
+    source = source_ref(cfg, dataset)
     idc = cfg.data.ts_id_col
     sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
     clause = f"\nWHERE {sfilter}" if sfilter else ""
@@ -579,7 +579,7 @@ def build_series_count_query(
     and `_snapshot_clause` with the query that lists the ids is what makes the two agree; deriving
     the count any other way would let the repair invent work.
     """
-    source = _source_ref(cfg, dataset)
+    source = source_ref(cfg, dataset)
     idc = cfg.data.ts_id_col
     sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
     clause = f"\nWHERE {sfilter}" if sfilter else ""
@@ -674,7 +674,7 @@ def build_fold_drop_statements(
     nothing to drop.
     """
     if model_name in _MODEL_TYPE:
-        ref = _model_ref(cfg, model_name, _registry_of(dataset, registry_dataset), fold_id=fold_id)
+        ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
         return [f"DROP MODEL IF EXISTS {ref};"]
     return []
 

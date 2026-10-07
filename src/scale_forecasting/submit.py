@@ -37,12 +37,14 @@ from typing import TYPE_CHECKING, Any
 
 from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
 from .commands import build_driver_args
-from .errors import ConfigError, EngineError, JobIdTaken, get_logger
+from .errors import ConfigError, EngineError, JobIdTaken, configure_cli_logging, get_logger
 from .hardware import spark_executor_env
 from .job_wait import wait_for_job
 from .staging import stage_code, stage_config
 
 if TYPE_CHECKING:
+    from google.cloud.dataproc_v1 import Batch
+
     from .config import RunConfig
     from .profiling.cost import ComputeProfile
     from .settings import Settings
@@ -198,9 +200,9 @@ def _estimated_series(
         return None
     from google.cloud import bigquery
 
-    from .engines.bigquery_names import _source_ref
+    from .engines.bigquery_names import source_ref
 
-    table = _source_ref(cfg, settings.dataset_ref)
+    table = source_ref(cfg, settings.dataset_ref)
     sql = f"SELECT APPROX_COUNT_DISTINCT(`{cfg.data.ts_id_col}`) AS n FROM `{table}`"
     try:
         rows = list(bigquery.Client(project=settings.project_id).query(sql).result())
@@ -349,7 +351,7 @@ def build_batch(
     hardware: str = "cpu",
     gpu_type: str | None = None,
     properties: dict[str, str] | None = None,
-) -> object:
+) -> Batch:
     """Assemble the ``dataproc_v1.Batch`` for one forecast run (pure — builds the message only).
 
     Mirrors the Terraform seed batch: runtime container + package zip on ``python_file_uris``, the
@@ -527,7 +529,7 @@ def submit_batch(
     _log.info("submitting batch %s to %s", batch_id, parent)
     since = launch_window_start()  # before submit: nothing this batch writes can predate it
     try:
-        operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)  # type: ignore[attr-defined]
+        operation = client.create_batch(parent=parent, batch=batch, batch_id=batch_id)
     except AlreadyExists as exc:
         # The platform holds this batch id already. Translated here rather than left to surface as
         # a raw 409 so the row records *why* and the operator is told the two ways out — see
@@ -584,6 +586,7 @@ def main(argv: list[str] | None = None) -> None:
     """
     from .config import load_config_uri
 
+    configure_cli_logging()
     p = argparse.ArgumentParser(prog="submit", description="Submit a forecast run to Dataproc.")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--config", help="path to the run config JSON")

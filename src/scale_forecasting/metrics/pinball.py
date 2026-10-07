@@ -30,10 +30,12 @@ class Pinball(BaseMetric):
     needs_intervals: ClassVar[bool] = True
 
     def compute(self, ctx: MetricContext) -> float:
-        if not ctx.has_intervals:
+        bounds = ctx.bounds()
+        if bounds is None:
             return float("nan")
-        lo = _pinball_q(ctx.y_true, ctx.lower, LOWER_Q)
-        up = _pinball_q(ctx.y_true, ctx.upper, UPPER_Q)
+        lower, upper = bounds
+        lo = _pinball_q(ctx.y_true, lower, LOWER_Q)
+        up = _pinball_q(ctx.y_true, upper, UPPER_Q)
         return float(np.mean([lo, up]))
 
 

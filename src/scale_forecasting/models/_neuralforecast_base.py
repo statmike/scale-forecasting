@@ -46,7 +46,7 @@ _BAND: tuple[float, float, float] = (0.1, 0.5, 0.9)
 _LOCAL_UID = "__local__"
 
 
-def _ensure_mpl_dir() -> None:
+def ensure_mpl_dir() -> None:
     """Ensure Matplotlib has a writable cache directory inside sandboxed / container workers."""
     cur = os.environ.get("MPLCONFIGDIR")
     if cur and os.access(cur, os.W_OK):
@@ -59,7 +59,7 @@ def _ensure_mpl_dir() -> None:
         pass
 
 
-def _quiet_lightning() -> None:
+def quiet_lightning() -> None:
     """Suppress verbose PyTorch Lightning banner and step logs during cell execution."""
     for logger_name in (
         "pytorch_lightning",
@@ -210,8 +210,8 @@ class NeuralForecastBaseModel(BaseModel):
         stat_cols: list[str],
     ) -> Any:
         """Construct the ``NeuralForecast`` wrapper and inner Lightning model."""
-        _ensure_mpl_dir()
-        _quiet_lightning()
+        ensure_mpl_dir()
+        quiet_lightning()
         try:
             import neuralforecast.models as nf_models
             from neuralforecast import NeuralForecast

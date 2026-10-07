@@ -48,23 +48,11 @@ class Croston(BaseModel):
 
     def _estimate(self, vals: np.ndarray) -> tuple[float, np.ndarray]:
         """Return ``(level, in_sample_one_step)`` for the configured variant."""
+        if self._variant == "tsb":
+            return self._estimate_tsb(vals)
         alpha = self._alpha
         n = len(vals)
         fitted = np.zeros(n)
-        if self._variant == "tsb":
-            nz = vals[vals > 0]
-            z = float(nz[0]) if nz.size else 0.0
-            p = float(np.mean(vals > 0))
-            for t in range(n):
-                fitted[t] = p * z
-                d = vals[t]
-                if d > 0:
-                    z += alpha * (d - z)
-                    p += alpha * (1.0 - p)
-                else:
-                    p += alpha * (0.0 - p)
-            return p * z, fitted
-
         # classic / sba: smooth demand size z and interval p, forecast z / p.
         correction = 1.0 - alpha / 2.0 if self._variant == "sba" else 1.0
         z: float | None = None
@@ -74,7 +62,7 @@ class Croston(BaseModel):
             fitted[t] = (z / p) * correction if (z is not None and p) else 0.0
             d = vals[t]
             if d > 0:
-                if z is None:
+                if z is None or p is None:
                     z, p = d, float(q)
                 else:
                     z += alpha * (d - z)
@@ -84,6 +72,25 @@ class Croston(BaseModel):
                 q += 1
         level = (z / p) * correction if (z is not None and p) else 0.0
         return level, fitted
+
+    def _estimate_tsb(self, vals: np.ndarray) -> tuple[float, np.ndarray]:
+        """Teunter-Syntetos-Babai: smooth the demand *probability* ``p`` every period and the
+        demand *size* ``z`` on demand periods; the level is ``p * z``."""
+        alpha = self._alpha
+        n = len(vals)
+        fitted = np.zeros(n)
+        nz = vals[vals > 0]
+        z = float(nz[0]) if nz.size else 0.0
+        p = float(np.mean(vals > 0))
+        for t in range(n):
+            fitted[t] = p * z
+            d = vals[t]
+            if d > 0:
+                z += alpha * (d - z)
+                p += alpha * (1.0 - p)
+            else:
+                p += alpha * (0.0 - p)
+        return p * z, fitted
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
         vals = y.astype(float).to_numpy()

@@ -17,8 +17,8 @@
 # aside entirely rather than blocking when it cannot run properly.
 #
 # It is NOT a substitute for `make test`. The pre-push hook (.githooks/pre-push) adds the fast
-# non-test CI checks — ruff, the lock, the requirements export — at the moment a commit leaves the
-# machine; the six-minute suite stays a deliberate `make test` or `make ci-offline`.
+# non-test CI checks — ruff, mypy, the lock, the requirements export — at the moment a commit
+# leaves the machine; the six-minute suite stays a deliberate `make test` or `make ci-offline`.
 #
 # Enable it once per clone:   make hooks
 # Bypass it for one commit:   git commit --no-verify
