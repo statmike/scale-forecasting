@@ -6,8 +6,9 @@ __pycache__/
 build/
 dist/
 
-# Virtual envs
+# Virtual envs (.venv-ci is the second env `make ci-offline` syncs exactly like the CI offline job)
 .venv/
+.venv-ci/
 venv/
 
 # uv

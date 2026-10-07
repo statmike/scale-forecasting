@@ -144,6 +144,14 @@ dev = [
     # (scale_forecasting.notebook_acceptance). Dev-only: the harness is a test/CI tool, not part of
     # the shipped forecasting runtime, so it doesn't belong in core deps.
     "nbformat>=5.10",
+    # tests/unit/test_docs_integrity.py imports `pymdownx.slugs` directly to compute heading anchors
+    # with the exact slugify MkDocs is configured with (mkdocs.yml `toc.slugify`), so a cross-link that
+    # resolves on the published site is checked the same way here. It arrives transitively through the
+    # `docs` group (mkdocs-material), but the CI `offline` job syncs `--all-extras` WITHOUT that group —
+    # which is how `main` went red on 2026-10-06 with a ModuleNotFoundError that no local venv (where
+    # `make docs` had already installed it) could reproduce. Same rule as threadpoolctl/protobuf above:
+    # a module we import by name is a dependency we declare by name.
+    "pymdown-extensions>=10",
 ]
 # Documentation site (MkDocs Material + mkdocstrings). Builds the guides, the notebook tour, and an
 # API reference generated straight from the source docstrings. mkdocstrings-python uses griffe's
@@ -164,9 +172,17 @@ docs = [
 # `uv sync` working everywhere. The [ray]/@gpu path is Linux-only by construction, so this is the
 # only place the GPU build is needed.
 [tool.uv]
+# The two environments the lock resolves for: the Linux x86_64 runtime (container, Dataproc, Vertex,
+# GKE, GCE, CI) and Apple-silicon macOS for local development. Intel macOS is deliberately absent:
+# torch — required by the [models] extra — has shipped no x86_64 macOS wheel since 2.3, so a bare
+# `sys_platform == 'darwin'` environment asks the resolver for a split it cannot satisfy. The
+# previously committed lock carried that split with an arm64-only wheel (an Intel Mac would have
+# failed at `uv sync`), and `uv lock --check` accepted it because it does not re-resolve — but a
+# fresh `uv lock` refuses outright ("No solution found"), which turned every dependency edit into a
+# hard error until the environment was narrowed to what the wheels actually support.
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "sys_platform == 'darwin'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [[tool.uv.index]]

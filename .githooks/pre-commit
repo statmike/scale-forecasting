@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# Pre-commit: the two consistency tripwires, and nothing else.
+# Pre-commit: the fast consistency tripwires (AGENTS.md Gate 1), and nothing else.
 #
 # These guard a failure shape the full gate cannot, because the full gate takes six minutes and so
-# it gets run *before* the last edit rather than after it. Both of these tripwires compare prose
-# against code — the validation ledger against the architecture axes it claims results on, and the
-# config-coverage map against the declared surface — which means a documentation-only edit made
+# it gets run *before* the last edit rather than after it. Each tripwire compares prose or
+# declarations against code — the validation ledger against the architecture axes it claims results
+# on, the config-coverage map against the declared surface, every Markdown file against the models
+# and metrics that exist, the API docs against the public modules, the smoke configs against the
+# schema, and the test-suite's imports against what CI actually installs — which means an edit made
 # after a green gate can turn them red with no code change at all. That is not hypothetical: it is
-# how `main` went red on 2026-09-26, when a ledger row was marked NEVER_RUN while still carrying the
-# run_id of a run that had not happened.
+# how `main` went red on 2026-09-26 (a ledger row marked NEVER_RUN while carrying a real run_id) and
+# again on 2026-10-06 (a test importing a module only the `docs` group installs).
 #
 # The design constraint is the one `make lock-check` learned the hard way, recorded in the Makefile:
 # a guard that is slow or flaky trains you to bypass it, and a bypassed guard is worse than none. So
-# this hook runs in under two seconds, runs only checks that cannot fail for environmental reasons,
-# and steps aside entirely rather than blocking when it cannot run properly.
+# this hook runs in seconds, runs only checks that cannot fail for environmental reasons, and steps
+# aside entirely rather than blocking when it cannot run properly.
 #
-# It is NOT a substitute for `make test`. It checks two files' worth of consistency, not the suite.
+# It is NOT a substitute for `make test`. The pre-push hook (.githooks/pre-push) adds the fast
+# non-test CI checks — ruff, the lock, the requirements export — at the moment a commit leaves the
+# machine; the six-minute suite stays a deliberate `make test` or `make ci-offline`.
 #
 # Enable it once per clone:   make hooks
 # Bypass it for one commit:   git commit --no-verify
@@ -48,6 +52,9 @@ output="$(env "${sf_unset[@]}" "${runner[@]}" \
   tests/unit/test_validation_ledger.py \
   tests/unit/test_config_coverage.py \
   tests/unit/test_docs_integrity.py \
+  tests/unit/test_api_docs_coverage.py \
+  tests/unit/test_test_dependencies_declared.py \
+  tests/smokes/test_smoke_configs.py \
   -q --no-header -p no:cacheprovider 2>&1)"
 status=$?
 
@@ -57,17 +64,21 @@ if [[ $status -ne 0 ]]; then
 
 pre-commit: a consistency tripwire failed — see above.
 
-  test_validation_ledger  — the ledger's rows against the architecture they claim to be proven on.
-                            A row cannot cite evidence it does not have, and a result cannot
-                            survive a change to the axes it was measured under.
-  test_config_coverage    — every declared config value against the configs and the ledger. A value
-                            that becomes proven, or stops being proven, needs its classification
-                            updated in the UNPROVEN map.
-  test_docs_integrity     — all Markdown tables, Mermaid diagrams, embedded RunConfig JSON blocks,
-                            relative links, CLI module invocations, and canonical model/metric/view
-                            counts across all .md files.
+  test_validation_ledger          — the ledger's rows against the architecture they claim to be
+                                    proven on. A row cannot cite evidence it does not have, and a
+                                    result cannot survive a change to the axes it was measured under.
+  test_config_coverage            — every declared config value against the configs and the ledger.
+                                    A value that becomes proven, or stops being proven, needs its
+                                    classification updated in the UNPROVEN map.
+  test_docs_integrity             — all Markdown tables, Mermaid diagrams, embedded RunConfig JSON
+                                    blocks, relative links, CLI module invocations, and canonical
+                                    model/metric/view counts across all .md files.
+  test_api_docs_coverage          — every public module has a docs/api page wired into mkdocs.yml.
+  test_test_dependencies_declared — every module the tests import is installed by the CI offline
+                                    sync (declared in pyproject, not merely present in your venv).
+  test_smoke_configs              — every configs/smokes/*.json validates against RunConfig.
 
-Fix the row, map, or documentation and commit again. To commit anyway: git commit --no-verify
+Fix the row, map, declaration, or documentation and commit again. To commit anyway: git commit --no-verify
 EOF
   exit 1
 fi

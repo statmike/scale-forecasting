@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Pre-push: the fast, environment-independent CI checks, run at the moment a commit leaves the machine.
+#
+# CI's `lock-check` job and the first two steps of its `offline` job are deterministic and take a
+# few seconds — `ruff format --check`, `ruff check`, `uv lock --check`, and "does the committed
+# docker/requirements.txt equal what the lock exports". None of them can go red for a reason that
+# is not in the diff, so there is no excuse for discovering them from a red badge after the push.
+# This hook runs exactly those, with exactly the flags CI uses (the export flags are read from the
+# Makefile's EXPORT_ARGS so the three places cannot drift apart).
+#
+# What it deliberately does NOT run: the six-minute offline test suite and the strict MkDocs build.
+# Those are real gates, but a pre-push that takes minutes gets `--no-verify`d, and a bypassed guard
+# is worse than none (the same constraint .githooks/pre-commit records). Run them deliberately:
+#   make test          — ruff + the offline suite, in your synced venv
+#   make ci-offline    — the same suite in a venv built exactly as CI builds it (catches a package
+#                        your venv has that CI's does not; see the 2026-10-06 incident in pre-commit)
+#   make docs          — the strict site build
+#
+# What it deliberately does NOT touch: your .venv. `uv run` syncs the project environment as a side
+# effect, and when uv decides the interpreter has changed underneath it (a `uv python` upgrade, a
+# new minor-version link) that "sync" is a delete-and-recreate without extras — which is a bad thing
+# for a git hook to do to the environment you are working in. So ruff is taken from .venv/bin when
+# it exists, and `uv run --no-sync` otherwise; neither path installs or removes anything.
+#
+# Enable it once per clone:   make hooks      (same core.hooksPath as pre-commit)
+# Bypass it for one push:     git push --no-verify
+
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root" || exit 0
+
+fail() {
+  echo >&2
+  echo "pre-push: $1" >&2
+  echo "          Fix it and push again. To push anyway: git push --no-verify" >&2
+  exit 1
+}
+
+# 1. Layout is machine-decided; `make format` is the fix. Same ruff the suite uses, no sync.
+if [[ -x .venv/bin/ruff ]]; then
+  ruff=(.venv/bin/ruff)
+elif command -v uv >/dev/null 2>&1; then
+  ruff=(uv run --frozen --no-sync ruff)
+else
+  echo "pre-push: no .venv/bin/ruff and no uv — skipping the ruff checks." >&2
+  ruff=()
+fi
+if (( ${#ruff[@]} )); then
+  "${ruff[@]}" format --check src tests || fail "ruff format --check failed (run: make format)."
+  "${ruff[@]}" check src tests          || fail "ruff check failed."
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "pre-push: uv not found — skipping the lock and requirements checks." >&2
+  exit 0
+fi
+
+# 2. The lock must already satisfy pyproject.toml — a dependency edit that was not re-locked fails
+#    CI's lock-check in the first thirty seconds. `uv lock --check` never touches the venv.
+uv lock --check || fail "uv.lock is out of sync with pyproject.toml (run: make lock, commit both files)."
+
+# 3. docker/requirements.txt is a derived export of the lock; CI regenerates it in place and diffs.
+#    Do the same here into a temp file so a failure never leaves the working tree modified. The flags
+#    are the Makefile's EXPORT_ARGS, read rather than copied, so this cannot drift from `make lock`.
+#    uv writes its own invocation — including `-o <path>` — into the file's second line, so that
+#    one line is normalised on both sides before comparing (the Makefile's lock-check comment
+#    records the version of this check that forgot to and could never pass).
+export_args="$(sed -n 's/^EXPORT_ARGS *:= *//p' Makefile)"
+if [[ -z "$export_args" ]]; then
+  fail "could not read EXPORT_ARGS from the Makefile — the requirements drift check cannot run."
+fi
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+# shellcheck disable=SC2086  # EXPORT_ARGS is a flag list and must word-split
+uv export $export_args -o "$tmp" >/dev/null 2>&1 || fail "uv export failed — cannot verify docker/requirements.txt."
+strip_output_path='2s/ -o [^ ]*$//'
+cmp -s <(sed "$strip_output_path" "$tmp") <(sed "$strip_output_path" docker/requirements.txt) \
+  || fail "docker/requirements.txt is stale against uv.lock (run: make lock, commit both files)."
+
+exit 0
