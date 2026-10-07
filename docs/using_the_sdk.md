@@ -23,9 +23,9 @@ Touching `RunConfig`/`Settings` alone pays no model-import cost.
 ```mermaid
 flowchart TD
     subgraph Doors["Three Python Surfaces (`import scale_forecasting as sf`)"]
-        D1["1. Easy Path: `sf.Forecaster`\n.dry_run() · .feasibility() · .dag()\n.run() · .monitor() · .review_run()"]
-        D2["2. Direct Path: Embed in Spark / Ray\nsf.make_group_runner · sf.make_chunk_runner\nsf.chunk_cells · sf.run_group"]
-        D3["3. Manage Path: `sf.Registry`\n.doctor() · .close_runs() · .drop_run()\n.reap_clusters() · .snapshot() · .export()"]
+        D1["1. Easy Path: `sf.Forecaster`<br/>.dry_run() · .feasibility() · .dag()<br/>.run() · .monitor() · .review_run()"]
+        D2["2. Direct Path: Embed in Spark / Ray<br/>sf.make_group_runner · sf.make_chunk_runner<br/>sf.chunk_cells · sf.run_group"]
+        D3["3. Manage Path: `sf.Registry`<br/>.doctor() · .close_runs() · .drop_run()<br/>.reap_clusters() · .snapshot() · .export()"]
     end
     D1 --> Main["main.run (Family DAG Orchestrator)"]
     Main --> Cell["worker.run_cell (Single Series × Model)"]
@@ -49,10 +49,10 @@ plan = forecaster.dry_run()
 print(plan.run_id)  # deterministic config hash — the id the real run lands under
 print(plan.fanout)  # series × models = cells (folds happen inside a cell)
 print(plan.workload)  # the same counts plus the fit-cost half, when it can be known
-print(plan.python_models)  # models routed to the Spark/Ray runtime
+print(plan.python_models)  # models routed to Python / AutoML runtimes (spark / ray / vertex / gce / gke / vertex_automl)
 print(plan.bq_models)  # models routed to BigQuery-native
 
-# Run it. Spark/Ray and BigQuery-native run in parallel under one run_id.
+# Run it. Python / AutoML families and BigQuery-native run in parallel under one run_id.
 result = forecaster.run()
 print(result.run_id, result.dataset_ref)
 print(result.views)  # the five registry views — query any of them by run_id
@@ -113,7 +113,7 @@ result = forecaster.run()
 
 ### Plan the DAG and trace the jobs
 
-A run is a DAG of **one job per model family** (statistical / ml / deep-learning / native), each on
+A run is a DAG of **one job per model family** (`statistical` / `ml` / `deep_learning` / `automl` / `native`), each on
 its resolved runtime, plus a downstream ensemble node. Two methods expose that DAG — one offline
 (what *will* run) and one live (what *did*), lined up by the same deterministic `job_key`:
 
@@ -154,10 +154,13 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 | `forecaster.plot_ensemble_weights()` | `matplotlib.figure.Figure` | Horizontal stacked bar chart of base-learner contribution shares per ensemble strategy |
 | `forecaster.explain_forecast(ts_id, model)` | `pd.DataFrame` | Decomposes a series forecast into seasonal naive baseline, trend/model residual, and covariate alignment |
 | `forecaster.plot_forecast_explanation(ts_id, model)` | `matplotlib.figure.Figure` | Multi-panel decomposition plot (history + fan chart, baseline vs residual split, and future exogenous drivers) |
+| `forecaster.attributions_df(ts_id=..., model=...)` | `pd.DataFrame` | Returns **Tier 1 (`fit_diagnostics.feature_attributions`)** and **Tier 2 (`forecast_predictions.explanations`)** feature attributions across `automl` (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`) and `ml` (`xgboost`, `lightgbm`, `catboost`, `random_forest`, `regression_lags`) models |
+| `forecaster.plot_attributions(ts_id, model)` | `matplotlib.figure.Figure` | 2-panel visualization of Tier 1 overall feature importance and Tier 2 per-horizon-step local attribution over `forecast_date` |
 | `forecaster.plot_series(ts_id, models=[...])` | `matplotlib.figure.Figure` | Overlay historical actuals, prediction intervals, and multi-model forecast trajectories |
 
 Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the
 top level of `scale_forecasting` (`explain_forecast_frame`, `plot_forecast_explanation`,
+`build_attributions_frame`, `plot_attributions`,
 `build_calibration_frames`, `plot_calibration`, `build_ensemble_weights_frame`,
 `plot_ensemble_weights`, `build_cohorts_frame`), so you can run the exact same diagnostics on
 in-memory `CellResult` objects in `00_model_playground.ipynb` before touching Google Cloud.

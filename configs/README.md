@@ -104,7 +104,7 @@ Configurations designed for fleet-scale execution and reviewed in [`notebooks/10
 | File | Series | Models | Runtimes Exercised | Purpose |
 | :--- | ---: | :--- | :--- | :--- |
 | [`ray_autoscale_demo.json`](./ray_autoscale_demo.json) | 10,000 | `theta`, `holtwinters`, `sarimax` | Ray CPU (Autoscaling 1–8 nodes) | 10k-series statistical run on an autoscaling Ray-on-Vertex cluster with multi-region fallback. |
-| [`all_families_10k.json`](./all_families_10k.json) | 10,000 | `theta`, `holtwinters`, `sarimax`, `xgboost`, `neuralprophet`, `arima_plus`, `timesfm` | Ray (CPU + T4 GPU) $\parallel$ BigQuery | All 4 model families at 10k scale with `gpu_fraction: "auto"` calibration and learned + calculated ensembles. |
+| [`all_families_10k.json`](./all_families_10k.json) | 10,000 | `theta`, `holtwinters`, `sarimax`, `xgboost`, `neuralprophet`, `arima_plus`, `timesfm` | Ray (CPU + T4 GPU) $\parallel$ BigQuery | Four model families (`statistical`, `ml`, `deep_learning`, `native`) at 10k scale with `gpu_fraction: "auto"` calibration and learned + calculated ensembles. |
 | [`all_families_10k_full.json`](./all_families_10k_full.json) | 10,000 | `theta`, `holtwinters`, `sarimax`, `xgboost`, `neuralprophet`, `arima_plus`, `timesfm` | Ray (CPU + T4 GPU) $\parallel$ BigQuery | Full-featured 10k run adding `features.holidays: "US"`, `transform: "log1p"`, `persist_models: true`, and `xgb` ensembling. |
 | [`explode_100k.json`](./explode_100k.json) | 100,000 | `theta`, `holtwinters`, `sarimax`, `xgboost` | Spark Serverless (CPU) | Full 100k-series benchmark across `statistical` and `ml` families on Dataproc Serverless (`max_executors: 20`). |
 | [`ray_100k.json`](./ray_100k.json) | 100,000 | `theta`, `holtwinters`, `sarimax`, `xgboost` | Ray CPU (Autoscaling 1–20 nodes) | Full 100k-series Ray counterpart to `explode_100k.json` for cross-engine accuracy and throughput comparison. |
@@ -126,7 +126,7 @@ Paired configurations that hold data, seeds, and hyperparameters constant while 
 
 ## Smoke Configuration Suite (`configs/smokes/`)
 
-The **[`configs/smokes/`](./smokes/README.md)** subdirectory contains 41 numbered configurations (`01` through `41`) that systematically exercise every runtime (`spark`, `ray`, `vertex`, `gce`, `gke`, and `bigquery`), hardware mode, backtest scheme, HPO granularity, feature transform, covariate tier, hierarchical reconciliation method, and ensemble strategy in the platform. See **[`configs/smokes/README.md`](./smokes/README.md)** for the full index.
+The **[`configs/smokes/`](./smokes/README.md)** subdirectory contains 42 numbered configurations (`01` through `42`) that systematically exercise every runtime (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, and `bigquery`), hardware mode, backtest scheme, HPO granularity, feature transform, covariate tier, hierarchical reconciliation method, and ensemble strategy in the platform. See **[`configs/smokes/README.md`](./smokes/README.md)** for the full index.
 
 ---
 

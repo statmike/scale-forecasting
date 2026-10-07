@@ -155,13 +155,17 @@ def _check_idempotency(run_id: str, settings: Settings) -> Idempotency:
 
 
 def _needs_batch_infra(cfg: RunConfig) -> bool:
-    """Does any family in ``cfg`` run on Spark, Vertex, GCE, or GKE (needing `BatchInfra`)?"""
-    if cfg.python_runtime in ("spark", "vertex", "gce", "gke"):
+    """Does any family in ``cfg`` run on Spark, Vertex, AutoML, GCE, or GKE?"""
+    from .models import get_model
+
+    if cfg.python_runtime in ("spark", "vertex", "vertex_automl", "gce", "gke"):
         return True
     if cfg.python_runtime == "ray" and cfg.compute.ray_mode == "gke":
         return True
+    if any(get_model(m).family == "automl" for m in cfg.models):
+        return True
     return any(
-        fc.runtime in ("spark", "vertex", "gce", "gke")
+        fc.runtime in ("spark", "vertex", "vertex_automl", "gce", "gke")
         or (fc.runtime == "ray" and fc.ray_mode == "gke")
         for fc in cfg.compute.families.values()
     )
@@ -229,6 +233,7 @@ def _assemble_commands(
     Compute Engine single-VM family, and/or ``"gke:<family>"`` per GKE family.
     """
     from .commands import (
+        build_automl_commands,
         build_gce_commands,
         build_gke_commands,
         build_main_command,
@@ -245,14 +250,21 @@ def _assemble_commands(
         commands["ray"] = build_ray_commands(
             config_uri=config_uri, cluster_name=cfg.compute.ray_cluster_name
         )
-    if not any(n.runtime in ("spark", "vertex", "gce", "gke") for n in nodes):
+    if not any(n.runtime in ("spark", "vertex", "vertex_automl", "gce", "gke") for n in nodes):
         return commands
 
+    from .automl_submit import plan_automl_job
     from .batch_infra import BatchInfra
     from .gce_submit import plan_gce_job
     from .gke_submit import plan_gke_job
     from .profiling.source import profile_for_run
-    from .registry.ids import dataproc_job_id, gce_instance_id, gke_job_id, vertex_job_id
+    from .registry.ids import (
+        dataproc_job_id,
+        gce_instance_id,
+        gke_job_id,
+        vertex_automl_job_id,
+        vertex_job_id,
+    )
     from .submit import sizing_properties
     from .vertex_submit import plan_vertex_job
 
@@ -310,6 +322,32 @@ def _assemble_commands(
                 worker_count=vplan.worker_count,
                 accelerator_type=vplan.accelerator_type,
                 accelerator_count=vplan.accelerator_count,
+            )
+        elif node.runtime == "vertex_automl":
+            fc = cfg.resolve_family_compute(node.family)
+            aplan = plan_automl_job(
+                cfg,
+                models,
+                run_id=plan.run_id,
+                job_id=vertex_automl_job_id(node.job_key),
+                automl_mode=fc.automl_mode,
+                hardware=hardware,
+                gpu_type=node.gpu_type,
+                machine_type=fc.machine_type,
+                max_workers=fc.max_workers or fc.workers,
+                accelerator_count=fc.accelerator_count or None,
+                config_uri=config_uri,
+                service_account=infra.compute_sa,
+            )
+            commands[f"vertex_automl:{node.family}"] = build_automl_commands(
+                config_uri=config_uri,
+                job_id=aplan.display_name,
+                automl_mode=aplan.automl_mode,
+                models=models,
+                hardware=aplan.hardware,
+                gpu_type=aplan.gpu_type,
+                machine_type=aplan.machine_type,
+                max_workers=aplan.max_workers,
             )
         elif node.runtime == "gce":
             fc = cfg.resolve_family_compute(node.family)

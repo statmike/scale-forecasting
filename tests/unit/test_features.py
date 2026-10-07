@@ -479,9 +479,17 @@ def test_every_model_declares_explicit_three_tier_covariate_support() -> None:
     from scale_forecasting.playground import model_catalog
 
     catalog = model_catalog().set_index("model")
-    assert len(catalog) == 30
+    assert len(catalog) == 34
 
-    static_models = {"tide", "tft", "tsmixer"}
+    static_models = {
+        "tide",
+        "tft",
+        "tsmixer",
+        "vertex_l2l",
+        "vertex_tide",
+        "vertex_tft",
+        "vertex_seq2seq",
+    }
     for name in list_models():
         cls = get_model(name)
         assert isinstance(cls.supports_future_covariates, bool)

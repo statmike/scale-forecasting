@@ -426,6 +426,72 @@ class GkeSubmitter:
         return handle
 
 
+class VertexAutoMLSubmitter:
+    """Vertex AI AutoML / Tabular Workflows for Forecasting (`runtime="vertex_automl"`)."""
+
+    name = "vertex_automl"
+
+    def launch(
+        self,
+        cfg: RunConfig,
+        *,
+        models: list[str],
+        manage_header: bool,
+        settings: Settings,
+        spark: object | None = None,
+        wait: bool = True,
+        max_executors: int | None = None,
+        system_job_id: str | None = None,
+        hardware: str = "cpu",
+        gpu_type: str | None = None,
+        spark_mode: str | None = None,
+        spark_cluster_name: str | None = None,
+        spark_cluster_region: str | None = None,
+        ray_cluster_name: str | None = None,
+        ray_cluster_region: str | None = None,
+    ) -> ProbeHandle | None:
+        from .automl_submit import submit_automl
+        from .models import get_model
+
+        _ = (
+            spark,
+            max_executors,
+            spark_mode,
+            spark_cluster_name,
+            spark_cluster_region,
+            ray_cluster_name,
+            ray_cluster_region,
+        )
+        automl_mode: str | None = None
+        machine_type: str | None = None
+        max_workers: int | None = None
+        accelerator_count: int | None = None
+        if models:
+            family = get_model(models[0]).family
+            if family != "native":
+                fc = cfg.resolve_family_compute(family)
+                automl_mode = fc.automl_mode
+                machine_type = fc.machine_type
+                max_workers = fc.max_workers or fc.workers
+                accelerator_count = fc.accelerator_count or None
+
+        _, _, handle = submit_automl(
+            cfg,
+            settings=settings,
+            wait=wait,
+            models=models,
+            job_id=system_job_id,
+            manage_header=manage_header,
+            automl_mode=automl_mode,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            machine_type=machine_type,
+            max_workers=max_workers,
+            accelerator_count=accelerator_count,
+        )
+        return handle
+
+
 # Registered by cfg.python_runtime. A new runtime = one class + one entry here.
 _SUBMITTERS: dict[str, RuntimeSubmitter] = {
     SparkSubmitter.name: SparkSubmitter(),
@@ -433,6 +499,7 @@ _SUBMITTERS: dict[str, RuntimeSubmitter] = {
     VertexSubmitter.name: VertexSubmitter(),
     GceSubmitter.name: GceSubmitter(),
     GkeSubmitter.name: GkeSubmitter(),
+    VertexAutoMLSubmitter.name: VertexAutoMLSubmitter(),
 }
 
 

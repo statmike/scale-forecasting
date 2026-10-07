@@ -96,6 +96,7 @@ def test_every_repairable_family_has_a_token_and_the_ensemble_does_not() -> None
         "statistical_repair",
         "ml_repair",
         "deep_learning_repair",
+        "automl_repair",
         "native_repair",
     )
     # A repair never re-runs the ensemble — `dag.narrow_to_models` returns ensemble_enabled=False.

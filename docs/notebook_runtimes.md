@@ -23,7 +23,7 @@ flowchart LR
         S3["3. Local Kernel<br/>uv sync + ADC + SF_* Env"]
     end
     S1 & S2 & S3 --> NB["11 Notebooks<br/>00_model_playground .. 10_registry_operations_and_scale"]
-    NB -->|"Orchestrate & Query"| Cloud["BigQuery · GCE · Vertex AI · Dataproc Spark · Vertex Ray"]
+    NB -->|"Orchestrate & Query"| Cloud["BigQuery · GCE · Vertex AI · GKE · Vertex AI AutoML · Dataproc Spark · Vertex Ray"]
 ```
 
 ## Running locally
@@ -53,15 +53,15 @@ Colab Enterprise templates can bake them in, so no environment cell is needed (s
 
 | Notebook | Cloud compute | Python | Notes | Extra | Colab template |
 |----------|---------------|--------|-------|-------|----------------|
-| `00_model_playground` | none (fully local) | 3.11 | pure local sandbox across 30 models, 21 metrics, covariates & 7 FPP3 reconciliation methods | none | `sf-main` |
+| `00_model_playground` | none (fully local) | 3.11 | pure local sandbox across 34 models (5 families), 21 metrics, covariates, two-tier explainability & 7 FPP3 reconciliation methods | none | `sf-main` |
 | `01_bigquery_native_sql` | BigQuery | 3.11 | pure SQL (`ARIMA_PLUS`, `TimesFM`) + ensembling | none | `sf-main` |
-| `02_vertex_and_gce_vms` | GCE Single-VM & Vertex `CustomJob` | 3.11 | compares `gce` single-VM and `vertex` multi-worker sharding | none | `sf-main` |
+| `02_vertex_and_gce_vms` | GCE Single-VM, Vertex `CustomJob` & GKE Jobs | 3.11 | compares `gce` single-VM, `vertex` multi-worker sharding, and `gke` Indexed Jobs + feature attributions | none | `sf-main` |
 | `03_spark_serverless_and_connect` | Dataproc Spark (`serverless` / `cluster` / `connect`) | 3.11 | Serverless Spark batch $\parallel$ BQ + interactive Spark Connect on runtime **2.3** | `[spark]` | `sf-main` |
-| `04_ray_on_vertex_gpu` | Ray on Vertex AI (CPU & GPU) | 3.11 | client↔cluster Ray parity (2.47) + fractional GPU (`gpu_fraction=0.25`) | `[ray]` | `sf-main` |
-| `05_covariates_and_global_models` | Vertex AI / Spark + BigQuery | 3.11 | 3-tier covariates (`static`, `future`, `past`) + global cross-series ML | none | `sf-main` |
+| `04_ray_on_vertex_gpu` | Ray on Vertex AI & GKE (CPU & GPU) | 3.11 | client↔cluster Ray parity (2.47) + fractional GPU (`gpu_fraction=0.25`) | `[ray]` | `sf-main` |
+| `05_covariates_and_global_models` | Vertex AI / Spark + BigQuery | 3.11 | 3-tier covariates (`static`, `future`, `past`) + global cross-series ML + TreeSHAP feature attributions | none | `sf-main` |
 | `06_hierarchical_reconciliation` | Vertex AI / Spark + BigQuery | 3.11 | multi-level hierarchy rollups + `bottom_up`, `wls_struct`, `mint_shrink` | none | `sf-main` |
 | `07_hpo_backtesting_and_ensembles` | BigQuery + Vertex AI | 3.11 | Optuna HPO + in-run, post-run (`reensemble`), and cross-run (`ensemble_runs`) ensembling | none | `sf-main` |
-| `08_multi_engine_master_workflow` | Spark $\parallel$ Vertex $\parallel$ BigQuery | 3.11 | 4-family parallel DAG + `run_live()` monitoring + 5-panel review | none | `sf-main` |
+| `08_multi_engine_master_workflow` | Spark $\parallel$ Vertex / GKE / AutoML $\parallel$ BigQuery | 3.11 | multi-family parallel DAG + `run_live()` monitoring + full diagnostic & explainability review | none | `sf-main` |
 | `09_custom_models_and_metrics` | none (fully local) | 3.11 | author custom 1-file `BaseModel` & `BaseMetric` plugins offline | none | `sf-main` |
 | `10_registry_operations_and_scale` | BigQuery (read-only + ops) | 3.11 | `Registry.doctor()`, live probes, Composer DAG emitter & 100k scale review | none | `sf-main` |
 

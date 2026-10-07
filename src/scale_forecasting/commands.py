@@ -427,3 +427,33 @@ def build_gke_commands(
         native = shell_join(gcloud)
 
     return LaunchCommands(runtime="gke", universal=shell_join(argv), native=native)
+
+
+def build_automl_commands(
+    *,
+    config_uri: str,
+    job_id: str | None = None,
+    automl_mode: str = "tabular_workflow",
+    models: list[str] | None = None,
+    hardware: str | None = None,
+    gpu_type: str | None = None,
+    machine_type: str | None = None,
+    max_workers: int | None = None,
+) -> LaunchCommands:
+    """Build the universal (`automl_submit`) command for a Vertex AI AutoML family job."""
+    argv = ["python", "-m", "scale_forecasting.automl_submit", "--config-uri", config_uri]
+    if models is not None:
+        argv += ["--models", ",".join(models)]
+    if job_id is not None:
+        argv += ["--job-id", job_id]
+    if automl_mode and automl_mode != "tabular_workflow":
+        argv += ["--automl-mode", automl_mode]
+    if hardware is not None:
+        argv += ["--hardware", hardware]
+    if gpu_type is not None:
+        argv += ["--gpu-type", gpu_type]
+    if machine_type:
+        argv += ["--machine-type", machine_type]
+    if max_workers is not None:
+        argv += ["--max-workers", str(max_workers)]
+    return LaunchCommands(runtime="vertex_automl", universal=shell_join(argv), native=None)

@@ -6,8 +6,8 @@
 flowchart TB
     subgraph offline["Tier 1: Offline Gate (tests/unit/ + tests/smokes/test_*.py)"]
         direction LR
-        unit["Pure Unit & Seam Tests<br/>~4,780+ tests · Zero cloud/Spark/Ray required<br/>(make test)"]
-        contracts["Catalogue Contract Suites<br/>test_models_contract.py (all 30 models)<br/>test_worker_model_matrix.py (full run_cell)<br/>test_metrics_contract.py (all 21 metrics)"]
+        unit["Pure Unit & Seam Tests<br/>~4,800+ tests · Zero cloud/Spark/Ray required<br/>(make test)"]
+        contracts["Catalogue Contract Suites<br/>test_models_contract.py (all 34 models)<br/>test_worker_model_matrix.py (full run_cell)<br/>test_metrics_contract.py (all 21 metrics)"]
         snaps["Pinned Golden Snapshots (snapshots/)<br/>SQL DDL & views · BQML SQL<br/>run_id digests · numeric golden panel"]
         trips["Consistency Tripwires (pre-commit)<br/>test_validation_ledger.py<br/>test_config_coverage.py<br/>test_docs_integrity.py<br/>test_code_delivery.py · test_launch_point_lean.py"]
     end
@@ -17,7 +17,7 @@ flowchart TB
     end
 
     subgraph smokes["Tier 3: Live System Validation Smokes (tests/smokes/)"]
-        sh["smoke_harness.py & airflow_smoke.py<br/>Executes configs/smokes/01..41 on live GCP,<br/>verifies BigQuery rows, metrics & teardown"]
+        sh["smoke_harness.py & airflow_smoke.py<br/>Executes configs/smokes/01..42 on live GCP,<br/>verifies BigQuery rows, metrics & teardown"]
     end
 
     offline --> integ --> smokes

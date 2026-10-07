@@ -208,7 +208,10 @@ def resolve_job_gpu(cfg: RunConfig) -> tuple[bool, str | None]:
     family asked; a config with no deep-learning model still answers, and the answer costs
     nothing because the resolver is pure.
     """
-    dl = cfg.resolve_family_compute(_GPU_FAMILY)
+    try:
+        dl = cfg.resolve_family_compute(_GPU_FAMILY)
+    except ValueError:
+        return bool(cfg.compute.use_gpu), cfg.compute.gpu_type if cfg.compute.use_gpu else None
     return dl.hardware == "gpu", dl.gpu_type
 
 

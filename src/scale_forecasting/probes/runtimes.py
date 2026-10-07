@@ -106,6 +106,18 @@ _VERTEX_CUSTOM_JOB_STATES = {
     "JOB_STATE_PARTIALLY_SUCCEEDED": NATIVE_FAILED,
 }
 
+# Vertex AI ``PipelineJob`` ``PipelineState``.
+_VERTEX_PIPELINE_STATES = {
+    "PIPELINE_STATE_QUEUED": NATIVE_RUNNING,
+    "PIPELINE_STATE_PENDING": NATIVE_RUNNING,
+    "PIPELINE_STATE_RUNNING": NATIVE_RUNNING,
+    "PIPELINE_STATE_CANCELLING": NATIVE_RUNNING,
+    "PIPELINE_STATE_PAUSED": NATIVE_RUNNING,
+    "PIPELINE_STATE_SUCCEEDED": NATIVE_SUCCEEDED,
+    "PIPELINE_STATE_FAILED": NATIVE_FAILED,
+    "PIPELINE_STATE_CANCELLED": NATIVE_FAILED,
+}
+
 
 def _short_detail(exc: Exception) -> str:
     """A concise, scannable degrade reason — the exception type + its first message line,
@@ -780,12 +792,131 @@ class GkeProbe:
             return _cancel_failure(exc)
 
 
+class VertexAutoMLProbe:
+    """Probe a Vertex AI AutoML / Tabular Workflow ``PipelineJob`` via ``PipelineServiceClient``."""
+
+    name = "vertex_automl"
+
+    @staticmethod
+    def _resolve_pipeline_jobs(client: Any, handle: ProbeHandle, settings: Settings) -> list[Any]:
+        from google.api_core.exceptions import NotFound
+
+        target = handle.resource_name or handle.native_id
+        if not target:
+            raise NotFound("vertex automl pipeline job id not yet assigned")
+        region = handle.region or settings.region
+        parent = f"projects/{settings.project_id}/locations/{region}"
+        if target.startswith("projects/"):
+            if "/pipelineJobs/" in target:
+                return [client.get_pipeline_job(name=target, timeout=_PROBE_TIMEOUT_S)]
+            raise NotFound("vertex automl pipeline job not found")
+
+        # Try exact pipelineJob name first, then prefix match on display_name.
+        with_exact_name = f"{parent}/pipelineJobs/{target}"
+        try:
+            return [client.get_pipeline_job(name=with_exact_name, timeout=_PROBE_TIMEOUT_S)]
+        except NotFound:
+            pass
+
+        matches = [
+            job
+            for job in client.list_pipeline_jobs(
+                request={"parent": parent},
+                timeout=_PROBE_TIMEOUT_S,
+            )
+            if (getattr(job, "display_name", "") or "").startswith(target)
+            or (getattr(job, "name", "") or "").rsplit("/", 1)[-1].startswith(target)
+        ]
+        if not matches:
+            raise NotFound("vertex automl pipeline job not found")
+        return matches
+
+    def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
+        try:
+            from google.api_core.exceptions import NotFound
+
+            from ..automl_submit import _pipeline_client
+
+            region = handle.region or settings.region
+            client = _pipeline_client(region)
+            try:
+                jobs = self._resolve_pipeline_jobs(client, handle, settings)
+            except NotFound:
+                return ProbeResult(
+                    NATIVE_NOT_FOUND,
+                    exists=False,
+                    detail="vertex automl pipeline job not found",
+                )
+
+            any_failed = False
+            any_running = False
+            detail = ""
+            for job in jobs:
+                state = getattr(job, "state", None)
+                state_name = getattr(state, "name", str(state))
+                norm = _VERTEX_PIPELINE_STATES.get(state_name, NATIVE_UNKNOWN)
+                if norm == NATIVE_RUNNING:
+                    any_running = True
+                elif norm == NATIVE_FAILED:
+                    any_failed = True
+                    error = getattr(job, "error", None)
+                    detail = getattr(error, "message", "") or detail if error else detail
+            if any_running:
+                return ProbeResult(NATIVE_RUNNING, exists=True, detail=detail)
+            if any_failed:
+                return ProbeResult(NATIVE_FAILED, exists=True, detail=detail)
+            return ProbeResult(NATIVE_SUCCEEDED, exists=True, detail=detail)
+        except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
+            return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
+
+    def cancel(self, handle: ProbeHandle, *, settings: Settings) -> CancelResult:
+        try:
+            from google.api_core.exceptions import NotFound
+
+            from ..automl_submit import _pipeline_client
+
+            region = handle.region or settings.region
+            client = _pipeline_client(region)
+            try:
+                jobs = self._resolve_pipeline_jobs(client, handle, settings)
+            except NotFound:
+                return CancelResult(
+                    stopped=False,
+                    already_gone=True,
+                    detail="vertex automl pipeline job already gone",
+                )
+            live = [
+                job
+                for job in jobs
+                if _VERTEX_PIPELINE_STATES.get(
+                    getattr(getattr(job, "state", None), "name", ""), NATIVE_UNKNOWN
+                )
+                not in _BATCH_TERMINAL
+            ]
+            if not live:
+                return CancelResult(
+                    stopped=False,
+                    already_gone=True,
+                    detail="vertex automl pipeline job already terminal",
+                )
+            for job in live:
+                client.cancel_pipeline_job(name=job.name, timeout=_PROBE_TIMEOUT_S)
+            return CancelResult(
+                stopped=True,
+                already_gone=False,
+                detail=f"cancelled {len(live)} vertex automl pipeline job(s)",
+            )
+        except Exception as exc:  # noqa: BLE001 - cancel is advisory: report failure, never raise
+            return _cancel_failure(exc)
+
+
 # Registered by ``runtime`` (a `ProbeHandle.runtime`). A new probe = one class + one entry here,
 # mirroring `submitters._SUBMITTERS`.
 _PROBES: dict[str, RuntimeProbe] = {
     SparkProbe.name: SparkProbe(),
     RayProbe.name: RayProbe(),
     VertexProbe.name: VertexProbe(),
+    VertexAutoMLProbe.name: VertexAutoMLProbe(),
     GceProbe.name: GceProbe(),
     GkeProbe.name: GkeProbe(),
     BigQueryProbe.name: BigQueryProbe(),

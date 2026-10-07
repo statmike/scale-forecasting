@@ -320,7 +320,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 
 | Module | Purpose |
 | :--- | :--- |
-| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, GKE, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets). |
+| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, Dataflow, Pipelines, GKE, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets). |
 | [`iam`](./main/modules/iam/main.tf) | Creates the two workload service accounts (`sf-runner` and `sf-compute`), custom least-privilege roles, and Google-managed service-agent bindings. |
 | [`network`](./main/modules/network/main.tf) | Provisions the VPC, regional subnet with Private Google Access, Cloud Router/NAT, internal firewall rules, Private Service Access peering, and PSC network attachment for Vertex Ray. |
 | [`storage`](./main/modules/storage/main.tf) | Creates the two GCS buckets (`<project>-warehouse` for Iceberg tables and model artifacts; `<project>-code` for staged configs, package zips, and packed-venv archives). |

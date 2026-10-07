@@ -96,13 +96,13 @@ series:
 ```mermaid
 flowchart LR
     subgraph F0["Fold 0 (Inner Fold)"]
-        T0["Train: [0 .. 1376)"] --> G0["Gap (0)"] --> V0["Validate: [1376 .. 1404)\ncutoff_date = ds[1375]"]
+        T0["Train: [0 .. 1376)"] --> G0["Gap (0)"] --> V0["Validate: [1376 .. 1404)<br/>cutoff_date = ds[1375]"]
     end
     subgraph F1["Fold 1 (Inner Fold)"]
-        T1["Train: [0 .. 1404)"] --> G1["Gap (0)"] --> V1["Validate: [1404 .. 1432)\ncutoff_date = ds[1403]"]
+        T1["Train: [0 .. 1404)"] --> G1["Gap (0)"] --> V1["Validate: [1404 .. 1432)<br/>cutoff_date = ds[1403]"]
     end
     subgraph F2["Fold 2 (Holdout Fold — Fits Nothing)"]
-        T2["Train: [0 .. 1432)"] --> G2["Gap (0)"] --> V2["Validate: [1432 .. 1460)\ncutoff_date = ds[1431]"]
+        T2["Train: [0 .. 1432)"] --> G2["Gap (0)"] --> V2["Validate: [1432 .. 1460)<br/>cutoff_date = ds[1431]"]
     end
     subgraph Ship["Final Shipped Forecast"]
         TS["Train: Full History [0 .. 1460)"] --> VS["Forecast: Next 28 Steps"]

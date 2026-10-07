@@ -12,14 +12,15 @@ for where the *results* go see [output_schemas.md](./output_schemas.md); for the
 
 ```mermaid
 flowchart LR
-    subgraph Source["BigQuery Source Table\n(source_series_iceberg or source_series_native)"]
-        Snap["Snapshot Pin\n(Header Time-Travel Instant)\n+ Column Projection + series_limit"]
+    subgraph Source["BigQuery Source Table<br/>(source_series_iceberg or source_series_native)"]
+        Snap["Snapshot Pin<br/>(Header Time-Travel Instant)<br/>+ Column Projection + series_limit"]
     end
-    Snap -->|"Storage Read API (Arrow)\nspark-bigquery + snapshotTimeMillis"| Spark["Spark Explode\n(spark_io.read_source_series)"]
-    Snap -->|"Storage Read API (Arrow)\ncreate_read_session + row_restriction"| RayDC["Ray driver_collect (default)\n(ray_io._read_driver_collect)"]
-    Snap -->|"Storage Read API (Arrow)\nray.data.read_bigquery"| RayData["Ray ray_data (opt-in)\n(ray_io._read_ray_data)"]
-    Snap -->|"Storage Read API (Arrow)\ncreate_read_session + contiguous shard row_restriction"| VertexGCE["Vertex CustomJob & GCE\n(vertex_engine._read_source_panel)"]
-    Snap -->|"BigQuery Query API\nFOR SYSTEM_TIME AS OF subquery"| BQ["BigQuery-Native SQL\n(bigquery_sql)"]
+    Snap -->|"Storage Read API (Arrow)<br/>spark-bigquery + snapshotTimeMillis"| Spark["Spark Explode<br/>(spark_io.read_source_series)"]
+    Snap -->|"Storage Read API (Arrow)<br/>create_read_session + row_restriction"| RayDC["Ray driver_collect (default)<br/>(ray_io._read_driver_collect)"]
+    Snap -->|"Storage Read API (Arrow)<br/>ray.data.read_bigquery"| RayData["Ray ray_data (opt-in)<br/>(ray_io._read_ray_data)"]
+    Snap -->|"Storage Read API (Arrow)<br/>create_read_session + contiguous shard row_restriction"| VertexGCE["Vertex CustomJob · GCE · GKE Indexed Job<br/>(vertex_engine._read_source_panel)"]
+    Snap -->|"Snapshot-Pinned BQ Staging Tables<br/>(CREATE OR REPLACE TABLE ... FOR SYSTEM_TIME AS OF)"| AutoML["Vertex AI AutoML & Tabular Workflows<br/>(automl_engine)"]
+    Snap -->|"BigQuery Query API<br/>FOR SYSTEM_TIME AS OF subquery"| BQ["BigQuery-Native SQL<br/>(bigquery_sql)"]
 ```
 
 ---
@@ -29,7 +30,7 @@ flowchart LR
 1. **Column projection.** A cell needs only the id, date, and target columns plus any configured
    `features.exog` / `static_covariates` / `future_covariates` / `past_covariates` (and `hierarchy.levels`), so every reader projects to exactly those columns — never `SELECT *`. Narrow rows
    matter because the Spark fan-out cross-joins each series once per model, so an unused column is
-   paid for on every cell (Ray, Vertex, and GCE shard by series instead, but still pay it on every row). (The projection is order-preserving and de-duplicated.)
+   paid for on every cell (Ray, Vertex, GCE, and GKE shard by series instead, but still pay it on every row). (The projection is order-preserving and de-duplicated.)
 2. **Deterministic subset.** With `data.series_limit` set, each reader keeps the *same* first N series
    — distinct ids, ordered, first N — so "10 vs 100 vs 100k series" is a clean apples-to-apples
    runtime comparison rather than a different sample each time. Unset = the whole panel. *Where* the
@@ -42,8 +43,7 @@ flowchart LR
 4. **Storage Read API, Arrow.** The Python runtimes read through the **BigQuery Storage Read API** in
    **Arrow** format — the columnar, zero-copy path into the executor-side pandas frames the cells
    consume. The Storage Read API does **not** consume query slots, so a wide fan-out doesn't compete
-   with the analyst queries on the project. (The BigQuery-native family is the exception — it never
-   leaves BigQuery; see below.)
+   with the analyst queries on the project. (The BigQuery-native and Vertex AI AutoML families are the exceptions — their training pipelines read directly from BigQuery tables; see below.)
 
 ---
 
@@ -57,7 +57,7 @@ on a connector default), applies the column projection with `.select(...)`, and 
 `series_limit` with a deterministic semi-join. The snapshot pin is the connector's
 `snapshotTimeMillis` time-travel option.
 
-### Ray — `driver_collect` (default)
+### Ray (Vertex AI Ray & Ray on GKE) — `driver_collect` (default)
 
 `_read_driver_collect` reads with the `BigQueryReadClient` (`create_read_session`) directly, in
 `DataFormat.ARROW`. The snapshot pin is the Storage Read API's native `table_modifiers.snapshot_time`
@@ -83,14 +83,18 @@ stays a pure table scan. For the same reason it takes no `row_restriction`, so `
 applied on the driver *after* the read rather than pushed into it — one more reason a subsetting run
 is cheaper on the default reader. Select it with `compute.ray_read_mode="ray_data"`.
 
-### Vertex AI `CustomJob` (`vertex`) & Compute Engine (`gce`)
+### Vertex AI `CustomJob` (`vertex`), Compute Engine (`gce`) & GKE Indexed Jobs (`gke`, `gke_mode="job"`)
 
-`vertex_engine._read_source_panel` reads directly through the `BigQueryReadClient` (`create_read_session` in `DataFormat.ARROW`) with the same snapshot pin (`table_modifiers.snapshot_time`), column projection, and multi-stream reader as Ray's `driver_collect` path — and adds **per-worker contiguous shard pushdown** when a local-model family (`statistical` or `ml`) runs across multiple worker VMs (`workers > 1`):
+`vertex_engine._read_source_panel` reads directly through the `BigQueryReadClient` (`create_read_session` in `DataFormat.ARROW`) with the same snapshot pin (`table_modifiers.snapshot_time`), column projection, and multi-stream reader as Ray's `driver_collect` path — and adds **per-worker contiguous shard pushdown** when a local-model family (`statistical` or `ml`) runs across multiple worker VMs or Kubernetes Indexed Job pods (`workers > 1`):
 
 1. An initial lightweight ID scan (`_read_ordered_ts_ids`) reads only `ts_id_col` at the pinned snapshot to resolve the sorted distinct series IDs (bounded to `series_limit`).
 2. `shard_series_for_worker(all_ts_ids, rank=rank, world_size=world_size)` assigns each worker rank a **contiguous sorted slice** (`[shard_min, shard_max]`) rather than modulo-interleaved IDs.
-3. Because the slice is contiguous in UTF-8 sort order, the worker pushes `(ts_id >= '<shard_min>' AND ts_id <= '<shard_max>')` directly into the BigQuery Storage Read API `row_restriction` — so a 4-worker job transfers only ~1/4 of the table to each worker VM instead of scanning the full table on every worker.
+3. Because the slice is contiguous in UTF-8 sort order, the worker pushes `(ts_id >= '<shard_min>' AND ts_id <= '<shard_max>')` directly into the BigQuery Storage Read API `row_restriction` — so a 4-worker job transfers only ~1/4 of the table to each worker VM or Pod instead of scanning the full table on every worker.
 4. When fleetwide HPO (`hpo.enabled=true` and `granularity="fleetwide"`) is active on a multi-worker job, `sample_series_ids` deterministically selects the `hpo.sample_n` tuning series from the global ID list and unions them into the `row_restriction` (`(...range...) OR ts_id IN (...)`) so every worker derives identical fleetwide HPO hyperparameters before fitting its own shard.
+
+### Vertex AI AutoML & Tabular Workflows (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`)
+
+The Vertex AI Tabular Workflow pipeline (`automl_mode="tabular_workflow"`) and `AutoMLForecastingTrainingJob` (`automl_mode="training_job"`) require a `bq://project.dataset.table` source URI containing both a `predefined_split_column` (`TRAIN` / `VALIDATE` / `TEST`) and a companion prediction input table covering the historical context window plus future horizon rows (`y = NULL` with populated future covariates). `automl_engine.py` materializes these short-lived staging tables in BigQuery using `FOR SYSTEM_TIME AS OF` snapshot-pinned queries filtered to the exact `series_limit` subset and projected covariate columns, passes their `bq://` URIs to the Vertex AI pipeline and `BatchPredictionJob`, and drops the staging tables in a `finally` block once predictions and explanations have been written to the registry.
 
 ### BigQuery-native (`arima_plus`, `timesfm`)
 
@@ -131,13 +135,13 @@ because the preflight could not reach BigQuery.
 ## Bounding read parallelism — `read_max_streams`
 
 `compute.read_max_streams` caps the number of Storage Read streams the source read requests, shared
-across the three engines that read through the Storage Read API:
+across the engines that read through the Storage Read API:
 
 | Reader | How the cap is applied |
 |--------|------------------------|
 | Spark connector | the connector's `maxParallelism` option |
-| Ray `driver_collect` | `create_read_session`'s `max_stream_count` |
-| Vertex `CustomJob` & GCE (`vertex_engine`) | `create_read_session`'s `max_stream_count` |
+| Ray `driver_collect` (Vertex Ray & Ray on GKE) | `create_read_session`'s `max_stream_count` |
+| Vertex `CustomJob`, GCE & GKE Indexed Jobs (`vertex_engine`) | `create_read_session`'s `max_stream_count` |
 
 `0` (the default) lets the **server** size the stream count from the table — the known-good default;
 leave it there unless you have a reason not to. Set a **positive** value to bound read parallelism —

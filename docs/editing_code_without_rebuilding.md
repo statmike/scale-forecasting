@@ -13,13 +13,13 @@ work with it.
 ```mermaid
 flowchart LR
     subgraph Frozen["1. Frozen Dependency Layer (Built Once per Lock Change)"]
-        Lock["pyproject.toml + uv.lock"] --> Img["Shared Runtime Container\n(/opt/venv) + Packed Venv Archive"]
+        Lock["pyproject.toml + uv.lock"] --> Img["Shared Runtime Container<br/>(/opt/venv) + Packed Venv Archive"]
     end
     subgraph Live["2. Live Code Layer (Shipped on Every Submit)"]
         Src["Local src/scale_forecasting/"] --> Del["code_delivery.py"]
         Del -->|"python_file_uris (.zip)"| DP["Dataproc Serverless / Cluster"]
-        Del -->|"runtime_env.working_dir"| Ray["Ray on Vertex"]
-        Del -->|"--code-uri / SF_CODE_ZIP_URI (.zip)"| Vtx["Vertex AI CustomJob & GCE Single-VM"]
+        Del -->|"runtime_env.working_dir"| Ray["Ray on Vertex & Ray on GKE"]
+        Del -->|"--code-uri / SF_CODE_ZIP_URI (.zip)"| Vtx["Vertex CustomJob · GCE Single-VM<br/>· GKE Indexed Job · Vertex AutoML"]
     end
     Img --> DP & Ray & Vtx
 ```
@@ -37,8 +37,10 @@ Your code is delivered **at submit time**, freshly, on every run:
 | Runtime | How your `src/` reaches the workers |
 |---------|-------------------------------------|
 | **Dataproc (Spark)** | `submit_batch` zips `src/` and uploads it to the code bucket, then passes it on the batch's `python_file_uris`. A tiny `gs://` shim is the `__main__`; it imports the in-package logic from the uploaded zip. |
-| **Ray on Vertex** | `code_delivery.build_runtime_env` ships `src/` as the job's `runtime_env.working_dir`, so every Ray worker imports the code you just submitted. |
-| **Vertex AI CustomJob** | `vertex_submit.submit_vertex_job` zips `src/` and uploads both `scale_forecasting.zip` and `vertex_entry.py` to the code bucket. Each worker container runs `/opt/venv/bin/python`, downloads `vertex_entry.py` and `--code-uri` via `google.cloud.storage`, prepends the zip to `sys.path`, and imports `scale_forecasting` live. |
+| **Ray on Vertex & Ray on GKE** | `code_delivery.build_runtime_env` ships `src/` as the job's `runtime_env.working_dir`, so every Ray worker imports the code you just submitted. |
+| **Vertex AI CustomJob & GCE Single-VM** | `vertex_submit.submit_vertex_job` / `submit_gce_job` zips `src/` and uploads both `scale_forecasting.zip` and `vertex_entry.py` to the code bucket. Each worker container runs `/opt/venv/bin/python`, downloads `vertex_entry.py` and `--code-uri` via `google.cloud.storage`, prepends the zip to `sys.path`, and imports `scale_forecasting` live. |
+| **GKE Indexed Job (`gke_mode="job"`)** | `gke_submit.submit_gke_job` stages `scale_forecasting.zip` and `vertex_entry.py` to the code bucket; each indexed pod downloads them on startup and imports `scale_forecasting` live without rebuilding the container image. |
+| **Vertex AI AutoML (`vertex_automl`)** | `automl_submit.submit_automl_job` executes the local/container `automl_engine` orchestrator directly from `src/` (or via `--code-uri` when dispatched in a container) to compile and submit the managed Vertex AI Tabular Workflow or AutoML Training Job. |
 | **The seed job** | Same pattern — Terraform's `seed` module zips `src/` and ships it on `python_file_uris`. |
 
 In every case the image is the *environment* and `src/` is *cargo*. The two are decoupled on

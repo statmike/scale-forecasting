@@ -1,10 +1,11 @@
 # Resource Sizing & Hardware Translation (`src/scale_forecasting/resources/`)
 
-This subpackage translates **what a model family needs per cell** (from [`profiling/`](../profiling/README.md)) and **what the cloud region allows** (from [`quota.py`](../quota.py) and [`RunConfig.compute`](../config.py)) into concrete executor, worker, and task resource requests across all five Python compute surfaces:
+This subpackage translates **what a model family needs per cell** (from [`profiling/`](../profiling/README.md)) and **what the cloud region allows** (from [`quota.py`](../quota.py) and [`RunConfig.compute`](../config.py)) into concrete executor, worker, and task resource requests across all six Python and AutoML compute surfaces:
 1. **Dataproc Serverless** (`serverless.py`)
 2. **Dataproc GCE Clusters** (`cluster.py`)
 3. **Ray on Vertex AI & GKE** (`fleet.py` + `slot.py`)
 4. **Vertex AI `CustomJob`, Compute Engine Single-VM & GKE Indexed Jobs** (`catalog.py` + `slot.py` + [`engines/vertex_engine.py`](../engines/vertex_engine.py))
+5. **Vertex AI AutoML & Tabular Workflows** (`catalog.py` + [`engines/automl_engine.py`](../engines/automl_engine.py))
 
 Every function in `resources/` is **pure** (zero network or cloud I/O), making the entire sizing pipeline deterministic and unit-tested offline in [`tests/unit/test_resources.py`](../../../tests/unit/test_resources.py).
 

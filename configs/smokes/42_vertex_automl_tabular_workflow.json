@@ -1,0 +1,77 @@
+{
+  "run_name": "smoke_42_vertex_automl_tabular_workflow",
+  "python_runtime": "vertex_automl",
+  "data": {
+    "source_table": "source_series_covariates_iceberg",
+    "horizon": 14,
+    "series_limit": 20
+  },
+  "models": [
+    "xgboost",
+    "vertex_tide",
+    "arima_plus"
+  ],
+  "model_params": {
+    "vertex_tide": {
+      "training_mode": "global",
+      "context_window": 28,
+      "train_budget_milli_node_hours": 1000,
+      "max_num_trials": 2,
+      "max_parallel_trial_count": 2,
+      "trainer_machine_type": "n1-standard-8",
+      "trainer_replica_count": 1,
+      "enable_explainability": true
+    }
+  },
+  "backtest": {
+    "enabled": true,
+    "horizon": 14,
+    "n_folds": 1,
+    "step": 14,
+    "decision_metric": "rmsse"
+  },
+  "features": {
+    "static_covariates": [
+      "region",
+      "category"
+    ],
+    "future_covariates": [
+      "is_holiday",
+      "promo_flag",
+      "price_index"
+    ],
+    "past_covariates": [
+      "temperature"
+    ],
+    "on_unsupported_covariates": "fallback"
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": [
+      "mean",
+      "inverse_error",
+      "nnls"
+    ]
+  },
+  "compute": {
+    "use_gpu": false,
+    "automl_mode": "tabular_workflow",
+    "machine_type": "n1-standard-8",
+    "max_workers": 2,
+    "families": {
+      "ml": {
+        "runtime": "vertex",
+        "hardware": "cpu",
+        "machine_type": "n2-standard-8",
+        "workers": 1
+      },
+      "automl": {
+        "runtime": "vertex_automl",
+        "automl_mode": "tabular_workflow",
+        "hardware": "cpu",
+        "machine_type": "n1-standard-8",
+        "max_workers": 2
+      }
+    }
+  }
+}

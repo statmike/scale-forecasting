@@ -21,14 +21,14 @@ flowchart TB
     subgraph submit["Runtime Submission & Lifecycle"]
         sub["Job Launchers<br/>job_launch.py · submitters.py · staging.py<br/>code_delivery.py · shared_clusters.py"]
         spark_sub["Spark Submitters<br/>submit.py · cluster_submit.py<br/>dataproc_cluster.py · cluster_deps.py"]
-        ray_sub["Ray, Vertex, GCE & GKE Submitters<br/>ray_submit.py · ray_cluster.py · ray_jobs.py<br/>vertex_submit.py · gce_submit.py · gke_submit.py"]
+        ray_sub["Ray, Vertex, GCE, GKE & AutoML Submitters<br/>ray_submit.py · ray_cluster.py · ray_jobs.py<br/>vertex_submit.py · gce_submit.py · gke_submit.py · automl_submit.py"]
         probes["Runtime Probes & Repair<br/>probes/ · retry_run.py · retry_policy.py"]
     end
 
     subgraph core["Per-Series & Panel Forecasting Core"]
-        eng["Execution Engines<br/>engines/ (Spark · Ray · Vertex/GCE/GKE · BigQuery)"]
+        eng["Execution Engines<br/>engines/ (Spark · Ray · Vertex/GCE/GKE · Vertex AutoML · BigQuery)"]
         wf["Feature, Backtest, Reconciliation & Ensemble Core<br/>features.py · backtest.py · calibration.py · reconciliation.py<br/>hpo.py · ensembler.py · ensemble_run.py"]
-        mod["Models & Metrics<br/>models/ (30 models) · metrics/ (21 metrics)"]
+        mod["Models & Metrics<br/>models/ (34 models) · metrics/ (21 metrics)"]
     end
 
     reg[("BigQuery Run Registry<br/>registry/ (DDL · Storage Write API · Views · Ops)")]
@@ -49,12 +49,12 @@ Each subpackage has its own `README.md` with architecture diagrams and module gu
 
 | Subpackage | Purpose |
 | :--- | :--- |
-| **[`models/`](./models/README.md)** | The 30 forecasting models (`statistical`, `ml`, `deep_learning`, `native`), the `BaseModel` contract (local, global, and hybrid scopes), recursive lag design matrix (`_lag_forecaster.py`), Nixtla `neuralforecast` adapter (`_neuralforecast_base.py`), and model registry. |
+| **[`models/`](./models/README.md)** | The 34 forecasting models (`statistical`, `ml`, `deep_learning`, `automl`, `native`), the `BaseModel` contract (local, global, and hybrid scopes + two-tier explainability), recursive lag design matrix (`_lag_forecaster.py`), Nixtla `neuralforecast` adapter (`_neuralforecast_base.py`), Vertex AI AutoML adapter (`_vertex_automl_base.py`), and model registry. |
 | **[`metrics/`](./metrics/README.md)** | The 21 evaluation metrics (16 point metrics + 5 prediction-interval metrics), `BaseMetric` contract, and `METRIC_NAMES` schema driver. |
-| **[`engines/`](./engines/README.md)** | Distributed and single-VM fan-out engines for Dataproc Spark (`spark_explode.py`, `spark_io.py`), Ray on Vertex AI & GKE (`ray_engine.py`, `ray_io.py`), Vertex AI `CustomJob`, Compute Engine & GKE Indexed Jobs (`vertex_engine.py`), and BigQuery SQL (`bigquery_engine.py`, `bigquery_sql.py`). |
+| **[`engines/`](./engines/README.md)** | Distributed, single-VM, and managed AutoML engines for Dataproc Spark (`spark_explode.py`, `spark_io.py`), Ray on Vertex AI & GKE (`ray_engine.py`, `ray_io.py`), Vertex AI `CustomJob`, Compute Engine & GKE Indexed Jobs (`vertex_engine.py`), Vertex AI AutoML Tabular Workflows (`automl_engine.py`), and BigQuery SQL (`bigquery_engine.py`, `bigquery_sql.py`). |
 | **[`registry/`](./registry/README.md)** | BigQuery table DDL (`ddl.py`), deterministic `run_id` hashing (`ids.py`), Storage Write API streaming (`write_api.py`), SQL views (`views.py`), and operator maintenance verbs (`ops.py`). |
 | **[`probes/`](./probes/README.md)** | Live runtime-to-registry reconciliation (`reconcile.py`), platform status readers (`runtimes.py`), safe job cancellation (`cancel.py`), and abandoned-row settling (`settle.py`). |
-| **[`resources/`](./resources/README.md)** | Translates measured per-cell resource profiles and regional quotas into concrete executor/worker sizing for Dataproc Serverless, Dataproc Clusters, Ray pools, Vertex `CustomJob`, GCE, and GKE. |
+| **[`resources/`](./resources/README.md)** | Translates measured per-cell resource profiles and regional quotas into concrete executor/worker sizing for Dataproc Serverless, Dataproc Clusters, Ray pools, Vertex `CustomJob`, GCE, GKE, and Vertex AI AutoML. |
 | **[`profiling/`](./profiling/README.md)** | Empirical per-cell CPU, memory, and wall-time measurement (`measure.py`), representative series sampling (`sampling.py`), baseline fallbacks (`baseline.py`), and cost-weighted bucketing (`cost.py`). |
 | **[`data_gen/`](./data_gen/README.md)** | Synthetic multi-archetype time-series panel generator (`generator.py`) and distributed Spark seeding job (`seed_spark.py`). |
 
@@ -63,9 +63,9 @@ Each subpackage has its own `README.md` with architecture diagrams and module gu
 ## Top-Level Modules by Role
 
 ### 1. User & Orchestration Entrypoints
-- **[`sdk.py`](./sdk.py):** The Python SDK (`Forecaster` for planning, running, monitoring, probing, cancelling, settling, and retrying runs; `Registry` for dataset maintenance).
+- **[`sdk.py`](./sdk.py):** The Python SDK (`Forecaster` for planning, running, monitoring, probing, cancelling, settling, retrying runs, and inspecting feature attributions; `Registry` for dataset maintenance).
 - **[`main.py`](./main.py):** Primary CLI and orchestration entrypoint (`python -m scale_forecasting.main --config ...`).
-- **[`review.py`](./review.py):** Live run progress monitoring (`monitor_run`) and post-run evaluation (`review_run`), plus matplotlib visualization helpers.
+- **[`review.py`](./review.py):** Live run progress monitoring (`monitor_run`), post-run evaluation (`review_run`), two-tier feature attribution analytics (`build_attributions_frame`, `plot_attributions`), and matplotlib visualization helpers.
 - **[`playground.py`](./playground.py):** Offline single-series sandbox (`python -m scale_forecasting.playground`) for testing models and backtests without cloud infrastructure.
 - **[`airflow_emit.py`](./airflow_emit.py) & [`airflow_tasks.py`](./airflow_tasks.py):** Renders any `RunConfig` into a standalone Cloud Composer / Airflow Python DAG (`dag_<run_id>.py`) and provides the task callables it executes.
 
@@ -94,7 +94,7 @@ Each subpackage has its own `README.md` with architecture diagrams and module gu
 - **[`submit.py`](./submit.py), [`batch_infra.py`](./batch_infra.py) & [`batch_telemetry.py`](./batch_telemetry.py):** Dataproc Serverless batch submission and telemetry extraction.
 - **[`dataproc_cluster.py`](./dataproc_cluster.py), [`cluster_submit.py`](./cluster_submit.py), [`cluster_deps.py`](./cluster_deps.py) & [`cluster_telemetry.py`](./cluster_telemetry.py):** Ephemeral and named Dataproc GCE cluster creation, packed-venv init action wiring, PySpark job submission, and teardown.
 - **[`ray_cluster.py`](./ray_cluster.py), [`ray_submit.py`](./ray_submit.py), [`ray_jobs.py`](./ray_jobs.py), [`ray_infra.py`](./ray_infra.py), [`ray_telemetry.py`](./ray_telemetry.py) & [`ray_reaper.py`](./ray_reaper.py):** Ray on Vertex AI cluster lifecycle, autoscaling pool configuration, bearer-token-resilient job polling, and leaked-cluster reaping (`reap-clusters` / `sweep_on_launch`).
-- **[`vertex_submit.py`](./vertex_submit.py), [`gce_submit.py`](./gce_submit.py) & [`gke_submit.py`](./gke_submit.py):** Serverless Vertex AI `CustomJob` (`runtime="vertex"`), direct Compute Engine Single-VM (`runtime="gce"`), and Google Kubernetes Engine (`runtime="gke"`, `gke_mode="job" | "ray"`, `ray_mode="gke"`) submission, worker-pool sizing, regional/zonal capacity fallback, and zero-orphan lifecycle management.
+- **[`vertex_submit.py`](./vertex_submit.py), [`gce_submit.py`](./gce_submit.py), [`gke_submit.py`](./gke_submit.py) & [`automl_submit.py`](./automl_submit.py):** Serverless Vertex AI `CustomJob` (`runtime="vertex"`), direct Compute Engine Single-VM (`runtime="gce"`), Google Kubernetes Engine (`runtime="gke"`, `gke_mode="job" | "ray"`, `ray_mode="gke"`), and Vertex AI AutoML Tabular Workflow (`runtime="vertex_automl"`) submission, worker-pool sizing, regional/zonal capacity fallback, and zero-orphan lifecycle management.
 - **[`shared_clusters.py`](./shared_clusters.py):** Reference-counted cluster sharing when multiple model families co-locate on one ephemeral Dataproc or Ray cluster.
 - **[`retry_run.py`](./retry_run.py) & [`retry_policy.py`](./retry_policy.py):** Cell-level and family-level surgical repair (`--retry` / `Forecaster.retry()`), targeting only failed or missing `(series_id, model)` pairs.
 - **[`spark_entry.py`](./spark_entry.py), [`ray_entry.py`](./ray_entry.py), [`vertex_entry.py`](./vertex_entry.py), [`_entry.py`](./_entry.py) & [`_infra_args.py`](./_infra_args.py):** Remote driver/worker entrypoints executed inside Dataproc, Ray, Vertex AI `CustomJob`, GCE, and GKE jobs.

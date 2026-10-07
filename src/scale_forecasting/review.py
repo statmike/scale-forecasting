@@ -81,6 +81,7 @@ __all__ = [
     "build_cohorts_frame",
     "build_calibration_frames",
     "build_ensemble_weights_frame",
+    "build_attributions_frame",
     "explain_forecast_frame",
     "plot_progress",
     "plot_leaderboard",
@@ -89,13 +90,21 @@ __all__ = [
     "plot_hierarchy_frame",
     "plot_calibration",
     "plot_ensemble_weights",
+    "plot_attributions",
     "plot_forecast_explanation",
 ]
 
 # Display order for families in a progress/review readout: the base families in DAG order, then the
 # downstream ensemble node last. (Mirrors dag._FAMILY_ORDER + the ensemble node it appends.) Repair
 # jobs are listed after all of these, in the same order as the families they repair.
-_FAMILY_ORDER: tuple[str, ...] = ("statistical", "ml", "deep_learning", "native", "ensemble")
+_FAMILY_ORDER: tuple[str, ...] = (
+    "statistical",
+    "ml",
+    "deep_learning",
+    "automl",
+    "native",
+    "ensemble",
+)
 
 
 def _family_rank(family: str) -> int:
@@ -2393,3 +2402,197 @@ def plot_forecast_explanation(
     ax_err.set_xlabel("date")
     ax_err.legend(loc="best", fontsize=8, ncol=2)
     return axes
+
+
+def build_attributions_frame(
+    rows: list[dict[str, Any]],
+    *,
+    level: str = "global",
+) -> pd.DataFrame:
+    """Unpack Tier 1 (``level="global"``) or Tier 2 (``level="local"``) attribution rows into a
+    tidy ``DataFrame`` (pure, offline).
+
+    - ``level="global"`` unpacks ``fit_diagnostics["feature_attributions"]`` into columns
+      ``["ts_id", "model_type", "compute_engine", "feature", "importance"]`` sorted by
+      ``ts_id, model_type, importance DESC``.
+    - ``level="local"`` unpacks per-horizon-step ``explanations`` JSON into columns
+      ``["ts_id", "model_type", "compute_engine", "forecast_date", "yhat", "baseline_score",
+      "feature", "attribution"]`` sorted by ``ts_id, model_type, forecast_date``.
+    """
+    import json
+
+    import pandas as pd
+
+    if level == "local":
+        cols = [
+            "ts_id",
+            "model_type",
+            "compute_engine",
+            "forecast_date",
+            "yhat",
+            "baseline_score",
+            "feature",
+            "attribution",
+        ]
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        records: list[dict[str, Any]] = []
+        for r in rows:
+            raw_exp = r.get("explanations")
+            if isinstance(raw_exp, str) and raw_exp:
+                try:
+                    parsed = json.loads(raw_exp)
+                except ValueError:
+                    continue
+            elif isinstance(raw_exp, dict):
+                parsed = raw_exp
+            else:
+                continue
+            attrs = parsed.get("attributions") if isinstance(parsed, dict) else None
+            if not isinstance(attrs, dict) or not attrs:
+                continue
+            baseline = parsed.get("baseline_score", 0.0)
+            baseline_val = (
+                float(baseline)
+                if isinstance(baseline, (int, float)) and math.isfinite(float(baseline))
+                else 0.0
+            )
+            fdate = pd.to_datetime(r.get("forecast_date")).tz_localize(None)
+            yhat_raw = r.get("yhat")
+            yhat_val = (
+                float(yhat_raw)
+                if isinstance(yhat_raw, (int, float)) and math.isfinite(float(yhat_raw))
+                else float("nan")
+            )
+            for feat, val in sorted(
+                attrs.items(),
+                key=lambda kv: -abs(float(kv[1])) if isinstance(kv[1], (int, float)) else 0.0,
+            ):
+                if isinstance(val, (int, float)) and math.isfinite(float(val)):
+                    records.append(
+                        {
+                            "ts_id": str(r.get("ts_id") or ""),
+                            "model_type": str(r.get("model_type") or ""),
+                            "compute_engine": r.get("compute_engine"),
+                            "forecast_date": fdate,
+                            "yhat": yhat_val,
+                            "baseline_score": baseline_val,
+                            "feature": str(feat),
+                            "attribution": float(val),
+                        }
+                    )
+        if not records:
+            return pd.DataFrame(columns=cols)
+        return pd.DataFrame.from_records(records, columns=cols)
+
+    cols = ["ts_id", "model_type", "compute_engine", "feature", "importance"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    records = []
+    for r in rows:
+        raw_diag = r.get("fit_diagnostics")
+        if isinstance(raw_diag, str) and raw_diag:
+            try:
+                parsed = json.loads(raw_diag)
+            except ValueError:
+                continue
+        elif isinstance(raw_diag, dict):
+            parsed = raw_diag
+        else:
+            continue
+        f_attrs = parsed.get("feature_attributions") if isinstance(parsed, dict) else None
+        if not isinstance(f_attrs, dict) or not f_attrs:
+            continue
+        for feat, val in sorted(
+            f_attrs.items(),
+            key=lambda kv: -float(kv[1]) if isinstance(kv[1], (int, float)) else 0.0,
+        ):
+            if isinstance(val, (int, float)) and math.isfinite(float(val)):
+                records.append(
+                    {
+                        "ts_id": str(r.get("ts_id") or ""),
+                        "model_type": str(r.get("model_type") or ""),
+                        "compute_engine": r.get("compute_engine"),
+                        "feature": str(feat),
+                        "importance": float(val),
+                    }
+                )
+    if not records:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame.from_records(records, columns=cols)
+
+
+def plot_attributions(
+    attributions_df: pd.DataFrame,
+    *,
+    ts_id: str | None = None,
+    model_type: str | None = None,
+    top_k: int = 12,
+    ax: Any = None,
+    title: str | None = None,
+) -> Any:
+    """Plot Tier 1 global driver importance or Tier 2 per-horizon-step local feature attributions
+    (pure, offline).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(9.5, 4.5))
+    if attributions_df.empty:
+        ax.set_title(f"{title or 'Feature Attributions'} (no attribution rows)")
+        return ax
+
+    df = attributions_df.copy()
+    if ts_id is not None and "ts_id" in df.columns:
+        df = df[df["ts_id"].astype(str) == str(ts_id)]
+    if model_type is not None and "model_type" in df.columns:
+        df = df[df["model_type"].astype(str) == str(model_type)]
+    if df.empty:
+        ax.set_title(f"{title or 'Feature Attributions'} (no matching rows)")
+        return ax
+
+    is_local = "attribution" in df.columns and "forecast_date" in df.columns
+    if is_local:
+        # Aggregate mean |attribution| to pick top_k features, then plot signed mean attribution
+        # or horizon trajectory.
+        top_feats = (
+            df.assign(abs_attr=df["attribution"].abs())
+            .groupby("feature", as_index=False)["abs_attr"]
+            .mean()
+            .sort_values("abs_attr", ascending=False)
+            .head(max(1, top_k))["feature"]
+            .tolist()
+        )
+        sub = df[df["feature"].isin(top_feats)]
+        agg = (
+            sub.groupby("feature", as_index=False)["attribution"]
+            .mean()
+            .sort_values("attribution", ascending=True)
+        )
+        ys = np.arange(len(agg))
+        vals = agg["attribution"].to_numpy(dtype=float)
+        colors = ["#0072B2" if v >= 0 else "#D55E00" for v in vals]
+        ax.barh(ys, vals, color=colors, height=0.6)
+        ax.axvline(0.0, color="#666666", linestyle=":", linewidth=1.0)
+        ax.set_yticks(list(ys))
+        ax.set_yticklabels(agg["feature"].tolist())
+        ax.set_xlabel("mean signed local attribution across horizon")
+        ax.set_title(title or "Tier 2 Local Feature Attributions (Horizon Mean)")
+        return ax
+
+    agg = (
+        df.groupby("feature", as_index=False)["importance"]
+        .mean()
+        .sort_values("importance", ascending=False)
+        .head(max(1, top_k))
+        .iloc[::-1]
+    )
+    ys = np.arange(len(agg))
+    vals = agg["importance"].to_numpy(dtype=float)
+    ax.barh(ys, vals, color="#0072B2", height=0.6)
+    ax.set_yticks(list(ys))
+    ax.set_yticklabels(agg["feature"].tolist())
+    ax.set_xlabel("normalized driver importance")
+    ax.set_title(title or "Tier 1 Global Feature Attributions")
+    return ax

@@ -20,12 +20,12 @@ so that's fine — the patch pin is about reproducibility where we build the env
 
 ```mermaid
 flowchart TD
-    Pin[".python-version (3.11.15)\npyproject.toml (>=3.11,<3.12)"]
-    Pin --> Kernel["Local uv Kernel &\nColab Enterprise sf-main (py311)"]
-    Pin --> Container["Custom Container (/opt/venv)\n& Packed Venv Archive (3.11.15)"]
-    Kernel <-->|"1. applyInPandas Pickle Parity"| Connect["Dataproc Spark Connect 2.3\n(Python 3.11 Workers)"]
-    Kernel <-->|"2. JobSubmissionClient REST API\n(Client Ray >=2.52 -> Cluster 2.47.1 + py311)"| VertexRay["Vertex AI Ray Cluster\n(Python 3.11 / Ray 2.47.1)"]
-    Container <-->|"3. Driver ↔ Executor Parity"| Batch["Dataproc Serverless / Cluster\n& Vertex CustomJob & GCE Single-VM"]
+    Pin[".python-version (3.11.15)<br/>pyproject.toml (>=3.11,<3.12)"]
+    Pin --> Kernel["Local uv Kernel &<br/>Colab Enterprise sf-main (py311)"]
+    Pin --> Container["Custom Container (/opt/venv)<br/>& Packed Venv Archive (3.11.15)"]
+    Kernel <-->|"1. applyInPandas Pickle Parity"| Connect["Dataproc Spark Connect 2.3<br/>(Python 3.11 Workers)"]
+    Kernel <-->|"2. JobSubmissionClient REST API<br/>(Client Ray >=2.52 -> Cluster 2.47.1 + py311)"| VertexRay["Vertex AI Ray Cluster<br/>(Python 3.11 / Ray 2.47.1)"]
+    Container <-->|"3. Driver ↔ Executor / Pod Parity"| Batch["Dataproc · Vertex CustomJob · GCE Single-VM<br/>& GKE (Indexed Job & Ray on GKE)"]
 ```
 
 ## The matrix
@@ -33,11 +33,13 @@ flowchart TD
 | Surface | Where it runs | Runtime version | Base runtime Python | **Effective Python** | Spark / Ray | How Python is set |
 |---------|---------------|-----------------|---------------------|----------------------|-------------|-------------------|
 | **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11.15** | Ray >=2.52 (client) | `.python-version` (3.11.15) + `pyproject.toml` `requires-python = ">=3.11,<3.12"`; Colab template PATCHed to `py311` |
-| **Custom container** | attached to batch + Spark Connect | — | — | **3.11.15** | Spark 3.5.x (from base) | `docker/Dockerfile` — `uv` installs 3.11.15 (from `.python-version`) into `/opt/venv` on `debian:12-slim` |
+| **Custom container** | attached to batch, Spark Connect, Vertex, GCE & GKE | — | — | **3.11.15** | Spark 3.5.x / Ray 2.59.0 | `docker/Dockerfile` — `uv` installs 3.11.15 (from `.python-version`) into `/opt/venv` on `debian:12-slim` |
 | **Dataproc batch** (`explode`) | Serverless | **2.2** (default) | 3.12 | **3.11** ← *container wins* | Spark 3.5.3 | container image attached on **every** submit (`submit.py`), overriding base |
-| **Spark Connect** (nb01, interactive) | Serverless session | **2.3** | 3.11 | **3.11** | Spark 3.5.3 | runtime 2.3 base is already 3.11 **and** container attached |
-| **Ray on Vertex** (nb04) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 (cluster) | `ray_infra.py` pins `python_version="3.11"`, `ray_version="2.47"`; client uses `ray>=2.52` over REST Jobs API |
-| **BigQuery-native** (nb02: ARIMA_PLUS, TimesFM) | BigQuery engine | — | — | n/a (SQL) | — | no client Python on the compute path |
+| **Vertex CustomJob · GCE Single-VM · GKE (`job` & `ray`)** | Vertex AI, GCE COS, GKE Autopilot/Standard | — | — | **3.11.15** | Ray 2.59.0 (when `gke_mode="ray"`) | runs `/opt/venv/bin/python` directly inside the shared runtime container image |
+| **Spark Connect** (nb03, interactive) | Serverless session | **2.3** | 3.11 | **3.11** | Spark 3.5.3 | runtime 2.3 base is already 3.11 **and** container attached |
+| **Ray on Vertex** (`ray_mode="vertex"`) | Vertex Ray cluster | Ray **2.47** | 3.11 | **3.11** | Ray 2.47.1 (cluster) | `ray_infra.py` pins `python_version="3.11"`, `ray_version="2.47"`; client uses `ray>=2.52` over REST Jobs API |
+| **Vertex AI AutoML** (`vertex_automl`) | Vertex AI Pipelines & Training | Managed | Managed | **3.11.15** (launcher) / Managed (pipeline) | — | launcher runs in `3.11.15`; remote AutoML stages execute inside Google-managed Kubeflow / AutoML containers |
+| **BigQuery-native** (`arima_plus`, `timesfm`) | BigQuery engine | — | — | n/a (SQL) | — | no client Python on the compute path |
 
 > **"Effective Python" is what your code actually executes on.** For batch it's the *container's*
 > 3.11, not the base runtime's 3.12 — the attached image replaces the runtime's interpreter for both

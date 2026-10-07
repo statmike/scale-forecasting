@@ -10,15 +10,16 @@ over the BigQuery **Storage Write API**. For the *tables* themselves (every colu
 ```mermaid
 flowchart LR
     subgraph Writers["Engine Workers & Drivers"]
-        W1["Spark Executor\n(make_group_runner)"]
-        W2["Ray Worker Task\n(make_chunk_runner)"]
-        W5["Vertex / GCE Worker\n(vertex_engine)"]
-        W3["BigQuery-Native Driver\n(bigquery_engine)"]
-        W4["Ensembler\n(ensemble_run)"]
+        W1["Spark Executor<br/>(make_group_runner)"]
+        W2["Ray Worker Task<br/>(make_chunk_runner)"]
+        W5["Vertex / GCE / GKE Worker<br/>(vertex_engine)"]
+        W6["Vertex AutoML Driver<br/>(automl_engine)"]
+        W3["BigQuery-Native Driver<br/>(bigquery_engine)"]
+        W4["Ensembler<br/>(ensemble_run)"]
     end
-    W1 & W2 & W5 & W3 & W4 -->|"Batch of CellResult"| Cells["registry.cells.write_cells\nProto-Encoded Default Stream"]
-    Cells -->|"Storage Write API\n(Append-Only + Backoff)"| Tables["BigQuery Registry Tables\nforecast_metadata · forecast_predictions · backtest_oof"]
-    Tables -->|"QUALIFY ROW_NUMBER() = 1\n(Dedupe-on-Read)"| Views["5 Analyst Views\nv_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage · v_run_summary · v_run_jobs"]
+    W1 & W2 & W5 & W6 & W3 & W4 -->|"Batch of CellResult"| Cells["registry.cells.write_cells<br/>Proto-Encoded Default Stream"]
+    Cells -->|"Storage Write API<br/>(Append-Only + Backoff)"| Tables["BigQuery Registry Tables<br/>forecast_metadata · forecast_predictions · backtest_oof"]
+    Tables -->|"QUALIFY ROW_NUMBER() = 1<br/>(Dedupe-on-Read)"| Views["5 Analyst Views<br/>v_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage · v_run_summary · v_run_jobs"]
 ```
 
 ---
@@ -31,7 +32,7 @@ system has exactly **one** result-write path, and it does not care which format 
 There is **no** separate Iceberg-output writer to build or maintain, now or later.
 
 (As it happens, the five run-collection tables are themselves always **native** BigQuery — a reseed is
-a clean truncate, and `raw_config`/`quantiles`/`best_params` are the real `JSON` type; see
+a clean truncate, and `raw_config`/`quantiles`/`best_params`/`explanations` are the real `JSON` type; see
 [output_schemas.md](./output_schemas.md). The point stands regardless: were a destination Iceberg, the
 same Storage Write API path would write it unchanged.)
 
@@ -39,7 +40,7 @@ same Storage Write API path would write it unchanged.)
 
 ## How results are written
 
-Every engine — Spark, Ray, Vertex `CustomJob`, GCE Single-VM, and the BigQuery-native family — funnels its results through the **same**
+Every engine — Spark, Ray, Vertex `CustomJob`, GCE Single-VM, GKE, Vertex AI AutoML (`vertex_automl`), and the BigQuery-native family — funnels its results through the **same**
 writer, `registry.cells.write_cells`:
 
 - **Workers return data, not RPCs.** A cell returns a `CellResult`; the engine hands a batch of them

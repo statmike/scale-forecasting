@@ -23,7 +23,8 @@ locals {
     "bigquery.googleapis.com",           # registry + native models + Iceberg tables
     "bigqueryconnection.googleapis.com", # BigLake / Cloud Resource connection for Iceberg
     "dataproc.googleapis.com",           # Dataproc Serverless (Spark engines + seed job)
-    "aiplatform.googleapis.com",         # Vertex AI (Ray on Vertex + CustomJob)
+    "aiplatform.googleapis.com",         # Vertex AI (Ray on Vertex + CustomJob + Tabular Workflows)
+    "dataflow.googleapis.com",           # Dataflow (Vertex AI Tabular Workflow Feature Transform Engine)
     "container.googleapis.com",          # Google Kubernetes Engine (GKE Indexed Jobs + Ray on GKE)
     # The Ray interactive dashboard / job-submission handshake is served through the managed
     # Inverting-Proxy fabric (*.aiplatform-training.googleusercontent.com), which is built on the

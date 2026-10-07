@@ -20,8 +20,8 @@ erDiagram
     run_jobs {
         STRING run_id FK
         STRING job_id PK
-        STRING family "statistical | ml | deep_learning | native | ensemble"
-        STRING runtime "spark | ray | vertex | gce | bigquery"
+        STRING family "statistical | ml | deep_learning | automl | native | ensemble"
+        STRING runtime "spark | ray | vertex | gce | gke | vertex_automl | bigquery"
         STRING hardware "cpu | gpu"
         STRING status "EMITTED | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED"
         JSON job_telemetry "Platform handle, cluster, cell tallies"
@@ -33,7 +33,8 @@ erDiagram
         STRING status "ok | error"
         FLOAT64 wape "Plus all 20 other panel metrics"
         JSON best_params "Fitted/tuned parameters & calibration"
-        STRUCT model_artifact "GCS object_ref lineage"
+        JSON fit_diagnostics "Two-tier feature_attributions & diagnostics"
+        STRING model_artifact "GCS object_ref / Stage-1 tuning artifact URI"
     }
     forecast_predictions {
         STRING run_id FK
@@ -43,6 +44,7 @@ erDiagram
         FLOAT64 yhat
         FLOAT64 yhat_lower
         FLOAT64 yhat_upper
+        JSON explanations "Per-horizon-step baseline & feature attributions"
     }
     backtest_oof {
         STRING run_id FK
@@ -60,7 +62,7 @@ erDiagram
 ## Modules in This Subpackage
 
 ### 1. Schema, Views & Identity
-- **[`ddl.py`](./ddl.py):** Pure SQL DDL generator for the four source tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, `source_series_covariates_native`) and five registry tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), plus idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations derived from `METRIC_NAMES`.
+- **[`ddl.py`](./ddl.py):** Pure SQL DDL generator for the four source tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, `source_series_covariates_native`) and five registry tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), plus idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations derived from `METRIC_NAMES` and `explanations JSON`.
 - **[`views.py`](./views.py):** Pure SQL definitions for the five analyst views created over the registry:
   - `v_run_summary`: One row per run joining `run_registry` with cell completion counts and best model accuracy.
   - `v_run_jobs`: Deduplicated per-family job execution trace with runtime, hardware, and platform job IDs.
@@ -71,14 +73,14 @@ erDiagram
 - **[`ids.py`](./ids.py):** Computes deterministic `<slug>-<12hex>` `run_id`s (`make_run_id`) from canonicalized `RunConfig` JSON, maintaining historical `run_id` stability via `_REMOVED_DEFAULTS` and `_DEFAULT_ELIDED`.
 
 ### 2. High-Throughput Writing & Lifecycle
-- **[`write_api.py`](./write_api.py):** Streams rows to BigQuery using the **BigQuery Storage Write API** (`append_rows` over dynamically generated Protobuf descriptors), supporting native `JSON` columns (`raw_config`, `run_telemetry`, `job_telemetry`, `best_params`, `quantiles`) without load-job quota limits.
+- **[`write_api.py`](./write_api.py):** Streams rows to BigQuery using the **BigQuery Storage Write API** (`append_rows` over dynamically generated Protobuf descriptors), supporting native `JSON` columns (`raw_config`, `run_telemetry`, `job_telemetry`, `best_params`, `quantiles`, `explanations`) without load-job quota limits.
 - **[`rows.py`](./rows.py) & [`params.py`](./params.py):** Pure row assemblers (`assemble_metadata_row`, `assemble_prediction_rows`, `assemble_oof_rows`, `assemble_run_row`, `assemble_job_row`) and JSON-safe parameter serializers.
 - **[`cells.py`](./cells.py) & [`harvest.py`](./harvest.py):** Coordinates streaming batches of `CellResult` objects into `forecast_metadata`, `forecast_predictions`, and `backtest_oof`, and tallies cell completion outcomes (`JobHarvest`).
 - **[`header.py`](./header.py), [`jobs.py`](./jobs.py) & [`lifecycle.py`](./lifecycle.py):** Context managers (`run_header`, `job_trace`) and append-only status transitions for `run_registry` and `run_jobs`.
 - **[`artifacts.py`](./artifacts.py):** Uploads pickled fitted models and ensemble artifacts to GCS (`gs://<warehouse>/artifacts/<project>/<registry_dataset>/<run_id>/...`) and builds BigQuery `ObjectRef` structs.
 
 ### 3. Queries & Operator Maintenance
-- **[`reads.py`](./reads.py):** Read queries backing the SDK, ensembler, and run reviewer (`run_exists`, `read_run_config`, `read_progress`, `read_metric_aggregates`, `read_cell_metrics`, `fetch_oof_and_forecasts`, `fetch_completed_cells`).
+- **[`reads.py`](./reads.py):** Read queries backing the SDK, ensembler, and run reviewer (`run_exists`, `read_run_config`, `read_progress`, `read_metric_aggregates`, `read_cell_metrics`, `read_feature_attributions`, `fetch_oof_and_forecasts`, `fetch_completed_cells`).
 - **[`ops.py`](./ops.py):** Implements the 8 operator maintenance verbs (exposed via `python -m scale_forecasting.registry.ops <verb>` and the `Registry` SDK class in [`sdk.py`](../sdk.py)):
   - `init`: Ensure all registry tables and analyst views exist.
   - `doctor`: Read-only health check reporting table row counts, runs stuck at `RUNNING`, and orphaned GCS/BQML artifacts.

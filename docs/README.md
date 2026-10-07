@@ -6,11 +6,11 @@ this repo on every push to `main`: **https://statmike.github.io/scale-forecastin
 
 ```mermaid
 flowchart LR
-    Deploy["1. Deploy\nTerraform & GCP Setup"] --> Operate["2. Operate\nSubmit, Monitor, Review"]
-    Operate --> Demo["3. Demo\nWorkshop & Notebooks"]
-    Operate --> SDK["4. SDK & API\nForecaster, Registry, Direct"]
-    Operate --> Ref["5. Reference\nArchitecture, Config, Backtest, Quota"]
-    Ref --> Val["6. System Validation\nLive GCP Ledger & Smokes"]
+    Deploy["1. Deploy<br/>Terraform & GCP Setup"] --> Operate["2. Operate<br/>Submit, Monitor, Review"]
+    Operate --> Demo["3. Demo<br/>Workshop & Notebooks"]
+    Operate --> SDK["4. SDK & API<br/>Forecaster, Registry, Direct"]
+    Operate --> Ref["5. Reference<br/>Architecture, Config, Backtest, Quota"]
+    Ref --> Val["6. System Validation<br/>Live GCP Ledger & Smokes"]
 ```
 
 ## Deploy
@@ -21,8 +21,8 @@ Stand the platform up in a Google Cloud project.
 
 ## Operate
 Run forecasts, review results, and keep a deployment healthy.
-- [running_and_reviewing.md](./running_and_reviewing.md) — **the run loop**: submit (Spark / Ray /
-  BigQuery), watch it land, review the leaderboard, re-ensemble. Home of the `SF_*` identity setup.
+- [running_and_reviewing.md](./running_and_reviewing.md) — **the run loop**: submit (Spark / Ray / Vertex / GCE / GKE / Vertex AI AutoML /
+  BigQuery), watch it land, review the leaderboard and feature attributions, re-ensemble. Home of the `SF_*` identity setup.
 - [operations.md](./operations.md) — rework/reset, disk hygiene, and long-running jobs on a
   persistent VM.
 
@@ -36,8 +36,8 @@ How it works and every knob.
   codebase.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
-- [models_reference.md](./models_reference.md) — all 30 built-in models, 6 ensemble strategies,
-  upstream package provenance, hyperparameter search spaces, and optional dependency extras.
+- [models_reference.md](./models_reference.md) — all 34 built-in models, 6 ensemble strategies,
+  Two-Tier Explainability (`attributions_df`, `plot_attributions`), upstream package provenance, hyperparameter search spaces, and optional dependency extras.
 - [metrics_reference.md](./metrics_reference.md) — all 21 evaluation metrics, mathematical
   definitions, direction/calibration flags, and edge-case rules.
 - [backtesting.md](./backtesting.md) — the method: how folds are laid out, why the newest fold fits
@@ -76,11 +76,11 @@ always matches the code.
 
 ## System Validation
 End-to-end platform verification across Dataproc Serverless, Dataproc GCE clusters, Vertex AI Ray,
-and BigQuery (distinct from forecast backtesting).
+Vertex AI CustomJob, GCE Single-VM, GKE, Vertex AI AutoML Tabular Workflows, and BigQuery (distinct from forecast backtesting).
 - [validation.md](./validation.md) — **System Validation Ledger**: the CI-enforced matrix of
-  architecture axes, 39 smoke configs, 19 demonstration configs, 11 notebooks, and 18 capabilities
+  architecture axes, 42 smoke configs, 20 demonstration configs, 11 notebooks, and 19 capabilities
   proven on live GCP.
-- [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 39-smoke suite
+- [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 42-smoke suite
   (`smoke_harness.py`) to verify a deployment or infrastructure change.
 
 ## Troubleshooting

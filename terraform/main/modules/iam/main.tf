@@ -98,6 +98,9 @@ locals {
     "connection"       = local.connection_role            # get/use/delegate the BigLake connection
     "storage.objAdmin" = "roles/storage.objectAdmin"      # read/write model artifacts
     "dataproc.worker"  = "roles/dataproc.worker"          # batch RUNTIME SA: logs/metrics/staging
+    "dataflow.worker"  = "roles/dataflow.worker"          # Tabular Workflow Feature Transform Engine Dataflow workers
+    "dataflow.dev"     = "roles/dataflow.developer"       # Tabular Workflow pipeline step submits/polls Dataflow FTE jobs
+    "aiplatform.user"  = "roles/aiplatform.user"          # Tabular Workflow pipeline steps submit Stage-1/2 jobs + upload Model
     "artifactreg.read" = "roles/artifactregistry.reader"  # pull the custom Spark runtime image
     "gke.nodeSa"       = "roles/container.defaultNodeServiceAccount" # GKE worker node telemetry + system logging/monitoring
   }
@@ -116,6 +119,12 @@ locals {
     "aiplatform.persistentResources.get", # Ray: reach the cluster to read job status
     "aiplatform.customJobs.get",          # Vertex CustomJob: read job state by resource name
     "aiplatform.customJobs.list",         # Vertex CustomJob: resolve job state by display_name
+    "aiplatform.pipelineJobs.get",        # Vertex Tabular Workflow: read PipelineJob state by resource name
+    "aiplatform.pipelineJobs.list",       # Vertex Tabular Workflow: resolve PipelineJob by display_name
+    "aiplatform.hyperparameterTuningJobs.get",  # Vertex Tabular Workflow Stage-1 tuner: read trial counts
+    "aiplatform.hyperparameterTuningJobs.list", # Vertex Tabular Workflow Stage-1 tuner: list child tuning jobs
+    "aiplatform.trainingPipelines.get",   # Vertex AutoML TrainingJob: read TrainingPipeline state
+    "aiplatform.trainingPipelines.list",  # Vertex AutoML TrainingJob: resolve TrainingPipeline by display_name
     "compute.instances.get",              # GCE single-VM runtime: read VM state by instance name
     "compute.instances.list",             # GCE single-VM runtime: list VMs across candidate zones
     "container.clusters.get",             # GKE runtime: read cluster endpoint/status
@@ -128,6 +137,9 @@ locals {
     "dataproc.batches.delete",     # Serverless has no cancel — deleting a running batch stops it
     "dataproc.jobs.cancel",        # Dataproc cluster job cancel
     "aiplatform.customJobs.cancel",# Vertex CustomJob cancel
+    "aiplatform.pipelineJobs.cancel",             # Vertex Tabular Workflow PipelineJob cancel
+    "aiplatform.hyperparameterTuningJobs.cancel", # Vertex Tabular Workflow Stage-1 tuner early-stop cancel
+    "aiplatform.trainingPipelines.cancel",        # Vertex AutoML TrainingPipeline cancel
     "compute.instances.delete",    # GCE single-VM runtime: delete running instance
     "container.clusters.delete",   # GKE runtime: tear down ephemeral GKE cluster
     "container.jobs.delete",       # GKE runtime: delete running Kubernetes Job
@@ -232,7 +244,8 @@ data "google_project" "this" {
 }
 
 locals {
-  vertex_agent = "service-${data.google_project.this.number}@gcp-sa-aiplatform.iam.gserviceaccount.com"
+  vertex_agent   = "service-${data.google_project.this.number}@gcp-sa-aiplatform.iam.gserviceaccount.com"
+  dataflow_agent = "service-${data.google_project.this.number}@dataflow-service-producer-prod.iam.gserviceaccount.com"
 }
 
 resource "google_project_iam_member" "vertex_agent_network_user" {
@@ -240,6 +253,13 @@ resource "google_project_iam_member" "vertex_agent_network_user" {
   project = var.project_id
   role    = "roles/compute.networkUser"
   member  = "serviceAccount:${local.vertex_agent}"
+}
+
+resource "google_project_iam_member" "dataflow_agent_network_user" {
+  count   = var.create ? 1 : 0
+  project = var.project_id
+  role    = "roles/compute.networkUser"
+  member  = "serviceAccount:${local.dataflow_agent}"
 }
 
 # On top of networkUser, consuming a PSC-I network attachment needs the attachment-specific verbs
@@ -287,6 +307,15 @@ resource "google_service_account_iam_member" "runner_impersonates_self" {
   service_account_id = google_service_account.runner[0].name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${local.runner_email}"
+}
+
+# Let the compute SA act as ITSELF so Vertex AI Tabular Workflow pipeline steps running as
+# scale-forecasting-compute can launch Feature Transform Engine Dataflow workers under the same SA.
+resource "google_service_account_iam_member" "compute_impersonates_self" {
+  count              = var.create ? 1 : 0
+  service_account_id = google_service_account.compute[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${local.compute_email}"
 }
 
 output "runner_email" {

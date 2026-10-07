@@ -94,7 +94,11 @@ def assemble_prediction_rows(
     and so nothing silently stamps a row with the time it happened to be re-assembled.
     """
     rows: list[dict[str, Any]] = []
-    for rec in result.predictions.to_dict("records"):
+    expl_list = result.explanations
+    for idx, rec in enumerate(result.predictions.to_dict("records")):
+        raw_expl = rec.get("explanations")
+        if raw_expl is None and expl_list is not None and idx < len(expl_list):
+            raw_expl = expl_list[idx]
         rows.append(
             {
                 "run_id": result.run_id,
@@ -114,6 +118,7 @@ def assemble_prediction_rows(
                 "yhat_upper": _as_float(rec.get("yhat_upper")),
                 "quantiles": _as_json(rec.get("quantiles")),
                 "created_at": created_at,
+                "explanations": _as_json(raw_expl),
             }
         )
     return rows
@@ -247,7 +252,9 @@ def assemble_metadata_row(
         "fold_id": None,
         "fit_seconds": _as_float(result.fit_seconds),
         "best_params": _as_json(result.best_params),
-        "model_artifact": model_artifact,
+        "model_artifact": (
+            model_artifact if model_artifact is not None else result.model_artifact_uri
+        ),
         "created_at": created_at,
         "worker_id": result.worker_id,
         "cell_started_at": result.cell_started_at,

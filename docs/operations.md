@@ -10,10 +10,10 @@ instead ([§4 — Long runs on a persistent VM](#4-long-runs-on-a-persistent-vm-
 ```mermaid
 flowchart TD
     Op["Already-Deployed Environment"] --> D0["§0 Check Cloud Shell Disk Hygiene (~5 GB)"]
-    D0 --> P1["§1 Infra / Template Change\nterraform init + plan + apply"]
-    D0 --> P2["§2 Clear Registry\n2a: TRUNCATE output tables\n2b: registry.ops drop-run\n2c: Full dataset teardown"]
-    D0 --> P3["§3 Short Re-run (<1h)\nCloud Shell + uv sync --extra submit"]
-    D0 --> P4["§4 Multi-Hour Run\nPersistent GCE VM via IAP + tmux"]
+    D0 --> P1["§1 Infra / Template Change<br/>terraform init + plan + apply"]
+    D0 --> P2["§2 Clear Registry<br/>2a: TRUNCATE output tables<br/>2b: registry.ops drop-run<br/>2c: Full dataset teardown"]
+    D0 --> P3["§3 Short Re-run (<1h)<br/>Cloud Shell + uv sync --extra submit"]
+    D0 --> P4["§4 Multi-Hour Run<br/>Persistent GCE VM via IAP + tmux"]
 ```
 
 ---
@@ -101,7 +101,7 @@ job via the Terraform `seed` module or `data_gen.seed_spark`).
 
 ### 2a. Truncate the output tables (keep the seed) — the usual rework
 
-Truncates only the **four run-output tables** and **keeps `source_series_iceberg`** (the 100k seeded
+Truncates only the **five run-output tables** and **keeps `source_series_iceberg`** (the 100k seeded
 panel every run reads), so you get a clean registry **without** paying to reseed 100k series. This is
 the right reset between demo runs. Run in
 [BigQuery Studio](https://console.cloud.google.com/bigquery) (or `bq query --use_legacy_sql=false`):
@@ -109,6 +109,7 @@ the right reset between demo runs. Run in
 ```sql
 -- swap gcp-scale-forecasting for your project_id if you deployed elsewhere
 TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.run_registry`;
+TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.run_jobs`;
 TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.forecast_metadata`;
 TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.forecast_predictions`;
 TRUNCATE TABLE `gcp-scale-forecasting.scale_forecasting.backtest_oof`;

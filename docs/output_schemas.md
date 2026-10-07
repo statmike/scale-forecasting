@@ -1,13 +1,13 @@
 # Output schemas — the registry tables
 
 Every run writes to the same **registry tables** plus a backtest table, and reads back through
-three curated views. This page documents the layout of each — what every column collects and how the
+five curated views. This page documents the layout of each — what every column collects and how the
 tiers link — so you can query the results directly, not just through the notebooks.
 
 Two facts hold for all of them:
 
 - **Always native BigQuery.** The five run-collection tables are native (never Iceberg), so
-  `raw_config` / `job_telemetry` / `quantiles` / `best_params` are the real `JSON` column type and a
+  `raw_config` / `job_telemetry` / `quantiles` / `best_params` / `fit_diagnostics` / `explanations` are the real `JSON` column type and a
   reseed is a clean `WRITE_TRUNCATE`. (The *input* table is the one that ships in both Iceberg and
   native — see [configuration_reference.md](./configuration_reference.md).)
 - **Written via the Storage Write API.** Engines return data, not RPCs; results are streamed into
@@ -26,11 +26,11 @@ The schema below is rendered from a single source of truth,
 ```mermaid
 flowchart LR
     subgraph Tables["5 Native Registry Tables (Append-Only via Storage Write API)"]
-        RR["run_registry\n(1 row per run_id)"]
-        RJ["run_jobs\n(1 row per run_id × family)"]
-        FM["forecast_metadata\n(1 row per run_id × ts_id × model_type)"]
-        FP["forecast_predictions\n(N rows per run_id × ts_id × model_type × forecast_date)"]
-        BO["backtest_oof\n(N rows per run_id × ts_id × model_type × fold_id × forecast_date)"]
+        RR["run_registry<br/>(1 row per run_id)"]
+        RJ["run_jobs<br/>(1 row per run_id × family)"]
+        FM["forecast_metadata<br/>(1 row per run_id × ts_id × model_type)"]
+        FP["forecast_predictions<br/>(N rows per run_id × ts_id × model_type × forecast_date)"]
+        BO["backtest_oof<br/>(N rows per run_id × ts_id × model_type × fold_id × forecast_date)"]
         RR -->|"run_id"| RJ & FM & FP & BO
     end
     subgraph Views["5 Curated Serving Views (Dedupe-on-Read)"]
@@ -63,7 +63,7 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 | `created_at` | `TIMESTAMP` | When the header row was written. |
 | `user_id` | `STRING` | Who/what launched the run (identity of the writer). |
 | `git_sha` | `STRING` | The code revision that produced the run (lineage). |
-| `python_runtime` | `STRING` | `spark` or `ray` — the run-level default runtime for the Python model families (a family can override it). |
+| `python_runtime` | `STRING` | `spark`, `ray`, `vertex`, `gce`, `gke`, or `vertex_automl` — the run-level default runtime for the Python/AutoML model families (a family can override it). |
 | `bq_models` | `ARRAY<STRING>` | Which BigQuery-native models ran in parallel (e.g. `arima_plus`). |
 | `backtest_on` | `BOOL` | Whether backtesting was enabled for the run. |
 | `decision_metric` | `STRING` | The metric folds were judged on (when backtesting). |
@@ -73,11 +73,11 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 | `n_series` | `INT64` | Series count actually run. |
 | `n_models` | `INT64` | Model count actually run. |
 | `runtime_seconds` | `FLOAT64` | The engine's own compute time (excludes cluster stand-up). |
-| `job_telemetry` | `JSON` | Dataproc/Ray overlay: `total_wall_s`, executor sizing, `dcu_milli_seconds`, `runtime_version`, plus `sizing.<family>` — the whole sizing decision per family job. Unpacked by `v_run_summary`. |
+| `job_telemetry` | `JSON` | Engine overlay: `total_wall_s`, executor/worker sizing, `dcu_milli_seconds`, `runtime_version`, plus `sizing.<family>` — the whole sizing decision per family job. Unpacked by `v_run_summary`. |
 
 ## `run_jobs` — one row per family job
 
-A run resolves into one job per model family (`statistical` / `ml` / `deep_learning` / `native`),
+A run resolves into one job per model family (`statistical` / `ml` / `deep_learning` / `automl` / `native`),
 plus the downstream `ensemble` node — each launched in parallel under the shared `run_id`. This tier
 records what each of those jobs actually ran on and how it fared, so a run's DAG is queryable as
 executed. A `--force` re-run appends a higher-`attempt` job under the same `(run_id, family)`.
@@ -87,13 +87,13 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, family`.
 |--------|------|----------|
 | `job_id` | `STRING` | The canonical per-family job key (`make_job_key`) — `sf-<run_id>-<family>-a<attempt>`. |
 | `run_id` | `STRING` | Joins to `run_registry`. |
-| `family` | `STRING` | The model family this job ran (`statistical` / `ml` / `deep_learning` / `native`, or `ensemble`). |
+| `family` | `STRING` | The model family this job ran (`statistical` / `ml` / `deep_learning` / `automl` / `native`, or `ensemble`). |
 | `attempt` | `INT64` | Attempt number — a `--force` re-run bumps it so re-runs are distinctly keyed under one `run_id`. |
-| `runtime` | `STRING` | The resolved runtime for this family (`spark` / `ray` / `bigquery`). |
+| `runtime` | `STRING` | The resolved runtime for this family (`spark` / `ray` / `vertex` / `gce` / `gke` / `vertex_automl` / `bigquery`). |
 | `spark_mode` | `STRING` | The resolved Spark launch mode when `runtime=spark` (else NULL). |
 | `hardware` | `STRING` | The resolved hardware profile for this family (else NULL). |
 | `gpu_type` | `STRING` | The GPU type when the family ran on GPUs (e.g. Ray deep-learning), else NULL. |
-| `system_job_id` | `STRING` | The platform's own job id (`dataproc_job_id` / `ray_submission_id` / `bigquery_job_id`) — jump straight to the platform console. |
+| `system_job_id` | `STRING` | The platform's own job id (`dataproc_job_id` / `ray_submission_id` / `vertex_custom_job_id` / `gce_instance_name` / `gke_job_name` / `vertex_pipeline_job_id` / `bigquery_job_id`) — jump straight to the platform console. |
 | `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED` for this job. Two pre-launch statuses can come first: `AWAITING_CAPACITY` while a family walks regions looking for machines, and `EMITTED` for a job id a staged command handed out but this process never launched ([why](./troubleshooting.md#a-submit-is-refused--the-job-id-is-already-taken)). |
 | `created_at` | `TIMESTAMP` | When the job row was written. |
 | `runtime_seconds` | `FLOAT64` | The job's own compute time (excludes cluster stand-up). |
@@ -108,8 +108,8 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 |--------|------|----------|
 | `run_id` | `STRING` | Joins to `run_registry`. |
 | `ts_id` | `STRING` | The series. |
-| `model_type` | `STRING` | The model (e.g. `theta`, `arima_plus`). |
-| `compute_engine` | `STRING` | Where the cell ran (`spark` / `ray` / `bigquery`). |
+| `model_type` | `STRING` | The model (e.g. `theta`, `arima_plus`, `vertex_tide`). |
+| `compute_engine` | `STRING` | Where the cell ran (`spark` / `ray` / `vertex` / `gce` / `gke` / `vertex_automl` / `bigquery`). |
 | `model_hash` | `STRING` | Content hash of the fitted model (lineage / cache key). |
 | `ensemble_id` | `STRING` | NULL for base models; the `EnsembleConfig` digest for ensemble pseudo-models (so two ensemble configs under one `run_id` stay distinct). |
 | `fold_id` | `INT64` | NULL for the final (full-fit) row; set for a backtest fold's metrics. |
@@ -143,7 +143,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `n_fits` | `INT64` | Fits behind the **published forecast**: the backtest arms plus the final full-history fit. Measured, not derived — see [What the cell paid for](#what-the-cell-paid-for-in-fits) for why `n_folds_achieved + 1` is wrong on four of six refit paths. |
 | `train_rows_total` | `INT64` | Training observations those fits saw, summed. Not `n_fits × n_obs`: a fold trains on a prefix. |
 | `n_hpo_fits` | `INT64` | Fits a **per-series** hyperparameter search burned. None of them ship a forecast, so they are counted apart; total paid for is `n_fits + n_hpo_fits`. `0` under a fleetwide search, which runs on the driver and belongs to no row. |
-| `fit_diagnostics` | `JSON` | Whatever the fitting library said about this fit (AIC, a chosen `(p,d,q)`, an early-stop epoch). Per-model and **not** comparable across models, which is why it is a bag and not a metric column. NULL fleet-wide today — no model in this tree opts in yet. |
+| `fit_diagnostics` | `JSON` | Whatever the fitting library said about this fit — including **Tier 1 (`feature_attributions`)** normalized global/series-level feature importance (`{"feature_attributions": {"promo_flag": 0.41, ...}}`) populated by `ml` models (`xgboost`, `lightgbm`, `catboost`, `random_forest`, `regression_lags`) and `automl` models (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`), plus `stage_1_tuning_result_artifact_uri` and `vertex_model_resource_name` on `vertex_automl`. |
 
 ### Why a cell failed, in a word you can group by
 
@@ -378,11 +378,10 @@ An error cell reports these too, with `0` meaning the cell died before fitting a
 burned forty fits and then failed is an expensive failure, and without the column it looks exactly
 like a cheap one.
 
-### What the model said about its own fit
+### What the model said about its own fit & Two-Tier Explainability
 
 `fit_diagnostics` is a nullable JSON bag, beside `best_params`, holding whatever the fitting library
-reports about *this* fit: an AIC or log-likelihood, the `(p,d,q)` an `auto_arima` chose, a boosting
-round an early stop landed on, a changepoint count.
+reports about *this* fit: **Tier 1 (`feature_attributions`)** normalized global/series-level driver importance (`{"feature_attributions": {feature_name: float}}` populated by `xgboost`, `lightgbm`, `catboost`, `random_forest`, `regression_lags`, and all 4 `vertex_*` AutoML models), plus `stage_1_tuning_result_artifact_uri` and `vertex_model_resource_name` on `vertex_automl`.
 
 It is deliberately **not** in the metric panel. A scored metric is a pure function of
 `(y_true, yhat, y_train, bounds)` that the framework computes, so it means the same thing for every
@@ -390,8 +389,7 @@ model and a leaderboard can rank on it. A diagnostic is whatever a library happe
 exists for some models and not others, and where two models both report an "AIC" the two numbers are
 not on a comparable scale. A leaderboard column built on one would look uniform and not be.
 
-No model in this tree ships diagnostics yet, so the column is NULL fleet-wide today; the seam is
-`BaseModel.diagnostics()` and it defaults to `{}`. Two guards apply at the worker boundary rather
+The seam is `BaseModel.diagnostics()` (and `BaseModel.feature_attributions()`), which defaults to `{}`. Two guards apply at the worker boundary rather
 than being left to model authors: a key named after a metric is dropped (with a warning naming it),
 and so is a value `json.dumps` cannot carry — the Storage Write API rejects a whole append on one
 bad row, which in a Spark or Ray worker kills the task and cascades to the run.
@@ -436,7 +434,7 @@ The values tier: one row per (run, series, model, **date**) over the horizon. Pa
 | `run_id` | `STRING` | Joins to `run_registry`. |
 | `ts_id` | `STRING` | The series. |
 | `model_type` | `STRING` | The model that produced this point (base model name or `ensemble_<strategy>`). |
-| `compute_engine` | `STRING` | Where it ran (`spark` / `ray` / `bigquery`). |
+| `compute_engine` | `STRING` | Where it ran (`spark` / `ray` / `vertex` / `gce` / `gke` / `vertex_automl` / `bigquery`). |
 | `ensemble_id` | `STRING` | NULL for base models; the ensemble digest for ensemble rows. |
 | `forecast_date` | `DATE` | The future date this point forecasts (partition key). |
 | `yhat` | `FLOAT64` | The point forecast that shipped — whichever arm `output.point_forecast` selected. |
@@ -445,6 +443,7 @@ The values tier: one row per (run, series, model, **date**) over the horizon. Pa
 | `yhat_lower` | `FLOAT64` | Lower prediction-interval bound. |
 | `yhat_upper` | `FLOAT64` | Upper prediction-interval bound. |
 | `quantiles` | `JSON` | Full quantile forecast when a model emits one (e.g. `{"0.1": ..., "0.9": ...}`), else NULL. |
+| `explanations` | `JSON` | **Tier 2 per-horizon-step local feature attributions** (`{"baseline_score": float, "attributions": {feature_name: float}}`) populated by Vertex AI AutoML models (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq` when `generate_explanation=true`) and Python ML models (`xgboost`, `lightgbm`, `catboost` via native C++ TreeSHAP; `regression_lags` via exact linear attribution; `random_forest` via importance-weighted deviation), else NULL. Read and plotted via `Forecaster.attributions_df()` and `Forecaster.plot_attributions()`. |
 | `created_at` | `TIMESTAMP` | **Declared, not yet written — NULL today.** Reserved for telling two generations of rows apart under one `run_id`; see the note under `forecast_metadata`. |
 
 ## `backtest_oof` — out-of-fold predictions (learned ensembling)

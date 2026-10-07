@@ -68,11 +68,14 @@ class RegressionLags(BaseModel):
         if len(y) <= max(lf.LAGS):
             raise ModelError(f"regression_lags requires more than {max(lf.LAGS)} observations")
         design, y_aligned, self._features = lf.build_design(y, X)
+        self._design = design.to_numpy()
+        self._design_mean = self._design.mean(axis=0)
+        self._baseline_score = float(y_aligned.mean())
         self._history = y.astype(float)
         self._last_date = y.index[-1]
         self._model = _Ridge(float(self.params.get("alpha", 1.0)))
-        self._model.fit(design.to_numpy(), y_aligned.to_numpy())
-        fitted = self._model.predict(design.to_numpy())
+        self._model.fit(self._design, y_aligned.to_numpy())
+        fitted = self._model.predict(self._design)
         self._set_residuals(y_aligned.to_numpy() - np.asarray(fitted, dtype=float))
 
     def predict(
@@ -92,6 +95,24 @@ class RegressionLags(BaseModel):
         t, lam = self.ctx.transform, self.ctx.transform_lambda
         qmap = {q: invert_transform(v, t, lam) for q, v in qmap_t.items()}
         return self._assemble_frame(ds, qmap, raw=invert_transform(mean, t, lam))
+
+    def diagnostics(self) -> dict[str, Any]:
+        attrs = lf.global_feature_attributions(self._model, self._features, self._design)
+        return {"feature_attributions": attrs} if attrs else {}
+
+    def explain(
+        self, horizon: int, X: pd.DataFrame | None = None
+    ) -> list[dict[str, Any] | None] | None:
+        full_index = self._future_index(self._last_date, self._forecast_steps(horizon))
+        return lf.recursive_explain(
+            self._model,
+            self._history,
+            full_index,
+            self._features,
+            self._forecast_exog(X),
+            design_mean=self._design_mean,
+            baseline_score=self._baseline_score,
+        )[-horizon:]
 
     def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:
         self._history = pd.concat([self._history, y_new.astype(float)])
