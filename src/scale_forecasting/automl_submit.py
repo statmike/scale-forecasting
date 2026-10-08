@@ -34,7 +34,7 @@ from . import staging
 from .batch_infra import BatchInfra
 from .config import RunConfig
 from .engines import automl_engine
-from .errors import ConfigError, configure_cli_logging, get_logger
+from .errors import ConfigError, configure_cli_logging, get_logger, require_extra
 from .models import get_model
 from .probes.vocabulary import ProbeHandle
 from .profiling.source import profile_for_run
@@ -358,6 +358,7 @@ def main(argv: list[str] | None = None) -> str:
     from .config import load_config_uri
 
     configure_cli_logging()
+    require_extra("models-automl", purpose="Submitting Vertex AI AutoML training")
     args = _build_parser().parse_args(argv)
     cfg = load_config_uri(args.config or args.config_uri).with_series_limit(args.n_series)
     models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None

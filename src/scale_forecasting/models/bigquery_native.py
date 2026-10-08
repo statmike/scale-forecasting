@@ -124,6 +124,10 @@ class _BigQueryNativeModel(BaseModel):
     family = "native"
     supports_native_intervals = True  # ML.FORECAST returns prediction-interval bounds
     package = "bigquery-ml"
+    # Executed by BigQuery, submitted by the client: without [gcp] there is no way to run them, so
+    # a bare install lists them as unavailable rather than failing at submit.
+    optional_import = "google.cloud.bigquery"
+    optional_extra = "gcp"
     package_url = "https://cloud.google.com/bigquery/docs/bqml-introduction"
 
     def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:

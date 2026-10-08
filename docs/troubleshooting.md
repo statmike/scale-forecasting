@@ -6,8 +6,8 @@ doc explains *why* the handling exists so you recognize the symptom fast.
 
 Grouped by where it bites: [In-flight runs](#in-flight-runs--probe-settle-cancel) ·
 [Capacity](#capacity--the-cloud-has-no-room) · [Ray](#ray-on-vertex) · [Spark](#spark-on-dataproc) ·
-[Registry / writes](#registry--writes) · [Versions](#versions--runtimes) ·
-[Deploy / Terraform](#deploy--terraform) · [Notebooks](#notebooks).
+[Registry / writes](#registry--writes) · [Install / extras](#install--extras) ·
+[Versions](#versions--runtimes) · [Deploy / Terraform](#deploy--terraform) · [Notebooks](#notebooks).
 
 ---
 
@@ -459,6 +459,42 @@ is **append-only + dedupe-on-read**, never delete-then-write.
 **Fix:** this is by design and the serving views dedupe on `run_id`. If you want a physically
 separate run, use a fresh/timestamped `run_name` (which changes the `run_id`). See
 [output_schemas.md](./output_schemas.md).
+
+---
+
+## Install / extras
+
+### `MissingExtraError: ... needs the 'gcp' extra, which is not installed`
+**Symptom:** `main.run`, `Forecaster.run()`, a `python -m scale_forecasting.*_submit` command,
+`--probe`, `--dry-run --feasibility`, `registry.ops`, or a plot call raises `MissingExtraError`
+(also an `ImportError`) naming an extra — `gcp`, `notebook`, `ray`, or `models-automl`.
+**Cause:** `pip install scale-forecasting` installs the pure offline layer only (config, every model
+and metric, the planner, the playground). Everything that talks to Google Cloud lives behind
+`[gcp]`; plotting behind `[notebook]`; the Ray client behind `[ray]`; the AutoML pipeline components
+behind `[models-automl]`. Each entry point checks once, up front, so the failure is a sentence with
+the install line rather than a `ModuleNotFoundError` from inside a client library.
+**Fix:** install the extra the message names — `pip install "scale-forecasting[gcp]"` (or, from a
+clone, `uv sync --extra gcp`) — and re-run. The full extra-by-extra table is in
+[runtime_dependencies.md](./runtime_dependencies.md#dependency-extras).
+
+### `ModuleNotFoundError: No module named 'google'` from a reading or review method
+**Symptom:** a core-only install raises a raw `ModuleNotFoundError` (not `MissingExtraError`) from
+`Forecaster.predictions_df()`, `Registry`, or another method that reads BigQuery.
+**Cause:** the read path constructs a BigQuery client lazily at the call site; only the launch,
+submit, ops, and plotting entry points carry the guided check.
+**Fix:** same remedy — `pip install "scale-forecasting[gcp]"`. A notebook or workstation that both
+launches and reviews wants `[gcp,notebook]`; the per-surface install table is in
+[runtime_dependencies.md](./runtime_dependencies.md#dependency-extras).
+
+### `list_models(available_only=True)` returns 15, not 34
+**Symptom:** the catalogue lists all 34 models but only 15 report as available.
+**Cause:** availability is honest about what is importable: the 15 are the models whose library is
+in the core install (statsmodels, scikit-learn, scipy). The rest declare an `optional_extra` —
+`models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-automl` for the four Vertex AI
+AutoML models, or `gcp` for the two BigQuery-native models.
+**Fix:** install the family extras you intend to run (`[models]` is all five families, AutoML
+included) plus `[gcp]` for the BigQuery-native pair. The model→extra map is the "Granular
+installation extras" table in [models_reference.md](./models_reference.md).
 
 ---
 

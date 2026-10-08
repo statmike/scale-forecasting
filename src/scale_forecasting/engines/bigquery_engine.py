@@ -589,10 +589,11 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
     import argparse
 
     from ..config import load_config
-    from ..errors import configure_cli_logging, get_logger
+    from ..errors import configure_cli_logging, get_logger, require_extra
     from ..router import split_by_runtime
 
     configure_cli_logging()
+    require_extra("gcp", purpose="The BigQuery-native engine")
     parser = argparse.ArgumentParser(description="Run the BigQuery-native forecasting models.")
     parser.add_argument("--config", required=True, help="Path to the run config JSON.")
     args = parser.parse_args(argv)

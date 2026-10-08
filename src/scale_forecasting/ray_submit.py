@@ -57,7 +57,7 @@ from . import ray_cluster, ray_jobs, ray_telemetry
 from .code_delivery import build_runtime_env
 from .commands import build_driver_args
 from .engines import ray_io
-from .errors import EngineError, configure_cli_logging, get_logger
+from .errors import EngineError, configure_cli_logging, get_logger, require_extra
 from .ray_infra import RayInfra
 from .resources.audit import sizing_telemetry
 from .staging import stage_config
@@ -296,6 +296,7 @@ def main(argv: list[str] | None = None) -> None:
     from .config import load_config_uri
 
     configure_cli_logging()
+    require_extra("ray", purpose="Submitting to Ray on Vertex AI")
     p = argparse.ArgumentParser(
         prog="ray_submit", description="Submit a forecast run to Vertex Ray."
     )

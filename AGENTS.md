@@ -48,6 +48,7 @@ flowchart LR
         T4["test_api_docs_coverage.py"]
         T5["test_test_dependencies_declared.py"]
         T6["test_notebook_hygiene.py"]
+        T7["test_packaging_extras.py"]
     end
 
     Pure -->|"Shared execution contract"| Cloud
@@ -73,7 +74,7 @@ flowchart LR
 
 ## 3. Canonical Inventories & Mandatory Co-Update Matrix
 
-Whenever you add or modify a model, metric, compute runtime, `RunConfig` field, BigQuery table/view, or smoke configuration, **you must update the corresponding documentation and tripwire files in the same work unit before declaring the task complete**:
+Whenever you add or modify a model, metric, compute runtime, `RunConfig` field, BigQuery table/view, smoke configuration, or dependency extra, **you must update the corresponding documentation and tripwire files in the same work unit before declaring the task complete**:
 
 | System Surface | Canonical Source of Truth | Current Count / Set | Files That MUST Be Updated Together |
 | :--- | :--- | :--- | :--- |
@@ -82,6 +83,7 @@ Whenever you add or modify a model, metric, compute runtime, `RunConfig` field, 
 | **Compute Runtimes & Hardware** | [`config.py`](./src/scale_forecasting/config.py) & [`resources/catalog.py`](./src/scale_forecasting/resources/catalog.py) | **7 runtimes** (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`) · **4 GPU types** (`T4`, `L4`, `A100`, `A100_80GB`) | [`README.md`](./README.md), [`docs/runtimes_reference.md`](./docs/runtimes_reference.md), [`docs/configuration_reference.md`](./docs/configuration_reference.md), [`docs/architecture.md`](./docs/architecture.md), [`docs/quota_and_scale.md`](./docs/quota_and_scale.md), [`src/scale_forecasting/engines/README.md`](./src/scale_forecasting/engines/README.md), [`src/scale_forecasting/resources/README.md`](./src/scale_forecasting/resources/README.md), [`src/scale_forecasting/probes/README.md`](./src/scale_forecasting/probes/README.md), [`tests/unit/test_config_coverage.py`](./tests/unit/test_config_coverage.py) |
 | **Registry Tables & Views** | [`registry/ddl.py`](./src/scale_forecasting/registry/ddl.py) & [`registry/views.py`](./src/scale_forecasting/registry/views.py) | **4 source tables** · **5 registry tables** · **5 analytical SQL views** (`v_model_leaderboard`, `v_model_leaderboard_comparable`, `v_backtest_coverage`, `v_run_summary`, `v_run_jobs`) | [`README.md`](./README.md), [`docs/output_schemas.md`](./docs/output_schemas.md), [`docs/writing_results.md`](./docs/writing_results.md), [`docs/reading_source_data.md`](./docs/reading_source_data.md), [`src/scale_forecasting/registry/README.md`](./src/scale_forecasting/registry/README.md), [`docs/workshop.md`](./docs/workshop.md) |
 | **Smoke & Demo Configs** | [`configs/smokes/*.json`](./configs/smokes/) & [`configs/*.json`](./configs/) | **42 smoke configs** (`01`–`42`) · **20 root demo configs** | [`configs/smokes/README.md`](./configs/smokes/README.md), [`configs/README.md`](./configs/README.md), [`docs/smoke_testing.md`](./docs/smoke_testing.md), [`docs/validation.md`](./docs/validation.md), [`tests/README.md`](./tests/README.md), [`tests/smokes/test_smoke_configs.py`](./tests/smokes/test_smoke_configs.py) |
+| **Dependency Extras** | [`pyproject.toml`](./pyproject.toml) (`[project.optional-dependencies]`) | **12 extras** (`gcp`, `notebook`, `spark`, `ray`, `submit`, `models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-automl`, `models`, `all`); core `dependencies` are the pure offline layer and `[gcp]` is the single home of every Google client | [`README.md`](./README.md), [`docs/runtime_dependencies.md`](./docs/runtime_dependencies.md), [`docs/models_reference.md`](./docs/models_reference.md), [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md), [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md), [`docs/troubleshooting.md`](./docs/troubleshooting.md), [`docker/Dockerfile`](./docker/Dockerfile), [`Makefile`](./Makefile) (`EXPORT_ARGS`), [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), the notebooks' bootstrap `EXTRAS` lists, [`errors.py`](./src/scale_forecasting/errors.py) (`EXTRA_MODULES`), then `make lock` (enforced by [`tests/unit/test_packaging_extras.py`](./tests/unit/test_packaging_extras.py) and [`tests/unit/test_core_install.py`](./tests/unit/test_core_install.py)) |
 | **Public Python Modules** | [`src/scale_forecasting/**/*.py`](./src/scale_forecasting/) | All non-private modules | [`docs/api/*.md`](./docs/api/index.md), [`mkdocs.yml`](./mkdocs.yml) (enforced by [`tests/unit/test_api_docs_coverage.py`](./tests/unit/test_api_docs_coverage.py)) |
 
 ---
@@ -126,6 +128,7 @@ Run this after *any* code, config, or documentation edit:
   tests/unit/test_api_docs_coverage.py \
   tests/unit/test_test_dependencies_declared.py \
   tests/unit/test_notebook_hygiene.py \
+  tests/unit/test_packaging_extras.py \
   tests/smokes/test_smoke_configs.py -q
 ```
 - **`test_validation_ledger.py`:** Verifies every smoke config (`01`–`42`), root demo config (`20`), and notebook (`11`) has a valid row in `docs/validation.md` whose architecture axes match current code.
@@ -134,6 +137,7 @@ Run this after *any* code, config, or documentation edit:
 - **`test_api_docs_coverage.py`:** Verifies every public Python module has a corresponding `docs/api/*.md` page and `mkdocs.yml` nav entry.
 - **`test_test_dependencies_declared.py`:** Verifies every third-party module imported anywhere under `tests/` (including lazy, function-level imports) belongs to a distribution that CI's `uv sync --frozen --all-extras` installs, computed from `uv.lock`. A package that is only in your `.venv` because of `make docs` or an ad-hoc `uv pip install` is **not** declared; add it to `[dependency-groups].dev` (or an extra) in `pyproject.toml` and run `make lock`.
 - **`test_notebook_hygiene.py`:** Scans every notebook's sources **and persisted outputs** (stream text, text/JSON display data, tracebacks) for the identifiers §1 rule 4 forbids — e-mail addresses, personal or corporate home paths, internal hostnames and short links, credential material. The failure message names the notebook, cell, and pattern, never the matched text. Fix the cell (silence the warning at its source, clear or re-run the output); do not widen the allowlists.
+- **`test_packaging_extras.py`:** Holds `pyproject.toml` to the §3 extras layout (pure core, `[gcp]` as the single home of every Google client, composed `spark`/`ray`/`models-automl`/`models`/`all`, each floor declared once) and verifies every surface that names an extra — Makefile, `ci.yml`, Dockerfile, `requirements.txt` header, Markdown, notebook bootstraps, `errors.EXTRA_MODULES`, the model→extra table — names one that exists. Adding or renaming an extra means updating all of them in the same change.
 
 ### Gate 2: Formatting, Linting, Type-Checking, Lock Drift & Strict MkDocs Site Build
 ```bash

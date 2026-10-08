@@ -11,9 +11,11 @@ requires-python = ">=3.11,<3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "scale-forecasting contributors" }]
 
-# Core dependencies: the pure forecasting + orchestration layer that runs anywhere
-# (local notebook or Airflow). Heavy compute backends live in optional groups so a
-# data scientist can `uv sync` and read/run the core without pulling Spark or Ray.
+# Core dependencies: the pure forecasting layer — config, the 34 model plugins' shared base, the 21
+# metrics, features, backtests, calibration, reconciliation, ensembling, HPO, the worker, and the
+# playground. Nothing here talks to a cloud API. A bare `pip install scale-forecasting` is enough to
+# run `python -m scale_forecasting.playground` on synthetic data with no project, no billing, and
+# no credentials; everything that touches Google Cloud is the [gcp] extra below.
 dependencies = [
     "pydantic>=2.7",
     # pandas is capped <3 because neuralprophet (the [models] deep-learning model) still calls the
@@ -36,32 +38,58 @@ dependencies = [
     "threadpoolctl>=3.1",
     "optuna>=3.6",
     "holidays>=0.50",
-    "google-cloud-bigquery>=3.25",
-    "google-cloud-bigquery-storage>=2.25",
-    "google-cloud-storage>=2.17",
-    # BigQuery→pandas conversion (client.query(...).to_dataframe()) maps DATE / NUMERIC columns
-    # through db-dtypes; the BigQuery-native engine reads its held-out eval back this way.
-    "db-dtypes>=1.2",
-    # Storage Write API rows are protobuf: registry/bq.py builds a dynamic descriptor per
-    # cell table and serializes rows against it (a transitive dep of the google libs above,
-    # pinned explicit because we import google.protobuf directly).
-    "protobuf>=4.25",
-    # Notebook kernel. Driving a run from a local notebook (or Colab Enterprise) is a
-    # first-class use — many notebooks are pure orchestration of the Dataproc/Ray/BigQuery
-    # work — so the kernel ships in core, not a dev extra: `uv sync` then register a kernel
-    # (`uv run python -m ipykernel install --user --name scale-forecasting`).
-    "ipykernel>=6.29",
-    # The notebooks plot forecasts + their intervals and the scale-review charts; matplotlib
-    # is their only extra import beyond pandas/google, so it rides in core with the kernel.
-    "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]
-# Python runtime A — Dataproc Serverless (Spark). Installed on the cluster via the
-# packed-venv archive; a data scientist only needs this locally to test UDF wiring.
-spark = [
-    "pyspark>=3.5",
+# Google Cloud clients — every one the package imports, the way `apache-beam[gcp]` means "every
+# Google client Beam can use". The pure layer needs none of them; `pip install
+# "scale-forecasting[gcp]"` is the install for anyone running on Google Cloud. The package has zero
+# top-level `google.*` imports; `errors.require_extra("gcp")` at the entry points turns a missing
+# client into one sentence naming this extra instead of a ModuleNotFoundError from inside a job.
+# What stays outside it is only the two non-Google runtimes' own client libraries: pyspark
+# ([spark]) and ray ([ray]).
+gcp = [
+    # BigQuery (the registry and the BigQuery-native engine), the Storage Read API (worker
+    # sharding), Cloud Storage (code delivery, artifacts).
+    "google-cloud-bigquery>=3.25",
+    "google-cloud-bigquery-storage>=2.25",
+    "google-cloud-storage>=2.17",
+    # The launch clients: Dataproc Serverless batches and clusters (`submit`), and the Vertex AI
+    # JobServiceClient / PipelineServiceClient behind the `vertex` CustomJob and `vertex_automl`
+    # runtimes (`vertex_submit`, `automl_submit`) plus `vertex_ray` for Ray on Vertex. The GCE and
+    # GKE submitters use google.auth's `AuthorizedSession` against the REST APIs instead of
+    # per-product SDKs, so there is nothing to add for them.
     "google-cloud-dataproc>=5.9",
+    "google-cloud-aiplatform>=1.60",
+    # Both arrive transitively through the clients above, pinned explicit because we import them by
+    # name: google.auth (ADC, `AuthorizedSession`) and google.api_core (`exceptions`,
+    # `client_options`). A module we import by name is a dependency we declare by name.
+    "google-auth>=2.30",
+    "google-api-core>=2.19",
+    # BigQuery→pandas conversion (client.query(...).to_dataframe()) maps DATE / NUMERIC columns
+    # through db-dtypes; the BigQuery-native engine reads its held-out eval back this way.
+    "db-dtypes>=1.2",
+    # Storage Write API rows are protobuf: registry/write_api.py builds a dynamic descriptor per
+    # cell table and serializes rows against it (a transitive dep of the google libs above,
+    # pinned explicit because we import google.protobuf directly).
+    "protobuf>=4.25",
+]
+# Notebook kernel + plotting. Driving a run from a local notebook (or Colab Enterprise) is a
+# first-class use, so these are one named extra rather than a dev afterthought: register a kernel
+# with `uv run python -m ipykernel install --user --name scale-forecasting`. matplotlib is the only
+# import the forecast / interval / scale-review charts in `review.py` and `sdk.plot_trace` need
+# beyond pandas; they import it lazily and name this extra when it is missing.
+notebook = [
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+]
+# Python runtime A — Dataproc Serverless (Spark). Installed on the cluster via the
+# packed-venv archive; a data scientist only needs this locally to test UDF wiring or to drive the
+# engine over Spark Connect from a notebook. Submitting a batch needs only [gcp] (the Dataproc
+# client lives there); this adds the Spark client itself.
+spark = [
+    "scale-forecasting[gcp]",
+    "pyspark>=3.5",
     # Client-side only — lets a notebook drive the engine over a Dataproc Spark Connect endpoint
     # (an injected DataprocSparkSession). NEVER imported by the engine modules (they run on-cluster
     # against a classic session), so the same engine code runs as a batch and over Connect (G1).
@@ -71,34 +99,32 @@ spark = [
     # driver↔worker parity on the single py3.11 build. Keep the client on the 0.7 line.
     "dataproc-spark-connect>=0.7,<1.0",
 ]
-# Python runtime B — Ray on Vertex AI.
+# Python runtime B — Ray on Vertex AI and Ray on GKE. Submitting a Ray job needs Ray's own
+# `JobSubmissionClient`, which only ships with the ray distribution — the one launch client that
+# is not a Google library, hence not in [gcp].
 ray = [
+    "scale-forecasting[gcp]",
     # Require ray>=2.52 for security vulnerability remediation. Client-side job submission uses the
     # HTTP REST Ray Jobs API (`JobSubmissionClient` over PSC-I), which is wire-compatible with Vertex
     # AI's managed 2.47.1 cluster image (`ray_infra.py` keeps `_DEFAULT_RAY_VERSION = "2.47"` and
     # `code_delivery.py` excludes `ray` from the on-cluster `runtime_env` package list).
     "ray[default]>=2.52",
-    "google-cloud-aiplatform>=1.60",
-    "google-cloud-pipeline-components>=2.14",
     # vertex_ray imports immutabledict at module load; aiplatform only declares it under its own
     # [ray] extra, which would pin ray[default]<=2.47.1 and conflict with ours — so pull it directly.
     "immutabledict>=4.0",
 ]
-# Submit-only client set — everything needed to LAUNCH runs from a thin client (Cloud Shell, CI)
-# without the on-cluster runtimes. The three batch entrypoints (`main --dry-run`, `submit`,
-# `ray_submit`) build API messages via these clients and never import pyspark (spark_io imports it
-# only under TYPE_CHECKING), so this deliberately OMITS the [spark] extra's pyspark (~300MB of JARs
-# that overflow Cloud Shell's home quota and are only needed for notebook 01's interactive Connect
-# path, which runs in Colab). It is the union of the dataproc submit client + the [ray] client deps.
+# Thin launch client — everything needed to LAUNCH a run on any runtime from Cloud Shell or CI
+# without pyspark (~300MB of JARs that overflow Cloud Shell's home quota and are only needed for
+# the interactive Spark Connect path). Every Google launch client is in [gcp] and the Ray client is
+# in [ray], so this is [ray] under the name the operations runbook uses.
 submit = [
-    "google-cloud-dataproc>=5.9",
-    "ray[default]>=2.52",
-    "google-cloud-aiplatform>=1.60",
-    "google-cloud-pipeline-components>=2.14",
-    "immutabledict>=4.0",
+    "scale-forecasting[ray]",
 ]
 # Granular model extras for environment agility — install individual model libraries
 # when enterprise environments restrict specific packages, or install `models` for the full suite.
+# 15 of the 34 models run on the core install alone (numpy / scipy / statsmodels / scikit-learn);
+# these extras add the 17 that need a third-party or cloud library, and the two BigQuery ML models
+# need [gcp]. docs/models_reference.md maps each extra to its models.
 models-stats = [
     "statsforecast>=2.0",
 ]
@@ -113,17 +139,6 @@ models-prophet = [
 models-dl = [
     "neuralprophet>=0.9",
     "neuralforecast>=1.7",
-    "torch>=2.13,<2.14",
-]
-# Full optional model suite (statistical + boosted-tree + Prophet + deep-learning).
-models = [
-    "statsforecast>=2.0",
-    "xgboost>=2.0",
-    "lightgbm>=4.3",
-    "catboost>=1.2",
-    "prophet>=1.1.5",
-    "neuralprophet>=0.9",
-    "neuralforecast>=1.7",
     # torch is transitive via neuralprophet, but we pin it explicitly to bind the CUDA build below.
     # NeuralProphet is the only GPU model, and it runs on Ray-on-Vertex T4s whose host driver
     # (535.x) caps at CUDA 12.2. The default PyPI torch wheel is a CUDA-13 build that refuses to
@@ -132,9 +147,31 @@ models = [
     # compatibility lets a 12.6-built wheel run on the 535 driver.
     "torch>=2.13,<2.14",
 ]
+# The four Vertex AI AutoML models (vertex_l2l / tide / tft / seq2seq) run as Tabular Workflow
+# pipelines or managed training jobs. The Vertex SDK is in [gcp]; this adds the pipeline components
+# the Tabular Workflow path compiles against.
+models-automl = [
+    "scale-forecasting[gcp]",
+    "google-cloud-pipeline-components>=2.14",
+]
+# Full optional model suite (statistical + boosted-tree + Prophet + deep-learning + Vertex AutoML),
+# composed from the family extras so every version floor is declared exactly once.
+models = [
+    "scale-forecasting[models-stats,models-trees,models-prophet,models-dl,models-automl]",
+]
+# Everything: every client, every model library, both on-cluster runtimes, the notebook kernel.
+# This is what `uv sync --all-extras` (CI, `make sync`) resolves to, spelled as one installable name.
+all = [
+    "scale-forecasting[gcp,notebook,spark,ray,submit,models]",
+]
 
 [dependency-groups]
 dev = [
+    # A bare `uv sync` installs core + this group. Core is the pure layer, so without this line a
+    # fresh clone could not reach BigQuery or plot; the clients and the kernel ride along here so
+    # `uv sync` keeps meaning "a venv that can run the notebooks and the live tests". The heavy
+    # runtimes and model libraries stay behind `--extra` / `--all-extras` (`make sync`).
+    "scale-forecasting[gcp,notebook]",
     "pytest>=8.2",
     "pytest-cov>=5.0",
     "ruff>=0.5",

@@ -1059,11 +1059,12 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
 
     from ._infra_args import add_infra_args, export_infra_env
     from .config import load_config
-    from .errors import ConfigError, configure_cli_logging, get_logger
+    from .errors import ConfigError, configure_cli_logging, get_logger, require_extra
     from .registry.ids import make_run_id
     from .settings import Settings
 
     configure_cli_logging()
+    require_extra("gcp", purpose="Re-running the ensemble stage")
     parser = argparse.ArgumentParser(
         prog="ensemble_run",
         description="Re-run the ensemble stage for a completed run or across multiple runs.",

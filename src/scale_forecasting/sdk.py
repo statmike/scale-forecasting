@@ -1603,6 +1603,9 @@ def plot_trace(frame: pd.DataFrame, *, ax: Any = None, title: str = "run trace")
     the near-instant ``import scale_forecasting`` path. An empty frame renders an empty titled axes
     rather than raising.
     """
+    from .errors import require_extra
+
+    require_extra("notebook", purpose="Plotting")
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
 

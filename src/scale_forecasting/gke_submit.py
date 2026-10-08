@@ -49,7 +49,7 @@ from .config import RunConfig, resolve_vm_machine_type
 from .engines import ray_io
 from .engines.ray_io import RayClusterPlan, pool_families, resolve_job_gpu
 from .engines.vertex_engine import effective_worker_count, plan_vertex_pool
-from .errors import ConfigError, EngineError, configure_cli_logging, get_logger
+from .errors import ConfigError, EngineError, configure_cli_logging, get_logger, require_extra
 from .job_outcome import launch_window_start
 from .job_wait import is_stalled
 from .probes.vocabulary import ProbeHandle
@@ -1575,6 +1575,7 @@ def main(argv: Sequence[str] | None = None) -> None:  # pragma: no cover - CLI e
     from .config import load_config, load_config_uri
 
     configure_cli_logging()
+    require_extra("gcp", purpose="Submitting to GKE")
     args = _build_parser().parse_args(argv)
     cfg = load_config_uri(args.config_uri) if args.config_uri else load_config(args.config)
     submit_gke(

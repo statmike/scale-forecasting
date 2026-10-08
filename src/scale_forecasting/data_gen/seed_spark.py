@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .._infra_args import add_infra_args, export_infra_env
-from ..errors import configure_cli_logging, get_logger
+from ..errors import configure_cli_logging, get_logger, require_extra
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -415,6 +415,7 @@ def main(argv: list[str] | None = None) -> None:
     from .generator import GenConfig, generate_panel, generate_partition
 
     configure_cli_logging()
+    require_extra("gcp", purpose="Seeding the source tables")
     args = _parse_args(argv)
     settings = Settings.resolve()
     include_covs = args.include_covariates

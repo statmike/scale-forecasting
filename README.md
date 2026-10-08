@@ -398,11 +398,22 @@ Every run provides two complementary explainability lenses:
   - **Tier 2 (Per-Horizon-Step Local Attributions):** Signed additive attributions (`{"baseline_score": float, "attributions": {feature_name: float}}`) stored in `forecast_predictions.explanations` for every `(ts_id, forecast_date)` row, computed via native C++ TreeSHAP (`xgboost`, `lightgbm`, `catboost`), exact linear weights (`regression_lags`), feature deviations (`random_forest`), or Vertex AI Explainable AI (`BatchPredictionJob(generate_explanation=True)`).
 - **Structural Forecast Decomposition (`forecaster.explain_forecast()` & `forecaster.plot_forecast_explanation()`):** Works across **all 34 models**, decomposing any series' forecast into historical trend, structural regime level shifts, seasonal cycle, exogenous covariate alignment, and conformal interval width.
 
-### Environment Agility: Omitting Optional Model Packages
+### Environment Agility: Install Only What You Run
 
-All third-party model libraries are imported **lazily inside `fit()`**. If your enterprise environment restricts or omits specific packages (such as `catboost` or `neuralprophet`), the platform still imports cleanly and runs every other model:
-- **Granular Installation Extras:** Install everything with `scale-forecasting[models]`, or choose individual family subsets (`scale-forecasting[models-stats]`, `models-trees`, `models-prophet`, `models-dl`, `models-automl`).
+The package is layered so a bare install is a complete offline forecasting toolkit and everything that reaches Google Cloud, a cluster runtime, or a third-party model library is an opt-in extra (see [runtime_dependencies.md](./docs/runtime_dependencies.md#dependency-extras)):
+
+| Install | What it adds | Who needs it |
+| :--- | :--- | :--- |
+| `scale-forecasting` | The pure layer: all 34 models' metadata, 15 models that fit on NumPy / SciPy / statsmodels / scikit-learn alone, all 21 metrics, backtesting, calibration, reconciliation, ensembling, HPO, the playground, `--dry-run` | Anyone evaluating the platform; no project, billing, or credentials |
+| `scale-forecasting[gcp]` | Every Google Cloud client the package imports (BigQuery, Storage, Dataproc, Vertex AI) | Anyone launching or reviewing runs on Google Cloud |
+| `scale-forecasting[spark]`, `[ray]` | The non-Google runtime clients: PySpark + Spark Connect, Ray's job client (each includes `[gcp]`) | Interactive Spark Connect sessions; Ray on Vertex AI or GKE submission |
+| `scale-forecasting[notebook]` | The Jupyter kernel and matplotlib (every `plot_*` helper) | Local notebooks and plotting |
+| `scale-forecasting[models]` or `[models-stats]`, `[models-trees]`, `[models-prophet]`, `[models-dl]`, `[models-automl]` | The 17 models that need a third-party or Vertex AI library, as one extra or per family | Environments that restrict specific packages (`catboost`, `torch`, ...) |
+| `scale-forecasting[all]` | Everything above — what `uv sync --all-extras` and `make sync` install | Contributors and CI |
+
+All third-party model libraries are imported **lazily inside `fit()`**, so an environment that omits a package still imports cleanly and runs every other model:
 - **Automatic Filtering:** Inspect installed models via `uv run python -m scale_forecasting.playground --list` or `sf.list_models(available_only=True)`, and pass `--ignore-unavailable-models` to `scale_forecasting.main` to skip any un-installed models in a shared configuration automatically.
+- **One Sentence, Not a Stack Trace:** A core-only install that calls `main.run`, `Forecaster.run()`, a submit CLI, or a `plot_*` helper raises `MissingExtraError` naming the extra and the exact `pip install` line, before anything is provisioned.
 
 ### Adding a Custom Model in 1 File (Zero Image Rebuilds)
 

@@ -291,17 +291,18 @@ All third-party model libraries are imported **lazily inside `fit()`** rather th
 
 ### Granular installation extras
 
-In addition to `scale-forecasting[models]` (which installs all model families), `pyproject.toml` provides family-scoped extras so you can install only the packages approved for your environment:
+`pyproject.toml` layers the install (see [runtime_dependencies.md](./runtime_dependencies.md#dependency-extras) for the whole table): the bare package already fits 15 of the 34 models, and family-scoped extras add the rest so you install only the packages approved for your environment. Each model declares the extra it needs (`optional_extra`) and the message it raises when that package is missing names it.
 
-| Extra | Installed Upstream Packages | Models Enabled |
+| Extra | Installed upstream packages | Models enabled |
 | :--- | :--- | :--- |
-| *(Core dependencies)* | `numpy`, `scipy`, `pandas` | `naive_mean`, `naive_seasonal`, `naive_drift`, `naive_moving_average`, `croston`, `fft`, `arima_plus`, `timesfm` |
-| `scale-forecasting[models-stats]` | `statsmodels>=0.14`, `statsforecast>=2.0` | Adds `theta`, `auto_theta`, `holtwinters`, `autoets`, `auto_ces`, `tbats`, `stl_bagging`, `auto_arima`, `sarimax`, `ucm`, `kalman` |
-| `scale-forecasting[models-trees]` | `scikit-learn>=1.4`, `lightgbm>=4.3`, `xgboost>=2.0`, `catboost>=1.2` | Adds `regression_lags`, `random_forest`, `lightgbm`, `xgboost`, `catboost` |
-| `scale-forecasting[models-prophet]` | `prophet>=1.1.5` | Adds `prophet` |
-| `scale-forecasting[models-dl]` | `torch>=2.2`, `neuralprophet>=0.8`, `neuralforecast>=1.7` | Adds `neuralprophet`, `tide`, `tft`, `tsmixer`, `patchtst` |
-| `scale-forecasting[models-automl]` | `google-cloud-pipeline-components>=2.17`, `kfp>=2.7`, `google-cloud-aiplatform>=1.60` | Adds `vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq` |
-| `scale-forecasting[models]` | All of the above | All 34 built-in models |
+| *(core — no extra)* | `numpy`, `scipy`, `statsmodels>=0.14`, `scikit-learn>=1.5` | `naive_mean`, `naive_seasonal`, `naive_drift`, `naive_moving_average`, `croston`, `regression_lags`, `fft`, `theta`, `holtwinters`, `autoets`, `stl_bagging`, `sarimax`, `ucm`, `kalman`, `random_forest` (15) |
+| `scale-forecasting[models-stats]` | `statsforecast>=2.0` | `auto_arima`, `auto_theta`, `auto_ces`, `tbats` |
+| `scale-forecasting[models-trees]` | `xgboost>=2.0`, `lightgbm>=4.3`, `catboost>=1.2` | `xgboost`, `lightgbm`, `catboost` |
+| `scale-forecasting[models-prophet]` | `prophet>=1.1.5` | `prophet` |
+| `scale-forecasting[models-dl]` | `neuralprophet>=0.9`, `neuralforecast>=1.7`, `torch>=2.13,<2.14` | `neuralprophet`, `tide`, `tft`, `tsmixer`, `patchtst` |
+| `scale-forecasting[models-automl]` | `google-cloud-pipeline-components>=2.14` (+ `[gcp]`, which carries `google-cloud-aiplatform`) | `vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq` |
+| `scale-forecasting[gcp]` | `google-cloud-bigquery` and the other Google Cloud clients | `arima_plus`, `timesfm` (BigQuery ML runs them; the client submits the SQL) |
+| `scale-forecasting[models]` | The five `models-*` extras above | All 34 built-in models (with `[gcp]` for the two BigQuery ML models) |
 
 ### Inspecting and filtering available models
 

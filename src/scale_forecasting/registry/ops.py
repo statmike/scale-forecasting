@@ -77,7 +77,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..capacity import AWAITING_CAPACITY
-from ..errors import configure_cli_logging, get_logger
+from ..errors import configure_cli_logging, get_logger, require_extra
 from . import artifacts
 from .artifacts import ArtifactPrefix
 from .ddl import REGISTRY_TABLE_NAMES
@@ -1185,6 +1185,7 @@ def main(argv: list[str] | None = None) -> None:
     import argparse
 
     configure_cli_logging()
+    require_extra("gcp", purpose="Registry operations")
     p = argparse.ArgumentParser(
         prog="registry-ops",
         description="Manage one scale-forecasting registry (the dataset SF_REGISTRY_DATASET_ID, "
