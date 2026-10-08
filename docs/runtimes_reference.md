@@ -1,4 +1,4 @@
-# Compute Runtimes & Scaling Reference
+# Compute runtimes & scaling reference
 
 `scale-forecasting` decouples **what** you forecast (`models`, `features`, `backtest`, `hpo`, `hierarchy`, `ensemble`) from **where** it executes (`python_runtime`, `compute`, and `compute.families.<family>`). The same declarative [`RunConfig`](./configuration_reference.md) runs unchanged across **7 cloud compute runtimes** and **5 execution engines**, either uniformly across the entire run or mixed per model family within a single content-addressed `run_id`.
 

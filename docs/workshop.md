@@ -1,4 +1,4 @@
-# Hands-On Workshop: Massively Parallel Forecasting on Google Cloud
+# Hands-on workshop: forecasting on Google Cloud at any scale
 
 <p align="center">
   <b>A Guided Practitioner & Architecture Workshop for Forecasting 100,000+ Time Series</b><br>

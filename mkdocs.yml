@@ -90,6 +90,11 @@ nav:
   - Start here:
       - Platform overview: overview.md
       - Getting started: getting_started.md
+      - Choosing a runtime: choosing_a_runtime.md
+      - Cost estimates & controls: cost_estimates.md
+      - Why Google Cloud: why_google_cloud.md
+      - FAQ: faq.md
+      - Glossary: glossary.md
   - Deploy:
       - Deploying on GCP: deploying_on_gcp.md
   - Operate:
