@@ -175,7 +175,7 @@ All notebooks in [`notebooks/`](./notebooks/README.md) include committed outputs
 
 ## Where next
 
-- **Start here:** [Getting started](./docs/getting_started.md) · [Platform overview](./docs/overview.md) · [Documentation map](./docs/README.md)
+- **Start here:** [Getting started](./docs/getting_started.md) · [Platform overview](./docs/overview.md) · [Choosing a runtime](./docs/choosing_a_runtime.md) · [Cost estimates & controls](./docs/cost_estimates.md) · [Why Google Cloud](./docs/why_google_cloud.md) · [FAQ](./docs/faq.md) · [Glossary](./docs/glossary.md) · [Documentation map](./docs/README.md)
 - **Reference:** [Compute runtimes](./docs/runtimes_reference.md) · [Configuration](./docs/configuration_reference.md) · [Models & ensembles](./docs/models_reference.md) · [Evaluation metrics](./docs/metrics_reference.md) · [Output schemas & views](./docs/output_schemas.md)
 - **Operate & extend:** [Python SDK (`Forecaster`)](./docs/using_the_sdk.md) · [Running & reviewing](./docs/running_and_reviewing.md) · [Operations & repair](./docs/operations.md) · [Quota & 100k scale](./docs/quota_and_scale.md) · [System validation ledger](./docs/validation.md) · [API reference](https://statmike.github.io/scale-forecasting/api/)
 

@@ -1,4 +1,4 @@
-# Smoke Testing Guide
+# Smoke testing guide
 
 A **smoke test** is a small, end-to-end live run (20–100 time series) that verifies a specific runtime, hardware, backtesting, HPO, feature-engineering, or ensembling combination against live Google Cloud infrastructure.
 

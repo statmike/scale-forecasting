@@ -121,6 +121,29 @@ def test_the_notebook_set_is_the_one_the_ledger_tracks() -> None:
     assert len(_NOTEBOOKS) >= 11, [p.name for p in _NOTEBOOKS]
 
 
+@pytest.mark.parametrize("path", _NOTEBOOKS, ids=[p.stem for p in _NOTEBOOKS])
+def test_notebook_at_a_glance_and_closing_cells(path: Path) -> None:
+    """Every notebook opens with an 'At a glance' table and closes with a 'Where next' cell."""
+    nb = json.loads(path.read_text(encoding="utf-8"))
+    cells = nb.get("cells", [])
+    assert len(cells) >= 3, f"{path.name}: expected at least 3 cells"
+
+    intro_src = "".join(cells[1].get("source", []))
+    for required in (
+        "### At a glance",
+        "**Learning outcomes**",
+        "**Prerequisites**",
+        "**Estimated time**",
+        "**Estimated run cost**",
+        "**Ongoing cost**",
+    ):
+        assert required in intro_src, f"{path.name} cell 1 missing {required!r}"
+
+    closing_src = "".join(cells[-1].get("source", []))
+    assert cells[-1].get("cell_type") == "markdown", f"{path.name} final cell must be markdown"
+    assert "## Where next" in closing_src, f"{path.name} final cell missing '## Where next'"
+
+
 @pytest.mark.parametrize(
     ("label", "sample", "should_match"),
     [

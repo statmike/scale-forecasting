@@ -155,6 +155,8 @@ uv run python -m scale_forecasting.registry.ops reap-clusters       # preview: w
 uv run python -m scale_forecasting.registry.ops reap-clusters --yes
 ```
 
+If you previously enabled **Cloud Composer 3** (`create_composer = true`, estimated `~\$300–\$400/month` continuous billing while active) and later turned it off (`create_composer = false`), note that Google Cloud does **not** automatically delete the Composer environment's Cloud Storage bucket (`gs://<region>-<env-name>-<hash>-bucket`). List and remove any retired Composer buckets when you no longer need their DAGs or task logs (`gcloud storage buckets list` / `gcloud storage rm -r gs://<composer-bucket>`). See [Cost estimates & controls](./cost_estimates.md) for all ongoing-cost switches.
+
 The full verb set (`init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` /
 `reap-clusters` / `snapshot` / `export`) and the
 matching `Registry` SDK class are documented in

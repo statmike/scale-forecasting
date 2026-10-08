@@ -1,4 +1,4 @@
-# System Validation Ledger
+# System validation ledger
 
 **What has been proven on live Google Cloud infrastructure, and on which architecture.**
 

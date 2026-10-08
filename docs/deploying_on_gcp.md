@@ -152,8 +152,8 @@ toggles (all default to the greenfield/quickstart behavior).
 | `enable_apis` | `true` | An admin already enabled the APIs | Nothing — just ensure they're on |
 | `create_service_accounts` | `true` | You bring your own SAs | `runner_sa_email` + `compute_sa_email` (and your admin owns their grants) |
 | `create_network` | `true` | Your org already manages a VPC | `subnetwork_uri` — a subnet with **Private Google Access** + an **internal-ingress** firewall rule |
-| `create_composer` | `false` | You want scheduled DAG runs | Nothing — flip **on** (starts the ~$300–400/mo meter); flip off to stop it |
-| `create_gke` | `false` | You want a standing GKE cluster (`SF_GKE_CLUSTER`) | Nothing — flip **on** (node pools scale to `0` at rest) |
+| `create_composer` | `false` | You want scheduled DAG runs | Nothing — flip **on** (starts the estimated `~\$300–\$400/mo` continuous Composer 3 meter); flip off to stop it, and delete the Composer-created `<region>-<env>-*-bucket` in Cloud Storage if you no longer need its DAGs/logs |
+| `create_gke` | `false` | You want a standing GKE cluster (`SF_GKE_CLUSTER`) | Nothing — flip **on** (node pools scale to `0` at rest; GKE cluster management fee applies while enabled — see [Cost estimates & controls](./cost_estimates.md)) |
 | `build_image` | `true` | You build/push the runtime image yourself (CI / air-gapped) | Push your image to the `seed_image_tag` before running compute |
 | `run_seed` | `true` | You'll bring your own source table (skip the example data) | Flip **off**; then point runs at your own `source_series_*` table |
 | `create_project` *(bootstrap)* | `true` | Your org pre-creates projects | An existing `project_id` |
