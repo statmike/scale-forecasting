@@ -11,7 +11,7 @@
 export UV_NO_CONFIG := 1
 EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra gcp --extra models --extra ray --format requirements-txt
 
-.PHONY: lock lock-check sync test typecheck ci-offline hooks docs composer-sync
+.PHONY: lock lock-check sync test typecheck ci-offline hooks docs social-card composer-sync
 
 ## lock: re-resolve uv.lock from pyproject.toml and regenerate docker/requirements.txt from it.
 ## Run this after editing dependencies in pyproject.toml, then commit both files.
@@ -103,6 +103,10 @@ format:
 ## docs: build the documentation site (strict — fails on any broken nav/link/xref).
 docs:
 	uv run --group docs mkdocs build --strict
+
+## social-card: render docs/assets/social_card.png (1280x640) from docs/assets/social_card.html via headless Chrome.
+social-card:
+	google-chrome --headless=new --disable-gpu --hide-scrollbars --window-size=1280,640 --virtual-time-budget=8000 --screenshot=docs/assets/social_card.png "file://$(CURDIR)/docs/assets/social_card.html"
 
 ## composer-sync: deliver THIS working tree's src/ to the Composer workers (the code-delivery step).
 ## GitHub is only the origin — you pull/fork/modify locally, and this ships your src/ to the env so a

@@ -1,6 +1,7 @@
 site_name: scale-forecasting
+site_url: https://statmike.github.io/scale-forecasting/
 site_description: >-
-  Massively-parallel time-series forecasting on Google Cloud — Spark, Ray,
+  Enterprise time-series forecasting on Google Cloud — Spark, Ray,
   Vertex AI, GKE, Compute Engine, and BigQuery, one config away.
 repo_url: https://github.com/statmike/scale-forecasting
 repo_name: statmike/scale-forecasting
@@ -9,9 +10,12 @@ docs_dir: docs
 
 # The *_template.py files are copy-me starting points, not pages — keep them in the repo (linked
 # to GitHub) but out of the built site so mkdocs-jupyter doesn't render them as notebooks.
+# assets/README.md documents the static asset generator and is not a site navigation page.
 exclude_docs: |
   model_template.py
   metric_template.py
+  assets/README.md
+  assets/social_card.html
 
 theme:
   name: material
