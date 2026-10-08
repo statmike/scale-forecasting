@@ -6,12 +6,18 @@ this repo on every push to `main`: **https://statmike.github.io/scale-forecastin
 
 ```mermaid
 flowchart LR
-    Deploy["1. Deploy<br/>Terraform & GCP Setup"] --> Operate["2. Operate<br/>Submit, Monitor, Review"]
-    Operate --> Demo["3. Demo<br/>Workshop & Notebooks"]
-    Operate --> SDK["4. SDK & API<br/>Forecaster, Registry, Direct"]
-    Operate --> Ref["5. Reference<br/>Architecture, Config, Backtest, Quota"]
-    Ref --> Val["6. System Validation<br/>Live GCP Ledger & Smokes"]
+    Start["1. Start here<br/>Overview & Getting Started"] --> Deploy["2. Deploy<br/>Terraform & GCP Setup"]
+    Deploy --> Operate["3. Operate<br/>Submit, Monitor, Review"]
+    Operate --> Demo["4. Demo<br/>Workshop & Notebooks"]
+    Operate --> SDK["5. SDK & API<br/>Forecaster, Registry, Direct"]
+    Operate --> Ref["6. Reference<br/>Architecture, Config, Backtest, Quota"]
+    Ref --> Val["7. System Validation<br/>Live GCP Ledger & Smokes"]
 ```
+
+## Start here
+Understand what the platform does, fit your first forecast locally in 5 minutes, and launch your first cloud run.
+- [overview.md](./overview.md) — **Platform overview**: conceptual tour of the 7 Google Cloud runtimes, 34 models, 21 evaluation metrics, per-family DAG, and 5 analytical SQL views.
+- [getting_started.md](./getting_started.md) — **Getting started**: install the offline layer or `[gcp]` extra, run the local playground, validate a `RunConfig` with `dry_run()`, connect to a Google Cloud deployment, and read the leaderboard.
 
 ## Deploy
 Stand the platform up in a Google Cloud project.

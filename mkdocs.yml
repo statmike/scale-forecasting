@@ -83,6 +83,9 @@ markdown_extensions:
 
 nav:
   - Home: README.md
+  - Start here:
+      - Platform overview: overview.md
+      - Getting started: getting_started.md
   - Deploy:
       - Deploying on GCP: deploying_on_gcp.md
   - Operate:
