@@ -25,12 +25,15 @@ updates:
     groups:
       python:
         patterns: ["*"]
-    # Ceilings pyproject.toml sets on purpose (each one is explained next to its pin): pandas <3 and
-    # numpy <2 for neuralprophet, torch on the 2.13 line for the CUDA 12.6 build the T4 hosts need,
-    # dataproc-spark-connect <1.0 for Dataproc runtime 2.3 parity. Dependabot must not propose
-    # widening them; a human raises a ceiling when the reason behind it is gone.
+    # Ceilings pyproject.toml sets on purpose (each one is explained next to its pin): pandas <3
+    # (and pandas-stubs <3, whose majors track pandas) and numpy <2 for neuralprophet, torch on the
+    # 2.13 line for the CUDA 12.6 build the T4 hosts need, dataproc-spark-connect <1.0 for Dataproc
+    # runtime 2.3 parity. Dependabot must not propose widening them; a human raises a ceiling when
+    # the reason behind it is gone.
     ignore:
       - dependency-name: pandas
+        update-types: ["version-update:semver-major"]
+      - dependency-name: pandas-stubs
         update-types: ["version-update:semver-major"]
       - dependency-name: numpy
         update-types: ["version-update:semver-major"]

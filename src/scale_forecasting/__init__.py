@@ -26,6 +26,7 @@ import cost; touching ``RunConfig``/``Settings`` does not. ``test_sdk.py`` guard
 
 from __future__ import annotations
 
+from importlib.metadata import version as _pkg_version
 from typing import TYPE_CHECKING
 
 # Eager (light): the config contract, infra identity, and the error hierarchy. None of these pull
@@ -48,7 +49,7 @@ from .errors import (
 )
 from .settings import Settings
 
-__version__ = "0.1.0"
+__version__: str = _pkg_version("scale-forecasting")
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the

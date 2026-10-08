@@ -1,0 +1,97 @@
+name: release
+
+# Triggered when a version tag (`v*`, e.g., `v1.0.0rc1` or `v1.0.0`) is pushed:
+#   1. build          — verifies the git tag matches `pyproject.toml`, builds sdist + wheel with
+#                       `uv build`, smoke-tests the wheel in a clean virtualenv, and uploads `dist/`.
+#   2. publish-testpypi — on release-candidate tags (`v*rc*`), publishes to TestPyPI via OIDC
+#                         trusted publishing under the `testpypi` GitHub environment.
+#   3. publish        — on final release tags (`v*` without `rc`), publishes to PyPI via OIDC
+#                       trusted publishing (with PEP 740 attestations) under the protected `pypi`
+#                       GitHub environment.
+#   4. github-release — after PyPI publish succeeds, creates the GitHub Release with the built
+#                       distributions attached.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: tag must equal the project version
+        run: test "v$(uv version --short)" = "$GITHUB_REF_NAME"
+      - name: build sdist and wheel
+        run: uv build
+      - name: install the wheel in a clean venv and smoke-test import + playground
+        run: |
+          uv venv --python 3.11 /tmp/clean
+          uv pip install --python /tmp/clean/bin/python dist/*.whl
+          /tmp/clean/bin/python - <<'EOF'
+          import os, scale_forecasting as sf
+          expected = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          assert sf.__version__ == expected, f"wheel version {sf.__version__!r} != tag {expected!r}"
+          print(f"scale-forecasting {sf.__version__} verified")
+          EOF
+          /tmp/clean/bin/python -m scale_forecasting.playground --list >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-testpypi:
+    needs: build
+    if: contains(github.ref_name, 'rc')
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/scale-forecasting
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish:
+    needs: build
+    if: "!contains(github.ref_name, 'rc')"
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/scale-forecasting
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    if: "!contains(github.ref_name, 'rc')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

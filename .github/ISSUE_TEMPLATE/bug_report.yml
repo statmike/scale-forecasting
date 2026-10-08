@@ -1,0 +1,48 @@
+name: Bug Report
+description: Report a bug in a forecasting model, metric, cloud runtime, or the Python SDK.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue. **Never include service account keys, credentials, email addresses, internal hostnames, or proprietary data in issue reports.**
+  - type: input
+    id: version
+    attributes:
+      label: scale-forecasting version & Python environment
+      description: Output of `python -c "import scale_forecasting as sf; print(sf.__version__)"`
+      placeholder: "1.0.0 (Python 3.11)"
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Compute runtime
+      options:
+        - Local offline (playground / dry_run / worker)
+        - spark (Dataproc Serverless / Cluster / Connect)
+        - ray (Vertex AI Ray / Ray on GKE)
+        - vertex (Vertex AI CustomJob)
+        - gce (Compute Engine Single-VM)
+        - gke (GKE Indexed Job)
+        - vertex_automl (Tabular Workflow / AutoML Training Job)
+        - bigquery (ARIMA_PLUS / AI.FORECAST)
+        - Terraform / Docker / Packaging
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Minimal RunConfig JSON or reproduction steps
+      description: Provide a minimal, sanitized `RunConfig` JSON or Python snippet that reproduces the problem.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior & traceback
+      description: What happened, including any error message or `run_jobs.failure_reason` output?
+    validations:
+      required: true

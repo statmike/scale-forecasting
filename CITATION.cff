@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+title: "scale-forecasting: Enterprise Time-Series Forecasting on Google Cloud"
+message: "If you use scale-forecasting in your work or research, please cite it using the metadata below."
+type: software
+authors:
+  - name: "scale-forecasting contributors"
+repository-code: "https://github.com/statmike/scale-forecasting"
+url: "https://statmike.github.io/scale-forecasting/"
+license: Apache-2.0
+version: "1.0.0"
+date-released: "2026-10-08"
+keywords:
+  - time-series
+  - forecasting
+  - google-cloud
+  - bigquery
+  - vertex-ai
+  - dataproc
+  - spark
+  - ray
+  - gke
+  - automl
+  - conformal-prediction
+  - hierarchical-reconciliation

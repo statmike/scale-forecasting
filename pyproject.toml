@@ -1,6 +1,6 @@
 [project]
 name = "scale-forecasting"
-version = "0.1.0"
+version = "1.0.0"
 description = "Time-series forecasting on Google Cloud at any scale: one JSON configuration runs every model family on Dataproc Serverless, Ray, Vertex AI, GKE, Compute Engine, or BigQuery ML and writes forecasts and leaderboards back to BigQuery."
 readme = "README.md"
 # 3.11 is the single tested/supported version everywhere: Vertex Ray client↔cluster parity at 2.47,
@@ -10,6 +10,32 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "scale-forecasting contributors" }]
+keywords = [
+    "time-series",
+    "forecasting",
+    "google-cloud",
+    "bigquery",
+    "vertex-ai",
+    "dataproc",
+    "spark",
+    "ray",
+    "gke",
+    "automl",
+    "timesfm",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
 
 # Core dependencies: the pure forecasting layer — config, the 34 model plugins' shared base, the 21
 # metrics, features, backtests, calibration, reconciliation, ensembling, HPO, the worker, and the
@@ -39,6 +65,13 @@ dependencies = [
     "optuna>=3.6",
     "holidays>=0.50",
 ]
+
+[project.urls]
+Homepage = "https://github.com/statmike/scale-forecasting"
+Documentation = "https://statmike.github.io/scale-forecasting/"
+Repository = "https://github.com/statmike/scale-forecasting"
+Changelog = "https://github.com/statmike/scale-forecasting/blob/main/CHANGELOG.md"
+Issues = "https://github.com/statmike/scale-forecasting/issues"
 
 [project.optional-dependencies]
 # Google Cloud clients — every one the package imports, the way `apache-beam[gcp]` means "every
@@ -238,6 +271,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scale_forecasting"]
+exclude = ["src/scale_forecasting/**/README.md"]
 
 [tool.ruff]
 line-length = 100
