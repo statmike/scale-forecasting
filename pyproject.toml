@@ -176,7 +176,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
-    "pandas-stubs>=2.2,<3",
+    "pandas-stubs>=2.2,<4",
     # Parses the executed notebooks the acceptance harness downloads, to scan for cell errors
     # (scale_forecasting.notebook_acceptance). Dev-only: the harness is a test/CI tool, not part of
     # the shipped forecasting runtime, so it doesn't belong in core deps.

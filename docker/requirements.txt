@@ -15,11 +15,11 @@ aiohttp-cors==0.8.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin')
     # via ray
 aiosignal==1.4.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via aiohttp
-alembic==1.18.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+alembic==1.20.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via optuna
 annotated-types==0.8.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via pydantic
-anyio==4.14.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+anyio==4.15.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-genai
     #   httpx
@@ -40,16 +40,16 @@ certifi==2026.7.22 ; (platform_machine == 'arm64' and sys_platform == 'darwin') 
     #   kfp-server-api
     #   kubernetes
     #   requests
-cffi==2.1.0 ; (platform_machine == 'arm64' and platform_python_implementation != 'PyPy' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and platform_python_implementation != 'PyPy' and sys_platform == 'linux')
+cffi==2.1.1 ; (platform_machine == 'arm64' and platform_python_implementation != 'PyPy' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and platform_python_implementation != 'PyPy' and sys_platform == 'linux')
     # via cryptography
-charset-normalizer==3.4.9 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+charset-normalizer==3.5.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via requests
-click==8.4.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+click==8.5.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   click-option-group
     #   kfp
     #   ray
-click-option-group==0.5.7 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+click-option-group==0.5.9 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via kfp
 cloudpickle==3.1.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via statsforecast
@@ -65,17 +65,17 @@ coreforecast==0.0.18 ; (platform_machine == 'arm64' and sys_platform == 'darwin'
     # via
     #   neuralforecast
     #   statsforecast
-cryptography==49.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+cryptography==50.0.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-auth
-cuda-bindings==12.9.7 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+cuda-bindings==13.4.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch
-cuda-pathfinder==1.6.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+cuda-pathfinder==1.8.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-bindings
-cuda-toolkit==12.6.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+cuda-toolkit==13.4.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch
 cycler==0.12.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via matplotlib
-db-dtypes==1.7.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+db-dtypes==1.7.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
 distlib==0.4.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via virtualenv
@@ -85,19 +85,19 @@ docstring-parser==0.18.0 ; (platform_machine == 'arm64' and sys_platform == 'dar
     # via
     #   google-cloud-aiplatform
     #   kfp
-filelock==3.32.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+filelock==4.0.11 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   python-discovery
     #   ray
     #   torch
     #   virtualenv
-fonttools==4.63.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+fonttools==4.66.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via matplotlib
 frozenlist==1.8.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2026.6.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+fsspec==2026.9.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   neuralforecast
     #   pytorch-lightning
@@ -106,7 +106,7 @@ fsspec==2026.6.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or
     #   triad
 fugue==0.9.7 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via statsforecast
-google-api-core==2.33.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-api-core==2.40.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-aiplatform
     #   google-cloud-bigquery
@@ -119,7 +119,7 @@ google-api-core==2.33.0 ; (platform_machine == 'arm64' and sys_platform == 'darw
     #   kfp
     #   opencensus
     #   scale-forecasting
-google-auth==2.56.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-auth==2.59.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-api-core
     #   google-cloud-aiplatform
@@ -137,51 +137,51 @@ google-cloud-aiplatform==1.162.0 ; (platform_machine == 'arm64' and sys_platform
     # via
     #   google-cloud-pipeline-components
     #   scale-forecasting
-google-cloud-bigquery==3.42.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-cloud-bigquery==3.46.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-aiplatform
     #   scale-forecasting
-google-cloud-bigquery-storage==2.39.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-cloud-bigquery-storage==2.42.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
-google-cloud-core==2.6.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-cloud-core==2.8.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-bigquery
     #   google-cloud-storage
-google-cloud-dataproc==5.30.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-cloud-dataproc==5.31.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
 google-cloud-pipeline-components==2.22.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
-google-cloud-resource-manager==1.18.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-cloud-resource-manager==1.19.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-cloud-aiplatform
-google-cloud-storage==3.13.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-cloud-storage==3.16.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-aiplatform
     #   kfp
     #   scale-forecasting
-google-crc32c==1.8.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-crc32c==1.9.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-storage
     #   google-resumable-media
-google-genai==2.14.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-genai==2.28.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-cloud-aiplatform
-google-resumable-media==2.10.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+google-resumable-media==2.11.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-bigquery
     #   google-cloud-storage
-googleapis-common-protos==1.75.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+googleapis-common-protos==1.75.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-api-core
     #   grpc-google-iam-v1
     #   grpcio-status
 graphviz==0.21 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via catboost
-greenlet==3.5.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+greenlet==3.5.6 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via sqlalchemy
-grpc-google-iam-v1==0.14.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+grpc-google-iam-v1==0.14.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-dataproc
     #   google-cloud-resource-manager
-grpcio==1.83.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+grpcio==1.84.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-api-core
     #   google-cloud-bigquery-storage
@@ -192,11 +192,11 @@ grpcio==1.83.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (
     #   grpcio-status
     #   ray
     #   tensorboard
-grpcio-status==1.83.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+grpcio-status==1.84.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-api-core
 h11==0.16.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via httpcore
-holidays==0.101 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+holidays==0.105 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   neuralprophet
     #   prophet
@@ -205,7 +205,7 @@ httpcore==1.0.9 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or 
     # via httpx
 httpx==0.28.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-genai
-idna==3.18 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+idna==3.20 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   anyio
     #   httpx
@@ -219,23 +219,23 @@ jinja2==3.1.6 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (p
     # via
     #   google-cloud-pipeline-components
     #   torch
-joblib==1.5.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+joblib==1.6.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scikit-learn
 jsonschema==4.26.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
 jsonschema-specifications==2025.9.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via jsonschema
-kaleido==0.2.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+kaleido==1.4.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via neuralprophet
-kfp==2.16.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+kfp==2.17.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-cloud-pipeline-components
 kfp-pipeline-spec==2.17.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via kfp
 kfp-server-api==2.17.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via kfp
-kiwisolver==1.5.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+kiwisolver==1.5.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via matplotlib
-kubernetes==30.1.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+kubernetes==36.0.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via kfp
 lightgbm==4.7.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
@@ -243,30 +243,30 @@ lightning-utilities==0.15.3 ; (platform_machine == 'arm64' and sys_platform == '
     # via
     #   pytorch-lightning
     #   torchmetrics
-mako==1.3.12 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+mako==1.4.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via alembic
-markdown==3.10.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+markdown==3.11 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via tensorboard
-markupsafe==3.0.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+markupsafe==3.0.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   jinja2
     #   mako
     #   werkzeug
-matplotlib==3.11.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+matplotlib==3.11.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   captum
     #   catboost
     #   neuralprophet
     #   prophet
-mpmath==1.3.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+mpmath==1.4.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via sympy
-msgpack==1.2.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+msgpack==1.2.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
-multidict==6.7.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+multidict==7.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   aiohttp
     #   yarl
-narwhals==2.24.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+narwhals==2.26.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   lightgbm
     #   plotly
@@ -306,46 +306,46 @@ numpy==1.26.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (p
     #   triad
     #   utilsforecast
     #   xgboost
-nvidia-cublas-cu12==12.6.4.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cublas-cu12==12.9.2.10 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   cuda-toolkit
     #   nvidia-cudnn-cu12
     #   nvidia-cusolver-cu12
-nvidia-cuda-cupti-cu12==12.6.80 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cuda-cupti-cu12==12.9.79 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
-nvidia-cuda-nvrtc-cu12==12.6.85 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cuda-nvrtc-cu12==12.9.86 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
-nvidia-cuda-runtime-cu12==12.6.77 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cuda-runtime-cu12==12.9.79 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
-nvidia-cudnn-cu12==9.10.2.21 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cudnn-cu12==9.27.0.42 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch
-nvidia-cufft-cu12==11.3.0.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cufft-cu12==11.4.1.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
-nvidia-cufile-cu12==1.11.1.6 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cufile-cu12==1.14.1.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
-nvidia-curand-cu12==10.3.7.77 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-curand-cu12==10.3.10.19 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
-nvidia-cusolver-cu12==11.7.1.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cusolver-cu12==11.7.5.82 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
-nvidia-cusparse-cu12==12.5.4.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cusparse-cu12==12.5.10.65 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   cuda-toolkit
     #   nvidia-cusolver-cu12
-nvidia-cusparselt-cu12==0.7.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-cusparselt-cu12==0.8.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch
-nvidia-nccl-cu12==2.29.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-nccl-cu12==2.32.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   torch
     #   xgboost
-nvidia-nvjitlink-cu12==12.6.85 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-nvjitlink-cu12==12.9.86 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   cuda-toolkit
     #   nvidia-cufft-cu12
     #   nvidia-cusolver-cu12
     #   nvidia-cusparse-cu12
-nvidia-nvshmem-cu12==3.4.5 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-nvshmem-cu12==3.8.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch
-nvidia-nvtx-cu12==12.6.77 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+nvidia-nvtx-cu12==12.9.79 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via cuda-toolkit
 oauthlib==4.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
@@ -355,26 +355,26 @@ opencensus==0.11.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') 
     # via ray
 opencensus-context==0.1.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via opencensus
-opentelemetry-api==1.44.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+opentelemetry-api==1.45.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   opentelemetry-exporter-prometheus
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-prometheus==0.65b0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+opentelemetry-exporter-prometheus==0.66b0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
-opentelemetry-proto==1.44.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+opentelemetry-proto==1.45.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
-opentelemetry-sdk==1.44.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+opentelemetry-sdk==1.45.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   opentelemetry-exporter-prometheus
     #   ray
-opentelemetry-semantic-conventions==0.65b0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+opentelemetry-semantic-conventions==0.66b0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via opentelemetry-sdk
-optuna==4.9.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+optuna==5.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   neuralforecast
     #   scale-forecasting
-packaging==26.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+packaging==26.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   captum
     #   db-dtypes
@@ -406,17 +406,17 @@ pandas==2.3.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (p
     #   statsmodels
     #   triad
     #   utilsforecast
-patsy==1.0.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+patsy==1.0.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via statsmodels
 pillow==12.3.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   matplotlib
     #   tensorboard
-platformdirs==4.11.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+platformdirs==4.12.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   python-discovery
     #   virtualenv
-plotly==6.9.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+plotly==7.1.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   catboost
     #   neuralprophet
@@ -424,13 +424,13 @@ prometheus-client==0.26.0 ; (platform_machine == 'arm64' and sys_platform == 'da
     # via
     #   opentelemetry-exporter-prometheus
     #   ray
-propcache==0.5.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+propcache==0.5.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   aiohttp
     #   yarl
-prophet==1.3.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+prophet==1.4.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
-proto-plus==1.28.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+proto-plus==1.29.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-api-core
     #   google-cloud-aiplatform
@@ -457,7 +457,7 @@ protobuf==6.33.6 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or
     #   tensorboardx
 py-spy==0.4.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
-pyarrow==25.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+pyarrow==25.0.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   db-dtypes
     #   ray
@@ -469,15 +469,15 @@ pyasn1-modules==0.4.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin
     # via google-auth
 pycparser==3.0 ; (implementation_name != 'PyPy' and platform_machine == 'arm64' and platform_python_implementation != 'PyPy' and sys_platform == 'darwin') or (implementation_name != 'PyPy' and platform_machine == 'x86_64' and platform_python_implementation != 'PyPy' and sys_platform == 'linux')
     # via cffi
-pydantic==2.13.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+pydantic==2.13.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   google-cloud-aiplatform
     #   google-genai
     #   ray
     #   scale-forecasting
-pydantic-core==2.46.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+pydantic-core==2.49.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via pydantic
-pyparsing==3.3.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+pyparsing==3.3.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via matplotlib
 python-dateutil==2.9.0.post0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
@@ -487,13 +487,13 @@ python-dateutil==2.9.0.post0 ; (platform_machine == 'arm64' and sys_platform == 
     #   kubernetes
     #   matplotlib
     #   pandas
-python-discovery==1.5.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+python-discovery==1.6.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via virtualenv
-pytorch-lightning==2.5.6 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+pytorch-lightning==2.6.6 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   neuralforecast
     #   neuralprophet
-pytz==2026.3.post1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+pytz==2026.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via pandas
 pyyaml==6.0.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
@@ -525,11 +525,11 @@ requests-oauthlib==2.0.0 ; (platform_machine == 'arm64' and sys_platform == 'dar
     # via kubernetes
 requests-toolbelt==1.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via kfp
-rpds-py==2026.6.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+rpds-py==2026.9.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   jsonschema
     #   referencing
-scikit-learn==1.9.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+scikit-learn==1.9.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
 scipy==1.17.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
@@ -541,7 +541,7 @@ scipy==1.17.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (p
     #   statsforecast
     #   statsmodels
     #   xgboost
-setuptools==83.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+setuptools==84.0.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   tensorboard
     #   torch
@@ -553,11 +553,11 @@ six==1.17.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (pla
     #   opencensus
     #   python-dateutil
     #   triad
-smart-open==8.0.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+smart-open==8.0.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
 sniffio==1.3.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-genai
-sqlalchemy==2.0.51 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+sqlalchemy==2.1.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   alembic
     #   optuna
@@ -565,7 +565,7 @@ stanio==0.5.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (p
     # via cmdstanpy
 statsforecast==2.1.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
-statsmodels==0.14.6 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+statsmodels==0.15.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   scale-forecasting
     #   statsforecast
@@ -581,7 +581,7 @@ tensorboard-data-server==0.7.2 ; (platform_machine == 'arm64' and sys_platform =
     # via tensorboard
 tensorboardx==2.6.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
-threadpoolctl==3.6.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+threadpoolctl==3.7.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   scale-forecasting
     #   scikit-learn
@@ -606,9 +606,9 @@ torchmetrics==1.9.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin')
     # via
     #   neuralprophet
     #   pytorch-lightning
-tornado==6.5.8 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+tornado==6.5.10 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via neuralforecast
-tqdm==4.69.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+tqdm==4.70.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   captum
     #   cmdstanpy
@@ -620,7 +620,7 @@ triad==1.0.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (pl
     # via
     #   adagio
     #   fugue
-triton==3.7.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+triton==3.8.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch
 typing-extensions==4.16.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
@@ -643,11 +643,11 @@ typing-extensions==4.16.0 ; (platform_machine == 'arm64' and sys_platform == 'da
     #   sqlalchemy
     #   torch
     #   typing-inspection
-typing-inspection==0.4.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+typing-inspection==0.4.4 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via pydantic
-tzdata==2026.3 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+tzdata==2026.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via pandas
-urllib3==2.7.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+urllib3==2.8.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
     #   kfp
     #   kfp-server-api
@@ -657,17 +657,17 @@ utilsforecast==0.2.16 ; (platform_machine == 'arm64' and sys_platform == 'darwin
     # via
     #   neuralforecast
     #   statsforecast
-virtualenv==21.7.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+virtualenv==21.14.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via ray
 websocket-client==1.9.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via kubernetes
-websockets==16.1.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+websockets==17.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via google-genai
-werkzeug==3.1.8 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+werkzeug==3.1.9 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via tensorboard
-wrapt==2.2.2 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+wrapt==2.5.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via smart-open
 xgboost==3.2.0 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via scale-forecasting
-yarl==1.24.5 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
+yarl==1.25.1 ; (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via aiohttp
