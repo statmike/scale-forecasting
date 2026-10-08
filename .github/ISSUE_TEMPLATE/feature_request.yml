@@ -1,0 +1,32 @@
+name: Feature Request
+description: Propose a new forecasting model, evaluation metric, runtime enhancement, or SDK capability.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Area
+      options:
+        - Forecasting model plugin (src/scale_forecasting/models/)
+        - Evaluation metric plugin (src/scale_forecasting/metrics/)
+        - Cloud compute runtime or sizing (src/scale_forecasting/engines/)
+        - BigQuery registry, views, or reconciliation
+        - Python SDK, CLI, or notebooks
+        - Documentation or Terraform deployment
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What forecasting workflow or operational requirement does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed design or configuration shape
+      description: How should this be expressed in `RunConfig` or the Python SDK?
+    validations:
+      required: true

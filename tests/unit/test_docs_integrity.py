@@ -74,7 +74,14 @@ _FORBIDDEN_DOC_TOKENS = (
 
 def _all_markdown_files() -> list[Path]:
     files: list[Path] = []
-    for top in ("README.md", "AGENTS.md"):
+    for top in (
+        "README.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+        "CHANGELOG.md",
+    ):
         p = _REPO_ROOT / top
         if p.exists():
             files.append(p)
@@ -508,3 +515,29 @@ def test_social_card_and_site_url() -> None:
     assert "site_url: https://statmike.github.io/scale-forecasting/" in mkdocs_yml, (
         "mkdocs.yml missing canonical site_url"
     )
+
+
+def test_governance_and_release_kit_files_exist() -> None:
+    """Verify governance kit, CHANGELOG, CITATION.cff, issue/PR templates, and release workflow."""
+    required_files = (
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+        "CHANGELOG.md",
+        "CITATION.cff",
+        ".github/CODEOWNERS",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        ".github/ISSUE_TEMPLATE/feature_request.yml",
+        ".github/workflows/release.yml",
+    )
+    missing = [rel for rel in required_files if not (_REPO_ROOT / rel).is_file()]
+    assert not missing, f"Missing governance/release files: {missing}"
+
+    changelog = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## [1.0.0]" in changelog, "CHANGELOG.md missing ## [1.0.0] section"
+
+    citation = (_REPO_ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    assert "cff-version: 1.2.0" in citation, "CITATION.cff missing cff-version: 1.2.0"
+    assert 'version: "1.0.0"' in citation, 'CITATION.cff missing version: "1.0.0"'

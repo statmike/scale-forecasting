@@ -210,7 +210,19 @@ def test_coverage_floor_is_declared_once_in_pyproject_and_is_a_ratchet() -> None
 
 def test_documented_install_lines_name_declared_extras() -> None:
     declared = set(_extras())
-    pages = [ROOT / "README.md", ROOT / "AGENTS.md", *(ROOT / "docs").glob("*.md")]
+    root_md = [
+        ROOT / name
+        for name in (
+            "README.md",
+            "AGENTS.md",
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+            "SECURITY.md",
+            "CHANGELOG.md",
+        )
+        if (ROOT / name).exists()
+    ]
+    pages = [*root_md, *(ROOT / "docs").glob("*.md")]
     for tree in ("configs", "docker", "notebooks", "src", "terraform", "tests"):
         pages += list((ROOT / tree).rglob("README.md"))
     bad: dict[str, set[str]] = {}
@@ -223,6 +235,17 @@ def test_documented_install_lines_name_declared_extras() -> None:
         if undeclared := named - declared:
             bad[str(page.relative_to(ROOT))] = undeclared
     assert not bad, f"docs name extras pyproject does not declare: {bad}"
+
+
+def test_pypi_metadata_and_urls_declared() -> None:
+    proj = _project()["project"]
+    assert proj["version"] == "1.0.0"
+    assert set(proj["urls"]) >= {"Homepage", "Documentation", "Repository", "Changelog", "Issues"}
+    classifiers = set(proj["classifiers"])
+    assert "Development Status :: 5 - Production/Stable" in classifiers
+    assert "Programming Language :: Python :: 3.11" in classifiers
+    assert "Typing :: Typed" in classifiers
+    assert {"time-series", "forecasting", "google-cloud", "bigquery"} <= set(proj["keywords"])
 
 
 def _bootstrap_extras(notebook: Path) -> list[str]:

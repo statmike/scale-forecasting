@@ -2,6 +2,7 @@
 
 **Enterprise time-series forecasting on Google Cloud — from 10 series on a laptop to 100,000+ in BigQuery, with one JSON configuration and no idle compute.**
 
+[![PyPI](https://img.shields.io/pypi/v/scale-forecasting?style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/scale-forecasting/)
 [![Colab Enterprise](https://img.shields.io/badge/Colab%20Enterprise-Launch%20Playground-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://console.cloud.google.com/vertex-ai/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2Fstatmike%2Fscale-forecasting%2Fmain%2Fnotebooks%2F00_model_playground.ipynb)
 [![Documentation](https://img.shields.io/badge/Docs-Documentation%20Site-0F9D58?style=for-the-badge&logo=materialformkdocs&logoColor=white)](https://statmike.github.io/scale-forecasting/)
 [![Getting Started](https://img.shields.io/badge/Start%20Here-Getting%20Started-EA4335?style=for-the-badge&logo=readthedocs&logoColor=white)](./docs/getting_started.md)

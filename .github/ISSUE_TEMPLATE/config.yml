@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Report
+    url: https://github.com/statmike/scale-forecasting/security/advisories/new
+    about: Report a security vulnerability privately via GitHub Security Advisories.
+  - name: Documentation & Troubleshooting
+    url: https://statmike.github.io/scale-forecasting/troubleshooting/
+    about: Check the documentation site and troubleshooting runbook first.
