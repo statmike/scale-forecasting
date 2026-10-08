@@ -65,7 +65,7 @@ def read_run_summary(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_run_summary failed for run {run_id}: {exc}") from exc
     return dict(rows[0]) if rows else None
 
@@ -93,7 +93,7 @@ def read_leaderboard(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_leaderboard failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -123,7 +123,7 @@ def read_prediction_counts(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_prediction_counts failed for run {run_id}: {exc}") from exc
     return {str(r["model_type"]): int(r["n"]) for r in rows}
 
@@ -179,7 +179,7 @@ def read_cell_groups(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_cell_groups failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -222,7 +222,7 @@ def read_cell_timing(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_cell_timing failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -255,7 +255,7 @@ def read_run_config(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_run_config failed for run {run_id}: {exc}") from exc
     if not rows or rows[0]["raw_config"] is None:
         return None
@@ -297,7 +297,7 @@ def read_progress(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_progress failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -345,7 +345,7 @@ def read_metric_aggregates(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_metric_aggregates failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -385,7 +385,7 @@ def read_cell_metrics(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_cell_metrics failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -440,7 +440,7 @@ def read_arm_comparison(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_arm_comparison failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -482,7 +482,7 @@ def read_coverage_by_step(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_coverage_by_step failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -512,7 +512,7 @@ def read_backtest_coverage(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_backtest_coverage failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -541,7 +541,7 @@ def read_comparable_leaderboard(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_comparable_leaderboard failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -593,7 +593,7 @@ def read_predictions(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_predictions failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -643,7 +643,7 @@ def read_oof(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_oof failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -678,7 +678,7 @@ def read_series_history(
         client = bigquery.Client(project=resolved.project_id)
         try:
             df = client.query(base_sql).result().to_dataframe()
-        except Exception as exc:  # noqa: BLE001 - re-raised with context
+        except Exception as exc:  # re-raised with context
             raise RegistryError(f"read_series_history failed for run {run_id}: {exc}") from exc
         if df.empty:
             return []
@@ -719,7 +719,7 @@ def read_series_history(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_series_history failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -760,7 +760,7 @@ def read_best_params(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_best_params failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -797,7 +797,7 @@ def read_recent_runs(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_recent_runs failed: {exc}") from exc
     return [dict(r) for r in rows]
 
@@ -850,7 +850,7 @@ def read_series_covariates(
                 sql, job_config=bigquery.QueryJobConfig(query_parameters=params)
             ).result()
         ]
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_series_covariates failed for run {run_id}: {exc}") from exc
 
     # When known_future_covariates are configured on the shipped synthetic panel, also fetch
@@ -874,7 +874,7 @@ def read_series_covariates(
                 ).result()
             ]
             rows.extend(fut_rows)
-        except Exception:  # noqa: BLE001, S110 - optional future table
+        except Exception:  # noqa: BLE001 - optional future table
             pass
     return rows
 
@@ -945,6 +945,6 @@ def read_feature_attributions(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_feature_attributions failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]

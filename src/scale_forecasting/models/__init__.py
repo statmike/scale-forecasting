@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 # --- model registration imports (side-effect: each calls register()) -----------
 # One line per model file.
-from . import (  # noqa: E402,F401
+from . import (  # noqa: F401
     auto_arima,
     auto_ces,
     auto_theta,

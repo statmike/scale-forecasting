@@ -736,7 +736,7 @@ def format_duration(seconds: float) -> str:
     """``4512.0`` → ``1h15m`` (pure). Coarse on purpose — these are estimates, not measurements."""
     if seconds < 60:
         return f"{seconds:.0f}s"
-    minutes = int(round(seconds / 60))
+    minutes = round(seconds / 60)
     if minutes < 60:
         return f"{minutes}m"
     return f"{minutes // 60}h{minutes % 60:02d}m"

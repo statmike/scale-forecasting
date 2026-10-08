@@ -47,7 +47,7 @@ def write_job(
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"write_job failed for job {row.get('job_id')}: {exc}") from exc
 
 
@@ -114,7 +114,7 @@ def update_job(
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"update_job failed for job {job_id}: {exc}") from exc
 
 
@@ -142,7 +142,7 @@ def latest_job_attempt(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"latest_job_attempt failed for {run_id}/{family}: {exc}") from exc
     return rows[0]["max_attempt"] if rows and rows[0]["max_attempt"] is not None else None
 
@@ -186,6 +186,6 @@ def read_run_jobs(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_run_jobs failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]

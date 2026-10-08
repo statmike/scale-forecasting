@@ -548,7 +548,7 @@ def _known_run_ids(settings: Settings) -> set[str]:  # pragma: no cover - GCP I/
     client = bigquery.Client(project=settings.project_id)
     try:
         return {str(row["run_id"]) for row in client.query(sql).result()}
-    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+    except Exception as exc:  # re-raised with registry context
         raise RegistryError(
             f"could not read run ids from {settings.registry_dataset_ref}: {exc}"
         ) from exc
@@ -573,7 +573,7 @@ def _statuses(
     client = bigquery.Client(project=settings.project_id)
     try:
         found = {str(r["run_id"]): r["status"] for r in client.query(sql, job_config).result()}
-    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+    except Exception as exc:  # re-raised with registry context
         raise RegistryError(
             f"could not read run statuses from {settings.registry_dataset_ref}: {exc}"
         ) from exc
@@ -603,7 +603,7 @@ def all_header_statuses(
     client = bigquery.Client(project=settings.project_id)
     try:
         return {str(r["run_id"]): r["status"] for r in client.query(sql).result()}
-    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+    except Exception as exc:  # re-raised with registry context
         raise RegistryError(
             f"could not read run statuses from {settings.registry_dataset_ref}: {exc}"
         ) from exc
@@ -676,7 +676,7 @@ def init(
         for name, statement in statements.items():
             try:
                 client.query(statement).result()
-            except Exception as exc:  # noqa: BLE001 - re-raised with table context
+            except Exception as exc:  # re-raised with table context
                 raise RegistryError(f"init failed {stage} {name}: {exc}") from exc
     ensure_views(settings=resolved)
     _log.info("registry ready: %s", resolved.registry_dataset_ref)
@@ -826,7 +826,7 @@ def drop_run(
     for name, statement in render_delete_rows(resolved.registry_dataset_ref).items():
         try:
             client.query(statement, job_config=job_config).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with table context
+        except Exception as exc:  # re-raised with table context
             raise RegistryError(
                 f"drop_run failed deleting from {name}: {exc}. If the run just finished, its rows "
                 "may still be in the Storage Write API streaming buffer (~90 min), which BigQuery "
@@ -859,7 +859,7 @@ def _stuck_run_ids(settings: Settings) -> tuple[str, ...]:  # pragma: no cover -
     client = bigquery.Client(project=settings.project_id)
     try:
         return tuple(str(r["run_id"]) for r in client.query(sql).result())
-    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+    except Exception as exc:  # re-raised with registry context
         raise RegistryError(
             f"could not list stuck runs in {settings.registry_dataset_ref}: {exc}"
         ) from exc
@@ -903,7 +903,7 @@ def _job_rows(
     client = bigquery.Client(project=settings.project_id)
     try:
         rows = client.query(sql, job_config).result()
-    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+    except Exception as exc:  # re-raised with registry context
         raise RegistryError(
             f"could not read job statuses from {settings.registry_dataset_ref}: {exc}"
         ) from exc
@@ -946,7 +946,7 @@ def _run_plans(
     client = bigquery.Client(project=settings.project_id)
     try:
         rows = list(client.query(sql, job_config).result())
-    except Exception as exc:  # noqa: BLE001 - re-raised with registry context
+    except Exception as exc:  # re-raised with registry context
         raise RegistryError(
             f"could not read run configs from {settings.registry_dataset_ref}: {exc}"
         ) from exc
@@ -1138,7 +1138,7 @@ def snapshot(
     for name, statement in statements.items():
         try:
             client.query(statement).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with table context
+        except Exception as exc:  # re-raised with table context
             raise RegistryError(f"snapshot failed for {name}: {exc}") from exc
         out[name] = f"{target}.{name}_{suffix}"
     _log.info("snapshotted %d tables into %s", len(out), target)
@@ -1166,7 +1166,7 @@ def export(
     for name, statement in statements.items():
         try:
             client.query(statement).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with table context
+        except Exception as exc:  # re-raised with table context
             raise RegistryError(f"export failed for {name}: {exc}") from exc
         out[name] = f"{root}/{name}/"
     _log.info("exported %d tables to %s", len(out), root)

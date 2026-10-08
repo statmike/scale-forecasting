@@ -288,7 +288,7 @@ def _report(result: AirflowSmokeResult) -> str:  # pragma: no cover - formatting
     ]
     for row in result.leaderboard:
         lines.append(
-            f"    {str(row.get('model_type')):20s} "
+            f"    {row.get('model_type')!s:20s} "
             f"wape={row.get('mean_wape')}  n_cells={row.get('n_cells')}"
         )
     lines.append(f"  RESULT:   {'PASS' if result.ok else 'FAIL'}")

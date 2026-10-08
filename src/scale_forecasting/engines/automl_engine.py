@@ -31,6 +31,7 @@ downstream ensembling alongside Statistical, ML, Deep Learning, and BigQuery-nat
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -990,10 +991,8 @@ def _extract_prediction_value_and_bounds(
         if isinstance(parsed, dict):
             raw_val = parsed.get("value")
             if raw_val is not None:
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     yhat = float(raw_val)
-                except (ValueError, TypeError):
-                    pass
             # In Vertex AI Forecasting BigQuery BatchPrediction output:
             # - `quantile_values` is ARRAY<FLOAT64> of quantile probabilities ([0.1, 0.5, 0.9])
             # - `quantile_predictions` is ARRAY<FLOAT64> of predicted values ([95.0, 105.5, 116.0])
@@ -1017,10 +1016,8 @@ def _extract_prediction_value_and_bounds(
 
             if isinstance(q_keys, list) and isinstance(q_vals, list) and len(q_keys) == len(q_vals):
                 for qk, qv in zip(q_keys, q_vals, strict=False):
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         q_map[round(float(qk), 4)] = float(qv)
-                    except (ValueError, TypeError):
-                        pass
             if math.isnan(yhat) and 0.5 in q_map:
                 yhat = q_map[0.5]
 
@@ -1509,7 +1506,7 @@ def _batch_predict_with_fallback(
                 generate_explanation=generate_explanation,
                 sync=True,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last_exc = exc
             if not _is_batch_predict_stockout(exc) or idx == len(candidates) - 1:
                 raise

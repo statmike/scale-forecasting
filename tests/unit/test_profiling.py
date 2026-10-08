@@ -1461,9 +1461,8 @@ def test_the_thread_pin_restores_the_environment_even_when_the_fit_raises():
     """A probe fit that raises must not leave the driver single-threaded for the rest of the run."""
     monkeypatch_free_before = os.environ.get("OMP_NUM_THREADS")
 
-    with pytest.raises(RuntimeError, match="fit exploded"):
-        with measure._pinned_intraop_threads(1):
-            raise RuntimeError("fit exploded")
+    with pytest.raises(RuntimeError, match="fit exploded"), measure._pinned_intraop_threads(1):
+        raise RuntimeError("fit exploded")
 
     assert os.environ.get("OMP_NUM_THREADS") == monkeypatch_free_before
 

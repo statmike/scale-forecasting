@@ -463,7 +463,7 @@ def aggregate_status(status_pdf: pd.DataFrame) -> RunOutcome:
     (all errored, or nothing ran at all). This is what the driver writes to
     ``run_registry.status`` after the Spark job returns.
     """
-    n_cells = int(len(status_pdf))
+    n_cells = len(status_pdf)
     if n_cells == 0:
         return RunOutcome(n_series=0, n_cells=0, n_ok=0, n_error=0, status="FAILED")
     n_error = int((status_pdf["status"] == "error").sum())

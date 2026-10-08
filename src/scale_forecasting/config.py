@@ -675,12 +675,14 @@ class FamilyCompute(BaseModel):
             raise ValueError(
                 "gke_cluster_name is only valid when runtime is 'gke' or ray_mode is 'gke'"
             )
-        if self.min_workers is not None and self.max_workers is not None:
-            if self.min_workers > self.max_workers:
-                raise ValueError(
-                    f"min_workers ({self.min_workers}) cannot exceed "
-                    f"max_workers ({self.max_workers})"
-                )
+        if (
+            self.min_workers is not None
+            and self.max_workers is not None
+            and self.min_workers > self.max_workers
+        ):
+            raise ValueError(
+                f"min_workers ({self.min_workers}) cannot exceed max_workers ({self.max_workers})"
+            )
         if (
             self.runtime in ("vertex", "gce") or (self.runtime == "gke" and self.gke_mode == "job")
         ) and (self.min_workers is not None or self.max_workers is not None):
@@ -1452,12 +1454,14 @@ class ComputeConfig(BaseModel):
     def _check_gpu_fraction(self) -> ComputeConfig:
         if isinstance(self.gpu_fraction, float) and not (0.0 < self.gpu_fraction <= 1.0):
             raise ValueError("gpu_fraction must be 'auto' or a float in (0, 1]")
-        if self.min_workers is not None and self.max_workers is not None:
-            if self.min_workers > self.max_workers:
-                raise ValueError(
-                    f"min_workers ({self.min_workers}) cannot exceed "
-                    f"max_workers ({self.max_workers})"
-                )
+        if (
+            self.min_workers is not None
+            and self.max_workers is not None
+            and self.min_workers > self.max_workers
+        ):
+            raise ValueError(
+                f"min_workers ({self.min_workers}) cannot exceed max_workers ({self.max_workers})"
+            )
         _default_gpu_machine_type(self.gpu_type, self.accelerator_count)
         if self.use_gpu and self.machine_type not in ("auto", "n2-standard-8"):
             resolve_vm_machine_type(
@@ -2243,7 +2247,7 @@ def load_config_uri(uri: str) -> RunConfig:
 
     try:
         raw = storage.Client().bucket(bucket).blob(blob).download_as_text()
-    except Exception as e:  # noqa: BLE001 - surface any fetch failure as one ConfigError
+    except Exception as e:  # surface any fetch failure as one ConfigError
         raise ConfigError(f"cannot read config URI '{uri}': {e}") from e
     try:
         data = json.loads(raw)

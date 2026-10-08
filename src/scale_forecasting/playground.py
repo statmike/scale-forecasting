@@ -323,9 +323,7 @@ def bakeoff(
     metric_df = pd.DataFrame(metric_long)
 
     # --- ensembles: calculated + learned, both via the framework's pure functions ------------
-    ens_pred_rows: list[dict[str, Any]] = []
-    for r in combine_calculated(base_df, cfg, metric_df):
-        ens_pred_rows.append(r)
+    ens_pred_rows: list[dict[str, Any]] = list(combine_calculated(base_df, cfg, metric_df))
     learned_weights, _artifacts, _basis = fit_learned(oof_df, cfg)
     for strategy, wmap in learned_weights.items():
         ens_pred_rows.extend(_apply_weights(base_df, wmap, cfg.run_name, strategy))

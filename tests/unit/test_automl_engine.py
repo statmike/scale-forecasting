@@ -834,7 +834,7 @@ class TestVertexAutoMLProbeAndSubmitter:
                 },
             },
         )
-        run_id, native_id, handle = submit_automl(
+        _run_id, native_id, handle = submit_automl(
             cfg,
             settings=settings,
             models=["vertex_tide"],

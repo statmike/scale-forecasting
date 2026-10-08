@@ -72,9 +72,9 @@ def test_gs_uri_fetches_parses_and_validates(monkeypatch) -> None:
 
 def test_gs_uri_bad_json_surfaces_as_config_error(monkeypatch) -> None:
     class _FakeClient:
-        def bucket(self, name: str):  # noqa: ANN202 - test double
+        def bucket(self, name: str):  # test double
             class _B:
-                def blob(self, _n: str):  # noqa: ANN202
+                def blob(self, _n: str):
                     class _Bl:
                         def download_as_text(self) -> str:
                             return "{not json"
@@ -93,7 +93,7 @@ def test_gs_uri_bad_json_surfaces_as_config_error(monkeypatch) -> None:
 
 def test_gs_uri_fetch_failure_surfaces_as_config_error(monkeypatch) -> None:
     class _FakeClient:
-        def bucket(self, name: str):  # noqa: ANN202 - test double
+        def bucket(self, name: str):  # test double
             raise RuntimeError("boom")
 
     from google.cloud import storage

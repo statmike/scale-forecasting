@@ -40,15 +40,15 @@ def _cfg(**over: Any) -> RunConfig:
 def _model(
     model_type: str, family: str, *, ens: str | None = None, score: float | None = 0.2, **over: Any
 ) -> R.ModelReview:
-    base: dict[str, Any] = dict(
-        model_type=model_type,
-        family=family,
-        ensemble_id=ens,
-        is_ensemble=ens is not None,
-        compute_engine="spark",
-        n_series=10,
-        score=score,
-    )
+    base: dict[str, Any] = {
+        "model_type": model_type,
+        "family": family,
+        "ensemble_id": ens,
+        "is_ensemble": ens is not None,
+        "compute_engine": "spark",
+        "n_series": 10,
+        "score": score,
+    }
     base.update(over)
     return R.ModelReview(**base)
 

@@ -49,10 +49,10 @@ def _patch_spark(monkeypatch: pytest.MonkeyPatch, session: _FakeSession) -> None
     import pyspark.sql as pyspark_sql
 
     class _Builder:
-        def appName(self, _name: str) -> _Builder:  # noqa: N802 - mirror Spark's API
+        def appName(self, _name: str) -> _Builder:  # mirror Spark's API
             return self
 
-        def getOrCreate(self) -> _FakeSession:  # noqa: N802 - mirror Spark's API
+        def getOrCreate(self) -> _FakeSession:  # mirror Spark's API
             return session
 
     monkeypatch.setattr(pyspark_sql.SparkSession, "builder", _Builder())

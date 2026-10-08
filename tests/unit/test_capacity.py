@@ -319,7 +319,7 @@ def test_shipped_policies_cover_every_service_with_a_candidate_walk() -> None:
         "dataproc_cluster",
         "dataproc_serverless",
     }
-    assert cap.UNMANAGED_SERVICES == frozenset({"bigquery"})
+    assert frozenset({"bigquery"}) == cap.UNMANAGED_SERVICES
     assert not set(cap.DEFAULT_POLICIES) & cap.UNMANAGED_SERVICES
 
 

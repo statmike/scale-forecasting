@@ -225,7 +225,7 @@ def _status_with_recovery(
     for attempt in range(1, attempts + 1):
         try:
             return poll()
-        except Exception as exc:  # noqa: BLE001 - classify, recover the channel, re-raise faults
+        except Exception as exc:  # classify, recover the channel, re-raise faults
             if not _is_recoverable_poll_error(exc) or attempt == attempts:
                 raise
             _log.warning(
@@ -329,7 +329,7 @@ def _connect_job_client(
     for attempt in range(1, _DASHBOARD_CONNECT_ATTEMPTS + 1):
         try:
             return JobSubmissionClient(f"vertex_ray://{cluster_resource_name}")
-        except Exception as exc:  # noqa: BLE001 - classify, retry transients, re-raise faults
+        except Exception as exc:  # classify, retry transients, re-raise faults
             if not _is_dashboard_warmup_error(exc):
                 raise
             last_exc = exc

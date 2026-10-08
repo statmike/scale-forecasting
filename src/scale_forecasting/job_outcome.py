@@ -231,7 +231,10 @@ def combined_run_status(job_statuses: dict[str, str | None], *, ensemble_enabled
     else:
         engine_status = PARTIAL
 
-    if ensemble_enabled and engine_status == COMPLETED:
-        if job_statuses.get("ensemble") != COMPLETED:
-            return FAILED
+    if (
+        ensemble_enabled
+        and engine_status == COMPLETED
+        and job_statuses.get("ensemble") != COMPLETED
+    ):
+        return FAILED
     return engine_status

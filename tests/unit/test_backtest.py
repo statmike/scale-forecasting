@@ -78,7 +78,7 @@ class _LastValue(BaseModel):
         yhat = invert_transform(
             np.full(horizon, self._last), self.ctx.transform, self.ctx.transform_lambda
         )
-        return self._assemble_frame(ds, {q: yhat for q in quantiles})
+        return self._assemble_frame(ds, dict.fromkeys(quantiles, yhat))
 
 
 def _factory(transform: str = "none") -> Any:
@@ -180,14 +180,14 @@ def test_achievable_folds_saturates_at_the_requested_count() -> None:
 def test_achievable_folds_agrees_with_the_folds_actually_built() -> None:
     """The count and the list must not drift; the cell records one and scores the other."""
     cfg = _cfg({"n_folds": 4, "horizon": 7, "step": 3, "min_train": 12})
-    for n in range(0, 60):
+    for n in range(60):
         assert achievable_folds(n, cfg) == len(make_folds(n, cfg)), f"disagreed at n={n}"
 
 
 def test_every_clamped_fold_still_honours_the_no_leakage_and_min_train_invariants() -> None:
     """Clamping must not buy folds by relaxing the geometry it was protecting."""
     cfg = _cfg({"n_folds": 4, "horizon": 7, "step": 3, "min_train": 12})
-    for n in range(0, 60):
+    for n in range(60):
         for f in make_folds(n, cfg):
             assert f.train_end == f.val_start  # no leakage
             assert f.train_size >= 12  # min_train respected
@@ -477,7 +477,7 @@ def test_every_policy_keeps_the_invariants_the_geometry_exists_to_protect() -> N
     for extra, floor in policies:
         for gap in (0, 3):
             cfg = _cfg({**_SHORT, **extra, "gap": gap})
-            for n in range(0, 60):
+            for n in range(60):
                 folds = make_folds(n, cfg)
                 assert len(folds) == achievable_folds(n, cfg), f"{extra} n={n}"
                 for f in folds:
@@ -543,7 +543,7 @@ def test_the_fold_grid_holds_its_shape_across_the_whole_geometry_surface(
     n_folds, horizon, gap = geom["n_folds"], geom["horizon"], geom["gap"]
     width = training_width(cfg)
 
-    for n in range(0, 150):
+    for n in range(150):
         folds = make_folds(n, cfg)
         effective = resolve_geometry(n, cfg)
         assert len(folds) == effective.n_achieved == achievable_folds(n, cfg), f"n={n}"
@@ -587,7 +587,7 @@ def test_error_lays_out_folds_exactly_like_adapt_at_every_geometry(geom: dict[st
     """
     strict = _cfg({**geom, "short_series": "error"})
     lenient = _cfg({**geom, "short_series": "adapt"})
-    for n in range(0, 150):
+    for n in range(150):
         assert make_folds(n, strict) == make_folds(n, lenient), f"n={n}"
 
 
@@ -600,7 +600,7 @@ def test_the_panel_gate_is_the_only_place_a_shortfall_can_stop_a_run(geom: dict[
     arithmetic in the message says it is.
     """
     cfg = _cfg({**geom, "short_series": "error"})
-    enough = next(n for n in range(0, 300) if achievable_folds(n, cfg) == geom["n_folds"])
+    enough = next(n for n in range(300) if achievable_folds(n, cfg) == geom["n_folds"])
 
     assert assert_panel_supports_folds([enough, enough + 40], cfg) is None
     with pytest.raises(ConfigError, match="1 of 2 series"):

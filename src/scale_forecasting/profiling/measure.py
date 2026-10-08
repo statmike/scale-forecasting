@@ -280,10 +280,8 @@ def _pinned_intraop_threads(limit: int) -> Iterator[int | None]:
     try:
         yield limit
     finally:
-        try:
+        with contextlib.suppress(Exception):  # restoring is best-effort; the fit already ran
             controller.restore_original_limits()
-        except Exception:  # noqa: BLE001 - restoring is best-effort; the fit already ran
-            pass
         _restore_env()
 
 
@@ -379,7 +377,7 @@ def measure_fit(
         id_col = cfg.data.ts_id_col
         if id_col in series.columns and len(series):
             ts_id = str(series[id_col].iloc[0])
-        n_obs = int(len(series))
+        n_obs = len(series)
         try:
             family = str(get_model(model_name).family)
         except Exception:  # noqa: BLE001 - an unknown model still yields a countable failure

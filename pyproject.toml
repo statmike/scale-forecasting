@@ -245,8 +245,28 @@ target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-# Sensible, non-noisy defaults: pyflakes, pycodestyle, isort, bugbear, pyupgrade.
-select = ["E", "F", "I", "B", "UP"]
+# pyflakes, pycodestyle, isort, bugbear, pyupgrade — plus the families added for v1.0.0:
+#   SIM   flake8-simplify        collapsible ifs, suppressible excepts, combined `with` blocks
+#   C4    flake8-comprehensions  no needless list()/dict()/set() calls or comprehensions
+#   PIE   flake8-pie             range(0, n), dict(**kw) for a literal, duplicate class fields
+#   PERF  perflint               needless copies and allocations inside loops
+#   RUF   ruff-specific          mutable class defaults, unused noqa, confusable characters, …
+#   BLE   flake8-blind-except    every `except Exception` carries `# noqa: BLE001` and a reason.
+#                                The package already marked its deliberate broad catches that way
+#                                by convention (the worker must turn any model failure into an error
+#                                cell, the probes must survive any client error); the rule makes the
+#                                convention a gate, so a new broad catch cannot land unexplained.
+select = ["E", "F", "I", "B", "UP", "SIM", "C4", "PIE", "PERF", "RUF", "BLE"]
+ignore = [
+    # PERF401 wants every `for …: out.append(f(x))` rewritten as a comprehension or `extend`. The
+    # loops it flags here are explicit on purpose — a guard clause, a multi-line constructor, or a
+    # body a reader scans top to bottom — and the rewrite is cosmetic churn with no measurable gain.
+    "PERF401",
+]
+# Typographic characters the docstrings and comments use deliberately: × for machine shapes and
+# products, – for ranges, − for a negative in prose, α for the exponential-smoothing parameter.
+# RUF001–RUF003 still fire on every other confusable (a Cyrillic а, a fullwidth comma, …).
+allowed-confusables = ["×", "–", "−", "α"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -303,3 +323,19 @@ markers = [
     "slow: long-running (scale smokes)",
     "airflow: needs apache-airflow installed (parses an emitted DAG; opt-in, isolated)",
 ]
+
+# Coverage is measured by the offline gate (`make test`, `make ci-offline`, the CI `offline` job)
+# over the package only. The floor is a ratchet, not a target: it sits just under the figure the
+# suite measured when it was introduced (85.77 % line coverage at v1.0.0, 17,905 statements) so a
+# refactor cannot trip it but deleting tests does. Raise it when coverage rises; never lower it.
+# The uncovered tail is the cloud-launch code the live smoke ledger proves instead
+# (`vertex_submit`, `gce_submit`, `airflow_tasks`, `seed_spark`, `notebook_acceptance`).
+# `--cov` is passed by those three commands rather than set in `addopts` so the bare-venv
+# `core-install` job and the `airflow-parse` job, which have no pytest-cov, still run pytest.
+[tool.coverage.run]
+source = ["scale_forecasting"]
+
+[tool.coverage.report]
+fail_under = 85
+skip_covered = true
+show_missing = true

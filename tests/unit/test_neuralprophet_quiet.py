@@ -18,8 +18,8 @@ import pytest
 
 pytest.importorskip("neuralprophet")
 
-from scale_forecasting.models.base_model import ModelContext  # noqa: E402
-from scale_forecasting.models.neuralprophet_model import NeuralProphetModel  # noqa: E402
+from scale_forecasting.models.base_model import ModelContext
+from scale_forecasting.models.neuralprophet_model import NeuralProphetModel
 
 _SILENCED = (UserWarning, FutureWarning, DeprecationWarning)
 

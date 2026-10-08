@@ -77,7 +77,7 @@ def build_package_zip() -> tuple[bytes, str]:
         for path in sorted(_PKG_ROOT.rglob("*.py")):
             zf.write(path, arcname=str(path.relative_to(_SRC_DIR)))
     data = buf.getvalue()
-    code_hash = hashlib.md5(data).hexdigest()[:8]  # noqa: S324 - non-crypto object-name tag
+    code_hash = hashlib.md5(data).hexdigest()[:8]  # non-crypto object-name tag
     return data, code_hash
 
 

@@ -294,7 +294,7 @@ def calibrate_from_oof(
 
     # Every step landing on the identical widened sample means the window opened all the way and
     # "per-step" would be the pooled band wearing a better label. Say pooled.
-    distinct = {tuple(sorted(s.quantiles.items())) + (s.mean,) for s in by_step.values()}
+    distinct = {(*sorted(s.quantiles.items()), s.mean) for s in by_step.values()}
     if not by_step or len(distinct) == 1:
         return Calibration(by_step={}, pooled=pooled, source="oof-flat")
     return Calibration(by_step=by_step, pooled=pooled, source="oof-per-step")

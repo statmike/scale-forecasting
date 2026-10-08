@@ -861,7 +861,7 @@ def _settle_report(*, executed: bool, settled_flags: list[bool], hint: str = "")
     plan = SettlePlan(
         run_id="rid-1",
         header_status="RUNNING",
-        items=tuple(_settle_item(f) for f in families) + (_settle_item("quiet", settleable=False),),
+        items=(*(_settle_item(f) for f in families), _settle_item("quiet", settleable=False)),
     )
     outcomes = (
         tuple(
@@ -980,7 +980,7 @@ def _retry_report(*, executed: bool, blocked: tuple[str, ...] = (), errors: bool
             CellState("s1", "theta", has_metadata=True, error_class="TRANSIENT_INFRA", n_cells=40),
         ),
         families={},
-        landed_counts={m: 99_000 for m in blocked},
+        landed_counts=dict.fromkeys(blocked, 99000),
         expected_series=1000,
         universe_source="source table at the run's pinned snapshot (17)",
     )

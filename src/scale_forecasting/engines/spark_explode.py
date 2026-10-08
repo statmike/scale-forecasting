@@ -40,7 +40,7 @@ def _conf_int(spark: SparkSession, key: str) -> int | None:
     """
     try:
         raw = spark.conf.get(key, None)
-    except Exception:  # a Connect session may reject an unknown key outright
+    except Exception:  # noqa: BLE001 - a Connect session may reject an unknown key outright
         return None
     try:
         return int(raw)

@@ -621,7 +621,7 @@ def run_cell(
 
     try:
         model_cls = get_model(model_name)
-    except Exception as e:  # unknown model name → error cell, engine unknown
+    except Exception as e:  # noqa: BLE001 - unknown model name → error cell, engine unknown
         return _error(e, cfg.python_runtime)
 
     engine = _compute_engine(model_cls, cfg)
@@ -826,7 +826,7 @@ def run_cell(
             train_rows_total=fits.train_rows,
             n_hpo_fits=hpo_fits.n_fits,
         )
-    except Exception as e:  # any failure → error cell, batch survives
+    except Exception as e:  # noqa: BLE001 - any failure → error cell, batch survives
         return _error(e, engine)
 
 

@@ -8,7 +8,7 @@ serverless smoke.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -899,7 +899,7 @@ class _FakeRuntimeInfo:
 class _FakeRuntimeConfig:
     version = "2.2.82"
     container_image = "us-central1-docker.pkg.dev/p/repo/spark-runtime:latest"
-    properties = {
+    properties: ClassVar[dict[str, str]] = {
         "spark.driver.cores": "4",
         "spark.executor.cores": "4",
         "spark.executor.instances": "2",
@@ -959,7 +959,10 @@ def test_the_batch_echo_does_not_pretend_to_know_the_executed_fan_out() -> None:
         version = "2.2"
         container_image = "img:tag"
         # Even when the property is somehow present on the batch, it is not what ran.
-        properties = {"spark.executor.cores": "8", "spark.sql.shuffle.partitions": "200"}
+        properties: ClassVar[dict[str, str]] = {
+            "spark.executor.cores": "8",
+            "spark.sql.shuffle.partitions": "200",
+        }
 
     tel = extract_job_telemetry(type("B", (), {"runtime_config": _RC()})())
     assert "shuffle_partitions" not in tel
@@ -995,7 +998,7 @@ def test_extract_job_telemetry_no_executor_cap_when_unset() -> None:
     class _RC:
         version = "2.2"
         container_image = "img:tag"
-        properties = {"spark.executor.instances": "8"}
+        properties: ClassVar[dict[str, str]] = {"spark.executor.instances": "8"}
 
     class _B:
         runtime_config = _RC()
@@ -1187,7 +1190,7 @@ def test_the_overlay_sizes_to_the_executed_subset_not_the_whole_config() -> None
 def test_a_gpu_overlay_uses_the_configs_own_gpu_fraction_not_the_nominal_one() -> None:
     # On the GPU path executor.cores IS the per-task device share, so a config that says a cell
     # takes a tenth of a card must not be sized as if it took half: 8 cells per L4 rather than 4.
-    common: dict[str, Any] = dict(data={"source_table": "t", "series_limit": 100})
+    common: dict[str, Any] = {"data": {"source_table": "t", "series_limit": 100}}
     half = sizing_properties(_cfg(**common, compute={"gpu_fraction": 0.5}), hardware="gpu")
     tenth = sizing_properties(_cfg(**common, compute={"gpu_fraction": 0.1}), hardware="gpu")
     assert half["spark.executor.cores"] == "4"
@@ -1347,7 +1350,10 @@ def test_the_echoed_telemetry_carries_the_memory_the_batch_was_actually_given() 
     class _RC:
         version = "2.2"
         container_image = "img:tag"
-        properties = {"spark.executor.memory": "3891m", "spark.executor.memoryOverhead": "1024m"}
+        properties: ClassVar[dict[str, str]] = {
+            "spark.executor.memory": "3891m",
+            "spark.executor.memoryOverhead": "1024m",
+        }
 
     tel = extract_job_telemetry(type("_B", (), {"runtime_config": _RC()})())
     assert tel["executor_memory"] == "3891m"

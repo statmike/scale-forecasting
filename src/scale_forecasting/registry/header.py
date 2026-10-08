@@ -150,7 +150,7 @@ def write_header(
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"write_header failed for run {run_id}: {exc}") from exc
 
 
@@ -249,7 +249,7 @@ def update_header(
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"update_header failed for run {run_id}: {exc}") from exc
 
 
@@ -330,7 +330,7 @@ def merge_header_telemetry(
     client = bigquery.Client(project=resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"merge_header_telemetry failed for run {run_id}: {exc}") from exc
 
 
@@ -360,6 +360,6 @@ def header_status(
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"header_status failed for run {run_id}: {exc}") from exc
     return rows[0]["status"] if rows else None

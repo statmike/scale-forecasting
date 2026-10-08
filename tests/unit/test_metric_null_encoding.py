@@ -31,11 +31,9 @@ _CREATED_AT = datetime(2026, 9, 2, tzinfo=UTC)
 
 def _cfg() -> RunConfig:
     return RunConfig(
-        **{
-            "run_name": "metric null encoding",
-            "data": {"source_table": "source_series_native", "horizon": 7},
-            "models": ["theta", "arima_plus"],
-        }
+        run_name="metric null encoding",
+        data={"source_table": "source_series_native", "horizon": 7},
+        models=["theta", "arima_plus"],
     )
 
 

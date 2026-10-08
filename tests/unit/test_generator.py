@@ -193,7 +193,7 @@ def test_partition_union_equals_full_panel() -> None:
     full = generate_panel(12, cfg, SEED)
 
     # Arbitrary, uneven partitioning of range(12).
-    parts = [range(0, 3), range(3, 4), range(4, 10), range(10, 12)]
+    parts = [range(3), range(3, 4), range(4, 10), range(10, 12)]
     union = pd.concat([generate_partition(p, cfg, SEED) for p in parts], ignore_index=True)
 
     pd.testing.assert_frame_equal(full, union)

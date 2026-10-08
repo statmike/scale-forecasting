@@ -551,7 +551,7 @@ def walk(
             # `Exception`, not `BaseException`: a KeyboardInterrupt or SystemExit during a create is
             # an operator ending the run, not the cloud running out of room. Classifying one as
             # TRANSIENT_CAPACITY would make Ctrl-C start the next region.
-            except Exception as exc:  # noqa: BLE001 - classified below; CONFIG_FAULT re-raises
+            except Exception as exc:  # classified below; CONFIG_FAULT re-raises
                 message = (
                     describe_failure(candidate, exc) if describe_failure else str(exc)
                 ) or repr(exc)

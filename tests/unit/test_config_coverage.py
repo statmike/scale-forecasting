@@ -75,7 +75,7 @@ from pydantic import BaseModel
 # Borrowed from the tripwire that already owns them: the ledger's table layout and the one config
 # that is not a run config are facts about those two artefacts, written down once. A second copy
 # here would be a second thing to drift.
-from test_validation_ledger import _NOT_A_RUN_CONFIG, _table_rows  # noqa: PLC2701
+from test_validation_ledger import _NOT_A_RUN_CONFIG, _table_rows
 
 from scale_forecasting.config import RECONCILIATION_METHODS, RunConfig
 from scale_forecasting.metrics import METRIC_NAMES

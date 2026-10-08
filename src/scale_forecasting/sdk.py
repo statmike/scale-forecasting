@@ -16,6 +16,7 @@ near-instant ``import scale_forecasting`` contract enforced by ``test_sdk.py``.
 
 from __future__ import annotations
 
+import contextlib
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -38,14 +39,14 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 __all__ = [
-    "Forecaster",
-    "Registry",
     "DryRunResult",
-    "RunResult",
-    "ModelResult",
+    "Forecaster",
     "JobTrace",
-    "build_explain_frame",
+    "ModelResult",
+    "Registry",
+    "RunResult",
     "build_best_params_frame",
+    "build_explain_frame",
     "build_trace_frame",
     "plot_trace",
 ]
@@ -683,7 +684,7 @@ class Forecaster:
                         snap.n_expected if snap.n_expected is not None else "?",
                         frac,
                     )
-            except Exception:  # noqa: BLE001, S110 - transient read errors never abort the run
+            except Exception:  # noqa: BLE001 - transient read errors never abort the run
                 pass
         thread.join()
         elapsed = time.monotonic() - t0
@@ -691,10 +692,8 @@ class Forecaster:
             raise outcome["error"]
         res = outcome["result"]
         final_snap = last_snap
-        try:
+        with contextlib.suppress(Exception):  # the closing snapshot is a nicety, never a failure
             final_snap = self.monitor(res.run_id)
-        except Exception:  # noqa: BLE001
-            pass
         if plot and final_snap is not None and getattr(final_snap, "families", None):
             from .review import plot_progress
 

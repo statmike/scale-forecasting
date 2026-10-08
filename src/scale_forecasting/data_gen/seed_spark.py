@@ -248,7 +248,7 @@ def _clear_existing(settings: Settings, table_name: str, *, iceberg: bool) -> No
     client = bigquery.Client(project=settings.project_id)
     try:
         client.query(stmt).result()
-    except Exception as exc:  # noqa: BLE001 - re-raised with table context
+    except Exception as exc:  # re-raised with table context
         raise RegistryError(f"seed clear of {table} failed: {exc}") from exc
 
 
