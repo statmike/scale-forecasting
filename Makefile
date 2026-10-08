@@ -9,7 +9,7 @@
 # header comment, and in the CI drift check (.github/workflows/ci.yml) — that three-way match is what
 # guarantees the committed file always equals the lock.
 export UV_NO_CONFIG := 1
-EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra models --extra ray --format requirements-txt
+EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra gcp --extra models --extra ray --format requirements-txt
 
 .PHONY: lock lock-check sync test typecheck ci-offline hooks docs composer-sync
 

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 import numpy as np
 import pandas as pd
 
-from ..errors import ModelError
+from ..errors import ModelError, is_importable
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -200,12 +200,15 @@ class BaseModel(ABC):
 
     @classmethod
     def is_available(cls) -> bool:
-        """Whether this model's upstream Python package is installed in the current environment."""
+        """Whether this model's upstream Python package is installed in the current environment.
+
+        Probed without importing it (`errors.is_importable`), so listing 34 models costs nothing and
+        a dotted name whose parent is absent (``google.cloud.bigquery`` on a core-only install)
+        reads as "not installed" rather than raising.
+        """
         if cls.optional_import is None:
             return True
-        import importlib.util
-
-        return importlib.util.find_spec(cls.optional_import) is not None
+        return is_importable(cls.optional_import)
 
     @classmethod
     def require_available(cls) -> None:

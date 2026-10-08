@@ -17,7 +17,8 @@ Every mechanism below resolves back to a single locked environment, managed end-
 - **`uv.lock`** — the fully-resolved, hashed version of *every* dependency (core + all extras + dev),
   and **`.python-version`** — the exact interpreter (`3.11.15`). Together they pin the whole stack.
 - **`docker/Dockerfile`** — uses `uv` to install *that* interpreter and `uv sync --frozen` *that* lock
-  (core + models + Ray extras) into an isolated venv at **`/opt/venv`** on `debian:12-slim`, plus the
+  (core + the `gcp`, `models`, and `ray` extras) into an isolated venv at **`/opt/venv`** on
+  `debian:12-slim`, plus the
   handful of **system** libraries the wheels link against (e.g. `libgomp1` for lightgbm). The result is
   the **shared runtime image**.
 - **`docker/requirements.txt`** — a **derived, human-readable export** of the lock (`uv export …`,
@@ -41,6 +42,44 @@ flowchart LR
     Req --> RayEnv["Vertex AI Ray<br/>(runtime_env uv plugin)"]
     Lock --> Colab["Colab Enterprise (sf-main)<br/>& Local uv sync --frozen"]
 ```
+
+## Dependency extras
+
+`pyproject.toml` layers the package so that a bare install is the pure forecasting layer and every
+client library is an opt-in extra. The layering is what lets `pip install scale-forecasting` run
+the playground with no project, billing, or credentials, and it is what keeps a Composer worker or
+a thin Cloud Shell client from carrying PySpark's JARs or PyTorch.
+
+| Extra | Adds | Composed from |
+|-------|------|---------------|
+| *(none)* | pydantic, pandas, NumPy, pyarrow, statsmodels, SciPy, scikit-learn, threadpoolctl, Optuna, holidays — every model's metadata, the 15 models that fit on this stack alone, all 21 metrics, backtesting, calibration, reconciliation, ensembling, HPO, the playground, `--dry-run` and `--emit-airflow` | — |
+| `gcp` | every Google Cloud client the package imports by name: BigQuery + Storage Read API, Cloud Storage, Dataproc, Vertex AI (`aiplatform`), `google-auth`, `google-api-core`, `db-dtypes`, `protobuf` | — |
+| `notebook` | `ipykernel`, `matplotlib` (every `plot_*` helper in `review.py` and `sdk.plot_trace`) | — |
+| `spark` | PySpark + `dataproc-spark-connect` (the interactive Spark Connect client; submitting a batch needs only `gcp`) | `gcp` |
+| `ray` | `ray[default]` (Ray's `JobSubmissionClient`, the one launch client that is not a Google library) + `immutabledict` | `gcp` |
+| `submit` | the thin launch client for Cloud Shell and CI — every launch client, no PySpark | `ray` |
+| `models-stats`, `models-trees`, `models-prophet`, `models-dl` | statsforecast; xgboost + lightgbm + catboost; prophet; neuralprophet + neuralforecast + torch | — |
+| `models-automl` | `google-cloud-pipeline-components` (the Tabular Workflow compiler behind the four `vertex_*` models) | `gcp` |
+| `models` | the five family extras | `models-*` |
+| `all` | everything — what `uv sync --all-extras` and `make sync` install | every extra |
+
+Each surface installs a named subset of this table: the shared runtime image and the
+`docker/requirements.txt` export carry `gcp` + `models` + `ray` (the Makefile `EXPORT_ARGS`, the
+Dockerfile, and the CI `lock-check` job spell the identical flag set); the notebook bootstrap cells
+install `gcp` (plus `spark` for the Spark Connect notebook) so a Colab run resolves the locked client
+versions rather than whatever the runtime image happens to ship; the `dev` dependency group includes
+`gcp` and `notebook` so a bare `uv sync` still yields a venv that can reach BigQuery and plot.
+
+A core-only install that calls something cloud-side does not fail with a `ModuleNotFoundError` six
+frames down. `main.run`, every `main` verb except `--dry-run` and `--emit-airflow`, each submit CLI,
+and every plotting helper call `errors.require_extra(...)` first, which raises `MissingExtraError`
+(both an `ImportError` and a `ScaleForecastError`) whose message names the purpose, the extra, and
+the exact `pip install "scale-forecasting[<extra>]"` line. The offline plan (`--dry-run`) degrades
+instead: it still returns the run id, fan-out, and runtime split, and logs that the registry verdict
+and launch commands were skipped. `tests/unit/test_packaging_extras.py` keeps the table above, the
+four surfaces, and every install line in the docs in agreement with `pyproject.toml`;
+`tests/unit/test_core_install.py` and the CI `core-install` job prove the bare install in a fresh
+interpreter.
 
 ## The matrix
 

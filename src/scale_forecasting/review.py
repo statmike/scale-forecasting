@@ -40,12 +40,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from .capacity import AWAITING_CAPACITY
 from .config import RunConfig
 from .dag import group_models_by_family
 from .device_audit import verdict_label
+from .errors import require_extra
 from .registry.ids import base_family, is_repair_family
 from .registry.reads import parse_ts
 from .registry.rows import EMITTED, METRIC_COLUMNS
@@ -1025,6 +1027,19 @@ def _reportable_verdicts(progress: RunProgress) -> dict[str, str]:
     }
 
 
+def _pyplot() -> ModuleType:
+    """``matplotlib.pyplot``, imported lazily behind the ``notebook`` extra.
+
+    Every plot helper in this module goes through here, so matplotlib never touches the
+    near-instant ``import scale_forecasting`` path and a core-only install fails with the install
+    line for the extra rather than a ``ModuleNotFoundError`` from inside a chart.
+    """
+    require_extra("notebook", purpose="Plotting")
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
 def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = None) -> Any:
     """Render a `RunProgress` as a per-family progress bar chart and return the matplotlib ``Axes``.
 
@@ -1047,7 +1062,7 @@ def plot_progress(progress: RunProgress, *, ax: Any = None, title: str | None = 
     from a CPU family's, which is the whole reason the accelerator went twenty-one jobs without
     anyone noticing it was doing nothing.
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
 
     heading = title or f"{progress.run_id} — {progress.status or 'unknown'}"
     if progress.fraction is not None:
@@ -1102,7 +1117,7 @@ def plot_leaderboard(
     labelled at each bar end. Unscored models (no backtest) are dropped. ``top`` caps the bar count.
     matplotlib imports lazily; a review with no scored model renders an empty titled axes.
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
 
     scored = [m for m in review.models if m.score is not None]
     if top is not None:
@@ -1155,7 +1170,7 @@ def plot_metric_distribution(
     ``metric`` defaults to the run's decision metric. matplotlib imports lazily; a review with no
     aggregated percentiles renders an empty titled axes.
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
 
     chosen = metric or review.decision_metric
     rows = [m for m in review.models if m.metric_p50.get(chosen) is not None]
@@ -1368,7 +1383,7 @@ def plot_forecasts_frame(
     Renders up to ``max_series`` subplots (one per ``ts_id``) and returns the matplotlib ``Axes``
     (or array of ``Axes`` when multiple series are plotted).
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
     import pandas as pd
 
     if frame.empty:
@@ -1570,7 +1585,7 @@ def plot_hierarchy_frame(
     """Plot top-level (``__total__``) forecast against the sum of bottom-level leaf forecasts (or
     a level summary from `build_hierarchy_frame`) to visually verify hierarchical coherence.
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
     import pandas as pd
 
     df = (
@@ -1790,7 +1805,7 @@ def plot_calibration(
     * Right panel: Mean prediction-interval width ($\\hat{y}_{\\text{upper}} -
       \\hat{y}_{\\text{lower}}$) by horizon step.
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
 
     _, cov_df = build_calibration_frames(report)
     palette = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9"]
@@ -1934,7 +1949,7 @@ def plot_ensemble_weights(
     """Plot base-model stacking weights across learned ensemble strategies (`nnls`, `ridge`, `xgb`)
     as a horizontal stacked bar chart (pure, offline).
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
     import numpy as np
     import pandas as pd
 
@@ -2274,7 +2289,7 @@ def plot_forecast_explanation(
        \\hat{y}_{\\text{OOF}}$) transitioning into future 80% interval width
        ($\\hat{y}_{\\text{upper}} - \\hat{y}_{\\text{lower}}$).
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
     import pandas as pd
 
     if explanation_df.empty:
@@ -2563,7 +2578,7 @@ def plot_attributions(
     """Plot Tier 1 global driver importance or Tier 2 per-horizon-step local feature attributions
     (pure, offline).
     """
-    import matplotlib.pyplot as plt
+    plt = _pyplot()
     import numpy as np
 
     if ax is None:

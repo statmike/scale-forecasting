@@ -2,7 +2,7 @@
 #
 # This one image is the DEPENDENCY-delivery mechanism for every compute path: the seed job,
 # the `explode`/`multi` forecast engines, and Ray on Vertex. It carries the full locked
-# dependency set (core + [models] + [ray]) resolved straight from uv.lock — but NOT the
+# dependency set (core + [gcp] + [models] + [ray]) resolved straight from uv.lock — but NOT the
 # `scale_forecasting` package itself.
 #
 # ONE TOOL, WHOLE STACK: uv manages BOTH the interpreter and the dependencies here, from the exact
@@ -85,11 +85,11 @@ ENV UV_PROJECT_ENVIRONMENT=${VENV} \
 WORKDIR /opt/scale-forecasting
 COPY .python-version pyproject.toml uv.lock ./
 # Install the exact interpreter named by .python-version (3.11.15), then the LOCKED dependency set
-# (core + [models] + [ray]; NOT [spark], NOT the project). --frozen uses uv.lock verbatim (no
+# (core + [gcp] + [models] + [ray]; NOT [spark], NOT the project). --frozen uses uv.lock verbatim (no
 # re-resolve); --no-install-project keeps the package out of the image; [tool.uv.sources] routes the
 # torch cu126 build from the PyTorch index automatically (no manual --extra-index-url needed).
 RUN uv python install "$(cat .python-version)" \
-    && uv sync --frozen --no-dev --no-install-project --extra models --extra ray
+    && uv sync --frozen --no-dev --no-install-project --extra gcp --extra models --extra ray
 
 # --- make /opt/venv fully SELF-CONTAINED (for the Dataproc-cluster packed-venv archive) ----------
 # A Dataproc *cluster* can't take a custom container, so the cluster path ships this /opt/venv as a

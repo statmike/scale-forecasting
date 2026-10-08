@@ -44,7 +44,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .errors import ConfigError, get_logger
+from .errors import ConfigError, MissingExtraError, get_logger, require_extra
 from .registry.ids import make_run_id
 from .router import split_by_runtime
 
@@ -482,7 +482,10 @@ def _emit_plan(result: LaunchPlan) -> None:
         _log.info("  node %s: %s on %s%s", node.family, node.job_key, node.runtime, after)
     if result.commands is None:
         _log.info(
-            "%s %s: infra unresolved (no SF_* env) — commands not emitted", verb, result.run_id
+            "%s %s: infra unresolved (no SF_* env, or the gcp extra is not installed) — "
+            "commands not emitted",
+            verb,
+            result.run_id,
         )
         return
     for name, lc in result.commands.items():
@@ -761,6 +764,9 @@ def plan_run(
     idempotency = Idempotency(checked=False, exists=False, prior_status=None)
     try:
         settings = settings or resolve_settings()
+        # The verdict is a registry read. A core-only install (no ``gcp`` extra) gets the same
+        # answer a missing environment does — the plan without the verdict — not a stack trace.
+        require_extra("gcp", purpose="The plan's exists-vs-new registry lookup")
         idempotency = _check_idempotency(plan.run_id, settings)
         # Only now that a registry is reachable — see `_nodes_with_submit_attempts`. Rebinding
         # `nodes` rather than using a second name is deliberate: the LaunchPlan below carries these
@@ -781,6 +787,10 @@ def plan_run(
         )
     except ConfigError:
         # No SF_* env (or no injected settings/infra): return the plan without commands.
+        config_uri = None
+        commands = None
+    except MissingExtraError as exc:
+        _log.info("plan: registry verdict and launch commands skipped — %s", exc)
         config_uri = None
         commands = None
     result = LaunchPlan(

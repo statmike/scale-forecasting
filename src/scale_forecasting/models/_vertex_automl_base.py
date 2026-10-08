@@ -123,6 +123,11 @@ class VertexAutoMLBaseModel(BaseModel):
     supports_hybrid = False
     gpu_capable = True
     package = "google-cloud-pipeline-components"
+    # The launcher compiles the Tabular Workflow with the pipeline components, so a bare install
+    # lists these four as unavailable and `--ignore-unavailable-models` drops them, the same way
+    # it drops catboost without [models-trees].
+    optional_import = "google_cloud_pipeline_components"
+    optional_extra = "models-automl"
     package_url = (
         "https://docs.cloud.google.com/gemini-enterprise-agent-platform/"
         "machine-learning/tabular-data/tabular-workflows/forecasting"

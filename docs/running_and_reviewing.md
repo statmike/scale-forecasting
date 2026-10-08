@@ -95,12 +95,15 @@ flowchart LR
   > override defaults (dataset/bucket/connection/subnet names) break the convention — then read the
   > exact `terraform output` values instead.
 
-- For submitting (not for reviewing), install the client deps. The lean, disk-light choice is the
-  `[submit]` extra — `uv sync --extra submit` — the Dataproc **and** Ray submit clients with **no**
-  pyspark, so it fits a thin client like Cloud Shell (pyspark's ~300MB of JARs are only needed for
-  notebook 01's interactive Spark Connect path, not for launching batches). Use `[spark]` / `[ray]`
-  only when you also want that interactive Connect session or a local Spark session. The runtime
-  image itself is code-free — see the note above.
+- For submitting and reviewing, install the client deps: the `[gcp]` extra carries every Google
+  Cloud client (BigQuery, Storage, Dataproc, Vertex AI), which launches on every runtime except Ray.
+  The lean, disk-light choice for a thin client like Cloud Shell is the `[submit]` extra —
+  `uv sync --extra submit` — `[gcp]` plus Ray's job client, with **no** pyspark (pyspark's ~300MB of
+  JARs are only needed for the interactive Spark Connect path, not for launching batches). Use
+  `[spark]` only when you also want that interactive Connect session or a local Spark session. A
+  bare `uv sync` from a clone already includes `[gcp]` through the dev group; see
+  [runtime_dependencies.md](./runtime_dependencies.md#dependency-extras) for the full table. The
+  runtime image itself is code-free — see the note above.
 
 ## Notebooks and kernels
 
@@ -109,7 +112,7 @@ BigQuery work (with ADC for auth), so a local clone drives cloud compute directl
 project kernel once:
 
 ```bash
-uv sync                                                          # core deps incl. ipykernel + matplotlib
+uv sync                                                          # core + dev group ([gcp] clients, ipykernel, matplotlib)
 uv run python -m ipykernel install --user --name scale-forecasting --display-name "scale-forecasting (uv)"
 ```
 

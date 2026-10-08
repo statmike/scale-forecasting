@@ -37,7 +37,14 @@ from typing import TYPE_CHECKING, Any
 
 from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
 from .commands import build_driver_args
-from .errors import ConfigError, EngineError, JobIdTaken, configure_cli_logging, get_logger
+from .errors import (
+    ConfigError,
+    EngineError,
+    JobIdTaken,
+    configure_cli_logging,
+    get_logger,
+    require_extra,
+)
 from .hardware import spark_executor_env
 from .job_wait import wait_for_job
 from .staging import stage_code, stage_config
@@ -587,6 +594,7 @@ def main(argv: list[str] | None = None) -> None:
     from .config import load_config_uri
 
     configure_cli_logging()
+    require_extra("gcp", purpose="Submitting to Dataproc")
     p = argparse.ArgumentParser(prog="submit", description="Submit a forecast run to Dataproc.")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--config", help="path to the run config JSON")

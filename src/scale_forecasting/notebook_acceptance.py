@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .errors import EngineError, configure_cli_logging, get_logger
+from .errors import EngineError, configure_cli_logging, get_logger, require_extra
 
 _log = get_logger(__name__)
 
@@ -703,6 +703,7 @@ def _run_fanout_cli(
 def main(argv: list[str] | None = None) -> int:
     """Run the selected tier, print a per-notebook table; return non-zero on any failure."""
     configure_cli_logging()
+    require_extra("gcp", purpose="The notebook acceptance runner")
     args = _parse_args(argv)
     notebooks_dir = (
         Path(args.notebooks_dir)

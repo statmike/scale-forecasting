@@ -127,7 +127,7 @@ def run(
 
     from .backtest import hpo_scoring_claim
     from .dag import plan_dag, preflight
-    from .errors import EngineError
+    from .errors import EngineError, require_extra
     from .job_outcome import combined_run_status
     from .profiling.source import check_pinned_source
     from .registry.header import header_status, merge_header_telemetry
@@ -151,6 +151,10 @@ def run(
         # so this contract is unchanged.
         return launch_plan.plan_run(cfg, settings=settings, force=force).run_id
 
+    # Everything below reaches BigQuery and a runtime. A bare ``pip install scale-forecasting`` is
+    # the pure layer (the playground runs; this does not), so name the extra before the environment
+    # check — a core-only install has no use for ``SF_PROJECT_ID`` yet.
+    require_extra("gcp", purpose="Launching a run")
     settings = settings or Settings.resolve()
 
     # A pinned ``compute.profile.source`` is a human assertion that one specific run's measurements
@@ -517,7 +521,7 @@ def _main(argv: list[str] | None = None) -> None:
     import argparse
 
     from .config import load_config_uri
-    from .errors import configure_cli_logging
+    from .errors import configure_cli_logging, require_extra
 
     configure_cli_logging()
 
@@ -619,6 +623,14 @@ def _main(argv: list[str] | None = None) -> None:
         "installed in the current environment",
     )
     ns = p.parse_args(argv)
+
+    # The two verbs whose help says "touch no GCP" are the only ones a core-only install can serve
+    # (`--feasibility` turns the plan into a BigQuery read). Everything else reaches the registry or
+    # a runtime, so name the extra here, before a `gs://` config or a registry lookup trips over a
+    # bare ``ModuleNotFoundError`` further in.
+    offline_verb = (ns.dry_run and not ns.feasibility) or ns.emit_airflow or bool(ns.emit_out)
+    if not offline_verb:
+        require_extra("gcp", purpose="Every `main` verb except --dry-run and --emit-airflow")
 
     if ns.run_id:
         # Restricted to --retry on purpose. The other verbs already reach a run through its config's

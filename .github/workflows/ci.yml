@@ -1,6 +1,6 @@
 name: ci
 
-# Two guarantees on every push / PR:
+# Three guarantees on every push / PR:
 #   1. lock-check — the dependency stack never drifts. uv.lock must be in sync with pyproject.toml,
 #      and docker/requirements.txt (the derived export the container + packed-venv build from) must
 #      equal what the lock produces. This is the automated half of the "one source of truth" design:
@@ -8,6 +8,10 @@ name: ci
 #   2. offline — the code gate that needs no cloud: ruff + mypy + the offline test suite. Interpreter
 #      and every dependency come from the same uv.lock + .python-version the runtime image is built
 #      from, so a green CI run reflects the exact versions production runs.
+#   3. core-install — `pip install scale-forecasting` with no extra is a working forecasting
+#      toolkit, and the first call that needs Google Cloud or matplotlib names the extra to install.
+#      Checked in a bare venv built from the wheel, because only that proves the packaging metadata
+#      (the offline suite mirrors it with an import blocker in tests/unit/test_core_install.py).
 
 on:
   push:
@@ -31,7 +35,7 @@ jobs:
       - name: docker/requirements.txt matches the lock
         run: |
           uv export --frozen --no-emit-project --no-dev --no-hashes \
-            --extra models --extra ray --format requirements-txt -o docker/requirements.txt
+            --extra gcp --extra models --extra ray --format requirements-txt -o docker/requirements.txt
           git diff --exit-code docker/requirements.txt \
             || { echo "::error::docker/requirements.txt is stale — run 'make lock' and commit."; exit 1; }
 
@@ -57,6 +61,42 @@ jobs:
         run: uv run mypy src/scale_forecasting
       - name: offline test gate
         run: uv run pytest -m "not gcp and not spark and not ray" -q
+
+  # core-install — the bare-install contract, in a venv that has genuinely nothing optional in it.
+  # `uv pip install .` builds the wheel and installs it the way `pip install scale-forecasting`
+  # will, so what runs here is the published metadata, not the editable checkout. pytest is added
+  # afterwards only to drive the one test; it pulls no optional package of ours.
+  core-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+      - name: install the wheel with no extras
+        run: |
+          uv venv --python 3.11 .venv-core
+          uv pip install --python .venv-core/bin/python . pytest
+      - name: nothing optional is present
+        run: |
+          .venv-core/bin/python - <<'EOF'
+          import importlib.util
+          optional = ["google", "matplotlib", "ipykernel", "pyspark", "ray", "torch", "xgboost",
+                      "lightgbm", "catboost", "prophet", "statsforecast", "db_dtypes"]
+          present = [m for m in optional if importlib.util.find_spec(m) is not None]
+          assert not present, f"a bare install pulled optional packages: {present}"
+          EOF
+      - name: the pure layer works and the cloud entry points name the extra
+        run: .venv-core/bin/python -m pytest tests/unit/test_core_install.py -q -p no:cacheprovider
+      - name: "[gcp] adds the clients"
+        run: |
+          uv pip install --python .venv-core/bin/python ".[gcp]"
+          .venv-core/bin/python - <<'EOF'
+          import google.cloud.aiplatform_v1, google.cloud.bigquery, google.cloud.dataproc_v1
+          import google.cloud.storage
+          import scale_forecasting.registry.reads
+          from scale_forecasting.errors import require_extra
+          require_extra("gcp", purpose="CI")
+          print("[gcp] ok")
+          EOF
 
   # airflow-parse — the cheap "does Airflow actually parse the emitted DAG?" gate. Airflow is heavy
   # and prone to dependency conflicts with our torch/ray/spark pins, so it is deliberately NOT in

@@ -67,6 +67,72 @@ class JobIdTaken(EngineError):
     """
 
 
+class MissingExtraError(ScaleForecastError, ImportError):
+    """A feature needs an optional-dependency extra that is not installed.
+
+    Both a `ScaleForecastError` and an ``ImportError``, so ``except ScaleForecastError`` and the
+    idiomatic ``except ImportError`` each catch it. The message is the fix: the ``pip install``
+    line naming the extra. Raised by `require_extra`.
+    """
+
+
+# What each extra must make importable, one probe per distribution — the module that *proves* the
+# distribution is present, not every module it ships. The composed extras (`[spark]`, `[ray]`,
+# `[models-automl]` all include `[gcp]`) list their base's probes too, so the install line in the
+# error is sufficient for whichever module turned out to be missing.
+_GCP_MODULES: tuple[str, ...] = (
+    "google.cloud.bigquery",
+    "google.cloud.bigquery_storage",
+    "google.cloud.storage",
+    "google.cloud.dataproc_v1",
+    "google.cloud.aiplatform",
+)
+EXTRA_MODULES: dict[str, tuple[str, ...]] = {
+    "gcp": _GCP_MODULES,
+    "notebook": ("matplotlib",),
+    "spark": (*_GCP_MODULES, "pyspark"),
+    "ray": (*_GCP_MODULES, "ray"),
+    "submit": (*_GCP_MODULES, "ray"),
+    "models-automl": (*_GCP_MODULES, "google_cloud_pipeline_components"),
+}
+
+
+def is_importable(module: str) -> bool:
+    """Is ``module`` installed? Probed without importing it, so this costs microseconds.
+
+    ``find_spec`` on a dotted name imports the *parents*, and raises ``ModuleNotFoundError`` when a
+    parent is absent (``google.cloud.bigquery`` with no ``google`` at all) — which is just another
+    way of saying "not installed".
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def require_extra(extra: str, *, purpose: str) -> None:
+    """Raise `MissingExtraError` naming the install command unless ``extra`` is installed.
+
+    The package has zero top-level ``google.*`` imports and a bare ``pip install scale-forecasting``
+    is the pure forecasting layer (models, metrics, backtests, the playground). Everything that
+    reaches Google Cloud sits behind the ``gcp`` extra, so a core-only install that calls
+    `main.run` would otherwise die on ``ModuleNotFoundError: No module named 'google'`` somewhere
+    below the registry. This is called once at each entry point that needs the extra — `main.run`,
+    the `Forecaster`, the CLI mains, the plotting helpers — with ``purpose`` saying what the caller
+    was trying to do, so the failure is one sentence with the fix in it.
+    """
+    missing = [m for m in EXTRA_MODULES[extra] if not is_importable(m)]
+    if missing:
+        raise MissingExtraError(
+            f"{purpose} needs the '{extra}' extra, which is not installed "
+            f"(missing: {', '.join(missing)}). Install it with:\n"
+            f'    pip install "scale-forecasting[{extra}]"\n'
+            f"or, from a clone, `uv sync --extra {extra}`."
+        )
+
+
 PACKAGE_LOGGER = "scale_forecasting"
 CLI_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
 
