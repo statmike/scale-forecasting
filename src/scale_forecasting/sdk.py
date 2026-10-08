@@ -1238,25 +1238,20 @@ class Registry:
     def runs_df(self, *, limit: int = 25, status: str | None = None) -> pd.DataFrame:
         """Return a ``DataFrame`` of the most recent runs in this registry from ``v_run_summary``,
         newest first, optionally filtered by ``status``.
+
+        Beside the header columns comes the run's time ledger, rolled up from its job rows:
+        ``n_jobs``, ``longest_job_seconds`` (the critical-path family), ``jobs_seconds`` (every
+        job's wall added up — more than the run's own wall when families overlapped),
+        ``jobs_span_seconds`` (first job start to last job end), and ``overhead_seconds`` /
+        ``overhead_fraction`` (the span the slowest job did not account for — ensemble, native
+        job, scheduler gaps; never negative). ``dcu_milli_seconds`` is the last Dataproc
+        Serverless batch's usage, NULL on other runtimes. See `registry.views`.
         """
         import pandas as pd
 
-        from .registry.reads import read_recent_runs
+        from .registry.reads import RECENT_RUNS_COLUMNS, read_recent_runs
 
-        cols = [
-            "run_id",
-            "created_at",
-            "status",
-            "python_runtime",
-            "n_series",
-            "n_models",
-            "backtest_on",
-            "runtime_seconds",
-            "total_wall_s",
-            "overhead_seconds",
-            "overhead_fraction",
-            "dcu_milli_seconds",
-        ]
+        cols = list(RECENT_RUNS_COLUMNS)
         rows = read_recent_runs(limit=limit, status=status, settings=self._settings)
         if not rows:
             return pd.DataFrame(columns=cols)

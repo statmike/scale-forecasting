@@ -569,9 +569,12 @@ def test_forecaster_jobs_df_and_registry_runs_df(monkeypatch: pytest.MonkeyPatch
                 "n_models": 4,
                 "backtest_on": True,
                 "runtime_seconds": 42.0,
-                "total_wall_s": 55.0,
-                "overhead_seconds": 13.0,
-                "overhead_fraction": 0.236,
+                "n_jobs": 3,
+                "longest_job_seconds": 30.0,
+                "jobs_seconds": 55.0,
+                "jobs_span_seconds": 38.0,
+                "overhead_seconds": 8.0,
+                "overhead_fraction": 0.211,
                 "dcu_milli_seconds": None,
             }
         ],
@@ -579,3 +582,16 @@ def test_forecaster_jobs_df_and_registry_runs_df(monkeypatch: pytest.MonkeyPatch
     rdf = f.registry().runs_df(limit=5)
     assert len(rdf) == 1
     assert rdf.loc[0, "run_id"] == "run-1"
+    # The ledger columns come through in the view's order, between the header wall and the
+    # per-batch DCU figure; a renamed column would surface as a NaN column here.
+    assert list(rdf.columns[7:14]) == [
+        "runtime_seconds",
+        "n_jobs",
+        "longest_job_seconds",
+        "jobs_seconds",
+        "jobs_span_seconds",
+        "overhead_seconds",
+        "overhead_fraction",
+    ]
+    assert rdf.loc[0, "overhead_seconds"] == 8.0
+    assert "total_wall_s" not in rdf.columns

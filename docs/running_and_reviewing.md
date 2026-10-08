@@ -224,10 +224,14 @@ after the engine finishes, so poll briefly. The run header:
 SELECT * FROM `PROJECT.DATASET.v_run_summary` WHERE run_id = 'YOUR_RUN_ID';
 ```
 
-`v_run_summary` is one row per run: `status`, `python_runtime`, `n_series`/`n_models`,
-the engine's `runtime_seconds`, plus the Dataproc telemetry overlay — `total_wall_s`,
-`overhead_seconds` and `overhead_fraction` (provisioning tax, which amortizes as series grow), and
-`dcu_milli_seconds` (the cost proxy).
+`v_run_summary` is one row per run: `status`, `python_runtime`, `n_series`/`n_models`, the
+header's `runtime_seconds`, and a time ledger rolled up from the run's job rows —
+`longest_job_seconds` (the critical-path family), `jobs_seconds` (every job's wall added up),
+`jobs_span_seconds` (first job start to last job end), and `overhead_seconds` /
+`overhead_fraction` (the span the slowest job did not account for: the barrier ensemble, the native
+job, start skew, Composer's gaps). `dcu_milli_seconds` and the executor columns are the Dataproc
+Serverless echo, NULL for a run that submitted no Serverless batch. Column by column:
+[output_schemas.md](./output_schemas.md#v_run_summary--how-did-each-run-go-and-how-efficiently).
 
 For the **per-family** breakdown — which family ran on which runtime/hardware, its platform job id,
 status, and per-job wall-clock — query `v_run_jobs` (one row per `(run_id, family)`, plus the

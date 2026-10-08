@@ -61,6 +61,7 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 |--------|------|----------|
 | `run_id` | `STRING` | The run identity — a digest of the full config (`make_run_id`). Same config → same id (idempotent). |
 | `created_at` | `TIMESTAMP` | When the header row was written. |
+| `snapshot_millis` | `INT64` | The input-data snapshot every job in the run pins its source read to — one epoch-millis instant off the BigQuery clock (`registry.header.resolve_snapshot_millis`), so a Spark batch, a Ray job and the native models all read the identical source state. NULL on a run that read unpinned. |
 | `user_id` | `STRING` | Who/what launched the run (identity of the writer). |
 | `git_sha` | `STRING` | The code revision that produced the run (lineage). |
 | `python_runtime` | `STRING` | `spark`, `ray`, `vertex`, `gce`, `gke`, or `vertex_automl` — the run-level default runtime for the Python/AutoML model families (a family can override it). |
@@ -72,8 +73,8 @@ went. Partitioned by `DATE(created_at)`, clustered by `run_id`.
 | `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED`. A run that was *staged* rather than launched opens at `STAGED` instead — its artifacts are up and its job ids are handed out, but no compute exists yet ([why](./troubleshooting.md#a-submit-is-refused--the-job-id-is-already-taken)). |
 | `n_series` | `INT64` | Series count actually run. |
 | `n_models` | `INT64` | Model count actually run. |
-| `runtime_seconds` | `FLOAT64` | The engine's own compute time (excludes cluster stand-up). |
-| `job_telemetry` | `JSON` | Engine overlay: `total_wall_s`, executor/worker sizing, `dcu_milli_seconds`, `runtime_version`, plus `sizing.<family>` — the whole sizing decision per family job. Unpacked by `v_run_summary`. |
+| `runtime_seconds` | `FLOAT64` | The header owner's wall-clock. Under `main.run` (CLI, SDK, Batch container) that is the whole run from header write to finalize — provisioning, every family, the ensemble; under Composer it is the slowest job's wall (`airflow_tasks.finalize_run`); an engine driven directly in owner mode records its own wall. Compare runs through `v_run_summary`'s job ledger, which means the same thing on every path. |
+| `job_telemetry` | `JSON` | Run-level overlay: `sizing.<family>` (the whole sizing decision per family job), `capacity` (the shared-cluster attempt ledgers), and the platform echo of whichever family jobs stamped one, merged by key with the last to finish winning — a Dataproc Serverless batch's executor shape, `dcu_milli_seconds`, `runtime_version` and `total_wall_s`; a Ray job's pool sizes and elastic bounds. Unpacked by `v_run_summary`. |
 
 ## `run_jobs` — one row per family job
 
@@ -96,8 +97,10 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, family`.
 | `system_job_id` | `STRING` | The platform's own job id (`dataproc_job_id` / `ray_submission_id` / `vertex_custom_job_id` / `gce_instance_name` / `gke_job_name` / `vertex_pipeline_job_id` / `bigquery_job_id`) — jump straight to the platform console. |
 | `status` | `STRING` | `RUNNING` → `COMPLETED` / `FAILED` for this job. Two pre-launch statuses can come first: `AWAITING_CAPACITY` while a family walks regions looking for machines, and `EMITTED` for a job id a staged command handed out but this process never launched ([why](./troubleshooting.md#a-submit-is-refused--the-job-id-is-already-taken)). |
 | `created_at` | `TIMESTAMP` | When the job row was written. |
-| `runtime_seconds` | `FLOAT64` | The job's own compute time (excludes cluster stand-up). |
-| `job_telemetry` | `JSON` | Per-job overlay: `total_wall_s`, `dcu_milli_seconds`, sizing, and — for a GPU family — `device_use`, the verdict on whether the accelerator did anything ([below](#was-the-accelerator-you-paid-for-actually-used)). Unpacked by `v_run_jobs`. |
+| `started_at`, `ended_at` | `TIMESTAMP` | The job's wall-clock bracket: `started_at` is stamped when the launcher writes the row and starts the job, `ended_at` by `lifecycle.run_job` at exit. Every term of `v_run_summary`'s time ledger is measured on this bracket. |
+| `runtime_seconds` | `FLOAT64` | The launcher's wall around this job, submit → terminal, cluster stand-up included (`lifecycle.run_job`'s monotonic clock). It differs from the bracket only by the row-write latency. |
+| `failure_reason` | `STRING` | Why a `FAILED` row failed, as a token: `CAPACITY_EXHAUSTED` when a family ran out of regions to try ([capacity](./quota_and_scale.md)), `JOB_ID_TAKEN` when the platform already held the job id, `LAUNCHER_EXCEPTION` for anything else that raised — with its type and message under `job_telemetry.$.failure`. NULL on a job that ended well. |
+| `job_telemetry` | `JSON` | Per-job overlay: the family's own `capacity` region walk, the platform handle (`vertex_custom_job` / `gce_instance` / `gke_job`), `cells`, `settle`, `retry`, `cancel`, `failure`, and — for a GPU family — `device_use`, the verdict on whether the accelerator did anything ([below](#was-the-accelerator-you-paid-for-actually-used)). The platform's batch wall and DCU figures are *not* here; they land on the header. Unpacked by `v_run_jobs`. |
 
 ## `forecast_metadata` — one row per (run, series, model) cell
 
@@ -530,18 +533,42 @@ apply the dedupe-on-read). Full operator loop in
 
 ### `v_run_summary` — how did each run go, and how efficiently?
 
-One row per run: the scaling knobs (`n_series`, `n_models`, `python_runtime`) plus the `job_telemetry`
-JSON unpacked into scalars — `total_wall_s`, `overhead_seconds` (`total_wall_s − runtime_seconds`),
-`overhead_fraction`, `executor_instances` / `executor_cores` / `max_executors` /
-`executor_memory` / `executor_memory_overhead`, `dcu_milli_seconds`, `runtime_version` — and the
-raw `sizing` record. This is the run-level scaling-and-efficiency story: how wall-clock and overhead
-move with the series and model counts and the chosen runtime, with provisioning overhead that
-amortizes at scale. The per-family runtime/hardware breakdown that composes each run lives in
-`v_run_jobs`.
+One row per run: the scaling knobs (`n_series`, `n_models`, `python_runtime`), the header's own
+`runtime_seconds`, and a **time ledger rolled up from the run's `run_jobs` rows**:
 
-The executor columns are the shape the platform was **told** (echoed back off the submitted job);
-`sizing` is **why** it was that shape. Each family job of a run writes its own entry, so the column
-holds one object per family:
+| Column | Meaning |
+| :--- | :--- |
+| `n_jobs` | Job rows in the ledger — one per family that launched, plus `ensemble` when it ran. |
+| `longest_job_seconds` | The critical-path job: the widest `started_at → ended_at` bracket. |
+| `jobs_seconds` | Every job's bracket added up. Families run in parallel, so this exceeds the run's own wall whenever the DAG overlapped — the "compute-seconds" view of the run. |
+| `jobs_span_seconds` | First job start to last job end — the run's job window. |
+| `overhead_seconds` | `jobs_span_seconds − longest_job_seconds`: the wall inside the job window that the slowest family did not account for — the barrier ensemble after the join, the native BigQuery job, family start skew, and under Composer the scheduler's gaps between tasks. |
+| `overhead_fraction` | `overhead_seconds / jobs_span_seconds`. |
+
+The ledger means the same thing whichever tier finalized the header, which is why it is derived
+from the job rows rather than from header columns: the header's `runtime_seconds` is the launcher's
+wall under `main.run` but the slowest job's under Composer, and the platform wall a Serverless batch
+stamps on the header is one family's, not the run's. Three rules keep it exact. Every term is
+measured on the job rows' own `started_at` / `ended_at` timestamps — not on `runtime_seconds`,
+which the launcher reads off a monotonic clock — so a span always contains its longest member and
+`overhead_seconds` is ≥ 0 by arithmetic. The rows are the **current attempt per family** (the
+highest-`attempt` rule `v_run_jobs` applies) **written after the header row**, so a run resumed
+hours later is not charged the idle time between its launches. And **repair rows are excluded**
+(`family` ending in `_repair`): a repair is filed later under its own token and writes no header,
+so counting it would stretch the span across the gap. A header with no job row in its launch — a
+run that failed before its first family launched, or one written by an older release — carries NULL
+in the ledger and still renders.
+
+Beside the ledger sit the Dataproc Serverless scalars unpacked from the header's `job_telemetry` —
+`executor_instances` / `executor_cores` / `max_executors` / `executor_memory` /
+`executor_memory_overhead`, `dcu_milli_seconds`, `runtime_version` — and the raw `sizing` and
+`capacity` records. The executor columns are the shape the platform was **told** (echoed back off
+the submitted batch); `sizing` is **why** it was that shape. The scalars are written by the run's
+Serverless batches, last to finish wins: exact for a single-family Serverless run, one family's
+answer for a mixed run, NULL for a run that submitted no Serverless batch. The per-family
+runtime/hardware breakdown that composes each run lives in `v_run_jobs`.
+
+Each family job of a run writes its own `sizing` entry, so the column holds one object per family:
 
 ```sql
 SELECT
@@ -563,15 +590,19 @@ existed, or one that left the platform's own defaults standing.
 
 One row per `(run_id, family)` = the run's DAG as executed: the deterministic `job_id`, the
 `attempt`, the resolved `runtime` / `spark_mode` / `hardware` / `gpu_type`, the platform's own
-`system_job_id`, the per-job `status` / `created_at` / `runtime_seconds`, and the per-job
-`job_telemetry` unpacked into `total_wall_s` and `dcu_milli_seconds`. `device_verdict` is the one
-word saying whether this row's accelerator did any work, with the counts behind it in `device_use`
-beside it — both NULL for a CPU family, so `WHERE device_verdict != 'ENGAGED_UTILISED'` is the "what
-did I pay for and not use" query ([below](#was-the-accelerator-you-paid-for-actually-used)). A
-`--force` re-run appends a
-higher-`attempt` job under the same `(run_id, family)`; the view keeps only the current one
-(`QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1`), so the `run_id → current job` map is one row
-per family.
+`system_job_id`, the per-job `status`, its `started_at` / `ended_at` bracket and `runtime_seconds`
+(the launcher's wall around the platform job, submit to terminal — the bracket is what
+`v_run_summary`'s ledger is built from), and `failure_reason` for a row that failed. Out of the
+per-job `job_telemetry` it unpacks `probe_handle` (the platform handle the launcher kept) and
+`capacity` (this family's own region walk, NULL for a job that never had to wait — nearly all of
+them). `device_verdict` is the one word saying whether this row's accelerator did any work, with the
+counts behind it in `device_use` beside it — both NULL for a CPU family, so `WHERE device_verdict
+!= 'ENGAGED_UTILISED'` is the "what did I pay for and not use" query
+([below](#was-the-accelerator-you-paid-for-actually-used)). The platform's own batch wall and DCU
+figures are not on this row: Serverless telemetry lands on the header, so they read from
+`v_run_summary`. A `--force` re-run appends a higher-`attempt` job under the same `(run_id,
+family)`; the view keeps only the current one (`QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1`),
+so the `run_id → current job` map is one row per family.
 
 ### `v_model_leaderboard` — which model won, per run?
 

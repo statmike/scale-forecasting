@@ -44,12 +44,51 @@ def test_dataset_ref_substituted_in_name_and_sources() -> None:
     assert "`myproj.myds.run_registry`" in stmt
 
 
-def test_run_summary_unpacks_telemetry_and_derives_overhead() -> None:
+def test_run_summary_builds_its_time_ledger_from_the_current_job_rows() -> None:
     stmt = render_create_views("d")["v_run_summary"]
-    # telemetry is read out of the JSON STRING, and overhead is total_wall − our runtime
-    assert "JSON_VALUE(job_telemetry, '$.total_wall_s')" in stmt
-    assert "overhead_seconds" in stmt
-    assert "overhead_fraction" in stmt
+    # The ledger comes from run_jobs, current attempt per family — the same highest-attempt rule
+    # v_run_jobs applies — not from header columns.
+    assert "FROM `d.run_jobs`" in stmt
+    assert "PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC" in stmt
+    for column in ("n_jobs", "longest_job_seconds", "jobs_seconds", "jobs_span_seconds"):
+        assert f"AS {column}" in stmt
+    # Every term is read off the rows' own timestamps, never off runtime_seconds: the launcher
+    # measures that on a monotonic clock, and a span minus a monotonic duration came out a few
+    # milliseconds negative under clock slew. Same clock on both sides is what makes overhead ≥ 0.
+    assert "TIMESTAMP_DIFF(j.ended_at, j.started_at, MILLISECOND) / 1000 AS job_seconds" in stmt
+    assert "MAX(job_seconds) AS longest_job_seconds" in stmt
+    assert "SUM(job_seconds) AS jobs_seconds" in stmt
+    assert "TIMESTAMP_DIFF(MAX(ended_at), MIN(started_at), MILLISECOND) / 1000" in stmt
+    assert "runtime_seconds" not in stmt.split("launch_jobs AS (")[1].split("ledger AS (")[0]
+    # A header with no job row yet still renders, with NULLs in the ledger.
+    assert "LEFT JOIN ledger AS l USING (run_id)" in stmt
+
+
+def test_run_summary_ledger_covers_the_headers_own_launch_and_skips_repairs() -> None:
+    from scale_forecasting.registry.ids import REPAIR_SUFFIX
+
+    stmt = render_create_views("d")["v_run_summary"]
+    # The summary row is the latest header's; its ledger is the jobs that launch wrote. A run
+    # resumed hours later must not be charged the idle time between its launches.
+    assert "WHERE j.created_at >= h.created_at" in stmt
+    # A repair is filed later under its own family token and writes no header, so it would
+    # stretch the span to cover the gap. The suffix comes from registry.ids, not a literal.
+    assert f"AND NOT ENDS_WITH(j.family, '{REPAIR_SUFFIX}')" in stmt
+    assert "{repair_suffix}" not in stmt
+
+
+def test_run_summary_overhead_is_span_minus_longest_job_and_never_the_header_wall() -> None:
+    stmt = render_create_views("d")["v_run_summary"]
+    # Overhead is the wall inside the run's job window that the slowest family does not account
+    # for. A span contains its longest member, so the number is ≥ 0 by construction and means the
+    # same thing whether main.run or Composer finalized the header.
+    assert "l.jobs_span_seconds - l.longest_job_seconds AS overhead_seconds" in stmt
+    assert "SAFE_DIVIDE(l.jobs_span_seconds - l.longest_job_seconds, l.jobs_span_seconds)" in stmt
+    # The old definition subtracted the header's whole-run wall from one family batch's platform
+    # wall and came out ≤ 0 on nearly every run; neither operand may come back.
+    assert "total_wall_s" not in stmt
+    assert "- runtime_seconds" not in stmt
+    assert "- h.runtime_seconds" not in stmt
 
 
 def test_run_summary_exposes_the_shape_that_ran_and_the_decision_behind_it() -> None:
@@ -64,7 +103,7 @@ def test_run_summary_exposes_the_shape_that_ran_and_the_decision_behind_it() -> 
         assert f"AS {column}" in stmt
     # And the whole decision, per family, left as JSON: its interesting parts are nested, so
     # unpacking it into columns would pick a family for the reader.
-    assert "JSON_QUERY(job_telemetry, '$.sizing') AS sizing" in stmt
+    assert "JSON_QUERY(h.job_telemetry, '$.sizing') AS sizing" in stmt
 
 
 def test_run_summary_keeps_one_row_per_run_after_a_forced_rerun() -> None:
@@ -75,6 +114,32 @@ def test_run_summary_keeps_one_row_per_run_after_a_forced_rerun() -> None:
         "QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1"
         in stmt
     )
+
+
+def _output_columns(stmt: str) -> list[str]:
+    """The column names a rendered view yields, in order, read off its final SELECT list."""
+    select_list = stmt.rsplit("\nSELECT\n", 1)[1].split("\nFROM ", 1)[0]
+    columns: list[str] = []
+    for raw in select_list.replace("\n    AS ", " AS ").splitlines():
+        expr = raw.strip().rstrip(",")
+        name = expr.rsplit(" AS ", 1)[1] if " AS " in expr else expr.rsplit(".", 1)[-1]
+        columns.append(name)
+    return columns
+
+
+def test_recent_runs_reader_selects_columns_the_summary_view_yields_in_view_order() -> None:
+    from scale_forecasting.registry.reads import RECENT_RUNS_COLUMNS
+
+    view_columns = _output_columns(render_create_views("d")["v_run_summary"])
+    # Every column the reader (and `Forecaster.registry().runs_df()`) names exists on the view…
+    missing = [c for c in RECENT_RUNS_COLUMNS if c not in view_columns]
+    assert not missing, f"read_recent_runs selects columns v_run_summary does not have: {missing}"
+    # …and in the view's own order, so the frame reads like the view does.
+    positions = [view_columns.index(c) for c in RECENT_RUNS_COLUMNS]
+    assert positions == sorted(positions)
+    # The whole ledger is carried, not a subset of it.
+    for column in ("n_jobs", "longest_job_seconds", "jobs_span_seconds", "overhead_seconds"):
+        assert column in RECENT_RUNS_COLUMNS
 
 
 def test_leaderboard_is_per_run_model_full_fit_only() -> None:
@@ -122,6 +187,11 @@ def test_run_jobs_view_exposes_job_timing_for_the_trace() -> None:
     # the wall-clock bracket the SDK trace() reads to place each job on a timeline
     assert "started_at" in stmt
     assert "ended_at" in stmt
+    # The platform's own wall and DCU land on the header, not the job row (batch_telemetry and
+    # ray_telemetry merge into run_registry), so a column unpacking them here read NULL on every
+    # job. Neither may be projected until a writer puts them on the row.
+    assert "total_wall_s" not in stmt
+    assert "dcu_milli_seconds" not in stmt
 
 
 def test_run_jobs_view_projects_probe_handle() -> None:
@@ -152,7 +222,7 @@ def test_run_summary_view_projects_the_shared_clusters_capacity_ledger() -> None
     # The run-level half of the same story: a shared cluster is provisioned before any job row
     # exists, so its walk is recorded on the header instead — see `shared_capacity_path`.
     stmt = render_create_views("d")["v_run_summary"]
-    assert "JSON_QUERY(job_telemetry, '$.capacity') AS capacity" in stmt
+    assert "JSON_QUERY(h.job_telemetry, '$.capacity') AS capacity" in stmt
 
 
 # --- the two cohort views: is the ranking comparable at all? --------------------
