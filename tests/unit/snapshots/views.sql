@@ -1,31 +1,64 @@
 CREATE OR REPLACE VIEW `proj.scale_forecasting.v_run_summary` AS
+WITH header AS (
+  SELECT *
+  FROM `proj.scale_forecasting.run_registry`
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1
+),
+current_jobs AS (
+  SELECT run_id, family, created_at, started_at, ended_at
+  FROM `proj.scale_forecasting.run_jobs`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC
+  ) = 1
+),
+launch_jobs AS (
+  SELECT
+    j.run_id,
+    j.started_at,
+    j.ended_at,
+    TIMESTAMP_DIFF(j.ended_at, j.started_at, MILLISECOND) / 1000 AS job_seconds
+  FROM current_jobs AS j
+  JOIN header AS h USING (run_id)
+  WHERE j.created_at >= h.created_at
+    AND NOT ENDS_WITH(j.family, '_repair')
+),
+ledger AS (
+  SELECT
+    run_id,
+    COUNT(*) AS n_jobs,
+    MAX(job_seconds) AS longest_job_seconds,
+    SUM(job_seconds) AS jobs_seconds,
+    TIMESTAMP_DIFF(MAX(ended_at), MIN(started_at), MILLISECOND) / 1000 AS jobs_span_seconds
+  FROM launch_jobs
+  GROUP BY run_id
+)
 SELECT
-  run_id,
-  created_at,
-  status,
-  python_runtime,
-  n_series,
-  n_models,
-  backtest_on,
-  runtime_seconds,
-  CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
-  CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64)
-    - runtime_seconds AS overhead_seconds,
-  SAFE_DIVIDE(
-    CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) - runtime_seconds,
-    CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64)
-  ) AS overhead_fraction,
-  CAST(JSON_VALUE(job_telemetry, '$.executor_instances') AS INT64) AS executor_instances,
-  CAST(JSON_VALUE(job_telemetry, '$.executor_cores') AS INT64) AS executor_cores,
-  CAST(JSON_VALUE(job_telemetry, '$.max_executors') AS INT64) AS max_executors,
-  JSON_VALUE(job_telemetry, '$.executor_memory') AS executor_memory,
-  JSON_VALUE(job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
-  CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
-  JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version,
-  JSON_QUERY(job_telemetry, '$.sizing') AS sizing,
-  JSON_QUERY(job_telemetry, '$.capacity') AS capacity
-FROM `proj.scale_forecasting.run_registry`
-QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1;
+  h.run_id,
+  h.created_at,
+  h.status,
+  h.python_runtime,
+  h.n_series,
+  h.n_models,
+  h.backtest_on,
+  h.runtime_seconds,
+  l.n_jobs,
+  l.longest_job_seconds,
+  l.jobs_seconds,
+  l.jobs_span_seconds,
+  l.jobs_span_seconds - l.longest_job_seconds AS overhead_seconds,
+  SAFE_DIVIDE(l.jobs_span_seconds - l.longest_job_seconds, l.jobs_span_seconds)
+    AS overhead_fraction,
+  CAST(JSON_VALUE(h.job_telemetry, '$.executor_instances') AS INT64) AS executor_instances,
+  CAST(JSON_VALUE(h.job_telemetry, '$.executor_cores') AS INT64) AS executor_cores,
+  CAST(JSON_VALUE(h.job_telemetry, '$.max_executors') AS INT64) AS max_executors,
+  JSON_VALUE(h.job_telemetry, '$.executor_memory') AS executor_memory,
+  JSON_VALUE(h.job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
+  CAST(JSON_VALUE(h.job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
+  JSON_VALUE(h.job_telemetry, '$.runtime_version') AS runtime_version,
+  JSON_QUERY(h.job_telemetry, '$.sizing') AS sizing,
+  JSON_QUERY(h.job_telemetry, '$.capacity') AS capacity
+FROM header AS h
+LEFT JOIN ledger AS l USING (run_id);
 
 CREATE OR REPLACE VIEW `proj.scale_forecasting.v_run_jobs` AS
 SELECT
@@ -44,8 +77,6 @@ SELECT
   ended_at,
   runtime_seconds,
   failure_reason,
-  CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
-  CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
   JSON_VALUE(job_telemetry, '$.device_use.verdict') AS device_verdict,
   JSON_QUERY(job_telemetry, '$.device_use') AS device_use,
   JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle,

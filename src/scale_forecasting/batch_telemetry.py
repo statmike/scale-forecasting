@@ -59,12 +59,13 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
 
     Pure (no network): reads only fields already on the ``batch`` object that ``get_batch`` returns.
     Answers the operability questions the registry couldn't before — *how big was the cluster, did
-    it autoscale, how much did it cost, and where did the wall-clock go* (provision + startup +
-    closeout vs. our own ``runtime_seconds``):
+    it autoscale, how much did it cost, and how long did the platform hold it*:
 
-    - ``total_wall_s`` — ``state_time − create_time``: the full provision→terminal wall-clock. The
-      gap between this and the engine's ``runtime_seconds`` is Dataproc overhead (autoscaling
-      warm-up + teardown), which amortizes as scale grows — the efficiency half of the scale story.
+    - ``total_wall_s`` — ``state_time − create_time``: this batch's full provision→terminal
+      wall-clock as Dataproc saw it. It is one family's figure and it lands on the run **header**
+      (last batch to finish wins), so it is a per-batch fact, not a run-level one; the run's
+      overhead is derived from the ``run_jobs`` brackets in ``v_run_summary`` instead
+      (`registry.views`).
     - ``dcu_milli_seconds`` / ``shuffle_storage_gb_seconds`` — approximate usage (billing proxy +
       shuffle pressure).
     - ``driver_cores`` / ``executor_cores`` / ``task_cpus`` / ``executor_instances`` /

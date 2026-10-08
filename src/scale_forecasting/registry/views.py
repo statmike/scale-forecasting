@@ -9,20 +9,49 @@ strings (no client), so they render + snapshot-test offline exactly like the tab
 Five views, matched to the questions a run prompts:
 
 - ``v_run_summary`` — *how did each run go, and how efficiently?* One row per run: the scaling
-  knobs (``n_series``, ``n_models``), the engine's own ``runtime_seconds``, and the Dataproc
-  ``job_telemetry`` overlay unpacked from its JSON column — total wall-clock, the provisioning
-  overhead (``total_wall_s − runtime_seconds``) and its share, cluster sizing, and DCU usage. This
-  is the run-level scaling-and-efficiency story as one ``SELECT * ORDER BY n_series`` — how
-  wall-clock and overhead move with scale (overhead amortizes as the series count grows); the
-  per-family runtime/hardware breakdown that composes each run lives in ``v_run_jobs``.
-  The executor columns are the shape the platform was *told* (echoed back off the submitted batch),
-  while ``sizing`` is the whole decision behind it — one entry per family under ``$.sizing``, each
-  holding the fleet plan, its translation to platform settings, and the `ComputeProfile` it was
-  sized off (`resources.audit.sizing_telemetry`). Left as raw ``JSON`` rather than unpacked into
-  columns because its interesting parts are per-family and nested: read a run's shape from the
-  scalar columns, read *why* with ``JSON_QUERY(sizing, '$.deep_learning')``. NULL on a run submitted
-  before this existed, or one that left the platform's own defaults standing. ``capacity`` is the
-  same shape for the other run-level wait: one attempt ledger per *shared* cluster, keyed by service
+  knobs (``n_series``, ``n_models``), the header's whole-run ``runtime_seconds``, and a **time
+  ledger rolled up from the run's job rows**: ``n_jobs``, ``longest_job_seconds`` (the
+  critical-path job), ``jobs_seconds`` (every job's wall added up — families run in parallel, so
+  this exceeds the run's own wall when the DAG overlapped), ``jobs_span_seconds`` (first job start
+  to last job end), and ``overhead_seconds = jobs_span_seconds − longest_job_seconds`` with its
+  share ``overhead_fraction``. That overhead is the wall inside the run's job window that the
+  slowest family did not account for: the barrier ensemble, the native BigQuery job, family start
+  skew, and — under Composer — the scheduler's gaps between tasks. It means the same thing
+  whichever tier finalized the header, which is why it is derived from the job rows rather than
+  from header columns: the header's ``runtime_seconds`` is the launcher's wall under `main.run`
+  but the slowest job under Composer (`airflow_tasks.finalize_run`), and the platform wall a family
+  batch stamps on the header (``$.total_wall_s``) is one family's, not the run's — the earlier
+  ``total_wall_s − runtime_seconds`` definition compared those two and came out ≤ 0 on nearly
+  every run.
+
+  Three rules make the ledger exact rather than approximately right. Every term is measured on the
+  job rows' own ``started_at`` → ``ended_at`` timestamps (not on ``runtime_seconds``, which the
+  launcher reads off a monotonic clock — mixing the two left overhead a few milliseconds negative
+  under clock slew), so a span contains its longest member and ``overhead_seconds`` is ≥ 0 by
+  arithmetic; the bracket exceeds the row's ``runtime_seconds`` by the row-write latency, which is
+  the only difference between them. The rows are the **current attempt per family** (the same
+  highest-attempt rule ``v_run_jobs`` applies) **written after the header row** — the summary
+  describes the header's own launch, so a run resumed hours later is not charged the idle time
+  between its launches. And **repair rows are excluded** (families ending in
+  `registry.ids.REPAIR_SUFFIX`): a repair is filed days later under its own token, writes no
+  header, and would otherwise stretch the span to cover the gap. A header with no job row in its
+  launch (a run that failed before its first family launched, or one written by an older release)
+  carries NULL in the ledger and still renders.
+
+  The executor columns (``executor_instances`` / ``executor_cores`` / ``max_executors`` /
+  ``executor_memory`` / ``executor_memory_overhead``), ``dcu_milli_seconds``, and
+  ``runtime_version`` are unpacked from the header's ``job_telemetry``, and those keys are written
+  by **the run's Dataproc Serverless batches, last to finish wins** — see
+  `batch_telemetry._stamp_job_telemetry`, which merges by key; a Ray job or a Dataproc cluster job
+  stamps other keys. So they are the echoed shape of *a* family batch: exact for a single-family
+  Serverless run, one family's answer for a mixed run, and NULL for a run that submitted no
+  Serverless batch.
+  The per-family decision — one entry per family under ``$.sizing`` — is the whole story, left as
+  raw ``JSON`` because its interesting parts are nested: read a run's shape from the scalar
+  columns, read *why*, per family, with ``JSON_QUERY(sizing, '$.deep_learning')``
+  (`resources.audit.sizing_telemetry`). NULL on a run submitted before this existed, or one that
+  left the platform's own defaults standing. ``capacity`` is the same shape for the other run-level
+  wait: one attempt ledger per *shared* cluster, keyed by service
   (`shared_clusters.shared_capacity_path`), recording every region tried before one had room. A
   per-family walk is on the family's row instead — see ``v_run_jobs``. A forced re-run of an
   unchanged config appends a second header row under the same ``run_id``; the view keeps only the
@@ -32,15 +61,19 @@ Five views, matched to the questions a run prompts:
 - ``v_run_jobs`` — *what jobs ran for this run, on what runtime/hardware, and how did each fare?*
   One row per ``(run_id, family)`` = the run's DAG as executed: the deterministic ``job_id``, the
   resolved ``runtime`` / ``spark_mode`` / ``hardware`` / ``gpu_type``, the platform's own
-  ``system_job_id``, the per-job ``status`` and ``runtime_seconds``, and a ``dcu_milli_seconds``
-  overlay from the per-job ``job_telemetry``. ``failure_reason`` says *why* a FAILED row failed
+  ``system_job_id``, the per-job ``status``, its ``started_at`` / ``ended_at`` bracket and
+  ``runtime_seconds`` — the launcher's wall around the platform job, from submit to terminal,
+  which is what ``v_run_summary``'s ledger is built from. ``failure_reason`` says *why* a FAILED
+  row failed
   (``CAPACITY_EXHAUSTED`` is the first token) and ``capacity`` carries the whole attempt ledger —
   every candidate tried, its verdict, and the cloud's verbatim message. Both are NULL for a job
   that never had to wait, which is nearly all of them. ``device_verdict`` is the one word that says
   whether the accelerator on this row's ``hardware`` did any work (`device_audit`) — NULL for every
   CPU family, so ``WHERE device_verdict != 'ENGAGED_UTILISED'`` is the "what did I pay for and not
   use" query — and ``device_use`` beside it carries the counts and the peak byte figure the word was
-  decided from. A ``--force`` re-run appends a
+  decided from. The platform's own wall and DCU figures are *not* on this row: the batch telemetry
+  lands on the header (above), and a column that unpacked it from here would read NULL on every
+  job. A ``--force`` re-run appends a
   higher-``attempt`` job under the same ``(run_id, family)``; the view keeps only the current one
   (``QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1``), so the forward ``run_id → current job``
   map is one row per family.
@@ -132,38 +165,73 @@ Public surface: ``VIEW_NAMES``, ``render_create_views``.
 
 from __future__ import annotations
 
+from .ids import REPAIR_SUFFIX
+
 # View bodies. `{d}` is the dataset ref (`project.dataset` or `dataset`); the registry tables the
 # view reads are qualified with the same ref so a view and its sources always share a dataset.
 _VIEW_BODIES: dict[str, str] = {
     "v_run_summary": """\
 CREATE OR REPLACE VIEW `{d}.v_run_summary` AS
+WITH header AS (
+  SELECT *
+  FROM `{d}.run_registry`
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1
+),
+current_jobs AS (
+  SELECT run_id, family, created_at, started_at, ended_at
+  FROM `{d}.run_jobs`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC
+  ) = 1
+),
+launch_jobs AS (
+  SELECT
+    j.run_id,
+    j.started_at,
+    j.ended_at,
+    TIMESTAMP_DIFF(j.ended_at, j.started_at, MILLISECOND) / 1000 AS job_seconds
+  FROM current_jobs AS j
+  JOIN header AS h USING (run_id)
+  WHERE j.created_at >= h.created_at
+    AND NOT ENDS_WITH(j.family, '{repair_suffix}')
+),
+ledger AS (
+  SELECT
+    run_id,
+    COUNT(*) AS n_jobs,
+    MAX(job_seconds) AS longest_job_seconds,
+    SUM(job_seconds) AS jobs_seconds,
+    TIMESTAMP_DIFF(MAX(ended_at), MIN(started_at), MILLISECOND) / 1000 AS jobs_span_seconds
+  FROM launch_jobs
+  GROUP BY run_id
+)
 SELECT
-  run_id,
-  created_at,
-  status,
-  python_runtime,
-  n_series,
-  n_models,
-  backtest_on,
-  runtime_seconds,
-  CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
-  CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64)
-    - runtime_seconds AS overhead_seconds,
-  SAFE_DIVIDE(
-    CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) - runtime_seconds,
-    CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64)
-  ) AS overhead_fraction,
-  CAST(JSON_VALUE(job_telemetry, '$.executor_instances') AS INT64) AS executor_instances,
-  CAST(JSON_VALUE(job_telemetry, '$.executor_cores') AS INT64) AS executor_cores,
-  CAST(JSON_VALUE(job_telemetry, '$.max_executors') AS INT64) AS max_executors,
-  JSON_VALUE(job_telemetry, '$.executor_memory') AS executor_memory,
-  JSON_VALUE(job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
-  CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
-  JSON_VALUE(job_telemetry, '$.runtime_version') AS runtime_version,
-  JSON_QUERY(job_telemetry, '$.sizing') AS sizing,
-  JSON_QUERY(job_telemetry, '$.capacity') AS capacity
-FROM `{d}.run_registry`
-QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1""",
+  h.run_id,
+  h.created_at,
+  h.status,
+  h.python_runtime,
+  h.n_series,
+  h.n_models,
+  h.backtest_on,
+  h.runtime_seconds,
+  l.n_jobs,
+  l.longest_job_seconds,
+  l.jobs_seconds,
+  l.jobs_span_seconds,
+  l.jobs_span_seconds - l.longest_job_seconds AS overhead_seconds,
+  SAFE_DIVIDE(l.jobs_span_seconds - l.longest_job_seconds, l.jobs_span_seconds)
+    AS overhead_fraction,
+  CAST(JSON_VALUE(h.job_telemetry, '$.executor_instances') AS INT64) AS executor_instances,
+  CAST(JSON_VALUE(h.job_telemetry, '$.executor_cores') AS INT64) AS executor_cores,
+  CAST(JSON_VALUE(h.job_telemetry, '$.max_executors') AS INT64) AS max_executors,
+  JSON_VALUE(h.job_telemetry, '$.executor_memory') AS executor_memory,
+  JSON_VALUE(h.job_telemetry, '$.executor_memory_overhead') AS executor_memory_overhead,
+  CAST(JSON_VALUE(h.job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
+  JSON_VALUE(h.job_telemetry, '$.runtime_version') AS runtime_version,
+  JSON_QUERY(h.job_telemetry, '$.sizing') AS sizing,
+  JSON_QUERY(h.job_telemetry, '$.capacity') AS capacity
+FROM header AS h
+LEFT JOIN ledger AS l USING (run_id)""",
     "v_run_jobs": """\
 CREATE OR REPLACE VIEW `{d}.v_run_jobs` AS
 SELECT
@@ -182,8 +250,6 @@ SELECT
   ended_at,
   runtime_seconds,
   failure_reason,
-  CAST(JSON_VALUE(job_telemetry, '$.total_wall_s') AS FLOAT64) AS total_wall_s,
-  CAST(JSON_VALUE(job_telemetry, '$.dcu_milli_seconds') AS INT64) AS dcu_milli_seconds,
   JSON_VALUE(job_telemetry, '$.device_use.verdict') AS device_verdict,
   JSON_QUERY(job_telemetry, '$.device_use') AS device_use,
   JSON_QUERY(job_telemetry, '$.probe_handle') AS probe_handle,
@@ -301,5 +367,11 @@ def render_create_views(dataset: str) -> dict[str, str]:
             name and the registry tables it reads.
 
     Each statement is ``CREATE OR REPLACE`` (idempotent — safe to re-run on every ``ensure``).
+    ``v_run_summary``'s ledger excludes repair rows by the same `registry.ids.REPAIR_SUFFIX` the
+    id scheme files them under, substituted here rather than spelled in the SQL so the two cannot
+    drift.
     """
-    return {name: body.format(d=dataset) + ";" for name, body in _VIEW_BODIES.items()}
+    return {
+        name: body.format(d=dataset, repair_suffix=REPAIR_SUFFIX) + ";"
+        for name, body in _VIEW_BODIES.items()
+    }

@@ -364,9 +364,13 @@ The files:
   and reading the layout back — which run owns a blob, which prefixes the registry has no row for,
   and deleting them. `registry/ops.py`'s destructive verbs run on that second half.
 - [`views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) — the five analyst views: `v_run_summary`
-  (per-run scaling/efficiency, unpacking the telemetry JSON), `v_run_jobs` (the per-family-job trace —
-  latest attempt per family, its runtime/hardware/system job id/status/telemetry),
-  `v_model_leaderboard` (per-model accuracy across all 21 metrics), `v_model_leaderboard_comparable` (cross-run comparison grouped by `eval_fingerprint`), and `v_backtest_coverage` (fold-coverage distribution per run and model). The first three are what notebook 07
+  (per-run scaling and efficiency — a time ledger rolled up from the run's job rows, plus the
+  Serverless telemetry unpacked from the header), `v_run_jobs` (the per-family-job trace —
+  latest attempt per family, its runtime/hardware/system job id/status/bracket/telemetry),
+  `v_model_leaderboard` (per-model roll-up: cell counts, fit time, mean `wape` / `mae`),
+  `v_model_leaderboard_comparable` (the same ranking restricted to the holdout fold and pooled over
+  the panel, so rows are comparable), and `v_backtest_coverage` (the achieved-fold histogram per
+  run and model). The first three are what notebook 07
   reads.
 
 ---

@@ -36,10 +36,10 @@ def extract_ray_telemetry(
 
     The Ray analog of `extract_job_telemetry`, answering the same
     operability questions — *how big was the pool (and its elastic bounds), what did it cost in
-    wall-clock, and what sizing produced it* — so a Ray run is as auditable on ``v_run_summary`` as
-    a Spark one. Reads only fields already on the ``plan`` and the ``cluster`` object; every cluster
-    field is optional (a missing attr degrades to None, never a raise) so this is safe on any object
-    ``get_ray_cluster`` returns.
+    wall-clock, and what sizing produced it* — so a Ray run is as auditable on the run header's
+    ``job_telemetry`` as a Spark one. Reads only fields already on the ``plan`` and the ``cluster``
+    object; every cluster field is optional (a missing attr degrades to None, never a raise) so
+    this is safe on any object ``get_ray_cluster`` returns.
     """
     return {
         "runtime": "ray",
@@ -51,8 +51,8 @@ def extract_ray_telemetry(
         "cpu_node_count": plan.cpu_node_count,
         "gpu_node_count": plan.gpu_node_count,
         "total_worker_nodes": plan.total_worker_nodes,
-        # Elastic spec: the flag + per-pool bounds the cluster was created with, so
-        # v_run_summary shows whether/how the pools autoscaled. node_count above is the derived
+        # Elastic spec: the flag + per-pool bounds the cluster was created with, so the header's
+        # job_telemetry shows whether/how the pools autoscaled. node_count above is the derived
         # fixed-size-equivalent (the reference size; under autoscaling the pool starts at min).
         "autoscale": plan.autoscale,
         "cpu_min_nodes": plan.cpu_min_nodes,

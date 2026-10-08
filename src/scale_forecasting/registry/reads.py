@@ -19,6 +19,29 @@ from .tables import resolve_settings
 if TYPE_CHECKING:
     from ..settings import Settings
 
+# The ``v_run_summary`` columns `read_recent_runs` selects, in the order `Forecaster.registry()
+# .runs_df()` shows them: the header's identity and scaling knobs, then the run's time ledger
+# (rolled up from its job rows — see `registry.views`), then the one per-batch figure kept for the
+# cost story. One tuple, imported by the SDK, pinned against the rendered view by
+# ``tests/unit/test_views.py`` — so a view column cannot be renamed out from under the reader.
+RECENT_RUNS_COLUMNS: tuple[str, ...] = (
+    "run_id",
+    "created_at",
+    "status",
+    "python_runtime",
+    "n_series",
+    "n_models",
+    "backtest_on",
+    "runtime_seconds",
+    "n_jobs",
+    "longest_job_seconds",
+    "jobs_seconds",
+    "jobs_span_seconds",
+    "overhead_seconds",
+    "overhead_fraction",
+    "dcu_milli_seconds",
+)
+
 
 def parse_ts(value: Any) -> datetime | None:
     """Coerce a registry timestamp to a timezone-aware UTC ``datetime``, or ``None`` if it isn't.
@@ -782,9 +805,7 @@ def read_recent_runs(
     resolved = resolve_settings(settings)
     where_clause = " WHERE status=@status" if status is not None else ""
     sql = (
-        "SELECT run_id, created_at, status, python_runtime, n_series, n_models, "
-        "backtest_on, runtime_seconds, total_wall_s, overhead_seconds, overhead_fraction, "
-        "dcu_milli_seconds "
+        f"SELECT {', '.join(RECENT_RUNS_COLUMNS)} "
         f"FROM `{resolved.registry_table_ref('v_run_summary')}`"
         f"{where_clause} "
         "ORDER BY created_at DESC NULLS LAST LIMIT @limit"

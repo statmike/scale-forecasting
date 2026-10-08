@@ -64,11 +64,11 @@ erDiagram
 ### 1. Schema, Views & Identity
 - **[`ddl.py`](./ddl.py):** Pure SQL DDL generator for the four source tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, `source_series_covariates_native`) and five registry tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), plus idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations derived from `METRIC_NAMES` and `explanations JSON`.
 - **[`views.py`](./views.py):** Pure SQL definitions for the five analyst views created over the registry:
-  - `v_run_summary`: One row per run joining `run_registry` with cell completion counts and best model accuracy.
-  - `v_run_jobs`: Deduplicated per-family job execution trace with runtime, hardware, and platform job IDs.
-  - `v_model_leaderboard`: Per-run model ranking across all 21 metrics with `RANK() OVER (PARTITION BY run_id ORDER BY wape)`.
-  - `v_model_leaderboard_comparable`: Cross-run model comparison grouped by `eval_fingerprint` so runs with identical evaluation layouts can be ranked directly.
-  - `v_backtest_coverage`: Fold-coverage distribution (`n_folds_completed`) per run and model.
+  - `v_run_summary`: One row per run — the header's scaling knobs and `runtime_seconds`, a time ledger rolled up from the run's current `run_jobs` rows (`n_jobs`, `longest_job_seconds`, `jobs_seconds`, `jobs_span_seconds`, `overhead_seconds = span − longest`, `overhead_fraction`), and the Dataproc Serverless executor/DCU scalars plus raw `sizing` / `capacity` unpacked from the header's `job_telemetry`.
+  - `v_run_jobs`: Deduplicated per-family job execution trace — the current attempt per `(run_id, family)` with runtime, hardware, platform job id, `started_at` / `ended_at` bracket, `failure_reason`, and the `device_verdict` / `capacity` unpacked from the job's telemetry.
+  - `v_model_leaderboard`: Per-run model roll-up over final rows (`fold_id IS NULL`) — `n_cells`, `no_artifact_rate`, `median_fit_seconds`, `mean_wape` / `mean_mae`, `mean_staleness_gap`, `refit_modes` — one row per `(run_id, model_type, ensemble_id)`.
+  - `v_model_leaderboard_comparable`: The same ranking held to one question — restricted to the holdout fold of `backtest_oof` and pooled (`SUM(|y_true − yhat|) / SUM(|y_true|)` as `pooled_wape`, plus `pooled_mae`) so the number is one WAPE of the whole panel, with `n_series` / `n_points` carried as the evidence the rows are comparable.
+  - `v_backtest_coverage`: The achieved-fold histogram per model — one row per `(run_id, model_type, ensemble_id, backtest_status, n_folds_achieved, backtest_refit)` with `n_series` and `series_share`.
 - **[`tables.py`](./tables.py):** Idempotent `ensure_tables(settings)` helper that creates missing tables, applies additive column migrations, and refreshes the five analyst views.
 - **[`ids.py`](./ids.py):** Computes deterministic `<slug>-<12hex>` `run_id`s (`make_run_id`) from canonicalized `RunConfig` JSON, maintaining historical `run_id` stability via `_REMOVED_DEFAULTS` and `_DEFAULT_ELIDED`.
 
