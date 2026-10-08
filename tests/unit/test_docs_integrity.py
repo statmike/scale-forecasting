@@ -481,3 +481,30 @@ def test_backticked_exception_names_resolve_to_real_classes(markdown_files: list
         "Documentation names exception classes that do not exist (see scale_forecasting.errors):\n"
         + "\n".join(problems)
     )
+
+
+def test_social_card_and_site_url() -> None:
+    """Verify the 1280x640 social preview PNG, its HTML source, Makefile target, and site_url."""
+    import struct
+
+    png_path = _REPO_ROOT / "docs" / "assets" / "social_card.png"
+    html_path = _REPO_ROOT / "docs" / "assets" / "social_card.html"
+    assets_readme = _REPO_ROOT / "docs" / "assets" / "README.md"
+    makefile = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    mkdocs_yml = (_REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+
+    assert html_path.is_file(), "Missing docs/assets/social_card.html"
+    assert assets_readme.is_file(), "Missing docs/assets/README.md"
+    assert png_path.is_file(), "Missing docs/assets/social_card.png (run: make social-card)"
+
+    data = png_path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "docs/assets/social_card.png is not a valid PNG"
+    assert data[12:16] == b"IHDR", "docs/assets/social_card.png missing IHDR chunk"
+    width, height = struct.unpack(">II", data[16:24])
+    assert (width, height) == (1280, 640), (
+        f"docs/assets/social_card.png must be 1280x640, got {width}x{height}"
+    )
+    assert "social-card:" in makefile, "Makefile missing social-card target"
+    assert "site_url: https://statmike.github.io/scale-forecasting/" in mkdocs_yml, (
+        "mkdocs.yml missing canonical site_url"
+    )

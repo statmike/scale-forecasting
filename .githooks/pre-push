@@ -27,6 +27,7 @@
 # Bypass it for one push:     git push --no-verify
 
 set -uo pipefail
+export UV_NO_CONFIG=1
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root" || exit 0
