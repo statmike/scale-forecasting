@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1  # this action publishes no floating major tag; pin exact
+      - uses: astral-sh/setup-uv@v10.2.0  # this action publishes no floating major tag; pin exact
       # The lock must already satisfy pyproject.toml (no re-resolve needed).
       - name: uv.lock is in sync with pyproject.toml
         run: uv lock --check
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       # Install the interpreter (.python-version → 3.11.15) + all extras + dev group from the lock.
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: install the wheel with no extras
         run: |
           uv venv --python 3.11 .venv-core
@@ -107,7 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       # Core + dev (pytest) + the editable package, no heavy extras — the DAG parse only needs the
