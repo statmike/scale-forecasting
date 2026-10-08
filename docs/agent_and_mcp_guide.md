@@ -1,6 +1,6 @@
 # AI Agents, Portable Skills & Built-in MCP Server
 
-`scale-forecasting` is engineered as an **agent-first repository**. Whether you use **Gemini CLI**, **Claude Code**, **Antigravity / Jetski**, **Cursor**, **VS Code GitHub Copilot**, or an LLM ingestion pipeline, the platform exposes its entire configuration contract (`RunConfig`), all **34 models**, **21 metrics**, **7 compute runtimes**, **5 execution paths**, and **live BigQuery registry operations** as structured, environment-aware tools and drift-locked reference surfaces.
+`scale-forecasting` is engineered as an **agent-first repository**. Whether you use **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code GitHub Copilot (Agent Mode)**, **Windsurf**, **OpenAI Codex CLI**, or an LLM ingestion pipeline, the platform exposes its entire configuration contract (`RunConfig`), all **34 models**, **21 metrics**, **7 compute runtimes**, **5 execution paths**, and **live BigQuery registry operations** as structured, environment-aware tools and drift-locked reference surfaces.
 
 ```mermaid
 flowchart TB
@@ -14,8 +14,8 @@ flowchart TB
 
     subgraph Surfaces["Four Agent-First Surfaces (Zero Extra Dependencies)"]
         direction LR
-        S1["1. Portable Skill<br/>skills/scale-forecasting/SKILL.md<br/>+ 3 Auto-Generated References"]
-        S2["2. Built-In MCP Server<br/>python -m scale_forecasting.mcp<br/>(7 Resources · 9 Tools over stdio)"]
+        S1["1. Portable Skill & Auto-Discovery<br/>skills/scale-forecasting/SKILL.md<br/>+ .agents/skills/ & .agents/skills.json"]
+        S2["2. Built-In MCP Server<br/>python -m scale_forecasting.mcp<br/>(plugin.json · mcp_config.json · .mcp.json)"]
         S3["3. JSON Schema (Draft 2020-12)<br/>docs/schemas/run_config.schema.json<br/>IDE Autocomplete via $schema"]
         S4["4. LLM Context Indexes<br/>docs/llms.txt & docs/llms-full.txt<br/>Single-File RAG / Context Bundle"]
     end
@@ -37,35 +37,62 @@ flowchart TB
 
 Every agent surface works out of the box on a base `pip install scale-forecasting` (or `pip install -e .`) installation — **zero extra MCP or web-server dependencies are required**.
 
-### Gemini CLI
+| AI Agent Environment | Automatic Workspace Discovery (In-Repo) | Global / Plugin Registration |
+| :--- | :--- | :--- |
+| **Google Antigravity (`agy` CLI & IDE)** | **Automatic:** Reads `AGENTS.md`, [`.agents/skills.json`](https://github.com/statmike/scale-forecasting/blob/main/.agents/skills.json), and `.agents/skills/scale-forecasting/SKILL.md` on workspace open. | Symlink repo as a plugin (`~/.gemini/config/plugins/scale-forecasting`) using [`plugin.json`](https://github.com/statmike/scale-forecasting/blob/main/plugin.json) + [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json), or merge `mcp_config.json` into `~/.gemini/config/mcp_config.json`. |
+| **Claude Code** | **Automatic:** Reads [`.mcp.json`](https://github.com/statmike/scale-forecasting/blob/main/.mcp.json) and `AGENTS.md` at repository root. | `claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp` and link `skills/scale-forecasting` into `.claude/skills/scale-forecasting`. |
+| **Cursor** | **Automatic:** Reads `AGENTS.md` and `.agents/skills/scale-forecasting/SKILL.md`. | Copy [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json) to `.cursor/mcp.json` or `~/.cursor/mcp.json`. |
+| **VS Code (GitHub Copilot Agent Mode)** | **Automatic:** Reads `.agents/skills/scale-forecasting/SKILL.md` and root [`.mcp.json`](https://github.com/statmike/scale-forecasting/blob/main/.mcp.json). | Add `"scale-forecasting"` under `"servers"` in `.vscode/mcp.json`. |
+| **Windsurf / OpenAI Codex CLI** | **Automatic:** Reads `AGENTS.md` and `.agents/skills/scale-forecasting/SKILL.md`. | Merge [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json) into `~/.codeium/windsurf/mcp_config.json`. |
 
-The repository root includes [`gemini-extension.json`](https://github.com/statmike/scale-forecasting/blob/main/gemini-extension.json), which registers both [`skills/scale-forecasting/SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md) and the `scale-forecasting` MCP server automatically. You can also register the MCP server explicitly:
+### Google Antigravity (`agy` CLI & IDE)
+
+Google Antigravity (`agy` in the terminal and Antigravity IDE) is the unified agentic environment that succeeded the legacy Gemini CLI. This repository ships native Antigravity workspace discovery and plugin manifests:
+
+1. **Zero-Setup Workspace Discovery:** Cloning `scale-forecasting` and running `agy` (or opening the folder in Antigravity IDE) automatically discovers `AGENTS.md` and `.agents/skills/scale-forecasting/SKILL.md` via [`.agents/skills.json`](https://github.com/statmike/scale-forecasting/blob/main/.agents/skills.json).
+2. **Antigravity Plugin Bundle (`plugin.json` + `mcp_config.json`):** The repository root includes [`plugin.json`](https://github.com/statmike/scale-forecasting/blob/main/plugin.json) and [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json), allowing you to register the entire repository (skill + rules + MCP server) as a single toggleable Antigravity plugin, or add the MCP server directly to `~/.gemini/config/mcp_config.json`:
 
 ```bash
-# Read-only + planning + offline playground (cloud launches safety-locked):
-gemini mcp add scale-forecasting -- python -m scale_forecasting.mcp
+# Option A: Link as a toggleable Antigravity plugin (bundles SKILL.md + mcp_config.json):
+mkdir -p ~/.gemini/config/plugins
+ln -s "$(pwd)" ~/.gemini/config/plugins/scale-forecasting
 
-# Unlock cloud job submission and surgical registry repair:
-gemini mcp add scale-forecasting -- python -m scale_forecasting.mcp --allow-launch
+# Option B: Launch `agy` directly inside the repository:
+agy
 ```
 
-### Claude Code
-
-Register the built-in `stdio` MCP server and point Claude Code at the portable skill in [`skills/scale-forecasting/SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md):
-
-```bash
-claude mcp add scale-forecasting -- python -m scale_forecasting.mcp
-```
-
-### Cursor / VS Code Copilot / Antigravity / Windsurf
-
-Add the server to your workspace `.mcp.json` (or `.cursor/mcp.json` / `.vscode/mcp.json`):
+To configure the MCP server standalone in `~/.gemini/config/mcp_config.json` (pass `"--allow-launch"` only when you want the agent to submit live cloud jobs or run mutating registry repairs):
 
 ```json
 {
   "mcpServers": {
     "scale-forecasting": {
-      "command": "python",
+      "command": "python3",
+      "args": ["-m", "scale_forecasting.mcp"]
+    }
+  }
+}
+```
+
+### Claude Code
+
+The repository root includes [`.mcp.json`](https://github.com/statmike/scale-forecasting/blob/main/.mcp.json), which Claude Code detects automatically when launched inside the repository. You can also register the MCP server and portable skill from any directory:
+
+```bash
+claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp
+```
+
+### Cursor, VS Code GitHub Copilot & Windsurf
+
+- **Skills & Rules:** Cursor, VS Code GitHub Copilot (Agent Mode), Windsurf, and OpenAI Codex CLI automatically discover `AGENTS.md` and `.agents/skills/scale-forecasting/SKILL.md`.
+- **MCP Server:** Copy [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json) to `.cursor/mcp.json` (Cursor) or `~/.codeium/windsurf/mcp_config.json` (Windsurf). VS Code GitHub Copilot reads root [`.mcp.json`](https://github.com/statmike/scale-forecasting/blob/main/.mcp.json) directly or `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "scale-forecasting": {
+      "type": "stdio",
+      "command": "python3",
       "args": ["-m", "scale_forecasting.mcp"]
     }
   }

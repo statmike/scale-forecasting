@@ -1351,9 +1351,9 @@ def render_llms_txt() -> str:
             "",
             (
                 f"- [AI Agents, Skills & MCP Guide]({_SITE_BASE}/agent_and_mcp_guide/): How to "
-                "connect Gemini CLI, Claude Code, Antigravity/Jetski, Cursor, and VS Code via the "
-                "built-in MCP server (`python -m scale_forecasting.mcp`), `SKILL.md`, and JSON "
-                "Schema."
+                "connect Google Antigravity (`agy` CLI & IDE), Claude Code, Cursor, VS Code "
+                "Copilot, and Windsurf via the built-in MCP server (`python -m "
+                "scale_forecasting.mcp`), `SKILL.md`, and JSON Schema."
             ),
             (
                 f"- [RunConfig JSON Schema (Draft 2020-12)]"

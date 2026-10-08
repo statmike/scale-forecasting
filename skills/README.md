@@ -1,6 +1,6 @@
 # `skills/` — Portable AI Agent Skills & Drift-Locked Reference Surfaces
 
-This directory contains the portable `SKILL.md` package for `scale-forecasting` following the open [Agent Skills specification](https://agentskills.io). Any compatible AI coding assistant (Gemini CLI, Claude Code, Antigravity / Jetski, Cursor, VS Code Copilot, Windsurf) can load [`scale-forecasting/SKILL.md`](./scale-forecasting/SKILL.md) to configure, validate, dry-run, execute, review, and repair enterprise forecasting pipelines across all 7 runtimes and 5 launch surfaces.
+This directory contains the portable `SKILL.md` package for `scale-forecasting` following the open [Agent Skills specification](https://agentskills.io). Any compatible AI coding assistant (Google Antigravity `agy` CLI & IDE, Claude Code, Cursor, VS Code GitHub Copilot, Windsurf, OpenAI Codex CLI) can load [`scale-forecasting/SKILL.md`](./scale-forecasting/SKILL.md) (auto-discovered via [`.agents/skills.json`](../.agents/skills.json) and `.agents/skills/scale-forecasting`) to configure, validate, dry-run, execute, review, and repair enterprise forecasting pipelines across all 7 runtimes and 5 launch surfaces.
 
 To guarantee that the skill's documentation never drifts from the Python implementation, the three companion files under [`scale-forecasting/references/`](./scale-forecasting/references/) are generated deterministically from [`src/scale_forecasting/agent_surfaces.py`](../src/scale_forecasting/agent_surfaces.py) (`make agent-surfaces`) and verified in `.githooks/pre-commit` and CI by [`tests/unit/test_agent_surfaces.py`](../tests/unit/test_agent_surfaces.py).
 
@@ -28,13 +28,13 @@ flowchart LR
 
     subgraph Clients["AI Agent Clients"]
         direction TB
-        A1["Gemini CLI · Claude Code"]
-        A2["Antigravity / Jetski · Cursor · VS Code"]
+        A1["Google Antigravity (agy CLI & IDE)"]
+        A2["Claude Code · Cursor · VS Code · Windsurf"]
     end
 
     Code -->|"python -m scale_forecasting.agent_surfaces --write"| Skill
     S1 -->|"On-demand context"| R1 & R2 & R3
-    Skill -->|"Loaded via SKILL.md or MCP"| Clients
+    Skill -->|"Auto-discovered via .agents/ or MCP"| Clients
 ```
 
 ---

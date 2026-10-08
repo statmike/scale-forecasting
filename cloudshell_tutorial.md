@@ -56,22 +56,22 @@ Render a self-contained Cloud Composer 3 / Apache Airflow DAG (`dag_<run_id>.py`
 python -m scale_forecasting.main --config configs/ensemble_demo.json --emit-airflow --with-retry
 ```
 
-### Connect Gemini CLI or Any MCP Agent
+### Connect Google Antigravity (`agy` CLI & IDE), Claude Code, or Any MCP Agent
 
-Because this repository includes [`gemini-extension.json`](./gemini-extension.json) and [`skills/scale-forecasting/SKILL.md`](./skills/scale-forecasting/SKILL.md), you can test the built-in MCP server (`scale_forecasting.mcp`) right from Cloud Shell:
+Because this repository includes [`.agents/skills.json`](./.agents/skills.json), [`plugin.json`](./plugin.json), [`mcp_config.json`](./mcp_config.json), [`.mcp.json`](./.mcp.json), and [`skills/scale-forecasting/SKILL.md`](./skills/scale-forecasting/SKILL.md), you can test the built-in MCP server (`scale_forecasting.mcp`) right from Cloud Shell:
 
 ```bash
 python -m scale_forecasting.mcp --probe-env
 ```
 
-Or register the MCP server in Gemini CLI / Claude Code:
+Or launch Google Antigravity (`agy` CLI) or register the MCP server in Claude Code:
 
 ```bash
-# Gemini CLI:
-gemini mcp add scale-forecasting -- python -m scale_forecasting.mcp
+# Google Antigravity CLI (auto-discovers .agents/skills/ & AGENTS.md):
+agy
 
-# Claude Code:
-claude mcp add scale-forecasting -- python -m scale_forecasting.mcp
+# Claude Code (auto-discovers .mcp.json at repo root, or register globally):
+claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp
 ```
 
 ---

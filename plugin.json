@@ -1,0 +1,12 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "scale-forecasting",
+  "displayName": "Scale Forecasting on Google Cloud",
+  "version": "1.0.0",
+  "description": "Configure, validate, dry-run, execute, and review massively-parallel time-series forecasting on Google Cloud (34 models, 21 metrics, 7 runtimes).",
+  "suggestedPrompts": [
+    "Probe my environment and recommend a forecasting model family and runtime",
+    "Run an offline model playground backtest on synthetic daily series",
+    "Inspect the BigQuery forecast registry health and review the latest run"
+  ]
+}

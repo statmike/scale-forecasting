@@ -4,7 +4,7 @@
 
 ## Agent-First Surfaces (MCP, Skills & Schemas)
 
-- [AI Agents, Skills & MCP Guide](https://statmike.github.io/scale-forecasting/agent_and_mcp_guide/): How to connect Gemini CLI, Claude Code, Antigravity/Jetski, Cursor, and VS Code via the built-in MCP server (`python -m scale_forecasting.mcp`), `SKILL.md`, and JSON Schema.
+- [AI Agents, Skills & MCP Guide](https://statmike.github.io/scale-forecasting/agent_and_mcp_guide/): How to connect Google Antigravity (`agy` CLI & IDE), Claude Code, Cursor, VS Code Copilot, and Windsurf via the built-in MCP server (`python -m scale_forecasting.mcp`), `SKILL.md`, and JSON Schema.
 - [RunConfig JSON Schema (Draft 2020-12)](https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json): Machine-readable schema for `RunConfig` with editor autocomplete (`"$schema": "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json"`).
 - [Comprehensive LLM Context Bundle (`llms-full.txt`)](https://statmike.github.io/scale-forecasting/llms-full.txt): Single-file reference containing all `RunConfig` fields, all 34 models, 21 metrics, 7 runtimes, 12 extras, and 5 execution paths.
 - [Repository Portable Skill (`skills/scale-forecasting/SKILL.md`)](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md): Portable Agent Skill with Progressive Disclosure reference tables.
