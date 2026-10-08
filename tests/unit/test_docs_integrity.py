@@ -408,16 +408,24 @@ def test_no_stale_config_names_or_counts_in_docs(markdown_files: list[Path]) -> 
     n_smokes = len(list((_REPO_ROOT / "configs" / "smokes").glob("*.json")))
 
     root_readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    overview = (_REPO_ROOT / "docs" / "overview.md").read_text(encoding="utf-8")
     pkg_readme = (_REPO_ROOT / "src" / "scale_forecasting" / "README.md").read_text(
         encoding="utf-8"
     )
 
-    if f"{n_models} models" not in root_readme:
-        errors.append(f"README.md missing '{n_models} models'")
-    if f"{n_metrics} evaluation metrics" not in root_readme:
-        errors.append(f"README.md missing '{n_metrics} evaluation metrics'")
-    if f"{n_views} Analytical SQL Views" not in root_readme:
-        errors.append(f"README.md missing '{n_views} Analytical SQL Views'")
+    for label, text in (("README.md", root_readme), ("docs/overview.md", overview)):
+        if f"{n_models} models" not in text:
+            errors.append(f"{label} missing '{n_models} models'")
+        if f"{n_metrics} evaluation metrics" not in text:
+            errors.append(f"{label} missing '{n_metrics} evaluation metrics'")
+        if f"{n_views} Analytical SQL Views" not in text:
+            errors.append(f"{label} missing '{n_views} Analytical SQL Views'")
+    if len(root_readme.splitlines()) > 250:
+        errors.append(
+            f"README.md exceeds 250-line front-door cap ({len(root_readme.splitlines())} lines)"
+        )
+    if len(overview.splitlines()) > 350:
+        errors.append(f"docs/overview.md exceeds 350-line cap ({len(overview.splitlines())} lines)")
     if f"{n_models} models" not in pkg_readme:
         errors.append(f"src/scale_forecasting/README.md missing '{n_models} models'")
     if f"{n_metrics} metrics" not in pkg_readme:

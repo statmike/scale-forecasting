@@ -1,6 +1,6 @@
 # Deploying on GCP — a reviewer's guide to the Terraform
 
-This is the deep-dive companion to the [README quickstart](https://github.com/statmike/scale-forecasting/blob/main/README.md#deploy-on-gcp). It exists so
+This is the deep-dive companion to [Getting started](./getting_started.md#4-connect-to-or-deploy-your-google-cloud-project). It exists so
 you can **read the Terraform before you run it**: what gets created, which GCP services it uses and
 how, why each permission is granted and who uses it, and how to fit the deployment into an existing
 locked-down project instead of a fresh one.
@@ -129,7 +129,7 @@ review, then rerun at `100000`. Select one format with `seed_variant = "iceberg"
 (default `"both"`).
 
 > The **same generator** produces the local playground's sample panel — see the
-> [local quickstart](https://github.com/statmike/scale-forecasting/blob/main/README.md#quickstart). `playground.sample_data()` calls the identical
+> [local quickstart](./getting_started.md#2-fit-your-first-forecast-locally-no-cloud-no-credentials). `playground.sample_data()` calls the identical
 > `generate_panel()` with the same master seed, just 3 series in-memory instead of 100k written to
 > BigQuery. So what you explore locally is a small slice of the same deterministic dataset the cloud
 > seed materializes (same code path locally and at scale).
