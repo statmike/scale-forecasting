@@ -27,8 +27,8 @@ import pytest
 
 pytest.importorskip("pyspark")
 
-from scale_forecasting.config import RunConfig  # noqa: E402
-from scale_forecasting.settings import Settings  # noqa: E402
+from scale_forecasting.config import RunConfig
+from scale_forecasting.settings import Settings
 
 pytestmark = pytest.mark.spark
 

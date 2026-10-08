@@ -110,7 +110,7 @@ def test_sample_data_is_wellformed_and_deterministic() -> None:
     a = sample_data(n_series=3, history=120)
     b = sample_data(n_series=3, history=120)
     pd.testing.assert_frame_equal(a, b)
-    assert set(["ts_id", "ds", "y"]).issubset(a.columns)
+    assert {"ts_id", "ds", "y"}.issubset(a.columns)
     assert a["ts_id"].nunique() == 3
 
 

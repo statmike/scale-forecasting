@@ -280,7 +280,7 @@ def test_embedded_runconfig_json_examples_validate(markdown_files: list[Path]) -
                 continue
             try:
                 cfg = RunConfig.model_validate(payload)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - any validation failure is a doc error
                 errors.append(f"{rel}:{line_no}: RunConfig validation failed: {exc}")
                 continue
             authored_strategies = set((payload.get("ensemble") or {}).get("strategies") or [])

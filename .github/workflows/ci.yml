@@ -5,9 +5,9 @@ name: ci
 #      and docker/requirements.txt (the derived export the container + packed-venv build from) must
 #      equal what the lock produces. This is the automated half of the "one source of truth" design:
 #      a hand-edited requirements.txt, or a pyproject change that wasn't re-locked, fails here.
-#   2. offline — the code gate that needs no cloud: ruff + mypy + the offline test suite. Interpreter
-#      and every dependency come from the same uv.lock + .python-version the runtime image is built
-#      from, so a green CI run reflects the exact versions production runs.
+#   2. offline — the code gate that needs no cloud: ruff + mypy + the offline test suite under the
+#      coverage floor. Interpreter and every dependency come from the same uv.lock + .python-version
+#      the runtime image is built from, so a green CI run reflects the exact versions production runs.
 #   3. core-install — `pip install scale-forecasting` with no extra is a working forecasting
 #      toolkit, and the first call that needs Google Cloud or matplotlib names the extra to install.
 #      Checked in a bare venv built from the wheel, because only that proves the packaging metadata
@@ -59,8 +59,11 @@ jobs:
       # Zero errors is the bar (pyproject [tool.mypy]); tests stay dynamically typed on purpose.
       - name: mypy
         run: uv run mypy src/scale_forecasting
+      # Same selection and flags as the Makefile's OFFLINE_PYTEST (tests/unit/test_packaging_extras.py
+      # holds the two identical). `--cov` measures the package and fails under the floor declared in
+      # pyproject [tool.coverage.report]; the floor is a ratchet and only ever moves up.
       - name: offline test gate
-        run: uv run pytest -m "not gcp and not spark and not ray" -q
+        run: uv run pytest -m "not gcp and not spark and not ray" -q --cov --cov-report=term-missing
 
   # core-install — the bare-install contract, in a venv that has genuinely nothing optional in it.
   # `uv pip install .` builds the wheel and installs it the way `pip install scale-forecasting`

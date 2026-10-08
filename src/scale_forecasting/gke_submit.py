@@ -447,8 +447,7 @@ def _pod_env_items(
         env_map["SF_CONNECTION"] = settings.connection
         env_map["SF_WAREHOUSE_URI"] = settings.warehouse_uri
         env_map["SF_REGION"] = settings.region
-    for k, v in intraop_env_vars(threads).items():
-        env_map[k] = v
+    env_map.update(intraop_env_vars(threads))
     if extra_env:
         env_map.update(extra_env)
     return [{"name": k, "value": str(v)} for k, v in env_map.items()]

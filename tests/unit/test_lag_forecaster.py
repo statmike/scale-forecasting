@@ -64,7 +64,7 @@ def test_build_design_passes_a_lagged_covariate_straight_through() -> None:
 
 def test_recursive_predict_refuses_the_same_collisions_build_design_does() -> None:
     y = _series()
-    design, y_aligned, feature_names = lf.build_design(y, None)
+    _design, y_aligned, feature_names = lf.build_design(y, None)
 
     class _Mean:
         """Trivial estimator: predicts the mean of the training target, ignoring features."""

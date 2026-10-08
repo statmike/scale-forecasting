@@ -170,7 +170,7 @@ def test_the_learned_dispatch_has_a_branch_for_every_learned_strategy() -> None:
     """
     from scale_forecasting.config import LEARNED_STRATEGIES
 
-    assert LEARNED_STRATEGIES == {"nnls", "ridge", "xgb"}
+    assert {"nnls", "ridge", "xgb"} == LEARNED_STRATEGIES
 
 
 def test_multi_strategy_fits_each_learned() -> None:
@@ -587,13 +587,11 @@ def test_the_ensemble_blends_both_models_on_the_short_series_of_a_ragged_panel()
     says it was a consensus of one.
     """
     cfg = RunConfig(
-        **{
-            "run_name": "ens ragged",
-            "data": {"source_table": "t"},
-            "models": ["theta", "arima_plus"],
-            "ensemble": {"enabled": True, "strategies": ["mean"]},
-            "backtest": {"enabled": True, "n_folds": _N_FOLDS, "decision_metric": "wape"},
-        }
+        run_name="ens ragged",
+        data={"source_table": "t"},
+        models=["theta", "arima_plus"],
+        ensemble={"enabled": True, "strategies": ["mean"]},
+        backtest={"enabled": True, "n_folds": _N_FOLDS, "decision_metric": "wape"},
     )
     oof = _ragged_two_engine_oof()
 

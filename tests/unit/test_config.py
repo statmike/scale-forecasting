@@ -758,7 +758,7 @@ def test_the_arm_is_part_of_the_run_id() -> None:
 
 
 def test_mean_without_a_backtest_is_an_error_not_a_silent_downgrade() -> None:
-    with pytest.raises(ValueError, match="requires backtest.enabled"):
+    with pytest.raises(ValueError, match=r"requires backtest\.enabled"):
         RunConfig(**_minimal_dict(backtest={"enabled": False}, output={"point_forecast": "mean"}))
 
 
@@ -793,7 +793,7 @@ def test_raw_against_a_squared_error_metric_does_not_warn(
 
 def test_auto_requires_a_backtest_and_the_error_names_the_alternatives() -> None:
     """There are no held-out folds to choose from, and silently choosing anyway would be a lie."""
-    with pytest.raises(ValueError, match="'auto' requires backtest.enabled"):
+    with pytest.raises(ValueError, match=r"'auto' requires backtest\.enabled"):
         RunConfig(**_minimal_dict(backtest={"enabled": False}, output={"point_forecast": "auto"}))
 
 

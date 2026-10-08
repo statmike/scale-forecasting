@@ -254,7 +254,7 @@ def test_the_same_inputs_always_produce_the_same_slices() -> None:
     first = spark_io.allocate_buckets(models, 47, weights)
     assert all(spark_io.allocate_buckets(models, 47, weights) == first for _ in range(5))
     # Offsets follow the caller's model order, not sorted order — the cross-join's order.
-    assert [name for name in first] == ["b", "a", "c"]
+    assert list(first) == ["b", "a", "c"]
     assert first["b"][0] == 0
 
 
@@ -546,7 +546,7 @@ def test_status_schema_and_status_columns_cannot_drift() -> None:
 def test_run_group_untagged_loops_models_per_series() -> None:
     cfg = _cfg(models=["theta", "holtwinters"])
     pdf = _panel(["s0", "s1"])  # no model column — an untagged frame groups by ts_id only
-    results, status = run_group(pdf, cfg)
+    results, _status = run_group(pdf, cfg)
 
     assert len(results) == 4  # 2 series × 2 models, run per series in a loop
     assert {(r.ts_id, r.model_type) for r in results} == {
@@ -785,7 +785,7 @@ class _RecordingSource:
 
     # The `short_series="error"` gate's chain: groupBy(id).count().select("count").toPandas().
     # Only ever called when that policy is armed, which is the point of logging it separately.
-    def groupBy(self, col: str) -> _RecordingSource:  # noqa: N802 - the pyspark spelling
+    def groupBy(self, col: str) -> _RecordingSource:  # the pyspark spelling
         self.log.append(f"groupBy:{col}")
         return self
 
@@ -795,7 +795,7 @@ class _RecordingSource:
     def select(self, col: str) -> _RecordingSource:
         return self
 
-    def toPandas(self) -> pd.DataFrame:  # noqa: N802 - the pyspark spelling
+    def toPandas(self) -> pd.DataFrame:  # the pyspark spelling
         self.log.append("count_collect")
         return pd.DataFrame({"count": self.obs_counts})
 

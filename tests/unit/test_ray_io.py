@@ -83,7 +83,7 @@ def test_split_honors_executed_subset() -> None:
 
 
 def test_split_preserves_order() -> None:
-    gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=["holtwinters", _CPU]))
+    _gpu, cpu = ray_io.split_gpu_cpu_models(_cfg(models=["holtwinters", _CPU]))
     assert cpu == ["holtwinters", _CPU]  # input order, not sorted
 
 

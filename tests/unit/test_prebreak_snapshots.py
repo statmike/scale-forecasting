@@ -332,7 +332,7 @@ def build_golden_panel() -> dict[str, Any]:
             "metrics": {k: _jsonable(result.metrics[k]) for k in sorted(result.metrics)},
             "columns": sorted(preds.columns),
             "yhat": [_jsonable(v) for v in preds["yhat"].tolist()],
-            "n_oof_rows": 0 if result.oof is None else int(len(result.oof)),
+            "n_oof_rows": 0 if result.oof is None else len(result.oof),
         }
     return {"folds": build_folds(), "cells": cells}
 

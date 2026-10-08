@@ -61,7 +61,7 @@ def ensure_tables(
     for name, statement in ddl.items():
         try:
             client.query(statement).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with table context
+        except Exception as exc:  # re-raised with table context
             raise RegistryError(f"ensure_tables failed creating {name}: {exc}") from exc
 
     # Additive schema evolution: bring tables created under an older schema up to the current
@@ -75,7 +75,7 @@ def ensure_tables(
     for name, statement in migrations.items():
         try:
             client.query(statement).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with table context
+        except Exception as exc:  # re-raised with table context
             raise RegistryError(f"ensure_tables failed migrating {name}: {exc}") from exc
 
     # Curated analyst views sit on top of the tables — create them in the same setup pass so the
@@ -103,7 +103,7 @@ def ensure_views(
     for name, statement in views.items():
         try:
             client.query(statement).result()
-        except Exception as exc:  # noqa: BLE001 - re-raised with view context
+        except Exception as exc:  # re-raised with view context
             raise RegistryError(f"ensure_views failed creating {name}: {exc}") from exc
 
 

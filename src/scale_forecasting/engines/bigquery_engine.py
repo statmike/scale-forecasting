@@ -293,7 +293,7 @@ def run(
 
             _append_rows(settings, "backtest_oof", _OOF_SPEC, oof_rows)
             _append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)
-        except Exception as exc:  # noqa: BLE001 - run_header records FAILED as this propagates
+        except Exception as exc:  # run_header records FAILED as this propagates
             # Wrap the cause so the failure reads clearly; run_header (owner mode) or main.run's
             # finalize (contributor mode) records the FAILED/PARTIAL header status.
             raise RegistryError(f"bigquery run failed for {run_id}: {exc}") from exc

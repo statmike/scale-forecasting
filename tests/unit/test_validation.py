@@ -158,14 +158,14 @@ def test_non_date_timestamp_names_value() -> None:
     df = _panel()
     df["ds"] = df["ds"].astype(object)  # a real source (CSV/BQ) can hand us strings
     df.loc[5, "ds"] = "not-a-date"
-    with pytest.raises(DataError, match="non-date value.*not-a-date"):
+    with pytest.raises(DataError, match=r"non-date value.*not-a-date"):
         validate_panel(df, _cfg())
 
 
 def test_non_numeric_target_names_value() -> None:
     df = _panel().astype({"y": object})
     df.loc[3, "y"] = "oops"
-    with pytest.raises(DataError, match="must be numeric.*oops"):
+    with pytest.raises(DataError, match=r"must be numeric.*oops"):
         validate_panel(df, _cfg())
 
 
@@ -257,5 +257,5 @@ def test_backtest_history_sufficient_passes() -> None:
 
 def test_min_history_override() -> None:
     df = _panel(n_series=1, n_days=30)
-    with pytest.raises(DataError, match="needs >= 100.*caller-requested"):
+    with pytest.raises(DataError, match=r"needs >= 100.*caller-requested"):
         validate_panel(df, _cfg(horizon=7), min_history=100)

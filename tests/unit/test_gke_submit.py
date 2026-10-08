@@ -519,7 +519,7 @@ def test_submit_gke_standing_and_ephemeral_lifecycle(monkeypatch: pytest.MonkeyP
     assert deleted_jobs == ["sf-test-standing"]
 
     # 2. Ephemeral cluster: deletes cluster in finally
-    rid2, jname2, handle2 = submit_gke(
+    _rid2, jname2, handle2 = submit_gke(
         cfg,
         settings=settings,
         infra=infra_ephemeral,

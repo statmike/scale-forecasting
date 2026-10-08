@@ -137,9 +137,8 @@ def verify_leaderboard(board_rows: list[dict[str, Any]], cfg: RunConfig) -> list
     for model in cfg.models:
         if model not in present:
             problems.append(f"model {model!r} did not score onto the leaderboard")
-    if cfg.ensemble.enabled:
-        if not any(m.startswith("ensemble_") for m in present):
-            problems.append("ensemble enabled but no ensemble_* pseudo-model scored")
+    if cfg.ensemble.enabled and not any(m.startswith("ensemble_") for m in present):
+        problems.append("ensemble enabled but no ensemble_* pseudo-model scored")
     if cfg.hierarchy.enabled:
         python_models, _ = split_by_runtime(cfg)
         for model in python_models:
@@ -246,7 +245,7 @@ def format_trace(job_rows: list[dict[str, Any]]) -> list[str]:
         accel = f"/{gpu}" if gpu else ""
         service = _service_for(runtime, spark_mode if spark_mode is None else str(spark_mode))
         lines.append(
-            f"  {str(row.get('family')):14s} {runtime}/{hw}{accel:6s} "
+            f"  {row.get('family')!s:14s} {runtime}/{hw}{accel:6s} "
             f"{row.get('system_job_id')!s:40s} [{service}]"
         )
     return lines
@@ -311,7 +310,7 @@ def run_smoke(
     run_error: str | None = None
     try:
         run_id = main_mod.run(cfg, settings=settings, force=force)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the harness records any failure and moves on
         import traceback
 
         traceback.print_exc()
@@ -383,7 +382,7 @@ def _report(result: SmokeResult) -> str:  # pragma: no cover - formatting for th
     ]
     for row in result.leaderboard:
         lines.append(
-            f"    {str(row.get('model_type')):20s} "
+            f"    {row.get('model_type')!s:20s} "
             f"wape={row.get('mean_wape')}  n_cells={row.get('n_cells')}"
         )
     lines.append(f"  RESULT:   {'PASS' if result.ok else 'FAIL'}")

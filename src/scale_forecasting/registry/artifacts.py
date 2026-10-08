@@ -142,7 +142,7 @@ def upload_artifact(
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         blob.upload_from_filename(local_path)
-    except Exception as exc:  # noqa: BLE001 - re-raised as a package error with context
+    except Exception as exc:  # re-raised as a package error with context
         raise RegistryError(f"artifact upload failed for {local_path!r} -> {uri}: {exc}") from exc
     return uri
 
@@ -172,7 +172,7 @@ def upload_artifact_bytes(
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         blob.upload_from_string(data, content_type="application/octet-stream")
-    except Exception as exc:  # noqa: BLE001 - re-raised as a package error with context
+    except Exception as exc:  # re-raised as a package error with context
         raise RegistryError(f"artifact upload failed for {basename!r} -> {uri}: {exc}") from exc
     return uri
 

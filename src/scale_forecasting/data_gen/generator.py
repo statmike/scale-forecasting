@@ -306,7 +306,7 @@ def _one_series(
             + base * _CATEGORY_TREND_BONUS[category] * t
         )
 
-        promo_cycle = max(int(round(short_period * 4)), 14)
+        promo_cycle = max(round(short_period * 4), 14)
         promo_window = max(1, min(3, promo_cycle // 10))
         promo_flag = (((pos.astype(int) + i * 7) % promo_cycle) < promo_window).astype(np.int64)
         promo_lift = base * _CATEGORY_PROMO_LIFT[category] * promo_flag.astype(float)
@@ -321,7 +321,7 @@ def _one_series(
         temp_norm = (temperature - 18.0) / 12.0
         temp_lag1 = np.roll(temp_norm, 1)
         temp_lag1[0] = temp_norm[0]
-        lag_s = max(1, min(int(round(short_period)), max(n - 1, 1)))
+        lag_s = max(1, min(round(short_period), max(n - 1, 1)))
         temp_lags = np.roll(temp_norm, lag_s)
         temp_lags[:lag_s] = temp_norm[:lag_s]
         temp_effect = base * (0.03 * temp_norm + 0.04 * temp_lag1 + 0.025 * temp_lags)

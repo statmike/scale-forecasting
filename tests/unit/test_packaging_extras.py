@@ -10,6 +10,11 @@ and the docs name the extras in install lines. These tests read the one source o
 (``pyproject.toml``) and fail the moment any of those drift from it, so an install line in the
 README can never name an extra pip cannot resolve (which is how ``[models-automl]`` spent a while
 documented but undeclared).
+
+The same file holds two facts of the same kind about the offline gate — that ``make test``,
+``make ci-offline``, and the CI ``offline`` job run one identical pytest command, and that the
+coverage floor is declared once, in ``[tool.coverage.report]`` — because they are also build and CI
+surfaces restating ``pyproject.toml``.
 """
 
 from __future__ import annotations
@@ -174,6 +179,33 @@ def test_container_export_and_ci_share_one_extras_set_that_includes_gcp() -> Non
     }
     assert "gcp" in makefile, "the runtime image must carry the Google clients"
     assert makefile <= set(_extras()), f"undeclared extras in the export flags: {makefile}"
+
+
+def test_offline_pytest_command_is_the_same_in_make_and_ci() -> None:
+    # `make test`, `make ci-offline`, and the CI `offline` job must run one pytest invocation —
+    # same marker selection, same `--cov` flags — or "the CI job, step for step" stops being true.
+    makefile = (ROOT / "Makefile").read_text()
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    make_cmd = re.search(r"^OFFLINE_PYTEST\s*:=\s*(.+)$", makefile, re.M)
+    ci_cmd = re.search(r"- name: offline test gate\n\s+run: uv run (.+)$", ci, re.M)
+    assert make_cmd and ci_cmd, "could not find the offline pytest command in both files"
+    assert make_cmd.group(1).strip() == ci_cmd.group(1).strip()
+    assert "--cov" in make_cmd.group(1), "the offline gate must measure coverage"
+    assert makefile.count("$(OFFLINE_PYTEST)") == 2, "both `test` and `ci-offline` must use it"
+
+
+def test_coverage_floor_is_declared_once_in_pyproject_and_is_a_ratchet() -> None:
+    # The floor lives in [tool.coverage.report] so there is one number to raise; a
+    # `--cov-fail-under` on a command line would be a second one. 85 is where the ratchet
+    # started (85.77 % measured).
+    report = _project()["tool"]["coverage"]["report"]
+    assert report["fail_under"] >= 85, "the coverage floor only moves up"
+    assert _project()["tool"]["coverage"]["run"]["source"] == ["scale_forecasting"]
+    for rel in ("Makefile", ".github/workflows/ci.yml"):
+        text = (ROOT / rel).read_text()
+        assert "--cov-fail-under" not in text, f"{rel}: the floor belongs in pyproject"
+    addopts = _project()["tool"]["pytest"]["ini_options"].get("addopts", "")
+    assert "--cov" not in addopts, "addopts would break the bare-venv core-install job"
 
 
 def test_documented_install_lines_name_declared_extras() -> None:

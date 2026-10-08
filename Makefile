@@ -58,12 +58,14 @@ typecheck:
 
 ## test: the offline test gate (no GCP / Spark / Ray required) — the CI `offline` job, step for step.
 ## `format --check` is a gate, not a suggestion: layout is machine-decided so review reads diffs of
-## meaning. Run `make format` to fix.
+## meaning. Run `make format` to fix. The pytest step also measures line coverage of the package and
+## fails under the floor in pyproject's [tool.coverage.report] (a ratchet: it only moves up).
+OFFLINE_PYTEST := pytest -m "not gcp and not spark and not ray" -q --cov --cov-report=term-missing
 test:
 	uv run ruff format --check src tests
 	uv run ruff check src tests
 	uv run mypy src/scale_forecasting
-	uv run pytest -m "not gcp and not spark and not ray" -q
+	uv run $(OFFLINE_PYTEST)
 
 ## ci-offline: the offline gate in a venv built EXACTLY as CI builds it, not in your working venv.
 ##
@@ -79,7 +81,7 @@ ci-offline:
 	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen ruff format --check src tests
 	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen ruff check src tests
 	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen mypy src/scale_forecasting
-	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen pytest -m "not gcp and not spark and not ray" -q
+	UV_PROJECT_ENVIRONMENT=.venv-ci uv run --frozen $(OFFLINE_PYTEST)
 
 ## hooks: enable the tracked git hooks in .githooks (one-time, per clone).
 ##

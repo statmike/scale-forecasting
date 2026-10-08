@@ -108,7 +108,7 @@ def test_hierarchy_config_validation_rejects_invalid_specs() -> None:
             },
         )
 
-    with pytest.raises(ValidationError, match="must be one of hierarchy.levels"):
+    with pytest.raises(ValidationError, match=r"must be one of hierarchy\.levels"):
         RunConfig(
             run_name="r",
             data={"source_table": "p.d.t"},

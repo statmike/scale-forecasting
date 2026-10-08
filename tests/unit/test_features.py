@@ -170,7 +170,7 @@ def test_build_features_applies_transform_to_y() -> None:
 
 
 def test_build_features_exog_passthrough() -> None:
-    y, X = build_features(_series(6, with_exog=True), _cfg(features={"exog": ["price_index"]}))
+    _y, X = build_features(_series(6, with_exog=True), _cfg(features={"exog": ["price_index"]}))
     assert X is not None
     assert "price_index" in X.columns
     assert np.allclose(X["price_index"].to_numpy(), np.arange(100.0, 106.0))
@@ -183,7 +183,7 @@ def test_build_features_missing_exog_raises() -> None:
 
 def test_build_features_holiday_flag() -> None:
     # series spanning US New Year's Day 2026-01-01
-    y, X = build_features(_series(10), _cfg(features={"holidays": ["US"]}))
+    _y, X = build_features(_series(10), _cfg(features={"holidays": ["US"]}))
     assert X is not None
     assert "is_holiday" in X.columns
     # 2026-01-01 is a holiday, 2026-01-02 is not
@@ -223,7 +223,7 @@ def test_build_features_skips_exog_lags_for_a_model_that_owns_them() -> None:
 
 
 def test_build_features_fourier_terms() -> None:
-    y, X = build_features(_series(8), _cfg(features={"fourier": True}))
+    _y, X = build_features(_series(8), _cfg(features={"fourier": True}))
     assert X is not None
     fcols = [c for c in X.columns if c.startswith("fourier_")]
     assert len(fcols) == 6  # order 3 → sin+cos × 3
@@ -432,7 +432,7 @@ def test_extract_static_covariates_validates_constancy() -> None:
     assert static == {"region": "NA", "category": "enterprise"}
 
     # Static covariates do not pollute the local single-series X matrix with constant columns.
-    y, X = build_features(s, cfg)
+    _y, X = build_features(s, cfg)
     assert X is None
 
     # A time-varying value in a static covariate column is rejected.
@@ -612,7 +612,7 @@ def test_on_unsupported_covariates_error_refuses_in_preflight_and_effective_conf
             "on_unsupported_covariates": "error",
         },
     )
-    with pytest.raises(ConfigError, match="features.on_unsupported_covariates='error'"):
+    with pytest.raises(ConfigError, match=r"features\.on_unsupported_covariates='error'"):
         preflight(invalid_strict)
     with pytest.raises(ConfigError, match="does not support configured covariate tier"):
         effective_config_for_model(invalid_strict, get_model("xgboost"))
@@ -628,7 +628,7 @@ def test_preflight_rejects_hierarchy_with_native_and_per_series_hpo_with_global_
         hierarchy={"enabled": True, "levels": [["region"]]},
     )
     with pytest.raises(
-        ConfigError, match="hierarchy.enabled=True is not supported with BigQuery-native"
+        ConfigError, match=r"hierarchy\.enabled=True is not supported with BigQuery-native"
     ):
         check_model_params(hier_native)
 
@@ -640,5 +640,5 @@ def test_preflight_rejects_hierarchy_with_native_and_per_series_hpo_with_global_
         backtest={"enabled": True, "n_folds": 2, "horizon": 4, "step": 4, "min_train": 20},
         hpo={"enabled": True, "granularity": "per_series", "n_trials": 2},
     )
-    with pytest.raises(ConfigError, match="cannot be combined with hpo.granularity='per_series'"):
+    with pytest.raises(ConfigError, match=r"cannot be combined with hpo\.granularity='per_series'"):
         check_model_params(per_series_global)

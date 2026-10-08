@@ -50,7 +50,7 @@ from ..errors import ConfigError
 # One line per metric file. Alphabetical, because the import block does *not* set the panel
 # order — `METRIC_NAMES` below does, so that an import sorter can never silently re-order the
 # table's columns.
-from . import (  # noqa: E402,F401
+from . import (  # noqa: F401
     bias,
     coverage,
     cv,

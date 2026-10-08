@@ -334,10 +334,10 @@ def test_run_fanout_submits_all_without_polling(
 class _FakeResp:
     """Minimal stand-in for a requests.Response carrying a created-job operation name."""
 
-    def raise_for_status(self) -> None:  # noqa: D102 - trivial stub
+    def raise_for_status(self) -> None:  # trivial stub
         return None
 
-    def json(self) -> dict[str, str]:  # noqa: D102 - trivial stub
+    def json(self) -> dict[str, str]:  # trivial stub
         return {"name": "projects/p/locations/us-central1/notebookExecutionJobs/42/operations/1"}
 
 

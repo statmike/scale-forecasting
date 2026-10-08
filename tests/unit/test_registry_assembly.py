@@ -9,7 +9,7 @@ serialization, and the model_hash idempotency key.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 import pytest
@@ -731,9 +731,8 @@ def test_run_job_writes_running_then_completes(monkeypatch: Any) -> None:
 
 def test_run_job_records_failed_and_reraises(monkeypatch: Any) -> None:
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(ValueError, match="boom"):
-        with run_job("rid-0123456789ab", "ml", 2):
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), run_job("rid-0123456789ab", "ml", 2):
+        raise ValueError("boom")
 
     assert cap["written"]["status"] == "RUNNING"
     assert len(cap["updates"]) == 1
@@ -757,9 +756,8 @@ def test_a_taken_job_id_gets_its_own_failure_token(monkeypatch: Any) -> None:
     the table a week later needs to be able to filter for exactly it.
     """
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(JobIdTaken):
-        with run_job("rid-0123456789ab", "ml", 2):
-            raise JobIdTaken("batch sf-rid-0123456789ab-ml-a2 already exists")
+    with pytest.raises(JobIdTaken), run_job("rid-0123456789ab", "ml", 2):
+        raise JobIdTaken("batch sf-rid-0123456789ab-ml-a2 already exists")
 
     _, fields = cap["updates"][0]
     assert fields["status"] == "FAILED"
@@ -775,10 +773,9 @@ def test_a_reason_the_body_set_is_never_overwritten_by_the_derived_one(monkeypat
     reason over the top would replace the one fact worth recording with a generic one.
     """
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(RuntimeError):
-        with run_job("rid-0123456789ab", "deep_learning", 1) as job:
-            job.finalize(failure_reason="CAPACITY_EXHAUSTED", telemetry={"capacity": {"tries": 4}})
-            raise RuntimeError("no room anywhere")
+    with pytest.raises(RuntimeError), run_job("rid-0123456789ab", "deep_learning", 1) as job:
+        job.finalize(failure_reason="CAPACITY_EXHAUSTED", telemetry={"capacity": {"tries": 4}})
+        raise RuntimeError("no room anywhere")
 
     _, fields = cap["updates"][0]
     assert fields["failure_reason"] == "CAPACITY_EXHAUSTED"
@@ -789,9 +786,8 @@ def test_a_reason_the_body_set_is_never_overwritten_by_the_derived_one(monkeypat
 def test_a_messageless_exception_still_records_something(monkeypatch: Any) -> None:
     """``str(exc)`` is empty for a bare ``KeyboardInterrupt``; the row should not be, either."""
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(KeyboardInterrupt):
-        with run_job("rid-0123456789ab", "ml", 1):
-            raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt), run_job("rid-0123456789ab", "ml", 1):
+        raise KeyboardInterrupt
 
     _, fields = cap["updates"][0]
     assert fields["failure_reason"] == LAUNCHER_EXCEPTION
@@ -804,9 +800,8 @@ def test_a_messageless_exception_still_records_something(monkeypatch: Any) -> No
 def test_the_recorded_failure_message_is_capped(monkeypatch: Any) -> None:
     """A library that puts a whole DataFrame in its message must not put it in the registry."""
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(ValueError):
-        with run_job("rid-0123456789ab", "ml", 1):
-            raise ValueError("x" * 9000)
+    with pytest.raises(ValueError), run_job("rid-0123456789ab", "ml", 1):
+        raise ValueError("x" * 9000)
 
     _, fields = cap["updates"][0]
     assert len(fields["merge_telemetry"]["failure"]["message"]) == 2000
@@ -822,12 +817,12 @@ def test_the_failure_write_carries_what_the_body_finalized_before_it_raised(
     regions to try — the only route it has, since the whole point is that the block does not return.
     """
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(ValueError, match="no room"):
-        with run_job("rid-0123456789ab", "deep_learning", 1) as job:
-            job.finalize(
-                failure_reason="CAPACITY_EXHAUSTED", telemetry={"capacity": {"attempts": []}}
-            )
-            raise ValueError("no room anywhere")
+    with (
+        pytest.raises(ValueError, match="no room"),
+        run_job("rid-0123456789ab", "deep_learning", 1) as job,
+    ):
+        job.finalize(failure_reason="CAPACITY_EXHAUSTED", telemetry={"capacity": {"attempts": []}})
+        raise ValueError("no room anywhere")
 
     _, fields = cap["updates"][0]
     assert fields["status"] == "FAILED"
@@ -856,10 +851,9 @@ def test_a_raising_body_is_failed_whatever_status_it_hoped_to_finalize(
 ) -> None:
     """`finalize` keeps ``status`` out of ``extra``, so the two can never collide in the kwargs."""
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(ValueError):
-        with run_job("rid-0123456789ab", "ml", 1) as job:
-            job.finalize(status="COMPLETED", system_job_id="dp-1")
-            raise ValueError("died after finalizing")
+    with pytest.raises(ValueError), run_job("rid-0123456789ab", "ml", 1) as job:
+        job.finalize(status="COMPLETED", system_job_id="dp-1")
+        raise ValueError("died after finalizing")
 
     _, fields = cap["updates"][0]
     assert fields["status"] == "FAILED"
@@ -891,9 +885,11 @@ def test_run_job_contributor_mode_touches_nothing(monkeypatch: Any) -> None:
 
 def test_a_failing_job_will_not_overwrite_a_cancellation(monkeypatch: Any) -> None:
     cap = _capture_job_io(monkeypatch)
-    with pytest.raises(ValueError, match="stopped"):
-        with run_job("rid-0123456789ab", "deep_learning", 1):
-            raise ValueError("ray job stopped")
+    with (
+        pytest.raises(ValueError, match="stopped"),
+        run_job("rid-0123456789ab", "deep_learning", 1),
+    ):
+        raise ValueError("ray job stopped")
 
     _, fields = cap["updates"][0]
     assert fields["status"] == "FAILED"
@@ -1097,7 +1093,7 @@ class _OkResponse:
         message = ""
 
     error = _Err()
-    row_errors: list[Any] = []
+    row_errors: ClassVar[list[Any]] = []
 
 
 def _append(client: Any) -> None:
@@ -1190,7 +1186,7 @@ def test_append_response_level_error_fails_fast(monkeypatch: Any) -> None:
             message = "N Errors found"
 
         error = _Err()
-        row_errors: list[Any] = []
+        row_errors: ClassVar[list[Any]] = []
 
     # a response-level error is a data/schema problem — fail on the first call, no retry
     client = _FakeWriteClient([[_BadResponse()]])

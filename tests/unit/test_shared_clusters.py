@@ -127,9 +127,11 @@ def test_shared_ray_cluster_tears_down_on_exception(monkeypatch: pytest.MonkeyPa
     _patch_shared_cluster(monkeypatch, calls)
     cfg = _ray_cfg()
     run_dag = dag.plan_dag(cfg)
-    with pytest.raises(RuntimeError, match="boom"):
-        with shared_clusters.shared_ray_cluster(cfg, run_dag, "run-abc", _SETTINGS):
-            raise RuntimeError("boom")
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        shared_clusters.shared_ray_cluster(cfg, run_dag, "run-abc", _SETTINGS),
+    ):
+        raise RuntimeError("boom")
     assert calls["teardown"] == ("sf-ray-shared", "us-west1")  # finally still ran
 
 
@@ -418,9 +420,11 @@ def test_shared_spark_cluster_tears_down_on_exception(monkeypatch: pytest.Monkey
     _patch_shared_spark(monkeypatch, calls)
     cfg = _spark_cluster_cfg()
     run_dag = dag.plan_dag(cfg)
-    with pytest.raises(RuntimeError, match="boom"):
-        with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
-            raise RuntimeError("boom")
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS),
+    ):
+        raise RuntimeError("boom")
     assert calls["teardown"] == [("sf-cluster-shared", "us-central1")]  # unwind still ran
 
 
@@ -435,9 +439,11 @@ def test_shared_spark_cluster_unwinds_a_partial_create(monkeypatch: pytest.Monke
     _patch_shared_spark(monkeypatch, calls, fail_on="gpu")
     cfg = _mixed_hardware_cfg()
     run_dag = dag.plan_dag(cfg)
-    with pytest.raises(RuntimeError, match="capacity: gpu"):
-        with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
-            pytest.fail("body must not run — one of the creates failed")
+    with (
+        pytest.raises(RuntimeError, match="capacity: gpu"),
+        shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS),
+    ):
+        pytest.fail("body must not run — one of the creates failed")
     assert calls["teardown"] == [("sf-cluster-shared-cpu", "us-central1")]
 
 
@@ -486,9 +492,11 @@ def test_shared_spark_cluster_tears_down_a_sibling_that_lands_after_the_failure(
     _patch_shared_spark(monkeypatch, calls, fail_on="cpu", during=_during)
     cfg = _mixed_hardware_cfg()
     run_dag = dag.plan_dag(cfg)
-    with pytest.raises(RuntimeError, match="capacity: cpu"):
-        with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
-            pytest.fail("body must not run — one of the creates failed")
+    with (
+        pytest.raises(RuntimeError, match="capacity: cpu"),
+        shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS),
+    ):
+        pytest.fail("body must not run — one of the creates failed")
     assert calls["teardown"] == [("sf-cluster-shared-gpu", "us-central1")]
 
 
@@ -509,9 +517,11 @@ def test_shared_spark_cluster_tears_down_the_rest_when_one_teardown_raises(
     monkeypatch.setattr(dataproc_cluster, "teardown_shared_cluster", _teardown)
     cfg = _mixed_hardware_cfg()
     run_dag = dag.plan_dag(cfg)
-    with pytest.raises(RuntimeError, match="delete: gpu"):
-        with shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS):
-            pass
+    with (
+        pytest.raises(RuntimeError, match="delete: gpu"),
+        shared_clusters.shared_spark_cluster(cfg, run_dag, "run-abc", _SETTINGS),
+    ):
+        pass
     assert set(calls["teardown"]) == {
         ("sf-cluster-shared-cpu", "us-central1"),
         ("sf-cluster-shared-gpu", "us-central1"),

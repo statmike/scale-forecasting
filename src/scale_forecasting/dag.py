@@ -186,7 +186,7 @@ def planned_families(cfg: RunConfig) -> tuple[str, ...]:
     expected work would make every un-repaired run look incomplete.
     """
     families = tuple(group_models_by_family(cfg))
-    return families + ("ensemble",) if cfg.ensemble.enabled else families
+    return (*families, "ensemble") if cfg.ensemble.enabled else families
 
 
 def check_model_params(cfg: RunConfig) -> None:

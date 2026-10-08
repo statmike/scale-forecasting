@@ -107,11 +107,7 @@ def _build_static_df(
     stat_cols: list[str] = []
     for col in raw_cols:
         series = raw_df[col]
-        if pd.api.types.is_bool_dtype(series):
-            cname = f"stat__{col}"
-            encoded_parts.append(pd.DataFrame({cname: series.astype(float)}))
-            stat_cols.append(cname)
-        elif pd.api.types.is_numeric_dtype(series):
+        if pd.api.types.is_bool_dtype(series) or pd.api.types.is_numeric_dtype(series):
             cname = f"stat__{col}"
             encoded_parts.append(pd.DataFrame({cname: series.astype(float)}))
             stat_cols.append(cname)

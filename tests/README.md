@@ -45,12 +45,12 @@ To reproduce the CI `offline` job's environment exactly (a second `.venv-ci` syn
 
 ### 2. Full Offline Gate (`make test`)
 
-Runs `ruff format --check`, `ruff check`, `mypy` over `src/` (`make typecheck` on its own), and all offline unit, contract, and snapshot tests (deselecting `@gcp`, `@spark`, and `@ray` markers) — the CI `offline` job, step for step:
+Runs `ruff format --check`, `ruff check` (pyflakes, pycodestyle, isort, bugbear, pyupgrade, plus `SIM`, `C4`, `PIE`, `PERF`, `RUF`, and `BLE` — every `except Exception` must carry `# noqa: BLE001` and a reason), `mypy` over `src/` (`make typecheck` on its own), and all offline unit, contract, and snapshot tests (deselecting `@gcp`, `@spark`, and `@ray` markers) **under the coverage floor** — the CI `offline` job, step for step. The pytest step runs with `--cov`; line coverage of `src/scale_forecasting` must stay at or above `fail_under` in `pyproject.toml`'s `[tool.coverage.report]` (85 %, set just under the 85.77 % measured when it was introduced). The floor is a ratchet: raise it when coverage rises, never lower it. The uncovered tail is the cloud-launch code the live smoke ledger proves instead.
 
 ```bash
 make test
-# Or directly with pytest:
-uv run pytest -m "not gcp and not spark and not ray" -q
+# Or directly with pytest (the exact command is the Makefile's OFFLINE_PYTEST):
+uv run pytest -m "not gcp and not spark and not ray" -q --cov --cov-report=term-missing
 ```
 
 ### 3. Live Cloud Integration & Smoke Suites

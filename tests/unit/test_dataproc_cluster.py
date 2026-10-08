@@ -28,7 +28,7 @@ from scale_forecasting.settings import Settings
 # the [spark] extra is absent (parity with test_submit).
 pytest.importorskip("google.cloud.dataproc_v1")
 
-from scale_forecasting import (  # noqa: E402
+from scale_forecasting import (
     cluster_deps,
     cluster_submit,
     cluster_telemetry,
@@ -294,7 +294,7 @@ def test_build_cluster_gpu_with_custom_image_bakes_driver_no_init_action() -> No
     # Custom image carries its own version, so image_version is unset.
     assert not cfg.software_config.image_version
     # The physical card is still attached, and unsigned modules still need Secure Boot off.
-    assert list(cfg.worker_config.accelerators)[0].accelerator_type_uri == "nvidia-tesla-t4"
+    assert next(iter(cfg.worker_config.accelerators)).accelerator_type_uri == "nvidia-tesla-t4"
     assert cfg.gce_cluster_config.shielded_instance_config.enable_secure_boot is False
 
 
@@ -342,7 +342,7 @@ def test_build_cluster_gpu_l4_attaches_g2_machine() -> None:
     )
     cfg = cluster.config
     assert cfg.worker_config.machine_type_uri == "g2-standard-8"
-    assert list(cfg.worker_config.accelerators)[0].accelerator_type_uri == "nvidia-l4"
+    assert next(iter(cfg.worker_config.accelerators)).accelerator_type_uri == "nvidia-l4"
 
 
 def test_build_cluster_honours_worker_count() -> None:

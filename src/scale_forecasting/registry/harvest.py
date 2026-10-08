@@ -87,7 +87,7 @@ def read_compute_harvest(
                 sql, job_config=bigquery.QueryJobConfig(query_parameters=params)
             ).result()
         ]
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_compute_harvest failed for run {run_id}: {exc}") from exc
     if not rows:
         return None
@@ -247,6 +247,6 @@ def discover_harvest_run(
                 sql, job_config=bigquery.QueryJobConfig(query_parameters=params)
             ).result()
         ]
-    except Exception as exc:  # noqa: BLE001 - re-raised with context
+    except Exception as exc:  # re-raised with context
         raise RegistryError(f"discover_harvest_run failed: {exc}") from exc
     return rank_harvest_candidates(rows, target_series=target_series, target_runtime=target_runtime)

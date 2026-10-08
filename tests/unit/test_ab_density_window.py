@@ -48,7 +48,7 @@ _SQL = Path(__file__).resolve().parents[2] / "docs" / "sql" / "ab_density_window
 class Cell:
     """One fitted cell, as the three columns the rule reads. Times are integer epoch seconds."""
 
-    __slots__ = ("arm", "worker", "started", "ended", "fit_seconds")
+    __slots__ = ("arm", "ended", "fit_seconds", "started", "worker")
 
     def __init__(self, arm: str, worker: str, started: int, ended: int, fit_seconds: float):
         self.arm = arm
@@ -212,7 +212,7 @@ def test_the_repaired_rule_does_not_care_where_the_run_falls_on_the_clock() -> N
     def shifted(by: int) -> list[Cell]:
         return [Cell(c.arm, c.worker, c.started + by, c.ended + by, c.fit_seconds) for c in base]
 
-    def mean(rule, cells) -> float:  # noqa: ANN001 - local helper over two rule functions
+    def mean(rule, cells) -> float:  # local helper over two rule functions
         bs = rule(cells)["cpu"]
         return sum(b.density for b in bs) / len(bs)
 

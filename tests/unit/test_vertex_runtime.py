@@ -352,7 +352,7 @@ def test_vertex_engine_executes_single_and_sharded_workers_and_hierarchy() -> No
             "reconciliation_methods": ["bottom_up"],
         },
     )
-    res_h0, st_h0 = execute_panel(
+    res_h0, _st_h0 = execute_panel(
         panel,
         cfg_hier,
         models=["naive_mean"],

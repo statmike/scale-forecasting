@@ -27,9 +27,9 @@ from scale_forecasting.settings import Settings
 # the [spark] extra is absent (parity with test_submit).
 pytest.importorskip("google.cloud.dataproc_v1")
 
-from scale_forecasting.batch_infra import BatchInfra  # noqa: E402
-from scale_forecasting.ray_submit import build_entrypoint  # noqa: E402
-from scale_forecasting.submit import build_batch  # noqa: E402
+from scale_forecasting.batch_infra import BatchInfra
+from scale_forecasting.ray_submit import build_entrypoint
+from scale_forecasting.submit import build_batch
 
 
 def _cfg(**over: Any) -> RunConfig:
@@ -155,13 +155,13 @@ def test_spark_native_gpu_command_reconstructs_the_gpu_batchs_properties() -> No
     # every fit lands on the CPU. Both sides resolve the GPU block through `submit.apply_gpu_
     # properties`, and this compares the resulting property maps rather than trusting that.
     settings, infra = _settings(), _infra()
-    common = dict(
-        package_uri="gs://code-bkt/runs/pkg-1234.zip",
-        launcher_uri="gs://code-bkt/runs/spark_main.py",
-        config_uri="gs://code-bkt/runs/run-abc.json",
-        models=["neuralprophet"],
-        max_executors=6,
-    )
+    common = {
+        "package_uri": "gs://code-bkt/runs/pkg-1234.zip",
+        "launcher_uri": "gs://code-bkt/runs/spark_main.py",
+        "config_uri": "gs://code-bkt/runs/run-abc.json",
+        "models": ["neuralprophet"],
+        "max_executors": 6,
+    }
     cmds = build_spark_commands(
         settings=settings,
         infra=infra,
@@ -354,12 +354,12 @@ def test_spark_native_carries_the_sizing_overlay_in_one_properties_flag() -> Non
 
 
 def test_spark_native_is_unchanged_when_there_is_no_overlay() -> None:
-    common: dict[str, object] = dict(
-        settings=_settings(),
-        infra=_infra(),
-        batch_id="sf-x",
-        package_uri="gs://c/p.zip",
-        launcher_uri="gs://c/e.py",
-        config_uri="gs://c/r.json",
-    )
+    common: dict[str, object] = {
+        "settings": _settings(),
+        "infra": _infra(),
+        "batch_id": "sf-x",
+        "package_uri": "gs://c/p.zip",
+        "launcher_uri": "gs://c/e.py",
+        "config_uri": "gs://c/r.json",
+    }
     assert build_spark_commands(**common) == build_spark_commands(**common, properties={})

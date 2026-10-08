@@ -310,7 +310,7 @@ def list_clusters(
         parent = f"projects/{settings.project_id}/locations/{region}"
         try:
             resources = list(client.list_persistent_resources(parent=parent))
-        except Exception as exc:  # noqa: BLE001 - re-raised with the region that could not be read
+        except Exception as exc:  # re-raised with the region that could not be read
             raise EngineError(
                 f"could not list Vertex persistent resources in {region}: {exc}"
             ) from exc

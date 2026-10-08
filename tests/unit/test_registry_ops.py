@@ -205,7 +205,7 @@ def test_doctor_report_health_and_missing_tables():
     broken = ops.DoctorReport(
         registry="proj.reg",
         artifact_root="gs://b/r",
-        tables=stats[:-1] + (ops.TableStat(stats[-1].table, None),),
+        tables=(*stats[:-1], ops.TableStat(stats[-1].table, None)),
     )
     assert not broken.healthy
     assert broken.missing_tables == (stats[-1].table,)

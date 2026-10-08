@@ -57,7 +57,7 @@ def test_library_covers_every_runtime_combo() -> None:
     for path in _CONFIGS:
         cfg = load_config(str(path))
         dag = plan_dag(cfg)
-        python_models, bq_models = split_by_runtime(cfg)
+        _python_models, bq_models = split_by_runtime(cfg)
         if bq_models:
             seen.add("native")
         for job in dag.python_jobs:

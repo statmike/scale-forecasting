@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import os
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 import numpy as np
@@ -659,7 +659,7 @@ class _DeviceSpy(BaseModel):
     runtime = "python"
     family = "deep_learning"
     gpu_capable = True
-    seen: list[str] = []
+    seen: ClassVar[list[str]] = []
 
     def __init__(self, params: dict[str, Any], ctx: Any) -> None:
         super().__init__(params, ctx)
@@ -677,7 +677,7 @@ class _DeviceSpy(BaseModel):
     ) -> pd.DataFrame:
         yhat = np.full(horizon, self._mean)
         return self._assemble_frame(
-            self._future_index(self._last, horizon), {q: yhat for q in quantiles}
+            self._future_index(self._last, horizon), dict.fromkeys(quantiles, yhat)
         )
 
     @classmethod

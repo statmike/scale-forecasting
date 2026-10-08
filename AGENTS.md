@@ -148,6 +148,7 @@ make lock-check
 .venv/bin/mkdocs build --strict
 ```
 - The first four are also run by `.githooks/pre-push` (enabled with `make hooks`), with exactly the flags CI uses, so a push can never be the first place they fail.
+- **ruff runs `E`, `F`, `I`, `B`, `UP`, `SIM`, `C4`, `PIE`, `PERF`, `RUF`, and `BLE`** (`[tool.ruff.lint]` in `pyproject.toml`, each family and the one ignored rule explained there). `BLE` means every `except Exception` carries `# noqa: BLE001 - <why this catch is deliberate>`; a broad catch that re-raises or logs with `exc_info` needs no marker. Fix a report rather than adding a `noqa`; when a `noqa` is the right answer, it carries its reason on the same line.
 - **mypy is a zero-error gate on `src/` only.** The package ships `py.typed`, so every public signature is a promise to downstream type-checkers. Fix a report by narrowing (a small typed helper, an `isinstance` branch, a `Protocol` for a duck-typed estimator) rather than by `cast`, `Any`, or `# type: ignore`; tests stay dynamically typed on purpose.
 - After editing `pyproject.toml` or any test import, run `make ci-offline`: it syncs a second environment (`.venv-ci`) with the CI `offline` job's exact command and runs the full offline gate there. Your working `.venv` is a superset of CI's and cannot reproduce a missing-package failure.
 
@@ -155,6 +156,7 @@ make lock-check
 ```bash
 .venv/bin/pytest tests/unit/ -q
 ```
+- CI's `offline` job, `make test`, and `make ci-offline` run the same selection with `--cov` (the Makefile's `OFFLINE_PYTEST`; `tests/unit/test_packaging_extras.py` holds the three identical). Line coverage of `src/scale_forecasting` must stay at or above `fail_under` in `[tool.coverage.report]` — **85 %** at v1.0.0, set just under the 85.77 % measured when the floor was introduced. The floor is a ratchet: raise it when coverage rises; never lower it, never add `omit`, never move it onto a command line. New cloud-launch code that only live smokes can exercise is the one accepted reason coverage moves down, and it is paid for by raising coverage elsewhere, not by lowering the number.
 
 ### Gate 4: Live Cloud & BigQuery Output Verification (When Touching Runtimes, Engines, or Smokes)
 When validating a runtime or smoke configuration on Google Cloud:
