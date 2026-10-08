@@ -81,11 +81,12 @@ def _all_markdown_files() -> list[Path]:
         "CODE_OF_CONDUCT.md",
         "SECURITY.md",
         "CHANGELOG.md",
+        "cloudshell_tutorial.md",
     ):
         p = _REPO_ROOT / top
         if p.exists():
             files.append(p)
-    for sub in ("docs", "src", "configs", "notebooks", "tests", "docker", "terraform"):
+    for sub in ("docs", "src", "configs", "notebooks", "tests", "docker", "terraform", "skills"):
         sub_dir = _REPO_ROOT / sub
         if not sub_dir.exists():
             continue
@@ -279,7 +280,7 @@ def test_embedded_runconfig_json_examples_validate(markdown_files: list[Path]) -
                 and '"models"' in raw
             ):
                 continue
-            clean = re.sub(r"//.*", "", raw)
+            clean = re.sub(r"(?<!:)//.*", "", raw)
             try:
                 payload = json.loads(clean)
             except json.JSONDecodeError as exc:

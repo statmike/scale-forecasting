@@ -111,6 +111,7 @@ def test_folder_readme_spine_has_mermaid_diagrams() -> None:
         REPO_ROOT / "configs" / "smokes" / "README.md",
         REPO_ROOT / "docs" / "README.md",
         REPO_ROOT / "notebooks" / "README.md",
+        REPO_ROOT / "skills" / "README.md",
         REPO_ROOT / "terraform" / "README.md",
         REPO_ROOT / "docker" / "README.md",
         REPO_ROOT / "src" / "scale_forecasting" / "README.md",

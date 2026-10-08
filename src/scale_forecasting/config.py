@@ -1529,6 +1529,14 @@ class ResolvedFamilyCompute:
 # --- top-level config ----------------------------------------------------------
 
 
+# Published JSON Schema URI for IDE/editor autocomplete and static validation. Accepted and stripped
+# at `RunConfig` load time so adding `"$schema"` to any JSON config file never alters `model_dump()`
+# or the content-addressed `run_id` digest.
+RUN_CONFIG_SCHEMA_URI = (
+    "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json"
+)
+
+
 class RunConfig(BaseModel):
     """A complete, validated, frozen run specification."""
 
@@ -1561,6 +1569,25 @@ class RunConfig(BaseModel):
     # spend, where the registry is already loaded — that is also where a model gets to refuse a
     # block it cannot honour (`models.base_model.BaseModel.validate_params`).
     model_params: dict[str, dict[str, ModelParam]] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_json_schema_key(cls, data: Any) -> Any:
+        """Accept an optional JSON Schema ``$schema`` declaration without storing it on the model.
+
+        Storing ``$schema`` as a field would include it in ``model_dump()`` and therefore either
+        alter ``run_id`` digests or require a digest exclusion rule. Stripping it before validation
+        lets any config carry ``"$schema"`` for IDE autocomplete while keeping ``model_dump()`` and
+        ``run_id`` byte-identical to a config without it.
+        """
+        if isinstance(data, dict) and "$schema" in data:
+            schema_val = data["$schema"]
+            if not isinstance(schema_val, str) or not schema_val.strip():
+                raise ValueError("$schema must be a non-empty string URI when provided")
+            out = dict(data)
+            out.pop("$schema", None)
+            return out
+        return data
 
     @field_validator("model_params")
     @classmethod

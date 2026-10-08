@@ -90,6 +90,7 @@ nav:
   - Start here:
       - Platform overview: overview.md
       - Getting started: getting_started.md
+      - AI agents, skills & MCP: agent_and_mcp_guide.md
       - Choosing a runtime: choosing_a_runtime.md
       - Cost estimates & controls: cost_estimates.md
       - Why Google Cloud: why_google_cloud.md
@@ -136,6 +137,8 @@ nav:
   - API Reference:
       - Overview: api/index.md
       - Forecaster (SDK): api/sdk.md
+      - AI agent surfaces & probe: api/agent_surfaces.md
+      - MCP server (stdio): api/mcp.md
       - Run inspection & review: api/review.md
       - Model playground: api/playground.md
       - run (orchestration): api/main.md

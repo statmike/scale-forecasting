@@ -1,0 +1,706 @@
+# scale-forecasting
+
+> Declarative, multi-runtime enterprise time-series forecasting platform for Google Cloud. One frozen Pydantic `RunConfig` orchestrates 34 models across 5 families (`statistical`, `ml`, `deep_learning`, `automl`, `native`), 21 evaluation metrics, 7 compute runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`), rolling-origin backtesting, Optuna HPO, conformal/quantile calibration, FPP3 hierarchical reconciliation, and stacked ensembling into a 5-table, 5-view BigQuery registry.
+
+## Agent-First Surfaces (MCP, Skills & Schemas)
+
+- [AI Agents, Skills & MCP Guide](https://statmike.github.io/scale-forecasting/agent_and_mcp_guide/): How to connect Gemini CLI, Claude Code, Antigravity/Jetski, Cursor, and VS Code via the built-in MCP server (`python -m scale_forecasting.mcp`), `SKILL.md`, and JSON Schema.
+- [RunConfig JSON Schema (Draft 2020-12)](https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json): Machine-readable schema for `RunConfig` with editor autocomplete (`"$schema": "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json"`).
+- [Comprehensive LLM Context Bundle (`llms-full.txt`)](https://statmike.github.io/scale-forecasting/llms-full.txt): Single-file reference containing all `RunConfig` fields, all 34 models, 21 metrics, 7 runtimes, 12 extras, and 5 execution paths.
+- [Repository Portable Skill (`skills/scale-forecasting/SKILL.md`)](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md): Portable Agent Skill with Progressive Disclosure reference tables.
+
+## Start Here & Positioning
+
+- [Documentation Home](https://statmike.github.io/scale-forecasting/): Navigation hub by role and goal.
+- [Platform Overview](https://statmike.github.io/scale-forecasting/overview/): End-to-end architecture, capabilities summary, and registry model.
+- [Getting Started](https://statmike.github.io/scale-forecasting/getting_started/): 5-minute offline sandbox (`pip install scale-forecasting`) to first cloud run.
+- [Choosing a Runtime](https://statmike.github.io/scale-forecasting/choosing_a_runtime/): Decision flow and fit matrix across all 7 Google Cloud runtimes.
+- [Cost Estimates](https://statmike.github.io/scale-forecasting/cost_estimates/): Service-by-service cost drivers, zero-idle vs. always-on resources, and run cost bands.
+- [Why Google Cloud](https://statmike.github.io/scale-forecasting/why_google_cloud/): Six architectural proof points with code and validation citations.
+- [FAQ](https://statmike.github.io/scale-forecasting/faq/): Direct answers on installation, runtimes, pricing, covariates, and operations.
+- [Glossary](https://statmike.github.io/scale-forecasting/glossary/): Definitions of platform, forecasting, and BigQuery registry terms.
+
+## Reference & Operations
+
+- [Configuration Reference (`RunConfig`)](https://statmike.github.io/scale-forecasting/configuration_reference/): Complete JSON configuration guide.
+- [Models Reference (34 Models)](https://statmike.github.io/scale-forecasting/models_reference/): All 34 models, covariate support, explainability, and granular extras.
+- [Metrics Reference (21 Metrics)](https://statmike.github.io/scale-forecasting/metrics_reference/): All 16 point and 5 interval metrics.
+- [Runtimes Reference (7 Runtimes)](https://statmike.github.io/scale-forecasting/runtimes_reference/): Dataproc, Ray, Vertex CustomJob, GCE, GKE, Vertex AutoML, and BigQuery ML.
+- [Using the Python SDK (`Forecaster`)](https://statmike.github.io/scale-forecasting/using_the_sdk/): Programmatic execution, monitoring, review, and plotting.
+- [Output Schemas & Views](https://statmike.github.io/scale-forecasting/output_schemas/): DDL and query recipes for the 5 registry tables and 5 analytical views.
+- [Operations & Surgical Repair](https://statmike.github.io/scale-forecasting/operations/): Probing, settling, canceling, and repairing runs (`retry_run`, `registry.ops`).
+- [Live Validation Ledger](https://statmike.github.io/scale-forecasting/validation/): Proven `run_id` records across 42 smokes, 20 demo configs, and 11 notebooks.
+
+================================================================================
+
+# `RunConfig` Schema & Validation Reference
+
+> **Auto-generated from [`src/scale_forecasting/config.py`](../../../src/scale_forecasting/config.py) by `python -m scale_forecasting.agent_surfaces --write`.** Do not edit by hand; pre-commit (`test_agent_surfaces.py`) enforces zero drift.
+
+- **JSON Schema URI:** `https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json`
+- **Local Schema Path:** [`docs/schemas/run_config.schema.json`](../../../docs/schemas/run_config.schema.json)
+- **Strictness:** Every config block sets `ConfigDict(frozen=True, extra='forbid')`. Unknown keys fail immediately at load time (`ConfigError`).
+- **Optional `$schema` Key:** Any config JSON file may include `"$schema": "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json"` at the top level. `RunConfig` validates and strips `$schema` before model construction so `model_dump()` and `run_id` hashes are completely unaffected.
+
+---
+
+## 1. All Config Blocks & Fields
+
+### `RunConfig (top-level)`
+
+Root run configuration object.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `run_name` | `str` | **required** | — |
+| `data` | `DataConfig` | **required** | — |
+| `python_runtime` | `'spark' \| 'ray' \| 'vertex' \| 'gce' \| 'gke' \| 'vertex_automl'` | `"spark"` | — |
+| `models` | `list[str]` | **required** | `min_len= 1` |
+| `features` | `FeaturesConfig` | `FeaturesConfig()` | — |
+| `backtest` | `BacktestConfig` | `BacktestConfig()` | — |
+| `output` | `OutputConfig` | `OutputConfig()` | — |
+| `hpo` | `HpoConfig` | `HpoConfig()` | — |
+| `ensemble` | `EnsembleConfig` | `EnsembleConfig()` | — |
+| `hierarchy` | `HierarchyConfig` | `HierarchyConfig()` | — |
+| `compute` | `ComputeConfig` | `ComputeConfig()` | — |
+| `model_params` | `dict[str, dict[str, bool \| int \| float \| str \| None \| list[bool \| int \| float \| str \| None]]]` | `{}` | — |
+
+### `data (DataConfig)`
+
+Source BigQuery table, column names, frequency, and horizon.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `source_table` | `str` | **required** | — |
+| `ts_id_col` | `str` | `"ts_id"` | — |
+| `date_col` | `str` | `"ds"` | — |
+| `target_col` | `str` | `"y"` | — |
+| `freq` | `str` | `"D"` | — |
+| `horizon` | `int` | `28` | `> 0` |
+| `series_limit` | `int \| None` | `null` | `> 0` |
+
+### `features (FeaturesConfig)`
+
+Target transforms, country holidays, covariates (future/past/static), lags, and Fourier terms.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `holidays` | `list[str]` | `[]` | — |
+| `transform` | `'none' \| 'log1p' \| 'boxcox'` | `"none"` | — |
+| `exog` | `list[str]` | `[]` | — |
+| `static_covariates` | `list[str]` | `[]` | — |
+| `future_covariates` | `list[str]` | `[]` | — |
+| `past_covariates` | `list[str]` | `[]` | — |
+| `exog_lags` | `dict[str, list[int]]` | `{}` | — |
+| `on_unsupported_covariates` | `'fallback' \| 'error'` | `"fallback"` | — |
+| `fourier` | `bool` | `false` | — |
+| `level_shift` | `bool` | `false` | — |
+
+### `backtest (BacktestConfig)`
+
+Expanding, sliding, frozen, or stale cross-validation geometry and decision metric.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `bool` | `false` | — |
+| `scheme` | `'expanding' \| 'sliding' \| 'expanding_frozen' \| 'expanding_stale'` | `"expanding"` | — |
+| `n_folds` | `int` | `3` | `>= 1` |
+| `horizon` | `int` | `28` | `> 0` |
+| `step` | `int` | `28` | `> 0` |
+| `min_train` | `int` | `180` | `> 0` |
+| `decision_metric` | `str` | `"wape"` | — |
+| `short_series` | `'adapt' \| 'overlap' \| 'shrink_train' \| 'skip' \| 'error'` | `"adapt"` | — |
+| `min_folds` | `int` | `1` | `>= 1` |
+| `min_train_floor` | `int \| None` | `null` | `> 0` |
+| `gap` | `int` | `0` | `>= 0` |
+| `window` | `int \| None` | `null` | `> 0` |
+| `control_arm` | `bool` | `false` | — |
+
+### `output (OutputConfig)`
+
+Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`).
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `point_forecast` | `'raw' \| 'median' \| 'mean' \| 'auto' \| None` | `null` | — |
+
+### `hpo (HpoConfig)`
+
+Optuna hyperparameter optimization (`fleetwide` or `per_series`).
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `bool` | `false` | — |
+| `engine` | `'optuna'` | `"optuna"` | — |
+| `n_trials` | `int` | `20` | `> 0` |
+| `granularity` | `'fleetwide' \| 'per_series'` | `"fleetwide"` | — |
+| `sample_size` | `int` | `20` | `> 0` |
+
+### `ensemble (EnsembleConfig)`
+
+Calculated (`mean`, `median`, `inverse_error`) and learned (`nnls`, `ridge`, `xgb`) stackers.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `bool` | `false` | — |
+| `strategies` | `list['mean' \| 'median' \| 'inverse_error' \| 'nnls' \| 'ridge' \| 'xgb']` | `["median"]` | — |
+| `prune_threshold` | `float` | `0.0` | `>= 0.0` |
+
+### `hierarchy (HierarchyConfig)`
+
+Cross-sectional aggregation levels and FPP3 reconciliation (`bottom_up`, `mint_shrink`, ...).
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `bool` | `false` | — |
+| `levels` | `list[list[str]]` | `[]` | — |
+| `reconciliation_methods` | `list['bottom_up' \| 'top_down' \| 'middle_out' \| 'ols' \| 'wls_struct' \| 'wls_var' \| 'mint_shrink']` | `["bottom_up", "wls_struct", "mint_shrink"]` | — |
+| `middle_level` | `list[str] \| None` | `null` | — |
+
+### `compute (ComputeConfig)`
+
+Default runtime, GPU/VM shape, autoscaling bounds, profiling, capacity, and family overrides.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `max_parallelism` | `int` | `1000` | `> 0` |
+| `bucket_target_cells` | `int` | `8` | `> 0` |
+| `max_executors` | `int \| None` | `null` | `> 0` |
+| `machine_family` | `'auto' \| 'n1' \| 'n2' \| 'n2d' \| 'e2' \| 'c2'` | `"auto"` | — |
+| `spark_deps` | `'packed_venv' \| 'container'` | `"packed_venv"` | — |
+| `persist_models` | `bool` | `false` | — |
+| `use_gpu` | `bool` | `false` | — |
+| `gpu_type` | `'T4' \| 'L4' \| 'A100' \| 'A100_80GB'` | `"T4"` | — |
+| `gpu_fraction` | `'auto' \| float` | `"auto"` | — |
+| `budget_usd` | `float` | `50.0` | `>= 0.0` |
+| `machine_type` | `str` | `"auto"` | — |
+| `workers` | `int` | `1` | `> 0` |
+| `min_workers` | `int \| None` | `null` | `> 0` |
+| `max_workers` | `int \| None` | `null` | `> 0` |
+| `ray_cluster_name` | `str \| None` | `null` | — |
+| `ray_mode` | `'vertex' \| 'gke'` | `"vertex"` | — |
+| `gke_mode` | `'job' \| 'ray'` | `"job"` | — |
+| `gke_cluster_name` | `str \| None` | `null` | — |
+| `gke_namespace` | `str` | `"default"` | — |
+| `automl_mode` | `'tabular_workflow' \| 'training_job'` | `"tabular_workflow"` | — |
+| `ray_regions` | `list[str] \| None` | `null` | — |
+| `ray_head_machine_type` | `str` | `"n1-standard-16"` | — |
+| `ray_cpu_machine_type` | `str` | `"n1-standard-8"` | — |
+| `ray_gpu_machine_type` | `str` | `"n1-standard-8"` | — |
+| `accelerator_count` | `int` | `1` | `> 0` |
+| `ray_target_cells_per_slot` | `int` | `8` | `> 0` |
+| `ray_max_nodes` | `int` | `16` | `> 0` |
+| `ray_autoscale` | `bool` | `true` | — |
+| `ray_cpu_min_nodes` | `int` | `1` | `> 0` |
+| `ray_gpu_min_nodes` | `int` | `1` | `> 0` |
+| `ray_cpu_max_nodes` | `int \| None` | `null` | `> 0` |
+| `ray_gpu_max_nodes` | `int \| None` | `null` | `> 0` |
+| `gpu_calibration_samples` | `int` | `3` | `> 0` |
+| `gpu_safety_margin` | `float` | `1.3` | `> 1.0` |
+| `profile` | `ProfileConfig` | `ProfileConfig()` | — |
+| `capacity` | `CapacityConfig` | `CapacityConfig()` | — |
+| `ray_read_mode` | `'driver_collect' \| 'ray_data'` | `"driver_collect"` | — |
+| `read_max_streams` | `int` | `0` | `>= 0` |
+| `families` | `dict['statistical' \| 'ml' \| 'deep_learning' \| 'automl', FamilyCompute]` | `{}` | — |
+| `ensemble` | `EnsembleCompute` | `EnsembleCompute()` | — |
+
+### `compute.families.<family> (FamilyCompute)`
+
+Per-family runtime and hardware override (`statistical`, `ml`, `deep_learning`, `automl`).
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `runtime` | `'spark' \| 'ray' \| 'vertex' \| 'gce' \| 'gke' \| 'vertex_automl' \| None` | `null` | — |
+| `spark_mode` | `'serverless' \| 'cluster' \| None` | `null` | — |
+| `spark_cluster_name` | `str \| None` | `null` | — |
+| `gke_mode` | `'job' \| 'ray' \| None` | `null` | — |
+| `gke_cluster_name` | `str \| None` | `null` | — |
+| `ray_mode` | `'vertex' \| 'gke' \| None` | `null` | — |
+| `automl_mode` | `'tabular_workflow' \| 'training_job' \| None` | `null` | — |
+| `hardware` | `'cpu' \| 'gpu' \| None` | `null` | — |
+| `gpu_type` | `'T4' \| 'L4' \| 'A100' \| 'A100_80GB' \| None` | `null` | — |
+| `accelerator_count` | `int \| None` | `null` | `> 0` |
+| `machine_type` | `str \| None` | `null` | — |
+| `workers` | `int \| None` | `null` | `> 0` |
+| `min_workers` | `int \| None` | `null` | `> 0` |
+| `max_workers` | `int \| None` | `null` | `> 0` |
+
+### `compute.ensemble (EnsembleCompute)`
+
+When the ensemble DAG node executes (`barrier` vs. `microbatch`).
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `mode` | `'barrier' \| 'microbatch'` | `"barrier"` | — |
+| `microbatch_interval_s` | `float` | `60.0` | `> 0` |
+
+### `compute.profile (ProfileConfig)`
+
+Empirical compute profiling (`mode`, `measure`, `source`, safety margins).
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `mode` | `'off' \| 'auto' \| 'always'` | `"auto"` | — |
+| `samples` | `int` | `8` | `> 0` |
+| `min_cells` | `int` | `1000` | `> 0` |
+| `memory_margin` | `float` | `1.3` | `> 1.0` |
+| `time_margin` | `float` | `1.2` | `> 1.0` |
+| `measure` | `'off' \| 'harvest' \| 'controlled'` | `"harvest"` | — |
+| `source` | `str` | `"auto"` | — |
+
+### `compute.capacity (CapacityConfig)`
+
+Quota preflight and per-service regional capacity retry policies (excluded from `run_id`).
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `bool` | `true` | — |
+| `preflight` | `bool` | `true` | — |
+| `ray` | `CapacityServicePolicy` | `CapacityServicePolicy()` | — |
+| `vertex` | `CapacityServicePolicy` | `CapacityServicePolicy()` | — |
+| `vertex_automl` | `CapacityServicePolicy` | `CapacityServicePolicy()` | — |
+| `gce` | `CapacityServicePolicy` | `CapacityServicePolicy()` | — |
+| `gke` | `CapacityServicePolicy` | `CapacityServicePolicy()` | — |
+| `dataproc_cluster` | `CapacityServicePolicy` | `CapacityServicePolicy()` | — |
+| `dataproc_serverless` | `CapacityServicePolicy` | `CapacityServicePolicy()` | — |
+| `retry` | `RetryResources` | `RetryResources()` | — |
+
+### `compute.capacity.<service> (CapacityServicePolicy)`
+
+Per-service attempt, wall-clock, pass, and exponential backoff bounds.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `max_attempts` | `int \| None` | `null` | `>= 0` |
+| `max_wall_seconds` | `float \| None` | `null` | `>= 0` |
+| `max_passes` | `int \| None` | `null` | `>= 0` |
+| `backoff_seconds` | `float \| None` | `null` | `>= 0` |
+| `backoff_multiplier` | `float \| None` | `null` | `>= 1.0` |
+| `backoff_max_seconds` | `float \| None` | `null` | `>= 0` |
+
+### `compute.capacity.retry (RetryResources)`
+
+Resource ceiling (`max_executors`) for surgical `--retry` repairs.
+
+| Field | Type / Allowed Values | Default | Constraints |
+| :--- | :--- | :--- | :--- |
+| `max_executors` | `int \| None` | `null` | `> 0` |
+
+---
+
+## 2. Dynamic Vocabularies & Special Keys
+
+| Field | Allowed Values / Rule |
+| :--- | :--- |
+| `models` | Non-empty list of registered model names (`34` available; see [`catalog_reference.md`](./catalog_reference.md)). No duplicates allowed. |
+| `backtest.decision_metric` | Any of the `21` registered metrics: `mae`, `rmse`, `mse`, `mape`, `smape`, `wape`, `mase`, `rmsse`, `bias`, `coverage`, `pinball`, `mase_seasonal`, `maape`, `interval_score`, `interval_width`, `ope`, `rmsle`, `msse`, `msis`, `r2`, `cv`. |
+| `ensemble.strategies` | Calculated: `mean`, `median`, `inverse_error` (work with or without backtest). Learned stackers: `nnls`, `ridge`, `xgb` (require `backtest.enabled=true`). Singular shorthand `strategy` is also accepted. |
+| `hierarchy.reconciliation_methods` | Any subset of `bottom_up`, `middle_out`, `mint_shrink`, `ols`, `top_down`, `wls_struct`, `wls_var`. |
+| `compute.families` | Keys must be in `statistical`, `ml`, `deep_learning`, `automl`. `native` models always run in BigQuery and never take a `compute.families` entry. |
+| `compute.profile.source` | One of `none`, `auto`, `baseline` or an existing `<slug>-<12hex>` `run_id`. |
+| `model_params` | Dict mapping `<model_name>` to `<param_dict>` of JSON-safe scalars or flat lists (`bool`, `int`, `float`, `str`, `None`). Non-finite floats (`NaN`, `Infinity`) are rejected. |
+
+---
+
+## 3. Cross-Field Validation Rules (`RunConfig._normalize`)
+
+1. **HPO requires Backtesting:** `hpo.enabled = true` requires `backtest.enabled = true` (raises `ConfigError` otherwise).
+2. **Learned Ensembles require Backtesting:** If `ensemble.enabled = true` and `backtest.enabled = false`, learned strategies (`nnls`, `ridge`, `xgb`) are automatically dropped with a warning; always set `backtest.enabled = true` when using learned stackers.
+3. **Point Forecast Arm (`output.point_forecast`):**
+   - Defaults to `"auto"` when `backtest.enabled = true` and `"median"` when `backtest.enabled = false`.
+   - Setting `"mean"` or `"auto"` when `backtest.enabled = false` raises `ConfigError`.
+4. **Short-Series Backtest Policies (`backtest.short_series`):**
+   - `min_folds` cannot exceed `n_folds`.
+   - `short_series = "shrink_train"` requires `min_train_floor` to be set (and `min_train_floor` is forbidden on other `short_series` policies).
+   - `control_arm = true` is forbidden when `scheme = "expanding_stale"`.
+5. **Covariate Hygiene (`features`):**
+   - `future_covariates` and `past_covariates` must be disjoint.
+   - `static_covariates` must be disjoint from all dynamic covariates (`exog`, `future_covariates`, `past_covariates`).
+   - Every key in `exog_lags` must name a declared dynamic covariate, and lags must be positive integers.
+6. **Hierarchy Hygiene (`hierarchy`):**
+   - When `hierarchy.enabled = true`, both `levels` and `reconciliation_methods` must be non-empty, and `middle_level` (if set) must match one of the entries in `levels`.
+7. **Per-Family Runtime & Hardware Constraints (`compute.families`):**
+   - Only `deep_learning` and `automl` families may request `hardware = "gpu"` or `gpu_type`.
+   - Family `automl` must use `runtime = "vertex_automl"`, and no other family may use `vertex_automl` or `automl_mode`.
+   - `spark_mode` / `spark_cluster_name` are only valid when `runtime = "spark"`; Dataproc Serverless (`spark_mode = "serverless"`) supports `L4` GPUs only and forbids `machine_type`.
+   - `gke_mode` is only valid when `runtime = "gke"`; `ray_mode` is only valid when `runtime = "ray"`.
+   - `runtime = "gce"` is strictly single-VM (`workers = 1`).
+   - `min_workers` / `max_workers` are only valid on autoscaling runtimes (`ray`, `spark`, `vertex_automl`, or `gke` with `gke_mode = "ray"`).
+
+---
+
+## 4. GPU-to-VM Machine Type Compatibility (`resolve_vm_machine_type`)
+
+| `gpu_type` | Vertex Enum | VRAM | Allowed `accelerator_count` | Auto-Resolved `machine_type` | Valid Explicit `machine_type` Shapes |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `T4` | `NVIDIA_TESLA_T4` | 16 GiB | `1`, `2`, `4` | `n1-standard-8 (1-2 GPUs) | n1-standard-16 (4 GPUs)` | Any n1-* shape (1-2 GPUs max 48 vCPUs; 4 GPUs up to 96 vCPUs) |
+| `L4` | `NVIDIA_L4` | 24 GiB | `1`, `2`, `4`, `8` | `g2-standard-8 (1 GPU) | g2-standard-{24,48,96} (2/4/8 GPUs)` | 1 GPU: g2-standard-{4,8,12,16,32}; 2 GPUs: g2-standard-24; 4 GPUs: g2-standard-48; 8 GPUs: g2-standard-96 |
+| `A100` | `NVIDIA_TESLA_A100` | 40 GiB | `1`, `2`, `4`, `8`, `16` | `a2-highgpu-{1,2,4,8}g | a2-megagpu-16g` | Strict 1:1 mapping with accelerator_count |
+| `A100_80GB` | `NVIDIA_A100_80GB` | 80 GiB | `1`, `2`, `4`, `8` | `a2-ultragpu-{1,2,4,8}g` | Strict 1:1 mapping with accelerator_count |
+
+---
+
+## 5. Content-Addressed `run_id` Digest Rules (`registry/ids.py`)
+
+- `run_id` is `<slug>-<12hex>` computed from the normalized `RunConfig` JSON dump.
+- **Operational fields excluded from `run_id` (changing these keeps the same `run_id`):**
+  - Infrastructure environment (`SF_PROJECT_ID`, `SF_DATASET_ID`, `SF_REGISTRY_DATASET_ID`, `SF_REGION`, `SF_WAREHOUSE_URI`, `SF_CONNECTION`).
+  - `compute.capacity` (all regional retry policies and `compute.capacity.retry.max_executors`).
+  - `compute.profile.source` (resolved profile pointer).
+  - Default/unset `machine_type` (`"auto"`) and default `workers` (`1`) when left at their baseline defaults.
+  - Top-level `"$schema"` URI key.
+
+================================================================================
+
+# Canonical Platform Catalogs (Models, Metrics, Runtimes, Extras, Views & Configs)
+
+> **Auto-generated from code registries by `python -m scale_forecasting.agent_surfaces --write`.** Do not edit by hand; pre-commit (`test_agent_surfaces.py`) enforces zero drift.
+
+---
+
+## 1. Forecasting Models (34 Models Across 5 Families)
+
+| Model (`models` key) | Family | Runtime | Upstream Package | Install Extra | Future Cov. | Past Cov. | Static Cov. | Explainability | Global / Hybrid | GPU Capable |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `vertex_l2l` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
+| `vertex_seq2seq` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
+| `vertex_tft` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
+| `vertex_tide` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
+| `neuralprophet` | `deep_learning` | `python` | `neuralprophet` | `models-dl` | No | No | No | No | `local/global/hybrid` | Yes |
+| `patchtst` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | No | No | No | No | `local/global` | Yes |
+| `tft` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
+| `tide` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
+| `tsmixer` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
+| `catboost` | `ml` | `python` | `catboost` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
+| `lightgbm` | `ml` | `python` | `lightgbm` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
+| `random_forest` | `ml` | `python` | `scikit-learn` | `core` | Yes | Yes | No | Yes | `local` | No |
+| `regression_lags` | `ml` | `python` | `numpy` | `core` | Yes | Yes | No | Yes | `local` | No |
+| `xgboost` | `ml` | `python` | `xgboost` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
+| `arima_plus` | `native` | `bigquery` | `bigquery-ml` | `gcp` | No | No | No | No | `local` | No |
+| `timesfm` | `native` | `bigquery` | `bigquery-ml` | `gcp` | No | No | No | No | `local` | No |
+| `auto_arima` | `statistical` | `python` | `statsforecast` | `models-stats` | Yes | Yes | No | No | `local` | No |
+| `auto_ces` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |
+| `auto_theta` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |
+| `autoets` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
+| `croston` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
+| `fft` | `statistical` | `python` | `scipy` | `core` | No | No | No | No | `local` | No |
+| `holtwinters` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
+| `kalman` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | `local` | No |
+| `naive_drift` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
+| `naive_mean` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
+| `naive_moving_average` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
+| `naive_seasonal` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
+| `prophet` | `statistical` | `python` | `prophet` | `models-prophet` | Yes | Yes | No | No | `local` | No |
+| `sarimax` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | `local` | No |
+| `stl_bagging` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
+| `tbats` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |
+| `theta` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
+| `ucm` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | `local` | No |
+
+---
+
+## 2. Evaluation Metrics (21 Metrics: 16 Point + 5 Interval)
+
+| Metric (`decision_metric`) | Kind | Direction | Needs Intervals | Needs Train History | Needs Seasonal Period | Optimal Point Arm |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `mae` | `point` | `lower` | No | No | No | `median` |
+| `rmse` | `point` | `lower` | No | No | No | `mean` |
+| `mse` | `point` | `lower` | No | No | No | `mean` |
+| `mape` | `point` | `lower` | No | No | No | `median` |
+| `smape` | `point` | `lower` | No | No | No | `median` |
+| `wape` | `point` | `lower` | No | No | No | `median` |
+| `mase` | `point` | `lower` | No | Yes | No | `median` |
+| `rmsse` | `point` | `lower` | No | Yes | No | `mean` |
+| `bias` | `point` | `zero` | No | No | No | `mean` |
+| `coverage` | `interval` | `higher` | Yes | No | No | `median` |
+| `pinball` | `interval` | `lower` | Yes | No | No | `median` |
+| `mase_seasonal` | `point` | `lower` | No | Yes | Yes | `median` |
+| `maape` | `point` | `lower` | No | No | No | `median` |
+| `interval_score` | `interval` | `lower` | Yes | No | No | `median` |
+| `interval_width` | `interval` | `lower` | Yes | No | No | `median` |
+| `ope` | `point` | `lower` | No | No | No | `median` |
+| `rmsle` | `point` | `lower` | No | No | No | `median` |
+| `msse` | `point` | `lower` | No | Yes | No | `mean` |
+| `msis` | `interval` | `lower` | Yes | Yes | Yes | `median` |
+| `r2` | `point` | `higher` | No | No | No | `mean` |
+| `cv` | `point` | `lower` | No | No | No | `mean` |
+
+---
+
+## 3. Compute Runtimes (7 Runtimes)
+
+| Runtime | Sub-Modes | Supported Families | GPU Support | Scaling Model | Submitter Module |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `spark` | spark_mode: 'serverless' (default) \| 'cluster' (plus interactive Spark Connect) | `statistical`, `ml`, `deep_learning` | `L4 (serverless/cluster)`, `T4, A100, A100_80GB (cluster only)` | Dynamic executor allocation (max_executors / min_workers / max_workers) | `scale_forecasting.submit` |
+| `ray` | ray_mode: 'vertex' (default) \| 'gke' | `statistical`, `ml`, `deep_learning` | `T4`, `L4`, `A100`, `A100_80GB` | Autoscaling CPU + GPU worker pools (ray_autoscale, min_workers, max_workers) | `scale_forecasting.ray_submit` |
+| `vertex` | Managed Vertex AI CustomJob worker pool | `statistical`, `ml`, `deep_learning` | `T4`, `L4`, `A100`, `A100_80GB` | Fixed multi-VM worker pool (workers >= 1, auto-expands for multi-model DL) | `scale_forecasting.vertex_submit` |
+| `gce` | Single-VM Container-Optimized OS instance | `statistical`, `ml`, `deep_learning` | `T4`, `L4`, `A100`, `A100_80GB` | Strictly single-VM (workers = 1) with triple-redundant self-deletion | `scale_forecasting.gce_submit` |
+| `gke` | gke_mode: 'job' (default, K8s Indexed Job) \| 'ray' (KubeRay) | `statistical`, `ml`, `deep_learning` | `T4`, `L4`, `A100`, `A100_80GB` | Multi-pod Indexed Job (workers >= 1) or autoscaling Ray pods on GKE | `scale_forecasting.gke_submit` |
+| `vertex_automl` | automl_mode: 'tabular_workflow' (default) \| 'training_job' | `automl` | `T4`, `L4`, `A100`, `A100_80GB` | Managed Vertex AI Pipelines / AutoML worker pools (min_workers, max_workers) | `scale_forecasting.automl_submit` |
+| `bigquery` | In-warehouse BigQuery ML SQL | `native` | CPU / SQL only | Managed BigQuery slots (no VM provisioning) | `scale_forecasting.engines.bigquery_engine` |
+
+---
+
+## 4. Dependency Extras (12 Extras in `pyproject.toml`)
+
+| Extra | Install Command | Key Probe Modules | Purpose |
+| :--- | :--- | :--- | :--- |
+| `core` (base) | `pip install scale-forecasting` | `pydantic`, `pandas`, `statsmodels`, `sklearn`, `optuna` | Pure offline layer: 14 core models, 21 metrics, backtesting, ensembling, reconciliation, playground, dry-run, MCP server |
+| `[gcp]` | `pip install "scale-forecasting[gcp]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+1 more) | Google Cloud clients (BigQuery, Storage Read/Write APIs, GCS, Dataproc, Vertex AI) |
+| `[notebook]` | `pip install "scale-forecasting[notebook]"` | `matplotlib` | Interactive notebook kernel and matplotlib plotting helpers |
+| `[spark]` | `pip install "scale-forecasting[spark]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+2 more) | PySpark runtime client plus [gcp] |
+| `[ray]` | `pip install "scale-forecasting[ray]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+2 more) | Ray cluster/job submission client plus [gcp] |
+| `[submit]` | `pip install "scale-forecasting[submit]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+2 more) | Alias for [ray] (thin launch-host client for all cloud runtimes) |
+| `[models-stats]` | `pip install "scale-forecasting[models-stats]"` | `statsforecast` | Nixtla statsforecast and pmdarima statistical models (5 models) |
+| `[models-trees]` | `pip install "scale-forecasting[models-trees]"` | `xgboost`, `lightgbm`, `catboost` | Gradient-boosted tree models: XGBoost, LightGBM, CatBoost (3 models) |
+| `[models-prophet]` | `pip install "scale-forecasting[models-prophet]"` | `prophet` | Prophet additive/multiplicative decomposable model (1 model) |
+| `[models-dl]` | `pip install "scale-forecasting[models-dl]"` | `torch`, `neuralprophet`, `neuralforecast` | PyTorch, NeuralProphet, and NeuralForecast deep-learning models (5 models) |
+| `[models-automl]` | `pip install "scale-forecasting[models-automl]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+2 more) | Vertex AI Pipelines / KFP components for Tabular Workflows (4 models) |
+| `[models]` | `pip install "scale-forecasting[models]"` | `statsforecast`, `xgboost`, `lightgbm`, `catboost` (+10 more) | All 5 model family extras combined |
+| `[all]` | `pip install "scale-forecasting[all]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+13 more) | Complete installation (all cloud clients, runtimes, notebooks, and model families) |
+
+---
+
+## 5. BigQuery Source Tables, Registry Tables & Analytical SQL Views
+
+| Surface | Canonical Names | Description |
+| :--- | :--- | :--- |
+| **Source Tables (4)** | `source_series_iceberg`, `source_series_native`, `source_series_wide_native`, `source_series_hierarchical_native` | Input time-series panels (Apache Iceberg on GCS via BigLake + native BigQuery tables). |
+| **Registry Tables (5)** | `run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof` | Append-only experiment header, per-family job ledger, cell metadata/metrics, forward predictions, and out-of-fold backtests. |
+| **Analytical SQL Views (5)** | `v_run_summary`, `v_run_jobs`, `v_model_leaderboard`, `v_backtest_coverage`, `v_model_leaderboard_comparable` | Deduplicated leaderboards, comparable cohort rankings, backtest fold coverage, run time ledger (`overhead_seconds >= 0`), and current job state. |
+
+---
+
+## 6. Shipped Configuration Catalog (`configs/` & `configs/smokes/`)
+
+### Root Demonstration & Scale Configs (`configs/*.json`)
+
+| Config File | `run_name` | Default Runtime | Models | Backtest | Ensemble |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `configs/all_families_10k.json` | `all_families_10k` | `ray` | `theta`, `holtwinters`, `sarimax`, `xgboost` (+3) | off | off |
+| `configs/all_families_10k_full.json` | `all_families_10k_full` | `ray` | `theta`, `holtwinters`, `sarimax`, `xgboost` (+3) | `expanding` (2f) | off |
+| `configs/bq_native_demo.json` | `bq_native_demo` | `spark` | `arima_plus`, `timesfm` | off | off |
+| `configs/ensemble_demo.json` | `ensemble_demo` | `spark` | `theta`, `arima_plus`, `timesfm` | `expanding` (2f) | `mean`, `median`, `inverse_error` |
+| `configs/explode_100k.json` | `explode_100k` | `spark` | `theta`, `holtwinters`, `sarimax`, `xgboost` | off | off |
+| `configs/explode_demo.json` | `explode_demo` | `spark` | `theta`, `holtwinters`, `sarimax`, `xgboost` | off | off |
+| `configs/gke_demo.json` | `gke_demo` | `gke` | `theta`, `holtwinters`, `arima_plus`, `timesfm` | `expanding` (2f) | off |
+| `configs/mixed_demo.json` | `mixed_demo` | `spark` | `theta`, `arima_plus`, `timesfm` | `expanding` (2f) | off |
+| `configs/neuralprophet_ab_cluster_cpu.json` | `neuralprophet_ab_cluster_cpu` | `spark` | `neuralprophet` | `expanding` (2f) | off |
+| `configs/neuralprophet_ab_cluster_gpu.json` | `neuralprophet_ab_cluster_gpu` | `spark` | `neuralprophet` | `expanding` (2f) | off |
+| `configs/neuralprophet_ab_cpu.json` | `neuralprophet_ab_cpu` | `ray` | `neuralprophet` | `expanding` (2f) | off |
+| `configs/neuralprophet_ab_gpu.json` | `neuralprophet_ab_gpu` | `ray` | `neuralprophet` | `expanding` (2f) | off |
+| `configs/per_family_runtimes_cpu_demo.json` | `per_family_runtimes_cpu_demo` | `spark` | `theta`, `holtwinters`, `xgboost`, `neuralprophet` (+1) | off | off |
+| `configs/per_family_runtimes_demo.json` | `per_family_runtimes_demo` | `spark` | `theta`, `holtwinters`, `xgboost`, `neuralprophet` (+1) | off | off |
+| `configs/ray_100k.json` | `ray_100k` | `ray` | `theta`, `holtwinters`, `sarimax`, `xgboost` | off | off |
+| `configs/ray_autoscale_demo.json` | `ray_autoscale_demo` | `ray` | `theta`, `holtwinters`, `sarimax` | off | off |
+| `configs/ray_cpu_demo.json` | `ray_cpu_demo` | `ray` | `theta`, `holtwinters`, `arima_plus`, `timesfm` | `expanding` (2f) | off |
+| `configs/ray_gpu_demo.json` | `ray_gpu_demo` | `ray` | `neuralprophet`, `theta`, `arima_plus`, `timesfm` | `expanding` (2f) | off |
+| `configs/repair_demo.json` | `repair_demo` | `spark` | `theta`, `holtwinters`, `xgboost` | off | off |
+| `configs/repair_retry_demo.json` | `repair_retry_demo` | `spark` | `theta`, `holtwinters`, `xgboost` | off | off |
+
+### Live Smoke Test Configs (`configs/smokes/*.json`)
+
+| Smoke Config | `run_name` | Default Runtime | Family Overrides | Models |
+| :--- | :--- | :--- | :--- | :--- |
+| `configs/smokes/01_serverless_cpu.json` | `smoke_01_serverless_cpu` | `spark` | — | `theta`, `holtwinters`, `xgboost` |
+| `configs/smokes/02_bq_native.json` | `smoke_02_bq_native` | `spark` | — | `arima_plus`, `timesfm` |
+| `configs/smokes/03_serverless_gpu.json` | `smoke_03_serverless_gpu` | `spark` | `deep_learning:spark` | `neuralprophet` |
+| `configs/smokes/04_cluster_cpu.json` | `smoke_04_cluster_cpu` | `spark` | `ml:spark`, `statistical:spark` | `theta`, `holtwinters`, `xgboost` |
+| `configs/smokes/05_cluster_reuse.json` | `smoke_05_cluster_reuse` | `spark` | `ml:spark`, `statistical:spark` | `theta`, `xgboost` |
+| `configs/smokes/06_cluster_gpu.json` | `smoke_06_cluster_gpu` | `spark` | `deep_learning:spark` | `neuralprophet` |
+| `configs/smokes/07_ray_cpu.json` | `smoke_07_ray_cpu` | `ray` | — | `theta`, `holtwinters`, `xgboost` |
+| `configs/smokes/08_ray_gpu.json` | `smoke_08_ray_gpu` | `ray` | `deep_learning:ray` | `neuralprophet` |
+| `configs/smokes/09_shared_ray.json` | `smoke_09_shared_ray` | `ray` | `deep_learning:ray` | `theta`, `xgboost`, `neuralprophet` |
+| `configs/smokes/10_mixed_runtimes.json` | `smoke_10_mixed_runtimes` | `spark` | `deep_learning:ray` | `theta`, `xgboost`, `neuralprophet`, `arima_plus` (+1) |
+| `configs/smokes/11_ensemble_barrier.json` | `smoke_11_ensemble_barrier` | `spark` | — | `theta`, `holtwinters`, `arima_plus`, `timesfm` |
+| `configs/smokes/12_ensemble_microbatch.json` | `smoke_12_ensemble_microbatch` | `spark` | — | `theta`, `holtwinters`, `arima_plus`, `timesfm` |
+| `configs/smokes/13_native_format.json` | `smoke_13_native_format` | `spark` | — | `theta`, `xgboost`, `arima_plus`, `timesfm` |
+| `configs/smokes/14_full_dag.json` | `smoke_14_full_dag` | `spark` | `deep_learning:spark` | `theta`, `holtwinters`, `xgboost`, `neuralprophet` (+2) |
+| `configs/smokes/15_airflow_multi_engine.json` | `smoke_15_airflow_multi_engine` | `spark` | `deep_learning:ray` | `theta`, `xgboost`, `neuralprophet`, `arima_plus` (+1) |
+| `configs/smokes/16_cluster_split_hardware.json` | `smoke_16_cluster_split_hardware` | `spark` | `deep_learning:spark`, `statistical:spark` | `theta`, `holtwinters`, `neuralprophet` |
+| `configs/smokes/17_gpu_absent_serverless.json` | `smoke_17_gpu_absent_serverless` | `spark` | `deep_learning:spark` | `neuralprophet` |
+| `configs/smokes/18_gpu_absent_cluster.json` | `smoke_18_gpu_absent_cluster` | `spark` | `deep_learning:spark` | `neuralprophet` |
+| `configs/smokes/19_gpu_absent_ray.json` | `smoke_19_gpu_absent_ray` | `ray` | `deep_learning:ray` | `neuralprophet` |
+| `configs/smokes/20_gpu_intent_cpu_family.json` | `smoke_20_gpu_intent_cpu_family` | `ray` | `deep_learning:ray` | `neuralprophet` |
+| `configs/smokes/21_full_catalogue.json` | `smoke_21_full_catalogue` | `spark` | — | `autoets`, `croston`, `holtwinters`, `naive_drift` (+14) |
+| `configs/smokes/22_backtest_sliding_overlap.json` | `smoke_22_backtest_sliding_overlap` | `spark` | — | `theta`, `holtwinters`, `naive_seasonal` |
+| `configs/smokes/23_backtest_frozen_shrink.json` | `smoke_23_backtest_frozen_shrink` | `spark` | — | `theta`, `holtwinters`, `naive_seasonal` |
+| `configs/smokes/24_backtest_stale.json` | `smoke_24_backtest_stale` | `spark` | — | `theta`, `holtwinters`, `naive_seasonal` |
+| `configs/smokes/25_backtest_skip.json` | `smoke_25_backtest_skip` | `spark` | — | `theta`, `holtwinters`, `naive_seasonal` |
+| `configs/smokes/26_hpo_fleetwide.json` | `smoke_26_hpo_fleetwide` | `spark` | — | `theta`, `holtwinters`, `naive_moving_average` |
+| `configs/smokes/27_hpo_per_series.json` | `smoke_27_hpo_per_series` | `spark` | — | `theta`, `holtwinters`, `naive_moving_average` |
+| `configs/smokes/28_features_off.json` | `smoke_28_features_off` | `spark` | — | `prophet`, `sarimax`, `ucm`, `regression_lags` (+2) |
+| `configs/smokes/29_features_on.json` | `smoke_29_features_on` | `spark` | — | `prophet`, `sarimax`, `ucm`, `regression_lags` (+2) |
+| `configs/smokes/30_features_boxcox.json` | `smoke_30_features_boxcox` | `spark` | — | `prophet`, `sarimax`, `ucm`, `regression_lags` (+2) |
+| `configs/smokes/31_features_exog.json` | `smoke_31_features_exog` | `spark` | — | `prophet`, `sarimax`, `ucm`, `regression_lags` (+2) |
+| `configs/smokes/32_covariates_three_tier.json` | `smoke_32_covariates_three_tier` | `spark` | — | `prophet`, `sarimax`, `ucm`, `regression_lags` (+4) |
+| `configs/smokes/33_expanded_stats_ml.json` | `smoke_33_expanded_stats_ml` | `spark` | — | `auto_arima`, `auto_ces`, `auto_theta`, `tbats` (+4) |
+| `configs/smokes/34_global_hybrid_dl.json` | `smoke_34_global_hybrid_dl` | `ray` | `deep_learning:ray` | `tide`, `tft`, `tsmixer`, `patchtst` (+1) |
+| `configs/smokes/35_hierarchy_reconciliation.json` | `smoke_35_hierarchy_reconciliation` | `spark` | — | `theta`, `holtwinters`, `regression_lags`, `lightgbm` |
+| `configs/smokes/36_covariate_fallback_multi_runtime.json` | `smoke_36_covariate_fallback_multi_runtime` | `spark` | `deep_learning:ray` | `theta`, `sarimax`, `xgboost`, `catboost` (+4) |
+| `configs/smokes/37_hierarchy_covariates_ensemble.json` | `smoke_37_hierarchy_covariates_ensemble` | `spark` | — | `theta`, `sarimax`, `xgboost`, `lightgbm` |
+| `configs/smokes/38_vertex_custom_job.json` | `smoke_38_vertex_custom_job` | `vertex` | `deep_learning:vertex` | `theta`, `sarimax`, `xgboost`, `lightgbm` (+3) |
+| `configs/smokes/39_gce_single_vm.json` | `smoke_39_gce_single_vm` | `gce` | `deep_learning:gce` | `theta`, `sarimax`, `xgboost`, `tide` |
+| `configs/smokes/40_gke_indexed_job.json` | `smoke_40_gke_indexed_job` | `gke` | `deep_learning:gke`, `statistical:gke` | `theta`, `sarimax`, `xgboost`, `tide` |
+| `configs/smokes/41_gke_ray.json` | `smoke_41_gke_ray` | `gke` | `deep_learning:ray`, `ml:gke` | `theta`, `sarimax`, `xgboost`, `tide` |
+| `configs/smokes/42_vertex_automl_tabular_workflow.json` | `smoke_42_vertex_automl_tabular_workflow` | `vertex_automl` | `automl:vertex_automl`, `ml:vertex` | `xgboost`, `vertex_tide`, `arima_plus` |
+
+================================================================================
+
+# Execution Paths, Environment Variables & Operations Reference
+
+> **Auto-generated by `python -m scale_forecasting.agent_surfaces --write`.** Do not edit by hand; pre-commit (`test_agent_surfaces.py`) enforces zero drift.
+
+---
+
+## 1. Environment Variables (`Settings.resolve`)
+
+All cloud execution paths resolve their Google Cloud infrastructure target from `SF_*` environment variables (typically exported by `terraform/main` into `.env.infra`). `RunConfig` never embeds project IDs or bucket names so the same config is portable across environments.
+
+| Variable | Required for Cloud? | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `SF_PROJECT_ID` | **Yes** | `—` | Google Cloud project ID hosting BigQuery and compute runtimes. |
+| `SF_CONNECTION` | **Yes** | `—` | BigLake connection reference (`project.region.connection_name`). |
+| `SF_WAREHOUSE_URI` | **Yes** | `—` | Cloud Storage warehouse root (`gs://<bucket>/warehouse`). |
+| `SF_DATASET_ID` | No | `scale_forecasting` | BigQuery dataset containing source series tables (and registry unless overridden). |
+| `SF_REGISTRY_DATASET_ID` | No | `<SF_DATASET_ID>` | Optional separate BigQuery dataset for the 5 registry tables and 5 views. |
+| `SF_REGION` | No | `us-central1` | Default Google Cloud region for BigQuery, Dataproc, Vertex AI, and GKE. |
+| `SF_SERVICE_ACCOUNT` | No | `ADC / default SA` | Least-privilege runner service account email attached to cloud worker jobs. |
+| `SF_CONTAINER_IMAGE` | No | `Derived from project/region` | Artifact Registry container URI for Ray, Vertex CustomJob, GCE, and GKE. |
+| `SF_GKE_CLUSTER` | No | `Ephemeral per-run` | Existing GKE cluster name to reuse when `runtime='gke'` or `ray_mode='gke'`. |
+| `SF_SUBNET` | No | `default` | VPC subnet name or self-link for private-IP Dataproc, Ray, Vertex, and GCE jobs. |
+| `SF_LOG_LEVEL` | No | `INFO` | Root log level for CLI entry points (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+
+Load `.env.infra` in any shell before running cloud commands:
+
+```bash
+set -a && source .env.infra && set +a
+```
+
+---
+
+## 2. The 5 Execution Paths
+
+### Path 1: Offline Playground & Dry-Run (Zero GCP Required)
+
+Works on a bare `pip install scale-forecasting` core install with no Google Cloud credentials.
+
+```bash
+# Probe installed extras, available models, and environment readiness
+python -m scale_forecasting.agent_surfaces --probe-env
+
+# List all 34 models and 21 metrics with availability and capabilities
+python -m scale_forecasting.playground --list
+python -m scale_forecasting.playground --catalog
+
+# Run any installed Python model on synthetic panel data with 3-fold backtesting
+python -m scale_forecasting.playground --model holtwinters --horizon 14 --backtest
+
+# Validate a RunConfig, compute deterministic run_id, and estimate workload offline
+python -m scale_forecasting.main --config configs/ensemble_demo.json --dry-run
+```
+
+Python SDK equivalent:
+
+```python
+from scale_forecasting import Forecaster
+
+f = Forecaster.from_file("configs/ensemble_demo.json")
+dry = f.dry_run()          # DryRunResult(run_id, fanout, python_models, bq_models)
+dag_nodes = f.dag()        # Planned per-family DagNode tuple
+```
+
+### Path 2: Cloud Readiness, Feasibility, Quota Preflight & Staging (`[gcp]`)
+
+Reads BigQuery source metadata or regional quota meters and stages artifacts to Cloud Storage without launching compute jobs.
+
+```bash
+# Check achieved backtest fold cohorts against live BigQuery series history lengths
+python -m scale_forecasting.main --config configs/ensemble_demo.json --dry-run --feasibility
+
+# Check regional CPU/GPU quota headroom and GPU usefulness warnings
+python -m scale_forecasting.main --config configs/ray_gpu_demo.json --quota
+
+# Upload config + code archive to GCS, write STAGED manifest, and print commands
+python -m scale_forecasting.main --config configs/ensemble_demo.json --stage-only
+```
+
+### Path 3: Unified Multi-Family DAG Execution (`main.run` / `Forecaster.run`)
+
+Dispatches 1 independent job per active model family (`statistical`, `ml`, `deep_learning`, `automl`, `native`) in parallel under one shared `run_id`, followed by the `ensemble` node.
+
+```bash
+# Run full multi-family DAG end-to-end
+python -m scale_forecasting.main --config configs/ensemble_demo.json
+
+# Force a fresh attempt of an already-completed config
+python -m scale_forecasting.main --config configs/ensemble_demo.json --force
+
+# Filter config to models whose optional Python packages are installed locally
+python -m scale_forecasting.main --config configs/all_models.json --ignore-unavailable-models --dry-run
+```
+
+Python SDK equivalent:
+
+```python
+from scale_forecasting import Forecaster
+
+f = Forecaster.from_file("configs/ensemble_demo.json")
+result = f.run(n_series=100)   # RunResult(run_id, dataset_ref, views, status, runtime_seconds)
+```
+
+### Path 4: Direct Per-Family Cloud Submitters
+
+Submit a single family or runtime directly when driving jobs from an external scheduler:
+
+```bash
+python -m scale_forecasting.submit --config configs/example_config.json --family statistical
+python -m scale_forecasting.ray_submit --config configs/ray_gpu_demo.json --family deep_learning
+python -m scale_forecasting.vertex_submit --config configs/vertex_demo.json --family ml
+python -m scale_forecasting.gce_submit --config configs/gce_demo.json --family statistical
+python -m scale_forecasting.gke_submit --config configs/gke_demo.json --family statistical
+python -m scale_forecasting.automl_submit --config configs/automl_demo.json --family automl
+python -m scale_forecasting.ensemble_run --config configs/ensemble_demo.json
+```
+
+### Path 5: Cloud Composer 3 / Apache Airflow DAG Emission
+
+Renders a self-contained Airflow DAG file (`dag_<run_id>.py`) offline with one task per active model family, optional surgical repair node (`--with-retry`), and downstream ensemble task:
+
+```bash
+python -m scale_forecasting.main --config configs/ensemble_demo.json --emit-airflow --with-retry
+make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket when Composer is enabled
+```
+
+---
+
+## 3. Monitoring, Post-Run Review, Calibration & Surgical Repair
+
+| Goal | CLI Command | Python SDK / Function |
+| :--- | :--- | :--- |
+| **Reconcile live job status** | `python -m scale_forecasting.main --config <cfg> --probe [--job <family>]` | `Forecaster(cfg).monitor(probe=True)` / `monitor_run(run_id, probe=True)` |
+| **Preview stale row repair** | `python -m scale_forecasting.main --config <cfg> --settle` | `Forecaster(cfg).settle(yes=False)` |
+| **Apply stale row repair** | `python -m scale_forecasting.main --config <cfg> --settle --force --reason "..."` | `Forecaster(cfg).settle(yes=True, reason="...")` |
+| **Preview job cancellation** | `python -m scale_forecasting.main --config <cfg> --cancel` | `Forecaster(cfg).cancel(confirm=False)` |
+| **Confirm job cancellation** | `python -m scale_forecasting.main --config <cfg> --cancel --force --reason "..."` | `Forecaster(cfg).cancel(confirm=True, reason="...")` |
+| **Preview surgical cell repair** | `python -m scale_forecasting.main --run-id <run_id> --retry` | `Forecaster(cfg).retry(confirm=False)` / `retry_run(cfg, confirm=False)` |
+| **Submit surgical cell repair** | `python -m scale_forecasting.main --run-id <run_id> --retry --force --reason "..."` | `Forecaster(cfg).retry(confirm=True, reason="...")` |
+| **Full data-science run review** | — | `review_run(run_id)` / `Forecaster(cfg).review()` |
+| **Interval & arm calibration** | — | `calibration_report(run_id)` |
+
+---
+
+## 4. Registry Lifecycle Operations (`python -m scale_forecasting.registry.ops`)
+
+All mutating verbs default to **preview mode** and require `--yes` (CLI) or `yes=True` (Python) to execute:
+
+| Verb | CLI Invocation | What It Does |
+| :--- | :--- | :--- |
+| `init` | `python -m scale_forecasting.registry.ops init` | Idempotently create the 5 registry tables and 5 analytical SQL views. |
+| `doctor` | `python -m scale_forecasting.registry.ops doctor` | Read-only health report: table row counts, stuck `RUNNING` runs, orphaned GCS artifacts. |
+| `close-runs` | `python -m scale_forecasting.registry.ops close-runs [--yes]` | Finalize abandoned `RUNNING` headers whose `run_jobs` rows are all terminal. |
+| `drop-run` | `python -m scale_forecasting.registry.ops drop-run <run_id> [--yes]` | Delete named run(s) across GCS artifacts, BigQuery rows, and BQML model objects. |
+| `sweep-orphans` | `python -m scale_forecasting.registry.ops sweep-orphans [--yes]` | Delete GCS artifact prefixes under this registry with no `run_registry` header row. |
+| `reap-clusters` | `python -m scale_forecasting.registry.ops reap-clusters [--yes]` | Delete orphaned Vertex AI Ray clusters whose owning run is already terminal. |
+| `snapshot` | `python -m scale_forecasting.registry.ops snapshot --suffix <tag> [--yes]` | Create expirable BigQuery table snapshots of all 5 registry tables. |
+| `export` | `python -m scale_forecasting.registry.ops export --Dest gs://... [--format PARQUET\|JSON] [--yes]` | Export registry tables to Cloud Storage in Parquet or newline-delimited JSON. |

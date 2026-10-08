@@ -1,0 +1,15 @@
+{
+  "name": "scale-forecasting",
+  "version": "1.0.0",
+  "description": "Declarative, multi-runtime enterprise time-series forecasting platform for Google Cloud (34 models, 21 metrics, 7 runtimes, built-in stdio MCP server, and portable SKILL.md).",
+  "contextFileName": "skills/scale-forecasting/SKILL.md",
+  "mcpServers": {
+    "scale-forecasting": {
+      "command": "python",
+      "args": [
+        "-m",
+        "scale_forecasting.mcp"
+      ]
+    }
+  }
+}

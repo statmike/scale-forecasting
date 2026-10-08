@@ -4,8 +4,10 @@
 
 [![PyPI](https://img.shields.io/pypi/v/scale-forecasting?style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/scale-forecasting/)
 [![Colab Enterprise](https://img.shields.io/badge/Colab%20Enterprise-Launch%20Playground-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://console.cloud.google.com/vertex-ai/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2Fstatmike%2Fscale-forecasting%2Fmain%2Fnotebooks%2F00_model_playground.ipynb)
+[![Open in Cloud Shell](https://img.shields.io/badge/Cloud%20Shell-Open%20Tutorial-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/statmike/scale-forecasting&cloudshell_tutorial=cloudshell_tutorial.md)
 [![Documentation](https://img.shields.io/badge/Docs-Documentation%20Site-0F9D58?style=for-the-badge&logo=materialformkdocs&logoColor=white)](https://statmike.github.io/scale-forecasting/)
 [![Getting Started](https://img.shields.io/badge/Start%20Here-Getting%20Started-EA4335?style=for-the-badge&logo=readthedocs&logoColor=white)](./docs/getting_started.md)
+[![AI Agents & MCP](https://img.shields.io/badge/AI%20Agents-Skill%20%26%20MCP%20Server-8E24AA?style=for-the-badge)](./docs/agent_and_mcp_guide.md)
 [![Workshop](https://img.shields.io/badge/Workshop-Hands--On%20Lab-F4B400?style=for-the-badge&logo=google&logoColor=white)](./docs/workshop.md)
 [![Terraform](https://img.shields.io/badge/Terraform-Two--Stage%20Deploy-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)](./terraform/README.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-4E5D6C?style=for-the-badge)](./LICENSE)
@@ -112,6 +114,23 @@ Full operator loop: [Running and reviewing (`docs/running_and_reviewing.md`)](./
 
 ---
 
+## AI agents, portable skills & built-in MCP server
+
+`scale-forecasting` ships with a **portable [`SKILL.md`](./skills/scale-forecasting/SKILL.md)**, a **built-in Model Context Protocol (MCP) server (`python -m scale_forecasting.mcp`)**, a **Draft 2020-12 [`RunConfig` JSON Schema](./docs/schemas/run_config.schema.json)**, and **[`llms.txt`](./docs/llms.txt) / [`llms-full.txt`](./docs/llms-full.txt)** — all generated directly from the Python code and verified in pre-commit (`make agent-surfaces`):
+
+```bash
+# Probe installed extras, available models, and SF_* readiness:
+python -m scale_forecasting.agent_surfaces --probe-env
+
+# Register the built-in stdio MCP server (7 resources, 9 tools, zero extra dependencies):
+gemini mcp add scale-forecasting -- python -m scale_forecasting.mcp
+claude mcp add scale-forecasting -- python -m scale_forecasting.mcp
+```
+
+Full setup and architectural guide: **[AI Agents, Portable Skills & Built-in MCP Server (`docs/agent_and_mcp_guide.md`)](./docs/agent_and_mcp_guide.md)**.
+
+---
+
 ## One configuration, every engine
 
 Every run is a validated [`RunConfig`](./docs/configuration_reference.md) (such as [`configs/ensemble_demo.json`](./configs/ensemble_demo.json)). To move a model family between Dataproc Serverless, Ray, Vertex AI CustomJob, Compute Engine, or GKE, change `compute.families.<family>.runtime` — nothing else:
@@ -176,7 +195,7 @@ All notebooks in [`notebooks/`](./notebooks/README.md) include committed outputs
 
 ## Where next
 
-- **Start here:** [Getting started](./docs/getting_started.md) · [Platform overview](./docs/overview.md) · [Choosing a runtime](./docs/choosing_a_runtime.md) · [Cost estimates & controls](./docs/cost_estimates.md) · [Why Google Cloud](./docs/why_google_cloud.md) · [FAQ](./docs/faq.md) · [Glossary](./docs/glossary.md) · [Documentation map](./docs/README.md)
+- **Start here:** [Getting started](./docs/getting_started.md) · [Platform overview](./docs/overview.md) · [AI agents, skills & MCP](./docs/agent_and_mcp_guide.md) · [Choosing a runtime](./docs/choosing_a_runtime.md) · [Cost estimates & controls](./docs/cost_estimates.md) · [Why Google Cloud](./docs/why_google_cloud.md) · [FAQ](./docs/faq.md) · [Glossary](./docs/glossary.md) · [Documentation map](./docs/README.md)
 - **Reference:** [Compute runtimes](./docs/runtimes_reference.md) · [Configuration](./docs/configuration_reference.md) · [Models & ensembles](./docs/models_reference.md) · [Evaluation metrics](./docs/metrics_reference.md) · [Output schemas & views](./docs/output_schemas.md)
 - **Operate & extend:** [Python SDK (`Forecaster`)](./docs/using_the_sdk.md) · [Running & reviewing](./docs/running_and_reviewing.md) · [Operations & repair](./docs/operations.md) · [Quota & 100k scale](./docs/quota_and_scale.md) · [System validation ledger](./docs/validation.md) · [API reference](https://statmike.github.io/scale-forecasting/api/)
 

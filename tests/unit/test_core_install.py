@@ -64,14 +64,30 @@ os.environ.update(SF_PROJECT_ID="example-project", SF_REGION="us-central1",
                   SF_CODE_BUCKET="example-bucket")
 
 import scale_forecasting
-from scale_forecasting import backtest, calibration, config, dag, ensembler, features, hpo
-from scale_forecasting import launch_plan, main, playground, reconciliation, review, sdk, worker
+from scale_forecasting import agent_surfaces, backtest, calibration, config, dag, ensembler
+from scale_forecasting import features, hpo, launch_plan, main, mcp, playground, reconciliation
+from scale_forecasting import review, sdk, worker
 from scale_forecasting.errors import MissingExtraError
 from scale_forecasting.metrics import METRIC_NAMES
 from scale_forecasting.models import list_models
 
 assert len(list_models()) == 34, len(list_models())
 assert len(METRIC_NAMES) == 21, len(METRIC_NAMES)
+
+# Built-in agent probe and MCP server work in the pure-core install with zero optional extras.
+env_probe = agent_surfaces.probe_environment()
+assert env_probe["extras"]["gcp"]["installed"] is False
+server = mcp.McpServer(allow_launch=False)
+dry_resp = server.handle_message({{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {{
+        "name": "validate_and_dry_run",
+        "arguments": {{"config": {str(CONFIG)!r}, "ignore_unavailable_models": True}},
+    }},
+}})
+assert dry_resp is not None and "result" in dry_resp and not dry_resp["result"]["isError"]
 
 # The playground is the whole point of the bare install: fit + 3-fold backtest, no cloud.
 assert playground._main(["--model", "holtwinters", "--horizon", "7", "--backtest"]) == 0
